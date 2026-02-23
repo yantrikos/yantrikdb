@@ -1,12 +1,30 @@
+# MCP / Saga
 .mcp.json
 .tracker.db
 .tracker.db-shm
 .tracker.db-wal
 .env
+
+# Node
 node_modules/
+
+# Rust
 target/
+Cargo.lock
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
 *.egg-info/
+*.eggs/
+dist/
+build/
 .venv/
 .pytest_cache/
+.benchmarks/
+
+# Compiled extensions
+*.so
+*.dylib
+*.dll

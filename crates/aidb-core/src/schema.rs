@@ -1,8 +1,6 @@
-"""SQLite schema for AIDB — the cognitive memory engine."""
+pub const SCHEMA_VERSION: i32 = 1;
 
-SCHEMA_VERSION = 1
-
-SCHEMA_SQL = """
+pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
 CREATE TABLE IF NOT EXISTS memories (
     rid TEXT PRIMARY KEY,                -- UUIDv7, stable across devices
@@ -33,7 +31,7 @@ CREATE TABLE IF NOT EXISTS edges (
     edge_id TEXT PRIMARY KEY,            -- UUIDv7
     src TEXT NOT NULL,                   -- entity name or memory rid
     dst TEXT NOT NULL,                   -- entity name or memory rid
-    rel_type TEXT NOT NULL,              -- relationship type (e.g., "is_about", "related_to")
+    rel_type TEXT NOT NULL,              -- relationship type (e.g., \"is_about\", \"related_to\")
     weight REAL NOT NULL DEFAULT 1.0,    -- relationship strength [0, 1]
     created_at REAL NOT NULL,
     tombstoned INTEGER NOT NULL DEFAULT 0,
@@ -78,4 +76,4 @@ CREATE INDEX IF NOT EXISTS idx_edges_rel ON edges(rel_type);
 CREATE INDEX IF NOT EXISTS idx_oplog_timestamp ON oplog(timestamp);
 CREATE INDEX IF NOT EXISTS idx_oplog_target ON oplog(target_rid);
 CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
-"""
+";
