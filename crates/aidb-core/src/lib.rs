@@ -7,7 +7,7 @@ mod knowledge;
 mod vector;
 
 // ── Re-exports at original crate paths ──
-pub use base::{bench_utils, compression, error, hlc, schema, scoring, serde_helpers, types};
+pub use base::{bench_utils, compression, encryption, error, hlc, schema, scoring, serde_helpers, types};
 pub use cognition::{consolidate, patterns, triggers};
 pub use distributed::{conflict, replication, sync};
 pub use knowledge::{graph, graph_index};
@@ -15,6 +15,7 @@ pub use vector::hnsw;
 
 // ── Convenience re-exports ──
 pub use engine::AIDB;
+pub use engine::tenant::{TenantManager, TenantConfig};
 pub use error::AidbError;
 pub use types::*;
 pub use consolidate::{consolidate, find_consolidation_candidates};

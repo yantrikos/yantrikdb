@@ -15,29 +15,45 @@ impl AIDB {
         )?;
 
         let result = stmt.query_row(params![rid], |row| {
-            let meta_str: String = row.get("metadata")?;
-            let metadata: serde_json::Value =
-                serde_json::from_str(&meta_str).unwrap_or(serde_json::Value::Object(Default::default()));
-
-            Ok(Memory {
-                rid: row.get("rid")?,
-                memory_type: row.get("type")?,
-                text: row.get("text")?,
-                created_at: row.get("created_at")?,
-                importance: row.get("importance")?,
-                valence: row.get("valence")?,
-                half_life: row.get("half_life")?,
-                last_access: row.get("last_access")?,
-                consolidation_status: row.get("consolidation_status")?,
-                storage_tier: row.get("storage_tier")?,
-                consolidated_into: row.get("consolidated_into")?,
-                metadata,
-                namespace: row.get("namespace")?,
-            })
+            Ok((
+                row.get::<_, String>("rid")?,
+                row.get::<_, String>("type")?,
+                row.get::<_, String>("text")?,
+                row.get::<_, f64>("created_at")?,
+                row.get::<_, f64>("importance")?,
+                row.get::<_, f64>("valence")?,
+                row.get::<_, f64>("half_life")?,
+                row.get::<_, f64>("last_access")?,
+                row.get::<_, String>("consolidation_status")?,
+                row.get::<_, String>("storage_tier")?,
+                row.get::<_, Option<String>>("consolidated_into")?,
+                row.get::<_, String>("metadata")?,
+                row.get::<_, String>("namespace")?,
+            ))
         });
 
         match result {
-            Ok(mem) => Ok(Some(mem)),
+            Ok(row) => {
+                let text = self.decrypt_text(&row.2)?;
+                let meta_str = self.decrypt_text(&row.11)?;
+                let metadata: serde_json::Value = serde_json::from_str(&meta_str)
+                    .unwrap_or(serde_json::Value::Object(Default::default()));
+                Ok(Some(Memory {
+                    rid: row.0,
+                    memory_type: row.1,
+                    text,
+                    created_at: row.3,
+                    importance: row.4,
+                    valence: row.5,
+                    half_life: row.6,
+                    last_access: row.7,
+                    consolidation_status: row.8,
+                    storage_tier: row.9,
+                    consolidated_into: row.10,
+                    metadata,
+                    namespace: row.12,
+                }))
+            }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
@@ -65,10 +81,11 @@ impl AIDB {
         })?;
 
         for row in rows {
-            let (rid, text, importance, half_life, last_access, mem_type) = row?;
+            let (rid, stored_text, importance, half_life, last_access, mem_type) = row?;
             let elapsed = ts - last_access;
             let score = scoring::decay_score(importance, half_life, elapsed);
             if score < threshold {
+                let text = self.decrypt_text(&stored_text)?;
                 decayed.push(DecayedMemory {
                     rid,
                     text,

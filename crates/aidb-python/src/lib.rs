@@ -4,11 +4,13 @@ pub mod py_engine;
 pub mod py_types;
 pub mod py_consolidate;
 pub mod py_triggers;
+pub mod py_tenant;
 
 #[pymodule]
 fn _aidb_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Engine
     m.add_class::<py_engine::PyAIDB>()?;
+    m.add_class::<py_tenant::PyTenantManager>()?;
 
     // Triggers
     m.add_class::<py_triggers::PyTrigger>()?;

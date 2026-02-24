@@ -25,12 +25,17 @@ impl AIDB {
         let emb_blob = serialize_f32(embedding);
         let meta_str = serde_json::to_string(metadata)?;
 
+        // Encrypt fields if encryption is enabled
+        let stored_text = self.encrypt_text(text)?;
+        let stored_meta = self.encrypt_text(&meta_str)?;
+        let stored_emb = self.encrypt_embedding(&emb_blob)?;
+
         self.conn.execute(
             "INSERT INTO memories \
              (rid, type, text, embedding, created_at, updated_at, importance, \
               half_life, last_access, valence, metadata, namespace) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-            params![rid, memory_type, text, emb_blob, ts, ts, importance, half_life, ts, valence, meta_str, namespace],
+            params![rid, memory_type, stored_text, stored_emb, ts, ts, importance, half_life, ts, valence, stored_meta, namespace],
         )?;
 
         // Insert into vector index
@@ -87,13 +92,18 @@ impl AIDB {
             let emb_blob = serialize_f32(&input.embedding);
             let meta_str = serde_json::to_string(&input.metadata)?;
 
+            // Encrypt fields if encryption is enabled
+            let stored_text = self.encrypt_text(&input.text)?;
+            let stored_meta = self.encrypt_text(&meta_str)?;
+            let stored_emb = self.encrypt_embedding(&emb_blob)?;
+
             let result = self.conn.execute(
                 "INSERT INTO memories \
                  (rid, type, text, embedding, created_at, updated_at, importance, \
                   half_life, last_access, valence, metadata, namespace) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
-                params![rid, input.memory_type, input.text, emb_blob, ts, ts,
-                        input.importance, input.half_life, ts, input.valence, meta_str,
+                params![rid, input.memory_type, stored_text, stored_emb, ts, ts,
+                        input.importance, input.half_life, ts, input.valence, stored_meta,
                         input.namespace],
             );
 

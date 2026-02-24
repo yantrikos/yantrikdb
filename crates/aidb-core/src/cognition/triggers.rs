@@ -48,11 +48,12 @@ pub fn check_decay_triggers(
     })?;
 
     for row in rows {
-        let (rid, text, mem_type, importance, half_life, last_access, valence) = row?;
+        let (rid, stored_text, mem_type, importance, half_life, last_access, valence) = row?;
         let elapsed = ts - last_access;
         let current_score = scoring::decay_score(importance, half_life, elapsed);
 
         if current_score < decay_threshold {
+            let text = db.decrypt_text(&stored_text)?;
             let days_since = elapsed / 86400.0;
             let decay_ratio = if importance > 0.0 {
                 current_score / importance
@@ -208,7 +209,8 @@ pub fn check_temporal_drift(db: &AIDB) -> Result<Vec<Trigger>> {
     })?;
 
     for row in rows {
-        let (rid, text, created_at, _last_access) = row?;
+        let (rid, stored_text, created_at, _last_access) = row?;
+        let text = db.decrypt_text(&stored_text)?;
         let age_days = (ts - created_at) / 86400.0;
         let urgency = (age_days / 365.0).min(1.0);
 
@@ -241,7 +243,7 @@ pub fn check_redundancy(db: &AIDB, _sim_threshold: f64) -> Result<Vec<Trigger>> 
          LIMIT 100",
     )?;
 
-    let rows: Vec<(String, String, Vec<u8>)> = stmt
+    let raw_rows: Vec<(String, String, Vec<u8>)> = stmt
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>("rid")?,
@@ -250,6 +252,15 @@ pub fn check_redundancy(db: &AIDB, _sim_threshold: f64) -> Result<Vec<Trigger>> 
             ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    // Decrypt text and embeddings if encrypted
+    let rows: Vec<(String, String, Vec<u8>)> = raw_rows.into_iter()
+        .map(|(rid, stored_text, stored_emb)| {
+            let text = db.decrypt_text(&stored_text)?;
+            let emb = db.decrypt_embedding(&stored_emb)?;
+            Ok((rid, text, emb))
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     let mut triggers = Vec::new();
     let threshold = 0.85;

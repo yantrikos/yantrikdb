@@ -5,4 +5,5 @@ pub mod scoring;
 pub mod hlc;
 pub mod serde_helpers;
 pub mod compression;
+pub mod encryption;
 pub mod bench_utils;

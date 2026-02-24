@@ -22,6 +22,9 @@ pub enum AidbError {
 
     #[error("invalid HLC timestamp: {0}")]
     HlcParseError(String),
+
+    #[error("encryption error: {0}")]
+    Encryption(String),
 }
 
 pub type Result<T> = std::result::Result<T, AidbError>;

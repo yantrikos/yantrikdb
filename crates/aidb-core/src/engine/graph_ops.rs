@@ -107,9 +107,17 @@ impl AIDB {
             return Ok(0);
         }
 
-        let memories: Vec<(String, String)> = self.conn.prepare(
+        let raw_memories: Vec<(String, String)> = self.conn.prepare(
             "SELECT rid, text FROM memories WHERE consolidation_status = 'active'",
         )?.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<std::result::Result<Vec<_>, _>>()?;
+
+        // Decrypt text if encrypted
+        let memories: Vec<(String, String)> = raw_memories.into_iter()
+            .map(|(rid, stored_text)| {
+                let text = self.decrypt_text(&stored_text)?;
+                Ok((rid, text))
+            })
+            .collect::<crate::error::Result<Vec<_>>>()?;
 
         let mut count = 0usize;
         let mut gi = self.graph_index.borrow_mut();

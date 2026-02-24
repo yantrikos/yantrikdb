@@ -625,3 +625,173 @@ class TestQueryBuilder:
         assert "valence_multiplier" in scores
         c = scores["contributions"]
         assert all(k in c for k in ["similarity", "decay", "recency", "importance", "graph_proximity"])
+
+
+# ── Encryption tests ──
+
+
+class TestEncryption:
+    """Tests for encryption at rest."""
+
+    def test_encrypted_record_and_get(self, tmp_path):
+        key = bytes(range(32))
+        db = AIDB(str(tmp_path / "enc.db"), embedding_dim=DIM, encryption_key=key)
+        assert db.is_encrypted
+        rid = db.record("secret memory", embedding=_vec(1.0), importance=0.8)
+        mem = db.get(rid)
+        assert mem["text"] == "secret memory"
+        assert mem["importance"] == 0.8
+        db.close()
+
+    def test_encrypted_data_not_plaintext(self, tmp_path):
+        key = bytes(range(32))
+        db = AIDB(str(tmp_path / "enc2.db"), embedding_dim=DIM, encryption_key=key)
+        rid = db.record("top secret", embedding=_vec(1.0))
+
+        # Read raw from DB — text should be encrypted (not plaintext)
+        row = db._conn.execute(
+            "SELECT text FROM memories WHERE rid = ?", (rid,)
+        ).fetchone()
+        assert row["text"] != "top secret"
+        db.close()
+
+    def test_encrypted_recall(self, tmp_path):
+        key = bytes(range(32))
+        db = AIDB(str(tmp_path / "enc3.db"), embedding_dim=DIM, encryption_key=key)
+        db.record("cat on mat", embedding=_vec(1.0))
+        db.record("dog in park", embedding=_vec(5.0))
+        results = db.recall(query_embedding=_vec(1.0), top_k=1, skip_reinforce=True)
+        assert len(results) == 1
+        assert "cat" in results[0]["text"]
+        db.close()
+
+    def test_encrypted_reopen_same_key(self, tmp_path):
+        key = bytes(range(32))
+        path = str(tmp_path / "enc4.db")
+        db = AIDB(path, embedding_dim=DIM, encryption_key=key)
+        rid = db.record("persistent", embedding=_vec(1.0))
+        db.close()
+
+        # Reopen with same key
+        db2 = AIDB(path, embedding_dim=DIM, encryption_key=key)
+        mem = db2.get(rid)
+        assert mem["text"] == "persistent"
+        db2.close()
+
+    def test_encrypted_wrong_key_fails(self, tmp_path):
+        key_a = bytes(range(32))
+        path = str(tmp_path / "enc5.db")
+        db = AIDB(path, embedding_dim=DIM, encryption_key=key_a)
+        db.record("data", embedding=_vec(1.0))
+        db.close()
+
+        key_b = bytes([99] + list(range(1, 32)))
+        with pytest.raises(RuntimeError):
+            AIDB(path, embedding_dim=DIM, encryption_key=key_b)
+
+    def test_open_encrypted_without_key_fails(self, tmp_path):
+        key = bytes(range(32))
+        path = str(tmp_path / "enc6.db")
+        db = AIDB(path, embedding_dim=DIM, encryption_key=key)
+        db.record("data", embedding=_vec(1.0))
+        db.close()
+
+        with pytest.raises(RuntimeError):
+            AIDB(path, embedding_dim=DIM)
+
+    def test_invalid_key_length_rejected(self):
+        with pytest.raises((ValueError, RuntimeError)):
+            AIDB(":memory:", embedding_dim=DIM, encryption_key=b"short")
+
+    def test_unencrypted_unchanged(self, tmp_path):
+        db = AIDB(str(tmp_path / "plain.db"), embedding_dim=DIM)
+        assert not db.is_encrypted
+        rid = db.record("plaintext", embedding=_vec(1.0))
+        row = db._conn.execute(
+            "SELECT text FROM memories WHERE rid = ?", (rid,)
+        ).fetchone()
+        assert row["text"] == "plaintext"
+        db.close()
+
+
+# ── Tenant isolation tests ──
+
+
+class TestTenantIsolation:
+    """Tests for multi-tenant manager."""
+
+    def test_tenant_isolation(self, tmp_path):
+        from aidb import TenantManager
+
+        mgr = TenantManager(str(tmp_path / "tenants"), embedding_dim=DIM)
+        db_a = mgr.get("tenant-a")
+        db_b = mgr.get("tenant-b")
+
+        db_a.record("a-memory", embedding=_vec(1.0))
+        assert db_a.stats()["active_memories"] == 1
+        assert db_b.stats()["active_memories"] == 0
+
+        db_a.close()
+        db_b.close()
+
+    def test_tenant_with_encryption(self, tmp_path):
+        from aidb import TenantManager
+
+        mgr = TenantManager(str(tmp_path / "tenants"), embedding_dim=DIM)
+        mgr.register_tenant("secure", encryption_key=bytes(range(32)))
+
+        db = mgr.get("secure")
+        assert db.is_encrypted
+        rid = db.record("tenant secret", embedding=_vec(1.0))
+        mem = db.get(rid)
+        assert mem["text"] == "tenant secret"
+        db.close()
+
+    def test_discovered_tenants(self, tmp_path):
+        from aidb import TenantManager
+
+        mgr = TenantManager(str(tmp_path / "tenants"), embedding_dim=DIM)
+        mgr.get("alpha").close()
+        mgr.get("beta").close()
+
+        discovered = mgr.discovered_tenants()
+        assert "alpha" in discovered
+        assert "beta" in discovered
+
+    def test_cross_tenant_data_isolation(self, tmp_path):
+        from aidb import TenantManager
+
+        mgr = TenantManager(str(tmp_path / "tenants"), embedding_dim=DIM)
+
+        # Tenant A stores a memory
+        db_a = mgr.get("a")
+        db_a.record("only for A", embedding=_vec(1.0))
+        db_a.close()
+
+        # Tenant B should not see it
+        db_b = mgr.get("b")
+        results = db_b.recall(query_embedding=_vec(1.0), top_k=10, skip_reinforce=True)
+        assert len(results) == 0
+        db_b.close()
+
+    def test_tenant_different_encryption_keys(self, tmp_path):
+        from aidb import TenantManager
+
+        mgr = TenantManager(str(tmp_path / "tenants"), embedding_dim=DIM)
+
+        key_a = bytes([1] * 32)
+        key_b = bytes([2] * 32)
+        mgr.register_tenant("a", encryption_key=key_a)
+        mgr.register_tenant("b", encryption_key=key_b)
+
+        db_a = mgr.get("a")
+        db_b = mgr.get("b")
+
+        db_a.record("A's secret", embedding=_vec(1.0))
+        db_b.record("B's secret", embedding=_vec(2.0))
+
+        assert db_a.get(db_a.recall(query_embedding=_vec(1.0), top_k=1, skip_reinforce=True)[0]["rid"])["text"] == "A's secret"
+        assert db_b.get(db_b.recall(query_embedding=_vec(2.0), top_k=1, skip_reinforce=True)[0]["rid"])["text"] == "B's secret"
+
+        db_a.close()
+        db_b.close()

@@ -8,6 +8,7 @@ mod recall;
 mod record;
 mod stats;
 mod storage;
+pub mod tenant;
 #[cfg(test)]
 mod tests;
 
@@ -15,9 +16,11 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use base64::Engine;
 use rand::Rng;
 use rusqlite::{params, Connection};
 
+use crate::encryption::{self, EncryptionProvider};
 use crate::error::{AidbError, Result};
 use crate::graph_index::GraphIndex;
 use crate::hlc::{HLCTimestamp, HLC};
@@ -37,6 +40,7 @@ pub struct AIDB {
     pub(crate) scoring_cache: RefCell<HashMap<String, ScoringRow>>,
     pub(crate) vec_index: RefCell<HnswIndex>,
     pub(crate) graph_index: RefCell<GraphIndex>,
+    pub(crate) enc: Option<EncryptionProvider>,
 }
 
 pub(crate) fn now() -> f64 {
@@ -62,15 +66,29 @@ pub(crate) struct TextMetadataRow {
 impl AIDB {
     /// Create a new AIDB instance with auto-generated actor_id.
     pub fn new(db_path: &str, embedding_dim: usize) -> Result<Self> {
-        Self::open(db_path, embedding_dim, None)
+        Self::open(db_path, embedding_dim, None, None)
     }
 
     /// Create a new AIDB instance with an explicit actor_id (for sync tests).
     pub fn new_with_actor(db_path: &str, embedding_dim: usize, actor_id: &str) -> Result<Self> {
-        Self::open(db_path, embedding_dim, Some(actor_id.to_string()))
+        Self::open(db_path, embedding_dim, Some(actor_id.to_string()), None)
     }
 
-    fn open(db_path: &str, embedding_dim: usize, actor_id: Option<String>) -> Result<Self> {
+    /// Create a new encrypted AIDB instance.
+    ///
+    /// The 32-byte `master_key` is used to wrap/unwrap a per-database Data Encryption Key (DEK).
+    /// All text, metadata, and embedding fields are encrypted at rest using AES-256-GCM.
+    /// In-memory indexes operate on plaintext for full query performance.
+    pub fn new_encrypted(db_path: &str, embedding_dim: usize, master_key: &[u8; 32]) -> Result<Self> {
+        Self::open(db_path, embedding_dim, None, Some(master_key))
+    }
+
+    fn open(
+        db_path: &str,
+        embedding_dim: usize,
+        actor_id: Option<String>,
+        master_key: Option<&[u8; 32]>,
+    ) -> Result<Self> {
         let conn = Connection::open(db_path)?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;")?;
 
@@ -151,8 +169,46 @@ impl AIDB {
             }
         };
 
+        // Initialize encryption (envelope pattern: master_key wraps DEK)
+        let enc = if let Some(mk) = master_key {
+            let provider = match Self::get_meta(&conn, "encrypted_dek")? {
+                Some(wrapped_b64) => {
+                    // Existing DB: unwrap DEK
+                    let wrapped = base64::engine::general_purpose::STANDARD
+                        .decode(&wrapped_b64)
+                        .map_err(|e| AidbError::Encryption(format!("DEK base64: {e}")))?;
+                    let dek = encryption::unwrap_dek(mk, &wrapped)?;
+                    EncryptionProvider::from_dek(&dek)
+                }
+                None => {
+                    // New DB: generate and store DEK
+                    let dek = encryption::generate_key();
+                    let wrapped = encryption::wrap_dek(mk, &dek)?;
+                    let wrapped_b64 = base64::engine::general_purpose::STANDARD.encode(&wrapped);
+                    conn.execute(
+                        "INSERT OR REPLACE INTO meta (key, value) VALUES ('encrypted_dek', ?1)",
+                        params![wrapped_b64],
+                    )?;
+                    conn.execute(
+                        "INSERT OR REPLACE INTO meta (key, value) VALUES ('encryption_enabled', '1')",
+                        [],
+                    )?;
+                    EncryptionProvider::from_dek(&dek)
+                }
+            };
+            Some(provider)
+        } else {
+            // Verify we're not opening an encrypted DB without a key
+            if Self::get_meta(&conn, "encryption_enabled")?.as_deref() == Some("1") {
+                return Err(AidbError::Encryption(
+                    "database is encrypted but no master_key provided".into(),
+                ));
+            }
+            None
+        };
+
         let scoring_cache = Self::load_scoring_cache(&conn)?;
-        let vec_index = Self::build_vec_index(&conn, embedding_dim)?;
+        let vec_index = Self::build_vec_index_with_enc(&conn, embedding_dim, enc.as_ref())?;
         let graph_index = GraphIndex::build_from_db(&conn)?;
 
         Ok(Self {
@@ -163,6 +219,7 @@ impl AIDB {
             scoring_cache: RefCell::new(scoring_cache),
             vec_index: RefCell::new(vec_index),
             graph_index: RefCell::new(graph_index),
+            enc,
         })
     }
 
@@ -218,6 +275,45 @@ impl AIDB {
     /// Get a mutable reference to the underlying connection.
     pub fn conn_mut(&mut self) -> &mut Connection {
         &mut self.conn
+    }
+
+    /// Whether this instance has encryption enabled.
+    pub fn is_encrypted(&self) -> bool {
+        self.enc.is_some()
+    }
+
+    // ── Encryption helpers (transparent to callers) ──
+
+    /// Encrypt a string field if encryption is enabled, otherwise pass through.
+    pub(crate) fn encrypt_text(&self, plaintext: &str) -> Result<String> {
+        match &self.enc {
+            Some(e) => e.encrypt_string(plaintext),
+            None => Ok(plaintext.to_string()),
+        }
+    }
+
+    /// Decrypt a string field if encryption is enabled, otherwise pass through.
+    pub(crate) fn decrypt_text(&self, stored: &str) -> Result<String> {
+        match &self.enc {
+            Some(e) => e.decrypt_string(stored),
+            None => Ok(stored.to_string()),
+        }
+    }
+
+    /// Encrypt an embedding blob if encryption is enabled.
+    pub(crate) fn encrypt_embedding(&self, emb_blob: &[u8]) -> Result<Vec<u8>> {
+        match &self.enc {
+            Some(e) => e.encrypt_bytes(emb_blob),
+            None => Ok(emb_blob.to_vec()),
+        }
+    }
+
+    /// Decrypt an embedding blob if encryption is enabled.
+    pub(crate) fn decrypt_embedding(&self, stored: &[u8]) -> Result<Vec<u8>> {
+        match &self.enc {
+            Some(e) => e.decrypt_bytes(stored),
+            None => Ok(stored.to_vec()),
+        }
     }
 
     /// Close the database connection. After this, the engine cannot be used.

@@ -682,17 +682,19 @@ impl AIDB {
         let mut stmt = self.conn.prepare(&sql)?;
         let rows = stmt
             .query_map(params_ref.as_slice(), |row| {
-                Ok(TextMetadataRow {
-                    rid: row.get("rid")?,
-                    text: row.get("text")?,
-                    metadata: row.get("metadata")?,
-                })
+                Ok((
+                    row.get::<_, String>("rid")?,
+                    row.get::<_, String>("text")?,
+                    row.get::<_, String>("metadata")?,
+                ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         let mut map = HashMap::new();
-        for row in rows {
-            map.insert(row.rid.clone(), row);
+        for (rid, stored_text, stored_meta) in rows {
+            let text = self.decrypt_text(&stored_text)?;
+            let metadata = self.decrypt_text(&stored_meta)?;
+            map.insert(rid.clone(), TextMetadataRow { rid, text, metadata });
         }
         Ok(map)
     }
@@ -727,7 +729,8 @@ impl AIDB {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         let mut map = HashMap::new();
-        for (rid, emb) in rows {
+        for (rid, stored_emb) in rows {
+            let emb = self.decrypt_embedding(&stored_emb)?;
             map.insert(rid, emb);
         }
         Ok(map)

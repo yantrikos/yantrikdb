@@ -175,17 +175,36 @@ pub(crate) fn map_err(e: aidb_core::AidbError) -> PyErr {
 #[pymethods]
 impl PyAIDB {
     #[new]
-    #[pyo3(signature = (db_path=":memory:", embedding_dim=384, embedder=None))]
+    #[pyo3(signature = (db_path=":memory:", embedding_dim=384, embedder=None, encryption_key=None))]
     fn new(
         db_path: &str,
         embedding_dim: usize,
         embedder: Option<PyObject>,
+        encryption_key: Option<Vec<u8>>,
     ) -> PyResult<Self> {
-        let inner = AIDB::new(db_path, embedding_dim).map_err(map_err)?;
+        let inner = if let Some(key_bytes) = encryption_key {
+            if key_bytes.len() != 32 {
+                return Err(PyValueError::new_err(
+                    "encryption_key must be exactly 32 bytes",
+                ));
+            }
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&key_bytes);
+            AIDB::new_encrypted(db_path, embedding_dim, &key).map_err(map_err)?
+        } else {
+            AIDB::new(db_path, embedding_dim).map_err(map_err)?
+        };
         Ok(Self {
             inner: Some(inner),
             embedder,
         })
+    }
+
+    /// Whether this instance has encryption enabled.
+    #[getter]
+    fn is_encrypted(&self) -> PyResult<bool> {
+        let db = self.get_inner()?;
+        Ok(db.is_encrypted())
     }
 
     fn set_embedder(&mut self, embedder: PyObject) {

@@ -16,19 +16,22 @@ impl AIDB {
             |row| row.get::<_, Vec<u8>>(0),
         );
 
-        let raw_blob = match row {
+        let stored_blob = match row {
             Ok(blob) => blob,
             Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(false),
             Err(e) => return Err(e.into()),
         };
 
+        // Decrypt if encrypted, then compress, then re-encrypt for cold storage
+        let raw_blob = self.decrypt_embedding(&stored_blob)?;
         let embedding = crate::serde_helpers::deserialize_f32(&raw_blob);
         let compressed = crate::compression::compress_embedding(&embedding);
+        let stored_compressed = self.encrypt_embedding(&compressed)?;
         let ts = now();
 
         self.conn.execute(
             "UPDATE memories SET storage_tier = 'cold', embedding = ?1, updated_at = ?2 WHERE rid = ?3",
-            params![compressed, ts, rid],
+            params![stored_compressed, ts, rid],
         )?;
 
         self.vec_index.borrow_mut().remove(rid);
@@ -56,19 +59,22 @@ impl AIDB {
             |row| row.get::<_, Vec<u8>>(0),
         );
 
-        let compressed_blob = match row {
+        let stored_blob = match row {
             Ok(blob) => blob,
             Err(rusqlite::Error::QueryReturnedNoRows) => return Ok(false),
             Err(e) => return Err(e.into()),
         };
 
+        // Decrypt if encrypted, decompress, then re-encrypt for hot storage
+        let compressed_blob = self.decrypt_embedding(&stored_blob)?;
         let embedding = crate::compression::decompress_embedding(&compressed_blob);
         let raw_blob = serialize_f32(&embedding);
+        let stored_raw = self.encrypt_embedding(&raw_blob)?;
         let ts = now();
 
         self.conn.execute(
             "UPDATE memories SET storage_tier = 'hot', embedding = ?1, updated_at = ?2 WHERE rid = ?3",
-            params![raw_blob, ts, rid],
+            params![stored_raw, ts, rid],
         )?;
 
         self.vec_index.borrow_mut().insert(rid, &embedding)?;

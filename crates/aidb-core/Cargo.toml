@@ -14,6 +14,8 @@ hex = "0.4"
 rand = { version = "0.8", features = ["small_rng"] }
 zstd = "0.13"
 tracing = "0.1"
+aes-gcm = "0.10"
+base64 = "0.22"
 
 [features]
 default = []
@@ -21,6 +23,7 @@ profiling = []
 
 [dev-dependencies]
 criterion = "0.5"
+tempfile = "3"
 
 [[bench]]
 name = "engine_bench"

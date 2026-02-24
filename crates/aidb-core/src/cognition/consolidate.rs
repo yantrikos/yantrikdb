@@ -144,26 +144,40 @@ pub fn find_consolidation_candidates(
          AND type IN ('episodic', 'semantic')",
     )?;
 
-    let memories: Vec<MemoryWithEmbedding> = stmt
+    let raw_rows: Vec<(String, String, String, Vec<u8>, f64, f64, f64, f64, f64, String, String)> = stmt
         .query_map([], |row| {
-            let emb_blob: Vec<u8> = row.get("embedding")?;
-            let meta_str: String = row.get("metadata")?;
-            Ok(MemoryWithEmbedding {
-                rid: row.get("rid")?,
-                memory_type: row.get("type")?,
-                text: row.get("text")?,
-                embedding: deserialize_f32(&emb_blob),
-                created_at: row.get("created_at")?,
-                importance: row.get("importance")?,
-                valence: row.get("valence")?,
-                half_life: row.get("half_life")?,
-                last_access: row.get("last_access")?,
-                metadata: serde_json::from_str(&meta_str)
-                    .unwrap_or(serde_json::Value::Object(Default::default())),
-                namespace: row.get("namespace")?,
-            })
+            Ok((
+                row.get::<_, String>("rid")?,
+                row.get::<_, String>("type")?,
+                row.get::<_, String>("text")?,
+                row.get::<_, Vec<u8>>("embedding")?,
+                row.get::<_, f64>("created_at")?,
+                row.get::<_, f64>("importance")?,
+                row.get::<_, f64>("valence")?,
+                row.get::<_, f64>("half_life")?,
+                row.get::<_, f64>("last_access")?,
+                row.get::<_, String>("metadata")?,
+                row.get::<_, String>("namespace")?,
+            ))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
+
+    // Decrypt text, embedding, and metadata if encrypted
+    let memories: Vec<MemoryWithEmbedding> = raw_rows.into_iter()
+        .map(|(rid, memory_type, stored_text, stored_emb, created_at, importance, valence, half_life, last_access, stored_meta, namespace)| {
+            let text = db.decrypt_text(&stored_text)?;
+            let meta_str = db.decrypt_text(&stored_meta)?;
+            let emb_blob = db.decrypt_embedding(&stored_emb)?;
+            Ok(MemoryWithEmbedding {
+                rid, memory_type, text,
+                embedding: deserialize_f32(&emb_blob),
+                created_at, importance, valence, half_life, last_access,
+                metadata: serde_json::from_str(&meta_str)
+                    .unwrap_or(serde_json::Value::Object(Default::default())),
+                namespace,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
 
     // Group memories by namespace to prevent cross-namespace consolidation
     let mut by_namespace: std::collections::HashMap<String, Vec<MemoryWithEmbedding>> =
