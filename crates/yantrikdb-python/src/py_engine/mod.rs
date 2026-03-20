@@ -278,7 +278,7 @@ impl PyYantrikDB {
         })
     }
 
-    pub(crate) fn embed(&self, py: Python<'_>, text: &str) -> PyResult<Vec<f32>> {
+    pub(crate) fn embed_text(&self, py: Python<'_>, text: &str) -> PyResult<Vec<f32>> {
         // Try Rust-native embedder first (candle or any Embedder impl)
         if let Some(db) = &self.inner {
             if db.has_embedder() {

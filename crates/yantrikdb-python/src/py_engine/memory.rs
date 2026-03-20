@@ -31,7 +31,7 @@ impl PyYantrikDB {
 
         let emb = match embedding {
             Some(e) => e,
-            None => self.embed(py, text)?,
+            None => self.embed_text(py,text)?,
         };
 
         let meta = match metadata {
@@ -66,7 +66,7 @@ impl PyYantrikDB {
         let emb = match query_embedding {
             Some(e) => e,
             None => match query {
-                Some(q) => self.embed(py, q)?,
+                Some(q) => self.embed_text(py,q)?,
                 None => return Err(PyValueError::new_err("Must provide either query or query_embedding")),
             },
         };
@@ -103,7 +103,7 @@ impl PyYantrikDB {
         let emb = match query_embedding {
             Some(e) => e,
             None => match query {
-                Some(q) => self.embed(py, q)?,
+                Some(q) => self.embed_text(py,q)?,
                 None => return Err(PyValueError::new_err("Must provide either query or query_embedding")),
             },
         };
@@ -134,7 +134,7 @@ impl PyYantrikDB {
         let ref_emb = match refinement_embedding {
             Some(e) => e,
             None => match refinement_text {
-                Some(t) => self.embed(py, t)?,
+                Some(t) => self.embed_text(py,t)?,
                 None => return Err(PyValueError::new_err("Must provide either refinement_text or refinement_embedding")),
             },
         };
@@ -181,7 +181,7 @@ impl PyYantrikDB {
         let emb = match embedding {
             Some(e) => e,
             None => match query {
-                Some(q) => self.embed(py, q)?,
+                Some(q) => self.embed_text(py,q)?,
                 None => return Err(PyValueError::new_err("Must provide either query or embedding")),
             },
         };
@@ -236,7 +236,7 @@ impl PyYantrikDB {
         let db = self.get_inner()?;
         let emb = match embedding {
             Some(e) => e,
-            None => self.embed(py, new_text)?,
+            None => self.embed_text(py,new_text)?,
         };
         let result = db
             .correct(rid, new_text, new_importance, new_valence, &emb, correction_note)
@@ -284,7 +284,7 @@ impl PyYantrikDB {
 
             let embedding: Vec<f32> = match d.get_item("embedding")? {
                 Some(v) => v.extract()?,
-                None => self.embed(py, &text)?,
+                None => self.embed_text(py,&text)?,
             };
 
             let namespace: String = d.get_item("namespace")?
@@ -366,5 +366,14 @@ impl PyYantrikDB {
         dict.set_item("keyword_boost", w.keyword_boost)?;
         dict.set_item("generation", w.generation)?;
         Ok(dict.into())
+    }
+
+    /// Embed text using the configured embedder. Returns a list of floats.
+    ///
+    /// ```python
+    /// embedding = db.embed("some text")
+    /// ```
+    fn embed(&self, py: Python<'_>, text: &str) -> PyResult<Vec<f32>> {
+        self.embed_text(py, text)
     }
 }
