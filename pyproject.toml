@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "yantrikdb"
-version = "0.2.2"
+version = "0.2.3"
 description = "A Cognitive Memory Engine for Persistent AI Systems"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -12,7 +12,7 @@ requires-python = ">=3.10"
 authors = [
     { name = "Pranab Sarkar", email = "developer@pranab.co.in" },
 ]
-keywords = ["ai", "memory", "cognitive", "database", "embeddings", "knowledge-graph", "mcp"]
+keywords = ["ai", "memory", "cognitive", "database", "embeddings", "knowledge-graph"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -34,7 +34,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-mcp = ["mcp[cli]>=1.2.0"]
 server = ["fastapi>=0.110.0", "uvicorn[standard]>=0.29.0"]
 sync = ["websockets>=12.0"]
 langchain = ["langchain-core>=0.2.0"]
@@ -42,7 +41,7 @@ openai = ["openai>=1.0.0"]
 crewai = ["crewai>=0.40.0"]
 agent = ["httpx>=0.27.0", "pyyaml>=6.0"]
 all = [
-    "yantrikdb[mcp,server,sync,langchain,openai,agent]",
+    "yantrikdb[server,sync,langchain,openai,agent]",
 ]
 dev = [
     "pytest>=8.0.0",
@@ -51,7 +50,6 @@ dev = [
 
 [project.scripts]
 yantrikdb = "yantrikdb.cli:main"
-yantrikdb-mcp = "yantrikdb.mcp:main"
 yantrikdb-server = "yantrikdb.api:main"
 yantrikdb-sync = "yantrikdb.sync.transport:main"
 
