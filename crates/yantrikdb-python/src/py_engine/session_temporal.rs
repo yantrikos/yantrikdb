@@ -188,4 +188,46 @@ impl PyYantrikDB {
             Ok(dict.into())
         }).collect()
     }
+
+    // ── Substitution category APIs (V14) ──
+
+    #[pyo3(signature = (conflict_id, new_type))]
+    fn reclassify_conflict(
+        &self,
+        py: Python<'_>,
+        conflict_id: &str,
+        new_type: &str,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let result = db.reclassify_conflict(conflict_id, new_type).map_err(map_err)?;
+        reclassify_result_to_dict(py, &result)
+    }
+
+    fn substitution_categories(&self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
+        let db = self.get_inner()?;
+        let cats = db.substitution_categories().map_err(map_err)?;
+        cats.iter().map(|c| substitution_category_to_dict(py, c)).collect()
+    }
+
+    #[pyo3(signature = (category_name))]
+    fn substitution_members(
+        &self,
+        py: Python<'_>,
+        category_name: &str,
+    ) -> PyResult<Vec<PyObject>> {
+        let db = self.get_inner()?;
+        let members = db.substitution_members(category_name).map_err(map_err)?;
+        members.iter().map(|m| substitution_member_to_dict(py, m)).collect()
+    }
+
+    #[pyo3(signature = (category_name, members, source="llm_suggested"))]
+    fn learn_category_members(
+        &self,
+        category_name: &str,
+        members: Vec<(String, f64)>,
+        source: &str,
+    ) -> PyResult<usize> {
+        let db = self.get_inner()?;
+        db.learn_category_members(category_name, &members, source).map_err(map_err)
+    }
 }

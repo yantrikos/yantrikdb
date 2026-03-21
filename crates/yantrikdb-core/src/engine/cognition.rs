@@ -46,6 +46,9 @@ impl YantrikDB {
             0
         };
 
+        // Phase 2.5: Check if any substitution categories are ready for gossip expansion
+        all_triggers.extend(self.check_gossip_triggers()?);
+
         // Phase 3: Run consolidation if configured
         let consolidation_count = if config.run_consolidation {
             let stats = self.stats(None)?;
@@ -276,6 +279,90 @@ impl YantrikDB {
             personality_updated,
             duration_ms,
         })
+    }
+
+    // ── Gossip expansion triggers (V14) ──
+
+    /// Check substitution categories that are ready for LLM gossip expansion.
+    ///
+    /// Conditions per category:
+    /// - At least 3 confirmed members (source in seed/user_confirmed)
+    /// - No gossip trigger for this category in last 7 days
+    fn check_gossip_triggers(&self) -> Result<Vec<Trigger>> {
+        let mut triggers = Vec::new();
+        let conn = &self.conn;
+
+        // Find categories with enough confirmed members AND at least one non-seed member
+        // (seed-only categories don't need gossip expansion until the user has interacted)
+        let mut stmt = conn.prepare(
+            "SELECT c.id, c.name,
+                    COUNT(*) as confirmed_count,
+                    GROUP_CONCAT(m.token_display, ', ') as member_list
+             FROM substitution_categories c
+             JOIN substitution_members m ON m.category_id = c.id
+             WHERE c.status IN ('active', 'provisional')
+               AND m.status = 'active'
+               AND m.source IN ('seed', 'user_confirmed')
+             GROUP BY c.id
+             HAVING confirmed_count >= 3
+               AND SUM(CASE WHEN m.source != 'seed' THEN 1 ELSE 0 END) >= 1"
+        )?;
+
+        let candidates: Vec<(String, String, i64, String)> = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let cooldown_secs = 7.0 * 86400.0; // 7 days
+
+        for (cat_id, cat_name, _count, member_list) in candidates {
+            let cooldown_key = format!("gossip_{}", cat_name);
+
+            // Check cooldown
+            let recent: bool = conn.query_row(
+                "SELECT COUNT(*) > 0 FROM trigger_log
+                 WHERE cooldown_key = ?1 AND created_at > ?2",
+                params![cooldown_key, crate::time::now_secs() - cooldown_secs],
+                |row| row.get(0),
+            ).unwrap_or(false);
+
+            if recent {
+                continue;
+            }
+
+            let members: Vec<String> = member_list
+                .split(", ")
+                .map(|s| s.to_string())
+                .collect();
+
+            let mut context = std::collections::HashMap::new();
+            context.insert("category_id".to_string(), serde_json::json!(cat_id));
+            context.insert("category_name".to_string(), serde_json::json!(cat_name));
+            context.insert("confirmed_members".to_string(), serde_json::json!(members));
+
+            triggers.push(Trigger {
+                trigger_type: "gossip_expand_category".to_string(),
+                urgency: 0.3,
+                reason: format!(
+                    "Category '{}' has {} confirmed members and is ready for vocabulary expansion",
+                    cat_name, members.len()
+                ),
+                suggested_action: format!(
+                    "Ask LLM to suggest additional members for the '{}' category",
+                    cat_name
+                ),
+                source_rids: vec![],
+                context,
+            });
+        }
+
+        Ok(triggers)
     }
 
     // ── Trigger lifecycle API ──

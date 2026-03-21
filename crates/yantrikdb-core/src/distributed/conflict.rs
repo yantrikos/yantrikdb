@@ -54,13 +54,111 @@ const TEMPORAL_KEYWORDS: &[&str] = &[
     "q1", "q2", "q3", "q4",
 ];
 
+/// Date-like regex patterns for temporal substitution detection.
+const DATE_PATTERNS: &[&str] = &[
+    // Already handled by TEMPORAL_KEYWORDS: month names, day names, etc.
+    // These catch numeric dates that TEMPORAL_KEYWORDS miss.
+];
+
+/// Check if a token looks like a date component (numeric date parts).
+fn is_date_like(token: &str) -> bool {
+    // ISO date: 2024-01-15 (split into parts: 2024, 01, 15)
+    // Already covered by year keywords for 4-digit years.
+    // Catch day/month numbers: 1-31
+    if let Ok(n) = token.parse::<u32>() {
+        return (1..=31).contains(&n);
+    }
+    // Ordinals: 1st, 2nd, 3rd, 15th, etc.
+    if token.len() >= 3 && token.ends_with("st") || token.ends_with("nd")
+        || token.ends_with("rd") || token.ends_with("th")
+    {
+        let num_part = &token[..token.len() - 2];
+        if let Ok(n) = num_part.parse::<u32>() {
+            return (1..=31).contains(&n);
+        }
+    }
+    false
+}
+
+/// Map substitution category names to ConflictType.
+/// Identity-like categories produce IdentityFact; everything else produces Preference.
+const IDENTITY_CATEGORIES: &[&str] = &[
+    "cloud_providers",
+];
+
+/// Check substitution_members table for category-based conflict.
+fn check_category_substitution(
+    conn: &rusqlite::Connection,
+    diff_a: &[&String],
+    diff_b: &[&String],
+) -> Option<(ConflictType, String)> {
+    // Try each pair of diff tokens
+    let mut stmt = match conn.prepare_cached(
+        "SELECT c.name, c.conflict_mode
+         FROM substitution_members m1
+         JOIN substitution_members m2 ON m1.category_id = m2.category_id
+         JOIN substitution_categories c ON c.id = m1.category_id
+         WHERE m1.token_normalized = ?1 AND m2.token_normalized = ?2
+           AND m1.status = 'active' AND m2.status = 'active'
+           AND m1.confidence >= 0.6 AND m2.confidence >= 0.6
+           AND c.status = 'active'
+         LIMIT 1"
+    ) {
+        Ok(s) => s,
+        Err(_) => return None,
+    };
+
+    for token_a in diff_a {
+        for token_b in diff_b {
+            if let Ok((cat_name, _conflict_mode)) = stmt.query_row(
+                params![token_a.as_str(), token_b.as_str()],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            ) {
+                let conflict_type = if IDENTITY_CATEGORIES.contains(&cat_name.as_str()) {
+                    ConflictType::IdentityFact
+                } else {
+                    ConflictType::Preference
+                };
+                let desc = format!(
+                    "{} category substitution: {{{}}} vs {{{}}}",
+                    cat_name, token_a, token_b,
+                );
+                return Some((conflict_type, desc));
+            }
+        }
+    }
+
+    // Try multi-word: join all diff tokens and check
+    if diff_a.len() >= 2 || diff_b.len() >= 2 {
+        let joined_a: String = diff_a.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ");
+        let joined_b: String = diff_b.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ");
+        if let Ok((cat_name, _)) = stmt.query_row(
+            params![joined_a, joined_b],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ) {
+            let conflict_type = if IDENTITY_CATEGORIES.contains(&cat_name.as_str()) {
+                ConflictType::IdentityFact
+            } else {
+                ConflictType::Preference
+            };
+            let desc = format!(
+                "{} category substitution: {{{}}} vs {{{}}}",
+                cat_name, joined_a, joined_b,
+            );
+            return Some((conflict_type, desc));
+        }
+    }
+
+    None
+}
+
 /// Detect entity substitution in two memory texts.
 ///
-/// When two memories are semantically similar but differ in specific entities,
-/// this classifies the substitution type. For example:
-/// - "works at Google" vs "works at Meta" → IdentityFact (organization substitution)
-/// - "uses PostgreSQL for API" vs "uses MySQL for API" → Preference (tech substitution)
-/// - "meeting on March 15" vs "meeting on April 1" → Temporal (date substitution)
+/// Detection flow (in priority order):
+/// 1. Temporal keywords (month names, days, years, etc.)
+/// 2. Date-like numeric patterns (ordinals, day numbers)
+/// 3. Substitution category lookup (learned + seed categories)
+/// 4. Entity table lookup (legacy fallback)
 fn classify_entity_substitution(
     conn: &rusqlite::Connection,
     text_a: &str,
@@ -80,7 +178,7 @@ fn classify_entity_substitution(
     let diff_a: Vec<&String> = words_a.difference(&words_b).collect();
     let diff_b: Vec<&String> = words_b.difference(&words_a).collect();
 
-    // Check for temporal keyword substitution first (doesn't require entity lookup)
+    // ── Step 1: Temporal keyword substitution ──
     let temporal_a = diff_a.iter().any(|w| TEMPORAL_KEYWORDS.contains(&w.as_str()));
     let temporal_b = diff_b.iter().any(|w| TEMPORAL_KEYWORDS.contains(&w.as_str()));
     if temporal_a && temporal_b {
@@ -92,7 +190,24 @@ fn classify_entity_substitution(
         return (ConflictType::Temporal, Some(diff_desc));
     }
 
-    // Look up differing tokens in the entities table to see if they're known entities
+    // ── Step 2: Date-like numeric patterns ──
+    let date_a = diff_a.iter().any(|w| is_date_like(w));
+    let date_b = diff_b.iter().any(|w| is_date_like(w));
+    if (temporal_a || date_a) && (temporal_b || date_b) {
+        let diff_desc = format!(
+            "date substitution: {{{}}} vs {{{}}}",
+            diff_a.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+            diff_b.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+        );
+        return (ConflictType::Temporal, Some(diff_desc));
+    }
+
+    // ── Step 3: Substitution category lookup (seed + learned) ──
+    if let Some((conflict_type, desc)) = check_category_substitution(conn, &diff_a, &diff_b) {
+        return (conflict_type, Some(desc));
+    }
+
+    // ── Step 4: Entity table lookup (legacy fallback) ──
     let mut entity_types_a: Vec<String> = Vec::new();
     let mut entity_types_b: Vec<String> = Vec::new();
     let mut entity_names_a: Vec<String> = Vec::new();
@@ -115,7 +230,7 @@ fn classify_entity_substitution(
         }
     }
 
-    // Also try multi-word entity matching: join diff tokens and check
+    // Multi-word entity matching
     if entity_types_a.is_empty() && diff_a.len() >= 2 {
         let joined: String = diff_a.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" ");
         if let Ok(mut stmt) = conn.prepare_cached(
@@ -143,7 +258,7 @@ fn classify_entity_substitution(
         }
     }
 
-    // Check if both sides have entities of the same type → substitution conflict
+    // Check if both sides have entities of the same type
     for type_a in &entity_types_a {
         for type_b in &entity_types_b {
             if type_a == type_b {
@@ -160,13 +275,12 @@ fn classify_entity_substitution(
                 if PREFERENCE_ENTITY_TYPES.contains(&type_a.as_str()) {
                     return (ConflictType::Preference, Some(diff_desc));
                 }
-                // Same type but not in identity/preference → still a meaningful conflict
                 return (ConflictType::Minor, Some(diff_desc));
             }
         }
     }
 
-    // No entity substitution detected
+    // No substitution detected
     (ConflictType::Minor, None)
 }
 

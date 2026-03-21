@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 13;
+pub const SCHEMA_VERSION: i32 = 14;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -265,6 +265,38 @@ CREATE TABLE IF NOT EXISTS pattern_entities (
     PRIMARY KEY (pattern_id, entity_name)
 );
 CREATE INDEX IF NOT EXISTS idx_pattern_entities_entity ON pattern_entities(entity_name);
+
+-- Substitution categories for conflict detection (V14)
+CREATE TABLE IF NOT EXISTS substitution_categories (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    conflict_mode TEXT NOT NULL DEFAULT 'exclusive',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    hlc BLOB NOT NULL,
+    origin_actor TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS substitution_members (
+    id TEXT PRIMARY KEY,
+    category_id TEXT NOT NULL REFERENCES substitution_categories(id),
+    token_normalized TEXT NOT NULL,
+    token_display TEXT NOT NULL,
+    confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    source TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    context_hint TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    hlc BLOB NOT NULL,
+    origin_actor TEXT NOT NULL,
+    UNIQUE(category_id, token_normalized)
+);
+CREATE INDEX IF NOT EXISTS idx_sub_members_token ON substitution_members(token_normalized);
+CREATE INDEX IF NOT EXISTS idx_sub_members_category ON substitution_members(category_id);
+CREATE INDEX IF NOT EXISTS idx_sub_members_source_status ON substitution_members(source, status);
+CREATE INDEX IF NOT EXISTS idx_sub_categories_name ON substitution_categories(name);
 
 -- Recall feedback for adaptive learning (V10)
 CREATE TABLE IF NOT EXISTS recall_feedback (
@@ -697,4 +729,39 @@ CREATE INDEX IF NOT EXISTS idx_memories_session ON memories(namespace, session_i
 CREATE INDEX IF NOT EXISTS idx_memories_due_at ON memories(namespace, due_at)
     WHERE due_at IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_memories_last_access ON memories(last_access);
+";
+
+/// SQL to migrate from schema V13 to V14.
+pub const MIGRATE_V13_TO_V14: &str = "
+-- Substitution categories for feedback-driven conflict learning
+CREATE TABLE IF NOT EXISTS substitution_categories (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL UNIQUE,
+    conflict_mode TEXT NOT NULL DEFAULT 'exclusive',
+    status TEXT NOT NULL DEFAULT 'active',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    hlc BLOB NOT NULL,
+    origin_actor TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS substitution_members (
+    id TEXT PRIMARY KEY,
+    category_id TEXT NOT NULL REFERENCES substitution_categories(id),
+    token_normalized TEXT NOT NULL,
+    token_display TEXT NOT NULL,
+    confidence REAL NOT NULL CHECK (confidence >= 0.0 AND confidence <= 1.0),
+    source TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'active',
+    context_hint TEXT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    hlc BLOB NOT NULL,
+    origin_actor TEXT NOT NULL,
+    UNIQUE(category_id, token_normalized)
+);
+CREATE INDEX IF NOT EXISTS idx_sub_members_token ON substitution_members(token_normalized);
+CREATE INDEX IF NOT EXISTS idx_sub_members_category ON substitution_members(category_id);
+CREATE INDEX IF NOT EXISTS idx_sub_members_source_status ON substitution_members(source, status);
+CREATE INDEX IF NOT EXISTS idx_sub_categories_name ON substitution_categories(name);
 ";

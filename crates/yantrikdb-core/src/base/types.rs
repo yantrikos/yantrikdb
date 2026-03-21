@@ -800,6 +800,48 @@ pub struct RelationshipDepth {
     pub interaction_frequency: f64,
 }
 
+// ── Substitution categories (V14) ──
+
+/// A substitution category (e.g., "databases", "cloud_providers").
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubstitutionCategory {
+    pub id: String,
+    pub name: String,
+    pub conflict_mode: String,
+    pub status: String,
+    pub member_count: i64,
+}
+
+/// A member of a substitution category.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubstitutionMember {
+    pub id: String,
+    pub category_name: String,
+    pub token_normalized: String,
+    pub token_display: String,
+    pub confidence: f64,
+    pub source: String,
+    pub status: String,
+}
+
+/// Result of reclassifying a conflict (learning entry point).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReclassifyResult {
+    pub conflict_id: String,
+    pub old_type: String,
+    pub new_type: String,
+    pub learned_members: Vec<LearnedMember>,
+    pub category_created: Option<String>,
+}
+
+/// A member learned during conflict reclassification.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LearnedMember {
+    pub token: String,
+    pub category_name: String,
+    pub is_new: bool,
+}
+
 impl Default for PatternConfig {
     fn default() -> Self {
         Self {

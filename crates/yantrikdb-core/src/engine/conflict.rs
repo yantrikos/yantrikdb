@@ -258,6 +258,365 @@ impl YantrikDB {
         })
     }
 
+    // ── Substitution category APIs (V14) ──
+
+    /// Reclassify a conflict and learn from the diff tokens.
+    ///
+    /// When a user says "this redundancy is actually a conflict," this method:
+    /// 1. Extracts differing tokens between the two memories
+    /// 2. Learns them into substitution categories (creates/extends categories)
+    /// 3. Updates the conflict type and priority
+    pub fn reclassify_conflict(
+        &self,
+        conflict_id: &str,
+        new_type: &str,
+    ) -> Result<ReclassifyResult> {
+        let conflict = self
+            .get_conflict(conflict_id)?
+            .ok_or_else(|| YantrikDbError::NotFound(format!("conflict: {}", conflict_id)))?;
+
+        let old_type = conflict.conflict_type.clone();
+
+        // Get memory texts
+        let mem_a = self.get(&conflict.memory_a)?;
+        let mem_b = self.get(&conflict.memory_b)?;
+        let text_a = mem_a.map(|m| m.text).unwrap_or_default();
+        let text_b = mem_b.map(|m| m.text).unwrap_or_default();
+
+        // Decrypt if needed
+        let text_a = self.decrypt_text(&text_a).unwrap_or(text_a);
+        let text_b = self.decrypt_text(&text_b).unwrap_or(text_b);
+
+        // Extract differing tokens
+        let words_a: std::collections::HashSet<String> = text_a
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+            .filter(|w| !w.is_empty())
+            .collect();
+        let words_b: std::collections::HashSet<String> = text_b
+            .split_whitespace()
+            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+            .filter(|w| !w.is_empty())
+            .collect();
+
+        let diff_a: Vec<String> = words_a.difference(&words_b).cloned().collect();
+        let diff_b: Vec<String> = words_b.difference(&words_a).cloned().collect();
+
+        let ts = now();
+        let hlc_ts = self.tick_hlc();
+        let hlc_bytes = hlc_ts.to_bytes().to_vec();
+        let actor = self.actor_id.clone();
+        let mut learned_members = Vec::new();
+        let mut category_created = None;
+
+        // For each diff token pair, try to learn category membership
+        for token_a in &diff_a {
+            for token_b in &diff_b {
+                // Check if either token already belongs to a category
+                let cat_a = self.find_member_category(token_a);
+                let cat_b = self.find_member_category(token_b);
+
+                match (cat_a, cat_b) {
+                    (Some((cat_id, cat_name)), None) => {
+                        // token_a has a category, add token_b to same category
+                        self.add_member_to_category(
+                            &cat_id, token_b, token_b,
+                            1.0, "user_confirmed", ts, &hlc_bytes, &actor,
+                        )?;
+                        learned_members.push(LearnedMember {
+                            token: token_b.clone(),
+                            category_name: cat_name,
+                            is_new: true,
+                        });
+                    }
+                    (None, Some((cat_id, cat_name))) => {
+                        // token_b has a category, add token_a to same category
+                        self.add_member_to_category(
+                            &cat_id, token_a, token_a,
+                            1.0, "user_confirmed", ts, &hlc_bytes, &actor,
+                        )?;
+                        learned_members.push(LearnedMember {
+                            token: token_a.clone(),
+                            category_name: cat_name,
+                            is_new: true,
+                        });
+                    }
+                    (Some((cat_id_a, cat_name_a)), Some((cat_id_b, _cat_name_b))) => {
+                        if cat_id_a == cat_id_b {
+                            // Both in same category — reinforce confidence
+                            self.conn.execute(
+                                "UPDATE substitution_members SET confidence = 1.0, source = 'user_confirmed', updated_at = ?1
+                                 WHERE category_id = ?2 AND (token_normalized = ?3 OR token_normalized = ?4)",
+                                params![ts, cat_id_a, token_a, token_b],
+                            )?;
+                            learned_members.push(LearnedMember {
+                                token: token_a.clone(),
+                                category_name: cat_name_a.clone(),
+                                is_new: false,
+                            });
+                            learned_members.push(LearnedMember {
+                                token: token_b.clone(),
+                                category_name: cat_name_a,
+                                is_new: false,
+                            });
+                        }
+                        // Different categories: don't auto-merge, just log
+                    }
+                    (None, None) => {
+                        // Neither token in any category — check if this pair has recurred
+                        let recurrence = self.count_reclassify_pair_occurrences(token_a, token_b);
+                        if recurrence >= 1 {
+                            // Recurring pair → create provisional category
+                            let prov_name = format!(
+                                "learned_{}_{}", token_a, token_b
+                            );
+                            let cat_id = crate::id::new_id();
+                            self.conn.execute(
+                                "INSERT OR IGNORE INTO substitution_categories
+                                 (id, name, conflict_mode, status, created_at, updated_at, hlc, origin_actor)
+                                 VALUES (?1, ?2, 'exclusive', 'provisional', ?3, ?3, ?4, ?5)",
+                                params![cat_id, prov_name, ts, hlc_bytes, actor],
+                            )?;
+                            self.add_member_to_category(
+                                &cat_id, token_a, token_a,
+                                1.0, "user_confirmed", ts, &hlc_bytes, &actor,
+                            )?;
+                            self.add_member_to_category(
+                                &cat_id, token_b, token_b,
+                                1.0, "user_confirmed", ts, &hlc_bytes, &actor,
+                            )?;
+                            category_created = Some(prov_name.clone());
+                            learned_members.push(LearnedMember {
+                                token: token_a.clone(), category_name: prov_name.clone(), is_new: true,
+                            });
+                            learned_members.push(LearnedMember {
+                                token: token_b.clone(), category_name: prov_name, is_new: true,
+                            });
+                        }
+                        // First occurrence: just log in oplog as evidence (below)
+                    }
+                }
+            }
+        }
+
+        // Update conflict type and priority
+        let new_conflict_type = ConflictType::from_str(new_type);
+        let new_priority = new_conflict_type.default_priority();
+        self.conn.execute(
+            "UPDATE conflicts SET conflict_type = ?1, priority = ?2 WHERE conflict_id = ?3",
+            params![new_type, new_priority, conflict_id],
+        )?;
+
+        // Log to oplog
+        self.log_op(
+            "conflict_reclassify",
+            Some(conflict_id),
+            &serde_json::json!({
+                "conflict_id": conflict_id,
+                "old_type": old_type,
+                "new_type": new_type,
+                "diff_a": diff_a,
+                "diff_b": diff_b,
+                "learned_members": learned_members.iter().map(|m| {
+                    serde_json::json!({"token": m.token, "category": m.category_name, "is_new": m.is_new})
+                }).collect::<Vec<_>>(),
+                "category_created": category_created,
+            }),
+            None,
+        )?;
+
+        Ok(ReclassifyResult {
+            conflict_id: conflict_id.to_string(),
+            old_type,
+            new_type: new_type.to_string(),
+            learned_members,
+            category_created,
+        })
+    }
+
+    /// List all substitution categories with member counts.
+    pub fn substitution_categories(&self) -> Result<Vec<SubstitutionCategory>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.id, c.name, c.conflict_mode, c.status,
+                    (SELECT COUNT(*) FROM substitution_members m
+                     WHERE m.category_id = c.id AND m.status = 'active') as member_count
+             FROM substitution_categories c
+             ORDER BY c.name"
+        )?;
+
+        let cats = stmt
+            .query_map([], |row| {
+                Ok(SubstitutionCategory {
+                    id: row.get(0)?,
+                    name: row.get(1)?,
+                    conflict_mode: row.get(2)?,
+                    status: row.get(3)?,
+                    member_count: row.get(4)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(cats)
+    }
+
+    /// List members of a specific substitution category.
+    pub fn substitution_members(&self, category_name: &str) -> Result<Vec<SubstitutionMember>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT m.id, c.name, m.token_normalized, m.token_display,
+                    m.confidence, m.source, m.status
+             FROM substitution_members m
+             JOIN substitution_categories c ON c.id = m.category_id
+             WHERE c.name = ?1
+             ORDER BY m.confidence DESC, m.token_normalized"
+        )?;
+
+        let members = stmt
+            .query_map(params![category_name], |row| {
+                Ok(SubstitutionMember {
+                    id: row.get(0)?,
+                    category_name: row.get(1)?,
+                    token_normalized: row.get(2)?,
+                    token_display: row.get(3)?,
+                    confidence: row.get(4)?,
+                    source: row.get(5)?,
+                    status: row.get(6)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        Ok(members)
+    }
+
+    /// Ingest new members into a category (from LLM gossip or manual input).
+    ///
+    /// Creates the category if it doesn't exist. Returns number of new members added.
+    pub fn learn_category_members(
+        &self,
+        category_name: &str,
+        members: &[(String, f64)],
+        source: &str,
+    ) -> Result<usize> {
+        let ts = now();
+        let hlc_ts = self.tick_hlc();
+        let hlc_bytes = hlc_ts.to_bytes().to_vec();
+        let actor = self.actor_id.clone();
+
+        // Find or create category
+        let cat_id = match self.conn.query_row(
+            "SELECT id FROM substitution_categories WHERE name = ?1",
+            params![category_name],
+            |row| row.get::<_, String>(0),
+        ) {
+            Ok(id) => id,
+            Err(rusqlite::Error::QueryReturnedNoRows) => {
+                let id = crate::id::new_id();
+                self.conn.execute(
+                    "INSERT INTO substitution_categories
+                     (id, name, conflict_mode, status, created_at, updated_at, hlc, origin_actor)
+                     VALUES (?1, ?2, 'exclusive', 'active', ?3, ?3, ?4, ?5)",
+                    params![id, category_name, ts, hlc_bytes, actor],
+                )?;
+                self.log_op(
+                    "category_create",
+                    None,
+                    &serde_json::json!({
+                        "category_id": id,
+                        "name": category_name,
+                        "source": source,
+                    }),
+                    None,
+                )?;
+                id
+            }
+            Err(e) => return Err(e.into()),
+        };
+
+        let status = if source == "llm_suggested" { "pending" } else { "active" };
+        let mut added = 0;
+
+        for (token, confidence) in members {
+            let normalized = token.to_lowercase();
+            let display = token.clone();
+            let was_added = self.add_member_to_category(
+                &cat_id, &normalized, &display,
+                *confidence, source, ts, &hlc_bytes, &actor,
+            )?;
+            if was_added {
+                added += 1;
+            }
+        }
+
+        // Log to oplog
+        self.log_op(
+            "member_add",
+            None,
+            &serde_json::json!({
+                "category_id": cat_id,
+                "category_name": category_name,
+                "source": source,
+                "members_added": added,
+                "total_submitted": members.len(),
+            }),
+            None,
+        )?;
+
+        Ok(added)
+    }
+
+    // ── Internal helpers for substitution categories ──
+
+    fn find_member_category(&self, token: &str) -> Option<(String, String)> {
+        self.conn.query_row(
+            "SELECT c.id, c.name FROM substitution_members m
+             JOIN substitution_categories c ON c.id = m.category_id
+             WHERE m.token_normalized = ?1 AND m.status = 'active'
+             LIMIT 1",
+            params![token],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        ).ok()
+    }
+
+    fn add_member_to_category(
+        &self,
+        cat_id: &str,
+        normalized: &str,
+        display: &str,
+        confidence: f64,
+        source: &str,
+        ts: f64,
+        hlc_bytes: &[u8],
+        actor: &str,
+    ) -> Result<bool> {
+        let member_id = crate::id::new_id();
+        let status = if source == "llm_suggested" { "pending" } else { "active" };
+        let rows = self.conn.execute(
+            "INSERT OR IGNORE INTO substitution_members
+             (id, category_id, token_normalized, token_display, confidence,
+              source, status, context_hint, created_at, updated_at, hlc, origin_actor)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?8, ?9, ?10)",
+            params![member_id, cat_id, normalized, display, confidence, source, status, ts, hlc_bytes, actor],
+        )?;
+        Ok(rows > 0)
+    }
+
+    fn count_reclassify_pair_occurrences(&self, token_a: &str, token_b: &str) -> usize {
+        // Count how many times this pair appeared in conflict_reclassify oplog events
+        let count: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM oplog
+             WHERE op_type = 'conflict_reclassify'
+               AND (json_extract(payload, '$.diff_a') LIKE ?1
+                    OR json_extract(payload, '$.diff_b') LIKE ?1)
+               AND (json_extract(payload, '$.diff_a') LIKE ?2
+                    OR json_extract(payload, '$.diff_b') LIKE ?2)",
+            params![
+                format!("%{}%", token_a),
+                format!("%{}%", token_b),
+            ],
+            |row| row.get(0),
+        ).unwrap_or(0);
+        count as usize
+    }
+
     /// Dismiss a conflict (mark as not-a-conflict).
     pub fn dismiss_conflict(&self, conflict_id: &str, note: Option<&str>) -> Result<()> {
         let ts = now();

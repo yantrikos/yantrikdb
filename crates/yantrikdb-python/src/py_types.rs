@@ -375,6 +375,49 @@ pub fn relationship_depth_to_dict(py: Python<'_>, r: &yantrikdb_core::Relationsh
     Ok(dict.into())
 }
 
+/// Convert a ReclassifyResult to a Python dict.
+pub fn reclassify_result_to_dict(py: Python<'_>, r: &yantrikdb_core::ReclassifyResult) -> PyResult<PyObject> {
+    let dict = PyDict::new(py);
+    dict.set_item("conflict_id", &r.conflict_id)?;
+    dict.set_item("old_type", &r.old_type)?;
+    dict.set_item("new_type", &r.new_type)?;
+    let members = pyo3::types::PyList::empty(py);
+    for m in &r.learned_members {
+        let md = PyDict::new(py);
+        md.set_item("token", &m.token)?;
+        md.set_item("category_name", &m.category_name)?;
+        md.set_item("is_new", m.is_new)?;
+        members.append(md)?;
+    }
+    dict.set_item("learned_members", members)?;
+    dict.set_item("category_created", &r.category_created)?;
+    Ok(dict.into())
+}
+
+/// Convert a SubstitutionCategory to a Python dict.
+pub fn substitution_category_to_dict(py: Python<'_>, c: &yantrikdb_core::SubstitutionCategory) -> PyResult<PyObject> {
+    let dict = PyDict::new(py);
+    dict.set_item("id", &c.id)?;
+    dict.set_item("name", &c.name)?;
+    dict.set_item("conflict_mode", &c.conflict_mode)?;
+    dict.set_item("status", &c.status)?;
+    dict.set_item("member_count", c.member_count)?;
+    Ok(dict.into())
+}
+
+/// Convert a SubstitutionMember to a Python dict.
+pub fn substitution_member_to_dict(py: Python<'_>, m: &yantrikdb_core::SubstitutionMember) -> PyResult<PyObject> {
+    let dict = PyDict::new(py);
+    dict.set_item("id", &m.id)?;
+    dict.set_item("category_name", &m.category_name)?;
+    dict.set_item("token_normalized", &m.token_normalized)?;
+    dict.set_item("token_display", &m.token_display)?;
+    dict.set_item("confidence", m.confidence)?;
+    dict.set_item("source", &m.source)?;
+    dict.set_item("status", &m.status)?;
+    Ok(dict.into())
+}
+
 /// Convert a Python object to serde_json::Value.
 pub fn py_to_json(obj: &Bound<'_, PyAny>) -> PyResult<serde_json::Value> {
     if obj.is_none() {
