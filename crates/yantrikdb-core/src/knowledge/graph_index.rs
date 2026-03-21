@@ -112,6 +112,11 @@ impl GraphIndex {
         id
     }
 
+    /// Return all known entity names.
+    pub fn all_entity_names(&self) -> Vec<String> {
+        self.id_to_entity.clone()
+    }
+
     /// Add or update an entity (called from relate()).
     pub fn add_entity(&mut self, name: &str, entity_type: &str) {
         if let Some(&id) = self.entity_to_id.get(name) {

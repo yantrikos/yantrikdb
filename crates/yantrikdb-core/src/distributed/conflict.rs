@@ -280,6 +280,108 @@ pub fn scan_conflicts(db: &YantrikDB) -> Result<Vec<Conflict>> {
         }
     }
 
+    // Scan for entity-based semantic conflicts:
+    // Memories sharing entities that are semantically similar but textually different.
+    // This catches contradictions like "works at Google" vs "works at Meta" even
+    // without explicit relate() calls, as long as entities exist and memory_entities
+    // are populated (auto-linked on record).
+    {
+        // Group active memories by shared entities
+        let mut entity_mem_stmt = conn.prepare(
+            "SELECT me.entity_name, m.rid, m.text, m.embedding
+             FROM memory_entities me
+             JOIN memories m ON m.rid = me.memory_rid
+             WHERE m.consolidation_status = 'active'
+             AND m.embedding IS NOT NULL
+             ORDER BY me.entity_name",
+        )?;
+
+        let rows: Vec<(String, String, String, Vec<u8>)> = entity_mem_stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Vec<u8>>(3)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        // Group by entity
+        let mut entity_groups: std::collections::HashMap<String, Vec<(String, String, Vec<u8>)>> =
+            std::collections::HashMap::new();
+        for (entity, rid, text, emb) in rows {
+            let text = db.decrypt_text(&text).unwrap_or(text);
+            let emb = db.decrypt_embedding(&emb).unwrap_or(emb);
+            entity_groups
+                .entry(entity)
+                .or_default()
+                .push((rid, text, emb));
+        }
+
+        let mut seen_pairs: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+
+        for (entity, memories) in &entity_groups {
+            if memories.len() < 2 {
+                continue;
+            }
+            for i in 0..memories.len() {
+                for j in (i + 1)..memories.len() {
+                    let (ref rid_a, ref text_a, ref emb_a) = memories[i];
+                    let (ref rid_b, ref text_b, ref emb_b) = memories[j];
+
+                    let pair = if rid_a < rid_b {
+                        (rid_a.clone(), rid_b.clone())
+                    } else {
+                        (rid_b.clone(), rid_a.clone())
+                    };
+                    if seen_pairs.contains(&pair) {
+                        continue;
+                    }
+
+                    let emb_a_f32 = crate::serde_helpers::deserialize_f32(emb_a);
+                    let emb_b_f32 = crate::serde_helpers::deserialize_f32(emb_b);
+                    let sim = crate::consolidate::cosine_similarity(&emb_a_f32, &emb_b_f32);
+
+                    // Similar topic (>0.5) but not exact duplicate (<0.98)
+                    if sim > 0.5 && sim < 0.98 {
+                        // Compute word-level Jaccard to detect different content
+                        let words_a: std::collections::HashSet<&str> =
+                            text_a.split_whitespace().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric())).filter(|w| !w.is_empty()).collect();
+                        let words_b: std::collections::HashSet<&str> =
+                            text_b.split_whitespace().map(|w| w.trim_matches(|c: char| !c.is_alphanumeric())).filter(|w| !w.is_empty()).collect();
+
+                        let intersection = words_a.intersection(&words_b).count();
+                        let union = words_a.union(&words_b).count();
+                        let jaccard = if union > 0 { intersection as f64 / union as f64 } else { 1.0 };
+
+                        // High semantic similarity + low word overlap = likely contradiction
+                        // (they're about the same topic but say different things)
+                        if jaccard < 0.7 {
+                            seen_pairs.insert(pair);
+                            if !conflict_exists(db, rid_a, rid_b)? {
+                                let conflict = create_conflict(
+                                    db,
+                                    &ConflictType::Minor,
+                                    rid_a,
+                                    rid_b,
+                                    Some(entity),
+                                    None,
+                                    &format!(
+                                        "Memories sharing entity '{}' may contradict: \
+                                         similarity={:.0}%, word_overlap={:.0}%",
+                                        entity, sim * 100.0, jaccard * 100.0
+                                    ),
+                                )?;
+                                conflicts.push(conflict);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // Scan for concurrent consolidation conflicts
     let mut cm_stmt = conn.prepare(
         "SELECT cm1.consolidation_rid, cm2.consolidation_rid, cm1.source_rid

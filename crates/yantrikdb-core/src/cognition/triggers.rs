@@ -274,17 +274,48 @@ pub fn check_redundancy(db: &YantrikDB, _sim_threshold: f64) -> Result<Vec<Trigg
                 context.insert("text_b".to_string(), serde_json::json!(rows[j].1));
                 context.insert("similarity".to_string(), serde_json::json!(sim));
 
-                triggers.push(Trigger {
-                    trigger_type: "redundancy".to_string(),
-                    reason: format!(
-                        "Two memories are {:.0}% similar and may be redundant",
-                        sim * 100.0
-                    ),
-                    urgency: sim,
-                    source_rids: vec![rows[i].0.clone(), rows[j].0.clone()],
-                    suggested_action: "consolidate_or_forget".to_string(),
-                    context,
-                });
+                // Check if the pair shares entities — if so, this is likely a
+                // contradiction (same topic, different facts) not a simple duplicate.
+                let entities_a: Vec<String> = conn
+                    .prepare("SELECT entity_name FROM memory_entities WHERE memory_rid = ?1")?
+                    .query_map(rusqlite::params![rows[i].0], |r| r.get(0))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                let entities_b: Vec<String> = conn
+                    .prepare("SELECT entity_name FROM memory_entities WHERE memory_rid = ?1")?
+                    .query_map(rusqlite::params![rows[j].0], |r| r.get(0))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+
+                let shared: Vec<&String> = entities_a.iter().filter(|e| entities_b.contains(e)).collect();
+                let is_potential_conflict = !shared.is_empty() && sim < 0.98;
+
+                if is_potential_conflict {
+                    context.insert("shared_entities".to_string(),
+                        serde_json::json!(shared.iter().map(|s| s.as_str()).collect::<Vec<_>>()));
+                    triggers.push(Trigger {
+                        trigger_type: "potential_conflict".to_string(),
+                        reason: format!(
+                            "Two memories about '{}' are {:.0}% similar but may contradict each other",
+                            shared.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
+                            sim * 100.0
+                        ),
+                        urgency: sim,
+                        source_rids: vec![rows[i].0.clone(), rows[j].0.clone()],
+                        suggested_action: "review_conflict".to_string(),
+                        context,
+                    });
+                } else {
+                    triggers.push(Trigger {
+                        trigger_type: "redundancy".to_string(),
+                        reason: format!(
+                            "Two memories are {:.0}% similar and may be redundant",
+                            sim * 100.0
+                        ),
+                        urgency: sim,
+                        source_rids: vec![rows[i].0.clone(), rows[j].0.clone()],
+                        suggested_action: "consolidate_or_forget".to_string(),
+                        context,
+                    });
+                }
             }
         }
     }

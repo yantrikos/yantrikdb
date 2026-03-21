@@ -76,6 +76,23 @@ impl YantrikDB {
             )?;
         }
 
+        // Auto-link memory to known entities (populates memory_entities for graph recall)
+        {
+            let text_tokens = crate::graph::tokenize(text);
+            let gi = self.graph_index.borrow();
+            let all_entities = gi.all_entity_names();
+            drop(gi);
+            for entity in &all_entities {
+                if crate::graph::entity_matches_text(entity, &text_tokens) {
+                    self.conn.execute(
+                        "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) VALUES (?1, ?2)",
+                        params![rid, entity],
+                    )?;
+                    self.graph_index.borrow_mut().link_memory(&rid, entity);
+                }
+            }
+        }
+
         let emb_hash = embedding_hash(embedding);
         self.log_op(
             "record",
