@@ -146,8 +146,25 @@ impl YantrikDB {
             let heuristic_vec: Vec<String> = heuristic_entities.iter().cloned().collect();
             let relations = crate::graph::extract_heuristic_relations(text, &heuristic_vec);
             for rel in &relations {
-                // Ingest each extracted relation as a claim (best-effort, don't
-                // fail the record() call if claim ingestion fails).
+                // RFC 006 Phase 2: dedup check — skip if an identical claim
+                // (same src+rel_type+dst+extractor) already exists in this
+                // namespace. The ON CONFLICT in ingest_claim would UPDATE
+                // the existing row, but we prefer to NOT overwrite the
+                // original source_memory_rid provenance.
+                let already_exists = {
+                    let conn = self.conn();
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM edges WHERE src = ?1 AND rel_type = ?2 AND dst = ?3 \
+                         AND namespace = ?4 AND extractor = 'heuristic_v1' AND tombstoned = 0",
+                        params![rel.src, rel.rel_type, rel.dst, namespace],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0) > 0
+                };
+                if already_exists {
+                    continue; // Claim already exists — don't overwrite provenance
+                }
+
                 let _ = self.ingest_claim(
                     &rel.src,
                     &rel.rel_type,

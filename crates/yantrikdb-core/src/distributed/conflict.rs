@@ -838,9 +838,23 @@ pub fn scan_claim_conflicts(db: &YantrikDB, max_conflicts: usize) -> Result<Vec<
                 priority = "high";
             }
             Some(false) => {
-                // Both have time, but they DON'T overlap → succession, not conflict
-                reason_codes.push(reason_codes::POSSIBLE_SUCCESSION.to_string());
-                continue; // Skip — this is temporal succession, not a conflict
+                // Both have time, but they DON'T overlap → succession, not conflict.
+                // Mark the OLDER claim as superseded (non-destructive: just a metadata update).
+                let (older_src, older_dst, newer_vf) = if vf1.unwrap_or(0.0) < vf2.unwrap_or(0.0) {
+                    (dst1.as_str(), dst2.as_str(), vf2)
+                } else {
+                    (dst2.as_str(), dst1.as_str(), vf1)
+                };
+                // Set valid_to on the older claim to mark it as historical
+                {
+                    let conn = db.conn();
+                    let _ = conn.execute(
+                        "UPDATE edges SET valid_to = ?1 \
+                         WHERE src = ?2 AND rel_type = ?3 AND dst = ?4 AND valid_to IS NULL AND tombstoned = 0",
+                        params![newer_vf.unwrap_or(0.0), src, rel_type, older_src],
+                    );
+                }
+                continue; // Not a conflict — temporal succession handled
             }
             None => {
                 // One or both missing time → medium severity

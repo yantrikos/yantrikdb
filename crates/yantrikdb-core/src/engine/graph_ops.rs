@@ -474,12 +474,20 @@ impl YantrikDB {
     }
 
     /// Get claims (extended edges) for a specific entity, optionally filtered
-    /// by namespace and polarity.
+    /// by namespace. Includes a computed `status_suggestion` field derived at
+    /// read time (RFC 006 Phase 2):
+    ///
+    /// - `active`: positive polarity, no contradictions, no valid_to set
+    /// - `superseded`: valid_to is set (a later claim replaced this one)
+    /// - `historical`: valid_to is in the past (explicitly time-bounded)
+    /// - `conflicted`: an open conflict references this claim
+    /// - `negative`: polarity = -1 (negated claim, preserved for provenance)
     pub fn get_claims(
         &self,
         entity: &str,
         namespace: Option<&str>,
     ) -> Result<Vec<serde_json::Value>> {
+        let now = now();
         let conn = self.conn.lock();
         let sql = if let Some(ns) = namespace {
             format!(
@@ -499,24 +507,56 @@ impl YantrikDB {
                 .to_string()
         };
 
+        // Collect open conflict rids for status derivation
+        let conflict_rids: std::collections::HashSet<String> = {
+            let mut stmt = conn.prepare(
+                "SELECT memory_a FROM conflicts WHERE status = 'open' \
+                 UNION SELECT memory_b FROM conflicts WHERE status = 'open'"
+            )?;
+            let rows: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(0))?
+                .filter_map(|r| r.ok())
+                .collect();
+            drop(stmt);
+            rows.into_iter().collect()
+        };
+
         let mut stmt = conn.prepare(&sql)?;
         let claims = stmt
             .query_map(params![entity], |row| {
+                let claim_id: String = row.get(0)?;
+                let polarity: i32 = row.get(6)?;
+                let valid_to: Option<f64> = row.get(9)?;
+                let source_rid: Option<String> = row.get(12)?;
+
+                // Derive status at read time
+                let status = if polarity == -1 {
+                    "negative"
+                } else if let Some(vt) = valid_to {
+                    if vt < now { "historical" } else { "superseded" }
+                } else if conflict_rids.contains(&claim_id)
+                    || source_rid.as_ref().map_or(false, |r| conflict_rids.contains(r))
+                {
+                    "conflicted"
+                } else {
+                    "active"
+                };
+
                 Ok(serde_json::json!({
-                    "claim_id": row.get::<_, String>(0)?,
+                    "claim_id": claim_id,
                     "src": row.get::<_, String>(1)?,
                     "dst": row.get::<_, String>(2)?,
                     "rel_type": row.get::<_, String>(3)?,
                     "weight": row.get::<_, f64>(4)?,
                     "created_at": row.get::<_, f64>(5)?,
-                    "polarity": row.get::<_, i32>(6)?,
+                    "polarity": polarity,
                     "modality": row.get::<_, String>(7)?,
                     "valid_from": row.get::<_, Option<f64>>(8)?,
-                    "valid_to": row.get::<_, Option<f64>>(9)?,
+                    "valid_to": valid_to,
                     "extractor": row.get::<_, String>(10)?,
                     "confidence_band": row.get::<_, String>(11)?,
-                    "source_memory_rid": row.get::<_, Option<String>>(12)?,
+                    "source_memory_rid": source_rid,
                     "namespace": row.get::<_, String>(13)?,
+                    "status_suggestion": status,
                 }))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
