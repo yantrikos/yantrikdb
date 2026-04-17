@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 14;
+pub const SCHEMA_VERSION: i32 = 15;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -61,18 +61,43 @@ CREATE TABLE IF NOT EXISTS sessions (
     origin_actor TEXT
 );
 
--- Entity relationship graph
+-- Entity relationship graph / claims (RFC 006 Phase 1)
+-- Extended with claim-like qualifier columns for scoped conflict detection.
+-- In v0.7 (Phase 5) this table will be renamed to 'claims' with 'edges' as a VIEW.
 CREATE TABLE IF NOT EXISTS edges (
     edge_id TEXT PRIMARY KEY,            -- UUIDv7
     src TEXT NOT NULL,                   -- entity name or memory rid
     dst TEXT NOT NULL,                   -- entity name or memory rid
-    rel_type TEXT NOT NULL,              -- relationship type (e.g., \"is_about\", \"related_to\")
+    rel_type TEXT NOT NULL,              -- relationship type (e.g., \"ceo_of\", \"works_at\")
     weight REAL NOT NULL DEFAULT 1.0,    -- relationship strength [0, 1]
     created_at REAL NOT NULL,
     tombstoned INTEGER NOT NULL DEFAULT 0,
+    -- RFC 006 claim qualifiers
+    polarity INTEGER NOT NULL DEFAULT 1,           -- 1=positive, -1=negative, 0=unknown
+    modality TEXT NOT NULL DEFAULT 'asserted',      -- asserted|reported|hypothetical|denied|quoted
+    valid_from REAL,                                -- world-validity start (nullable)
+    valid_to REAL,                                  -- world-validity end (null=present)
+    extractor TEXT NOT NULL DEFAULT 'manual',       -- manual|structured_ingest|heuristic_v1|agent_llm
+    extractor_version TEXT,
+    confidence_band TEXT NOT NULL DEFAULT 'medium', -- low|medium|high
+    source_memory_rid TEXT,                         -- provenance: which memory spawned this claim
+    span_start INTEGER,                             -- byte offset in source memory text
+    span_end INTEGER,
+    namespace TEXT NOT NULL DEFAULT 'default',
 
     UNIQUE(src, dst, rel_type)
 );
+
+-- Entity aliases for alias-aware conflict detection (RFC 006 Layer B)
+CREATE TABLE IF NOT EXISTS entity_aliases (
+    alias TEXT NOT NULL,
+    canonical_name TEXT NOT NULL,
+    namespace TEXT NOT NULL DEFAULT 'default',
+    source TEXT NOT NULL DEFAULT 'explicit',  -- explicit|auto_suggested|approved
+    created_at REAL NOT NULL,
+    PRIMARY KEY (alias, namespace)
+);
+CREATE INDEX IF NOT EXISTS idx_alias_canonical ON entity_aliases(canonical_name, namespace);
 
 -- Entities extracted from memories
 CREATE TABLE IF NOT EXISTS entities (
@@ -764,4 +789,36 @@ CREATE INDEX IF NOT EXISTS idx_sub_members_token ON substitution_members(token_n
 CREATE INDEX IF NOT EXISTS idx_sub_members_category ON substitution_members(category_id);
 CREATE INDEX IF NOT EXISTS idx_sub_members_source_status ON substitution_members(source, status);
 CREATE INDEX IF NOT EXISTS idx_sub_categories_name ON substitution_categories(name);
+";
+
+/// SQL to migrate from schema V14 to V15 (RFC 006 Phase 1).
+///
+/// Extends edges with claim-like qualifier columns for scoped conflict
+/// detection: polarity, modality, valid_from/to, extractor, confidence_band,
+/// source provenance, and namespace. Also adds entity_aliases for
+/// alias-aware entity linking.
+pub const MIGRATE_V14_TO_V15: &str = "
+-- RFC 006 Phase 1: extend edges into claim-like records
+ALTER TABLE edges ADD COLUMN polarity INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE edges ADD COLUMN modality TEXT NOT NULL DEFAULT 'asserted';
+ALTER TABLE edges ADD COLUMN valid_from REAL;
+ALTER TABLE edges ADD COLUMN valid_to REAL;
+ALTER TABLE edges ADD COLUMN extractor TEXT NOT NULL DEFAULT 'manual';
+ALTER TABLE edges ADD COLUMN extractor_version TEXT;
+ALTER TABLE edges ADD COLUMN confidence_band TEXT NOT NULL DEFAULT 'medium';
+ALTER TABLE edges ADD COLUMN source_memory_rid TEXT;
+ALTER TABLE edges ADD COLUMN span_start INTEGER;
+ALTER TABLE edges ADD COLUMN span_end INTEGER;
+ALTER TABLE edges ADD COLUMN namespace TEXT NOT NULL DEFAULT 'default';
+
+-- Entity aliases for alias-aware conflict detection (RFC 006 Layer B)
+CREATE TABLE IF NOT EXISTS entity_aliases (
+    alias TEXT NOT NULL,
+    canonical_name TEXT NOT NULL,
+    namespace TEXT NOT NULL DEFAULT 'default',
+    source TEXT NOT NULL DEFAULT 'explicit',
+    created_at REAL NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (alias, namespace)
+);
+CREATE INDEX IF NOT EXISTS idx_alias_canonical ON entity_aliases(canonical_name, namespace);
 ";

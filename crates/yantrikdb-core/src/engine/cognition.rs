@@ -60,6 +60,7 @@ impl YantrikDB {
                     config.consolidation_time_window_days,
                     config.consolidation_min_cluster,
                     config.consolidation_limit,
+                    config.consolidation_require_entity_overlap,
                     false,
                 )?;
                 results.len()
@@ -139,7 +140,7 @@ impl YantrikDB {
                 };
 
                 // Add session context if available
-                let active_sessions = self.active_sessions.read().unwrap();
+                let active_sessions = self.active_sessions.read();
                 if !active_sessions.is_empty() {
                     let session_ids: Vec<&String> = active_sessions.values().collect();
                     context.insert(

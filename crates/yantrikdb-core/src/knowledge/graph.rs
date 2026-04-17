@@ -33,6 +33,353 @@ pub fn entity_matches_text(entity: &str, text_tokens: &[String]) -> bool {
     }
 }
 
+// ── Heuristic proper-noun extraction ──
+
+/// English function/pronoun/auxiliary words that should be stripped from the
+/// start or end of a capitalized chunk. A sentence-initial "The" or "Our" is
+/// capitalized by position, not because it names an entity.
+const ENTITY_STOPWORDS: &[&str] = &[
+    "The", "A", "An", "I", "We", "You", "He", "She", "It", "They",
+    "This", "That", "These", "Those", "My", "Your", "His", "Her",
+    "Its", "Our", "Their", "But", "And", "Or", "So", "If", "When",
+    "Where", "What", "Who", "Why", "How", "Is", "Are", "Was", "Were",
+    "Be", "Been", "Being", "Have", "Has", "Had", "Do", "Does", "Did",
+    "Of", "In", "On", "At", "To", "For", "With", "From", "By",
+    "As", "Than", "Then", "Also", "Just", "Only", "Very", "Much",
+];
+
+/// Extract candidate proper-noun entities from free-form text using a
+/// capitalized-chunk heuristic. Groups consecutive capitalized words into
+/// multi-word entities ("Alice Chen", "San Francisco", "Acme Corp") and
+/// strips leading/trailing English stopwords.
+///
+/// This is intentionally not a full NER — it captures the common case of
+/// people, companies, places, and products well enough that conflict
+/// detection can fire without requiring users to call `/v1/relate` for every
+/// entity. Acronyms, lowercase entities, and ambiguous mentions still need
+/// explicit `relate()` calls to enter the graph.
+pub fn extract_heuristic_entities(text: &str) -> Vec<String> {
+    let mut entities: Vec<String> = Vec::new();
+    let mut chunk: Vec<String> = Vec::new();
+
+    let flush = |chunk: &mut Vec<String>, out: &mut Vec<String>| {
+        while !chunk.is_empty() && ENTITY_STOPWORDS.contains(&chunk[0].as_str()) {
+            chunk.remove(0);
+        }
+        // Trailing-stopword strip skips single-character tokens so multi-word
+        // entities like "Series A" or "Version B" keep their letter suffix
+        // (A is a stopword but is also a valid version designator when trailing).
+        while let Some(last) = chunk.last() {
+            if ENTITY_STOPWORDS.contains(&last.as_str()) && last.chars().count() > 1 {
+                chunk.pop();
+            } else {
+                break;
+            }
+        }
+        if !chunk.is_empty() {
+            let candidate = chunk.join(" ");
+            let alpha_chars = candidate.chars().filter(|c| c.is_alphanumeric()).count();
+            if alpha_chars >= 2 {
+                out.push(candidate);
+            }
+        }
+        chunk.clear();
+    };
+
+    for word in text
+        .split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .filter(|s| !s.is_empty())
+    {
+        let first = word.chars().next().unwrap();
+        let starts_upper = first.is_uppercase();
+        let is_all_caps = word.len() > 1 && word.chars().all(|c| !c.is_alphabetic() || c.is_uppercase());
+
+        let joins_chunk = if chunk.is_empty() {
+            // Open a new chunk only on capitalized or all-caps tokens.
+            starts_upper || is_all_caps
+        } else {
+            // Continue an existing chunk on capitalized words or short letter-suffixes
+            // (e.g., "Series A", "Version B").
+            starts_upper
+                || is_all_caps
+                || (word.len() == 1 && first.is_ascii_uppercase())
+        };
+
+        if joins_chunk {
+            chunk.push(word.to_string());
+        } else {
+            flush(&mut chunk, &mut entities);
+        }
+    }
+    flush(&mut chunk, &mut entities);
+
+    // Deduplicate while preserving first-appearance order.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    entities.retain(|e| seen.insert(e.clone()));
+    entities
+}
+
+// ── Heuristic relation extraction (RFC 006 Phase 1) ──
+
+/// A candidate relation extracted from text by pattern matching.
+#[derive(Debug, Clone)]
+pub struct RelationCandidate {
+    pub src: String,
+    pub rel_type: String,
+    pub dst: String,
+    pub polarity: i32,       // 1=positive, -1=negative
+    pub modality: String,    // asserted, reported, hypothetical, denied
+    pub confidence_band: String, // low, medium, high
+}
+
+/// Relation patterns: keyword phrases that appear BETWEEN two entities
+/// and indicate a specific relationship. Each pattern maps to a rel_type.
+const RELATION_PATTERNS: &[(&[&str], &str)] = &[
+    // Role-based (entity A <pattern> entity B → rel_type)
+    (&["is the ceo of", "is ceo of", "serves as ceo of"], "ceo_of"),
+    (&["is the cto of", "is cto of", "serves as cto of"], "cto_of"),
+    (&["is the cfo of", "is cfo of", "serves as cfo of"], "cfo_of"),
+    (&["is the founder of", "is founder of", "co-founded"], "founded"),
+    (&["founded"], "founded"),
+    (&["leads", "heads", "runs", "manages", "directs"], "leads"),
+    (&["works at", "works for", "employed at", "employed by", "joined"], "works_at"),
+    // Location/origin
+    (&["was born in", "born in"], "born_in"),
+    (&["is headquartered in", "headquartered in", "is based in", "based in", "located in"], "headquartered_in"),
+    // Personal
+    (&["is married to", "married to", "wed to"], "married_to"),
+    // Corporate
+    (&["acquired", "bought", "purchased", "took over"], "acquired"),
+    (&["is a subsidiary of", "subsidiary of", "is owned by", "owned by"], "subsidiary_of"),
+    // Language/skill
+    (&["speaks", "is fluent in"], "speaks"),
+    // Generic membership/part-of
+    (&["is a member of", "member of", "belongs to", "part of"], "member_of"),
+    (&["reports to"], "reports_to"),
+];
+
+/// Possessive/appositive reverse patterns: "ORG's CEO, PERSON" or "ORG's CEO PERSON"
+const REVERSE_ROLE_PATTERNS: &[(&str, &str)] = &[
+    ("ceo", "ceo_of"),
+    ("cto", "cto_of"),
+    ("cfo", "cfo_of"),
+    ("founder", "founded"),
+    ("president", "leads"),
+    ("director", "leads"),
+    ("head", "leads"),
+];
+
+/// Extract candidate relations from text using entities as anchors.
+///
+/// For each ordered pair of entities (A before B in text), examines the
+/// text between them for relation-indicating keywords. Also checks for
+/// negation cues in the window to set polarity, and tense cues to infer
+/// past-tense (which callers can use for valid_to).
+///
+/// Returns high-precision, low-recall candidates — only emits when a
+/// clear keyword pattern matches. Designed for the RFC 006 Phase 1
+/// relation whitelist.
+pub fn extract_heuristic_relations(text: &str, entities: &[String]) -> Vec<RelationCandidate> {
+    if entities.len() < 2 {
+        return vec![];
+    }
+
+    let text_lower = text.to_lowercase();
+    let mut candidates: Vec<RelationCandidate> = Vec::new();
+
+    // Find position of each entity in the text (case-insensitive)
+    let mut entity_positions: Vec<(usize, &str)> = Vec::new();
+    for entity in entities {
+        let entity_lower = entity.to_lowercase();
+        if let Some(pos) = text_lower.find(&entity_lower) {
+            entity_positions.push((pos, entity.as_str()));
+        }
+    }
+    entity_positions.sort_by_key(|(pos, _)| *pos);
+
+    // For each adjacent pair, check the text between them
+    for i in 0..entity_positions.len() {
+        for j in (i + 1)..entity_positions.len() {
+            let (pos_a, entity_a) = entity_positions[i];
+            let (pos_b, entity_b) = entity_positions[j];
+
+            // Skip pairs too far apart (likely different sentences)
+            if pos_b - pos_a > 150 {
+                continue;
+            }
+
+            let between_start = pos_a + entity_a.to_lowercase().len();
+            let between_end = pos_b;
+            if between_start >= between_end || between_end > text_lower.len() {
+                continue;
+            }
+
+            let between = text_lower[between_start..between_end].trim();
+            if between.is_empty() {
+                continue;
+            }
+
+            // Check negation in the between-window, then strip negation
+            // words so pattern matching still works on "is NOT the CEO of"
+            let has_negation = NEGATION_CUES.iter().any(|cue| {
+                between.split_whitespace().any(|w| w == *cue)
+            });
+            let polarity = if has_negation { -1 } else { 1 };
+            let between_stripped: String = between
+                .split_whitespace()
+                .filter(|w| !NEGATION_CUES.contains(w))
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            // Check modality cues
+            let modality = if MODALITY_CUES.iter().any(|cue| between.contains(cue)) {
+                "reported"
+            } else {
+                "asserted"
+            };
+
+            // Match forward patterns: entity_a <pattern> entity_b
+            // Uses between_stripped (negation removed) for matching.
+            for (patterns, rel_type) in RELATION_PATTERNS {
+                for pattern in *patterns {
+                    if between_stripped.contains(pattern) {
+                        candidates.push(RelationCandidate {
+                            src: entity_a.to_string(),
+                            rel_type: rel_type.to_string(),
+                            dst: entity_b.to_string(),
+                            polarity,
+                            modality: modality.to_string(),
+                            confidence_band: "medium".to_string(),
+                        });
+                        break; // one match per pattern group per pair
+                    }
+                }
+            }
+
+            // Check possessive/appositive reverse: "Acme's CEO, Alice" → ceo_of(Alice, Acme)
+            for (role_keyword, rel_type) in REVERSE_ROLE_PATTERNS {
+                let possessive = format!("'s {}", role_keyword);
+                let possessive2 = format!("s {}", role_keyword);
+                if between_stripped.contains(&possessive) || between_stripped.contains(&possessive2) {
+                    // Reversed: entity_a is the org, entity_b is the person
+                    candidates.push(RelationCandidate {
+                        src: entity_b.to_string(), // person
+                        rel_type: rel_type.to_string(),
+                        dst: entity_a.to_string(), // org
+                        polarity,
+                        modality: modality.to_string(),
+                        confidence_band: "medium".to_string(),
+                    });
+                    break;
+                }
+            }
+        }
+    }
+
+    // Deduplicate: same (src, rel_type, dst) keeps highest confidence
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|c| seen.insert((c.src.clone(), c.rel_type.clone(), c.dst.clone())));
+
+    candidates
+}
+
+// ── Text feature analysis (Phase 0 audit data for RFC 006) ──
+
+/// Cues that indicate a statement is negated. Window-scanned around pattern
+/// matches to flag `polarity=negative` in v0.6.0. In v0.5.13 we only count
+/// occurrences for audit telemetry.
+const NEGATION_CUES: &[&str] = &[
+    "not", "no", "never", "denied", "refuted", "isn't", "wasn't",
+    "aren't", "weren't", "doesn't", "didn't", "disputes", "denies",
+];
+
+/// Cues that indicate a statement has temporal scope. Used to flag that a
+/// memory would benefit from `valid_from` / `valid_to` qualifiers.
+const TEMPORAL_CUES: &[&str] = &[
+    "was", "were", "until", "before", "after", "since", "during",
+    "former", "current", "currently", "previously", "recently",
+    "now", "then", "later", "earlier", "ago", "yesterday", "tomorrow",
+];
+
+/// Cues that indicate modality (hypothetical, reported, quoted).
+const MODALITY_CUES: &[&str] = &[
+    "may", "might", "allegedly", "reportedly", "rumor", "rumored",
+    "said", "claims", "according", "stated", "announced",
+];
+
+/// Compound-sentence separators that a v0.6.0 extractor should split on
+/// before running patterns. Counting these at audit time tells us how many
+/// real-world memories contain multiple claims per write.
+const COMPOUND_MARKERS: &[&str] = &[
+    "; ", ", then ", ", subsequently ", " but ", " however ", " although ",
+];
+
+/// Text features collected for extraction-audit telemetry (RFC 006 Phase 0).
+/// Captures everything the v0.6.0 extractor would need to know without
+/// changing any storage behavior — purely observational.
+#[derive(Debug, Clone, Default)]
+pub struct TextFeatures {
+    pub char_length: usize,
+    pub sentence_count: usize,
+    pub entity_count: usize,
+    pub negation_cue_count: usize,
+    pub temporal_cue_count: usize,
+    pub modality_cue_count: usize,
+    pub has_compound_markers: bool,
+    pub likely_assertion: bool,
+}
+
+/// Compute text features for extraction audit. Pure function, no I/O.
+pub fn analyze_text_features(text: &str, extracted_entities: &[String]) -> TextFeatures {
+    let lower = text.to_lowercase();
+    let tokens: Vec<&str> = text
+        .split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .filter(|s| !s.is_empty())
+        .collect();
+    let tokens_lower: Vec<String> = tokens.iter().map(|t| t.to_lowercase()).collect();
+
+    let sentence_count = text
+        .chars()
+        .filter(|c| matches!(c, '.' | '!' | '?'))
+        .count()
+        .max(1);
+
+    let negation_cue_count = tokens_lower
+        .iter()
+        .filter(|t| NEGATION_CUES.contains(&t.as_str()))
+        .count();
+
+    let temporal_cue_count = tokens_lower
+        .iter()
+        .filter(|t| TEMPORAL_CUES.contains(&t.as_str()))
+        .count();
+
+    let modality_cue_count = tokens_lower
+        .iter()
+        .filter(|t| MODALITY_CUES.contains(&t.as_str()))
+        .count();
+
+    let has_compound_markers = COMPOUND_MARKERS.iter().any(|m| lower.contains(m));
+
+    // Rough "assertion?" signal: not a question, has at least 2 tokens, not
+    // pure modality/rumor. Used to estimate what fraction of agent writes
+    // the v0.6.0 extractor should try to process at all.
+    let likely_assertion = !text.trim_end().ends_with('?')
+        && tokens.len() >= 2
+        && modality_cue_count == 0;
+
+    TextFeatures {
+        char_length: text.chars().count(),
+        sentence_count,
+        entity_count: extracted_entities.len(),
+        negation_cue_count,
+        temporal_cue_count,
+        modality_cue_count,
+        has_compound_markers,
+        likely_assertion,
+    }
+}
+
 // ── Entity type classification ──
 
 /// Tech terms that should NOT be classified as person names even if title-cased/all-caps.
@@ -350,6 +697,165 @@ pub fn graph_proximity(
 mod tests {
     use super::*;
     use crate::YantrikDB;
+
+    #[test]
+    fn test_extract_heuristic_entities_basic_names() {
+        let got = extract_heuristic_entities("Alice Chen is the CEO of Acme Corp");
+        assert!(got.contains(&"Alice Chen".to_string()), "got: {:?}", got);
+        assert!(got.contains(&"Acme Corp".to_string()), "got: {:?}", got);
+        // CEO is all-caps standalone — should appear as an entity candidate.
+        assert!(got.contains(&"CEO".to_string()), "got: {:?}", got);
+    }
+
+    #[test]
+    fn test_extract_heuristic_entities_strips_sentence_start() {
+        let got = extract_heuristic_entities("The database backend is PostgreSQL");
+        assert_eq!(got, vec!["PostgreSQL".to_string()]);
+    }
+
+    #[test]
+    fn test_extract_heuristic_entities_multi_word_place() {
+        let got = extract_heuristic_entities("Acme is headquartered in San Francisco");
+        assert!(got.contains(&"Acme".to_string()), "got: {:?}", got);
+        assert!(got.contains(&"San Francisco".to_string()), "got: {:?}", got);
+    }
+
+    #[test]
+    fn test_extract_heuristic_entities_single_letter_suffix() {
+        let got = extract_heuristic_entities("Series A funding was 20 million dollars");
+        assert!(got.contains(&"Series A".to_string()), "got: {:?}", got);
+    }
+
+    #[test]
+    fn test_extract_heuristic_entities_dedupe() {
+        let got = extract_heuristic_entities("Alice met Alice at the cafe");
+        let alice_count = got.iter().filter(|e| *e == "Alice").count();
+        assert_eq!(alice_count, 1);
+    }
+
+    #[test]
+    fn test_extract_heuristic_entities_empty_on_lowercase() {
+        let got = extract_heuristic_entities("the quick brown fox jumps over the lazy dog");
+        assert!(got.is_empty(), "got: {:?}", got);
+    }
+
+    // ── Relation extraction tests ──
+
+    #[test]
+    fn test_extract_relations_ceo_of() {
+        let entities = vec!["Alice Chen".to_string(), "Acme Corp".to_string()];
+        let rels = extract_heuristic_relations("Alice Chen is the CEO of Acme Corp", &entities);
+        assert_eq!(rels.len(), 1, "got: {:?}", rels);
+        assert_eq!(rels[0].src, "Alice Chen");
+        assert_eq!(rels[0].rel_type, "ceo_of");
+        assert_eq!(rels[0].dst, "Acme Corp");
+        assert_eq!(rels[0].polarity, 1);
+    }
+
+    #[test]
+    fn test_extract_relations_works_at() {
+        let entities = vec!["Bob".to_string(), "Google".to_string()];
+        let rels = extract_heuristic_relations("Bob works at Google as an engineer", &entities);
+        assert!(rels.iter().any(|r| r.rel_type == "works_at"), "got: {:?}", rels);
+    }
+
+    #[test]
+    fn test_extract_relations_headquartered() {
+        let entities = vec!["Acme".to_string(), "San Francisco".to_string()];
+        let rels = extract_heuristic_relations("Acme is headquartered in San Francisco", &entities);
+        assert!(rels.iter().any(|r| r.rel_type == "headquartered_in"), "got: {:?}", rels);
+    }
+
+    #[test]
+    fn test_extract_relations_negation_detected() {
+        let entities = vec!["Alice".to_string(), "Acme".to_string()];
+        let rels = extract_heuristic_relations("Alice is not the CEO of Acme", &entities);
+        assert_eq!(rels.len(), 1);
+        assert_eq!(rels[0].polarity, -1, "negation should set polarity to -1");
+    }
+
+    #[test]
+    fn test_extract_relations_no_match_unrelated() {
+        let entities = vec!["Alice".to_string(), "Bob".to_string()];
+        let rels = extract_heuristic_relations("Alice and Bob went for coffee", &entities);
+        assert!(rels.is_empty(), "should not extract relation from unrelated text, got: {:?}", rels);
+    }
+
+    #[test]
+    fn test_extract_relations_multiple_pairs() {
+        let entities = vec!["Alice".to_string(), "Acme".to_string(), "San Francisco".to_string()];
+        let rels = extract_heuristic_relations(
+            "Alice is the CEO of Acme which is headquartered in San Francisco",
+            &entities,
+        );
+        assert!(rels.len() >= 2, "should find CEO + headquartered, got: {:?}", rels);
+    }
+
+    #[test]
+    fn test_extract_relations_needs_two_entities() {
+        let entities = vec!["Alice".to_string()];
+        let rels = extract_heuristic_relations("Alice is the CEO", &entities);
+        assert!(rels.is_empty(), "cannot extract relation with only one entity");
+    }
+
+    // ── Text feature analysis tests ──
+
+    #[test]
+    fn test_analyze_text_features_basic_assertion() {
+        let entities = vec!["Alice Chen".to_string(), "Acme Corp".to_string()];
+        let f = analyze_text_features("Alice Chen is the CEO of Acme Corp", &entities);
+        assert_eq!(f.entity_count, 2);
+        assert_eq!(f.negation_cue_count, 0);
+        assert_eq!(f.modality_cue_count, 0);
+        assert!(f.likely_assertion);
+        assert!(!f.has_compound_markers);
+    }
+
+    #[test]
+    fn test_analyze_text_features_negation() {
+        let f = analyze_text_features("Alice is not the CEO of Acme", &[]);
+        assert_eq!(f.negation_cue_count, 1);
+    }
+
+    #[test]
+    fn test_analyze_text_features_temporal() {
+        let f = analyze_text_features("Alice was previously the CEO before 2024", &[]);
+        assert!(f.temporal_cue_count >= 2, "got: {}", f.temporal_cue_count);
+    }
+
+    #[test]
+    fn test_analyze_text_features_modality_suppresses_assertion() {
+        let f = analyze_text_features("Alice may become CEO allegedly", &[]);
+        assert!(f.modality_cue_count >= 2);
+        assert!(!f.likely_assertion);
+    }
+
+    #[test]
+    fn test_analyze_text_features_compound() {
+        let f = analyze_text_features("Alice was CEO until 2024; then Bob took over", &[]);
+        assert!(f.has_compound_markers);
+    }
+
+    #[test]
+    fn test_analyze_text_features_question_not_assertion() {
+        let f = analyze_text_features("Who is the CEO of Acme?", &[]);
+        assert!(!f.likely_assertion);
+    }
+
+    #[test]
+    fn test_extract_heuristic_entities_distinct_people() {
+        // Regression guard for the false-merge case that motivated this:
+        // two sentences structurally similar but referring to different people.
+        let a = extract_heuristic_entities("Alice Chen is the CEO of Acme Corp");
+        let b = extract_heuristic_entities("Sarah Kim is the CTO of Acme Corp");
+        let a_set: std::collections::HashSet<_> = a.iter().collect();
+        let b_set: std::collections::HashSet<_> = b.iter().collect();
+        // They share Acme Corp but differ on person name — disjointness on people.
+        assert!(a_set.contains(&"Alice Chen".to_string()));
+        assert!(b_set.contains(&"Sarah Kim".to_string()));
+        assert!(!a_set.contains(&"Sarah Kim".to_string()));
+        assert!(!b_set.contains(&"Alice Chen".to_string()));
+    }
 
     fn setup_db() -> YantrikDB {
         let db = YantrikDB::new(":memory:", 4).unwrap();

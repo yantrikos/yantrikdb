@@ -216,7 +216,7 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             let rel_type = op.payload["rel_type"].as_str().unwrap_or_default();
             let weight = op.payload["weight"].as_f64().unwrap_or(1.0);
             if !src.is_empty() && !dst.is_empty() {
-                let mut gi = db.graph_index.write().unwrap();
+                let mut gi = db.graph_index.write();
                 let (src_type, dst_type) =
                     crate::graph::classify_with_relationship(src, dst, rel_type);
                 gi.add_entity(src, src_type);
@@ -235,8 +235,8 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             let rid = op.payload["rid"].as_str().unwrap_or_default();
             if !rid.is_empty() {
                 db.cache_remove(rid);
-                db.vec_index.write().unwrap().remove(rid);
-                db.graph_index.write().unwrap().unlink_memory(rid);
+                db.vec_index.write().remove(rid);
+                db.graph_index.write().unlink_memory(rid);
             }
         }
         "consolidate" => {
@@ -277,7 +277,7 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             if strategy == "keep_a" || strategy == "keep_b" {
                 if let Some(loser) = op.payload["loser_rid"].as_str() {
                     db.cache_remove(loser);
-                    db.vec_index.write().unwrap().remove(loser);
+                    db.vec_index.write().remove(loser);
                 }
             }
         }
@@ -305,7 +305,7 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             let original_rid = op.payload["original_rid"].as_str().unwrap_or_default();
             if !original_rid.is_empty() {
                 db.cache_remove(original_rid);
-                db.vec_index.write().unwrap().remove(original_rid);
+                db.vec_index.write().remove(original_rid);
             }
         }
         "trigger_fire" => materialize_trigger_fire(&*db.conn(), &op.payload, &op.hlc, &op.origin_actor)?,
@@ -1010,7 +1010,7 @@ mod tests {
         a.record("mem2", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.1, 8), "default", 0.8, "general", "user", None).unwrap();
 
         // Consolidate on A
-        let consolidated = crate::consolidate::consolidate(&a, 0.0, 365.0, 2, 10000, false).unwrap();
+        let consolidated = crate::consolidate::consolidate(&a, 0.0, 365.0, 2, 10000, false, false).unwrap();
         assert!(!consolidated.is_empty());
 
         // Extract all ops and apply to B

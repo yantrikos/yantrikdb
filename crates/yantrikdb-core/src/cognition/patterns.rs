@@ -281,6 +281,7 @@ fn mine_topic_clusters(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<Raw
 
     let cluster_indices = find_clusters(
         &memories,
+        None, // pattern mining is topic-level, not entity-gated
         config.topic_cluster_sim_threshold,
         config.topic_cluster_time_window_days,
         5,  // min cluster size for a "recurring topic"
@@ -482,7 +483,7 @@ fn mine_cross_domain_patterns(db: &YantrikDB, config: &PatternConfig) -> Result<
     candidates.retain(|(rid, _, _)| seen.insert(rid.clone()));
 
     // For each candidate, query HNSW for K=10 global neighbors
-    let vi = db.vec_index.read().unwrap();
+    let vi = db.vec_index.read();
     let mut patterns = Vec::new();
     let mut pair_counts: std::collections::HashMap<(String, String), usize> =
         std::collections::HashMap::new();

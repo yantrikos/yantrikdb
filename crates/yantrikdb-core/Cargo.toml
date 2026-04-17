@@ -1,6 +1,6 @@
 [package]
 name = "yantrikdb"
-version = "0.4.2"
+version = "0.4.4"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Cognitive memory engine for persistent AI systems"
@@ -22,6 +22,7 @@ zstd = "0.13"
 tracing = "0.1"
 aes-gcm = "0.10"
 base64 = "0.22"
+parking_lot = { version = "0.12", features = ["deadlock_detection"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"

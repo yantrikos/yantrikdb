@@ -36,6 +36,127 @@ fn test_actor_id_explicit() {
 }
 
 #[test]
+fn test_record_auto_extracts_entities() {
+    // Regression: /v1/remember should populate memory_entities from heuristic
+    // extraction so conflict detection can fire on raw-text inputs without
+    // requiring the user to call /v1/relate first. Fixes issue #2.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid = db
+        .record(
+            "Alice Chen is the CEO of Acme Corp",
+            "semantic",
+            0.8,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "people",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    let entities: Vec<String> = {
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare("SELECT entity_name FROM memory_entities WHERE memory_rid = ?1")
+            .unwrap();
+        stmt.query_map(params![rid], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+    };
+
+    assert!(
+        entities.contains(&"Alice Chen".to_string()),
+        "got: {:?}",
+        entities
+    );
+    assert!(
+        entities.contains(&"Acme Corp".to_string()),
+        "got: {:?}",
+        entities
+    );
+
+    // Also verify the entities table was populated.
+    let entity_count: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0))
+        .unwrap();
+    assert!(entity_count >= 2, "expected >= 2 entities, got {}", entity_count);
+}
+
+#[test]
+fn test_record_batch_auto_extracts_entities() {
+    // Same regression as above but for the batch path, which previously
+    // skipped entity linking entirely.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let inputs = vec![
+        RecordInput {
+            text: "Alice Chen is the CEO of Acme Corp".to_string(),
+            memory_type: "semantic".to_string(),
+            importance: 0.8,
+            valence: 0.0,
+            half_life: 604800.0,
+            metadata: empty_meta(),
+            embedding: vec_seed(1.0, 8),
+            namespace: "default".to_string(),
+            certainty: 0.8,
+            domain: "people".to_string(),
+            source: "user".to_string(),
+            emotional_state: None,
+        },
+        RecordInput {
+            text: "Sarah Kim is the CTO of Acme Corp".to_string(),
+            memory_type: "semantic".to_string(),
+            importance: 0.8,
+            valence: 0.0,
+            half_life: 604800.0,
+            metadata: empty_meta(),
+            embedding: vec_seed(1.05, 8),
+            namespace: "default".to_string(),
+            certainty: 0.8,
+            domain: "people".to_string(),
+            source: "user".to_string(),
+            emotional_state: None,
+        },
+    ];
+    let rids = db.record_batch(&inputs).unwrap();
+    assert_eq!(rids.len(), 2);
+
+    let total_links: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM memory_entities", [], |r| r.get(0))
+        .unwrap();
+    assert!(
+        total_links >= 3,
+        "expected batch to link both memories to entities, got {} links",
+        total_links
+    );
+
+    // The two memories refer to different people — verify extraction
+    // distinguished them rather than lumping both into one entity.
+    let load_entities = |rid: &str| -> Vec<String> {
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare("SELECT entity_name FROM memory_entities WHERE memory_rid = ?1")
+            .unwrap();
+        stmt.query_map(params![rid], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    let m1_entities = load_entities(&rids[0]);
+    let m2_entities = load_entities(&rids[1]);
+    assert!(m1_entities.contains(&"Alice Chen".to_string()));
+    assert!(m2_entities.contains(&"Sarah Kim".to_string()));
+    assert!(!m1_entities.contains(&"Sarah Kim".to_string()));
+    assert!(!m2_entities.contains(&"Alice Chen".to_string()));
+}
+
+#[test]
 fn test_record_and_get() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let emb = vec_seed(1.0, 8);
@@ -643,11 +764,14 @@ fn test_schema_v6_has_storage_tier() {
 #[test]
 fn test_schema_v7_has_fts5_and_join_tables() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let conn = db.conn();
 
-    // FTS5 virtual table exists — insert then search
+    // FTS5 virtual table exists — insert then search.
+    // Must record BEFORE acquiring conn — db.record() internally takes
+    // conn, so holding conn across record() would self-deadlock.
     let _rid = db.record("The quick brown fox jumps over the lazy dog", "episodic",
         0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+
+    let conn = db.conn();
 
     let count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH 'quick brown'",
@@ -676,7 +800,6 @@ fn test_schema_v7_has_fts5_and_join_tables() {
 #[test]
 fn test_fts5_search_multiple_memories() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let conn = db.conn();
 
     db.record("Alice loves Rust programming", "semantic",
         0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
@@ -684,6 +807,11 @@ fn test_fts5_search_multiple_memories() {
         0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(0.5, 8), "default", 0.8, "general", "user", None).unwrap();
     db.record("Alice and Bob work on Rust projects", "episodic",
         0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(0.3, 8), "default", 0.8, "general", "user", None).unwrap();
+
+    // Acquire conn AFTER records are written — db.record() internally takes
+    // conn, and holding it across db.record() would self-deadlock (the
+    // Mutex<Connection> is non-reentrant). See CONCURRENCY.md Rule 4.
+    let conn = db.conn();
 
     // Search for "Rust" should match 2 memories
     let count: i64 = conn.query_row(
