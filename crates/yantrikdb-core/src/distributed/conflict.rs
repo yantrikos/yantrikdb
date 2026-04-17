@@ -811,10 +811,32 @@ pub fn scan_claim_conflicts(db: &YantrikDB, max_conflicts: usize) -> Result<Vec<
             .collect::<std::result::Result<Vec<_>, _>>()?;
     } // conn released
 
-    // Phase 2: Evaluate each candidate pair
+    // Phase 2: Evaluate each candidate pair with policy awareness
     for (src, rel_type, dst1, dst2, vf1, vt1, vf2, vt2, namespace) in &candidates {
         if conflicts.len() >= max_conflicts {
             break;
+        }
+
+        // RFC 006 Phase 3: check relation policy before flagging.
+        // Look up namespace-specific policy first, then global '*'.
+        let policy: Option<(bool, bool, String)> = {
+            let conn = db.conn();
+            conn.query_row(
+                "SELECT overlap_allowed, temporal_required, missing_time_severity \
+                 FROM relation_policies \
+                 WHERE relation_type = ?1 AND (namespace = ?2 OR namespace = '*') \
+                 ORDER BY CASE WHEN namespace = ?2 THEN 0 ELSE 1 END \
+                 LIMIT 1",
+                params![rel_type, namespace],
+                |row| Ok((row.get::<_, bool>(0)?, row.get::<_, bool>(1)?, row.get::<_, String>(2)?)),
+            ).ok()
+        };
+
+        // If policy says overlap is allowed (e.g., works_at, speaks), skip
+        if let Some((overlap_allowed, _, _)) = &policy {
+            if *overlap_allowed {
+                continue; // Multiple values are normal for this relation
+            }
         }
 
         // Resolve aliases
@@ -822,12 +844,18 @@ pub fn scan_claim_conflicts(db: &YantrikDB, max_conflicts: usize) -> Result<Vec<
         let dst1_canonical = db.resolve_alias(dst1, namespace);
         let dst2_canonical = db.resolve_alias(dst2, namespace);
 
-        // If dsts resolve to the same canonical, not a conflict
         if dst1_canonical == dst2_canonical {
             continue;
         }
 
-        // Determine severity based on temporal information
+        // Determine severity — use policy's missing_time_severity if available
+        let policy_missing_severity = policy.as_ref()
+            .map(|(_, _, s)| s.as_str())
+            .unwrap_or("medium");
+        let policy_temporal_required = policy.as_ref()
+            .map(|(_, t, _)| *t)
+            .unwrap_or(false);
+
         let mut reason_codes = vec![reason_codes::SAME_SUBJECT_SAME_REL_DISTINCT_OBJECT.to_string()];
         let priority;
 
@@ -857,9 +885,14 @@ pub fn scan_claim_conflicts(db: &YantrikDB, max_conflicts: usize) -> Result<Vec<
                 continue; // Not a conflict — temporal succession handled
             }
             None => {
-                // One or both missing time → medium severity
+                // One or both missing time → severity from policy (default medium)
                 reason_codes.push(reason_codes::MISSING_TEMPORAL.to_string());
-                priority = "medium";
+                // If policy requires temporal evidence and it's missing, downgrade
+                if policy_temporal_required {
+                    priority = policy_missing_severity;
+                } else {
+                    priority = "medium";
+                }
             }
         }
 

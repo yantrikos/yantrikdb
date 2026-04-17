@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 15;
+pub const SCHEMA_VERSION: i32 = 16;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -98,6 +98,19 @@ CREATE TABLE IF NOT EXISTS entity_aliases (
     PRIMARY KEY (alias, namespace)
 );
 CREATE INDEX IF NOT EXISTS idx_alias_canonical ON entity_aliases(canonical_name, namespace);
+
+-- Relation conflict policies (RFC 006 Phase 3)
+-- Per-relation rules that govern how the conflict scanner treats claims.
+CREATE TABLE IF NOT EXISTS relation_policies (
+    relation_type TEXT NOT NULL,
+    namespace TEXT NOT NULL DEFAULT '*',           -- '*' = global default
+    uniqueness_scope TEXT NOT NULL DEFAULT '[\"dst\"]', -- JSON: which fields define uniqueness
+    overlap_allowed INTEGER NOT NULL DEFAULT 0,    -- 1 if multiple dst values are normal
+    temporal_required INTEGER NOT NULL DEFAULT 0,  -- 1 if conflict needs temporal overlap
+    missing_time_severity TEXT NOT NULL DEFAULT 'medium', -- low|medium|high
+    qualifier_exceptions TEXT,                     -- JSON: e.g. [\"qualifier=co\", \"qualifier=interim\"]
+    PRIMARY KEY (relation_type, namespace)
+);
 
 -- Entities extracted from memories
 CREATE TABLE IF NOT EXISTS entities (
@@ -821,4 +834,35 @@ CREATE TABLE IF NOT EXISTS entity_aliases (
     PRIMARY KEY (alias, namespace)
 );
 CREATE INDEX IF NOT EXISTS idx_alias_canonical ON entity_aliases(canonical_name, namespace);
+";
+
+/// SQL to migrate from schema V15 to V16 (RFC 006 Phase 3).
+pub const MIGRATE_V15_TO_V16: &str = "
+-- Relation conflict policies
+CREATE TABLE IF NOT EXISTS relation_policies (
+    relation_type TEXT NOT NULL,
+    namespace TEXT NOT NULL DEFAULT '*',
+    uniqueness_scope TEXT NOT NULL DEFAULT '[\"dst\"]',
+    overlap_allowed INTEGER NOT NULL DEFAULT 0,
+    temporal_required INTEGER NOT NULL DEFAULT 0,
+    missing_time_severity TEXT NOT NULL DEFAULT 'medium',
+    qualifier_exceptions TEXT,
+    PRIMARY KEY (relation_type, namespace)
+);
+
+-- Seed starter policies for RFC 006 whitelist relations
+INSERT OR IGNORE INTO relation_policies (relation_type, namespace, overlap_allowed, temporal_required, missing_time_severity)
+VALUES
+    ('ceo_of',            '*', 0, 1, 'medium'),
+    ('cto_of',            '*', 0, 1, 'medium'),
+    ('cfo_of',            '*', 0, 1, 'medium'),
+    ('founded',           '*', 1, 0, 'low'),
+    ('leads',             '*', 0, 1, 'medium'),
+    ('works_at',          '*', 1, 0, 'low'),
+    ('born_in',           '*', 0, 0, 'high'),
+    ('headquartered_in',  '*', 0, 0, 'high'),
+    ('married_to',        '*', 0, 1, 'medium'),
+    ('acquired',          '*', 0, 0, 'high'),
+    ('subsidiary_of',     '*', 0, 0, 'high'),
+    ('speaks',            '*', 1, 0, 'low');
 ";
