@@ -742,6 +742,12 @@ pub mod reason_codes {
     pub const OVERLAPPING_VALIDITY: &str = "overlapping_validity_windows";
     pub const MISSING_TEMPORAL: &str = "missing_temporal_qualifier";
     pub const POSSIBLE_SUCCESSION: &str = "possible_temporal_succession";
+    /// A positive claim and a negative claim about the same (src, rel_type, dst)
+    /// exist — someone asserted X and someone else denied X.
+    pub const POLARITY_CONTRADICTION: &str = "polarity_contradiction";
+    /// A claim has modality other than 'asserted' — reported, hypothetical, denied.
+    /// Lower confidence but still relevant for conflict tracking.
+    pub const MODALITY_MISMATCH: &str = "modality_mismatch";
 }
 
 /// Check if two time intervals overlap.
@@ -943,6 +949,68 @@ pub fn scan_claim_conflicts(db: &YantrikDB, max_conflicts: usize) -> Result<Vec<
             }
 
             conflicts.push(conflict);
+        }
+    }
+
+    // RFC 006 Phase 4: polarity contradiction scan.
+    // Find cases where the SAME (src, rel_type, dst) has both positive and
+    // negative polarity claims — someone asserted X and someone denied X.
+    if conflicts.len() < max_conflicts {
+        let polarity_candidates: Vec<(String, String, String, String, Option<String>, Option<String>)>;
+        {
+            let conn = db.conn();
+            let mut stmt = conn.prepare(
+                "SELECT e1.src, e1.rel_type, e1.dst, e1.namespace,
+                        e1.source_memory_rid, e2.source_memory_rid
+                 FROM edges e1
+                 JOIN edges e2
+                   ON e1.src = e2.src AND e1.rel_type = e2.rel_type AND e1.dst = e2.dst
+                   AND e1.namespace = e2.namespace
+                 WHERE e1.polarity = 1 AND e2.polarity = -1
+                   AND e1.tombstoned = 0 AND e2.tombstoned = 0
+                 LIMIT ?1",
+            )?;
+            let rows: Vec<_> = stmt.query_map(params![max_conflicts - conflicts.len()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+            polarity_candidates = rows;
+        }
+
+        for (src, rel_type, dst, _ns, mem_a, mem_b) in &polarity_candidates {
+            let rid_a = mem_a.as_deref().unwrap_or("unknown");
+            let rid_b = mem_b.as_deref().unwrap_or("unknown");
+            if rid_a != "unknown" && rid_b != "unknown" && !conflict_exists(db, rid_a, rid_b)? {
+                let reason = format!(
+                    "Polarity contradiction: '{}' has both positive and negative claims for {} → {}. Reasons: [{}]",
+                    src, rel_type, dst, reason_codes::POLARITY_CONTRADICTION
+                );
+                let conflict = create_conflict(
+                    db,
+                    &ConflictType::IdentityFact,
+                    rid_a,
+                    rid_b,
+                    Some(src),
+                    Some(rel_type),
+                    &reason,
+                )?;
+                // Polarity contradictions are always high priority
+                {
+                    let conn = db.conn();
+                    conn.execute(
+                        "UPDATE conflicts SET priority = 'high' WHERE conflict_id = ?1",
+                        params![conflict.conflict_id],
+                    )?;
+                }
+                conflicts.push(conflict);
+            }
         }
     }
 
