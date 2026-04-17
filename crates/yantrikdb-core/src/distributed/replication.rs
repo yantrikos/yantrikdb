@@ -379,12 +379,12 @@ fn materialize_relate(conn: &Connection, payload: &serde_json::Value) -> Result<
 
     // LWW: ON CONFLICT update if the incoming created_at is newer
     conn.execute(
-        "INSERT INTO edges (edge_id, src, dst, rel_type, weight, created_at) \
+        "INSERT INTO claims (claim_id, src, dst, rel_type, weight, created_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
          ON CONFLICT(src, dst, rel_type) DO UPDATE SET \
          weight = CASE WHEN ?6 > created_at THEN ?5 ELSE weight END, \
          created_at = CASE WHEN ?6 > created_at THEN ?6 ELSE created_at END, \
-         edge_id = CASE WHEN ?6 > created_at THEN ?1 ELSE edge_id END",
+         claim_id = CASE WHEN ?6 > created_at THEN ?1 ELSE claim_id END",
         params![edge_id, src, dst, rel_type, weight, created_at],
     )?;
 

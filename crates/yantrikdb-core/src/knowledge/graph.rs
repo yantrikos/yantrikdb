@@ -932,7 +932,7 @@ mod tests {
         let db = setup_db();
         // Tombstone the Alice->Bob edge
         db.conn().execute(
-            "UPDATE edges SET tombstoned = 1 WHERE src = 'Alice' AND dst = 'Bob'",
+            "UPDATE claims SET tombstoned = 1 WHERE src = 'Alice' AND dst = 'Bob'",
             [],
         ).unwrap();
         let expanded = expand_entities_nhop(&*db.conn(), &["Alice"], 1, 30).unwrap();

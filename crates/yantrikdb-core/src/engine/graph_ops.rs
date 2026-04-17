@@ -26,7 +26,7 @@ impl YantrikDB {
         {
             let conn = self.conn.lock();
             conn.execute(
-                "INSERT INTO edges (edge_id, src, dst, rel_type, weight, created_at) \
+                "INSERT INTO claims (claim_id, src, dst, rel_type, weight, created_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
                  ON CONFLICT(src, dst, rel_type) DO UPDATE SET weight = ?5, created_at = ?6",
                 params![edge_id, src, dst, rel_type, weight, ts],
@@ -408,7 +408,7 @@ impl YantrikDB {
         {
             let conn = self.conn.lock();
             conn.execute(
-                "INSERT INTO edges (edge_id, src, dst, rel_type, weight, created_at, \
+                "INSERT INTO claims (claim_id, src, dst, rel_type, weight, created_at, \
                  polarity, modality, valid_from, valid_to, extractor, extractor_version, \
                  confidence_band, source_memory_rid, span_start, span_end, namespace) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) \

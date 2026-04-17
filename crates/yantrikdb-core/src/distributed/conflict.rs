@@ -883,7 +883,7 @@ pub fn scan_claim_conflicts(db: &YantrikDB, max_conflicts: usize) -> Result<Vec<
                 {
                     let conn = db.conn();
                     let _ = conn.execute(
-                        "UPDATE edges SET valid_to = ?1 \
+                        "UPDATE claims SET valid_to = ?1 \
                          WHERE src = ?2 AND rel_type = ?3 AND dst = ?4 AND valid_to IS NULL AND tombstoned = 0",
                         params![newer_vf.unwrap_or(0.0), src, rel_type, older_src],
                     );

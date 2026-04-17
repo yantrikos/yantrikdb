@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 16;
+pub const SCHEMA_VERSION: i32 = 17;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -61,11 +61,11 @@ CREATE TABLE IF NOT EXISTS sessions (
     origin_actor TEXT
 );
 
--- Entity relationship graph / claims (RFC 006 Phase 1)
--- Extended with claim-like qualifier columns for scoped conflict detection.
--- In v0.7 (Phase 5) this table will be renamed to 'claims' with 'edges' as a VIEW.
-CREATE TABLE IF NOT EXISTS edges (
-    edge_id TEXT PRIMARY KEY,            -- UUIDv7
+-- Claims: first-class semantic relationship ledger (RFC 006 Phase 5)
+-- Each claim records a structured (subject, relation, object) triple.
+-- The legacy 'edges' name is preserved as a read-only VIEW for backward compat.
+CREATE TABLE IF NOT EXISTS claims (
+    claim_id TEXT PRIMARY KEY,           -- UUIDv7
     src TEXT NOT NULL,                   -- entity name or memory rid
     dst TEXT NOT NULL,                   -- entity name or memory rid
     rel_type TEXT NOT NULL,              -- relationship type (e.g., \"ceo_of\", \"works_at\")
@@ -87,6 +87,13 @@ CREATE TABLE IF NOT EXISTS edges (
 
     UNIQUE(src, dst, rel_type)
 );
+
+-- Backward-compatible VIEW: all code reading FROM edges continues to work.
+CREATE VIEW IF NOT EXISTS edges AS
+    SELECT claim_id AS edge_id, src, dst, rel_type, weight, created_at, tombstoned,
+           polarity, modality, valid_from, valid_to, extractor, extractor_version,
+           confidence_band, source_memory_rid, span_start, span_end, namespace
+    FROM claims;
 
 -- Entity aliases for alias-aware conflict detection (RFC 006 Layer B)
 CREATE TABLE IF NOT EXISTS entity_aliases (
@@ -234,9 +241,9 @@ CREATE INDEX IF NOT EXISTS idx_memories_due_at ON memories(namespace, due_at) WH
 CREATE INDEX IF NOT EXISTS idx_memories_last_access ON memories(last_access);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_one_active ON sessions(namespace, client_id) WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_sessions_client_started ON sessions(namespace, client_id, started_at DESC);
-CREATE INDEX IF NOT EXISTS idx_edges_src ON edges(src);
-CREATE INDEX IF NOT EXISTS idx_edges_dst ON edges(dst);
-CREATE INDEX IF NOT EXISTS idx_edges_rel ON edges(rel_type);
+CREATE INDEX IF NOT EXISTS idx_claims_src ON claims(src);
+CREATE INDEX IF NOT EXISTS idx_claims_dst ON claims(dst);
+CREATE INDEX IF NOT EXISTS idx_claims_rel ON claims(rel_type);
 CREATE INDEX IF NOT EXISTS idx_oplog_timestamp ON oplog(timestamp);
 CREATE INDEX IF NOT EXISTS idx_oplog_target ON oplog(target_rid);
 CREATE INDEX IF NOT EXISTS idx_oplog_hlc ON oplog(hlc);
@@ -865,4 +872,19 @@ VALUES
     ('acquired',          '*', 0, 0, 'high'),
     ('subsidiary_of',     '*', 0, 0, 'high'),
     ('speaks',            '*', 1, 0, 'low');
+";
+
+/// SQL to migrate from schema V16 to V17 (RFC 006 Phase 5).
+/// Renames `edges` table to `claims` and creates `edges` as a read-only VIEW.
+pub const MIGRATE_V16_TO_V17: &str = "
+-- Rename edges → claims (atomic, preserves all data + indexes)
+ALTER TABLE edges RENAME TO claims;
+-- Rename primary key column
+ALTER TABLE claims RENAME COLUMN edge_id TO claim_id;
+-- Create backward-compat VIEW so all SELECT FROM edges queries still work
+CREATE VIEW IF NOT EXISTS edges AS
+    SELECT claim_id AS edge_id, src, dst, rel_type, weight, created_at, tombstoned,
+           polarity, modality, valid_from, valid_to, extractor, extractor_version,
+           confidence_band, source_memory_rid, span_start, span_end, namespace
+    FROM claims;
 ";
