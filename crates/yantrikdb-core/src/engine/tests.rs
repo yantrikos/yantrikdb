@@ -370,13 +370,13 @@ fn test_get_conflicts_filtered() {
         Some("User"), Some("prefers"), "test 2",
     ).unwrap();
 
-    let all = db.get_conflicts(None, None, None, None, 50).unwrap();
+    let all = db.get_conflicts(None, None, None, None, None, 50).unwrap();
     assert_eq!(all.len(), 2);
 
-    let identity_only = db.get_conflicts(None, Some("identity_fact"), None, None, 50).unwrap();
+    let identity_only = db.get_conflicts(None, Some("identity_fact"), None, None, None, 50).unwrap();
     assert_eq!(identity_only.len(), 1);
 
-    let critical = db.get_conflicts(None, None, None, Some("critical"), 50).unwrap();
+    let critical = db.get_conflicts(None, None, None, Some("critical"), None, 50).unwrap();
     assert_eq!(critical.len(), 1);
 }
 

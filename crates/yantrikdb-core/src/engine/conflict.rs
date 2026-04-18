@@ -47,36 +47,50 @@ impl YantrikDB {
     // ── Conflict resolution API (V2) ──
 
     /// Get all conflicts, optionally filtered.
+    ///
+    /// `namespace` filter requires joining with the memories table — we keep
+    /// a conflict if EITHER memory_a OR memory_b is in the requested namespace.
+    /// This is what callers want when investigating a scoped scenario (e.g. a
+    /// single multi-witness case) without polluting results from other tenants.
     pub fn get_conflicts(
         &self,
         status: Option<&str>,
         conflict_type: Option<&str>,
         entity: Option<&str>,
         priority: Option<&str>,
+        namespace: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Conflict>> {
-        let mut sql = String::from("SELECT * FROM conflicts WHERE 1=1");
+        let mut sql = String::from("SELECT c.* FROM conflicts c WHERE 1=1");
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         let mut idx = 1;
 
         if let Some(s) = status {
-            sql.push_str(&format!(" AND status = ?{idx}"));
+            sql.push_str(&format!(" AND c.status = ?{idx}"));
             param_values.push(Box::new(s.to_string()));
             idx += 1;
         }
         if let Some(ct) = conflict_type {
-            sql.push_str(&format!(" AND conflict_type = ?{idx}"));
+            sql.push_str(&format!(" AND c.conflict_type = ?{idx}"));
             param_values.push(Box::new(ct.to_string()));
             idx += 1;
         }
         if let Some(e) = entity {
-            sql.push_str(&format!(" AND entity = ?{idx}"));
+            sql.push_str(&format!(" AND c.entity = ?{idx}"));
             param_values.push(Box::new(e.to_string()));
             idx += 1;
         }
         if let Some(p) = priority {
-            sql.push_str(&format!(" AND priority = ?{idx}"));
+            sql.push_str(&format!(" AND c.priority = ?{idx}"));
             param_values.push(Box::new(p.to_string()));
+            idx += 1;
+        }
+        if let Some(ns) = namespace {
+            sql.push_str(&format!(
+                " AND EXISTS (SELECT 1 FROM memories m \
+                 WHERE (m.rid = c.memory_a OR m.rid = c.memory_b) AND m.namespace = ?{idx})"
+            ));
+            param_values.push(Box::new(ns.to_string()));
             let _ = idx;
         }
 

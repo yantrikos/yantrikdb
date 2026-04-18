@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 17;
+pub const SCHEMA_VERSION: i32 = 18;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -85,7 +85,11 @@ CREATE TABLE IF NOT EXISTS claims (
     span_end INTEGER,
     namespace TEXT NOT NULL DEFAULT 'default',
 
-    UNIQUE(src, dst, rel_type)
+    -- RFC 006: multiple sources can make conflicting claims about the same (src, rel, dst).
+    -- Uniqueness is scoped to (src, dst, rel, extractor, polarity, namespace) so
+    -- e.g. witness A can claim \"X did Y\" while witness B claims \"X did NOT do Y\" and
+    -- both rows coexist. This enables polarity contradiction detection.
+    UNIQUE(src, dst, rel_type, extractor, polarity, namespace)
 );
 
 -- Backward-compatible VIEW: all code reading FROM edges continues to work.
@@ -882,6 +886,68 @@ ALTER TABLE edges RENAME TO claims;
 -- Rename primary key column
 ALTER TABLE claims RENAME COLUMN edge_id TO claim_id;
 -- Create backward-compat VIEW so all SELECT FROM edges queries still work
+CREATE VIEW IF NOT EXISTS edges AS
+    SELECT claim_id AS edge_id, src, dst, rel_type, weight, created_at, tombstoned,
+           polarity, modality, valid_from, valid_to, extractor, extractor_version,
+           confidence_band, source_memory_rid, span_start, span_end, namespace
+    FROM claims;
+";
+
+/// SQL to migrate from schema V17 to V18 (RFC 006 Phase 6).
+///
+/// The V17 UNIQUE constraint on (src, dst, rel_type) caused ingest_claim() to
+/// overwrite a previous source's claim whenever another source asserted the
+/// same (src, dst, rel_type) — destroying the polarity contradiction cases
+/// RFC 006 is designed to detect.
+///
+/// V18 widens the constraint to (src, dst, rel_type, extractor, polarity,
+/// namespace). Now two sources can make contradictory claims about the same
+/// fact and both rows survive, enabling proper multi-witness investigation.
+///
+/// Migration strategy (SQLite can't ALTER UNIQUE):
+///   1. Drop the edges VIEW (depends on claims table)
+///   2. Create claims_new with new constraint
+///   3. Copy data — deduplicate where old UNIQUE would have rejected
+///   4. Drop old claims, rename claims_new → claims
+///   5. Recreate indexes + edges VIEW
+pub const MIGRATE_V17_TO_V18: &str = "
+DROP VIEW IF EXISTS edges;
+
+CREATE TABLE claims_new (
+    claim_id TEXT PRIMARY KEY,
+    src TEXT NOT NULL,
+    dst TEXT NOT NULL,
+    rel_type TEXT NOT NULL,
+    weight REAL NOT NULL DEFAULT 1.0,
+    created_at REAL NOT NULL,
+    tombstoned INTEGER NOT NULL DEFAULT 0,
+    polarity INTEGER NOT NULL DEFAULT 1,
+    modality TEXT NOT NULL DEFAULT 'asserted',
+    valid_from REAL,
+    valid_to REAL,
+    extractor TEXT NOT NULL DEFAULT 'manual',
+    extractor_version TEXT,
+    confidence_band TEXT NOT NULL DEFAULT 'medium',
+    source_memory_rid TEXT,
+    span_start INTEGER,
+    span_end INTEGER,
+    namespace TEXT NOT NULL DEFAULT 'default',
+    UNIQUE(src, dst, rel_type, extractor, polarity, namespace)
+);
+
+INSERT INTO claims_new
+    SELECT claim_id, src, dst, rel_type, weight, created_at, tombstoned,
+           polarity, modality, valid_from, valid_to, extractor, extractor_version,
+           confidence_band, source_memory_rid, span_start, span_end, namespace
+    FROM claims;
+
+DROP TABLE claims;
+ALTER TABLE claims_new RENAME TO claims;
+
+CREATE INDEX IF NOT EXISTS idx_claims_src ON claims(src);
+CREATE INDEX IF NOT EXISTS idx_claims_dst ON claims(dst);
+CREATE INDEX IF NOT EXISTS idx_claims_rel ON claims(rel_type);
+
 CREATE VIEW IF NOT EXISTS edges AS
     SELECT claim_id AS edge_id, src, dst, rel_type, weight, created_at, tombstoned,
            polarity, modality, valid_from, valid_to, extractor, extractor_version,

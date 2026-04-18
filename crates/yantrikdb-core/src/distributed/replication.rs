@@ -381,7 +381,7 @@ fn materialize_relate(conn: &Connection, payload: &serde_json::Value) -> Result<
     conn.execute(
         "INSERT INTO claims (claim_id, src, dst, rel_type, weight, created_at) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
-         ON CONFLICT(src, dst, rel_type) DO UPDATE SET \
+         ON CONFLICT(src, dst, rel_type, extractor, polarity, namespace) DO UPDATE SET \
          weight = CASE WHEN ?6 > created_at THEN ?5 ELSE weight END, \
          created_at = CASE WHEN ?6 > created_at THEN ?6 ELSE created_at END, \
          claim_id = CASE WHEN ?6 > created_at THEN ?1 ELSE claim_id END",

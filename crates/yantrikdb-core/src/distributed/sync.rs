@@ -421,7 +421,7 @@ mod tests {
         sync_bidirectional(&a, &b).unwrap();
 
         // B should have the open conflict
-        let b_conflicts = b.get_conflicts(Some("open"), None, None, None, 50).unwrap();
+        let b_conflicts = b.get_conflicts(Some("open"), None, None, None, None, 50).unwrap();
         assert!(!b_conflicts.is_empty());
         assert_eq!(b_conflicts[0].conflict_type, "preference");
     }

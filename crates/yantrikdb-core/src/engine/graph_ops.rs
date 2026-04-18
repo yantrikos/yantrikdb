@@ -25,10 +25,13 @@ impl YantrikDB {
         // Phase 1: Lock conn for all SQL operations, then drop
         {
             let conn = self.conn.lock();
+            // Legacy relate() uses default extractor/polarity/namespace so the
+            // effective unique key is (src, dst, rel_type, 'manual', 1, 'default').
             conn.execute(
                 "INSERT INTO claims (claim_id, src, dst, rel_type, weight, created_at) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
-                 ON CONFLICT(src, dst, rel_type) DO UPDATE SET weight = ?5, created_at = ?6",
+                 ON CONFLICT(src, dst, rel_type, extractor, polarity, namespace) \
+                 DO UPDATE SET weight = ?5, created_at = ?6",
                 params![edge_id, src, dst, rel_type, weight, ts],
             )?;
 
@@ -407,16 +410,19 @@ impl YantrikDB {
         // Phase 1: SQL inserts (conn locked)
         {
             let conn = self.conn.lock();
+            // RFC 006: uniqueness is scoped to (src, dst, rel_type, extractor, polarity, namespace)
+            // so multiple sources can make conflicting claims about the same fact. Only an
+            // identical resubmission (same extractor + same polarity + same namespace) is
+            // treated as an update — typically a validity window refinement.
             conn.execute(
                 "INSERT INTO claims (claim_id, src, dst, rel_type, weight, created_at, \
                  polarity, modality, valid_from, valid_to, extractor, extractor_version, \
                  confidence_band, source_memory_rid, span_start, span_end, namespace) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) \
-                 ON CONFLICT(src, dst, rel_type) DO UPDATE SET \
-                 weight = ?5, created_at = ?6, polarity = ?7, modality = ?8, \
-                 valid_from = ?9, valid_to = ?10, extractor = ?11, extractor_version = ?12, \
-                 confidence_band = ?13, source_memory_rid = ?14, span_start = ?15, span_end = ?16, \
-                 namespace = ?17",
+                 ON CONFLICT(src, dst, rel_type, extractor, polarity, namespace) DO UPDATE SET \
+                 weight = ?5, created_at = ?6, modality = ?8, \
+                 valid_from = ?9, valid_to = ?10, extractor_version = ?12, \
+                 confidence_band = ?13, source_memory_rid = ?14, span_start = ?15, span_end = ?16",
                 params![
                     claim_id, src_resolved, dst_resolved, rel_type, weight, ts,
                     polarity, modality, valid_from, valid_to, extractor, extractor_version,
