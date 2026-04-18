@@ -107,7 +107,7 @@ impl PyYantrikDB {
 
     // ── Conflict resolution API (V2) ──
 
-    #[pyo3(signature = (status=None, conflict_type=None, entity=None, priority=None, limit=50))]
+    #[pyo3(signature = (status=None, conflict_type=None, entity=None, priority=None, namespace=None, limit=50))]
     fn get_conflicts(
         &self,
         py: Python<'_>,
@@ -115,11 +115,12 @@ impl PyYantrikDB {
         conflict_type: Option<&str>,
         entity: Option<&str>,
         priority: Option<&str>,
+        namespace: Option<&str>,
         limit: usize,
     ) -> PyResult<Vec<PyObject>> {
         let db = self.get_inner()?;
         let conflicts = db
-            .get_conflicts(status, conflict_type, entity, priority, limit)
+            .get_conflicts(status, conflict_type, entity, priority, namespace, limit)
             .map_err(map_err)?;
         conflicts
             .iter()

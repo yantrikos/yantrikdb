@@ -41,6 +41,7 @@ pub fn py_find_clusters(
 
     let cluster_indices = yantrikdb_core::consolidate::find_clusters(
         &mems,
+        None, // entities_by_rid — not exposed to Python yet
         sim_threshold,
         time_window_days,
         min_cluster_size,
@@ -79,6 +80,7 @@ pub fn find_consolidation_candidates(
         time_window_days,
         min_cluster_size,
         limit,
+        true, // require_entity_overlap — default since v0.6.0
     )
     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
@@ -113,6 +115,7 @@ pub fn py_consolidate(
         time_window_days,
         min_cluster_size,
         limit,
+        true, // require_entity_overlap — default behavior since v0.6.0
         dry_run,
     )
     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
