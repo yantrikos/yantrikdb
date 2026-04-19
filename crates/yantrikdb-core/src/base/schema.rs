@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 19;
+pub const SCHEMA_VERSION: i32 = 20;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -172,6 +172,119 @@ CREATE INDEX IF NOT EXISTS idx_scenario_ns ON scenario_specs(namespace);
 -- End RFC 007 Phase 0 tables. Claims table below gets a proposition_id FK.
 -- ──────────────────────────────────────────────────────────────────
 
+-- ──────────────────────────────────────────────────────────────────
+-- RFC 008 Phase 1: Warrant Flow — the control stack foundations.
+-- Scalar confidence is dead. These tables implement the 13-dim mobility
+-- calculus that replaces it, plus the actor-profile layer that calibrates
+-- every epistemic actor (sources, extractors, moves, agents, self-modes),
+-- plus the compression-artifact layer with reversible loss accounting.
+--
+-- Architecture doc: Saga notes §§ 10-12 on Epic 35.
+-- ──────────────────────────────────────────────────────────────────
+
+-- Mobility state: the 13-dim vector M(c|ρ) keyed by (proposition, regime).
+-- NOT a confidence score. Represents how the claim's warrant is moving
+-- through its epistemic neighborhood. All components are optional because
+-- they are materialized at different tiers (write/read/background) — see
+-- the `tier_*_fresh` columns for which components are currently authoritative.
+-- snapshot_ts lets background consolidation produce derived facts without
+-- overwriting writes that happened while the job was running.
+CREATE TABLE IF NOT EXISTS mobility_state (
+    proposition_id      TEXT NOT NULL REFERENCES propositions(proposition_id),
+    regime              TEXT NOT NULL DEFAULT 'default',
+    snapshot_ts         REAL NOT NULL,
+    -- 13-dim mobility components (all nullable, filled per tier)
+    support_mass            REAL,  -- σ: sum of weighted support from evidence
+    attack_mass             REAL,  -- α: sum of weighted attacks
+    source_diversity        REAL,  -- δ: entropy-ish over source families
+    effective_independence  REAL,  -- ι: dependence-discounted support
+    temporal_coherence      REAL,  -- τ: polarity persistence across time
+    transportability        REAL,  -- γ: cross-regime stability
+    mutability              REAL,  -- μ: ease of revision under plausible evidence
+    load_bearingness        REAL,  -- λ: downstream dependency weight
+    modality_consilience    REAL,  -- χ: cross-modal independent corroboration
+    self_gen_local          REAL,  -- ψ_l: fraction of immediate support self-generated
+    self_gen_ancestral      REAL,  -- ψ_a: fraction of ancestry self-generated
+    contamination_risk      REAL,  -- κ: shared-pipeline / dependency-collapse risk
+    novelty_isolation       REAL,  -- ν: isolation from established graph neighborhoods
+    -- Tier freshness flags — bit semantics TBD, using TEXT for now for legibility
+    tier_write_components   TEXT NOT NULL DEFAULT '[]',  -- JSON array of component names
+    tier_read_components    TEXT NOT NULL DEFAULT '[]',
+    tier_bg_components      TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (proposition_id, regime, snapshot_ts)
+);
+CREATE INDEX IF NOT EXISTS idx_mobility_prop ON mobility_state(proposition_id);
+CREATE INDEX IF NOT EXISTS idx_mobility_regime ON mobility_state(regime);
+
+-- Actor profile: calibration record for any epistemic actor — external
+-- sources, extractors, summarizers, internal cognitive moves, other
+-- agents, or specific self-modes. Regime-indexed because reliability is
+-- local (an extractor may be precise in legal text and noisy in medical).
+-- Updated by the closed-loop calibration job from downstream outcomes.
+CREATE TABLE IF NOT EXISTS actor_profile (
+    actor_id                 TEXT NOT NULL,
+    actor_type               TEXT NOT NULL,
+    -- Allowed actor_type values:
+    --   'source'         — external data source
+    --   'extractor'      — parser/NER/claim-extraction pipeline
+    --   'summarizer'     — compression/consolidation operator
+    --   'cognitive_move' — reasoning transform (analogy, decomposition, ...)
+    --   'self_mode'      — agent's own reasoning mode
+    --   'agent'          — peer agent in a federation
+    regime                   TEXT NOT NULL DEFAULT 'default',
+    -- Performance signature (not a single trust score)
+    corroboration_rate       REAL,  -- fraction of claims later corroborated
+    contradiction_hazard     REAL,  -- fraction later contradicted
+    independence_contribution REAL, -- avg independence of claims from this actor
+    latency_p50_ms           REAL,
+    latency_p99_ms           REAL,
+    repairability            REAL,  -- likelihood failures are recoverable
+    bias_signature           TEXT,  -- JSON: structured bias metadata
+    value_alignment_risk     REAL,  -- for meta-actors
+    -- Update tracking
+    last_updated             REAL NOT NULL,
+    update_count             INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (actor_id, regime),
+    CHECK (actor_type IN ('source', 'extractor', 'summarizer',
+                          'cognitive_move', 'self_mode', 'agent'))
+);
+CREATE INDEX IF NOT EXISTS idx_actor_type ON actor_profile(actor_type);
+CREATE INDEX IF NOT EXISTS idx_actor_updated ON actor_profile(last_updated);
+
+-- Compression artifact: a summary/consolidation of some source span, with
+-- REVERSIBLE LOSS ACCOUNTING. For month-scale minds, compression is forced
+-- and silent compression is silent insanity. Each artifact tracks:
+--   - what raw strata it covers (so queries can fall back on demand)
+--   - what operator produced it (for re-run)
+--   - what is known to be lost vs preserved
+--   - compression_drift_score: divergence in downstream decisions between
+--     using the artifact vs raw strata (computed against replay samples)
+-- If drift exceeds threshold, artifact is demoted (status='demoted') and
+-- queries fall back to raw strata until it's rebuilt.
+CREATE TABLE IF NOT EXISTS compression_artifact (
+    artifact_id              TEXT PRIMARY KEY,
+    source_span_json         TEXT NOT NULL,     -- JSON: {rids, propositions, time_range, ...}
+    abstraction_operator     TEXT NOT NULL,     -- which operator produced this
+    operator_version         TEXT,
+    known_omissions          TEXT NOT NULL DEFAULT '[]',  -- JSON list
+    uncertainty_distortion   REAL,              -- estimated per-dim distortion (L2 of M deltas)
+    dependency_impact        REAL,              -- how many downstream propositions rely on it
+    reversibility_pointer    TEXT NOT NULL,     -- pointer to raw strata for fallback
+    compression_drift_score  REAL NOT NULL DEFAULT 0.0,  -- computed by BG job
+    status                   TEXT NOT NULL DEFAULT 'active',
+    -- Allowed status values: 'active' | 'demoted' | 'expired' | 'rebuilding'
+    namespace                TEXT NOT NULL,
+    created_at               REAL NOT NULL,
+    last_drift_check_at      REAL,
+    CHECK (status IN ('active', 'demoted', 'expired', 'rebuilding'))
+);
+CREATE INDEX IF NOT EXISTS idx_compression_ns ON compression_artifact(namespace);
+CREATE INDEX IF NOT EXISTS idx_compression_status ON compression_artifact(status);
+
+-- ──────────────────────────────────────────────────────────────────
+-- End RFC 008 Phase 1 tables. Write-time mobility signals on claims below.
+-- ──────────────────────────────────────────────────────────────────
+
 -- Claims: first-class semantic relationship ledger (RFC 006 Phase 5)
 -- Each claim records a structured (subject, relation, object) triple.
 -- The legacy 'edges' name is preserved as a read-only VIEW for backward compat.
@@ -200,6 +313,15 @@ CREATE TABLE IF NOT EXISTS claims (
     -- V18→V19 backfill for existing rows). Propositions are the canonical
     -- identity for (src, rel_type, dst, namespace) tuples across all evidence.
     proposition_id TEXT REFERENCES propositions(proposition_id),
+
+    -- RFC 008 Phase 1: write-time mobility signals. These are the components
+    -- of the mobility state M(c|ρ) that can be computed in <10ms on ingest
+    -- without a graph walk. The full 13-dim state is aggregated at the
+    -- proposition level in `mobility_state`; these are the per-claim inputs.
+    regime_tag       TEXT NOT NULL DEFAULT 'default',
+    self_generated   INTEGER NOT NULL DEFAULT 0,  -- ψ_l contribution: did this claim come from self-reasoning?
+    source_lineage   TEXT NOT NULL DEFAULT '[]',   -- JSON: pipeline chain (source, extractor, summarizer, ...)
+    modality_signal  TEXT NOT NULL DEFAULT 'text', -- contribution to χ: 'text'|'image'|'numeric'|'audio'|'code'|'telemetry'
 
     -- RFC 006: multiple sources can make conflicting claims about the same (src, rel, dst).
     -- Uniqueness is scoped to (src, dst, rel, extractor, polarity, namespace) so
@@ -1201,4 +1323,95 @@ SET proposition_id = (
       AND p.namespace = claims.namespace
 )
 WHERE proposition_id IS NULL AND tombstoned = 0;
+";
+
+/// SQL to migrate from schema V19 to V20 (RFC 008 Phase 1 — Warrant Flow foundations).
+///
+/// Adds the three control-stack tables that start replacing scalar confidence
+/// with the mobility calculus:
+///   - mobility_state: 13-dim vector M(c|ρ) keyed by (proposition, regime, snapshot)
+///   - actor_profile: regime-indexed calibration for any epistemic actor
+///   - compression_artifact: summaries with reversible loss accounting
+///
+/// Also adds four write-time mobility signal columns to the claims table.
+/// These are populated on every future claim insert; existing claims get
+/// sensible defaults (regime='default', self_generated=0, lineage=[], modality='text').
+/// Backfilling accurate values for historical rows is a separate background job
+/// and not attempted in the migration path.
+///
+/// No data loss. mobility_state starts empty; it is populated incrementally
+/// as Phase 1 algorithm components come online.
+pub const MIGRATE_V19_TO_V20: &str = "
+CREATE TABLE IF NOT EXISTS mobility_state (
+    proposition_id          TEXT NOT NULL REFERENCES propositions(proposition_id),
+    regime                  TEXT NOT NULL DEFAULT 'default',
+    snapshot_ts             REAL NOT NULL,
+    support_mass            REAL,
+    attack_mass             REAL,
+    source_diversity        REAL,
+    effective_independence  REAL,
+    temporal_coherence      REAL,
+    transportability        REAL,
+    mutability              REAL,
+    load_bearingness        REAL,
+    modality_consilience    REAL,
+    self_gen_local          REAL,
+    self_gen_ancestral      REAL,
+    contamination_risk      REAL,
+    novelty_isolation       REAL,
+    tier_write_components   TEXT NOT NULL DEFAULT '[]',
+    tier_read_components    TEXT NOT NULL DEFAULT '[]',
+    tier_bg_components      TEXT NOT NULL DEFAULT '[]',
+    PRIMARY KEY (proposition_id, regime, snapshot_ts)
+);
+CREATE INDEX IF NOT EXISTS idx_mobility_prop ON mobility_state(proposition_id);
+CREATE INDEX IF NOT EXISTS idx_mobility_regime ON mobility_state(regime);
+
+CREATE TABLE IF NOT EXISTS actor_profile (
+    actor_id                 TEXT NOT NULL,
+    actor_type               TEXT NOT NULL,
+    regime                   TEXT NOT NULL DEFAULT 'default',
+    corroboration_rate       REAL,
+    contradiction_hazard     REAL,
+    independence_contribution REAL,
+    latency_p50_ms           REAL,
+    latency_p99_ms           REAL,
+    repairability            REAL,
+    bias_signature           TEXT,
+    value_alignment_risk     REAL,
+    last_updated             REAL NOT NULL,
+    update_count             INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (actor_id, regime),
+    CHECK (actor_type IN ('source', 'extractor', 'summarizer',
+                          'cognitive_move', 'self_mode', 'agent'))
+);
+CREATE INDEX IF NOT EXISTS idx_actor_type ON actor_profile(actor_type);
+CREATE INDEX IF NOT EXISTS idx_actor_updated ON actor_profile(last_updated);
+
+CREATE TABLE IF NOT EXISTS compression_artifact (
+    artifact_id              TEXT PRIMARY KEY,
+    source_span_json         TEXT NOT NULL,
+    abstraction_operator     TEXT NOT NULL,
+    operator_version         TEXT,
+    known_omissions          TEXT NOT NULL DEFAULT '[]',
+    uncertainty_distortion   REAL,
+    dependency_impact        REAL,
+    reversibility_pointer    TEXT NOT NULL,
+    compression_drift_score  REAL NOT NULL DEFAULT 0.0,
+    status                   TEXT NOT NULL DEFAULT 'active',
+    namespace                TEXT NOT NULL,
+    created_at               REAL NOT NULL,
+    last_drift_check_at      REAL,
+    CHECK (status IN ('active', 'demoted', 'expired', 'rebuilding'))
+);
+CREATE INDEX IF NOT EXISTS idx_compression_ns ON compression_artifact(namespace);
+CREATE INDEX IF NOT EXISTS idx_compression_status ON compression_artifact(status);
+
+-- Add write-time mobility signal columns to claims. SQLite can't add columns
+-- with arbitrary CHECK constraints via ALTER; we add plain-typed columns and
+-- rely on application-level validation for modality_signal values.
+ALTER TABLE claims ADD COLUMN regime_tag      TEXT NOT NULL DEFAULT 'default';
+ALTER TABLE claims ADD COLUMN self_generated  INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE claims ADD COLUMN source_lineage  TEXT NOT NULL DEFAULT '[]';
+ALTER TABLE claims ADD COLUMN modality_signal TEXT NOT NULL DEFAULT 'text';
 ";

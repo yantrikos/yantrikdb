@@ -490,6 +490,176 @@ fn test_schema_v19_rule_edge_whitelist_enforced() {
     ).unwrap();
 }
 
+// RFC 008 Phase 1: Warrant Flow — mobility_state + actor_profile + compression_artifact
+// on fresh install, plus write-time mobility signal columns on claims.
+#[test]
+fn test_schema_v20_has_rfc008_phase1_tables() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let count: i64 = db.conn().query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN \
+         ('mobility_state', 'actor_profile', 'compression_artifact')",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(count, 3, "RFC 008 Phase 1 should create mobility_state, actor_profile, compression_artifact");
+}
+
+#[test]
+fn test_schema_v20_claims_has_mobility_signals() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let conn = db.conn();
+    let mut stmt = conn.prepare("PRAGMA table_info(claims)").unwrap();
+    let cols: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    for expected in &["regime_tag", "self_generated", "source_lineage", "modality_signal"] {
+        assert!(
+            cols.contains(&expected.to_string()),
+            "claims table should have column {} after V20. Got: {:?}", expected, cols
+        );
+    }
+}
+
+#[test]
+fn test_schema_v20_actor_profile_whitelist_enforced() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    // Allowed actor_type — should succeed.
+    db.conn().execute(
+        "INSERT INTO actor_profile (actor_id, actor_type, regime, last_updated) \
+         VALUES ('ext_medical', 'extractor', 'medical', 0.0)",
+        [],
+    ).unwrap();
+    // Disallowed actor_type — should be rejected.
+    let bad = db.conn().execute(
+        "INSERT INTO actor_profile (actor_id, actor_type, regime, last_updated) \
+         VALUES ('weird', 'hallucinator', 'default', 0.0)",
+        [],
+    );
+    assert!(
+        bad.is_err(),
+        "actor_profile should reject actor_type not in the whitelist"
+    );
+}
+
+#[test]
+fn test_schema_v20_compression_artifact_status_whitelist() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    // Allowed status.
+    db.conn().execute(
+        "INSERT INTO compression_artifact (artifact_id, source_span_json, abstraction_operator, \
+         reversibility_pointer, namespace, created_at, status) \
+         VALUES ('a1', '[]', 'consolidate_v1', 'raw:1-100', 'default', 0.0, 'active')",
+        [],
+    ).unwrap();
+    // Disallowed status.
+    let bad = db.conn().execute(
+        "INSERT INTO compression_artifact (artifact_id, source_span_json, abstraction_operator, \
+         reversibility_pointer, namespace, created_at, status) \
+         VALUES ('a2', '[]', 'x', 'y', 'default', 0.0, 'freshly_minted')",
+        [],
+    );
+    assert!(bad.is_err(), "compression_artifact.status whitelist should reject unknown values");
+}
+
+#[test]
+fn test_schema_v20_mobility_state_roundtrip() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    // Seed a proposition so the FK holds.
+    db.conn().execute(
+        "INSERT INTO propositions (proposition_id, src, rel_type, dst, namespace, created_at) \
+         VALUES ('p1', 'Alice', 'works_at', 'Acme', 'default', 0.0)",
+        [],
+    ).unwrap();
+    // Insert a partial mobility state — only write-tier components populated.
+    db.conn().execute(
+        "INSERT INTO mobility_state (proposition_id, regime, snapshot_ts, \
+         support_mass, attack_mass, self_gen_local, modality_consilience, \
+         tier_write_components) \
+         VALUES ('p1', 'default', 100.0, 2.0, 0.5, 0.0, 1.0, \
+         '[\"support_mass\",\"attack_mass\",\"self_gen_local\",\"modality_consilience\"]')",
+        [],
+    ).unwrap();
+    // Read it back.
+    let (s, a, psi_l, chi): (f64, f64, f64, f64) = db.conn().query_row(
+        "SELECT support_mass, attack_mass, self_gen_local, modality_consilience \
+         FROM mobility_state WHERE proposition_id='p1'",
+        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+    ).unwrap();
+    assert_eq!(s, 2.0);
+    assert_eq!(a, 0.5);
+    assert_eq!(psi_l, 0.0);
+    assert_eq!(chi, 1.0);
+    // Background-tier components should be NULL since we didn't populate them.
+    let ancestral: Option<f64> = db.conn().query_row(
+        "SELECT self_gen_ancestral FROM mobility_state WHERE proposition_id='p1'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert!(ancestral.is_none(), "untouched background components should remain NULL");
+}
+
+#[test]
+fn test_schema_v20_migration_from_v19() {
+    // Simulate a V19 database (without V20's new tables/columns), run the V20
+    // migration, verify the tables + new claim columns appear, and that
+    // existing claims get sensible defaults for the new columns.
+    use rusqlite::Connection;
+    let conn = Connection::open_in_memory().unwrap();
+
+    // Minimal V19-shaped schema.
+    conn.execute_batch("
+        CREATE TABLE propositions (
+            proposition_id TEXT PRIMARY KEY,
+            src TEXT NOT NULL, rel_type TEXT NOT NULL, dst TEXT NOT NULL,
+            namespace TEXT NOT NULL, created_at REAL NOT NULL,
+            UNIQUE(src, rel_type, dst, namespace)
+        );
+        CREATE TABLE claims (
+            claim_id TEXT PRIMARY KEY,
+            src TEXT NOT NULL, dst TEXT NOT NULL, rel_type TEXT NOT NULL,
+            weight REAL NOT NULL DEFAULT 1.0,
+            created_at REAL NOT NULL,
+            tombstoned INTEGER NOT NULL DEFAULT 0,
+            polarity INTEGER NOT NULL DEFAULT 1,
+            modality TEXT NOT NULL DEFAULT 'asserted',
+            valid_from REAL, valid_to REAL,
+            extractor TEXT NOT NULL DEFAULT 'manual',
+            extractor_version TEXT,
+            confidence_band TEXT NOT NULL DEFAULT 'medium',
+            source_memory_rid TEXT,
+            span_start INTEGER, span_end INTEGER,
+            namespace TEXT NOT NULL DEFAULT 'default',
+            proposition_id TEXT
+        );
+    ").unwrap();
+    conn.execute("INSERT INTO propositions (proposition_id, src, rel_type, dst, namespace, created_at) \
+                  VALUES ('p1', 'Alice', 'works_at', 'Acme', 'default', 0.0)", []).unwrap();
+    conn.execute("INSERT INTO claims (claim_id, src, dst, rel_type, created_at, extractor, namespace, proposition_id) \
+                  VALUES ('c1', 'Alice', 'Acme', 'works_at', 0.0, 'manual', 'default', 'p1')", []).unwrap();
+
+    // Run V20 migration.
+    conn.execute_batch(crate::schema::MIGRATE_V19_TO_V20).unwrap();
+
+    // New tables should exist.
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN \
+         ('mobility_state', 'actor_profile', 'compression_artifact')",
+        [], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(count, 3);
+
+    // Existing claim should have sensible defaults for new columns.
+    let (regime, self_gen, lineage, modality): (String, i64, String, String) = conn.query_row(
+        "SELECT regime_tag, self_generated, source_lineage, modality_signal \
+         FROM claims WHERE claim_id='c1'",
+        [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    ).unwrap();
+    assert_eq!(regime, "default");
+    assert_eq!(self_gen, 0);
+    assert_eq!(lineage, "[]");
+    assert_eq!(modality, "text");
+}
+
 #[test]
 fn test_schema_v19_backfill_from_v18() {
     // Simulate a V18 database by running the schema up to but not including V19,
