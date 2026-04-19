@@ -3510,6 +3510,213 @@ fn test_m5b_seed_registries_idempotent() {
     assert_eq!(before, after, "INSERT OR IGNORE should not add duplicates");
 }
 
+// ──────────────────────────────────────────────────────────────────
+// RFC 008 Phase 1 M6: Background-tier mobility components (τ, λ, ψ_a).
+// ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_m6_temporal_coherence_stable_polarity_is_one() {
+    // All supports on the same proposition → no flips → τ = 1.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_coh");
+    seed_contest_claim(&db, "p_coh", "c1", "ext_a", 1, "[\"s\"]", None, "default", None, None);
+    seed_contest_claim(&db, "p_coh", "c2", "ext_b", 1, "[\"s\"]", None, "default", None, None);
+    seed_contest_claim(&db, "p_coh", "c3", "ext_c", 1, "[\"s\"]", None, "default", None, None);
+    db.compute_write_tier_mobility("p_coh", "default").unwrap();
+    let state = db.compute_background_mobility("p_coh", "default").unwrap().unwrap();
+    assert_eq!(state.temporal_coherence, Some(1.0));
+}
+
+#[test]
+fn test_m6_temporal_coherence_flips_reduce_score() {
+    // Alternating polarities: support, attack, support → two flips out of
+    // two transitions → τ = 1 - 2/2 = 0.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_flip");
+    // Use explicit created_at ordering: set created_at monotonically to
+    // ensure the sort order is what we expect.
+    let conn = db.conn();
+    let triples = [
+        ("c_p1", "ext_a",  1, 1.0),
+        ("c_a1", "ext_b", -1, 2.0),
+        ("c_p2", "ext_c",  1, 3.0),
+    ];
+    for (cid, ext, pol, ts) in triples {
+        conn.execute(
+            "INSERT INTO claims (claim_id, src, dst, rel_type, created_at, \
+             extractor, polarity, namespace, proposition_id, regime_tag, \
+             self_generated, source_lineage, modality_signal, weight) \
+             VALUES (?1, 'src_p_flip', 'dst_p_flip', 'rel_p_flip', ?2, ?3, ?4, \
+             'default', 'p_flip', 'default', 0, '[\"s\"]', 'text', 1.0)",
+            rusqlite::params![cid, ts, ext, pol],
+        ).unwrap();
+    }
+    drop(conn);
+    db.compute_write_tier_mobility("p_flip", "default").unwrap();
+    let state = db.compute_background_mobility("p_flip", "default").unwrap().unwrap();
+    let tau = state.temporal_coherence.unwrap();
+    assert!((tau - 0.0).abs() < 1e-9, "expected τ=0 for maximally flipping polarity, got {}", tau);
+}
+
+#[test]
+fn test_m6_temporal_coherence_single_claim_is_one_by_convention() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_solo");
+    seed_contest_claim(&db, "p_solo", "c1", "ext_a", 1, "[\"s\"]", None, "default", None, None);
+    db.compute_write_tier_mobility("p_solo", "default").unwrap();
+    let state = db.compute_background_mobility("p_solo", "default").unwrap().unwrap();
+    // Convention: too few claims to judge → default to 1.0 coherence.
+    assert_eq!(state.temporal_coherence, Some(1.0));
+}
+
+#[test]
+fn test_m6_load_bearingness_counts_downstream_moves() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_load");
+    seed_contest_claim(&db, "p_load", "upstream_a", "ext_a", 1, "[\"s\"]", None, "default", None, None);
+    seed_contest_claim(&db, "p_load", "upstream_b", "ext_b", 1, "[\"s\"]", None, "default", None, None);
+    db.compute_write_tier_mobility("p_load", "default").unwrap();
+
+    // No moves yet → λ = 0.
+    let before = db.compute_background_mobility("p_load", "default").unwrap().unwrap();
+    assert_eq!(before.load_bearingness, Some(0.0));
+
+    // Record two moves that consume the upstream claims.
+    db.record_move_event(mk_move_input("analogy", &["upstream_a"], &["derived_1"])).unwrap();
+    db.record_move_event(mk_move_input("decomposition", &["upstream_a", "upstream_b"], &["derived_2"])).unwrap();
+    // A third move that consumes an unrelated claim — should NOT count.
+    db.record_move_event(mk_move_input("analogy", &["unrelated_claim"], &["derived_3"])).unwrap();
+
+    let after = db.compute_background_mobility("p_load", "default").unwrap().unwrap();
+    assert_eq!(after.load_bearingness, Some(2.0),
+        "expected 2 downstream moves consuming this proposition's claims");
+}
+
+#[test]
+fn test_m6_self_gen_ancestral_traces_backward() {
+    // Build a two-step ancestry:
+    //   evidence_a (self_gen=true), evidence_b (self_gen=false)
+    //     → move_m1 → intermediate_c
+    //     → move_m2 (inputs: intermediate_c) → final_d
+    // Proposition P owns final_d. ψ_a should reflect the ancestry.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    // Seed proposition and its claim.
+    seed_proposition(&db, "p_anc");
+    // Add all the claims we'll reference. final_d belongs to p_anc;
+    // the others are referenced by move edges only.
+    let conn = db.conn();
+    for (cid, self_gen) in [("evidence_a", 1), ("evidence_b", 0), ("intermediate_c", 0), ("final_d", 0)] {
+        let prop = if cid == "final_d" { Some("p_anc") } else { None };
+        conn.execute(
+            "INSERT INTO claims (claim_id, src, dst, rel_type, created_at, \
+             extractor, polarity, namespace, proposition_id, regime_tag, \
+             self_generated, source_lineage, modality_signal, weight) \
+             VALUES (?1, ?2, ?3, 'rel_anc', 0.0, 'ext', 1, 'default', ?4, \
+             'default', ?5, '[]', 'text', 1.0)",
+            rusqlite::params![cid, format!("src_{}", cid), format!("dst_{}", cid), prop, self_gen],
+        ).unwrap();
+    }
+    drop(conn);
+    // m1: evidence_a + evidence_b → intermediate_c
+    let mut inp1 = mk_move_input("decomposition", &["evidence_a", "evidence_b"], &["intermediate_c"]);
+    inp1.operator_version = "v1".to_string();
+    db.record_move_event(inp1).unwrap();
+    // m2: intermediate_c → final_d
+    let mut inp2 = mk_move_input("ladder_up", &["intermediate_c"], &["final_d"]);
+    inp2.operator_version = "v1".to_string();
+    db.record_move_event(inp2).unwrap();
+
+    db.compute_write_tier_mobility("p_anc", "default").unwrap();
+    let state = db.compute_background_mobility("p_anc", "default").unwrap().unwrap();
+    // BFS from final_d (depth=2): layer 1 finds intermediate_c, layer 2
+    // finds evidence_a and evidence_b. Ancestry = {intermediate_c, evidence_a, evidence_b}.
+    // self_generated: evidence_a = true. → ψ_a = 1/3.
+    let psi_a = state.self_gen_ancestral.unwrap();
+    assert!((psi_a - 1.0 / 3.0).abs() < 1e-9,
+        "expected ψ_a = 1/3, got {}", psi_a);
+}
+
+#[test]
+fn test_m6_self_gen_ancestral_no_moves_is_zero() {
+    // Proposition with claims but no upstream moves → no ancestry → ψ_a = 0.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_leaf");
+    seed_contest_claim(&db, "p_leaf", "c1", "ext_a", 1, "[\"s\"]", None, "default", None, None);
+    db.compute_write_tier_mobility("p_leaf", "default").unwrap();
+    let state = db.compute_background_mobility("p_leaf", "default").unwrap().unwrap();
+    assert_eq!(state.self_gen_ancestral, Some(0.0));
+}
+
+#[test]
+fn test_m6_compute_background_missing_returns_none() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    // No mobility_state row yet → returns None, does not insert one.
+    let res = db.compute_background_mobility("nope", "default").unwrap();
+    assert!(res.is_none());
+}
+
+#[test]
+fn test_m6_background_idempotent() {
+    // Calling twice with unchanged data produces the same values.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_idem_bg");
+    seed_contest_claim(&db, "p_idem_bg", "c1", "ext_a", 1, "[\"s\"]", None, "default", None, None);
+    db.compute_write_tier_mobility("p_idem_bg", "default").unwrap();
+    let first = db.compute_background_mobility("p_idem_bg", "default").unwrap().unwrap();
+    let second = db.compute_background_mobility("p_idem_bg", "default").unwrap().unwrap();
+    assert_eq!(first.temporal_coherence, second.temporal_coherence);
+    assert_eq!(first.load_bearingness, second.load_bearingness);
+    assert_eq!(first.self_gen_ancestral, second.self_gen_ancestral);
+}
+
+#[test]
+fn test_m6_background_batch_scan() {
+    // Seed three propositions, compute write-tier for all, then run the
+    // batch recompute and verify all three get their background fields
+    // populated.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    for pid in ["p_batch_1", "p_batch_2", "p_batch_3"] {
+        seed_proposition(&db, pid);
+        seed_contest_claim(&db, pid, &format!("c_{}", pid), "ext_a", 1, "[\"s\"]", None, "default", None, None);
+        db.compute_write_tier_mobility(pid, "default").unwrap();
+    }
+    // All three should have NULL background fields pre-scan.
+    let pending_before: i64 = db.conn().query_row(
+        "SELECT COUNT(*) FROM mobility_state WHERE temporal_coherence IS NULL",
+        [], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(pending_before, 3);
+
+    let processed = db.recompute_background_mobility_batch(10).unwrap();
+    assert_eq!(processed, 3);
+
+    let pending_after: i64 = db.conn().query_row(
+        "SELECT COUNT(*) FROM mobility_state WHERE temporal_coherence IS NULL",
+        [], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(pending_after, 0);
+}
+
+#[test]
+fn test_m6_background_marks_tier_components() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_tier");
+    seed_contest_claim(&db, "p_tier", "c1", "ext_a", 1, "[\"s\"]", None, "default", None, None);
+    db.compute_write_tier_mobility("p_tier", "default").unwrap();
+    let state = db.compute_background_mobility("p_tier", "default").unwrap().unwrap();
+    for expected in ["temporal_coherence", "load_bearingness", "self_gen_ancestral"] {
+        assert!(
+            state.tier_bg_components.iter().any(|c| c == expected),
+            "tier_bg_components should include {}, got {:?}",
+            expected, state.tier_bg_components
+        );
+    }
+    // Repeat call shouldn't duplicate entries.
+    let state2 = db.compute_background_mobility("p_tier", "default").unwrap().unwrap();
+    let tc_count = state2.tier_bg_components.iter().filter(|c| *c == "temporal_coherence").count();
+    assert_eq!(tc_count, 1, "repeated calls must not duplicate tier_bg_components entries");
+}
+
 #[test]
 fn test_m5b_full_lifecycle_observed_to_retracted_with_adversarial() {
     // End-to-end: record an observed move, enrich with posthoc retraction,

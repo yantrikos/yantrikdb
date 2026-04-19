@@ -172,6 +172,80 @@ impl crate::engine::YantrikDB {
         let conn = self.conn.lock();
         upsert_mobility_state_inner(&conn, state)
     }
+
+    /// RFC 008 M6 — background-tier mobility recompute. Fills the
+    /// currently-NULL components τ (temporal_coherence), λ (load_bearingness),
+    /// and ψ_a (self_gen_ancestral) on the existing mobility_state row for
+    /// (proposition_id, regime). Does NOT recompute write-tier components
+    /// (σ, α, χ, ψ_l) — those are authoritative from M3's leave-one-out
+    /// ingestion hook.
+    ///
+    /// Idempotent under an unchanged claim + move graph: repeat calls
+    /// produce the same values. If no write-tier row exists yet, this is
+    /// a no-op (returns None).
+    ///
+    /// Designed to be called by a scan job or explicit app-code. No lock-
+    /// scope coupling with claim ingestion; consumers can run it whenever.
+    pub fn compute_background_mobility(
+        &self,
+        proposition_id: &str,
+        regime: &str,
+    ) -> Result<Option<MobilityState>> {
+        let conn = self.conn.lock();
+        let Some(mut state) = read_latest_state(&conn, proposition_id, regime)? else {
+            return Ok(None);
+        };
+        let tau = compute_temporal_coherence(&conn, proposition_id, regime)?;
+        let lambda = compute_load_bearingness(&conn, proposition_id)?;
+        let psi_a = compute_self_gen_ancestral(&conn, proposition_id, 2)?;
+        state.temporal_coherence = Some(tau);
+        state.load_bearingness = Some(lambda);
+        state.self_gen_ancestral = Some(psi_a);
+        // Mark background tier components as present. Extend the tier_bg
+        // component list idempotently so reads know what's been populated.
+        for name in ["temporal_coherence", "load_bearingness", "self_gen_ancestral"] {
+            if !state.tier_bg_components.iter().any(|c| c == name) {
+                state.tier_bg_components.push(name.to_string());
+            }
+        }
+        upsert_mobility_state_inner(&conn, &state)?;
+        Ok(Some(state))
+    }
+
+    /// RFC 008 M6 — batch scan. Walks mobility_state rows whose background
+    /// components are NULL (temporal_coherence IS NULL serves as the
+    /// sentinel — the three background components are populated together),
+    /// up to `limit` rows, and fills them in. Returns the number of rows
+    /// updated.
+    ///
+    /// Safe to call from `think()` or a periodic job. Each row is
+    /// processed in its own lock acquisition so long batches don't
+    /// monopolize the writer.
+    pub fn recompute_background_mobility_batch(&self, limit: usize) -> Result<usize> {
+        let pending = self.list_background_pending(limit)?;
+        let mut count = 0;
+        for (prop_id, regime) in pending {
+            if self.compute_background_mobility(&prop_id, &regime)?.is_some() {
+                count += 1;
+            }
+        }
+        Ok(count)
+    }
+
+    fn list_background_pending(&self, limit: usize) -> Result<Vec<(String, String)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT proposition_id, regime FROM mobility_state \
+             WHERE temporal_coherence IS NULL \
+             ORDER BY computed_at ASC LIMIT ?1",
+        )?;
+        let rows = stmt
+            .query_map(params![limit as i64], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -568,6 +642,161 @@ fn compute_self_gen_local(claims: &[&ClaimRow]) -> f64 {
     }
     let self_gen_count = claims.iter().filter(|c| c.self_generated).count();
     self_gen_count as f64 / claims.len() as f64
+}
+
+// ──────────────────────────────────────────────────────────────────
+// RFC 008 Phase 1 M6: Background-tier mobility components.
+//
+// τ — temporal_coherence: polarity persistence across a proposition's
+//     claim history. 1.0 means polarity never flipped; lower means it
+//     oscillated. Uses all claims (including tombstoned) because the
+//     historical polarity record is the input — tombstoning doesn't
+//     erase a past flip.
+//
+// λ — load_bearingness: raw count of cognitive moves whose inputs
+//     reference any claim of this proposition. High λ = heavily load-
+//     bearing = revising it has cascading effects. Stored as REAL for
+//     schema consistency; consumers can normalize or thresholds as
+//     needed.
+//
+// ψ_a — self_gen_ancestral: fraction of ancestry DAG nodes whose
+//     self_generated flag is set. Bounded BFS at depth 2 by default.
+//     Returns 0.0 when there is no ancestry to trace (e.g. all claims
+//     are leaf evidence with no producing moves).
+// ──────────────────────────────────────────────────────────────────
+
+fn compute_temporal_coherence(
+    conn: &Connection,
+    proposition_id: &str,
+    regime: &str,
+) -> Result<f64> {
+    // Use all claims in the proposition — tombstoned included — because
+    // a past polarity flip is real historical information even if later
+    // reconciled. Order by created_at for chronological sequence.
+    let mut stmt = conn.prepare(
+        "SELECT polarity FROM claims \
+         WHERE proposition_id = ?1 AND regime_tag = ?2 \
+         ORDER BY created_at ASC, claim_id ASC",
+    )?;
+    let polarities: Vec<i32> = stmt
+        .query_map(params![proposition_id, regime], |row| row.get::<_, i32>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    if polarities.len() < 2 {
+        // Single claim (or none) — no basis to judge coherence.
+        // Convention: fully coherent by default, since there's no evidence
+        // of inconsistency. Callers that want "undefined" can look at
+        // live_claim_count on the mobility row instead.
+        return Ok(1.0);
+    }
+    let mut flips = 0;
+    for w in polarities.windows(2) {
+        if w[0] != w[1] {
+            flips += 1;
+        }
+    }
+    let max_flips = (polarities.len() - 1) as f64;
+    Ok(1.0 - (flips as f64 / max_flips))
+}
+
+fn compute_load_bearingness(conn: &Connection, proposition_id: &str) -> Result<f64> {
+    // Count distinct moves that consume any claim of this proposition as
+    // input. This measures downstream-reasoning-weight: how many cognitive
+    // operations depend on these claims.
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(DISTINCT mie.move_id) \
+         FROM move_input_edge mie \
+         INNER JOIN claims c ON mie.claim_id = c.claim_id \
+         WHERE c.proposition_id = ?1",
+        params![proposition_id],
+        |row| row.get(0),
+    )?;
+    Ok(count as f64)
+}
+
+fn compute_self_gen_ancestral(
+    conn: &Connection,
+    proposition_id: &str,
+    max_depth: u32,
+) -> Result<f64> {
+    use std::collections::HashSet;
+
+    let seed_claims = fetch_proposition_live_claim_ids(conn, proposition_id)?;
+    if seed_claims.is_empty() {
+        return Ok(0.0);
+    }
+
+    // BFS backward through move_output_edge → move_events → move_input_edge.
+    // The seed layer itself is NOT counted as ancestry (it's the claims
+    // we're evaluating the ancestry of).
+    let mut ancestry: HashSet<String> = HashSet::new();
+    let mut frontier: Vec<String> = seed_claims;
+    for _depth in 0..max_depth {
+        if frontier.is_empty() {
+            break;
+        }
+        let mut next: Vec<String> = Vec::new();
+        for claim_id in &frontier {
+            let moves = fetch_producing_moves(conn, claim_id)?;
+            for mv in &moves {
+                let inputs = fetch_move_input_claim_ids(conn, mv)?;
+                for inp in inputs {
+                    if ancestry.insert(inp.clone()) {
+                        next.push(inp);
+                    }
+                }
+            }
+        }
+        frontier = next;
+    }
+    if ancestry.is_empty() {
+        return Ok(0.0);
+    }
+
+    // Count self-generated claims in the ancestry set.
+    let placeholders: String = (0..ancestry.len())
+        .map(|i| format!("?{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        "SELECT COUNT(*) FROM claims \
+         WHERE claim_id IN ({}) AND self_generated = 1",
+        placeholders
+    );
+    let params_vec: Vec<Box<dyn rusqlite::types::ToSql>> = ancestry
+        .iter()
+        .map(|c| Box::new(c.clone()) as Box<dyn rusqlite::types::ToSql>)
+        .collect();
+    let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+        params_vec.iter().map(|b| b.as_ref()).collect();
+    let self_gen: i64 = conn.query_row(&sql, params_ref.as_slice(), |row| row.get(0))?;
+    Ok(self_gen as f64 / ancestry.len() as f64)
+}
+
+fn fetch_proposition_live_claim_ids(conn: &Connection, proposition_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT claim_id FROM claims \
+         WHERE proposition_id = ?1 AND tombstoned = 0",
+    )?;
+    let rows = stmt
+        .query_map(params![proposition_id], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn fetch_producing_moves(conn: &Connection, claim_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT move_id FROM move_output_edge WHERE claim_id = ?1")?;
+    let rows = stmt
+        .query_map(params![claim_id], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+fn fetch_move_input_claim_ids(conn: &Connection, move_id: &str) -> Result<Vec<String>> {
+    let mut stmt = conn.prepare("SELECT claim_id FROM move_input_edge WHERE move_id = ?1")?;
+    let rows = stmt
+        .query_map(params![move_id], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    Ok(rows)
 }
 
 // ──────────────────────────────────────────────────────────────────
