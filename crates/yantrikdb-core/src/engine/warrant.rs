@@ -1066,9 +1066,81 @@ pub(super) fn compute_contest_state_conn(
         }
     }
 
+    // Capture pre-state flags for M10: if the conflict bits flip from off
+    // to on during this recompute, we'll auto-file adversarial candidates
+    // for any moves whose outputs are claims of this proposition.
+    let prior_flags = read_contest_state(conn, proposition_id, regime)?
+        .map(|s| s.heuristic_flags)
+        .unwrap_or(0);
+
     let state = derive_contest_state(proposition_id, regime, &claims, hash);
     upsert_contest_state(conn, &state)?;
+
+    // RFC 008 M10: auto-adversarial candidates on newly-set conflict flags.
+    // Scan the bits that transitioned off → on; for each affected flag,
+    // find moves whose outputs are among this proposition's claims and
+    // file a candidate. De-duplicated: an existing candidate on the same
+    // (move_id, discovered_via) combination is skipped.
+    let newly_set = state.heuristic_flags & !prior_flags;
+    if newly_set & 0b0010 != 0 {
+        // Bit 1 = SAME_SOURCE_CONFLICT
+        auto_file_adversarial_for_proposition(conn, proposition_id, "contradiction")?;
+    }
+    if newly_set & 0b1000 != 0 {
+        // Bit 3 = SAME_ARTIFACT_EXTRACTOR_CONFLICT
+        auto_file_adversarial_for_proposition(conn, proposition_id, "contradiction")?;
+    }
+
     Ok(state)
+}
+
+/// Auto-file adversarial candidates for moves whose outputs are among a
+/// flagged proposition's claims. De-duplicates on (move_id, discovered_via)
+/// so repeat recomputes don't spam the candidate queue.
+fn auto_file_adversarial_for_proposition(
+    conn: &Connection,
+    proposition_id: &str,
+    discovered_via: &str,
+) -> Result<()> {
+    let now_ts = crate::engine::now();
+    // Find moves whose output_edge points to any claim of this proposition.
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT moe.move_id FROM move_output_edge moe \
+         INNER JOIN claims c ON moe.claim_id = c.claim_id \
+         WHERE c.proposition_id = ?1",
+    )?;
+    let moves: Vec<String> = stmt
+        .query_map(params![proposition_id], |row| row.get::<_, String>(0))?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    drop(stmt);
+    for move_id in moves {
+        // Skip if an existing candidate for this (move_id, discovered_via)
+        // already exists — we don't want repeat flags to spam the queue.
+        let already_exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM move_adversarial_instance \
+                 WHERE move_id = ?1 AND discovered_via = ?2 LIMIT 1",
+                params![move_id, discovered_via],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if already_exists {
+            continue;
+        }
+        let instance_id = crate::id::new_id();
+        let root_cause = format!(
+            "auto-generated: proposition {} contest flag transitioned for move {}",
+            proposition_id, move_id
+        );
+        conn.execute(
+            "INSERT INTO move_adversarial_instance (\
+             instance_id, move_id, status, discovered_via, traced_root_cause, \
+             discovered_at, created_at) \
+             VALUES (?1, ?2, 'candidate', ?3, ?4, ?5, ?5)",
+            params![instance_id, move_id, discovered_via, root_cause, now_ts],
+        )?;
+    }
+    Ok(())
 }
 
 /// Pure-function derivation of ContestState from a live claim set. All

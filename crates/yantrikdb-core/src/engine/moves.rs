@@ -30,6 +30,7 @@ use crate::error::{Result, YantrikDbError};
 pub const SEED_MOVE_TYPES: &[(&str, &str, Option<i64>)] = &[
     ("analogy", "Cross-domain pattern transfer from known claims to a target", Some(60_000)),
     ("decomposition", "Split a claim into case-wise sub-claims", Some(30_000)),
+    ("aggregate_back", "Recombine case-wise sub-claims into an aggregate (dual of decomposition)", Some(30_000)),
     ("negate_and_test", "Generate the negation of a claim and actively seek disconfirming evidence", Some(300_000)),
     ("source_audit", "Inspect and reweight claims from a shared source (requires ψ_ancestral < 1.0)", Some(900_000)),
     ("ladder_up", "Abstract a specific claim to a more general proposition", Some(60_000)),
@@ -400,6 +401,34 @@ impl crate::engine::YantrikDB {
         };
         if rows == 0 {
             return Err(YantrikDbError::NotFound(format!("move_event: {}", move_id)));
+        }
+
+        // RFC 008 M10: auto-file adversarial candidate on negative outcomes.
+        // Retractions and harmful-side-effects are signals the move was
+        // epistemically or operationally wrong; record a candidate so the
+        // curator or induction pipeline has a queue to work from.
+        //
+        // Governance rule (M5a spec): automatic systems create `candidate`
+        // status with traced_root_cause only; generalized_lesson and
+        // lesson_scope_json are left NULL until a curator promotes.
+        if outcome == posthoc_outcome::RETRACTED || outcome == posthoc_outcome::HARMFUL_SIDE_EFFECT {
+            let instance_id = crate::id::new_id();
+            let discovered_via = if outcome == posthoc_outcome::RETRACTED {
+                "retraction"
+            } else {
+                "calibration_signal"
+            };
+            let root_cause = format!(
+                "auto-generated from posthoc_outcome='{}' on move {}",
+                outcome, move_id
+            );
+            conn.execute(
+                "INSERT INTO move_adversarial_instance (\
+                 instance_id, move_id, status, discovered_via, traced_root_cause, \
+                 discovered_at, created_at) \
+                 VALUES (?1, ?2, 'candidate', ?3, ?4, ?5, ?5)",
+                params![instance_id, move_id, discovered_via, root_cause, now_ts],
+            )?;
         }
         Ok(())
     }
@@ -780,6 +809,458 @@ impl crate::engine::YantrikDB {
             .query_map(params![move_id], row_to_adversarial)?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         Ok(rows)
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// RFC 008 M8: Axiomatic composition rules.
+//
+// Per M5a locked spec: axioms are definitional — they live in code, not
+// in the move_composition_rule table. The table stores only empirical
+// and user-declared rules. Axioms are compile-checked and versioned
+// with the system source; mixing them with noisy empirical observations
+// would let evidence override definitional truths.
+// ──────────────────────────────────────────────────────────────────
+
+/// Axiomatic composition kinds. Each axiom declares one of these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AxiomKind {
+    /// The sequence `left ∘ right` approximates the identity at warrant
+    /// level. Engine may elide such pairs from processing.
+    ApproxIdentity,
+    /// `left ∘ right` and `right ∘ left` are NOT equivalent; move order
+    /// matters for this pair.
+    NonCommutative,
+    /// The `left_move_type` has a definitional precondition; applying it
+    /// without the precondition holding is incoherent.
+    PreconditionRequirement,
+}
+
+/// Precondition checks evaluated against mobility_state / contest_state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Precondition {
+    /// Require self_gen_ancestral strictly less than the given threshold.
+    /// e.g. `SelfGenAncestralBelow(1.0)` means "there must be at least
+    /// some external ancestry (not fully self-generated)."
+    SelfGenAncestralBelow(f64),
+    /// Require support_mass (σ) strictly above the given threshold.
+    SupportMassAbove(f64),
+    /// Require contest_state.heuristic_flags bitmask intersection equals zero
+    /// (i.e. none of the listed flag bits are set).
+    NoContestFlags(u64),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Axiom {
+    pub name: &'static str,
+    pub kind: AxiomKind,
+    pub left_move_type: Option<&'static str>,
+    pub right_move_type: Option<&'static str>,
+    pub precondition: Option<Precondition>,
+    pub description: &'static str,
+}
+
+/// The axiom registry. Populated from RFC 008 § 2 and refined as new
+/// definitional laws are discovered. Bumping this registry is a code
+/// change, reviewed with the usual rigor; it is NOT schema migration.
+pub const AXIOMS: &[Axiom] = &[
+    Axiom {
+        name: "decompose_aggregate_identity",
+        kind: AxiomKind::ApproxIdentity,
+        left_move_type: Some("decomposition"),
+        right_move_type: Some("aggregate_back"),
+        precondition: None,
+        description: "decomposition ∘ aggregate_back ≈ identity at warrant level \
+                      (case splitting followed by reaggregation preserves support structure)",
+    },
+    Axiom {
+        name: "negate_analogize_non_commutative",
+        kind: AxiomKind::NonCommutative,
+        left_move_type: Some("negate_and_test"),
+        right_move_type: Some("analogy"),
+        precondition: None,
+        description: "negating then analogizing explores different structure than \
+                      analogizing then negating; the two orderings are not equivalent",
+    },
+    Axiom {
+        name: "source_audit_requires_external_ancestry",
+        kind: AxiomKind::PreconditionRequirement,
+        left_move_type: Some("source_audit"),
+        right_move_type: None,
+        precondition: Some(Precondition::SelfGenAncestralBelow(1.0)),
+        description: "source_audit is incoherent on fully self-generated claims \
+                      (there is no external source to audit when ψ_ancestral = 1.0)",
+    },
+    Axiom {
+        name: "compression_requires_support",
+        kind: AxiomKind::PreconditionRequirement,
+        left_move_type: Some("compression"),
+        right_move_type: None,
+        precondition: Some(Precondition::SupportMassAbove(0.0)),
+        description: "compression over a proposition with no support mass has \
+                      nothing to consolidate; apply only once claims exist",
+    },
+    Axiom {
+        name: "hypothesis_generation_skips_present_tense_conflict",
+        kind: AxiomKind::PreconditionRequirement,
+        left_move_type: Some("hypothesis_generation"),
+        right_move_type: None,
+        precondition: Some(Precondition::NoContestFlags(0b10000)), // PRESENT_TENSE_CONFLICT bit
+        description: "generating new hypotheses over an actively-contested proposition \
+                      compounds noise; resolve the present-tense conflict first",
+    },
+];
+
+/// A violated precondition, returned by `check_move_preconditions`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PreconditionViolation {
+    pub axiom_name: &'static str,
+    pub move_type: String,
+    pub description: &'static str,
+    /// Human-readable observation of what was seen vs required.
+    pub observation: String,
+}
+
+impl crate::engine::YantrikDB {
+    /// Return the static axiom registry. Useful for introspection tests
+    /// and documentation tools.
+    pub fn composition_axioms(&self) -> &'static [Axiom] {
+        AXIOMS
+    }
+
+    /// Check whether a pair of moves matches any ApproxIdentity or
+    /// NonCommutative axiom. Given two move_ids, this looks up their
+    /// canonical move_types (applying the latest correction) and then
+    /// scans the axiom registry for a match. Returns all matching
+    /// axioms — usually zero or one.
+    pub fn check_composition_axioms(
+        &self,
+        left_move_id: &str,
+        right_move_id: &str,
+    ) -> Result<Vec<&'static Axiom>> {
+        let left = self.get_move_event_canonical(left_move_id)?;
+        let right = self.get_move_event_canonical(right_move_id)?;
+        let (Some(l), Some(r)) = (left, right) else {
+            return Ok(Vec::new());
+        };
+        let matches: Vec<&'static Axiom> = AXIOMS
+            .iter()
+            .filter(|ax| matches!(ax.kind, AxiomKind::ApproxIdentity | AxiomKind::NonCommutative))
+            .filter(|ax| {
+                ax.left_move_type == Some(l.move_type.as_str())
+                    && ax.right_move_type == Some(r.move_type.as_str())
+            })
+            .collect();
+        Ok(matches)
+    }
+
+    /// Check whether a move of the given type would violate any of its
+    /// PreconditionRequirement axioms, given the current mobility and
+    /// contest state for (proposition_id, regime). Returns a list of
+    /// violated preconditions — empty list means the move is coherent.
+    ///
+    /// Callers typically check this BEFORE recording a move, to either
+    /// reject the operation or flag it for review. M8 provides the
+    /// mechanism; policy (reject vs warn) is the caller's decision.
+    pub fn check_move_preconditions(
+        &self,
+        move_type: &str,
+        proposition_id: &str,
+        regime: &str,
+    ) -> Result<Vec<PreconditionViolation>> {
+        let mobility = self.get_mobility_state(proposition_id, regime)?;
+        let contest = self.get_contest_state(proposition_id, regime)?;
+        let mut violations = Vec::new();
+        for ax in AXIOMS {
+            if ax.kind != AxiomKind::PreconditionRequirement {
+                continue;
+            }
+            if ax.left_move_type != Some(move_type) {
+                continue;
+            }
+            let Some(pre) = ax.precondition else { continue };
+            let violated = match pre {
+                Precondition::SelfGenAncestralBelow(threshold) => {
+                    let psi_a = mobility.as_ref().and_then(|m| m.self_gen_ancestral);
+                    match psi_a {
+                        Some(v) if v < threshold => None,
+                        Some(v) => Some(format!(
+                            "self_gen_ancestral = {:.3} (required < {})",
+                            v, threshold
+                        )),
+                        None => Some(format!(
+                            "self_gen_ancestral not yet computed (required < {}); \
+                             run compute_background_mobility first",
+                            threshold
+                        )),
+                    }
+                }
+                Precondition::SupportMassAbove(threshold) => {
+                    let sigma = mobility.as_ref().and_then(|m| m.support_mass);
+                    match sigma {
+                        Some(v) if v > threshold => None,
+                        Some(v) => Some(format!(
+                            "support_mass = {:.3} (required > {})",
+                            v, threshold
+                        )),
+                        None => Some(format!(
+                            "support_mass not yet computed (required > {})",
+                            threshold
+                        )),
+                    }
+                }
+                Precondition::NoContestFlags(bitmask) => {
+                    let flags = contest.as_ref().map(|c| c.heuristic_flags).unwrap_or(0);
+                    if flags & bitmask == 0 {
+                        None
+                    } else {
+                        Some(format!(
+                            "contest heuristic_flags = {:#x} intersects required-zero mask {:#x}",
+                            flags, bitmask
+                        ))
+                    }
+                }
+            };
+            if let Some(obs) = violated {
+                violations.push(PreconditionViolation {
+                    axiom_name: ax.name,
+                    move_type: move_type.to_string(),
+                    description: ax.description,
+                    observation: obs,
+                });
+            }
+        }
+        Ok(violations)
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────
+// RFC 008 M9: move_type_profile derivation.
+//
+// Background loop that folds resolved-or-past-horizon move_events into
+// per-(move_type, operator_version, context_regime) distortion profiles.
+// Called by app-layer scan or think() integration. Designed to be safe
+// under concurrent ingestion: each profile is recomputed from scratch
+// on demand, no incremental drift.
+// ──────────────────────────────────────────────────────────────────
+
+/// A single distortion profile row. Mirrors the move_type_profile schema.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct MoveTypeProfile {
+    pub move_type: String,
+    pub operator_version: String,
+    pub context_regime: String,
+    pub uses_count: i64,
+    pub resolved_count: i64,
+    pub corroborated_count: i64,
+    pub retracted_count: i64,
+    pub harmful_side_effect_count: i64,
+    pub contradiction_introduction_rate: Option<f64>,
+    pub avg_mobility_shift: Option<f64>,
+    pub predictive_gain_avg: Option<f64>,
+    pub calibration_gain_avg: Option<f64>,
+    pub last_updated: f64,
+}
+
+impl crate::engine::YantrikDB {
+    /// Recompute the move_type_profile row for a specific key. Scans all
+    /// move_events matching (move_type, operator_version, context_regime)
+    /// and aggregates outcomes into counters + rates. Returns the written
+    /// profile.
+    ///
+    /// A move counts as "resolved" when `posthoc_outcome IS NOT NULL` OR
+    /// when `created_at + expected_evaluation_horizon_ms` has passed.
+    /// The latter is measured against the current wall clock at compute
+    /// time — consumers that want strict determinism should pin the
+    /// horizon-check logic separately.
+    pub fn recompute_move_type_profile(
+        &self,
+        move_type: &str,
+        operator_version: &str,
+        context_regime: &str,
+    ) -> Result<MoveTypeProfile> {
+        let conn = self.conn.lock();
+        let now_ms = (crate::engine::now() * 1000.0) as i64;
+
+        // Count uses (all events).
+        let uses_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM move_events \
+             WHERE move_type = ?1 AND operator_version = ?2 AND context_regime = ?3",
+            params![move_type, operator_version, context_regime],
+            |row| row.get(0),
+        )?;
+
+        // Count resolved (outcome set OR past horizon).
+        let resolved_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM move_events \
+             WHERE move_type = ?1 AND operator_version = ?2 AND context_regime = ?3 \
+               AND (posthoc_outcome IS NOT NULL \
+                    OR (expected_evaluation_horizon_ms IS NOT NULL \
+                        AND (created_at * 1000 + expected_evaluation_horizon_ms) < ?4))",
+            params![move_type, operator_version, context_regime, now_ms],
+            |row| row.get(0),
+        )?;
+
+        // Per-outcome counters.
+        let corroborated_count = self.count_by_outcome(&conn, move_type, operator_version, context_regime, "corroborated")?;
+        let retracted_count = self.count_by_outcome(&conn, move_type, operator_version, context_regime, "retracted")?;
+        let harmful_side_effect_count = self.count_by_outcome(&conn, move_type, operator_version, context_regime, "harmful_side_effect")?;
+
+        // Rates — only well-defined when there are resolved moves.
+        let contradiction_introduction_rate = if resolved_count > 0 {
+            // Approximation: treat retracted + harmful as "introduced contradiction."
+            Some((retracted_count + harmful_side_effect_count) as f64 / resolved_count as f64)
+        } else {
+            None
+        };
+
+        // predictive_gain_avg and calibration_gain_avg come from yield_json;
+        // parsing those requires more structure than M9 ships. Leave NULL
+        // until a consumer defines the yield_json schema.
+        let predictive_gain_avg = None;
+        let calibration_gain_avg = None;
+
+        // avg_mobility_shift would come from comparing mobility snapshots
+        // before/after moves via the content_hash pointers. Leave NULL
+        // until M6+ provides the snapshot timeline.
+        let avg_mobility_shift = None;
+
+        let last_updated = crate::engine::now();
+
+        conn.execute(
+            "INSERT INTO move_type_profile (\
+             move_type, operator_version, context_regime, \
+             uses_count, resolved_count, \
+             corroborated_count, retracted_count, harmful_side_effect_count, \
+             contradiction_introduction_rate, avg_mobility_shift, \
+             predictive_gain_avg, calibration_gain_avg, last_updated) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13) \
+             ON CONFLICT(move_type, operator_version, context_regime) DO UPDATE SET \
+             uses_count = excluded.uses_count, \
+             resolved_count = excluded.resolved_count, \
+             corroborated_count = excluded.corroborated_count, \
+             retracted_count = excluded.retracted_count, \
+             harmful_side_effect_count = excluded.harmful_side_effect_count, \
+             contradiction_introduction_rate = excluded.contradiction_introduction_rate, \
+             avg_mobility_shift = excluded.avg_mobility_shift, \
+             predictive_gain_avg = excluded.predictive_gain_avg, \
+             calibration_gain_avg = excluded.calibration_gain_avg, \
+             last_updated = excluded.last_updated",
+            params![
+                move_type, operator_version, context_regime,
+                uses_count, resolved_count,
+                corroborated_count, retracted_count, harmful_side_effect_count,
+                contradiction_introduction_rate, avg_mobility_shift,
+                predictive_gain_avg, calibration_gain_avg, last_updated,
+            ],
+        )?;
+
+        Ok(MoveTypeProfile {
+            move_type: move_type.to_string(),
+            operator_version: operator_version.to_string(),
+            context_regime: context_regime.to_string(),
+            uses_count,
+            resolved_count,
+            corroborated_count,
+            retracted_count,
+            harmful_side_effect_count,
+            contradiction_introduction_rate,
+            avg_mobility_shift,
+            predictive_gain_avg,
+            calibration_gain_avg,
+            last_updated,
+        })
+    }
+
+    fn count_by_outcome(
+        &self,
+        conn: &Connection,
+        move_type: &str,
+        operator_version: &str,
+        context_regime: &str,
+        outcome: &str,
+    ) -> Result<i64> {
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM move_events \
+             WHERE move_type = ?1 AND operator_version = ?2 \
+               AND context_regime = ?3 AND posthoc_outcome = ?4",
+            params![move_type, operator_version, context_regime, outcome],
+            |row| row.get(0),
+        )?;
+        Ok(n)
+    }
+
+    /// Scan all distinct (move_type, operator_version, context_regime)
+    /// triples present in move_events and recompute each profile.
+    /// Returns the number of profiles updated.
+    pub fn recompute_all_move_type_profiles(&self) -> Result<usize> {
+        let keys = self.list_profile_keys()?;
+        let mut count = 0;
+        for (mt, op, regime) in keys {
+            self.recompute_move_type_profile(&mt, &op, &regime)?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
+    fn list_profile_keys(&self) -> Result<Vec<(String, String, String)>> {
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT DISTINCT move_type, operator_version, context_regime \
+             FROM move_events",
+        )?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Read a move_type_profile row. None if not yet computed.
+    pub fn get_move_type_profile(
+        &self,
+        move_type: &str,
+        operator_version: &str,
+        context_regime: &str,
+    ) -> Result<Option<MoveTypeProfile>> {
+        let conn = self.conn.lock();
+        let res = conn.query_row(
+            "SELECT move_type, operator_version, context_regime, \
+             uses_count, resolved_count, corroborated_count, retracted_count, \
+             harmful_side_effect_count, contradiction_introduction_rate, \
+             avg_mobility_shift, predictive_gain_avg, calibration_gain_avg, \
+             last_updated \
+             FROM move_type_profile \
+             WHERE move_type = ?1 AND operator_version = ?2 AND context_regime = ?3",
+            params![move_type, operator_version, context_regime],
+            |row| {
+                Ok(MoveTypeProfile {
+                    move_type: row.get(0)?,
+                    operator_version: row.get(1)?,
+                    context_regime: row.get(2)?,
+                    uses_count: row.get(3)?,
+                    resolved_count: row.get(4)?,
+                    corroborated_count: row.get(5)?,
+                    retracted_count: row.get(6)?,
+                    harmful_side_effect_count: row.get(7)?,
+                    contradiction_introduction_rate: row.get(8)?,
+                    avg_mobility_shift: row.get(9)?,
+                    predictive_gain_avg: row.get(10)?,
+                    calibration_gain_avg: row.get(11)?,
+                    last_updated: row.get(12)?,
+                })
+            },
+        );
+        match res {
+            Ok(p) => Ok(Some(p)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(e) => Err(e.into()),
+        }
     }
 }
 

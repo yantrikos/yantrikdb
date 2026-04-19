@@ -3118,12 +3118,13 @@ fn test_m5b_schema_v23_tables_present() {
 fn test_m5b_registries_seeded_at_bootstrap() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let conn = db.conn();
-    // move_type_registry should have all 12 seed entries.
+    // move_type_registry should have all 13 seed entries (12 from M5a +
+    // aggregate_back added in M8 to complete the decomposition axiom pair).
     let mt_count: i64 = conn.query_row(
         "SELECT COUNT(*) FROM move_type_registry WHERE status = 'active'",
         [], |r| r.get(0),
     ).unwrap();
-    assert_eq!(mt_count, 12, "move_type_registry seed vocabulary count");
+    assert_eq!(mt_count, 13, "move_type_registry seed vocabulary count");
 
     // inference_basis_registry should have all 5 seed entries.
     let ib_count: i64 = conn.query_row(
@@ -3514,6 +3515,338 @@ fn test_m5b_seed_registries_idempotent() {
 // RFC 008 Phase 1 M6: Background-tier mobility components (τ, λ, ψ_a).
 // ──────────────────────────────────────────────────────────────────
 
+// ──────────────────────────────────────────────────────────────────
+// RFC 008 Phase 1 M8: Axiomatic composition rules.
+// ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_m8_axiom_registry_has_core_entries() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let axioms = db.composition_axioms();
+    assert!(axioms.len() >= 3, "axiom registry should have at least 3 entries");
+    let names: Vec<&str> = axioms.iter().map(|a| a.name).collect();
+    assert!(names.contains(&"decompose_aggregate_identity"));
+    assert!(names.contains(&"negate_analogize_non_commutative"));
+    assert!(names.contains(&"source_audit_requires_external_ancestry"));
+}
+
+#[test]
+fn test_m8_check_composition_non_commutative_match() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let left = db.record_move_event(mk_move_input("negate_and_test", &["a"], &["b"])).unwrap();
+    let right = db.record_move_event(mk_move_input("analogy", &["b"], &["c"])).unwrap();
+    let matches = db.check_composition_axioms(&left, &right).unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].name, "negate_analogize_non_commutative");
+}
+
+#[test]
+fn test_m8_check_composition_approx_identity_match() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let d = db.record_move_event(mk_move_input("decomposition", &["a"], &["b"])).unwrap();
+    let ag = db.record_move_event(mk_move_input("aggregate_back", &["b"], &["c"])).unwrap();
+    let matches = db.check_composition_axioms(&d, &ag).unwrap();
+    assert_eq!(matches.len(), 1);
+    assert_eq!(matches[0].name, "decompose_aggregate_identity");
+}
+
+#[test]
+fn test_m8_check_composition_no_match() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let m1 = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    let m2 = db.record_move_event(mk_move_input("ladder_up", &["b"], &["c"])).unwrap();
+    let matches = db.check_composition_axioms(&m1, &m2).unwrap();
+    assert!(matches.is_empty(), "unrelated move pair should match no axiom");
+}
+
+#[test]
+fn test_m8_source_audit_precondition_violation() {
+    // source_audit requires self_gen_ancestral < 1.0 (external source must exist).
+    // Seed a proposition with its single claim AND a producing move where
+    // the input is self-generated, pushing ψ_a toward 1.0.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_self_audit");
+    // Seed final claim of the proposition (self-generated).
+    let conn = db.conn();
+    for (cid, self_gen, prop) in [("self_input", 1, None), ("final_out", 1, Some("p_self_audit"))] {
+        conn.execute(
+            "INSERT INTO claims (claim_id, src, dst, rel_type, created_at, \
+             extractor, polarity, namespace, proposition_id, regime_tag, \
+             self_generated, source_lineage, modality_signal, weight) \
+             VALUES (?1, ?2, ?3, 'rel', 0.0, 'ext', 1, 'default', ?4, 'default', \
+             ?5, '[]', 'text', 1.0)",
+            rusqlite::params![cid, format!("src_{}", cid), format!("dst_{}", cid), prop, self_gen],
+        ).unwrap();
+    }
+    drop(conn);
+    // A move producing final_out with self_input as its upstream.
+    db.record_move_event(mk_move_input("hypothesis_generation", &["self_input"], &["final_out"])).unwrap();
+    // Run write + background tiers so ψ_a is populated.
+    db.compute_write_tier_mobility("p_self_audit", "default").unwrap();
+    db.compute_background_mobility("p_self_audit", "default").unwrap();
+
+    let violations = db.check_move_preconditions("source_audit", "p_self_audit", "default").unwrap();
+    assert!(!violations.is_empty(), "source_audit on ψ_a=1.0 should violate");
+    assert_eq!(violations[0].axiom_name, "source_audit_requires_external_ancestry");
+    assert!(violations[0].observation.contains("self_gen_ancestral"));
+}
+
+#[test]
+fn test_m8_source_audit_passes_with_external_ancestry() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_ext_audit");
+    let conn = db.conn();
+    // Mix: one self-gen, one external in the ancestry.
+    for (cid, self_gen, prop) in [
+        ("ext_src", 0, None),
+        ("self_src", 1, None),
+        ("final_out", 0, Some("p_ext_audit")),
+    ] {
+        conn.execute(
+            "INSERT INTO claims (claim_id, src, dst, rel_type, created_at, \
+             extractor, polarity, namespace, proposition_id, regime_tag, \
+             self_generated, source_lineage, modality_signal, weight) \
+             VALUES (?1, ?2, ?3, 'rel', 0.0, 'ext', 1, 'default', ?4, 'default', \
+             ?5, '[]', 'text', 1.0)",
+            rusqlite::params![cid, format!("src_{}", cid), format!("dst_{}", cid), prop, self_gen],
+        ).unwrap();
+    }
+    drop(conn);
+    db.record_move_event(mk_move_input("decomposition", &["ext_src", "self_src"], &["final_out"])).unwrap();
+    db.compute_write_tier_mobility("p_ext_audit", "default").unwrap();
+    db.compute_background_mobility("p_ext_audit", "default").unwrap();
+
+    let state = db.get_mobility_state("p_ext_audit", "default").unwrap().unwrap();
+    // ψ_a should be 0.5 (1 self-gen out of 2 ancestral claims).
+    assert!((state.self_gen_ancestral.unwrap() - 0.5).abs() < 1e-9);
+
+    let violations = db.check_move_preconditions("source_audit", "p_ext_audit", "default").unwrap();
+    assert!(violations.is_empty(), "source_audit should be fine when external ancestry exists");
+}
+
+#[test]
+fn test_m8_compression_requires_support() {
+    // Seed a proposition with only negative polarity claims → σ = 0.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_no_support");
+    seed_contest_claim(&db, "p_no_support", "c1", "ext_a", -1, "[\"s\"]", None, "default", None, None);
+    db.compute_write_tier_mobility("p_no_support", "default").unwrap();
+
+    let violations = db.check_move_preconditions("compression", "p_no_support", "default").unwrap();
+    assert!(!violations.is_empty(), "compression should violate on zero support_mass");
+    assert_eq!(violations[0].axiom_name, "compression_requires_support");
+}
+
+#[test]
+fn test_m8_hypothesis_generation_blocked_on_present_tense_conflict() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_contested");
+    // Opposite-polarity claims with overlapping validity intervals → PRESENT_TENSE_CONFLICT.
+    seed_contest_claim(&db, "p_contested", "c_sup", "ext_a", 1, "[\"s\"]", None, "default", Some(0.0), Some(20.0));
+    seed_contest_claim(&db, "p_contested", "c_att", "ext_b", -1, "[\"s\"]", None, "default", Some(10.0), Some(30.0));
+    db.compute_write_tier_mobility("p_contested", "default").unwrap();
+    db.compute_contest_state("p_contested", "default").unwrap();
+
+    let violations = db.check_move_preconditions("hypothesis_generation", "p_contested", "default").unwrap();
+    assert!(!violations.is_empty(), "hypothesis_generation should be blocked by PRESENT_TENSE_CONFLICT");
+    assert_eq!(violations[0].axiom_name, "hypothesis_generation_skips_present_tense_conflict");
+}
+
+#[test]
+fn test_m8_preconditions_ignore_unrelated_move_types() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_any");
+    seed_contest_claim(&db, "p_any", "c1", "ext_a", 1, "[\"s\"]", None, "default", None, None);
+    db.compute_write_tier_mobility("p_any", "default").unwrap();
+
+    // analogy has no precondition axiom → no violations.
+    let violations = db.check_move_preconditions("analogy", "p_any", "default").unwrap();
+    assert!(violations.is_empty());
+}
+
+// ──────────────────────────────────────────────────────────────────
+// RFC 008 Phase 1 M9: move_type_profile derivation.
+// ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_m9_profile_counts_uses_and_resolutions() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    // Record three moves of the same type; resolve two (corroborated, retracted).
+    let m1 = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    let m2 = db.record_move_event(mk_move_input("analogy", &["c"], &["d"])).unwrap();
+    db.record_move_event(mk_move_input("analogy", &["e"], &["f"])).unwrap();
+    db.record_move_outcome(&m1, "corroborated", None).unwrap();
+    db.record_move_outcome(&m2, "retracted", None).unwrap();
+
+    let profile = db.recompute_move_type_profile("analogy", "v1", "default").unwrap();
+    assert_eq!(profile.uses_count, 3);
+    assert_eq!(profile.corroborated_count, 1);
+    assert_eq!(profile.retracted_count, 1);
+    assert_eq!(profile.harmful_side_effect_count, 0);
+    // resolved = 2 (two have posthoc_outcome set). The third is within its
+    // horizon (default 60s) so not counted as past-horizon.
+    assert_eq!(profile.resolved_count, 2);
+    // Contradiction rate = (retracted + harmful) / resolved = 1/2 = 0.5.
+    assert!((profile.contradiction_introduction_rate.unwrap() - 0.5).abs() < 1e-9);
+}
+
+#[test]
+fn test_m9_profile_round_trip_via_get() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    let computed = db.recompute_move_type_profile("analogy", "v1", "default").unwrap();
+    let read = db.get_move_type_profile("analogy", "v1", "default").unwrap().unwrap();
+    assert_eq!(read.uses_count, computed.uses_count);
+    assert_eq!(read.resolved_count, computed.resolved_count);
+}
+
+#[test]
+fn test_m9_recompute_all_keys_present() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    db.record_move_event(mk_move_input("decomposition", &["c"], &["d"])).unwrap();
+    let count = db.recompute_all_move_type_profiles().unwrap();
+    assert_eq!(count, 2, "two distinct (type, version, regime) triples");
+    assert!(db.get_move_type_profile("analogy", "v1", "default").unwrap().is_some());
+    assert!(db.get_move_type_profile("decomposition", "v1", "default").unwrap().is_some());
+}
+
+#[test]
+fn test_m9_profile_missing_returns_none() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let p = db.get_move_type_profile("analogy", "v1", "default").unwrap();
+    assert!(p.is_none());
+}
+
+#[test]
+fn test_m9_contradiction_rate_none_when_no_resolutions() {
+    // All moves still pending within horizon → resolved = 0 → rate is None.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    let profile = db.recompute_move_type_profile("analogy", "v1", "default").unwrap();
+    assert_eq!(profile.resolved_count, 0);
+    assert!(profile.contradiction_introduction_rate.is_none());
+}
+
+// ──────────────────────────────────────────────────────────────────
+// RFC 008 Phase 1 M10: auto-adversarial-candidate generation.
+// ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_m10_retraction_auto_files_candidate() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+
+    // Before outcome — no candidate.
+    let before = db.list_adversarial_for_move(&move_id).unwrap();
+    assert!(before.is_empty());
+
+    db.record_move_outcome(&move_id, "retracted", None).unwrap();
+
+    let after = db.list_adversarial_for_move(&move_id).unwrap();
+    assert_eq!(after.len(), 1, "retraction must auto-file a candidate");
+    assert_eq!(after[0].status, "candidate");
+    assert_eq!(after[0].discovered_via, "retraction");
+    assert!(after[0].traced_root_cause.is_some());
+    // Governance: no generalized_lesson on auto-candidates.
+    assert!(after[0].generalized_lesson.is_none());
+    assert!(after[0].lesson_scope_json.is_none());
+}
+
+#[test]
+fn test_m10_harmful_side_effect_auto_files_candidate() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    db.record_move_outcome(&move_id, "harmful_side_effect", None).unwrap();
+    let after = db.list_adversarial_for_move(&move_id).unwrap();
+    assert_eq!(after.len(), 1);
+    assert_eq!(after[0].discovered_via, "calibration_signal");
+}
+
+#[test]
+fn test_m10_corroborated_outcome_does_not_file_candidate() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    db.record_move_outcome(&move_id, "corroborated", None).unwrap();
+    let after = db.list_adversarial_for_move(&move_id).unwrap();
+    assert!(after.is_empty(), "corroborated outcome must not file an adversarial candidate");
+}
+
+#[test]
+fn test_m10_contest_flag_transition_auto_files_for_producing_move() {
+    // Record a move producing a claim. Then ingest a conflicting claim to
+    // the same proposition so SAME_SOURCE_CONFLICT flips on — the
+    // auto-file hook should create an adversarial candidate for the move.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_flag_auto");
+    // First claim of the proposition.
+    seed_contest_claim(&db, "p_flag_auto", "claim_out", "ext_a", 1, "[\"s\"]", None, "default", None, None);
+    // Move that produced claim_out.
+    let move_id = db.record_move_event(mk_move_input("hypothesis_generation", &["evidence"], &["claim_out"])).unwrap();
+    // Initial write-tier + contest recompute: no conflict yet.
+    db.compute_write_tier_mobility("p_flag_auto", "default").unwrap();
+    db.compute_contest_state("p_flag_auto", "default").unwrap();
+    assert!(db.list_adversarial_for_move(&move_id).unwrap().is_empty());
+
+    // Add an opposite-polarity claim with identical source_lineage → SAME_SOURCE_CONFLICT.
+    seed_contest_claim(&db, "p_flag_auto", "conflicting", "ext_b", -1, "[\"s\"]", None, "default", None, None);
+    db.compute_write_tier_mobility("p_flag_auto", "default").unwrap();
+    db.compute_contest_state("p_flag_auto", "default").unwrap();
+
+    let after = db.list_adversarial_for_move(&move_id).unwrap();
+    assert!(!after.is_empty(),
+        "SAME_SOURCE_CONFLICT should auto-file adversarial candidate for producing move");
+    assert_eq!(after[0].discovered_via, "contradiction");
+    assert_eq!(after[0].status, "candidate");
+}
+
+#[test]
+fn test_m10_contest_flag_transition_dedups_on_repeat_recompute() {
+    // Same setup as above but recompute contest multiple times — the
+    // (move_id, discovered_via) dedup guard should prevent duplicate rows.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_dedup");
+    seed_contest_claim(&db, "p_dedup", "claim_out", "ext_a", 1, "[\"s\"]", None, "default", None, None);
+    let move_id = db.record_move_event(mk_move_input("analogy", &["e"], &["claim_out"])).unwrap();
+    db.compute_write_tier_mobility("p_dedup", "default").unwrap();
+    db.compute_contest_state("p_dedup", "default").unwrap();
+    // Set up the conflict.
+    seed_contest_claim(&db, "p_dedup", "conflict", "ext_b", -1, "[\"s\"]", None, "default", None, None);
+    db.compute_write_tier_mobility("p_dedup", "default").unwrap();
+    db.compute_contest_state("p_dedup", "default").unwrap();
+
+    // Multiple recomputes must not create duplicates.
+    db.compute_contest_state("p_dedup", "default").unwrap();
+    db.compute_contest_state("p_dedup", "default").unwrap();
+    db.compute_contest_state("p_dedup", "default").unwrap();
+
+    let candidates = db.list_adversarial_for_move(&move_id).unwrap();
+    let contradiction_candidates: Vec<_> = candidates.iter()
+        .filter(|c| c.discovered_via == "contradiction").collect();
+    assert_eq!(contradiction_candidates.len(), 1,
+        "repeat contest recompute must not duplicate contradiction candidates");
+}
+
+#[test]
+fn test_m10_m9_feedback_loop_retraction_updates_profile() {
+    // End-to-end: record two moves of the same type, retract one, recompute
+    // the profile, verify the retraction count increments. This is the
+    // full M5b → M10 → M9 feedback loop.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let m1 = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    db.record_move_event(mk_move_input("analogy", &["c"], &["d"])).unwrap();
+    db.record_move_outcome(&m1, "retracted", None).unwrap();
+
+    // M10 should have filed an adversarial candidate.
+    let candidates = db.list_adversarial_for_move(&m1).unwrap();
+    assert_eq!(candidates.len(), 1);
+
+    // M9 profile recompute should pick up the retraction.
+    let profile = db.recompute_move_type_profile("analogy", "v1", "default").unwrap();
+    assert_eq!(profile.retracted_count, 1);
+    assert_eq!(profile.uses_count, 2);
+}
+
 #[test]
 fn test_m6_temporal_coherence_stable_polarity_is_one() {
     // All supports on the same proposition → no flips → τ = 1.
@@ -3729,23 +4062,23 @@ fn test_m5b_full_lifecycle_observed_to_retracted_with_adversarial() {
         &["hypothesis_h"],
     )).unwrap();
 
-    // Something goes wrong downstream — retract.
+    // Something goes wrong downstream — retract. Per M10, this auto-files
+    // an adversarial candidate with discovered_via='retraction'.
     db.record_move_outcome(
         &move_id,
         posthoc_outcome::RETRACTED,
         Some(serde_json::json!({"retraction_cause": "contradiction with high-weight claim"}).to_string()),
     ).unwrap();
 
-    // Automatic detector files a candidate.
-    let instance_id = db.create_adversarial_candidate(
-        &move_id,
-        "retraction",
-        Some("hypothesis_h was retracted due to downstream contradiction".to_string()),
-    ).unwrap();
+    // The M10 auto-candidate should exist.
+    let auto_candidates = db.list_adversarial_for_move(&move_id).unwrap();
+    assert_eq!(auto_candidates.len(), 1);
+    assert_eq!(auto_candidates[0].status, adversarial_status::CANDIDATE);
+    assert_eq!(auto_candidates[0].discovered_via, "retraction");
 
-    // Curator reviews and promotes with a generalized lesson.
+    // Curator reviews the auto-candidate and promotes with a generalized lesson.
     db.promote_adversarial_candidate(
-        &instance_id,
+        &auto_candidates[0].instance_id,
         "hypothesis_generation from ≤2 evidence sources is prone to retraction".into(),
         serde_json::json!({
             "regimes": ["default"],
@@ -3758,7 +4091,7 @@ fn test_m5b_full_lifecycle_observed_to_retracted_with_adversarial() {
     // Verify everything.
     let ev = db.get_move_event(&move_id).unwrap().unwrap();
     assert_eq!(ev.posthoc_outcome.as_deref(), Some("retracted"));
-    let instance = db.get_adversarial_instance(&instance_id).unwrap().unwrap();
+    let instance = db.get_adversarial_instance(&auto_candidates[0].instance_id).unwrap().unwrap();
     assert_eq!(instance.status, adversarial_status::CONFIRMED);
     let instances = db.list_adversarial_for_move(&move_id).unwrap();
     assert_eq!(instances.len(), 1);
