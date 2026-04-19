@@ -1,6 +1,10 @@
 # What a claim-graph sees that a vector DB doesn't
 
-A Wirecard case study against the RFC 008 substrate.
+*A Wirecard case study against the RFC 008 substrate.*
+
+## The problem, in one sentence
+
+If your agent thinks 20 news outlets citing the same FT story are 20 independent sources, your agent is wrong — and the standard tools (vector databases, knowledge graphs, LLM context windows) can't tell the difference. This is one case where that mistake had six-year consequences, and what a different kind of database does about it.
 
 ## The case
 
@@ -53,6 +57,34 @@ The 1.6 reflects the fact that EY's `[wirecard, ey]` overlaps `[wirecard]` by 50
 The 3.578 reflects BSP's `[bsp, bpi, bdo]` overlap with `[bpi]` and `[bdo]` individually — BSP's ω drops. Four denials become effectively 3.6 independent witnesses.
 
 This is not a tuning knob. It is grounded in set-level lineage, computed deterministically, order-invariant.
+
+## Ablation — which layer does what
+
+| Model | σ (supports) | α (attacks) | Says |
+|---|---|---|---|
+| **Naive polarity count** | 2.000 | 4.000 | 2-to-4, attack-dominant |
+| **+ lineage discount (⊕ only)** | 1.600 | 3.578 | Closer to 1.6-to-3.6 — EY and BSP partially redundant |
+| **+ temporal split (⊕ + ⋈)** | 1.600 / 3.578 | (as above) + PRESENT_TENSE_CONFLICT flag on 4 of 8 opposite pairs; 4 pairs marked as historical state changes, not active contradictions | Distinguishes "Wirecard still claims this right now, FT denies" from "Wirecard pulled its claim, then BDO denied" |
+
+The rows matter for different decisions. If all you need is "which side has more witnesses," row 1 is enough. If you need "how many independent sources actually agree," you need row 2. If you need to answer "is this an ongoing contradiction I have to resolve *now*, or a superseded claim from last month," you need row 3.
+
+Each row adds structure, not a knob. The outputs are deterministic functions of the input lineage + temporal fields; there are no hyperparameters tuned on Wirecard.
+
+## Why this is not just polarity scoring
+
+The obvious critique: "you made a scoring function and called it a database primitive."
+
+Partially fair. ω_k does produce numbers. What makes this a substrate choice and not a score:
+
+**Inspectability.** Every component of the output is a deterministic function of schema fields you can query: `support_mass`, `support_effective_independence`, `same_source_opposite_polarity_count`, `temporal_overlap_conflict_count`, `heuristic_flags`. If ⊕'s output surprises you, you read the lineage columns and see exactly why. A neural ranker or hand-tuned confidence score doesn't give you that.
+
+**Determinism.** Same inputs always produce same outputs. The recompute is order-invariant (proved by property tests), content-hashed (so repeat computation is a no-op), and reproducible across machines. A scoring function with tunable weights produces different outputs as you tune; this substrate has fixed definitional weights (0.5 / 0.3 / 0.7) and explicitly rejects "learn them" as a v1 path.
+
+**Structural differentiation.** The contest operator doesn't collapse into a scalar. It produces five separate counters and a bitset because "same-source contradiction" (BPI saying yes to BPI-sourced claim) is a different failure mode than "extraction-pathology contradiction" (two extractors on the same document disagreeing) and a different mode from "historical state change" (Wirecard pulled its claim before BDO denied). Flattening these into one confidence number discards the information that tells you what to *do* about the disagreement.
+
+**Non-goals.** This is not a trust score. It does not tell you who to believe. It does not handle "unknown unknowns" — if your lineage labels are wrong, ⊕ is wrong the same way. It does not replace source vetting. What it does is make the disagreement pattern *structurally visible* in a way a polarity scalar does not.
+
+If after reading this you still think "that's just scoring with extra steps," that's a legitimate read — and one of the things I'm trying to find out from posting this.
 
 ## What else fires
 
@@ -140,8 +172,13 @@ What it doesn't tell us:
 - Whether `⊕`'s weights (0.5, 0.3, 0.7) are calibrated for the generic case.
 - Whether the substrate helps on domains where source_lineage is weak or unknown.
 - Whether automated extraction of lineage from natural-language sources is feasible.
+- Whether outsiders see this as a meaningful abstraction or as a formalized scoring function in a trenchcoat.
 
-Those are the next adversarial cases. One showcase is a necessary condition, not a sufficient one.
+Those last one is the point of posting this walkthrough. The math is what it is; whether the abstraction is *useful* depends on whether someone besides me finds it legible enough to build on. If the answer is "I'd just use Postgres + application logic," that's a genuine answer.
+
+## Invitation
+
+If you read this and thought "yes, I've hit that problem," or "no, that's not a problem I have," or "this is clever but where's the product," — I'd like to hear it. Open an issue at [github.com/yantrikos/yantrikdb](https://github.com/yantrikos/yantrikdb) or email developer@pranab.co.in. One adversarial case is necessary but not sufficient; figuring out which adversarial case to test next is a conversation, not a solo decision.
 
 ---
 
