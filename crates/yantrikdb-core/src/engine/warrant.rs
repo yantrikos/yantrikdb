@@ -630,6 +630,27 @@ pub struct ContestState {
     pub computed_at: i64,
 }
 
+/// On-demand inspection payload — exemplar claim pairs that drove the
+/// contest flags. NOT persisted; recomputed on read. Per GPT-5.4's
+/// "top-k exemplars via query, not persisted state" pattern: we keep
+/// the substrate table compact (counters only) and expose pair detail
+/// only when callers ask for it.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ContestConflictReport {
+    pub proposition_id: String,
+    pub regime: String,
+    pub heuristic_flags: u64,
+    /// Pairs of claim_ids where both claims share identical normalized
+    /// source_lineage AND have opposite polarity.
+    pub same_source_opposite_polarity_pairs: Vec<(String, String)>,
+    /// Pairs of claim_ids deriving from the same source_memory_rid via
+    /// different extractors, with opposite polarity.
+    pub same_artifact_extractor_conflict_pairs: Vec<(String, String)>,
+    /// Pairs with opposite polarity AND overlapping validity intervals
+    /// (real present-tense contradictions, not state changes over time).
+    pub temporal_overlap_conflict_pairs: Vec<(String, String)>,
+}
+
 impl crate::engine::YantrikDB {
     /// Compute contest state ⋈ for (proposition_id, regime). Reads all
     /// live claims, computes content_hash, short-circuits on idempotent
@@ -653,6 +674,148 @@ impl crate::engine::YantrikDB {
         let conn = self.conn.lock();
         read_contest_state(&conn, proposition_id, regime)
     }
+
+    /// RFC 008 M4.5 — propositions whose contest_state has ANY of the
+    /// bits in `flag_mask` set. Indexed query via idx_contest_flags.
+    /// This is the primary post-M4 consumer of contest_state: audit
+    /// tools, UIs, or periodic review jobs can list all flagged
+    /// propositions by category (e.g. all SAME_SOURCE_CONFLICT for
+    /// source-audit routing).
+    ///
+    /// Passing `flag_mask = 0` returns the empty vec (no flags = no
+    /// matches). Use `contest_flags::*` constants to build masks.
+    /// Example: `flag_mask = SAME_SOURCE_CONFLICT | SAME_ARTIFACT_EXTRACTOR_CONFLICT`.
+    pub fn list_flagged_propositions(
+        &self,
+        flag_mask: u64,
+        limit: usize,
+    ) -> Result<Vec<ContestState>> {
+        if flag_mask == 0 {
+            return Ok(Vec::new());
+        }
+        let conn = self.conn.lock();
+        let mut stmt = conn.prepare(
+            "SELECT proposition_id, regime, support_mass, attack_mass, \
+             support_effective_independence, attack_effective_independence, \
+             support_distinct_source_count, attack_distinct_source_count, \
+             same_source_opposite_polarity_count, \
+             same_artifact_extractor_polarity_conflict_count, \
+             temporal_overlap_conflict_count, temporal_separable_opposition_count, \
+             referent_schema_heterogeneity_count, heuristic_flags, \
+             derivation_version, content_hash, live_claim_count, state_status, computed_at \
+             FROM contest_state \
+             WHERE (heuristic_flags & ?1) != 0 \
+             ORDER BY computed_at DESC \
+             LIMIT ?2",
+        )?;
+        let rows = stmt
+            .query_map(params![flag_mask as i64, limit as i64], |row| {
+                let flags_int: i64 = row.get(13)?;
+                Ok(ContestState {
+                    proposition_id: row.get(0)?,
+                    regime: row.get(1)?,
+                    support_mass: row.get(2)?,
+                    attack_mass: row.get(3)?,
+                    support_effective_independence: row.get(4)?,
+                    attack_effective_independence: row.get(5)?,
+                    support_distinct_source_count: row.get(6)?,
+                    attack_distinct_source_count: row.get(7)?,
+                    same_source_opposite_polarity_count: row.get(8)?,
+                    same_artifact_extractor_polarity_conflict_count: row.get(9)?,
+                    temporal_overlap_conflict_count: row.get(10)?,
+                    temporal_separable_opposition_count: row.get(11)?,
+                    referent_schema_heterogeneity_count: row.get(12)?,
+                    heuristic_flags: flags_int as u64,
+                    derivation_version: row.get(14)?,
+                    content_hash: row.get(15)?,
+                    live_claim_count: row.get(16)?,
+                    state_status: row.get(17)?,
+                    computed_at: row.get(18)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// RFC 008 M4.5 — produce a structured report of exemplar claim pairs
+    /// that drove the contest flags for a given proposition. Recomputed
+    /// on demand from the current live claim set; not persisted. Use
+    /// this when an audit tool or review UI needs the actual claim IDs
+    /// behind a flag like SAME_SOURCE_CONFLICT. Returns None if the
+    /// proposition has no contest_state row yet.
+    pub fn inspect_contest_conflicts(
+        &self,
+        proposition_id: &str,
+        regime: &str,
+    ) -> Result<Option<ContestConflictReport>> {
+        let conn = self.conn.lock();
+        let Some(state) = read_contest_state(&conn, proposition_id, regime)? else {
+            return Ok(None);
+        };
+        let claims = fetch_claims_for_mobility(&conn, proposition_id, regime)?;
+        drop(conn);
+        let supports: Vec<&ClaimRow> = claims.iter().filter(|c| c.polarity == 1).collect();
+        let attacks: Vec<&ClaimRow> = claims.iter().filter(|c| c.polarity == -1).collect();
+        Ok(Some(ContestConflictReport {
+            proposition_id: proposition_id.to_string(),
+            regime: regime.to_string(),
+            heuristic_flags: state.heuristic_flags,
+            same_source_opposite_polarity_pairs: same_source_pairs(&supports, &attacks),
+            same_artifact_extractor_conflict_pairs: same_artifact_pairs(&supports, &attacks),
+            temporal_overlap_conflict_pairs: temporal_overlap_pairs(&supports, &attacks),
+        }))
+    }
+}
+
+// Pair-listing helpers for ContestConflictReport. These duplicate the
+// pair-gating logic used by the counter functions; kept separate so the
+// hot-path counters stay minimal and the exemplar listing is opt-in via
+// `inspect_contest_conflicts`.
+
+fn same_source_pairs(supports: &[&ClaimRow], attacks: &[&ClaimRow]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for s in supports {
+        if s.source_lineage.is_empty() {
+            continue;
+        }
+        let s_key = lineage_key(&s.source_lineage);
+        for a in attacks {
+            if a.source_lineage.is_empty() {
+                continue;
+            }
+            if lineage_key(&a.source_lineage) == s_key {
+                out.push((s.claim_id.clone(), a.claim_id.clone()));
+            }
+        }
+    }
+    out
+}
+
+fn same_artifact_pairs(supports: &[&ClaimRow], attacks: &[&ClaimRow]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for s in supports {
+        let Some(s_rid) = &s.source_memory_rid else { continue };
+        for a in attacks {
+            if let Some(a_rid) = &a.source_memory_rid {
+                if a_rid == s_rid && a.extractor != s.extractor {
+                    out.push((s.claim_id.clone(), a.claim_id.clone()));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn temporal_overlap_pairs(supports: &[&ClaimRow], attacks: &[&ClaimRow]) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for s in supports {
+        for a in attacks {
+            if !intervals_disjoint(s, a) {
+                out.push((s.claim_id.clone(), a.claim_id.clone()));
+            }
+        }
+    }
+    out
 }
 
 pub(super) fn compute_contest_state_conn(

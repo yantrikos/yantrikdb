@@ -636,11 +636,16 @@ fn uuid_like(a: &str, b: &str, pol: i32) -> String {
 }
 
 fn seed_proposition(db: &YantrikDB, pid: &str) {
+    // Derive per-proposition (src, rel, dst) so multiple seed calls in the
+    // same DB don't collide on UNIQUE(src, rel_type, dst, namespace).
+    let src = format!("src_{}", pid);
+    let rel = format!("rel_{}", pid);
+    let dst = format!("dst_{}", pid);
     db.conn()
         .execute(
             "INSERT OR IGNORE INTO propositions (proposition_id, src, rel_type, dst, namespace, created_at) \
-             VALUES (?1, 'X', 'rel', 'Y', 'default', 0.0)",
-            rusqlite::params![pid],
+             VALUES (?1, ?2, ?3, ?4, 'default', 0.0)",
+            rusqlite::params![pid, src, rel, dst],
         )
         .unwrap();
 }
@@ -919,17 +924,26 @@ fn seed_contest_claim(
     valid_from: Option<f64>,
     valid_to: Option<f64>,
 ) {
+    // Derive per-proposition entity triples so tests that seed multiple
+    // propositions in one DB don't collide on the claim UNIQUE constraint
+    // (src, dst, rel_type, extractor, polarity, namespace). The proposition
+    // row uses 'X'/'rel'/'Y' by default (seed_proposition), but claim rows
+    // can use any triple — the FK is to proposition_id, not to the triple.
+    let src = format!("src_{}", proposition_id);
+    let dst = format!("dst_{}", proposition_id);
+    let rel = format!("rel_{}", proposition_id);
     db.conn()
         .execute(
             "INSERT INTO claims (claim_id, src, dst, rel_type, created_at, \
              extractor, polarity, namespace, proposition_id, regime_tag, \
              self_generated, source_lineage, modality_signal, weight, \
              source_memory_rid, valid_from, valid_to) \
-             VALUES (?1, 'X', 'Y', 'rel', 0.0, ?2, ?3, ?4, ?5, 'default', 0, \
-             ?6, 'text', 1.0, ?7, ?8, ?9)",
+             VALUES (?1, ?2, ?3, ?4, 0.0, ?5, ?6, ?7, ?8, 'default', 0, \
+             ?9, 'text', 1.0, ?10, ?11, ?12)",
             rusqlite::params![
-                claim_id, extractor, polarity, namespace, proposition_id,
-                source_lineage_json, source_memory_rid, valid_from, valid_to,
+                claim_id, src, dst, rel, extractor, polarity, namespace,
+                proposition_id, source_lineage_json, source_memory_rid,
+                valid_from, valid_to,
             ],
         )
         .unwrap();
@@ -1196,6 +1210,181 @@ fn test_m4_contest_independence_matches_omega_sum() {
     let c = db.compute_contest_state("p_ind", "default").unwrap();
     assert!((c.support_effective_independence - 2.0).abs() < 0.01,
         "expected ≈ 2.0, got {}", c.support_effective_independence);
+}
+
+// ──────────────────────────────────────────────────────────────────
+// RFC 008 Phase 1 M4.5 — contest_state gains a concrete reader outside
+// tests via list_flagged_propositions and inspect_contest_conflicts.
+// Closes the "earns its place" commitment from M4.
+// ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_m45_list_flagged_propositions_empty_when_nothing_flagged() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_clean");
+    seed_contest_claim(&db, "p_clean", "c1", "ext_a", 1, "[\"src_1\"]", None, "default", None, None);
+    db.compute_contest_state("p_clean", "default").unwrap();
+
+    let flagged = db
+        .list_flagged_propositions(crate::engine::warrant::contest_flags::SAME_SOURCE_CONFLICT, 10)
+        .unwrap();
+    assert!(flagged.is_empty(), "clean proposition should not be flagged");
+}
+
+#[test]
+fn test_m45_list_flagged_propositions_returns_matching() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    // Flagged proposition: same-source opposite polarity.
+    seed_proposition(&db, "p_flag");
+    seed_contest_claim(&db, "p_flag", "c_s", "ext_a", 1, "[\"src_x\"]", None, "default", None, None);
+    seed_contest_claim(&db, "p_flag", "c_a", "ext_b", -1, "[\"src_x\"]", None, "default", None, None);
+    db.compute_contest_state("p_flag", "default").unwrap();
+
+    // Clean proposition in the same DB.
+    seed_proposition(&db, "p_clean");
+    seed_contest_claim(&db, "p_clean", "c1", "ext_a", 1, "[\"src_y\"]", None, "default", None, None);
+    db.compute_contest_state("p_clean", "default").unwrap();
+
+    let flagged = db
+        .list_flagged_propositions(crate::engine::warrant::contest_flags::SAME_SOURCE_CONFLICT, 10)
+        .unwrap();
+    assert_eq!(flagged.len(), 1);
+    assert_eq!(flagged[0].proposition_id, "p_flag");
+}
+
+#[test]
+fn test_m45_list_flagged_propositions_combined_mask() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    // Same-source conflict proposition.
+    seed_proposition(&db, "p_same_src");
+    seed_contest_claim(&db, "p_same_src", "c_src_s", "ext_a", 1, "[\"src_x\"]", None, "default", None, None);
+    seed_contest_claim(&db, "p_same_src", "c_src_a", "ext_b", -1, "[\"src_x\"]", None, "default", None, None);
+    db.compute_contest_state("p_same_src", "default").unwrap();
+
+    // Same-artifact conflict proposition.
+    seed_proposition(&db, "p_artifact");
+    seed_contest_claim(&db, "p_artifact", "c_art_s", "extractor_a", 1, "[]", Some("doc_1"), "default", None, None);
+    seed_contest_claim(&db, "p_artifact", "c_art_a", "extractor_b", -1, "[]", Some("doc_1"), "default", None, None);
+    db.compute_contest_state("p_artifact", "default").unwrap();
+
+    let mask = crate::engine::warrant::contest_flags::SAME_SOURCE_CONFLICT
+        | crate::engine::warrant::contest_flags::SAME_ARTIFACT_EXTRACTOR_CONFLICT;
+    let flagged = db.list_flagged_propositions(mask, 10).unwrap();
+    assert_eq!(flagged.len(), 2, "combined mask should match both propositions");
+
+    let prop_ids: Vec<&str> = flagged.iter().map(|c| c.proposition_id.as_str()).collect();
+    assert!(prop_ids.contains(&"p_same_src"));
+    assert!(prop_ids.contains(&"p_artifact"));
+}
+
+#[test]
+fn test_m45_list_flagged_propositions_zero_mask_returns_empty() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_any");
+    seed_contest_claim(&db, "p_any", "c_s", "ext_a", 1, "[\"src_x\"]", None, "default", None, None);
+    seed_contest_claim(&db, "p_any", "c_a", "ext_b", -1, "[\"src_x\"]", None, "default", None, None);
+    db.compute_contest_state("p_any", "default").unwrap();
+
+    let flagged = db.list_flagged_propositions(0, 10).unwrap();
+    assert!(flagged.is_empty(), "mask = 0 should match nothing");
+}
+
+#[test]
+fn test_m45_inspect_contest_conflicts_missing_returns_none() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let report = db.inspect_contest_conflicts("nonexistent", "default").unwrap();
+    assert!(report.is_none());
+}
+
+#[test]
+fn test_m45_inspect_contest_returns_exemplar_pairs() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_insp");
+    seed_contest_claim(&db, "p_insp", "c_support", "ext_a", 1, "[\"src_shared\"]", None, "default", None, None);
+    seed_contest_claim(&db, "p_insp", "c_attack", "ext_b", -1, "[\"src_shared\"]", None, "default", None, None);
+    db.compute_contest_state("p_insp", "default").unwrap();
+
+    let report = db.inspect_contest_conflicts("p_insp", "default").unwrap().unwrap();
+    assert!(report.heuristic_flags & crate::engine::warrant::contest_flags::SAME_SOURCE_CONFLICT != 0);
+    assert_eq!(report.same_source_opposite_polarity_pairs.len(), 1);
+    let pair = &report.same_source_opposite_polarity_pairs[0];
+    assert!(
+        (pair.0 == "c_support" && pair.1 == "c_attack")
+            || (pair.0 == "c_attack" && pair.1 == "c_support"),
+        "exemplar pair should contain the actual conflicting claim_ids, got ({}, {})",
+        pair.0, pair.1
+    );
+}
+
+#[test]
+fn test_m45_inspect_temporal_overlap_pairs() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_temp");
+    // Overlapping intervals → should appear in temporal_overlap_conflict_pairs.
+    seed_contest_claim(&db, "p_temp", "c_s", "ext_a", 1, "[\"s1\"]", None, "default", Some(0.0), Some(20.0));
+    seed_contest_claim(&db, "p_temp", "c_a", "ext_b", -1, "[\"s2\"]", None, "default", Some(10.0), Some(30.0));
+    db.compute_contest_state("p_temp", "default").unwrap();
+
+    let report = db.inspect_contest_conflicts("p_temp", "default").unwrap().unwrap();
+    assert_eq!(report.temporal_overlap_conflict_pairs.len(), 1);
+    // Disjoint cases should NOT appear here — reseed with disjoint intervals.
+    let db2 = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db2, "p_sep");
+    seed_contest_claim(&db2, "p_sep", "c_s", "ext_a", 1, "[\"s1\"]", None, "default", Some(0.0), Some(10.0));
+    seed_contest_claim(&db2, "p_sep", "c_a", "ext_b", -1, "[\"s2\"]", None, "default", Some(20.0), Some(30.0));
+    db2.compute_contest_state("p_sep", "default").unwrap();
+    let report2 = db2.inspect_contest_conflicts("p_sep", "default").unwrap().unwrap();
+    assert_eq!(report2.temporal_overlap_conflict_pairs.len(), 0,
+        "disjoint intervals should not appear as overlap conflicts");
+}
+
+#[test]
+fn test_m45_end_to_end_ingest_then_flagged_query() {
+    // Full flow through the public API: ingest two opposite-polarity claims
+    // on the same proposition — the ingestion hook fires contest recompute,
+    // which sets flags; list_flagged_propositions returns the proposition.
+    // Relies on ingest_claim writing empty source_lineage (JSON '[]') via
+    // the schema default, so our SAME_SOURCE_CONFLICT gate (identical
+    // non-empty lineage) does NOT fire here; instead we verify that the
+    // contest_state was materialized and the reader API works end to end.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    db.ingest_claim(
+        "Alice", "works_at", "Acme", "default",
+        1, "asserted", None, None,
+        "manual", None, "medium",
+        None, None, None,
+        1.0,
+    ).unwrap();
+    db.ingest_claim(
+        "Alice", "works_at", "Acme", "default",
+        -1, "denied", None, None,
+        "alt_manual", None, "medium",
+        None, None, None,
+        1.0,
+    ).unwrap();
+
+    let prop_id: String = db.conn().query_row(
+        "SELECT proposition_id FROM propositions \
+         WHERE src = 'Alice' AND rel_type = 'works_at' AND dst = 'Acme' AND namespace = 'default'",
+        [],
+        |row| row.get(0),
+    ).unwrap();
+
+    let state = db.get_contest_state(&prop_id, "default").unwrap().unwrap();
+    assert_eq!(state.live_claim_count, 2);
+    // Both claims have empty source_lineage by default → no SAME_SOURCE_CONFLICT.
+    // No source_memory_rid → no SAME_ARTIFACT_EXTRACTOR_CONFLICT.
+    // Temporal intervals are all None → both treated as fully-open, which is
+    // NOT disjoint → overlap count ≥ 1. So PRESENT_TENSE_CONFLICT should fire.
+    assert!(state.heuristic_flags & crate::engine::warrant::contest_flags::PRESENT_TENSE_CONFLICT != 0,
+        "opposite-polarity claims without temporal bounds should flag as present-tense conflict");
+
+    // Reader returns the flagged proposition.
+    let flagged = db
+        .list_flagged_propositions(crate::engine::warrant::contest_flags::PRESENT_TENSE_CONFLICT, 10)
+        .unwrap();
+    assert_eq!(flagged.len(), 1);
+    assert_eq!(flagged[0].proposition_id, prop_id);
 }
 
 #[test]
