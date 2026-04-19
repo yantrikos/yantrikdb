@@ -254,15 +254,19 @@ db.upcoming(days=7)  # memories with approaching deadlines
 - [x] **V4** — Sessions, temporal awareness, cross-domain pattern mining, entity profiles
 - [ ] **V5** — Multi-agent shared memory, federated learning across users
 
-## Worked example: Wirecard
+## Worked example: Wirecard (RFC 008 substrate — with honest limits)
 
-For nearly a decade, Wirecard's filings and EY's audit attested to €1.9B in Philippine escrow accounts. In June 2020 both banks and the central bank formally denied the accounts existed. Wirecard filed insolvency 12 days later.
+For nearly a decade, Wirecard's filings and EY's audit attested to €1.9B in Philippine escrow accounts. In June 2020 both banks and the central bank formally denied the accounts existed.
 
-A naive tally says 2 supports, 4 attacks. RFC 008's `⊕` operator tracks source lineage and discounts dependent claims: EY audited Wirecard-provided documents (shared lineage), BSP restated BPI+BDO's denials (shared lineage). The substrate reports 1.6 effective independent supports and 3.6 effective independent attacks — grounded in the public record, not in a tuned score.
+When the `source_lineage` fields are hand-populated — EY as `[wirecard, ey]` to capture audit dependence on Wirecard-provided documents, BSP as `[bsp, bpi, bdo]` to capture restatement of the commercial banks — RFC 008's `⊕` discounts the dependent claims, and the contest operator's temporal split distinguishes present-tense contradictions from historical state changes. On this hand-populated data, the substrate produces useful annotations.
 
-The `⋈` contest operator further distinguishes *present-tense contradictions* (overlapping validity windows) from *temporally separable opposition* (one side's assertion expired before the other's was made). For Wirecard, 4 of the 8 opposite-polarity pairs are present-tense conflict; 4 are historical state changes.
+**Honest limits** (surfaced by Phase 2 empirical testing, Apr 2026):
 
-See **[docs/showcase/wirecard.md](docs/showcase/wirecard.md)** for the full walkthrough, or run it directly:
+- On naturalistic evidence where a real agent populates the fields, the substrate's gates don't reliably fire. Cases B and C of the Phase 2 eval need an extractor/canonicalizer (not yet built) to work; Case A exposed that `⊕` is mathematically incapable of flipping decisions at realistic N, regardless of coefficient tuning.
+- **Current claim**: structured schema for evidence provenance/temporal/conflict annotation, useful for audit and inspection. The dependence-discount operator works on curated inputs but needs replacement before it can drive decisions.
+- **Not a current claim**: "decision-improvement substrate for AGI-capable agents." That framing is withdrawn pending RFC 009.
+
+See **[docs/showcase/wirecard.md](docs/showcase/wirecard.md)** for the full walkthrough including the Phase 2 negative result and the gold-state ablation that partitioned operator failure from extraction failure. Run the hand-populated demonstration directly:
 
 ```bash
 cargo run --example showcase_wirecard

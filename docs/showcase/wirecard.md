@@ -192,6 +192,68 @@ Before publishing this, I ran the essay past a panel of eight AI models in red-t
 
 **Comparison to Bayesian belief networks.** Five of the eight red-team models independently suggested this. A BN with Dirichlet priors over source reliability and explicit conditional independence edges gets you principled uncertainty propagation — it *does* reason under uncertainty in a way ⊕ does not. The substrate's pitch vs. a BN is not "better uncertainty math" — it's "first-class schema fields, inspectable counters, content-hashed determinism." If what you need is P(claim true | evidence), use pgmpy or Pyro. If what you need is "which claims in my live set share provenance, what's the temporal contest shape, which moves produced each output," that's the substrate's territory.
 
+## Phase 2 negative result (correction, added later)
+
+This essay's original framing — "substrate produces better decisions on contested evidence" — did not survive contact with a real agent. I'm leaving the rest of the essay intact but adding this correction because the finding is important.
+
+### What I tested
+
+Three adversarial cases, each designed to make a different substrate mechanism earn its place: (A) rumor amplification where ⊕ should discount dependent sources; (B) temporal state change where the overlap/separable split should distinguish "contradiction" from "state change"; (C) same-source retraction where `SAME_SOURCE_CONFLICT` should fire. Local Qwen 3.6 (36B MoE) with tool access to the five RFC 008 HTTP endpoints, 3 cases × 3 conditions × 2 runs = 18 runs.
+
+### What happened
+
+The infrastructure worked — Qwen reliably called the tools (7-9 calls per run). But the substrate's intended mechanisms **did not fire correctly** in any of the three cases:
+
+| Case | What happened | Why |
+|---|---|---|
+| A rumor amp | σ=4.545 vs α=2.000. **Substrate agreed with the wrong majority.** | Qwen populated lineage correctly, but ⊕'s weights cap per-claim discount at ω=0.667 — mathematically incapable of flipping 5-vs-2 dependence. |
+| B temporal | `temporal_separable_opposition_count = 0`. Substrate missed the state-change pattern entirely. | Qwen didn't populate `valid_from`/`valid_to` when ingesting claims, so the temporal gate couldn't fire. |
+| C same-source | `same_source_opposite_polarity_count = 0`. SAME_SOURCE_CONFLICT didn't fire. | Qwen used `[reuters, reuters_original]` vs `[reuters, reuters_correction]` — related but not character-identical. The gate requires exact normalized-set equality. |
+
+Accuracy: **tool-use conditions averaged 5/12 correct; bare (no substrate) averaged 2/6 correct.** No meaningful improvement from tool access. Several runs came back as "unclear" — Qwen was *hedging*, reconciling its narrative intuition (often correct) with substrate output (often contradictory). The substrate may have made the model less decisive without making it more correct.
+
+### The gold-state ablation
+
+To distinguish "operator broken" from "extraction broken," I then hand-populated the *ideal* structured state for each case and re-ran:
+
+| Case | Gold-state result | Interpretation |
+|---|---|---|
+| A | σ=3.333, α=2.000. **Still wrong** even with all 5 supports sharing identical `[nova_pharma]` lineage (max Jaccard). | **Operator is structurally incapable.** ω_min = 0.4 under the current functional form; σ_min at N=5 = 2.0 = α. No coefficient tuning can fix it. |
+| B | `temporal_separable_opposition_count = 9`, no PRESENT_TENSE_CONFLICT. **Correct.** | Extraction/ergonomics problem. Gate works when fields are populated. |
+| C | `same_source_opposite_polarity_count = 1`, SAME_SOURCE_CONFLICT flag set. **Correct.** | Canonicalization problem. Gate works when lineage is normalized. |
+
+### What this means
+
+1. **Phase 1's "success" was a demo harness.** The Wirecard showcase above worked because I hand-populated the `source_lineage` fields to satisfy the gates. A real agent populating from narrative text does not produce that structured state.
+
+2. **⊕ in its current form is mathematically wrong for rumor amplification** — the use case it was most directly designed to handle. Any linear combination of bounded [0,1] discount terms with weights summing to 1.5 has a per-claim floor of ω = 0.4, so σ at N=5 cannot drop below 2.0. Replacing ⊕ with a cluster-collapse operator (treat claims sharing upstream provenance as effectively one source) would fix Case A; retuning the existing coefficients cannot.
+
+3. **Cases B and C are solvable with an extractor/canonicalizer** that normalizes source names, extracts temporal intervals from narrative, and ensures claims about the same proposition use the same `(src, rel_type, dst)` triple. That preprocessor was never built; I did it by hand in Wirecard.
+
+4. **"AGI-capable substrate" language was overstated.** What was built is a *structured provenance/temporal/conflict annotation schema*, with a partially-working operator layer, usable for audit and inspection. Not a decision-making mechanism for autonomous agents.
+
+### Where this leaves the claims
+
+- **Source-lineage discounting demonstrably helps on hand-populated cases** (the Wirecard example above still stands as a concrete demonstration of the *concept*).
+- **The substrate does NOT reliably improve decisions when a real agent populates the state.**
+- **The extractor/canonicalizer is the load-bearing problem**, not the substrate arithmetic.
+- **⊕ needs replacement, not retuning**, for the rumor-amplification use case.
+
+### What comes next
+
+RFC 009 (design-only, no code until red-teamed) will focus on:
+
+- **Layer 1** — extractor/canonicalizer: source alias resolution, citation-chain normalization, temporal interval extraction, canonical proposition triples. This is the real research problem.
+- **Layer 2** — cluster-collapse aggregation replacing ⊕. Identify shared-origin claim clusters; compute effective support at cluster level, not per claim.
+- **Layer 3** — reposition current substrate as structured audit scaffold. Stop claiming decision improvement. Surface the provenance/temporal/conflict signatures for inspection, not as authoritative weights.
+- **Eval** — 30-50 adversarial fixtures across rumor, corroboration, retraction, aliasing, temporal succession, missing fields, noisy extraction. Gold-state vs extracted-state vs model-native ablations.
+
+### Methodological note
+
+The 8-model red-team before Phase 2 predicted every one of these failure modes. The mistake was not listening harder and running the ablation sooner. RFC 009 will run gold-state eval on day 1 of design, not day 90 of implementation.
+
+Phase 2 raw data: [`yantrikdb-server/docs/phase2/results.json`](https://github.com/yantrikos/yantrikdb-server/blob/server/docs/phase2/results.json). Gold-state ablation: [`yantrikdb-server/docs/phase2/gold_state_results.json`](https://github.com/yantrikos/yantrikdb-server/blob/server/docs/phase2/gold_state_results.json). Both preserved so the negative result is reproducible.
+
 ## Invitation
 
 If you read this and thought "yes, I've hit that problem," or "no, that's not a problem I have," or "this is clever but where's the product," — I'd like to hear it. Open an issue at [github.com/yantrikos/yantrikdb](https://github.com/yantrikos/yantrikdb) or email developer@pranab.co.in. One adversarial case is necessary but not sufficient; figuring out which adversarial case to test next is a conversation, not a solo decision.
