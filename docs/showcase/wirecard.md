@@ -176,6 +176,22 @@ What it doesn't tell us:
 
 Those last one is the point of posting this walkthrough. The math is what it is; whether the abstraction is *useful* depends on whether someone besides me finds it legible enough to build on. If the answer is "I'd just use Postgres + application logic," that's a genuine answer.
 
+## Known weaknesses (surfaced by adversarial review)
+
+Before publishing this, I ran the essay past a panel of eight AI models in red-team mode — different families, different priors — asking each to find the sharpest technical attacks. The same four objections kept coming back, plus two that caught real issues:
+
+**Lineage extraction is the unsolved problem.** The substrate works if `source_lineage` is correctly populated. Extracting lineage from natural-language sources (who cites whom, which audit depends on which document) is not a solved problem. In Wirecard, I hand-curated the lineage column — that's the entire load-bearing assumption. Every attacker flagged this as the essay's central unearned claim. Defensible if the substrate is pitched at domains with already-structured provenance (citations, code dependencies, workflow audits) rather than as a drop-in for "any corpus of text."
+
+**The weights (0.5, 0.3, 0.7) are arbitrary.** Yes. The essay says "not a tuning knob" because the weights are fixed in v1, not because they're calibrated. Swap them to 0.3 / 0.5 / 0.9 and Wirecard's σ changes. "Learn them from labeled data" is deferred to a v2 that doesn't exist yet. Until then, treat ω_k as a structural *shape* — monotone in overlap, bounded, deterministic — not as a calibrated probability.
+
+**Jaccard measures label overlap, not information dependence.** An FT investigation based on a Wirecard-insider leak has zero Jaccard overlap with Wirecard's own claim but is 100% informationally dependent on it. Two independent audits both citing SEC filings have Jaccard > 0 without being epistemically dependent in any meaningful sense. The substrate catches *declared-source* redundancy; it doesn't catch hidden causal dependence. For the hard cases, that's a real gap.
+
+**Monotonicity violation (genuinely surprising).** Adding a claim with entirely unrelated lineage changes existing claims' ω values — because `D_k` is measured against the *rest-of-set* union, which grows. Concretely: A=[w], B=[w,e] → D_A = 0.5. Add orthogonal C=[x] → D_A drops to 0.333, ω_A rises. A weighs *more* after an unrelated claim joins the set. Two readings: (a) this is what "independence relative to live set" is supposed to mean, and the rise reflects A's larger relative diversity; (b) it violates independence of irrelevant alternatives and lets attackers inflate ω by padding with spurious claims. The substrate as it stands doesn't distinguish these readings. Watch for gaming if lineage is ever user-supplied.
+
+**Adversarial lineage padding.** Closely related to the above. If an attacker controls `source_lineage` on a claim they're trying to boost, they can add unique nonsense tokens (`["real_source_A", "unique_decoy_1", "unique_decoy_2", ...]`) to reduce their Jaccard against the rest of the live set. The substrate's answer to this is "lineage is supposed to be objective provenance, not attacker-controlled metadata" — but that assumption needs enforcing at the ingestion layer, not at the math layer.
+
+**Comparison to Bayesian belief networks.** Five of the eight red-team models independently suggested this. A BN with Dirichlet priors over source reliability and explicit conditional independence edges gets you principled uncertainty propagation — it *does* reason under uncertainty in a way ⊕ does not. The substrate's pitch vs. a BN is not "better uncertainty math" — it's "first-class schema fields, inspectable counters, content-hashed determinism." If what you need is P(claim true | evidence), use pgmpy or Pyro. If what you need is "which claims in my live set share provenance, what's the temporal contest shape, which moves produced each output," that's the substrate's territory.
+
 ## Invitation
 
 If you read this and thought "yes, I've hit that problem," or "no, that's not a problem I have," or "this is clever but where's the product," — I'd like to hear it. Open an issue at [github.com/yantrikos/yantrikdb](https://github.com/yantrikos/yantrikdb) or email developer@pranab.co.in. One adversarial case is necessary but not sufficient; figuring out which adversarial case to test next is a conversation, not a solo decision.
