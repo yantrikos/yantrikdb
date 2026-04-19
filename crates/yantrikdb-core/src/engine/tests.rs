@@ -598,6 +598,165 @@ fn test_schema_v20_mobility_state_roundtrip() {
     assert!(ancestral.is_none(), "untouched background components should remain NULL");
 }
 
+// RFC 008 Phase 1 M2: integration tests for compute_write_tier_mobility ⊕
+// through the YantrikDB API. Unit tests for the pure math are in warrant.rs.
+
+fn seed_mobility_claim(
+    db: &YantrikDB,
+    proposition_id: &str,
+    extractor: &str,
+    polarity: i32,
+    source_lineage_json: &str,
+    self_gen: i32,
+    modality: &str,
+    regime: &str,
+) {
+    let claim_id = format!("c_{}", uuid_like(extractor, source_lineage_json, polarity));
+    db.conn()
+        .execute(
+            "INSERT INTO claims (claim_id, src, dst, rel_type, created_at, \
+             extractor, polarity, namespace, proposition_id, regime_tag, \
+             self_generated, source_lineage, modality_signal, weight) \
+             VALUES (?1, 'X', 'Y', 'rel', 0.0, ?2, ?3, 'default', ?4, ?5, ?6, ?7, ?8, 1.0)",
+            rusqlite::params![
+                claim_id, extractor, polarity, proposition_id, regime,
+                self_gen, source_lineage_json, modality,
+            ],
+        )
+        .unwrap();
+}
+
+fn uuid_like(a: &str, b: &str, pol: i32) -> String {
+    // Cheap unique ID for tests — uses content hash, not lengths (which collide).
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    (a, b, pol).hash(&mut h);
+    format!("c_{:x}", h.finish())
+}
+
+fn seed_proposition(db: &YantrikDB, pid: &str) {
+    db.conn()
+        .execute(
+            "INSERT OR IGNORE INTO propositions (proposition_id, src, rel_type, dst, namespace, created_at) \
+             VALUES (?1, 'X', 'rel', 'Y', 'default', 0.0)",
+            rusqlite::params![pid],
+        )
+        .unwrap();
+}
+
+#[test]
+fn test_mobility_single_support_claim() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_single");
+    seed_mobility_claim(&db, "p_single", "ext_a", 1, "[\"src_1\"]", 0, "text", "default");
+
+    let state = db.compute_write_tier_mobility("p_single", "default").unwrap();
+    assert_eq!(state.support_mass, Some(1.0));
+    assert_eq!(state.attack_mass, Some(0.0));
+    assert_eq!(state.self_gen_local, Some(0.0));
+    // Single text claim → 1/6 modality slots filled.
+    assert!((state.modality_consilience.unwrap() - 1.0 / 6.0).abs() < 1e-9);
+}
+
+#[test]
+fn test_mobility_three_independent_sources() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_ind");
+    seed_mobility_claim(&db, "p_ind", "ext_a", 1, "[\"src_a\"]", 0, "text", "default");
+    seed_mobility_claim(&db, "p_ind", "ext_b", 1, "[\"src_b\"]", 0, "image", "default");
+    seed_mobility_claim(&db, "p_ind", "ext_c", 1, "[\"src_c\"]", 0, "numeric", "default");
+
+    let state = db.compute_write_tier_mobility("p_ind", "default").unwrap();
+    // Three disjoint sources, disjoint extractors, no self-gen → raw sum.
+    assert!(
+        (state.support_mass.unwrap() - 3.0).abs() < 1e-9,
+        "expected 3.0 for independent claims, got {:?}",
+        state.support_mass
+    );
+    // Three distinct modalities → 3/6 = 0.5.
+    assert!((state.modality_consilience.unwrap() - 0.5).abs() < 1e-9);
+}
+
+#[test]
+fn test_mobility_duplicate_sources_discounted() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_dup");
+    // Three claims from DIFFERENT extractors (required by claim UNIQUE) but
+    // sharing the same source_lineage. This is the real-world case: two
+    // extractors both derive claims from the same upstream source. The
+    // shared lineage is what should trigger the discount, NOT the extractor
+    // identity.
+    seed_mobility_claim(&db, "p_dup", "ext_a", 1, "[\"src_shared\"]", 0, "text", "default");
+    seed_mobility_claim(&db, "p_dup", "ext_b", 1, "[\"src_shared\"]", 0, "text", "default");
+    seed_mobility_claim(&db, "p_dup", "ext_c", 1, "[\"src_shared\"]", 0, "text", "default");
+
+    let state = db.compute_write_tier_mobility("p_dup", "default").unwrap();
+    let s = state.support_mass.unwrap();
+    // D_k = 1.0 (identical lineage), P_k = 0 (distinct extractors), S_k = 0.
+    // discount = 1 + 0.5·1 + 0 + 0 = 1.5; ω = 2/3; total ≈ 3 · 2/3 = 2.0
+    assert!(s < 2.5, "shared-source claims should discount below 2.5, got {}", s);
+    assert!(s > 1.8, "discount shouldn't be excessive, got {}", s);
+}
+
+#[test]
+fn test_mobility_support_and_attack_separate() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_mixed");
+    seed_mobility_claim(&db, "p_mixed", "ext_a", 1, "[\"src_a\"]", 0, "text", "default");
+    seed_mobility_claim(&db, "p_mixed", "ext_b", 1, "[\"src_b\"]", 0, "image", "default");
+    seed_mobility_claim(&db, "p_mixed", "ext_c", -1, "[\"src_c\"]", 0, "text", "default");
+
+    let state = db.compute_write_tier_mobility("p_mixed", "default").unwrap();
+    // Two supports accumulate, one attack accumulates separately.
+    assert!((state.support_mass.unwrap() - 2.0).abs() < 1e-9);
+    assert!((state.attack_mass.unwrap() - 1.0).abs() < 1e-9);
+    // self_gen_local only counts supporting claims.
+    assert_eq!(state.self_gen_local, Some(0.0));
+}
+
+#[test]
+fn test_mobility_upsert_and_read_back() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_rw");
+    seed_mobility_claim(&db, "p_rw", "ext_a", 1, "[\"src_1\"]", 0, "text", "default");
+
+    let computed = db.compute_write_tier_mobility("p_rw", "default").unwrap();
+    db.upsert_mobility_state(&computed).unwrap();
+
+    let read_back = db.get_mobility_state("p_rw", "default").unwrap().unwrap();
+    assert_eq!(read_back.support_mass, computed.support_mass);
+    assert_eq!(read_back.attack_mass, computed.attack_mass);
+    assert_eq!(read_back.tier_write_components.len(), 4);
+    // Background-tier components should be None (not yet computed).
+    assert!(read_back.self_gen_ancestral.is_none());
+    assert!(read_back.novelty_isolation.is_none());
+}
+
+#[test]
+fn test_mobility_missing_returns_none() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let result = db.get_mobility_state("nonexistent", "default").unwrap();
+    assert!(result.is_none());
+}
+
+#[test]
+fn test_mobility_self_generated_discount() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_self");
+    // Two claims self-generated by different self-modes but sharing lineage.
+    seed_mobility_claim(&db, "p_self", "self_mode_a", 1, "[\"self_1\"]", 1, "text", "default");
+    seed_mobility_claim(&db, "p_self", "self_mode_b", 1, "[\"self_1\"]", 1, "text", "default");
+
+    let state = db.compute_write_tier_mobility("p_self", "default").unwrap();
+    // D_k = 1.0 (same lineage), P_k = 0 (distinct extractors), S_k = 1.0 (both self-gen).
+    // discount = 1 + 0.5·1 + 0 + 0.7·1 = 2.2; ω ≈ 0.454; total ≈ 0.91
+    let s = state.support_mass.unwrap();
+    assert!(s < 1.2, "self-gen shared-lineage claims should collapse, got {}", s);
+    // ψ_l = 1.0 because all supporting claims are self-generated.
+    assert_eq!(state.self_gen_local, Some(1.0));
+}
+
 #[test]
 fn test_schema_v20_migration_from_v19() {
     // Simulate a V19 database (without V20's new tables/columns), run the V20

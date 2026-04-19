@@ -47,6 +47,7 @@ mod session;
 mod stats;
 mod storage;
 mod temporal_helpers;
+mod warrant;
 pub mod tenant;
 #[cfg(test)]
 mod tests;
