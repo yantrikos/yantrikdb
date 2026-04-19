@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 21;
+pub const SCHEMA_VERSION: i32 = 22;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -230,6 +230,51 @@ CREATE TABLE IF NOT EXISTS mobility_state (
 CREATE INDEX IF NOT EXISTS idx_mobility_prop ON mobility_state(proposition_id);
 CREATE INDEX IF NOT EXISTS idx_mobility_regime ON mobility_state(regime);
 CREATE INDEX IF NOT EXISTS idx_mobility_status ON mobility_state(state_status);
+
+-- RFC 008 Phase 1 M4 (V22): Contest state Γ(c). The contest operator ⋈
+-- produces a compact, reproducible summary of the SHAPE of contest across
+-- the live claim set — grounded diagnostic features only, NOT speculative
+-- contradiction semantics. Per M4 locked spec (Saga note 16), we store
+-- only features that are (a) reliably inferable from claim metadata,
+-- (b) cheap to compute, and (c) tied to a concrete downstream consumer.
+--
+-- Current-state overwrite semantics (no timeline). Own derivation_version
+-- and content_hash — contest logic evolves independently of mobility.
+CREATE TABLE IF NOT EXISTS contest_state (
+    proposition_id  TEXT NOT NULL REFERENCES propositions(proposition_id),
+    regime          TEXT NOT NULL DEFAULT 'default',
+    -- Polarity aggregates (same leave-one-out ⊕ math as mobility_state,
+    -- same snapshot because recomputed inside the same lock scope).
+    support_mass                   REAL NOT NULL DEFAULT 0.0,
+    attack_mass                    REAL NOT NULL DEFAULT 0.0,
+    support_effective_independence REAL NOT NULL DEFAULT 0.0,  -- Σ ω_k over supports
+    attack_effective_independence  REAL NOT NULL DEFAULT 0.0,  -- Σ ω_k over attacks
+    support_distinct_source_count  INTEGER NOT NULL DEFAULT 0,
+    attack_distinct_source_count   INTEGER NOT NULL DEFAULT 0,
+    -- Grounded contest diagnostics — strict gates, bounded computation
+    same_source_opposite_polarity_count              INTEGER NOT NULL DEFAULT 0,
+    same_artifact_extractor_polarity_conflict_count  INTEGER NOT NULL DEFAULT 0,
+    temporal_overlap_conflict_count                  INTEGER NOT NULL DEFAULT 0,
+    temporal_separable_opposition_count              INTEGER NOT NULL DEFAULT 0,
+    referent_schema_heterogeneity_count              INTEGER NOT NULL DEFAULT 0,
+    -- Heuristic flags bitset:
+    --   Bit 0 DUPLICATION_RISK: support_mass > 2.0 AND support_effective_independence < 2.0
+    --   Bit 1 SAME_SOURCE_CONFLICT: same_source_opposite_polarity_count > 0
+    --   Bit 2 REFERENT_HETEROGENEITY_PRESENT: referent_schema_heterogeneity_count > 0
+    --   Bit 3 SAME_ARTIFACT_EXTRACTOR_CONFLICT: same_artifact_extractor_polarity_conflict_count > 0
+    --   Bit 4 PRESENT_TENSE_CONFLICT: temporal_overlap_conflict_count > 0
+    heuristic_flags INTEGER NOT NULL DEFAULT 0,
+    -- Reproducibility
+    derivation_version INTEGER NOT NULL DEFAULT 1,
+    content_hash       TEXT NOT NULL DEFAULT '',
+    live_claim_count   INTEGER NOT NULL DEFAULT 0,
+    state_status       TEXT NOT NULL DEFAULT 'stale_formula'
+        CHECK (state_status IN ('fresh', 'recomputing', 'failed', 'stale_formula')),
+    computed_at        INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (proposition_id, regime)
+);
+CREATE INDEX IF NOT EXISTS idx_contest_flags ON contest_state(heuristic_flags);
+CREATE INDEX IF NOT EXISTS idx_contest_status ON contest_state(state_status);
 
 -- Actor profile: calibration record for any epistemic actor — external
 -- sources, extractors, summarizers, internal cognitive moves, other
@@ -1446,4 +1491,36 @@ ALTER TABLE mobility_state ADD COLUMN live_claim_count INTEGER NOT NULL DEFAULT 
 ALTER TABLE mobility_state ADD COLUMN state_status     TEXT NOT NULL DEFAULT 'stale_formula';
 ALTER TABLE mobility_state ADD COLUMN computed_at      INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_mobility_status ON mobility_state(state_status);
+";
+
+// RFC 008 M4: contest_state for Γ(c) grounded diagnostics. Reliable features
+// only — no speculative semantic typing, no pair list storage. One row per
+// (proposition_id, regime), current-state overwrite. See Saga note 16 for
+// the locked spec and why each field earned its place.
+pub const MIGRATE_V21_TO_V22: &str = "
+CREATE TABLE IF NOT EXISTS contest_state (
+    proposition_id  TEXT NOT NULL REFERENCES propositions(proposition_id),
+    regime          TEXT NOT NULL DEFAULT 'default',
+    support_mass                   REAL NOT NULL DEFAULT 0.0,
+    attack_mass                    REAL NOT NULL DEFAULT 0.0,
+    support_effective_independence REAL NOT NULL DEFAULT 0.0,
+    attack_effective_independence  REAL NOT NULL DEFAULT 0.0,
+    support_distinct_source_count  INTEGER NOT NULL DEFAULT 0,
+    attack_distinct_source_count   INTEGER NOT NULL DEFAULT 0,
+    same_source_opposite_polarity_count              INTEGER NOT NULL DEFAULT 0,
+    same_artifact_extractor_polarity_conflict_count  INTEGER NOT NULL DEFAULT 0,
+    temporal_overlap_conflict_count                  INTEGER NOT NULL DEFAULT 0,
+    temporal_separable_opposition_count              INTEGER NOT NULL DEFAULT 0,
+    referent_schema_heterogeneity_count              INTEGER NOT NULL DEFAULT 0,
+    heuristic_flags    INTEGER NOT NULL DEFAULT 0,
+    derivation_version INTEGER NOT NULL DEFAULT 1,
+    content_hash       TEXT NOT NULL DEFAULT '',
+    live_claim_count   INTEGER NOT NULL DEFAULT 0,
+    state_status       TEXT NOT NULL DEFAULT 'stale_formula'
+        CHECK (state_status IN ('fresh', 'recomputing', 'failed', 'stale_formula')),
+    computed_at        INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (proposition_id, regime)
+);
+CREATE INDEX IF NOT EXISTS idx_contest_flags ON contest_state(heuristic_flags);
+CREATE INDEX IF NOT EXISTS idx_contest_status ON contest_state(state_status);
 ";

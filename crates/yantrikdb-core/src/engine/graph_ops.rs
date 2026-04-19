@@ -530,6 +530,23 @@ impl YantrikDB {
                     "mobility recompute failed during claim ingest; reconciler will retry"
                 );
             }
+            // RFC 008 M4: contest state Γ(c) — grounded diagnostics from the
+            // same live claim set. Separate derivation boundary (own version
+            // and content_hash) but same snapshot via the shared lock scope.
+            // Same failure policy as mobility: log and continue; claim is
+            // authoritative.
+            if let Err(e) = crate::engine::warrant::compute_contest_state_conn(
+                &conn,
+                &proposition_id,
+                regime_tag,
+            ) {
+                tracing::warn!(
+                    proposition_id = %proposition_id,
+                    regime = regime_tag,
+                    error = %e,
+                    "contest recompute failed during claim ingest; reconciler will retry"
+                );
+            }
         } // conn dropped
 
         // Phase 2: graph_index update

@@ -77,7 +77,7 @@ use crate::schema::{
     MIGRATE_V9_TO_V10, MIGRATE_V10_TO_V11, MIGRATE_V11_TO_V12, MIGRATE_V12_TO_V13,
     MIGRATE_V13_TO_V14, MIGRATE_V14_TO_V15, MIGRATE_V15_TO_V16, MIGRATE_V16_TO_V17,
     MIGRATE_V17_TO_V18, MIGRATE_V18_TO_V19, MIGRATE_V19_TO_V20, MIGRATE_V20_TO_V21,
-    SCHEMA_SQL, SCHEMA_VERSION,
+    MIGRATE_V21_TO_V22, SCHEMA_SQL, SCHEMA_VERSION,
 };
 use crate::types::*;
 
@@ -224,6 +224,7 @@ impl YantrikDB {
             (18, MIGRATE_V18_TO_V19),
             (19, MIGRATE_V19_TO_V20),
             (20, MIGRATE_V20_TO_V21),
+            (21, MIGRATE_V21_TO_V22),
         ];
         if let Some(v) = existing_version {
             for &(from_v, sql) in migrations {

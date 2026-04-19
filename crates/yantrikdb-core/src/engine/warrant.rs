@@ -107,9 +107,9 @@ pub struct MobilityState {
     pub computed_at: i64,
 }
 
-/// A minimal projection of a claim row containing only the fields needed
-/// to compute write-tier mobility contributions. Fetched with a narrow
-/// SELECT to keep the hot path fast.
+/// A narrow projection of a claim row containing the fields needed by
+/// both the mobility (⊕) and contest (⋈) write-tier computations. Fetched
+/// once per recompute pass and shared between the two.
 #[derive(Debug, Clone)]
 struct ClaimRow {
     claim_id: String,
@@ -119,6 +119,16 @@ struct ClaimRow {
     source_lineage: Vec<String>, // normalized to deduped, sorted
     self_generated: bool,
     modality_signal: String,
+    // RFC 008 M4 additions — used only by contest_state computation.
+    // source_memory_rid is the artifact-level identity (same document/event)
+    // used to gate the same-artifact-extractor-polarity-conflict counter.
+    // namespace drives referent_schema_heterogeneity_count. valid_from/to
+    // drive the temporal split between overlap-conflict and separable-
+    // opposition.
+    source_memory_rid: Option<String>,
+    namespace: String,
+    valid_from: Option<f64>,
+    valid_to: Option<f64>,
 }
 
 impl crate::engine::YantrikDB {
@@ -319,7 +329,8 @@ fn fetch_claims_for_mobility(
     regime: &str,
 ) -> Result<Vec<ClaimRow>> {
     let mut stmt = conn.prepare(
-        "SELECT claim_id, polarity, weight, extractor, source_lineage, self_generated, modality_signal \
+        "SELECT claim_id, polarity, weight, extractor, source_lineage, self_generated, \
+         modality_signal, source_memory_rid, namespace, valid_from, valid_to \
          FROM claims \
          WHERE proposition_id = ?1 AND regime_tag = ?2 AND tombstoned = 0 \
          ORDER BY claim_id ASC",
@@ -337,6 +348,10 @@ fn fetch_claims_for_mobility(
                 source_lineage: lineage,
                 self_generated: self_gen_int != 0,
                 modality_signal: row.get(6)?,
+                source_memory_rid: row.get(7)?,
+                namespace: row.get(8)?,
+                valid_from: row.get(9)?,
+                valid_to: row.get(10)?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -427,24 +442,27 @@ fn unix_seconds() -> i64 {
 /// column exists on claims; S_k could become Jaccard over a self-gen
 /// ancestry lineage. Both preserve the set-symmetry property regardless.
 pub(super) fn accumulate_mass(claims: &[&ClaimRow]) -> f64 {
+    compute_omegas(claims).iter().enumerate().map(|(k, w)| w * claims[k].weight).sum()
+}
+
+/// Compute the per-claim discount ω_k vector for a polarity-homogeneous
+/// live set. Returns `vec![]` when the input is empty. The result is
+/// position-aligned with `claims`. Shared by both ⊕ (mass) and ⋈
+/// (effective_independence = Σ ω_k) so both operators use the same
+/// leave-one-out semantics from the same live-set snapshot.
+fn compute_omegas(claims: &[&ClaimRow]) -> Vec<f64> {
     if claims.is_empty() {
-        return 0.0;
+        return Vec::new();
     }
-    // Per-dimension element frequency map for source_lineage. Each entry
-    // counts how many claims in the live set contain that element.
-    // Using this we can derive each claim's leave-one-out Jaccard in
-    // O(|lineage_k|) rather than scanning all other claims.
     let mut freq: HashMap<&str, usize> = HashMap::new();
     for c in claims {
-        // claim's lineage is already normalized (deduped + sorted), so
-        // each element contributes exactly once per claim.
         for e in &c.source_lineage {
             *freq.entry(e.as_str()).or_insert(0) += 1;
         }
     }
     let total_distinct = freq.len();
 
-    let mut total = 0.0;
+    let mut omegas = Vec::with_capacity(claims.len());
     for (k, claim) in claims.iter().enumerate() {
         let d_k = leave_one_out_jaccard(&claim.source_lineage, &freq, total_distinct);
         let p_k = pipeline_overlap_ratio(claim, claims, k);
@@ -453,9 +471,9 @@ pub(super) fn accumulate_mass(claims: &[&ClaimRow]) -> f64 {
             + DEPENDENCE_WEIGHT_SOURCE * d_k
             + DEPENDENCE_WEIGHT_PIPELINE * p_k
             + DEPENDENCE_WEIGHT_SELF_GEN * s_k;
-        total += (1.0 / discount) * claim.weight;
+        omegas.push(1.0 / discount);
     }
-    total
+    omegas
 }
 
 /// Leave-one-out Jaccard of a claim's source_lineage set X against the
@@ -552,6 +570,463 @@ fn compute_self_gen_local(claims: &[&ClaimRow]) -> f64 {
     self_gen_count as f64 / claims.len() as f64
 }
 
+// ──────────────────────────────────────────────────────────────────
+// RFC 008 Phase 1 M4: Contest operator ⋈ — Γ(c) grounded diagnostics.
+//
+// ⋈ produces a compact reproducible summary of the SHAPE of contest in
+// the live claim set, using only features defensible from lineage and
+// claim metadata. No speculative contradiction typing, no pair storage,
+// no action recommendations. See Saga note 16 for the locked spec.
+// ──────────────────────────────────────────────────────────────────
+
+/// Contest derivation version. Bumped when counter definitions, gating
+/// rules, or content_hash input changes. Independent of mobility's
+/// FORMULA_VERSION — contest logic evolves on its own schedule.
+pub const CONTEST_DERIVATION_VERSION: i32 = 1;
+
+/// Heuristic flag bit positions (mirrors SQL schema comments).
+pub mod contest_flags {
+    /// σ > 2.0 AND support_effective_independence < 2.0 — apparent consensus
+    /// that collapses under dependence discount (rumor amplification risk).
+    pub const DUPLICATION_RISK: u64 = 1 << 0;
+    /// Same-source opposite-polarity claims detected (source self-conflict,
+    /// routes to source audit / chronology review).
+    pub const SAME_SOURCE_CONFLICT: u64 = 1 << 1;
+    /// Claims span multiple namespaces — referent alignment may be
+    /// heterogeneous (NOT asserted as incompatible — just observed).
+    pub const REFERENT_HETEROGENEITY_PRESENT: u64 = 1 << 2;
+    /// Same underlying source_memory_rid yielded opposite-polarity claims
+    /// through different extractors (extraction pathology signal).
+    pub const SAME_ARTIFACT_EXTRACTOR_CONFLICT: u64 = 1 << 3;
+    /// Opposite-polarity claims with overlapping validity intervals —
+    /// present-tense contradiction (not mere state-change-over-time).
+    pub const PRESENT_TENSE_CONFLICT: u64 = 1 << 4;
+}
+
+/// Materialized contest state for a (proposition_id, regime). This is
+/// Γ(c) — a structured contradiction signature, not a net-confidence
+/// scalar. Every field is directly computable from claim metadata with
+/// no speculative inference.
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct ContestState {
+    pub proposition_id: String,
+    pub regime: String,
+    pub support_mass: f64,
+    pub attack_mass: f64,
+    pub support_effective_independence: f64,
+    pub attack_effective_independence: f64,
+    pub support_distinct_source_count: i64,
+    pub attack_distinct_source_count: i64,
+    pub same_source_opposite_polarity_count: i64,
+    pub same_artifact_extractor_polarity_conflict_count: i64,
+    pub temporal_overlap_conflict_count: i64,
+    pub temporal_separable_opposition_count: i64,
+    pub referent_schema_heterogeneity_count: i64,
+    pub heuristic_flags: u64,
+    pub derivation_version: i32,
+    pub content_hash: String,
+    pub live_claim_count: i64,
+    pub state_status: String,
+    pub computed_at: i64,
+}
+
+impl crate::engine::YantrikDB {
+    /// Compute contest state ⋈ for (proposition_id, regime). Reads all
+    /// live claims, computes content_hash, short-circuits on idempotent
+    /// match, otherwise derives counters and heuristic flags, then
+    /// upserts. Same lock/transaction discipline as M3 mobility.
+    pub fn compute_contest_state(
+        &self,
+        proposition_id: &str,
+        regime: &str,
+    ) -> Result<ContestState> {
+        let conn = self.conn.lock();
+        compute_contest_state_conn(&conn, proposition_id, regime)
+    }
+
+    /// Read contest state. Returns None if never computed.
+    pub fn get_contest_state(
+        &self,
+        proposition_id: &str,
+        regime: &str,
+    ) -> Result<Option<ContestState>> {
+        let conn = self.conn.lock();
+        read_contest_state(&conn, proposition_id, regime)
+    }
+}
+
+pub(super) fn compute_contest_state_conn(
+    conn: &Connection,
+    proposition_id: &str,
+    regime: &str,
+) -> Result<ContestState> {
+    let claims = fetch_claims_for_mobility(conn, proposition_id, regime)?;
+    let hash = contest_content_hash(&claims);
+
+    // Idempotence: unchanged live set + current derivation_version + fresh
+    // status → no recompute needed.
+    if let Some(existing) = read_contest_state(conn, proposition_id, regime)? {
+        if existing.derivation_version == CONTEST_DERIVATION_VERSION
+            && existing.content_hash == hash
+            && existing.state_status == state_status::FRESH
+        {
+            return Ok(existing);
+        }
+    }
+
+    let state = derive_contest_state(proposition_id, regime, &claims, hash);
+    upsert_contest_state(conn, &state)?;
+    Ok(state)
+}
+
+/// Pure-function derivation of ContestState from a live claim set. All
+/// counters computed with leave-one-out symmetry and strict gating rules.
+fn derive_contest_state(
+    proposition_id: &str,
+    regime: &str,
+    claims: &[ClaimRow],
+    content_hash: String,
+) -> ContestState {
+    let supports: Vec<&ClaimRow> = claims.iter().filter(|c| c.polarity == 1).collect();
+    let attacks: Vec<&ClaimRow> = claims.iter().filter(|c| c.polarity == -1).collect();
+
+    // Polarity aggregates using shared ⊕ ω_k math.
+    let support_omegas = compute_omegas(&supports);
+    let attack_omegas = compute_omegas(&attacks);
+    let support_mass: f64 = support_omegas
+        .iter()
+        .enumerate()
+        .map(|(k, w)| w * supports[k].weight)
+        .sum();
+    let attack_mass: f64 = attack_omegas
+        .iter()
+        .enumerate()
+        .map(|(k, w)| w * attacks[k].weight)
+        .sum();
+    let support_effective_independence: f64 = support_omegas.iter().sum();
+    let attack_effective_independence: f64 = attack_omegas.iter().sum();
+
+    // Distinct source counts — cheap, grounded, directly interpretable.
+    let support_distinct_source_count = distinct_source_count(&supports);
+    let attack_distinct_source_count = distinct_source_count(&attacks);
+
+    // Grounded contest diagnostics. Each uses strict gating.
+    let same_source_opposite_polarity_count =
+        count_same_source_opposite_polarity(&supports, &attacks);
+    let same_artifact_extractor_polarity_conflict_count =
+        count_same_artifact_extractor_conflict(&supports, &attacks);
+    let (temporal_overlap_conflict_count, temporal_separable_opposition_count) =
+        count_temporal_conflicts(&supports, &attacks);
+    let referent_schema_heterogeneity_count = count_referent_heterogeneity(claims);
+
+    // Heuristic flags derived from the above counters.
+    let mut flags: u64 = 0;
+    if support_mass > 2.0 && support_effective_independence < 2.0 {
+        flags |= contest_flags::DUPLICATION_RISK;
+    }
+    if same_source_opposite_polarity_count > 0 {
+        flags |= contest_flags::SAME_SOURCE_CONFLICT;
+    }
+    if referent_schema_heterogeneity_count > 0 {
+        flags |= contest_flags::REFERENT_HETEROGENEITY_PRESENT;
+    }
+    if same_artifact_extractor_polarity_conflict_count > 0 {
+        flags |= contest_flags::SAME_ARTIFACT_EXTRACTOR_CONFLICT;
+    }
+    if temporal_overlap_conflict_count > 0 {
+        flags |= contest_flags::PRESENT_TENSE_CONFLICT;
+    }
+
+    ContestState {
+        proposition_id: proposition_id.to_string(),
+        regime: regime.to_string(),
+        support_mass,
+        attack_mass,
+        support_effective_independence,
+        attack_effective_independence,
+        support_distinct_source_count,
+        attack_distinct_source_count,
+        same_source_opposite_polarity_count,
+        same_artifact_extractor_polarity_conflict_count,
+        temporal_overlap_conflict_count,
+        temporal_separable_opposition_count,
+        referent_schema_heterogeneity_count,
+        heuristic_flags: flags,
+        derivation_version: CONTEST_DERIVATION_VERSION,
+        content_hash,
+        live_claim_count: claims.len() as i64,
+        state_status: state_status::FRESH.to_string(),
+        computed_at: unix_seconds(),
+    }
+}
+
+/// Distinct source elements across a set of claims (after normalization
+/// and dedup per-claim — source_lineage is already normalized at fetch).
+fn distinct_source_count(claims: &[&ClaimRow]) -> i64 {
+    let mut set: HashSet<&str> = HashSet::new();
+    for c in claims {
+        for e in &c.source_lineage {
+            set.insert(e.as_str());
+        }
+    }
+    set.len() as i64
+}
+
+/// Count opposite-polarity pairs where both claims share IDENTICAL
+/// normalized source_lineage sets. Groups supports by their lineage set
+/// serialization, then joins against attacks' groups — O(n + matches).
+fn count_same_source_opposite_polarity(supports: &[&ClaimRow], attacks: &[&ClaimRow]) -> i64 {
+    if supports.is_empty() || attacks.is_empty() {
+        return 0;
+    }
+    let mut support_groups: HashMap<String, usize> = HashMap::new();
+    for s in supports {
+        if s.source_lineage.is_empty() {
+            continue; // empty lineage provides no identity for this gate
+        }
+        *support_groups.entry(lineage_key(&s.source_lineage)).or_insert(0) += 1;
+    }
+    let mut count: i64 = 0;
+    for a in attacks {
+        if a.source_lineage.is_empty() {
+            continue;
+        }
+        if let Some(n_support) = support_groups.get(&lineage_key(&a.source_lineage)) {
+            count += *n_support as i64;
+        }
+    }
+    count
+}
+
+/// Count opposite-polarity pairs that derive from the same
+/// source_memory_rid (same underlying document/event) via DIFFERENT
+/// extractors. The same-artifact gate distinguishes extraction pathology
+/// from ordinary cross-source disagreement.
+fn count_same_artifact_extractor_conflict(
+    supports: &[&ClaimRow],
+    attacks: &[&ClaimRow],
+) -> i64 {
+    if supports.is_empty() || attacks.is_empty() {
+        return 0;
+    }
+    // Index supports by source_memory_rid → vec of extractors.
+    let mut by_artifact: HashMap<&str, Vec<&str>> = HashMap::new();
+    for s in supports {
+        if let Some(rid) = &s.source_memory_rid {
+            by_artifact.entry(rid.as_str()).or_default().push(s.extractor.as_str());
+        }
+    }
+    let mut count: i64 = 0;
+    for a in attacks {
+        if let Some(rid) = &a.source_memory_rid {
+            if let Some(support_extractors) = by_artifact.get(rid.as_str()) {
+                // Count supports on the same artifact whose extractor differs
+                // from this attack's extractor.
+                for se in support_extractors {
+                    if *se != a.extractor {
+                        count += 1;
+                    }
+                }
+            }
+        }
+    }
+    count
+}
+
+/// Split opposite-polarity pairs into temporal-overlap conflicts (real
+/// contradictions) and temporal-separable oppositions (state changes
+/// over time). Gated on both sides having validity intervals; if either
+/// is fully unknown (both bounds NULL), treat as overlap-possible since
+/// we cannot rule out temporal overlap.
+fn count_temporal_conflicts(supports: &[&ClaimRow], attacks: &[&ClaimRow]) -> (i64, i64) {
+    if supports.is_empty() || attacks.is_empty() {
+        return (0, 0);
+    }
+    let mut overlap = 0i64;
+    let mut separable = 0i64;
+    for s in supports {
+        for a in attacks {
+            if intervals_disjoint(s, a) {
+                separable += 1;
+            } else {
+                overlap += 1;
+            }
+        }
+    }
+    (overlap, separable)
+}
+
+/// Two claims' validity intervals are disjoint if both have at least one
+/// bound AND one interval ends before the other begins. Missing bounds
+/// are treated as open-ended (-∞ for valid_from, +∞ for valid_to); if
+/// both claims have no bounds at all, they are NOT disjoint.
+fn intervals_disjoint(a: &ClaimRow, b: &ClaimRow) -> bool {
+    let a_fully_open = a.valid_from.is_none() && a.valid_to.is_none();
+    let b_fully_open = b.valid_from.is_none() && b.valid_to.is_none();
+    if a_fully_open && b_fully_open {
+        return false;
+    }
+    let a_from = a.valid_from.unwrap_or(f64::NEG_INFINITY);
+    let a_to = a.valid_to.unwrap_or(f64::INFINITY);
+    let b_from = b.valid_from.unwrap_or(f64::NEG_INFINITY);
+    let b_to = b.valid_to.unwrap_or(f64::INFINITY);
+    // Disjoint iff one ends strictly before the other begins.
+    a_to < b_from || b_to < a_from
+}
+
+/// Count distinct namespaces present across all live claims. Values > 1
+/// indicate referent-schema heterogeneity (claims may be talking about
+/// subtly different referents under different ontologies — NOT an
+/// assertion of incompatibility, only observation of heterogeneity).
+fn count_referent_heterogeneity(claims: &[ClaimRow]) -> i64 {
+    let distinct: HashSet<&str> = claims.iter().map(|c| c.namespace.as_str()).collect();
+    if distinct.len() > 1 {
+        distinct.len() as i64
+    } else {
+        0
+    }
+}
+
+fn lineage_key(lineage: &[String]) -> String {
+    // lineage is already normalized (sorted, deduped) at fetch time.
+    lineage.join("\x01")
+}
+
+/// Contest content_hash. Input set differs from mobility's: adds
+/// source_memory_rid, namespace, valid_from/to (which contest counters
+/// depend on) and excludes modality_signal/self_generated (which mobility
+/// uses but contest doesn't). Separate blake3 domain tag prevents any
+/// confusion between the two hashes.
+fn contest_content_hash(claims: &[ClaimRow]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"yantrikdb.contest.v");
+    hasher.update(&CONTEST_DERIVATION_VERSION.to_le_bytes());
+    hasher.update(b"\x00claims\x00");
+    let mut indexed: Vec<(&String, &ClaimRow)> = claims.iter().map(|c| (&c.claim_id, c)).collect();
+    indexed.sort_by(|a, b| a.0.cmp(b.0));
+    for (cid, c) in indexed {
+        hasher.update(cid.as_bytes());
+        hasher.update(b"|");
+        hasher.update(&c.polarity.to_le_bytes());
+        hasher.update(b"|");
+        hasher.update(c.extractor.as_bytes());
+        hasher.update(b"|");
+        hasher.update(c.namespace.as_bytes());
+        hasher.update(b"|");
+        hasher.update(c.source_memory_rid.as_deref().unwrap_or("").as_bytes());
+        hasher.update(b"|");
+        let w_scaled = (c.weight * 1000.0).round() as i64;
+        hasher.update(&w_scaled.to_le_bytes());
+        hasher.update(b"|");
+        for src in &c.source_lineage {
+            hasher.update(src.as_bytes());
+            hasher.update(b",");
+        }
+        hasher.update(b"|");
+        // valid_from/to rounded to milliseconds for stable hashing.
+        let vf = c.valid_from.map(|t| (t * 1000.0).round() as i64).unwrap_or(i64::MIN);
+        let vt = c.valid_to.map(|t| (t * 1000.0).round() as i64).unwrap_or(i64::MAX);
+        hasher.update(&vf.to_le_bytes());
+        hasher.update(&vt.to_le_bytes());
+        hasher.update(b"\x00");
+    }
+    hex::encode(hasher.finalize().as_bytes())
+}
+
+fn read_contest_state(
+    conn: &Connection,
+    proposition_id: &str,
+    regime: &str,
+) -> Result<Option<ContestState>> {
+    let mut stmt = conn.prepare(
+        "SELECT proposition_id, regime, support_mass, attack_mass, \
+         support_effective_independence, attack_effective_independence, \
+         support_distinct_source_count, attack_distinct_source_count, \
+         same_source_opposite_polarity_count, \
+         same_artifact_extractor_polarity_conflict_count, \
+         temporal_overlap_conflict_count, temporal_separable_opposition_count, \
+         referent_schema_heterogeneity_count, heuristic_flags, \
+         derivation_version, content_hash, live_claim_count, state_status, computed_at \
+         FROM contest_state \
+         WHERE proposition_id = ?1 AND regime = ?2",
+    )?;
+    let result = stmt.query_row(params![proposition_id, regime], |row| {
+        let flags_int: i64 = row.get(13)?;
+        Ok(ContestState {
+            proposition_id: row.get(0)?,
+            regime: row.get(1)?,
+            support_mass: row.get(2)?,
+            attack_mass: row.get(3)?,
+            support_effective_independence: row.get(4)?,
+            attack_effective_independence: row.get(5)?,
+            support_distinct_source_count: row.get(6)?,
+            attack_distinct_source_count: row.get(7)?,
+            same_source_opposite_polarity_count: row.get(8)?,
+            same_artifact_extractor_polarity_conflict_count: row.get(9)?,
+            temporal_overlap_conflict_count: row.get(10)?,
+            temporal_separable_opposition_count: row.get(11)?,
+            referent_schema_heterogeneity_count: row.get(12)?,
+            heuristic_flags: flags_int as u64,
+            derivation_version: row.get(14)?,
+            content_hash: row.get(15)?,
+            live_claim_count: row.get(16)?,
+            state_status: row.get(17)?,
+            computed_at: row.get(18)?,
+        })
+    });
+    match result {
+        Ok(state) => Ok(Some(state)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn upsert_contest_state(conn: &Connection, s: &ContestState) -> Result<()> {
+    conn.execute(
+        "INSERT INTO contest_state (\
+         proposition_id, regime, support_mass, attack_mass, \
+         support_effective_independence, attack_effective_independence, \
+         support_distinct_source_count, attack_distinct_source_count, \
+         same_source_opposite_polarity_count, \
+         same_artifact_extractor_polarity_conflict_count, \
+         temporal_overlap_conflict_count, temporal_separable_opposition_count, \
+         referent_schema_heterogeneity_count, heuristic_flags, \
+         derivation_version, content_hash, live_claim_count, state_status, computed_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19) \
+         ON CONFLICT(proposition_id, regime) DO UPDATE SET \
+         support_mass = excluded.support_mass, \
+         attack_mass = excluded.attack_mass, \
+         support_effective_independence = excluded.support_effective_independence, \
+         attack_effective_independence = excluded.attack_effective_independence, \
+         support_distinct_source_count = excluded.support_distinct_source_count, \
+         attack_distinct_source_count = excluded.attack_distinct_source_count, \
+         same_source_opposite_polarity_count = excluded.same_source_opposite_polarity_count, \
+         same_artifact_extractor_polarity_conflict_count = excluded.same_artifact_extractor_polarity_conflict_count, \
+         temporal_overlap_conflict_count = excluded.temporal_overlap_conflict_count, \
+         temporal_separable_opposition_count = excluded.temporal_separable_opposition_count, \
+         referent_schema_heterogeneity_count = excluded.referent_schema_heterogeneity_count, \
+         heuristic_flags = excluded.heuristic_flags, \
+         derivation_version = excluded.derivation_version, \
+         content_hash = excluded.content_hash, \
+         live_claim_count = excluded.live_claim_count, \
+         state_status = excluded.state_status, \
+         computed_at = excluded.computed_at",
+        params![
+            s.proposition_id, s.regime, s.support_mass, s.attack_mass,
+            s.support_effective_independence, s.attack_effective_independence,
+            s.support_distinct_source_count, s.attack_distinct_source_count,
+            s.same_source_opposite_polarity_count,
+            s.same_artifact_extractor_polarity_conflict_count,
+            s.temporal_overlap_conflict_count, s.temporal_separable_opposition_count,
+            s.referent_schema_heterogeneity_count,
+            s.heuristic_flags as i64,
+            s.derivation_version, s.content_hash, s.live_claim_count,
+            s.state_status, s.computed_at,
+        ],
+    )?;
+    Ok(())
+}
+
 /// Row-to-struct decoder for mobility_state SELECTs.
 fn row_to_mobility_state(row: &rusqlite::Row) -> rusqlite::Result<MobilityState> {
     let tier_write_json: String = row.get(16)?;
@@ -613,6 +1088,10 @@ mod tests {
             source_lineage: normalized,
             self_generated: self_gen,
             modality_signal: modality.to_string(),
+            source_memory_rid: None,
+            namespace: "default".to_string(),
+            valid_from: None,
+            valid_to: None,
         }
     }
 
