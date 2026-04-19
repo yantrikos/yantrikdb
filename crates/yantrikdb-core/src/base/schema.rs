@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 22;
+pub const SCHEMA_VERSION: i32 = 23;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -275,6 +275,162 @@ CREATE TABLE IF NOT EXISTS contest_state (
 );
 CREATE INDEX IF NOT EXISTS idx_contest_flags ON contest_state(heuristic_flags);
 CREATE INDEX IF NOT EXISTS idx_contest_status ON contest_state(state_status);
+
+-- ──────────────────────────────────────────────────────────────────
+-- RFC 008 M5b (V23): Cognitive moves — the spine of reasoning.
+--
+-- Per M5a locked spec (Saga note 19): move_events is an append-only log
+-- of reasoning transformations. Inputs/outputs/side-effects are stored
+-- in normalized edge tables for indexed lookup. Corrections are first-
+-- class events; originals are never mutated for semantic correction.
+-- Adversarial instances are staged (candidate/confirmed/rejected) with
+-- governance enforced at the API layer.
+--
+-- move_type is intentionally unconstrained at DB level — a soft
+-- registry (move_type_registry) holds the canonical vocabulary but
+-- does NOT reject unknown types. Observability lifecycle is enforced
+-- by CHECK constraints since those values are definitional.
+-- ──────────────────────────────────────────────────────────────────
+
+CREATE TABLE IF NOT EXISTS move_events (
+    move_id                       TEXT PRIMARY KEY,
+    move_type                     TEXT NOT NULL,
+    operator_version              TEXT NOT NULL,
+    actor_id                      TEXT NOT NULL,
+    context_regime                TEXT NOT NULL DEFAULT 'default',
+    observability                 TEXT NOT NULL
+        CHECK (observability IN ('observed', 'self_reported', 'inferred')),
+    inference_confidence          REAL,
+    inference_basis_json          TEXT,
+    dependencies_json             TEXT NOT NULL DEFAULT '[]',
+    cost_tokens                   INTEGER,
+    cost_latency_ms               INTEGER,
+    cost_memory_reads             INTEGER,
+    yield_json                    TEXT NOT NULL DEFAULT '{}',
+    posthoc_outcome               TEXT
+        CHECK (posthoc_outcome IN ('corroborated', 'retracted', 'harmful_side_effect') OR posthoc_outcome IS NULL),
+    posthoc_recorded_at           REAL,
+    expected_evaluation_horizon_ms INTEGER,
+    mobility_state_hash_at_move   TEXT,
+    contest_state_hash_at_move    TEXT,
+    created_at                    REAL NOT NULL,
+    hlc                           BLOB NOT NULL,
+    origin_actor                  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_move_type_time ON move_events(move_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_move_actor_time ON move_events(actor_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_move_regime_time ON move_events(context_regime, created_at);
+
+CREATE TABLE IF NOT EXISTS move_input_edge (
+    move_id    TEXT NOT NULL REFERENCES move_events(move_id),
+    claim_id   TEXT NOT NULL,
+    input_role TEXT NOT NULL DEFAULT 'input',
+    ordinal    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (move_id, claim_id, input_role)
+);
+CREATE INDEX IF NOT EXISTS idx_move_input_claim ON move_input_edge(claim_id);
+
+CREATE TABLE IF NOT EXISTS move_output_edge (
+    move_id     TEXT NOT NULL REFERENCES move_events(move_id),
+    claim_id    TEXT NOT NULL,
+    output_role TEXT NOT NULL DEFAULT 'output',
+    ordinal     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (move_id, claim_id, output_role)
+);
+CREATE INDEX IF NOT EXISTS idx_move_output_claim ON move_output_edge(claim_id);
+
+CREATE TABLE IF NOT EXISTS move_side_effect_edge (
+    move_id     TEXT NOT NULL REFERENCES move_events(move_id),
+    claim_id    TEXT NOT NULL,
+    effect_kind TEXT NOT NULL,
+    PRIMARY KEY (move_id, claim_id, effect_kind)
+);
+CREATE INDEX IF NOT EXISTS idx_move_side_effect_claim ON move_side_effect_edge(claim_id);
+
+CREATE TABLE IF NOT EXISTS move_correction_event (
+    correction_id              TEXT PRIMARY KEY,
+    original_move_id           TEXT NOT NULL REFERENCES move_events(move_id),
+    corrected_move_type        TEXT,
+    corrected_operator_version TEXT,
+    corrected_context_regime   TEXT,
+    correction_reason          TEXT NOT NULL,
+    corrected_by_actor_id      TEXT NOT NULL,
+    corrected_at               REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_correction_original ON move_correction_event(original_move_id);
+
+CREATE TABLE IF NOT EXISTS move_adversarial_instance (
+    instance_id        TEXT PRIMARY KEY,
+    move_id            TEXT NOT NULL REFERENCES move_events(move_id),
+    status             TEXT NOT NULL
+        CHECK (status IN ('candidate', 'confirmed', 'rejected')),
+    discovered_via     TEXT NOT NULL
+        CHECK (discovered_via IN ('contradiction', 'retraction', 'calibration_signal', 'human_audit')),
+    traced_root_cause  TEXT,
+    generalized_lesson TEXT,
+    lesson_scope_json  TEXT,
+    curation_actor_id  TEXT,
+    discovered_at      REAL NOT NULL,
+    created_at         REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_adv_move ON move_adversarial_instance(move_id);
+CREATE INDEX IF NOT EXISTS idx_adv_status ON move_adversarial_instance(status);
+CREATE INDEX IF NOT EXISTS idx_adv_discovered_via ON move_adversarial_instance(discovered_via);
+
+CREATE TABLE IF NOT EXISTS move_type_registry (
+    move_type                             TEXT PRIMARY KEY,
+    status                                TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('proposed', 'active', 'deprecated')),
+    description                           TEXT,
+    introduced_at                         REAL NOT NULL,
+    deprecated_at                         REAL,
+    default_expected_evaluation_horizon_ms INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS inference_basis_registry (
+    basis_type  TEXT PRIMARY KEY,
+    description TEXT,
+    status      TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('proposed', 'active', 'deprecated'))
+);
+
+CREATE TABLE IF NOT EXISTS move_composition_rule (
+    rule_id                TEXT PRIMARY KEY,
+    left_move_type         TEXT NOT NULL,
+    right_move_type        TEXT NOT NULL,
+    left_operator_version  TEXT,
+    right_operator_version TEXT,
+    context_regime         TEXT,
+    rule_kind              TEXT NOT NULL
+        CHECK (rule_kind IN ('commutative', 'non_commutative', 'idempotent',
+                             'precondition_violation', 'approx_identity')),
+    precondition_json      TEXT,
+    evidence_basis_json    TEXT,
+    provenance             TEXT NOT NULL
+        CHECK (provenance IN ('empirical', 'user_declared', 'inferred')),
+    confidence             REAL NOT NULL DEFAULT 0.5,
+    created_at             REAL NOT NULL,
+    superseded_at          REAL
+);
+CREATE INDEX IF NOT EXISTS idx_comp_rule_types ON move_composition_rule(left_move_type, right_move_type);
+CREATE INDEX IF NOT EXISTS idx_comp_rule_regime ON move_composition_rule(context_regime);
+
+CREATE TABLE IF NOT EXISTS move_type_profile (
+    move_type                       TEXT NOT NULL,
+    operator_version                TEXT NOT NULL,
+    context_regime                  TEXT NOT NULL,
+    uses_count                      INTEGER NOT NULL DEFAULT 0,
+    resolved_count                  INTEGER NOT NULL DEFAULT 0,
+    corroborated_count              INTEGER NOT NULL DEFAULT 0,
+    retracted_count                 INTEGER NOT NULL DEFAULT 0,
+    harmful_side_effect_count       INTEGER NOT NULL DEFAULT 0,
+    contradiction_introduction_rate REAL,
+    avg_mobility_shift              REAL,
+    predictive_gain_avg             REAL,
+    calibration_gain_avg            REAL,
+    last_updated                    REAL NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (move_type, operator_version, context_regime)
+);
 
 -- Actor profile: calibration record for any epistemic actor — external
 -- sources, extractors, summarizers, internal cognitive moves, other
@@ -1497,6 +1653,144 @@ CREATE INDEX IF NOT EXISTS idx_mobility_status ON mobility_state(state_status);
 // only — no speculative semantic typing, no pair list storage. One row per
 // (proposition_id, regime), current-state overwrite. See Saga note 16 for
 // the locked spec and why each field earned its place.
+// RFC 008 M5b: cognitive moves substrate. Seven authoritative tables + two
+// soft registries + two derived tables. Per locked spec, Saga note 19.
+// Append-only event log, normalized edges, corrections as events, staged
+// adversarial memory. Registries are seeded by application code at
+// bootstrap via seed_move_type_registry() / seed_inference_basis_registry().
+pub const MIGRATE_V22_TO_V23: &str = "
+CREATE TABLE IF NOT EXISTS move_events (
+    move_id                       TEXT PRIMARY KEY,
+    move_type                     TEXT NOT NULL,
+    operator_version              TEXT NOT NULL,
+    actor_id                      TEXT NOT NULL,
+    context_regime                TEXT NOT NULL DEFAULT 'default',
+    observability                 TEXT NOT NULL
+        CHECK (observability IN ('observed', 'self_reported', 'inferred')),
+    inference_confidence          REAL,
+    inference_basis_json          TEXT,
+    dependencies_json             TEXT NOT NULL DEFAULT '[]',
+    cost_tokens                   INTEGER,
+    cost_latency_ms               INTEGER,
+    cost_memory_reads             INTEGER,
+    yield_json                    TEXT NOT NULL DEFAULT '{}',
+    posthoc_outcome               TEXT
+        CHECK (posthoc_outcome IN ('corroborated', 'retracted', 'harmful_side_effect') OR posthoc_outcome IS NULL),
+    posthoc_recorded_at           REAL,
+    expected_evaluation_horizon_ms INTEGER,
+    mobility_state_hash_at_move   TEXT,
+    contest_state_hash_at_move    TEXT,
+    created_at                    REAL NOT NULL,
+    hlc                           BLOB NOT NULL,
+    origin_actor                  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_move_type_time ON move_events(move_type, created_at);
+CREATE INDEX IF NOT EXISTS idx_move_actor_time ON move_events(actor_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_move_regime_time ON move_events(context_regime, created_at);
+CREATE TABLE IF NOT EXISTS move_input_edge (
+    move_id    TEXT NOT NULL REFERENCES move_events(move_id),
+    claim_id   TEXT NOT NULL,
+    input_role TEXT NOT NULL DEFAULT 'input',
+    ordinal    INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (move_id, claim_id, input_role)
+);
+CREATE INDEX IF NOT EXISTS idx_move_input_claim ON move_input_edge(claim_id);
+CREATE TABLE IF NOT EXISTS move_output_edge (
+    move_id     TEXT NOT NULL REFERENCES move_events(move_id),
+    claim_id    TEXT NOT NULL,
+    output_role TEXT NOT NULL DEFAULT 'output',
+    ordinal     INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (move_id, claim_id, output_role)
+);
+CREATE INDEX IF NOT EXISTS idx_move_output_claim ON move_output_edge(claim_id);
+CREATE TABLE IF NOT EXISTS move_side_effect_edge (
+    move_id     TEXT NOT NULL REFERENCES move_events(move_id),
+    claim_id    TEXT NOT NULL,
+    effect_kind TEXT NOT NULL,
+    PRIMARY KEY (move_id, claim_id, effect_kind)
+);
+CREATE INDEX IF NOT EXISTS idx_move_side_effect_claim ON move_side_effect_edge(claim_id);
+CREATE TABLE IF NOT EXISTS move_correction_event (
+    correction_id              TEXT PRIMARY KEY,
+    original_move_id           TEXT NOT NULL REFERENCES move_events(move_id),
+    corrected_move_type        TEXT,
+    corrected_operator_version TEXT,
+    corrected_context_regime   TEXT,
+    correction_reason          TEXT NOT NULL,
+    corrected_by_actor_id      TEXT NOT NULL,
+    corrected_at               REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_correction_original ON move_correction_event(original_move_id);
+CREATE TABLE IF NOT EXISTS move_adversarial_instance (
+    instance_id        TEXT PRIMARY KEY,
+    move_id            TEXT NOT NULL REFERENCES move_events(move_id),
+    status             TEXT NOT NULL
+        CHECK (status IN ('candidate', 'confirmed', 'rejected')),
+    discovered_via     TEXT NOT NULL
+        CHECK (discovered_via IN ('contradiction', 'retraction', 'calibration_signal', 'human_audit')),
+    traced_root_cause  TEXT,
+    generalized_lesson TEXT,
+    lesson_scope_json  TEXT,
+    curation_actor_id  TEXT,
+    discovered_at      REAL NOT NULL,
+    created_at         REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_adv_move ON move_adversarial_instance(move_id);
+CREATE INDEX IF NOT EXISTS idx_adv_status ON move_adversarial_instance(status);
+CREATE INDEX IF NOT EXISTS idx_adv_discovered_via ON move_adversarial_instance(discovered_via);
+CREATE TABLE IF NOT EXISTS move_type_registry (
+    move_type                             TEXT PRIMARY KEY,
+    status                                TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('proposed', 'active', 'deprecated')),
+    description                           TEXT,
+    introduced_at                         REAL NOT NULL,
+    deprecated_at                         REAL,
+    default_expected_evaluation_horizon_ms INTEGER
+);
+CREATE TABLE IF NOT EXISTS inference_basis_registry (
+    basis_type  TEXT PRIMARY KEY,
+    description TEXT,
+    status      TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('proposed', 'active', 'deprecated'))
+);
+CREATE TABLE IF NOT EXISTS move_composition_rule (
+    rule_id                TEXT PRIMARY KEY,
+    left_move_type         TEXT NOT NULL,
+    right_move_type        TEXT NOT NULL,
+    left_operator_version  TEXT,
+    right_operator_version TEXT,
+    context_regime         TEXT,
+    rule_kind              TEXT NOT NULL
+        CHECK (rule_kind IN ('commutative', 'non_commutative', 'idempotent',
+                             'precondition_violation', 'approx_identity')),
+    precondition_json      TEXT,
+    evidence_basis_json    TEXT,
+    provenance             TEXT NOT NULL
+        CHECK (provenance IN ('empirical', 'user_declared', 'inferred')),
+    confidence             REAL NOT NULL DEFAULT 0.5,
+    created_at             REAL NOT NULL,
+    superseded_at          REAL
+);
+CREATE INDEX IF NOT EXISTS idx_comp_rule_types ON move_composition_rule(left_move_type, right_move_type);
+CREATE INDEX IF NOT EXISTS idx_comp_rule_regime ON move_composition_rule(context_regime);
+CREATE TABLE IF NOT EXISTS move_type_profile (
+    move_type                       TEXT NOT NULL,
+    operator_version                TEXT NOT NULL,
+    context_regime                  TEXT NOT NULL,
+    uses_count                      INTEGER NOT NULL DEFAULT 0,
+    resolved_count                  INTEGER NOT NULL DEFAULT 0,
+    corroborated_count              INTEGER NOT NULL DEFAULT 0,
+    retracted_count                 INTEGER NOT NULL DEFAULT 0,
+    harmful_side_effect_count       INTEGER NOT NULL DEFAULT 0,
+    contradiction_introduction_rate REAL,
+    avg_mobility_shift              REAL,
+    predictive_gain_avg             REAL,
+    calibration_gain_avg            REAL,
+    last_updated                    REAL NOT NULL DEFAULT 0.0,
+    PRIMARY KEY (move_type, operator_version, context_regime)
+);
+";
+
 pub const MIGRATE_V21_TO_V22: &str = "
 CREATE TABLE IF NOT EXISTS contest_state (
     proposition_id  TEXT NOT NULL REFERENCES propositions(proposition_id),

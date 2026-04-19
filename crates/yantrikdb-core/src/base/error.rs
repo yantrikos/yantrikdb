@@ -34,6 +34,9 @@ pub enum YantrikDbError {
 
     #[error("session conflict: {0}")]
     SessionConflict(String),
+
+    #[error("invalid input: {0}")]
+    InvalidInput(String),
 }
 
 pub type Result<T> = std::result::Result<T, YantrikDbError>;

@@ -3059,3 +3059,500 @@ fn test_session_awareness_trigger() {
     assert!(!session_triggers.is_empty(), "should generate session awareness trigger after 3-day gap");
     assert!(session_triggers[0].reason.contains("hours"), "reason should mention time gap");
 }
+
+// ──────────────────────────────────────────────────────────────────
+// RFC 008 Phase 1 M5b: Cognitive moves substrate.
+// Schema V23, append-only event log, normalized edges, corrections as
+// events, adversarial candidate/confirmed staging. Locked spec: Saga 19.
+// ──────────────────────────────────────────────────────────────────
+
+use crate::engine::moves::{
+    ClaimRef, RecordMoveEventInput, SideEffectRef,
+    adversarial_status, observability, posthoc_outcome,
+};
+
+fn mk_move_input(
+    move_type: &str,
+    inputs: &[&str],
+    outputs: &[&str],
+) -> RecordMoveEventInput {
+    RecordMoveEventInput {
+        move_type: move_type.to_string(),
+        operator_version: "v1".to_string(),
+        context_regime: None,
+        observability: observability::OBSERVED.to_string(),
+        inputs: inputs.iter().enumerate().map(|(i, c)| ClaimRef {
+            claim_id: c.to_string(),
+            role: "input".to_string(),
+            ordinal: i as i64,
+        }).collect(),
+        outputs: outputs.iter().enumerate().map(|(i, c)| ClaimRef {
+            claim_id: c.to_string(),
+            role: "output".to_string(),
+            ordinal: i as i64,
+        }).collect(),
+        ..Default::default()
+    }
+}
+
+#[test]
+fn test_m5b_schema_v23_tables_present() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let conn = db.conn();
+    for table in [
+        "move_events", "move_input_edge", "move_output_edge", "move_side_effect_edge",
+        "move_correction_event", "move_adversarial_instance",
+        "move_type_registry", "inference_basis_registry",
+        "move_composition_rule", "move_type_profile",
+    ] {
+        let exists: bool = conn.query_row(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+            rusqlite::params![table],
+            |_| Ok(true),
+        ).unwrap_or(false);
+        assert!(exists, "V23 table {} must exist", table);
+    }
+}
+
+#[test]
+fn test_m5b_registries_seeded_at_bootstrap() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let conn = db.conn();
+    // move_type_registry should have all 12 seed entries.
+    let mt_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM move_type_registry WHERE status = 'active'",
+        [], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(mt_count, 12, "move_type_registry seed vocabulary count");
+
+    // inference_basis_registry should have all 5 seed entries.
+    let ib_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM inference_basis_registry WHERE status = 'active'",
+        [], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(ib_count, 5, "inference_basis_registry seed vocabulary count");
+
+    // Spot-check that core vocabulary is present.
+    for mt in ["analogy", "decomposition", "source_audit", "hypothesis_generation"] {
+        let found: bool = conn.query_row(
+            "SELECT 1 FROM move_type_registry WHERE move_type = ?1",
+            rusqlite::params![mt], |_| Ok(true),
+        ).unwrap_or(false);
+        assert!(found, "seed vocabulary missing: {}", mt);
+    }
+}
+
+#[test]
+fn test_m5b_record_move_event_basic() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let move_id = db.record_move_event(
+        mk_move_input("analogy", &["claim_a", "claim_b"], &["claim_c"])
+    ).unwrap();
+    assert!(!move_id.is_empty());
+
+    // Read it back.
+    let ev = db.get_move_event(&move_id).unwrap().unwrap();
+    assert_eq!(ev.move_type, "analogy");
+    assert_eq!(ev.operator_version, "v1");
+    assert_eq!(ev.observability, "observed");
+    assert_eq!(ev.context_regime, "default");
+    assert!(ev.posthoc_outcome.is_none());
+    // Default horizon from registry should be applied (analogy = 60s).
+    assert_eq!(ev.expected_evaluation_horizon_ms, Some(60_000));
+
+    // Input edges.
+    let inputs = db.get_move_inputs(&move_id).unwrap();
+    assert_eq!(inputs.len(), 2);
+    assert_eq!(inputs[0].claim_id, "claim_a");
+    assert_eq!(inputs[1].claim_id, "claim_b");
+
+    // Output edges.
+    let outputs = db.get_move_outputs(&move_id).unwrap();
+    assert_eq!(outputs.len(), 1);
+    assert_eq!(outputs[0].claim_id, "claim_c");
+}
+
+#[test]
+fn test_m5b_record_move_event_with_side_effects() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let mut inp = mk_move_input("quarantine", &["claim_suspect"], &[]);
+    inp.side_effects = vec![
+        SideEffectRef { claim_id: "downstream_a".into(), effect_kind: "quarantine".into() },
+        SideEffectRef { claim_id: "downstream_b".into(), effect_kind: "quarantine".into() },
+    ];
+    let move_id = db.record_move_event(inp).unwrap();
+    let side_effects = db.get_move_side_effects(&move_id).unwrap();
+    assert_eq!(side_effects.len(), 2);
+}
+
+#[test]
+fn test_m5b_list_moves_consuming_and_producing() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    // Two moves, both consume claim_x; one produces claim_y.
+    let m1 = db.record_move_event(mk_move_input("analogy", &["claim_x"], &["claim_y"])).unwrap();
+    let m2 = db.record_move_event(mk_move_input("decomposition", &["claim_x"], &["claim_z"])).unwrap();
+
+    let consumers = db.list_moves_consuming_claim("claim_x", 10).unwrap();
+    assert_eq!(consumers.len(), 2);
+    let consumer_ids: std::collections::HashSet<_> =
+        consumers.iter().map(|m| m.move_id.clone()).collect();
+    assert!(consumer_ids.contains(&m1));
+    assert!(consumer_ids.contains(&m2));
+
+    let producers = db.list_moves_producing_claim("claim_y", 10).unwrap();
+    assert_eq!(producers.len(), 1);
+    assert_eq!(producers[0].move_id, m1);
+}
+
+#[test]
+fn test_m5b_record_move_rejects_invalid_observability_fields() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    // observed + inference_confidence set → reject
+    let mut inp = mk_move_input("analogy", &["a"], &["b"]);
+    inp.inference_confidence = Some(0.7);
+    let r = db.record_move_event(inp);
+    assert!(r.is_err(), "should reject inference_confidence on non-inferred");
+
+    // observed + inference_basis non-empty → reject
+    let mut inp2 = mk_move_input("analogy", &["a"], &["b"]);
+    inp2.inference_basis = Some(vec!["structural_pattern_match".into()]);
+    let r2 = db.record_move_event(inp2);
+    assert!(r2.is_err(), "should reject inference_basis on non-inferred");
+}
+
+#[test]
+fn test_m5b_inferred_move_carries_confidence() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let mut inp = mk_move_input("analogy", &["a"], &["b"]);
+    inp.observability = observability::INFERRED.to_string();
+    inp.inference_confidence = Some(0.8);
+    inp.inference_basis = Some(vec!["structural_pattern_match".into()]);
+    let move_id = db.record_move_event(inp).unwrap();
+    let ev = db.get_move_event(&move_id).unwrap().unwrap();
+    assert_eq!(ev.observability, "inferred");
+    assert_eq!(ev.inference_confidence, Some(0.8));
+    assert!(ev.inference_basis_json.as_deref().unwrap_or("").contains("structural_pattern_match"));
+}
+
+#[test]
+fn test_m5b_record_move_outcome_narrow_mutation() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let move_id = db.record_move_event(
+        mk_move_input("analogy", &["a"], &["b"])
+    ).unwrap();
+
+    db.record_move_outcome(
+        &move_id,
+        posthoc_outcome::CORROBORATED,
+        Some(serde_json::json!({"predictive_gain": 0.3}).to_string()),
+    ).unwrap();
+
+    let ev = db.get_move_event(&move_id).unwrap().unwrap();
+    assert_eq!(ev.posthoc_outcome.as_deref(), Some("corroborated"));
+    assert!(ev.posthoc_recorded_at.is_some());
+    assert!(ev.yield_json.contains("predictive_gain"));
+
+    // Second call on the same move should reject (already set).
+    let second = db.record_move_outcome(&move_id, posthoc_outcome::RETRACTED, None);
+    assert!(second.is_err(), "should reject overwriting an existing posthoc_outcome");
+}
+
+#[test]
+fn test_m5b_record_move_outcome_rejects_invalid_label() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    let r = db.record_move_outcome(&move_id, "totally_made_up", None);
+    assert!(r.is_err());
+}
+
+#[test]
+fn test_m5b_correction_never_mutates_original() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+
+    let correction_id = db.submit_move_correction(
+        &move_id,
+        Some("decomposition".to_string()),
+        None,
+        None,
+        "initial categorization was wrong".to_string(),
+        "curator_alice".to_string(),
+    ).unwrap();
+    assert!(!correction_id.is_empty());
+
+    // The original row still has move_type='analogy'.
+    let original = db.get_move_event(&move_id).unwrap().unwrap();
+    assert_eq!(original.move_type, "analogy", "original row must not be mutated");
+
+    // Canonical view reflects the correction.
+    let canonical = db.get_move_event_canonical(&move_id).unwrap().unwrap();
+    assert_eq!(canonical.move_type, "decomposition", "canonical reflects latest correction");
+
+    // Correction is readable via list_move_corrections.
+    let corrections = db.list_move_corrections(&move_id).unwrap();
+    assert_eq!(corrections.len(), 1);
+    assert_eq!(corrections[0].correction_id, correction_id);
+}
+
+#[test]
+fn test_m5b_correction_latest_wins() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+
+    db.submit_move_correction(
+        &move_id, Some("decomposition".into()), None, None,
+        "first correction".into(), "curator_a".into(),
+    ).unwrap();
+    // Need non-zero time delta between corrections for deterministic ordering.
+    std::thread::sleep(std::time::Duration::from_millis(10));
+    db.submit_move_correction(
+        &move_id, Some("ladder_up".into()), None, None,
+        "second correction, first was also wrong".into(), "curator_b".into(),
+    ).unwrap();
+
+    let canonical = db.get_move_event_canonical(&move_id).unwrap().unwrap();
+    assert_eq!(canonical.move_type, "ladder_up", "latest correction should win");
+}
+
+#[test]
+fn test_m5b_correction_rejects_empty_reason_and_no_fields() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+
+    // No fields changed → reject.
+    let r = db.submit_move_correction(
+        &move_id, None, None, None, "reason".into(), "curator".into(),
+    );
+    assert!(r.is_err());
+
+    // Empty reason → reject.
+    let r2 = db.submit_move_correction(
+        &move_id, Some("decomposition".into()), None, None, "".into(), "curator".into(),
+    );
+    assert!(r2.is_err());
+}
+
+#[test]
+fn test_m5b_adversarial_candidate_lifecycle() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+
+    // Create candidate from an automatic signal.
+    let instance_id = db.create_adversarial_candidate(
+        &move_id,
+        "contradiction",
+        Some("output claim was retracted within 24h".to_string()),
+    ).unwrap();
+    let candidate = db.get_adversarial_instance(&instance_id).unwrap().unwrap();
+    assert_eq!(candidate.status, "candidate");
+    assert_eq!(candidate.discovered_via, "contradiction");
+    assert!(candidate.traced_root_cause.is_some());
+    // Governance invariant: candidate must NOT have generalized_lesson.
+    assert!(candidate.generalized_lesson.is_none());
+    assert!(candidate.lesson_scope_json.is_none());
+
+    // Promote.
+    db.promote_adversarial_candidate(
+        &instance_id,
+        "analogy over cross-domain claims with dim≠ input modalities often produces false corroborations".into(),
+        serde_json::json!({"regimes": ["default"], "move_types": ["analogy"]}).to_string(),
+        "curator_alice".into(),
+    ).unwrap();
+
+    let confirmed = db.get_adversarial_instance(&instance_id).unwrap().unwrap();
+    assert_eq!(confirmed.status, "confirmed");
+    assert!(confirmed.generalized_lesson.is_some());
+    assert!(confirmed.lesson_scope_json.is_some());
+    assert_eq!(confirmed.curation_actor_id.as_deref(), Some("curator_alice"));
+}
+
+#[test]
+fn test_m5b_adversarial_promote_rejects_non_candidate() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    let instance_id = db.create_adversarial_candidate(
+        &move_id, "contradiction", None,
+    ).unwrap();
+    db.promote_adversarial_candidate(
+        &instance_id, "lesson".into(), "{}".into(), "c".into(),
+    ).unwrap();
+    // Second promotion attempt → reject.
+    let r = db.promote_adversarial_candidate(
+        &instance_id, "lesson2".into(), "{}".into(), "c".into(),
+    );
+    assert!(r.is_err(), "cannot promote non-candidate");
+}
+
+#[test]
+fn test_m5b_adversarial_promote_requires_non_empty_lesson() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    let instance_id = db.create_adversarial_candidate(
+        &move_id, "retraction", None,
+    ).unwrap();
+
+    // Empty lesson → reject.
+    let r = db.promote_adversarial_candidate(
+        &instance_id, "".into(), "{}".into(), "c".into(),
+    );
+    assert!(r.is_err());
+
+    // Empty scope → reject.
+    let r2 = db.promote_adversarial_candidate(
+        &instance_id, "lesson".into(), "".into(), "c".into(),
+    );
+    assert!(r2.is_err());
+}
+
+#[test]
+fn test_m5b_adversarial_reject_candidate() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    let instance_id = db.create_adversarial_candidate(
+        &move_id, "calibration_signal", None,
+    ).unwrap();
+
+    db.reject_adversarial_candidate(&instance_id, "curator_bob".into()).unwrap();
+    let rejected = db.get_adversarial_instance(&instance_id).unwrap().unwrap();
+    assert_eq!(rejected.status, "rejected");
+
+    // Cannot reject again (no candidate).
+    let r = db.reject_adversarial_candidate(&instance_id, "curator_bob".into());
+    assert!(r.is_err());
+}
+
+#[test]
+fn test_m5b_unknown_move_type_warns_but_does_not_reject() {
+    // The soft registry policy: unknown move_type logs a warning but the
+    // insert still succeeds. This is the "preserve evidence shape" rule.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let inp = RecordMoveEventInput {
+        move_type: "entirely_novel_move_type_not_in_registry".into(),
+        operator_version: "v0".into(),
+        observability: observability::OBSERVED.into(),
+        ..Default::default()
+    };
+    let r = db.record_move_event(inp);
+    assert!(r.is_ok(), "unknown move_type must not reject");
+    let ev = db.get_move_event(&r.unwrap()).unwrap().unwrap();
+    assert_eq!(ev.move_type, "entirely_novel_move_type_not_in_registry");
+    assert!(ev.expected_evaluation_horizon_ms.is_none(),
+        "unregistered move_type has no default horizon");
+}
+
+#[test]
+fn test_m5b_dependencies_stored_as_json() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let m1 = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    let mut inp = mk_move_input("decomposition", &["b"], &["c"]);
+    inp.dependencies = vec![m1.clone()];
+    let m2 = db.record_move_event(inp).unwrap();
+    let ev = db.get_move_event(&m2).unwrap().unwrap();
+    assert!(ev.dependencies_json.contains(&m1),
+        "dependencies_json should reference the upstream move_id");
+}
+
+#[test]
+fn test_m5b_append_only_preserves_original_after_correction() {
+    // Reconstruct from the original row directly — corrections go in a
+    // separate table. The structural fields on move_events are never
+    // touched by submit_move_correction.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    db.submit_move_correction(
+        &move_id, Some("decomposition".into()), Some("v2".into()), None,
+        "reason".into(), "curator".into(),
+    ).unwrap();
+
+    let raw: (String, String) = db.conn().query_row(
+        "SELECT move_type, operator_version FROM move_events WHERE move_id = ?1",
+        rusqlite::params![move_id], |r| Ok((r.get(0)?, r.get(1)?)),
+    ).unwrap();
+    assert_eq!(raw.0, "analogy", "move_events row must keep original move_type");
+    assert_eq!(raw.1, "v1", "move_events row must keep original operator_version");
+}
+
+#[test]
+fn test_m5b_edge_tables_have_fk_integrity() {
+    // FK constraint: move_input_edge.move_id REFERENCES move_events(move_id).
+    // Attempting to insert an edge for a non-existent move should fail.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let conn = db.conn();
+    // Ensure foreign keys are enabled (SQLite defaults to off per-connection).
+    conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
+    let r = conn.execute(
+        "INSERT INTO move_input_edge (move_id, claim_id, input_role, ordinal) \
+         VALUES ('nonexistent_move', 'claim_x', 'input', 0)",
+        [],
+    );
+    assert!(r.is_err(), "FK constraint should reject orphan edge");
+}
+
+#[test]
+fn test_m5b_adversarial_discovered_via_whitelist() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    let r = db.create_adversarial_candidate(&move_id, "invalid_source", None);
+    assert!(r.is_err(), "discovered_via CHECK enforces the whitelist");
+}
+
+#[test]
+fn test_m5b_seed_registries_idempotent() {
+    // Calling seed_move_registries a second time should not duplicate or error.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let before: i64 = db.conn().query_row(
+        "SELECT COUNT(*) FROM move_type_registry", [], |r| r.get(0),
+    ).unwrap();
+    db.seed_move_registries().unwrap();
+    let after: i64 = db.conn().query_row(
+        "SELECT COUNT(*) FROM move_type_registry", [], |r| r.get(0),
+    ).unwrap();
+    assert_eq!(before, after, "INSERT OR IGNORE should not add duplicates");
+}
+
+#[test]
+fn test_m5b_full_lifecycle_observed_to_retracted_with_adversarial() {
+    // End-to-end: record an observed move, enrich with posthoc retraction,
+    // file an adversarial candidate, curator promotes to confirmed, verify
+    // the canonical view and all pieces are readable.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let move_id = db.record_move_event(mk_move_input(
+        "hypothesis_generation",
+        &["evidence_a", "evidence_b"],
+        &["hypothesis_h"],
+    )).unwrap();
+
+    // Something goes wrong downstream — retract.
+    db.record_move_outcome(
+        &move_id,
+        posthoc_outcome::RETRACTED,
+        Some(serde_json::json!({"retraction_cause": "contradiction with high-weight claim"}).to_string()),
+    ).unwrap();
+
+    // Automatic detector files a candidate.
+    let instance_id = db.create_adversarial_candidate(
+        &move_id,
+        "retraction",
+        Some("hypothesis_h was retracted due to downstream contradiction".to_string()),
+    ).unwrap();
+
+    // Curator reviews and promotes with a generalized lesson.
+    db.promote_adversarial_candidate(
+        &instance_id,
+        "hypothesis_generation from ≤2 evidence sources is prone to retraction".into(),
+        serde_json::json!({
+            "regimes": ["default"],
+            "move_types": ["hypothesis_generation"],
+            "input_signatures": {"min_inputs": 2}
+        }).to_string(),
+        "curator_dana".into(),
+    ).unwrap();
+
+    // Verify everything.
+    let ev = db.get_move_event(&move_id).unwrap().unwrap();
+    assert_eq!(ev.posthoc_outcome.as_deref(), Some("retracted"));
+    let instance = db.get_adversarial_instance(&instance_id).unwrap().unwrap();
+    assert_eq!(instance.status, adversarial_status::CONFIRMED);
+    let instances = db.list_adversarial_for_move(&move_id).unwrap();
+    assert_eq!(instances.len(), 1);
+}
