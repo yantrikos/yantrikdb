@@ -48,7 +48,7 @@ mod stats;
 mod storage;
 mod temporal_helpers;
 mod warrant;
-mod moves;
+pub mod moves;
 pub mod tenant;
 #[cfg(test)]
 mod tests;

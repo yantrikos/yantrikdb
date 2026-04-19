@@ -254,6 +254,20 @@ db.upcoming(days=7)  # memories with approaching deadlines
 - [x] **V4** — Sessions, temporal awareness, cross-domain pattern mining, entity profiles
 - [ ] **V5** — Multi-agent shared memory, federated learning across users
 
+## Worked example: Wirecard
+
+For nearly a decade, Wirecard's filings and EY's audit attested to €1.9B in Philippine escrow accounts. In June 2020 both banks and the central bank formally denied the accounts existed. Wirecard filed insolvency 12 days later.
+
+A naive tally says 2 supports, 4 attacks. RFC 008's `⊕` operator tracks source lineage and discounts dependent claims: EY audited Wirecard-provided documents (shared lineage), BSP restated BPI+BDO's denials (shared lineage). The substrate reports 1.6 effective independent supports and 3.6 effective independent attacks — grounded in the public record, not in a tuned score.
+
+The `⋈` contest operator further distinguishes *present-tense contradictions* (overlapping validity windows) from *temporally separable opposition* (one side's assertion expired before the other's was made). For Wirecard, 4 of the 8 opposite-polarity pairs are present-tense conflict; 4 are historical state changes.
+
+See **[docs/showcase/wirecard.md](docs/showcase/wirecard.md)** for the full walkthrough, or run it directly:
+
+```bash
+cargo run --example showcase_wirecard
+```
+
 ## Research & Publications
 
 - **U.S. Patent Application 19/573,392** (March 2026): "Cognitive Memory Database System with Relevance-Conditioned Scoring and Autonomous Knowledge Management"
