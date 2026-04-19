@@ -426,6 +426,136 @@ fn test_schema_v4_has_trigger_log_and_patterns() {
     assert_eq!(count, 2);
 }
 
+// RFC 007 Phase 0: the five-layer reasoning substrate tables exist on fresh install.
+#[test]
+fn test_schema_v19_has_rfc007_tables() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let count: i64 = db.conn().query_row(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN \
+         ('propositions', 'variables', 'state_assertions', 'rule_edges', 'scenario_specs')",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(count, 5, "RFC 007 Phase 0 should create all five new tables");
+}
+
+#[test]
+fn test_schema_v19_claims_has_proposition_id() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    // PRAGMA table_info returns a row per column; we assert proposition_id is among them.
+    let conn = db.conn();
+    let mut stmt = conn.prepare("PRAGMA table_info(claims)").unwrap();
+    let cols: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    assert!(
+        cols.contains(&"proposition_id".to_string()),
+        "claims table should have a proposition_id column after V19. Got: {:?}",
+        cols
+    );
+}
+
+#[test]
+fn test_schema_v19_rule_edge_whitelist_enforced() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    // Seed a variable so the FK is valid.
+    db.conn().execute(
+        "INSERT INTO variables (variable_id, name, namespace, value_space, scope, created_at) \
+         VALUES ('v1', 'var_a', 'default', '{}', 'generic', 0.0)",
+        [],
+    ).unwrap();
+    db.conn().execute(
+        "INSERT INTO variables (variable_id, name, namespace, value_space, scope, created_at) \
+         VALUES ('v2', 'var_b', 'default', '{}', 'generic', 0.0)",
+        [],
+    ).unwrap();
+    // Disallowed edge_type — CHECK constraint should reject.
+    let result = db.conn().execute(
+        "INSERT INTO rule_edges (rule_id, parent_variable_id, child_variable_id, edge_type, \
+         direction_confidence, persistence, scope, source, namespace, created_at) \
+         VALUES ('r1', 'v1', 'v2', 'implies', 'high', 'instantaneous', 'generic', 'test', 'default', 0.0)",
+        [],
+    );
+    assert!(
+        result.is_err(),
+        "rule_edges should reject edge_type='implies' — only whitelist (causal_promotes, causal_inhibits, requires) allowed"
+    );
+    // Allowed edge_type — should succeed.
+    db.conn().execute(
+        "INSERT INTO rule_edges (rule_id, parent_variable_id, child_variable_id, edge_type, \
+         direction_confidence, persistence, scope, source, namespace, created_at) \
+         VALUES ('r2', 'v1', 'v2', 'causal_promotes', 'high', 'instantaneous', 'generic', 'test', 'default', 0.0)",
+        [],
+    ).unwrap();
+}
+
+#[test]
+fn test_schema_v19_backfill_from_v18() {
+    // Simulate a V18 database by running the schema up to but not including V19,
+    // inserting some claim rows without proposition_id, then running the V19
+    // migration SQL directly and verifying backfill populates proposition_ids.
+    use rusqlite::Connection;
+    let conn = Connection::open_in_memory().unwrap();
+
+    // Minimal V18-shaped schema (just what V19's backfill needs).
+    conn.execute_batch("
+        CREATE TABLE claims (
+            claim_id TEXT PRIMARY KEY,
+            src TEXT NOT NULL,
+            dst TEXT NOT NULL,
+            rel_type TEXT NOT NULL,
+            weight REAL NOT NULL DEFAULT 1.0,
+            created_at REAL NOT NULL,
+            tombstoned INTEGER NOT NULL DEFAULT 0,
+            polarity INTEGER NOT NULL DEFAULT 1,
+            modality TEXT NOT NULL DEFAULT 'asserted',
+            valid_from REAL, valid_to REAL,
+            extractor TEXT NOT NULL DEFAULT 'manual',
+            extractor_version TEXT,
+            confidence_band TEXT NOT NULL DEFAULT 'medium',
+            source_memory_rid TEXT,
+            span_start INTEGER, span_end INTEGER,
+            namespace TEXT NOT NULL DEFAULT 'default'
+        );
+    ").unwrap();
+
+    // Three claims, two proposition-unique tuples, one tombstoned (should be skipped).
+    conn.execute("INSERT INTO claims (claim_id, src, dst, rel_type, created_at, extractor, namespace) \
+                  VALUES ('c1', 'Alice', 'Acme', 'works_at', 0.0, 'source_a', 'ns1')", []).unwrap();
+    conn.execute("INSERT INTO claims (claim_id, src, dst, rel_type, created_at, extractor, namespace) \
+                  VALUES ('c2', 'Alice', 'Acme', 'works_at', 0.0, 'source_b', 'ns1')", []).unwrap();
+    conn.execute("INSERT INTO claims (claim_id, src, dst, rel_type, created_at, extractor, namespace) \
+                  VALUES ('c3', 'Bob', 'Beta', 'works_at', 0.0, 'source_a', 'ns1')", []).unwrap();
+    conn.execute("INSERT INTO claims (claim_id, src, dst, rel_type, created_at, extractor, namespace, tombstoned) \
+                  VALUES ('c4', 'Carol', 'Gamma', 'works_at', 0.0, 'source_a', 'ns1', 1)", []).unwrap();
+
+    // Run the V19 migration.
+    conn.execute_batch(crate::schema::MIGRATE_V18_TO_V19).unwrap();
+
+    // Two propositions expected (Alice/Acme/works_at, Bob/Beta/works_at).
+    // The tombstoned claim's tuple should NOT create a proposition.
+    let prop_count: i64 = conn.query_row("SELECT COUNT(*) FROM propositions", [], |r| r.get(0)).unwrap();
+    assert_eq!(prop_count, 2, "backfill should create one proposition per unique non-tombstoned tuple");
+
+    // Both Alice claims should share the same proposition_id.
+    let alice_props: Vec<String> = conn.prepare("SELECT proposition_id FROM claims WHERE src='Alice'").unwrap()
+        .query_map([], |r| r.get::<_, String>(0))
+        .unwrap()
+        .filter_map(|r| r.ok())
+        .collect();
+    assert_eq!(alice_props.len(), 2);
+    assert_eq!(alice_props[0], alice_props[1], "claims on the same tuple should share a proposition_id");
+
+    // Alice and Bob should have different proposition_ids.
+    let bob_prop: String = conn.query_row("SELECT proposition_id FROM claims WHERE src='Bob'", [], |r| r.get(0)).unwrap();
+    assert_ne!(alice_props[0], bob_prop);
+
+    // The tombstoned claim's proposition_id should remain NULL.
+    let carol_prop: Option<String> = conn.query_row("SELECT proposition_id FROM claims WHERE src='Carol'", [], |r| r.get(0)).unwrap();
+    assert!(carol_prop.is_none(), "tombstoned claims should not be backfilled");
+}
+
 #[test]
 fn test_think_empty_db() {
     let db = YantrikDB::new(":memory:", 8).unwrap();

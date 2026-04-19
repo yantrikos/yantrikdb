@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 18;
+pub const SCHEMA_VERSION: i32 = 19;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -61,6 +61,117 @@ CREATE TABLE IF NOT EXISTS sessions (
     origin_actor TEXT
 );
 
+-- ──────────────────────────────────────────────────────────────────
+-- RFC 007 Phase 0: Meta-Cognitive Primitives — reasoning substrate.
+-- Five layers: evidence (claims), propositions, variables + state
+-- assertions, rule edges, scenarios. Every primitive operates on a
+-- specific layer; conflating layers is how memory systems produce
+-- confidently-wrong outputs.
+-- ──────────────────────────────────────────────────────────────────
+
+-- Layer 2 — Propositions: canonical identity for an abstract
+-- (subject, relation, object) triple within a namespace. Evidence
+-- rows in `claims` reference one proposition. Aggregation (support,
+-- oppose, diversity) is computed at the proposition level.
+CREATE TABLE IF NOT EXISTS propositions (
+    proposition_id TEXT PRIMARY KEY,            -- UUIDv7
+    src            TEXT NOT NULL,
+    rel_type       TEXT NOT NULL,
+    dst            TEXT NOT NULL,
+    namespace      TEXT NOT NULL DEFAULT 'default',
+    created_at     REAL NOT NULL,
+    UNIQUE(src, rel_type, dst, namespace)
+);
+CREATE INDEX IF NOT EXISTS idx_propositions_src ON propositions(src);
+CREATE INDEX IF NOT EXISTS idx_propositions_dst ON propositions(dst);
+CREATE INDEX IF NOT EXISTS idx_propositions_rel ON propositions(rel_type);
+
+-- Layer 3a — Variables: typed world-or-agent states that can be
+-- observed or intervened on. Variables are what scenarios target;
+-- they are distinct from propositions (which are abstract statements)
+-- and from state_assertions (which are specific observations).
+CREATE TABLE IF NOT EXISTS variables (
+    variable_id    TEXT PRIMARY KEY,            -- UUIDv7
+    name           TEXT NOT NULL,                 -- e.g. \"alice.sleep_quality\"
+    namespace      TEXT NOT NULL DEFAULT 'default',
+    value_space    TEXT NOT NULL,                 -- JSON: {type, values|range|unit}
+    scope          TEXT NOT NULL,                 -- generic|individual|instance
+    context_dims   TEXT NOT NULL DEFAULT '[]',    -- JSON array
+    manipulable    INTEGER NOT NULL DEFAULT 0,    -- 0 = non-actionable
+    actionability  TEXT,                          -- world_action|information_action|NULL
+    created_at     REAL NOT NULL,
+    UNIQUE(name, namespace)
+);
+CREATE INDEX IF NOT EXISTS idx_variables_ns ON variables(namespace);
+CREATE INDEX IF NOT EXISTS idx_variables_scope ON variables(scope);
+
+-- Layer 3b — State assertions: observations of a variable's value at
+-- a point in time, optionally context-qualified.
+CREATE TABLE IF NOT EXISTS state_assertions (
+    state_id          TEXT PRIMARY KEY,          -- UUIDv7
+    variable_id       TEXT NOT NULL REFERENCES variables(variable_id),
+    value             TEXT NOT NULL,              -- JSON from variable's value_space
+    valid_from        REAL NOT NULL,
+    valid_to          REAL,                       -- NULL = still valid
+    context_values    TEXT NOT NULL DEFAULT '{}', -- JSON
+    confidence_band   TEXT NOT NULL DEFAULT 'medium',
+    source            TEXT NOT NULL,
+    source_memory_rid TEXT,
+    namespace         TEXT NOT NULL,
+    created_at        REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_state_var ON state_assertions(variable_id);
+CREATE INDEX IF NOT EXISTS idx_state_valid ON state_assertions(valid_from, valid_to);
+CREATE INDEX IF NOT EXISTS idx_state_ns ON state_assertions(namespace);
+
+-- Layer 4 — Rule edges: typed causal-or-structural edges between
+-- variables. Whitelist enforced at schema level. Rule edges are
+-- themselves first-class claims: `source_evidence_rids` tracks the
+-- evidence supporting the rule's existence, and meta-contradictions
+-- on rules resolve via the same polarity/aggregation logic as any
+-- other proposition. Rules are NOT authoritative by fiat.
+CREATE TABLE IF NOT EXISTS rule_edges (
+    rule_id              TEXT PRIMARY KEY,       -- UUIDv7
+    parent_variable_id   TEXT NOT NULL REFERENCES variables(variable_id),
+    child_variable_id    TEXT NOT NULL REFERENCES variables(variable_id),
+    edge_type            TEXT NOT NULL CHECK (edge_type IN
+                           ('causal_promotes', 'causal_inhibits', 'requires')),
+    direction_confidence TEXT NOT NULL,           -- low|medium|high
+    lag_min_seconds      REAL,
+    lag_max_seconds      REAL,
+    persistence          TEXT NOT NULL,           -- instantaneous|transient|cumulative|permanent
+    scope                TEXT NOT NULL,           -- generic|context_specific
+    context_qualifier    TEXT,                    -- JSON; NULL for generic rules
+    source               TEXT NOT NULL,
+    source_evidence_rids TEXT NOT NULL DEFAULT '[]',  -- JSON array
+    namespace            TEXT NOT NULL,
+    tombstoned           INTEGER NOT NULL DEFAULT 0,
+    created_at           REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rule_parent ON rule_edges(parent_variable_id);
+CREATE INDEX IF NOT EXISTS idx_rule_child ON rule_edges(child_variable_id);
+CREATE INDEX IF NOT EXISTS idx_rule_type ON rule_edges(edge_type);
+
+-- Layer 5 — Scenario specs: saved assumption sets. Scenario execution
+-- itself is request-scoped and in-memory — this table only persists
+-- assumption lists so the same what-if can be re-run later.
+-- DO NOT store derived results here; always recompute from current base.
+CREATE TABLE IF NOT EXISTS scenario_specs (
+    spec_id        TEXT PRIMARY KEY,              -- UUIDv7
+    name           TEXT NOT NULL,
+    namespace      TEXT NOT NULL,
+    assumptions    TEXT NOT NULL,                 -- JSON array of overrides
+    created_by     TEXT,
+    engine_version TEXT,
+    created_at     REAL NOT NULL,
+    UNIQUE(name, namespace)
+);
+CREATE INDEX IF NOT EXISTS idx_scenario_ns ON scenario_specs(namespace);
+
+-- ──────────────────────────────────────────────────────────────────
+-- End RFC 007 Phase 0 tables. Claims table below gets a proposition_id FK.
+-- ──────────────────────────────────────────────────────────────────
+
 -- Claims: first-class semantic relationship ledger (RFC 006 Phase 5)
 -- Each claim records a structured (subject, relation, object) triple.
 -- The legacy 'edges' name is preserved as a read-only VIEW for backward compat.
@@ -85,12 +196,18 @@ CREATE TABLE IF NOT EXISTS claims (
     span_end INTEGER,
     namespace TEXT NOT NULL DEFAULT 'default',
 
+    -- RFC 007 Phase 0: canonical proposition FK. Populated on insert (or by
+    -- V18→V19 backfill for existing rows). Propositions are the canonical
+    -- identity for (src, rel_type, dst, namespace) tuples across all evidence.
+    proposition_id TEXT REFERENCES propositions(proposition_id),
+
     -- RFC 006: multiple sources can make conflicting claims about the same (src, rel, dst).
     -- Uniqueness is scoped to (src, dst, rel, extractor, polarity, namespace) so
     -- e.g. witness A can claim \"X did Y\" while witness B claims \"X did NOT do Y\" and
     -- both rows coexist. This enables polarity contradiction detection.
     UNIQUE(src, dst, rel_type, extractor, polarity, namespace)
 );
+CREATE INDEX IF NOT EXISTS idx_claims_proposition ON claims(proposition_id);
 
 -- Backward-compatible VIEW: all code reading FROM edges continues to work.
 CREATE VIEW IF NOT EXISTS edges AS
@@ -953,4 +1070,135 @@ CREATE VIEW IF NOT EXISTS edges AS
            polarity, modality, valid_from, valid_to, extractor, extractor_version,
            confidence_band, source_memory_rid, span_start, span_end, namespace
     FROM claims;
+";
+
+/// SQL to migrate from schema V18 to V19 (RFC 007 Phase 0).
+///
+/// Adds the five-layer reasoning substrate on top of RFC 006 claims:
+///   - propositions: canonical identity for (src, rel_type, dst, namespace) triples
+///   - variables: typed world/agent states with value_space + manipulability
+///   - state_assertions: observations of variable values at a point in time
+///   - rule_edges: whitelisted causal/structural edges between variables
+///   - scenario_specs: saved assumption sets (NOT derived state)
+///
+/// Claims table gains `proposition_id` column. Backfill: every unique
+/// (src, rel_type, dst, namespace) from claims becomes a proposition row,
+/// and claims.proposition_id is populated for all existing rows.
+///
+/// No data loss. Fresh installs run SCHEMA_SQL which already has the new tables.
+/// Variables, state_assertions, rule_edges, scenario_specs are empty after
+/// migration — manual curation, NOT auto-created from propositions.
+pub const MIGRATE_V18_TO_V19: &str = "
+CREATE TABLE IF NOT EXISTS propositions (
+    proposition_id TEXT PRIMARY KEY,
+    src            TEXT NOT NULL,
+    rel_type       TEXT NOT NULL,
+    dst            TEXT NOT NULL,
+    namespace      TEXT NOT NULL DEFAULT 'default',
+    created_at     REAL NOT NULL,
+    UNIQUE(src, rel_type, dst, namespace)
+);
+CREATE INDEX IF NOT EXISTS idx_propositions_src ON propositions(src);
+CREATE INDEX IF NOT EXISTS idx_propositions_dst ON propositions(dst);
+CREATE INDEX IF NOT EXISTS idx_propositions_rel ON propositions(rel_type);
+
+CREATE TABLE IF NOT EXISTS variables (
+    variable_id    TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    namespace      TEXT NOT NULL DEFAULT 'default',
+    value_space    TEXT NOT NULL,
+    scope          TEXT NOT NULL,
+    context_dims   TEXT NOT NULL DEFAULT '[]',
+    manipulable    INTEGER NOT NULL DEFAULT 0,
+    actionability  TEXT,
+    created_at     REAL NOT NULL,
+    UNIQUE(name, namespace)
+);
+CREATE INDEX IF NOT EXISTS idx_variables_ns ON variables(namespace);
+CREATE INDEX IF NOT EXISTS idx_variables_scope ON variables(scope);
+
+CREATE TABLE IF NOT EXISTS state_assertions (
+    state_id          TEXT PRIMARY KEY,
+    variable_id       TEXT NOT NULL REFERENCES variables(variable_id),
+    value             TEXT NOT NULL,
+    valid_from        REAL NOT NULL,
+    valid_to          REAL,
+    context_values    TEXT NOT NULL DEFAULT '{}',
+    confidence_band   TEXT NOT NULL DEFAULT 'medium',
+    source            TEXT NOT NULL,
+    source_memory_rid TEXT,
+    namespace         TEXT NOT NULL,
+    created_at        REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_state_var ON state_assertions(variable_id);
+CREATE INDEX IF NOT EXISTS idx_state_valid ON state_assertions(valid_from, valid_to);
+CREATE INDEX IF NOT EXISTS idx_state_ns ON state_assertions(namespace);
+
+CREATE TABLE IF NOT EXISTS rule_edges (
+    rule_id              TEXT PRIMARY KEY,
+    parent_variable_id   TEXT NOT NULL REFERENCES variables(variable_id),
+    child_variable_id    TEXT NOT NULL REFERENCES variables(variable_id),
+    edge_type            TEXT NOT NULL CHECK (edge_type IN
+                           ('causal_promotes', 'causal_inhibits', 'requires')),
+    direction_confidence TEXT NOT NULL,
+    lag_min_seconds      REAL,
+    lag_max_seconds      REAL,
+    persistence          TEXT NOT NULL,
+    scope                TEXT NOT NULL,
+    context_qualifier    TEXT,
+    source               TEXT NOT NULL,
+    source_evidence_rids TEXT NOT NULL DEFAULT '[]',
+    namespace            TEXT NOT NULL,
+    tombstoned           INTEGER NOT NULL DEFAULT 0,
+    created_at           REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_rule_parent ON rule_edges(parent_variable_id);
+CREATE INDEX IF NOT EXISTS idx_rule_child ON rule_edges(child_variable_id);
+CREATE INDEX IF NOT EXISTS idx_rule_type ON rule_edges(edge_type);
+
+CREATE TABLE IF NOT EXISTS scenario_specs (
+    spec_id        TEXT PRIMARY KEY,
+    name           TEXT NOT NULL,
+    namespace      TEXT NOT NULL,
+    assumptions    TEXT NOT NULL,
+    created_by     TEXT,
+    engine_version TEXT,
+    created_at     REAL NOT NULL,
+    UNIQUE(name, namespace)
+);
+CREATE INDEX IF NOT EXISTS idx_scenario_ns ON scenario_specs(namespace);
+
+-- Add proposition_id to claims. SQLite can't ADD COLUMN with REFERENCES, so
+-- we add a plain TEXT column here and rely on application-level referential
+-- integrity. Fresh installs via SCHEMA_SQL get the full FK constraint.
+ALTER TABLE claims ADD COLUMN proposition_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_claims_proposition ON claims(proposition_id);
+
+-- Backfill: one proposition per unique (src, rel_type, dst, namespace) from
+-- non-tombstoned claims. Uses lower(hex(randomblob(16))) for id generation —
+-- not UUIDv7-sortable, but acceptable for a one-time migration. New claims
+-- going forward will get Rust-generated UUIDv7 proposition_ids.
+INSERT OR IGNORE INTO propositions (proposition_id, src, rel_type, dst, namespace, created_at)
+SELECT
+    lower(hex(randomblob(16))) AS proposition_id,
+    src,
+    rel_type,
+    dst,
+    namespace,
+    strftime('%s','now') * 1.0 AS created_at
+FROM claims
+WHERE tombstoned = 0
+GROUP BY src, rel_type, dst, namespace;
+
+-- Populate claims.proposition_id from the new propositions table.
+UPDATE claims
+SET proposition_id = (
+    SELECT p.proposition_id
+    FROM propositions p
+    WHERE p.src = claims.src
+      AND p.rel_type = claims.rel_type
+      AND p.dst = claims.dst
+      AND p.namespace = claims.namespace
+)
+WHERE proposition_id IS NULL AND tombstoned = 0;
 ";
