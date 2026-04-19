@@ -757,6 +757,192 @@ fn test_mobility_self_generated_discount() {
     assert_eq!(state.self_gen_local, Some(1.0));
 }
 
+// ──────────────────────────────────────────────────────────────────
+// RFC 008 Phase 1 M3: ingestion hook + content_hash idempotence +
+// order invariance through the full DB round-trip. Locked spec in
+// Saga note 14.
+// ──────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_m3_schema_v21_columns_present() {
+    // Fresh-install schema (no migration) should have all five M3 columns.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let conn = db.conn();
+    let mut stmt = conn.prepare("PRAGMA table_info(mobility_state)").unwrap();
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(1))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    for expected in ["formula_version", "content_hash", "live_claim_count", "state_status", "computed_at"] {
+        assert!(
+            rows.iter().any(|c| c == expected),
+            "V21 column {} missing from mobility_state",
+            expected
+        );
+    }
+}
+
+#[test]
+fn test_m3_state_populated_with_hash_and_status() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_hash");
+    seed_mobility_claim(&db, "p_hash", "ext_a", 1, "[\"src_1\"]", 0, "text", "default");
+
+    let state = db.compute_write_tier_mobility("p_hash", "default").unwrap();
+    assert_eq!(state.formula_version, crate::engine::warrant::FORMULA_VERSION);
+    assert!(!state.content_hash.is_empty(), "content_hash should be populated");
+    assert_eq!(state.state_status, "fresh");
+    assert_eq!(state.live_claim_count, 1);
+    assert!(state.computed_at > 0, "computed_at should be set");
+
+    // Round-trip through the DB.
+    let read = db.get_mobility_state("p_hash", "default").unwrap().unwrap();
+    assert_eq!(read.content_hash, state.content_hash);
+    assert_eq!(read.state_status, "fresh");
+    assert_eq!(read.live_claim_count, 1);
+}
+
+#[test]
+fn test_m3_idempotent_recompute_on_unchanged_live_set() {
+    // Calling compute twice with no intervening changes should return the
+    // same content_hash and produce the same stored row (no new snapshot,
+    // no state change).
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_idem");
+    seed_mobility_claim(&db, "p_idem", "ext_a", 1, "[\"src_1\"]", 0, "text", "default");
+
+    let first = db.compute_write_tier_mobility("p_idem", "default").unwrap();
+    let second = db.compute_write_tier_mobility("p_idem", "default").unwrap();
+    assert_eq!(first.content_hash, second.content_hash, "hash must be stable on unchanged set");
+    assert_eq!(first.snapshot_ts, second.snapshot_ts, "idempotent call should return the same row");
+}
+
+#[test]
+fn test_m3_hash_discriminates_on_claim_change() {
+    // Adding a claim changes the live set → content_hash must change.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    seed_proposition(&db, "p_disc");
+    seed_mobility_claim(&db, "p_disc", "ext_a", 1, "[\"src_a\"]", 0, "text", "default");
+    let h1 = db.compute_write_tier_mobility("p_disc", "default").unwrap().content_hash;
+
+    seed_mobility_claim(&db, "p_disc", "ext_b", 1, "[\"src_b\"]", 0, "image", "default");
+    let h2 = db.compute_write_tier_mobility("p_disc", "default").unwrap().content_hash;
+    assert_ne!(h1, h2, "content_hash must change when live set changes");
+}
+
+#[test]
+fn test_m3_order_invariant_through_db() {
+    // Inserting the same three claims in two different orders must produce
+    // the same support_mass — this is the property the M3 spec is designed
+    // to guarantee.
+    fn setup_and_compute(order: &[(&str, &str, &str)]) -> (f64, String) {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        seed_proposition(&db, "p_ord");
+        for (ext, src, modality) in order {
+            let lineage = format!("[\"{}\"]", src);
+            seed_mobility_claim(&db, "p_ord", ext, 1, &lineage, 0, modality, "default");
+        }
+        let state = db.compute_write_tier_mobility("p_ord", "default").unwrap();
+        (state.support_mass.unwrap(), state.content_hash)
+    }
+
+    let (mass_abc, hash_abc) = setup_and_compute(&[
+        ("ext_a", "src_a", "text"),
+        ("ext_b", "src_b", "image"),
+        ("ext_c", "src_c", "numeric"),
+    ]);
+    let (mass_cba, hash_cba) = setup_and_compute(&[
+        ("ext_c", "src_c", "numeric"),
+        ("ext_b", "src_b", "image"),
+        ("ext_a", "src_a", "text"),
+    ]);
+    assert!((mass_abc - mass_cba).abs() < 1e-9, "order invariance broken: {} vs {}", mass_abc, mass_cba);
+    assert_eq!(hash_abc, hash_cba, "content_hash must be order-invariant");
+}
+
+#[test]
+fn test_m3_ingest_claim_triggers_mobility() {
+    // The ingestion hook is the hot-path entry: ingest_claim should create
+    // both the proposition row and a fresh mobility_state row in one pass.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let claim_id = db.ingest_claim(
+        "Alice", "works_at", "Acme", "default",
+        1, "asserted",
+        None, None,
+        "manual", None,
+        "medium",
+        None, None, None,
+        1.0,
+    ).unwrap();
+    assert!(!claim_id.is_empty());
+
+    // Proposition row should exist.
+    let prop_id: String = db.conn().query_row(
+        "SELECT proposition_id FROM propositions \
+         WHERE src = 'Alice' AND rel_type = 'works_at' AND dst = 'Acme' AND namespace = 'default'",
+        [],
+        |row| row.get(0),
+    ).unwrap();
+    assert!(!prop_id.is_empty());
+
+    // Claim row should have proposition_id populated.
+    let claim_prop_id: String = db.conn().query_row(
+        "SELECT proposition_id FROM claims WHERE claim_id = ?1",
+        rusqlite::params![claim_id],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(claim_prop_id, prop_id);
+
+    // Mobility state should exist with state_status='fresh'.
+    let state = db.get_mobility_state(&prop_id, "default").unwrap().unwrap();
+    assert_eq!(state.state_status, "fresh");
+    assert_eq!(state.live_claim_count, 1);
+    assert!(state.content_hash.len() >= 32);
+    // Single positive claim with weight 1.0, no lineage → ω = 1, σ = 1.
+    assert!((state.support_mass.unwrap() - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn test_m3_second_ingest_updates_mobility_deterministically() {
+    // Ingesting a second claim on the same proposition should trigger a
+    // recompute with a new content_hash and include both claims in
+    // live_claim_count.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    db.ingest_claim(
+        "Alice", "works_at", "Acme", "default",
+        1, "asserted", None, None,
+        "source_a", None, "medium",
+        None, None, None,
+        1.0,
+    ).unwrap();
+
+    let prop_id: String = db.conn().query_row(
+        "SELECT proposition_id FROM propositions \
+         WHERE src = 'Alice' AND rel_type = 'works_at' AND dst = 'Acme' AND namespace = 'default'",
+        [],
+        |row| row.get(0),
+    ).unwrap();
+    let h1 = db.get_mobility_state(&prop_id, "default").unwrap().unwrap().content_hash;
+
+    // Second claim, different extractor (so uniqueness doesn't collapse).
+    db.ingest_claim(
+        "Alice", "works_at", "Acme", "default",
+        1, "asserted", None, None,
+        "source_b", None, "medium",
+        None, None, None,
+        1.0,
+    ).unwrap();
+
+    let state2 = db.get_mobility_state(&prop_id, "default").unwrap().unwrap();
+    assert_eq!(state2.live_claim_count, 2);
+    assert_ne!(h1, state2.content_hash, "hash must change after new claim");
+    // Both claims have empty source_lineage (ingest_claim doesn't populate it),
+    // so pipeline_overlap = 0 (distinct extractors), source/self overlap = 0.
+    // σ should be ~2.0.
+    assert!((state2.support_mass.unwrap() - 2.0).abs() < 1e-9);
+}
+
 #[test]
 fn test_schema_v20_migration_from_v19() {
     // Simulate a V19 database (without V20's new tables/columns), run the V20

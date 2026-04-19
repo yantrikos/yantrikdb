@@ -1,9 +1,58 @@
-use rusqlite::params;
+use rusqlite::{params, Connection};
 
 use crate::error::Result;
 use crate::types::{Edge, Entity};
 
 use super::{now, YantrikDB};
+
+/// Resolve (src, rel_type, dst, namespace) to a proposition_id, creating
+/// the proposition row if it doesn't exist. Propositions are the canonical
+/// identity under which all claim rows about the same triple aggregate;
+/// RFC 008 mobility_state is keyed by (proposition_id, regime).
+///
+/// UNIQUE(src, rel_type, dst, namespace) is enforced at the schema level,
+/// so a concurrent inserter racing on the same triple will produce one
+/// proposition row and one duplicate-key violation; we recover from the
+/// violation by reading the existing row.
+fn ensure_proposition(
+    conn: &Connection,
+    src: &str,
+    rel_type: &str,
+    dst: &str,
+    namespace: &str,
+    created_at: f64,
+) -> Result<String> {
+    // Fast path: already exists.
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT proposition_id FROM propositions \
+             WHERE src = ?1 AND rel_type = ?2 AND dst = ?3 AND namespace = ?4",
+            params![src, rel_type, dst, namespace],
+            |row| row.get(0),
+        )
+        .ok();
+    if let Some(id) = existing {
+        return Ok(id);
+    }
+
+    let proposition_id = crate::id::new_id();
+    conn.execute(
+        "INSERT INTO propositions (proposition_id, src, rel_type, dst, namespace, created_at) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+         ON CONFLICT(src, rel_type, dst, namespace) DO NOTHING",
+        params![proposition_id, src, rel_type, dst, namespace, created_at],
+    )?;
+
+    // The INSERT may have been a no-op due to the conflict — re-read to
+    // get whichever id actually won (ours or the racer's).
+    let id: String = conn.query_row(
+        "SELECT proposition_id FROM propositions \
+         WHERE src = ?1 AND rel_type = ?2 AND dst = ?3 AND namespace = ?4",
+        params![src, rel_type, dst, namespace],
+        |row| row.get(0),
+    )?;
+    Ok(id)
+}
 
 impl YantrikDB {
     /// Create or update a relationship between entities.
@@ -407,9 +456,23 @@ impl YantrikDB {
         let (src_type, dst_type) =
             crate::graph::classify_with_relationship(&src_resolved, &dst_resolved, rel_type);
 
-        // Phase 1: SQL inserts (conn locked)
+        // RFC 008 M3: default regime for claims produced by the ingestion API.
+        // A regime-aware variant can accept this as an argument later; 'default'
+        // is the only regime written by the public HTTP endpoint today.
+        let regime_tag = "default";
+
+        // Phase 1: SQL inserts + write-tier mobility recompute, all under one
+        // parking_lot mutex hold so SQLite's single-writer invariant serializes
+        // concurrent ingests on the same proposition.
+        let proposition_id: String;
         {
             let conn = self.conn.lock();
+
+            // RFC 007 Phase 0: every claim must point at a canonical proposition.
+            // Ensure the (src, rel_type, dst, namespace) proposition exists and
+            // get its id — create atomically if missing.
+            proposition_id = ensure_proposition(&conn, &src_resolved, rel_type, &dst_resolved, namespace, ts)?;
+
             // RFC 006: uniqueness is scoped to (src, dst, rel_type, extractor, polarity, namespace)
             // so multiple sources can make conflicting claims about the same fact. Only an
             // identical resubmission (same extractor + same polarity + same namespace) is
@@ -417,16 +480,19 @@ impl YantrikDB {
             conn.execute(
                 "INSERT INTO claims (claim_id, src, dst, rel_type, weight, created_at, \
                  polarity, modality, valid_from, valid_to, extractor, extractor_version, \
-                 confidence_band, source_memory_rid, span_start, span_end, namespace) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17) \
+                 confidence_band, source_memory_rid, span_start, span_end, namespace, \
+                 proposition_id, regime_tag) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19) \
                  ON CONFLICT(src, dst, rel_type, extractor, polarity, namespace) DO UPDATE SET \
                  weight = ?5, created_at = ?6, modality = ?8, \
                  valid_from = ?9, valid_to = ?10, extractor_version = ?12, \
-                 confidence_band = ?13, source_memory_rid = ?14, span_start = ?15, span_end = ?16",
+                 confidence_band = ?13, source_memory_rid = ?14, span_start = ?15, span_end = ?16, \
+                 proposition_id = ?18, regime_tag = ?19",
                 params![
                     claim_id, src_resolved, dst_resolved, rel_type, weight, ts,
                     polarity, modality, valid_from, valid_to, extractor, extractor_version,
-                    confidence_band, source_memory_rid, span_start, span_end, namespace
+                    confidence_band, source_memory_rid, span_start, span_end, namespace,
+                    proposition_id, regime_tag
                 ],
             )?;
 
@@ -439,6 +505,30 @@ impl YantrikDB {
                      entity_type = CASE WHEN entities.entity_type = 'unknown' THEN ?2 ELSE entities.entity_type END",
                     params![entity, etype, ts, ts],
                 )?;
+            }
+
+            // RFC 008 M3: recompute write-tier mobility for the claim's
+            // (proposition_id, regime). Idempotent via content_hash — if the
+            // live set hasn't changed (e.g. ON CONFLICT DO UPDATE with the
+            // same extractor/polarity), this is a no-op aside from the
+            // content_hash comparison.
+            //
+            // Failures here do NOT abort the claim insert. M3 keeps claim
+            // durability as the authoritative commit; if mobility computation
+            // fails (malformed lineage, etc.), the state row is skipped and
+            // the background reconciler will recompute it. See Saga note 14
+            // for the correctness/availability tradeoff discussion.
+            if let Err(e) = crate::engine::warrant::compute_write_tier_mobility_conn(
+                &conn,
+                &proposition_id,
+                regime_tag,
+            ) {
+                tracing::warn!(
+                    proposition_id = %proposition_id,
+                    regime = regime_tag,
+                    error = %e,
+                    "mobility recompute failed during claim ingest; reconciler will retry"
+                );
             }
         } // conn dropped
 

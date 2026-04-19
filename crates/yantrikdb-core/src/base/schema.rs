@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 20;
+pub const SCHEMA_VERSION: i32 = 21;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -211,10 +211,25 @@ CREATE TABLE IF NOT EXISTS mobility_state (
     tier_write_components   TEXT NOT NULL DEFAULT '[]',  -- JSON array of component names
     tier_read_components    TEXT NOT NULL DEFAULT '[]',
     tier_bg_components      TEXT NOT NULL DEFAULT '[]',
+    -- M3 additions (V21): reproducible-state discipline for write-tier recompute.
+    -- content_hash is a sha256 over (formula_version || sorted claim_ids ||
+    -- sorted per-dim lineage elements || polarity flags). If the hash of the
+    -- current live claim set matches, the recompute is a no-op (idempotent).
+    -- formula_version lets us retire stale rows when the math changes.
+    -- state_status tracks liveness of the row itself: 'fresh' after recompute,
+    -- 'recomputing' while async, 'failed' on error, 'stale_formula' when the
+    -- row was written under an older formula version.
+    formula_version         INTEGER NOT NULL DEFAULT 1,
+    content_hash            TEXT NOT NULL DEFAULT '',
+    live_claim_count        INTEGER NOT NULL DEFAULT 0,
+    state_status            TEXT NOT NULL DEFAULT 'stale_formula'
+        CHECK (state_status IN ('fresh', 'recomputing', 'failed', 'stale_formula')),
+    computed_at             INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (proposition_id, regime, snapshot_ts)
 );
 CREATE INDEX IF NOT EXISTS idx_mobility_prop ON mobility_state(proposition_id);
 CREATE INDEX IF NOT EXISTS idx_mobility_regime ON mobility_state(regime);
+CREATE INDEX IF NOT EXISTS idx_mobility_status ON mobility_state(state_status);
 
 -- Actor profile: calibration record for any epistemic actor — external
 -- sources, extractors, summarizers, internal cognitive moves, other
@@ -1414,4 +1429,21 @@ ALTER TABLE claims ADD COLUMN regime_tag      TEXT NOT NULL DEFAULT 'default';
 ALTER TABLE claims ADD COLUMN self_generated  INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE claims ADD COLUMN source_lineage  TEXT NOT NULL DEFAULT '[]';
 ALTER TABLE claims ADD COLUMN modality_signal TEXT NOT NULL DEFAULT 'text';
+";
+
+// RFC 008 M3: reproducible-state discipline for write-tier mobility recompute.
+// Adds content_hash (sha256 of normalized input set), formula_version, live_claim_count,
+// state_status, and computed_at to mobility_state. Existing rows are marked
+// stale_formula so the next access or the background reconciler recomputes them
+// under the M3 locked formula (leave-one-out symmetric Jaccard).
+//
+// SQLite ALTER TABLE ADD COLUMN requires either NOT NULL + DEFAULT or nullable.
+// We use DEFAULT for all five to backfill existing rows.
+pub const MIGRATE_V20_TO_V21: &str = "
+ALTER TABLE mobility_state ADD COLUMN formula_version  INTEGER NOT NULL DEFAULT 1;
+ALTER TABLE mobility_state ADD COLUMN content_hash     TEXT NOT NULL DEFAULT '';
+ALTER TABLE mobility_state ADD COLUMN live_claim_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE mobility_state ADD COLUMN state_status     TEXT NOT NULL DEFAULT 'stale_formula';
+ALTER TABLE mobility_state ADD COLUMN computed_at      INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_mobility_status ON mobility_state(state_status);
 ";
