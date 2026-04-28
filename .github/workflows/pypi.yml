@@ -108,6 +108,27 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      # Idempotent crates.io publish.  Replaces a blanket
+      # `continue-on-error: true` that previously swallowed real publish
+      # failures (mirrors the yantrikos/yantrikdb-server v0.7.3 silent-failure
+      # incident).  exit 0 on success OR if the version is already published;
+      # exit non-zero on any other failure so the workflow status surfaces it.
       - name: Publish to crates.io
-        continue-on-error: true
-        run: cargo publish -p yantrikdb --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          set +e
+          out="$(cargo publish -p yantrikdb 2>&1)"
+          rc=$?
+          set -e
+          echo "$out"
+          if [[ $rc -eq 0 ]]; then
+            echo "::notice::yantrikdb: published to crates.io"
+            exit 0
+          fi
+          if echo "$out" | grep -qE "already exists on crates\.io"; then
+            echo "::notice::yantrikdb: already published at this version (idempotent re-run)"
+            exit 0
+          fi
+          echo "::error::yantrikdb: crates.io publish failed for a non-idempotent reason"
+          exit "$rc"
