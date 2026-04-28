@@ -36,8 +36,22 @@ pub struct SyncStats {
     pub ops_skipped: usize,
 }
 
-/// Extract ops from the oplog since a given cursor (hlc, op_id).
-/// Uses compound cursor: (hlc > since_hlc) OR (hlc = since_hlc AND op_id > since_op_id)
+/// Extract ops from the oplog since a given cursor.
+///
+/// Cursor semantics:
+/// - **(Some(hlc), Some(op_id))** — compound cursor for exact resumption:
+///   `hlc > since_hlc OR (hlc = since_hlc AND op_id > since_op_id)`.
+///   Use this when you saved both fields from the last op you processed.
+/// - **(Some(hlc), None)** — strict HLC boundary: `hlc > since_hlc`. Returns
+///   ops with strictly greater HLC, dropping any op_id ties at the boundary.
+/// - **(None, Some(op_id))** — resume from a known op by id. Looks up the
+///   op's hlc, then applies the same compound cursor as above so iteration
+///   is loss-free even when op_ids tie at the same HLC.
+/// - **(None, None)** — no cursor; return everything from the start.
+///
+/// Fixes #13: previously, only the (Some, Some) arm filtered. Single-watermark
+/// callers silently received the entire oplog because the `_` arm built SQL
+/// with no boundary clause.
 pub fn extract_ops_since(
     conn: &Connection,
     since_hlc: Option<&[u8]>,
@@ -45,14 +59,17 @@ pub fn extract_ops_since(
     exclude_actor: Option<&str>,
     limit: usize,
 ) -> Result<Vec<OplogEntry>> {
+    let select_cols = "SELECT op_id, op_type, timestamp, target_rid, payload, \
+                       actor_id, hlc, embedding_hash, origin_actor \
+                       FROM oplog \
+                       WHERE hlc IS NOT NULL";
+
     let (sql, param_values) = match (since_hlc, since_op_id) {
         (Some(hlc), Some(op_id)) => {
-            let mut sql = String::from(
-                "SELECT op_id, op_type, timestamp, target_rid, payload, \
-                 actor_id, hlc, embedding_hash, origin_actor \
-                 FROM oplog \
-                 WHERE hlc IS NOT NULL \
-                 AND ((hlc > ?1) OR (hlc = ?1 AND op_id > ?2))",
+            // Exact compound cursor: skip ops at-or-before (hlc, op_id).
+            let mut sql = format!(
+                "{select_cols} \
+                 AND ((hlc > ?1) OR (hlc = ?1 AND op_id > ?2))"
             );
             let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
                 Box::new(hlc.to_vec()),
@@ -68,13 +85,48 @@ pub fn extract_ops_since(
             sql.push_str(&format!(" LIMIT {limit}"));
             (sql, params)
         }
-        _ => {
-            let mut sql = String::from(
-                "SELECT op_id, op_type, timestamp, target_rid, payload, \
-                 actor_id, hlc, embedding_hash, origin_actor \
-                 FROM oplog \
-                 WHERE hlc IS NOT NULL",
+        (Some(hlc), None) => {
+            // HLC-only watermark: strictly greater. May skip op_id ties at
+            // the boundary HLC; pass the matching op_id too if you need
+            // exact dedup.
+            let mut sql = format!("{select_cols} AND hlc > ?1");
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                vec![Box::new(hlc.to_vec())];
+
+            if let Some(actor) = exclude_actor {
+                sql.push_str(" AND origin_actor != ?2");
+                params.push(Box::new(actor.to_string()));
+            }
+
+            sql.push_str(" ORDER BY hlc, op_id");
+            sql.push_str(&format!(" LIMIT {limit}"));
+            (sql, params)
+        }
+        (None, Some(op_id)) => {
+            // op_id-only watermark: look up the op's hlc inline, then apply
+            // the compound cursor so we don't lose op_id-ties at the same
+            // HLC. Subquery is constant — SQLite plans it once.
+            let mut sql = format!(
+                "{select_cols} \
+                 AND ((hlc > (SELECT hlc FROM oplog WHERE op_id = ?1)) \
+                   OR (hlc = (SELECT hlc FROM oplog WHERE op_id = ?1) \
+                       AND op_id > ?1))"
             );
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                vec![Box::new(op_id.to_string())];
+
+            if let Some(actor) = exclude_actor {
+                sql.push_str(" AND origin_actor != ?2");
+                params.push(Box::new(actor.to_string()));
+            }
+
+            sql.push_str(" ORDER BY hlc, op_id");
+            sql.push_str(&format!(" LIMIT {limit}"));
+            (sql, params)
+        }
+        (None, None) => {
+            // No cursor — full scan from the start of the log.
+            let mut sql = String::from(select_cols);
             let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![];
 
             if let Some(actor) = exclude_actor {
@@ -1025,5 +1077,82 @@ mod tests {
             |row| row.get(0),
         ).unwrap();
         assert!(count >= 2); // At least 2 source_rids
+    }
+
+    /// Regression test for issue #13 (yantrikos/yantrikdb-server).
+    ///
+    /// Before the fix, calling extract_ops_since with only since_op_id OR
+    /// only since_hlc silently returned ALL ops from the start of the log,
+    /// because the match expression's `_` arm built SQL with no boundary.
+    /// Both watermarks alone must independently filter.
+    ///
+    /// Reproduction adapted from @mbseid's report.
+    #[test]
+    fn test_extract_ops_since_single_watermark() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+
+        // Batch 1: two ops, save the second as the watermark.
+        db.record(
+            "I love coffee", "semantic", 0.5, 0.0, 604800.0,
+            &empty_meta(), &vec_seed(1.0, 8),
+            "default", 0.8, "general", "user", None,
+        ).unwrap();
+        db.record(
+            "I go hiking on weekends", "episodic", 0.6, 0.0, 604800.0,
+            &empty_meta(), &vec_seed(2.0, 8),
+            "default", 0.8, "general", "user", None,
+        ).unwrap();
+
+        let batch1 = extract_ops_since(&*db.conn(), None, None, None, 100).unwrap();
+        assert_eq!(batch1.len(), 2, "batch1 should contain exactly the 2 record ops");
+        let wm = batch1.last().unwrap().clone();
+        let wm_op_id = wm.op_id.clone();
+        let wm_hlc = wm.hlc.clone();
+
+        // Batch 2: two more ops.
+        db.record(
+            "I work in software", "semantic", 0.7, 0.0, 604800.0,
+            &empty_meta(), &vec_seed(3.0, 8),
+            "default", 0.8, "general", "user", None,
+        ).unwrap();
+        db.record(
+            "Saturdays are for chores", "episodic", 0.4, 0.0, 604800.0,
+            &empty_meta(), &vec_seed(4.0, 8),
+            "default", 0.8, "general", "user", None,
+        ).unwrap();
+
+        // 1. op_id-only watermark: should return ONLY the 2 new ops.
+        let after_op_id = extract_ops_since(
+            &*db.conn(), None, Some(wm_op_id.as_str()), None, 100,
+        ).unwrap();
+        assert_eq!(
+            after_op_id.len(), 2,
+            "since_op_id alone must filter; got {} ops, expected 2",
+            after_op_id.len()
+        );
+        for op in &after_op_id {
+            assert!(op.op_id != wm_op_id, "watermark op must not be returned");
+        }
+
+        // 2. hlc-only watermark: should return ONLY the 2 new ops.
+        let after_hlc = extract_ops_since(
+            &*db.conn(), Some(wm_hlc.as_slice()), None, None, 100,
+        ).unwrap();
+        assert_eq!(
+            after_hlc.len(), 2,
+            "since_hlc alone must filter; got {} ops, expected 2",
+            after_hlc.len()
+        );
+
+        // 3. Both watermarks together (the originally-working path): same result.
+        let after_both = extract_ops_since(
+            &*db.conn(), Some(wm_hlc.as_slice()), Some(wm_op_id.as_str()),
+            None, 100,
+        ).unwrap();
+        assert_eq!(after_both.len(), 2, "compound cursor must filter equivalently");
+
+        // 4. No watermark: should return all 4 ops.
+        let all = extract_ops_since(&*db.conn(), None, None, None, 100).unwrap();
+        assert_eq!(all.len(), 4, "no cursor returns full log");
     }
 }
