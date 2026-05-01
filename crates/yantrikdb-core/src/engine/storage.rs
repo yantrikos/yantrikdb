@@ -102,6 +102,46 @@ impl YantrikDB {
         Ok(true)
     }
 
+    /// Insert a single (rid, embedding) pair into the in-memory HNSW vector
+    /// index. The matching SQLite memory row must already exist (this is a
+    /// backfill helper for replication followers and similar callers that
+    /// receive memory rows out-of-band of `record()` and need to bring the
+    /// HNSW index up to date piecewise).
+    ///
+    /// Idempotent: re-inserting an rid that's already present in the index
+    /// is a no-op (the underlying HNSW layer is responsible for de-duping).
+    /// Errors propagate from the HNSW backend.
+    ///
+    /// Lock ordering: takes `vec_index.write()` only — caller must NOT hold
+    /// a `conn` guard across this call, per the engine-wide ordering rule
+    /// (conn → … → vec_index).
+    ///
+    /// Added in yantrikdb 0.6.5 (RFC 022 §2): exposes the previously
+    /// `pub(crate)` HNSW insert path so the server's replication backfill
+    /// (`yantrikdb-server crates/yantrikdb-server/src/cluster/sync_loop.rs`)
+    /// can populate followers' HNSW per-row instead of doing a full
+    /// `rebuild_vec_index()` at the end of every batch. That rebuild was
+    /// the cause of the multi-hour follower-recall lag reported by
+    /// yantrikdb-agi 2026-05-01.
+    #[tracing::instrument(skip(self, embedding), fields(rid = %rid))]
+    pub fn insert_vector(&self, rid: &str, embedding: &[f32]) -> Result<()> {
+        self.vec_index.write().insert(rid, embedding)
+    }
+
+    /// Encrypt an embedding blob if at-rest encryption is enabled on this
+    /// engine; otherwise return the input unchanged. Used by replication
+    /// followers' backfill path to encrypt locally-re-embedded vectors
+    /// before writing them to the SQLite `embedding` column, so encrypted
+    /// clusters maintain ciphertext-only persistence.
+    ///
+    /// Added in yantrikdb 0.6.5 (RFC 022 §2): public wrapper over the
+    /// existing `pub(crate) encrypt_embedding`. Without this, the server's
+    /// `backfill_embeddings()` could not encrypt vectors and skipped
+    /// encrypted-cluster writes entirely (see TODO in sync_loop.rs).
+    pub fn encrypt_embedding_pub(&self, emb_blob: &[u8]) -> Result<Vec<u8>> {
+        self.encrypt_embedding(emb_blob)
+    }
+
     /// Evict memories to cold storage based on decay scores.
     /// Archives the lowest-scoring memories until at most `max_active` hot memories remain.
     /// Returns the list of archived RIDs.

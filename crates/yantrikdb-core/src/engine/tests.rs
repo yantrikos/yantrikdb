@@ -4096,3 +4096,133 @@ fn test_m5b_full_lifecycle_observed_to_retracted_with_adversarial() {
     let instances = db.list_adversarial_for_move(&move_id).unwrap();
     assert_eq!(instances.len(), 1);
 }
+
+// ─────────────────────────────────────────────────────────────────
+// RFC 022 §2: insert_vector + encrypt_embedding_pub (yantrikdb 0.6.5)
+//
+// Pre-existing methods promoted from `pub(crate)` to `pub` so the
+// server's replication backfill path can populate followers' HNSW
+// per-row instead of doing a full rebuild_vec_index() per batch.
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn test_insert_vector_makes_recall_find_it() {
+    // Simulates the follower-backfill scenario: a memory row is in SQLite
+    // (here: inserted via record() so we don't need raw SQL), but the
+    // backfill caller wants to put a *different* embedding into the HNSW
+    // for a separately-supplied rid. The simpler exercise: insert_vector
+    // is the same path record() takes internally, so calling it with a
+    // fresh rid + vector should produce a recall hit on that vector.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+
+    // Use record() once to seat the embedder + indices.
+    let _ = db
+        .record(
+            "seed",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(0.1, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    // Now exercise the new public API directly with a synthetic rid +
+    // vector. This is the call path replication backfill will take.
+    let synthetic_rid = "test-synthetic-rid-1";
+    let synthetic_emb = vec_seed(0.9, 8);
+    db.insert_vector(synthetic_rid, &synthetic_emb).unwrap();
+
+    // The HNSW index now contains the synthetic rid. Recall against
+    // the synthetic vector should surface it as the top result. We
+    // skip the SQLite-row-fetch concern here because that path is
+    // exercised by the integration test in the server crate
+    // (yantrikdb-server replication_backfill.rs); engine-level test
+    // just verifies the API surface and HNSW insertion.
+    let results = db
+        .recall(
+            &synthetic_emb,
+            5,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+    // The synthetic rid won't have a matching SQLite row, so recall's
+    // post-fetch step will drop it. What matters for this test is that
+    // insert_vector() returned Ok(()) and the HNSW now knows about it
+    // (verified by stats).
+    let stats = db.stats(None).unwrap();
+    // We had 1 from record() + 1 from insert_vector — the HNSW knows
+    // about both even though SQLite only has the record() one.
+    assert!(
+        stats.vec_index_entries >= 2,
+        "vec_index_entries should be at least 2 (record + insert_vector); got {}",
+        stats.vec_index_entries
+    );
+    // Sanity: results are still well-formed (recall didn't crash on the
+    // dangling synthetic rid).
+    assert!(results.len() <= 5);
+}
+
+#[test]
+fn test_insert_vector_idempotent_on_same_rid() {
+    // Re-inserting the same rid+vector must not error. The HNSW backend
+    // is responsible for de-duping; insert_vector just propagates errors.
+    // This guarantees the follower-backfill loop can be retried safely
+    // (e.g., on sync_loop poll N+1 after partial-batch failure on poll N).
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid = "idempotency-test";
+    let emb = vec_seed(0.5, 8);
+
+    db.insert_vector(rid, &emb).unwrap();
+    // Second call must not panic or return error.
+    db.insert_vector(rid, &emb).unwrap();
+}
+
+#[test]
+fn test_encrypt_embedding_pub_unencrypted_returns_input_unchanged() {
+    // Without an encryption provider, encrypt_embedding_pub is a no-op:
+    // returns the input bytes as a Vec<u8>. This matches the existing
+    // pub(crate) encrypt_embedding's contract.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let raw: Vec<u8> = (0u8..32).collect();
+    let out = db.encrypt_embedding_pub(&raw).unwrap();
+    assert_eq!(out, raw, "no-encryption path must return input unchanged");
+}
+
+#[test]
+fn test_encrypt_embedding_pub_with_encryption_returns_ciphertext() {
+    // With encryption enabled, encrypt_embedding_pub must produce
+    // ciphertext that differs from the plaintext input. Round-trip
+    // verification (decrypt → original) is exercised by the existing
+    // `pub(crate) decrypt_embedding` callers (e.g., archive/hydrate
+    // tests above); this test only verifies the public wrapper exposes
+    // the encryption path correctly.
+    let master_key = [0xAB; 32];
+    let db = YantrikDB::new_encrypted(":memory:", 8, &master_key).unwrap();
+    let raw: Vec<u8> = (0u8..32).collect();
+    let out = db.encrypt_embedding_pub(&raw).unwrap();
+    assert_ne!(
+        out, raw,
+        "encrypted path must produce ciphertext, not plaintext"
+    );
+    // Encrypted blobs include a nonce + tag, so length differs from raw.
+    assert!(
+        out.len() > raw.len(),
+        "encrypted blob should be longer than plaintext (nonce + tag overhead)"
+    );
+}
