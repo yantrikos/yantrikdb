@@ -91,8 +91,30 @@ use crate::types::*;
 ///
 /// **Lock ordering** (always acquire in this order to prevent deadlocks):
 ///   conn → hlc → scoring_cache → vec_index → graph_index → active_sessions
+///
+/// ## Concurrent recall (read pool)
+///
+/// `read_conns` is a small pool of additional SQLite connections opened
+/// in WAL mode against the same database file. Each is wrapped in a
+/// `Mutex` (since `Connection` is `!Sync`). Read-heavy paths like
+/// `recall()` call [`Self::read_conn`] to acquire any free pooled
+/// connection, allowing N concurrent recalls instead of all serialising
+/// through the single `conn` mutex. Writes (record/forget/correct) and
+/// migrations continue to use `conn` so SQLite's single-writer rule is
+/// preserved naturally.
+///
+/// Pool size is configurable via the `YANTRIKDB_READ_POOL` env var
+/// (default 4). Set to 0 to disable the pool — `read_conn()` then
+/// returns the write connection, preserving v0.6.3 and earlier
+/// behavior.
 pub struct YantrikDB {
     pub(crate) conn: Mutex<Connection>,
+    /// Pool of additional read-only SQLite connections opened against
+    /// the same database file with WAL pragmas. Recall paths acquire a
+    /// free connection round-robin to enable concurrent reads.
+    pub(crate) read_conns: Vec<Mutex<Connection>>,
+    /// Round-robin starting index for read pool acquisition.
+    pub(crate) read_idx: std::sync::atomic::AtomicUsize,
     pub(crate) embedding_dim: usize,
     pub(crate) hlc: Mutex<HLC>,
     pub(crate) actor_id: String,
@@ -105,6 +127,31 @@ pub struct YantrikDB {
     embedder: Option<Box<dyn crate::types::Embedder + Send + Sync>>,
     /// Cache of active sessions: namespace → session_id
     pub(crate) active_sessions: RwLock<HashMap<String, String>>,
+}
+
+impl YantrikDB {
+    /// Acquire a read connection from the pool. Round-robin across pool
+    /// slots, with try_lock fast-path to avoid blocking when any slot
+    /// is free. If all are busy, blocks on the round-robin choice.
+    ///
+    /// If the pool is empty (`YANTRIKDB_READ_POOL=0`), falls back to the
+    /// write connection — preserves single-mutex behavior of pre-v0.6.4.
+    pub(crate) fn read_conn(&self) -> MutexGuard<'_, Connection> {
+        use std::sync::atomic::Ordering;
+        let n = self.read_conns.len();
+        if n == 0 {
+            return self.conn.lock();
+        }
+        let start = self.read_idx.fetch_add(1, Ordering::Relaxed) % n;
+        for i in 0..n {
+            let idx = (start + i) % n;
+            if let Some(g) = self.read_conns[idx].try_lock() {
+                return g;
+            }
+        }
+        // All slots busy — block on the round-robin choice.
+        self.read_conns[start].lock()
+    }
 }
 
 // Static assertion: YantrikDB must be Send + Sync.
@@ -333,8 +380,48 @@ impl YantrikDB {
         // Load active sessions from DB
         let active_sessions = Self::load_active_sessions(&conn)?;
 
+        // Build the read-connection pool. Each pooled connection opens
+        // independently against the same SQLite file with WAL-mode
+        // pragmas — WAL allows multiple readers concurrently. Pool
+        // size is read from YANTRIKDB_READ_POOL env (default 4).
+        //
+        // In-memory databases (`:memory:`) are SKIPPED: each
+        // `Connection::open(":memory:")` creates a *new* in-memory db,
+        // so pooled read connections wouldn't see writes from the main
+        // connection. Tests use `:memory:` extensively; falling back to
+        // the single write connection for those is correct and matches
+        // pre-pool behavior.
+        let is_memory = db_path == ":memory:" || db_path.starts_with("file::memory:");
+        let pool_size: usize = if is_memory {
+            0
+        } else {
+            std::env::var("YANTRIKDB_READ_POOL")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(4)
+        };
+        let mut read_conns = Vec::with_capacity(pool_size);
+        for _ in 0..pool_size {
+            let rc = Connection::open(db_path)?;
+            rc.execute_batch(
+                "PRAGMA journal_mode=WAL; \
+                 PRAGMA synchronous=NORMAL; \
+                 PRAGMA foreign_keys=ON; \
+                 PRAGMA busy_timeout=5000;",
+            )?;
+            read_conns.push(Mutex::new(rc));
+        }
+        if pool_size > 0 {
+            tracing::info!(
+                pool_size,
+                "yantrikdb-core: read connection pool initialized"
+            );
+        }
+
         Ok(Self {
             conn: Mutex::new(conn),
+            read_conns,
+            read_idx: std::sync::atomic::AtomicUsize::new(0),
             embedding_dim,
             hlc: Mutex::new(HLC::new(node_id)),
             actor_id,

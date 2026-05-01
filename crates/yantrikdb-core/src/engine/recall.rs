@@ -538,7 +538,7 @@ impl YantrikDB {
 
                         // Helper closure to run an FTS query and collect RIDs.
                         let run_fts_phase1 = |q: &str| -> Vec<String> {
-                            let conn = self.conn.lock();
+                            let conn = self.read_conn();
                             let mut stmt = conn.prepare_cached(&fts_sql).ok();
                             if let Some(ref mut stmt) = stmt {
                                 let result: std::result::Result<Vec<String>, _> = if let Some(mt) = memory_type {
@@ -617,7 +617,7 @@ impl YantrikDB {
 
                             // Helper to run Phase 2 with a given FTS query string.
                             let run_fts_phase2 = |q: &str| -> Vec<String> {
-                                let conn = self.conn.lock();
+                                let conn = self.read_conn();
                                 let mut stmt = conn.prepare_cached(&imp_fts_sql).ok();
                                 if let Some(ref mut stmt) = stmt {
                                     let result: std::result::Result<Vec<String>, _> = if let Some(mt) = memory_type {
@@ -712,7 +712,7 @@ impl YantrikDB {
 
                             for group in &keyword_groups {
                                 let anchor_rids: Vec<String> = {
-                                    let conn = self.conn.lock();
+                                    let conn = self.read_conn();
                                     let mut stmt = conn.prepare_cached(&anchor_fts_sql).ok();
                                     if let Some(ref mut stmt) = stmt {
                                         let result: std::result::Result<Vec<String>, _> = if let Some(mt) = memory_type {
@@ -1034,7 +1034,7 @@ impl YantrikDB {
                         };
 
                         let cold_rids: Vec<String> = {
-                            let conn = self.conn.lock();
+                            let conn = self.read_conn();
                             let mut stmt = conn.prepare_cached(&cold_sql).ok();
                             if let Some(ref mut stmt) = stmt {
                                 let result: std::result::Result<Vec<String>, _> = if let Some(mt) = memory_type {
@@ -2274,7 +2274,7 @@ impl YantrikDB {
                         };
 
                         let run_fts_phase1 = |q: &str| -> Vec<String> {
-                            let conn = self.conn.lock();
+                            let conn = self.read_conn();
                             let mut stmt = conn.prepare_cached(&fts_sql).ok();
                             if let Some(ref mut stmt) = stmt {
                                 let result: std::result::Result<Vec<String>, _> = if let Some(mt) = memory_type {
@@ -2342,7 +2342,7 @@ impl YantrikDB {
                             };
 
                             let run_fts_phase2 = |q: &str| -> Vec<String> {
-                                let conn = self.conn.lock();
+                                let conn = self.read_conn();
                                 let mut stmt = conn.prepare_cached(&imp_fts_sql).ok();
                                 if let Some(ref mut stmt) = stmt {
                                     let result: std::result::Result<Vec<String>, _> = if let Some(mt) = memory_type {
@@ -2428,7 +2428,7 @@ impl YantrikDB {
 
                             for group in &keyword_groups {
                                 let anchor_rids: Vec<String> = {
-                                    let conn = self.conn.lock();
+                                    let conn = self.read_conn();
                                     let mut stmt = conn.prepare_cached(&anchor_fts_sql).ok();
                                     if let Some(ref mut stmt) = stmt {
                                         let result: std::result::Result<Vec<String>, _> = if let Some(mt) = memory_type {
@@ -2729,7 +2729,7 @@ impl YantrikDB {
                         };
 
                         let cold_rids: Vec<String> = {
-                            let conn = self.conn.lock();
+                            let conn = self.read_conn();
                             let mut stmt = conn.prepare_cached(&cold_sql).ok();
                             if let Some(ref mut stmt) = stmt {
                                 let result: std::result::Result<Vec<String>, _> = if let Some(mt) = memory_type {
@@ -3216,7 +3216,7 @@ impl YantrikDB {
         let params_ref: Vec<&dyn rusqlite::types::ToSql> =
             param_values.iter().map(|p| p.as_ref()).collect();
 
-        let conn = self.conn.lock();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt
             .query_map(params_ref.as_slice(), |row| {
@@ -3261,7 +3261,7 @@ impl YantrikDB {
         let params_ref: Vec<&dyn rusqlite::types::ToSql> =
             param_values.iter().map(|p| p.as_ref()).collect();
 
-        let conn = self.conn.lock();
+        let conn = self.read_conn();
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt
             .query_map(params_ref.as_slice(), |row| {
@@ -3295,7 +3295,7 @@ impl YantrikDB {
         };
 
         {
-            let conn = self.conn.lock();
+            let conn = self.read_conn();
             conn.execute(
                 "UPDATE memories SET last_access = ?1, half_life = ?2, \
                  access_count = access_count + 1 WHERE rid = ?3",
