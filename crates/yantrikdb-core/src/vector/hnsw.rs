@@ -149,6 +149,11 @@ impl HnswIndex {
     }
 
     /// Number of active (non-tombstoned) entries.
+    /// Embedding dimension this index was constructed with.
+    pub fn dim(&self) -> usize {
+        self.dim
+    }
+
     pub fn len(&self) -> usize {
         self.active_count
     }
@@ -530,6 +535,11 @@ impl BruteForceIndex {
         scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
         scored.truncate(k);
         scored
+    }
+
+    /// Embedding dimension this index was constructed with.
+    pub fn dim(&self) -> usize {
+        self.dim
     }
 
     pub fn len(&self) -> usize {

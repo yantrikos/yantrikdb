@@ -23,6 +23,7 @@ tracing = "0.1"
 aes-gcm = "0.10"
 base64 = "0.22"
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
+arc-swap = "1"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
