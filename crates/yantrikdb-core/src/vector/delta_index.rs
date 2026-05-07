@@ -316,6 +316,67 @@ impl DeltaIndex {
         self.cold.store(Arc::new(new_cold));
     }
 
+    /// **Decoupled write path RFC, Phase 5 — compaction.**
+    ///
+    /// Drain the current delta into cold by clone-rebuilding the cold tier.
+    /// Atomic from the readers' perspective: the ArcSwap.store() at the end
+    /// is the visible epoch boundary. Old readers finish on the prior cold
+    /// snapshot; new readers see the merged cold.
+    ///
+    /// Algorithm:
+    ///   1. seal_delta_for_compaction() — atomically swap delta for an
+    ///      empty new one. Concurrent writes go to the new delta and are
+    ///      preserved across the compaction.
+    ///   2. Clone the current cold HnswIndex.
+    ///   3. For each sealed entry in seq order:
+    ///        - tombstoned: HnswIndex::remove(rid) on the clone
+    ///        - live with rid not in cold: HnswIndex::insert
+    ///        - live with rid in cold (update): remove + re-insert
+    ///   4. ArcSwap.store(Arc::new(new_cold)).
+    ///
+    /// Returns the number of delta entries applied.
+    ///
+    /// Idempotent on empty delta — returns 0 without touching cold.
+    pub fn compact(&self) -> Result<usize> {
+        let sealed = self.seal_delta_for_compaction();
+        if sealed.is_empty() {
+            return Ok(0);
+        }
+
+        // Clone cold off the live ArcSwap so readers continue against
+        // the prior epoch while we build the new one.
+        let mut new_cold: HnswIndex = (*self.cold.load_full()).clone();
+
+        // Apply sealed entries by seq order. Same-rid duplicates within the
+        // sealed batch resolve via "highest seq wins" — same rule as search.
+        let mut by_rid: std::collections::HashMap<String, &DeltaEntry> =
+            std::collections::HashMap::with_capacity(sealed.len());
+        for entry in &sealed {
+            match by_rid.get(&entry.rid) {
+                Some(existing) if existing.seq >= entry.seq => {}
+                _ => {
+                    by_rid.insert(entry.rid.clone(), entry);
+                }
+            }
+        }
+
+        let mut applied = 0usize;
+        for entry in by_rid.values() {
+            if entry.tombstoned {
+                new_cold.remove(&entry.rid);
+            } else {
+                // remove first to handle "update" semantics — if the rid
+                // was already in cold, the new embedding supersedes it.
+                new_cold.remove(&entry.rid);
+                new_cold.insert(&entry.rid, &entry.embedding)?;
+            }
+            applied += 1;
+        }
+
+        self.cold.store(Arc::new(new_cold));
+        Ok(applied)
+    }
+
     /// Whether the delta has reached its compaction threshold.
     /// Phase 5 compactor polls this.
     pub fn should_compact(&self) -> bool {
@@ -606,5 +667,118 @@ mod tests {
         assert!(!idx.should_compact(), "below half cap");
         idx.append("rid_5".to_string(), vec_seed(5.0, 64), 5).unwrap();
         assert!(idx.should_compact(), "at half cap = should compact");
+    }
+
+    #[test]
+    fn compact_drains_delta_into_cold() {
+        let idx = DeltaIndex::new(64);
+        for i in 0..10 {
+            idx.append(format!("rid_{i}"), vec_seed(i as f32, 64), i as u64).unwrap();
+        }
+        assert_eq!(idx.delta_len(), 10);
+        assert_eq!(idx.cold_len(), 0);
+
+        let n = idx.compact().unwrap();
+        assert_eq!(n, 10);
+        assert_eq!(idx.delta_len(), 0, "delta drained");
+        assert_eq!(idx.cold_len(), 10, "cold has all 10 entries now");
+
+        // Search still finds them (now in cold tier).
+        let r = idx.search(&vec_seed(5.0, 64), 3).unwrap();
+        assert_eq!(r.len(), 3);
+        assert_eq!(r[0].0, "rid_5", "exact match still found post-compaction");
+    }
+
+    #[test]
+    fn compact_applies_tombstones_to_cold() {
+        let idx = DeltaIndex::new(64);
+        // Pre-seed cold with two rids.
+        let mut cold = HnswIndex::new(64);
+        cold.insert("rid_keep", &vec_seed(1.0, 64)).unwrap();
+        cold.insert("rid_drop", &vec_seed(2.0, 64)).unwrap();
+        idx.install_cold(cold);
+        assert_eq!(idx.cold_len(), 2);
+
+        // Tombstone rid_drop in delta.
+        idx.tombstone("rid_drop", 1);
+        // Compact applies the tombstone to cold.
+        let n = idx.compact().unwrap();
+        assert_eq!(n, 1);
+        // HnswIndex.len() includes tombstoned nodes (same as pre-Phase 4),
+        // but search filters them. Verify via search:
+        let r = idx.search(&vec_seed(2.0, 64), 5).unwrap();
+        let rids: Vec<&str> = r.iter().map(|(rid, _)| rid.as_str()).collect();
+        assert!(!rids.contains(&"rid_drop"), "tombstone applied to cold");
+        assert!(rids.contains(&"rid_keep"));
+    }
+
+    #[test]
+    fn compact_applies_archive_then_hydrate_correctly() {
+        // The scenario engine_tests::test_hydrate_memory exercises:
+        //   1. record(rid)         -> append at seq=1
+        //   2. archive(rid)        -> tombstone at seq=2
+        //   3. hydrate(rid)        -> append at seq=3
+        // Compact must produce a cold where rid_X is LIVE (highest seq wins).
+        let idx = DeltaIndex::new(64);
+        idx.append("rid_X".to_string(), vec_seed(5.0, 64), 1).unwrap();
+        idx.tombstone("rid_X", 2);
+        idx.append("rid_X".to_string(), vec_seed(5.0, 64), 3).unwrap();
+
+        let n = idx.compact().unwrap();
+        assert_eq!(n, 1, "highest-seq winner applied once");
+
+        let r = idx.search(&vec_seed(5.0, 64), 5).unwrap();
+        assert_eq!(r.len(), 1);
+        assert_eq!(r[0].0, "rid_X", "rid alive in cold post-compaction");
+    }
+
+    #[test]
+    fn compact_idempotent_on_empty_delta() {
+        let idx = DeltaIndex::new(64);
+        assert_eq!(idx.compact().unwrap(), 0);
+        assert_eq!(idx.compact().unwrap(), 0);
+    }
+
+    #[test]
+    fn compact_preserves_in_flight_writes() {
+        // Writers appending during a compaction window must not be lost.
+        // Sealing swaps in a fresh delta atomically, so writes that arrive
+        // after the swap go to the new delta. The compactor sees only the
+        // sealed entries.
+        let idx = DeltaIndex::new(64);
+        for i in 0..5 {
+            idx.append(format!("before_{i}"), vec_seed(i as f32, 64), i as u64).unwrap();
+        }
+        // Seal manually + start "compaction" but before applying, append more.
+        let sealed = idx.seal_delta_for_compaction();
+        assert_eq!(sealed.len(), 5);
+        assert_eq!(idx.delta_len(), 0, "fresh delta after seal");
+
+        for i in 0..3 {
+            idx.append(format!("after_{i}"), vec_seed((100 + i) as f32, 64), (100 + i) as u64).unwrap();
+        }
+        assert_eq!(idx.delta_len(), 3, "after-seal writes accumulate in new delta");
+
+        // Note: the actual compactor (compact()) does seal+apply in one step.
+        // This test exercises the seal-only primitive to prove the swap
+        // does not lose subsequent writes.
+    }
+
+    #[test]
+    fn compact_threshold_drives_compaction() {
+        // Realistic loop: every time should_compact() returns true, run
+        // compact(), and the delta gets bounded.
+        let idx = DeltaIndex::with_capacity(64, 10);
+        for i in 0..50 {
+            // If we are above half-cap, compact first to make room.
+            if idx.should_compact() {
+                idx.compact().unwrap();
+            }
+            idx.append(format!("rid_{i}"), vec_seed(i as f32, 64), i as u64).unwrap();
+        }
+        // After 50 inserts with periodic compaction, cold has all 50.
+        idx.compact().unwrap(); // drain final delta
+        assert_eq!(idx.cold_len(), 50);
+        assert_eq!(idx.delta_len(), 0);
     }
 }

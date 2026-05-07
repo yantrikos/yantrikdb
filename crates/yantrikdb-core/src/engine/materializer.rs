@@ -138,6 +138,80 @@ pub fn recommended_worker_count() -> usize {
         .clamp(2, 16)
 }
 
+/// **Decoupled write path RFC, Phase 5 — compactor.**
+///
+/// Background thread that periodically calls `db.vec_index.compact()` to
+/// drain the delta tier into the cold tier, bounding read latency growth.
+///
+/// Polls every `COMPACTOR_INTERVAL` (1s by default). On each tick:
+///   1. Check `should_compact()` — fires when delta is past half-capacity.
+///   2. Run `compact()` — clone-rebuild cold from old cold + sealed delta,
+///      then ArcSwap the new cold in.
+///
+/// Drop the returned [`CompactorGuard`] (or let the engine `Arc<YantrikDB>`
+/// drop) for clean shutdown.
+
+pub struct CompactorGuard {
+    shutdown: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Drop for CompactorGuard {
+    fn drop(&mut self) {
+        self.shutdown.store(true, Ordering::Relaxed);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+/// How often the compactor wakes to check `should_compact()`.
+const COMPACTOR_INTERVAL: Duration = Duration::from_secs(1);
+
+pub fn spawn_compactor(db: &Arc<YantrikDB>) -> CompactorGuard {
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let shutdown_clone = Arc::clone(&shutdown);
+    let weak = Arc::downgrade(db);
+
+    let handle = std::thread::Builder::new()
+        .name("yantrikdb-compactor".to_string())
+        .spawn(move || compactor_loop(weak, shutdown_clone))
+        .expect("spawn compactor thread");
+
+    CompactorGuard {
+        shutdown,
+        handle: Some(handle),
+    }
+}
+
+fn compactor_loop(weak: Weak<YantrikDB>, shutdown: Arc<AtomicBool>) {
+    tracing::debug!("compactor started");
+
+    while !shutdown.load(Ordering::Relaxed) {
+        let Some(db) = weak.upgrade() else {
+            tracing::debug!("engine dropped — compactor exiting");
+            break;
+        };
+
+        if db.vec_index.should_compact() {
+            match db.vec_index.compact() {
+                Ok(0) => {}
+                Ok(n) => {
+                    tracing::debug!(applied = n, "compaction drained delta into cold");
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "compaction failed; retrying next tick");
+                }
+            }
+        }
+
+        drop(db);
+        std::thread::sleep(COMPACTOR_INTERVAL);
+    }
+
+    tracing::debug!("compactor exited");
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,5 +344,59 @@ mod tests {
     fn recommended_worker_count_in_range() {
         let n = recommended_worker_count();
         assert!((2..=16).contains(&n), "expected [2,16], got {n}");
+    }
+
+    #[test]
+    fn compactor_drains_delta_periodically() {
+        let db = open_test_db();
+        // Spawn compactor BEFORE pushing so we can observe the thread
+        // wake-up cycle.
+        let _guard = spawn_compactor(&db);
+
+        // Push 600 records directly to the DeltaIndex (bypassing record()).
+        // This isolates the compactor's drain path from foreground SQL work.
+        for i in 0..600 {
+            let emb: Vec<f32> = (0..64).map(|j| (i + j) as f32 * 0.001).collect();
+            let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
+            let normalized: Vec<f32> = emb.iter().map(|x| x / norm).collect();
+            let seq = db.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            db.vec_index.append(format!("rid_{i}"), normalized, seq).unwrap();
+        }
+        assert!(
+            db.vec_index.delta_len() >= 512,
+            "delta should have crossed compact threshold, got {}",
+            db.vec_index.delta_len()
+        );
+
+        // Compactor wakes every COMPACTOR_INTERVAL (1s). Wait up to 4s.
+        let mut tries = 0;
+        while db.vec_index.cold_len() < 512 && tries < 40 {
+            std::thread::sleep(Duration::from_millis(100));
+            tries += 1;
+        }
+
+        assert!(
+            db.vec_index.cold_len() >= 512,
+            "compactor should have moved >=512 entries to cold within 4s, got cold={} delta={}",
+            db.vec_index.cold_len(),
+            db.vec_index.delta_len()
+        );
+        assert!(
+            db.vec_index.delta_len() <= 256,
+            "delta should be drained below half-cap, got {}",
+            db.vec_index.delta_len()
+        );
+    }
+    #[test]
+    fn compactor_guard_drop_shuts_down_clean() {
+        let db = open_test_db();
+        let guard = spawn_compactor(&db);
+        std::thread::sleep(Duration::from_millis(100));
+        let start = std::time::Instant::now();
+        drop(guard);
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "compactor guard drop must join within 2s"
+        );
     }
 }

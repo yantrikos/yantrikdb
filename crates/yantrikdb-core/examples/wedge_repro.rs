@@ -32,6 +32,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use yantrikdb::YantrikDB;
+use yantrikdb::engine::materializer::spawn_compactor;
 
 #[derive(Clone, Copy)]
 struct Config {
@@ -92,6 +93,9 @@ fn run() {
     let _ = std::fs::remove_file(&db_path);
 
     let db = Arc::new(YantrikDB::new(&db_path, cfg.dim).expect("YantrikDB::new"));
+    // Phase 5 — spawn compactor so the delta drains into cold periodically.
+    // Without this, delta scan grows unbounded and reads degrade linearly.
+    let _compactor_guard = spawn_compactor(&db);
     println!("[setup] DB opened at {}", db_path);
 
     // Warmup — seed the HNSW graph so subsequent inserts cost realistic O(M·log N)

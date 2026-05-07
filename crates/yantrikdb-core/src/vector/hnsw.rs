@@ -91,6 +91,7 @@ impl PartialOrd for FarCandidate {
 
 // ── Node ──
 
+#[derive(Clone)]
 struct HnswNode {
     /// The embedding vector.
     embedding: Vec<f32>,
@@ -102,6 +103,7 @@ struct HnswNode {
 
 // ── HnswIndex ──
 
+#[derive(Clone)]
 /// A Rust-native HNSW vector index.
 pub struct HnswIndex {
     dim: usize,
