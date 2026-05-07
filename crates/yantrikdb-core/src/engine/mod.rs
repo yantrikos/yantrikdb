@@ -120,7 +120,11 @@ pub struct YantrikDB {
     pub(crate) hlc: Mutex<HLC>,
     pub(crate) actor_id: String,
     pub(crate) scoring_cache: RwLock<HashMap<String, ScoringRow>>,
-    pub(crate) vec_index: RwLock<HnswIndex>,
+    pub(crate) vec_index: crate::vector::delta_index::DeltaIndex,
+    /// Monotonic seq counter for vec_index appends/tombstones.
+    /// Used by Phase 6 RYW (recall_with_seq); also feeds DeltaIndex's
+    /// per-entry seq tag for compaction ordering.
+    pub(crate) vec_seq: std::sync::atomic::AtomicU64,
     pub(crate) graph_index: RwLock<GraphIndex>,
     pub(crate) enc: Option<EncryptionProvider>,
     /// Optional text-to-embedding converter. When set, enables `record_text()`
@@ -428,7 +432,14 @@ impl YantrikDB {
             hlc: Mutex::new(HLC::new(node_id)),
             actor_id,
             scoring_cache: RwLock::new(scoring_cache),
-            vec_index: RwLock::new(vec_index),
+            vec_index: {
+                let delta_max = std::env::var("YANTRIKDB_DELTA_MAX")
+                    .ok()
+                    .and_then(|v| v.parse::<usize>().ok())
+                    .unwrap_or(crate::vector::delta_index::DEFAULT_DELTA_MAX);
+                crate::vector::delta_index::DeltaIndex::from_cold(vec_index, delta_max)
+            },
+            vec_seq: std::sync::atomic::AtomicU64::new(0),
             graph_index: RwLock::new(graph_index),
             enc,
             embedder: None,

@@ -53,7 +53,7 @@ impl YantrikDB {
         let new_index = Self::build_vec_index_with_enc(&conn, self.embedding_dim, self.enc.as_ref())?;
         let count = new_index.len();
         drop(conn);
-        *self.vec_index.write() = new_index;
+        self.vec_index.install_cold(new_index);
         Ok(count)
     }
 

@@ -65,7 +65,8 @@ impl YantrikDB {
         // conn dropped here
 
         // Insert into vector index (lock ordering: conn already dropped)
-        self.vec_index.write().insert(&rid, embedding)?;
+        let seq = self.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.vec_index.append(rid.clone(), embedding.to_vec(), seq)?;
 
         // Insert into scoring cache (conn and vec_index dropped)
         self.cache_insert(rid.clone(), ScoringRow {
@@ -383,12 +384,10 @@ impl YantrikDB {
             );
         }
 
-        // Insert into HNSW vec index + scoring cache after SQL commit
-        {
-            let mut vi = self.vec_index.write();
-            for (rid, input) in rids.iter().zip(inputs.iter()) {
-                vi.insert(rid, &input.embedding)?;
-            }
+        // Append to vec_index (DeltaIndex) after SQL commit
+        for (rid, input) in rids.iter().zip(inputs.iter()) {
+            let seq = self.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.vec_index.append(rid.clone(), input.embedding.clone(), seq)?;
         }
         // vec_index dropped, now scoring_cache
         {

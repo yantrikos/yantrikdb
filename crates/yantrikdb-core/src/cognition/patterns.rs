@@ -482,8 +482,7 @@ fn mine_cross_domain_patterns(db: &YantrikDB, config: &PatternConfig) -> Result<
     let mut seen = std::collections::HashSet::new();
     candidates.retain(|(rid, _, _)| seen.insert(rid.clone()));
 
-    // For each candidate, query HNSW for K=10 global neighbors
-    let vi = db.vec_index.read();
+    // For each candidate, query HNSW for K=10 global neighbors (DeltaIndex merges cold + delta)
     let mut patterns = Vec::new();
     let mut pair_counts: std::collections::HashMap<(String, String), usize> =
         std::collections::HashMap::new();
@@ -498,7 +497,7 @@ fn mine_cross_domain_patterns(db: &YantrikDB, config: &PatternConfig) -> Result<
     // We'll query from DB as needed
 
     for (rid_a, domain_a, embedding) in &candidates {
-        let neighbors = match vi.search(embedding, 10) {
+        let neighbors = match db.vec_index.search(embedding, 10) {
             Ok(n) => n,
             Err(_) => continue,
         };

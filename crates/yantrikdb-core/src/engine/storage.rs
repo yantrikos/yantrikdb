@@ -39,7 +39,8 @@ impl YantrikDB {
             ts
         }; // drop conn before acquiring vec_index write lock
 
-        self.vec_index.write().remove(rid);
+        let seq = self.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.vec_index.tombstone(rid, seq);
 
         self.log_op(
             "archive",
@@ -87,7 +88,8 @@ impl YantrikDB {
             (ts, embedding)
         }; // drop conn before acquiring vec_index write lock
 
-        self.vec_index.write().insert(rid, &embedding)?;
+        let seq = self.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.vec_index.append(rid.to_string(), embedding.clone(), seq)?;
 
         self.log_op(
             "hydrate",
@@ -125,7 +127,8 @@ impl YantrikDB {
     /// yantrikdb-agi 2026-05-01.
     #[tracing::instrument(skip(self, embedding), fields(rid = %rid))]
     pub fn insert_vector(&self, rid: &str, embedding: &[f32]) -> Result<()> {
-        self.vec_index.write().insert(rid, embedding)
+        let seq = self.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.vec_index.append(rid.to_string(), embedding.to_vec(), seq).map(|_| ())
     }
 
     /// Encrypt an embedding blob if at-rest encryption is enabled on this

@@ -151,7 +151,7 @@ impl YantrikDB {
         let fetch_k = (top_k * 20).min(500);
         let vec_results = {
             let _span = tracing::debug_span!("hnsw_search", fetch_k).entered();
-            self.vec_index.read().search(query_embedding, fetch_k)?
+            self.vec_index.search(query_embedding, fetch_k)?
         };
 
         if vec_results.is_empty() {
@@ -1933,7 +1933,7 @@ impl YantrikDB {
         let t_vec = Instant::now();
         let ts = now();
         let fetch_k = (top_k * 20).min(500);
-        let vec_results = self.vec_index.read().search(query_embedding, fetch_k)?;
+        let vec_results = self.vec_index.search(query_embedding, fetch_k)?;
         let vec_search_ms = t_vec.elapsed().as_secs_f64() * 1000.0;
         let candidate_count = vec_results.len();
 

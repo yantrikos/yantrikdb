@@ -212,22 +212,34 @@ impl DeltaIndex {
         let cold = self.cold.load();
         let delta = self.delta.read();
 
-        // Tombstone set + delta hit set: rids tombstoned in delta or
-        // present in delta as a live entry should not pull from cold.
-        let mut tombstoned: std::collections::HashSet<&str> =
-            std::collections::HashSet::new();
-        let mut delta_live: Vec<(&DeltaEntry, f64)> = Vec::with_capacity(delta.len());
+        // Per-rid winner: highest seq wins. If the winning entry is
+        // tombstoned, the rid is dead. Otherwise it is the canonical live
+        // entry for the rid (and shadows any cold copy).
+        //
+        // This handles the archive/hydrate scenario: tombstone(rid, seq=5)
+        // followed by append(rid, embedding, seq=10) — the live entry at
+        // seq=10 wins, the tombstone at seq=5 loses.
+        let mut winner_per_rid: std::collections::HashMap<&str, &DeltaEntry> =
+            std::collections::HashMap::new();
         for entry in delta.iter() {
-            if entry.tombstoned {
-                tombstoned.insert(entry.rid.as_str());
-            } else {
-                let d = cosine_distance_f64(query, &entry.embedding);
-                delta_live.push((entry, d));
+            match winner_per_rid.get(entry.rid.as_str()) {
+                Some(existing) if existing.seq >= entry.seq => {}
+                _ => {
+                    winner_per_rid.insert(entry.rid.as_str(), entry);
+                }
             }
         }
-        // Live entries that ALSO have a later tombstone in delta:
-        // suppress them. We just iterate again and filter.
-        delta_live.retain(|(e, _)| !tombstoned.contains(e.rid.as_str()));
+        let mut tombstoned: std::collections::HashSet<&str> =
+            std::collections::HashSet::new();
+        let mut delta_live: Vec<(&DeltaEntry, f64)> = Vec::with_capacity(winner_per_rid.len());
+        for (rid, entry) in &winner_per_rid {
+            if entry.tombstoned {
+                tombstoned.insert(*rid);
+            } else {
+                let d = cosine_distance_f64(query, &entry.embedding);
+                delta_live.push((*entry, d));
+            }
+        }
 
         // Search cold for up to k * 2 candidates so we have headroom for
         // tombstone filtering + delta-shadowing without losing top-k.
@@ -266,6 +278,20 @@ impl DeltaIndex {
     /// Number of entries in the cold tier.
     pub fn cold_len(&self) -> usize {
         self.cold.load().len()
+    }
+
+    /// Total entry count across both tiers (cold + delta, including
+    /// tombstone markers in delta). Approximation: a tombstone in delta
+    /// shadowing a live cold entry is counted twice — matches the shape
+    /// HnswIndex.len() exposes. Stats callers use this for ballpark
+    /// health metrics, not for exact accounting.
+    pub fn len(&self) -> usize {
+        self.cold_len() + self.delta_len()
+    }
+
+    /// True iff both tiers are empty.
+    pub fn is_empty(&self) -> bool {
+        self.cold_len() == 0 && self.delta_len() == 0
     }
 
     /// Snapshot the delta entries — used by the compactor (Phase 5) to
