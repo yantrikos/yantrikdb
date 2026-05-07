@@ -1,4 +1,5 @@
 mod belief;
+pub mod materializer;
 mod cache;
 mod intent;
 mod action;
