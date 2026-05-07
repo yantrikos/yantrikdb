@@ -35,6 +35,23 @@ pub enum YantrikDbError {
     #[error("session conflict: {0}")]
     SessionConflict(String),
 
+
+    /// **Decoupled write path RFC, Phase 1.**
+    ///
+    /// The bounded global ingest queue is full. Foreground writers receive
+    /// this synchronously when `log_op_pending()` would push a pending op
+    /// past `MAX_PENDING_OPS`. Caller policy: retry with backoff after the
+    /// hint, surface to user as 503-like, or shed the write.
+    ///
+    /// `retry_after_ms` is a coarse hint — actual drain rate depends on
+    /// background worker throughput.
+    #[error("ingest queue full ({pending} pending ops, max={max}); retry after {retry_after_ms}ms")]
+    Backpressure {
+        pending: i64,
+        max: i64,
+        retry_after_ms: u64,
+    },
+
     #[error("invalid input: {0}")]
     InvalidInput(String),
 }

@@ -134,6 +134,27 @@ impl YantrikDB {
         let hlc_bytes = hlc_ts.to_bytes().to_vec();
         let payload_str = serde_json::to_string(payload)?;
 
+        // Backpressure: bound the pending-op set so an unbounded writer
+        // burst can't blow up RSS or starve the materializer.
+        // The bound is intentionally permissive in Phase 1; Phase 3 will
+        // add tunable per-namespace partitioning.
+        const MAX_PENDING_OPS: i64 = 10_000;
+        let pending_now: i64 = {
+            let conn = self.read_conn();
+            conn.query_row(
+                "SELECT COUNT(*) FROM oplog WHERE applied = 0",
+                [],
+                |row| row.get(0),
+            )?
+        };
+        if pending_now >= MAX_PENDING_OPS {
+            return Err(crate::error::YantrikDbError::Backpressure {
+                pending: pending_now,
+                max: MAX_PENDING_OPS,
+                retry_after_ms: 50,
+            });
+        }
+
         let conn = self.conn.lock();
         conn.execute(
             "INSERT OR IGNORE INTO oplog \
@@ -298,5 +319,46 @@ mod pending_ops_tests {
         db.log_op_pending("record", Some("rid_new"), &serde_json::json!({}), None, None)
             .unwrap();
         assert_eq!(db.count_pending_ops().unwrap(), 1);
+    }
+
+    #[test]
+    fn backpressure_engages_at_max_pending() {
+        // Saturate the queue with 10_000 pending ops, then verify the
+        // 10_001st returns Error::Backpressure with sane fields.
+        let db = open_test_db();
+        for i in 0..10_000 {
+            db.log_op_pending(
+                "record",
+                Some(&format!("rid_{i}")),
+                &serde_json::json!({}),
+                None,
+                None,
+            )
+            .expect("first 10k succeed");
+        }
+        assert_eq!(db.count_pending_ops().unwrap(), 10_000);
+
+        let err = db
+            .log_op_pending("record", Some("rid_overflow"), &serde_json::json!({}), None, None)
+            .expect_err("11k must fail with backpressure");
+        match err {
+            crate::error::YantrikDbError::Backpressure { pending, max, retry_after_ms } => {
+                assert_eq!(max, 10_000);
+                assert_eq!(pending, 10_000);
+                assert!(retry_after_ms > 0, "retry hint must be non-zero");
+            }
+            other => panic!("expected Backpressure, got {other:?}"),
+        }
+
+        // After draining one, the next push must succeed (proves backpressure
+        // is reactive, not sticky).
+        let conn = db.conn.lock();
+        conn.execute(
+            "UPDATE oplog SET applied = 1 WHERE op_id IN (SELECT op_id FROM oplog WHERE applied = 0 LIMIT 1)",
+            [],
+        ).unwrap();
+        drop(conn);
+        db.log_op_pending("record", Some("rid_after_drain"), &serde_json::json!({}), None, None)
+            .expect("succeeds after one drained");
     }
 }
