@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 23;
+pub const SCHEMA_VERSION: i32 = 24;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -599,7 +599,8 @@ CREATE TABLE IF NOT EXISTS oplog (
     hlc BLOB,                           -- hybrid logical clock timestamp (16 bytes)
     embedding_hash BLOB,                -- BLAKE3 hash of embedding (if applicable)
     origin_actor TEXT NOT NULL DEFAULT 'local', -- which device originally created this op
-    applied INTEGER NOT NULL DEFAULT 1  -- 1 = materialized locally, 0 = pending
+    applied INTEGER NOT NULL DEFAULT 1, -- 1 = materialized locally, 0 = pending
+    embedding BLOB                      -- v24: full embedding bytes for ingest replay (NULL for non-record ops)
 );
 
 -- Schema version tracking
@@ -1817,4 +1818,19 @@ CREATE TABLE IF NOT EXISTS contest_state (
 );
 CREATE INDEX IF NOT EXISTS idx_contest_flags ON contest_state(heuristic_flags);
 CREATE INDEX IF NOT EXISTS idx_contest_status ON contest_state(state_status);
+";
+
+
+/// v23 → v24: extend oplog with `embedding` BLOB column.
+///
+/// Engine v0.7.0 (decoupled write path RFC) needs the full embedding bytes
+/// in the oplog so that pending ingest entries (applied=0) can be replayed
+/// by background materializer workers without consulting the memories table.
+/// Existing rows get NULL — only writes after upgrade carry the embedding.
+///
+/// `record()` itself stays log-after-apply for now (Phase 4 of the RFC flips
+/// it to log-then-apply). This migration is a Phase 1 prerequisite.
+pub const MIGRATE_V23_TO_V24: &str = "
+ALTER TABLE oplog ADD COLUMN embedding BLOB;
+CREATE INDEX IF NOT EXISTS idx_oplog_pending ON oplog(applied) WHERE applied = 0;
 ";
