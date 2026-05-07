@@ -204,6 +204,66 @@ impl YantrikDB {
         )?;
         Ok(())
     }
+
+    /// **Decoupled write path RFC, Phase 3 scaffolding.**
+    ///
+    /// Drain up to `limit` pending oplog entries (applied=0) and apply each
+    /// to the engine's in-memory indexes. Returns the number of ops actually
+    /// applied this pass. Idempotent on re-entry — already-applied ops are
+    /// skipped via the `applied = 0` filter.
+    ///
+    /// This is the worker's main-loop body as a sync function. Phase 3.5
+    /// will wrap it in a thread spawn + condvar wake + Drop-based shutdown.
+    /// Phase 4 will switch foreground `record()` to call `log_op_pending()`
+    /// instead of materializing inline, at which point this drain becomes
+    /// the production write-completion path.
+    ///
+    /// Op-type dispatch in Phase 3 is intentionally a stub: each op type
+    /// has a placeholder materializer that just marks the op applied. Phase 4
+    /// fills in the actual application logic (memories INSERT, vec_index
+    /// update, graph_index update, scoring_cache insert) — and at that point
+    /// foreground record() can stop doing it inline.
+    pub fn apply_pending_ops_once(&self, limit: usize) -> Result<usize> {
+        let pending: Vec<(String, String)> = {
+            let conn = self.read_conn();
+            let mut stmt = conn.prepare(
+                "SELECT op_id, op_type FROM oplog \
+                 WHERE applied = 0 \
+                 ORDER BY hlc, op_id \
+                 LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(params![limit as i64], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        let mut applied = 0usize;
+        for (op_id, op_type) in &pending {
+            match op_type.as_str() {
+                "record" | "forget" | "relate" | "correct" | "consolidate" => {
+                    tracing::trace!(
+                        target: "yantrikdb::ingest::materialize",
+                        op_id = %op_id,
+                        op_type = %op_type,
+                        "phase 3 stub: marking pending op as applied without inline materialization"
+                    );
+                    self.mark_op_applied(op_id)?;
+                    applied += 1;
+                }
+                other => {
+                    tracing::warn!(
+                        target: "yantrikdb::ingest::materialize",
+                        op_id = %op_id,
+                        op_type = %other,
+                        "unknown op_type in pending oplog — skipping"
+                    );
+                }
+            }
+        }
+
+        Ok(applied)
+    }
 }
 
 #[cfg(test)]
@@ -360,5 +420,65 @@ mod pending_ops_tests {
         drop(conn);
         db.log_op_pending("record", Some("rid_after_drain"), &serde_json::json!({}), None, None)
             .expect("succeeds after one drained");
+    }
+
+    #[test]
+    fn apply_pending_drains_then_marks() {
+        let db = open_test_db();
+        // Seed 3 pending ops of various types.
+        for (op_type, target) in [("record", "rid_1"), ("forget", "rid_2"), ("relate", "rid_3")] {
+            db.log_op_pending(op_type, Some(target), &serde_json::json!({}), None, None)
+                .unwrap();
+        }
+        assert_eq!(db.count_pending_ops().unwrap(), 3);
+
+        let applied = db.apply_pending_ops_once(10).unwrap();
+        assert_eq!(applied, 3, "all 3 pending ops drained in one pass");
+        assert_eq!(db.count_pending_ops().unwrap(), 0);
+    }
+
+    #[test]
+    fn apply_pending_respects_limit() {
+        let db = open_test_db();
+        for i in 0..5 {
+            db.log_op_pending("record", Some(&format!("rid_{i}")), &serde_json::json!({}), None, None)
+                .unwrap();
+        }
+        let applied = db.apply_pending_ops_once(2).unwrap();
+        assert_eq!(applied, 2, "only 2 of 5 drained when limit=2");
+        assert_eq!(db.count_pending_ops().unwrap(), 3);
+
+        // Subsequent drain picks up the rest.
+        let applied2 = db.apply_pending_ops_once(10).unwrap();
+        assert_eq!(applied2, 3);
+        assert_eq!(db.count_pending_ops().unwrap(), 0);
+    }
+
+    #[test]
+    fn apply_pending_idempotent_when_empty() {
+        let db = open_test_db();
+        // No pending ops — drain returns 0 cleanly.
+        assert_eq!(db.apply_pending_ops_once(100).unwrap(), 0);
+        assert_eq!(db.apply_pending_ops_once(100).unwrap(), 0);
+    }
+
+    #[test]
+    fn apply_pending_skips_unknown_op_type() {
+        let db = open_test_db();
+        // Direct INSERT bypassing log_op_pending so we can use a synthetic op_type.
+        let conn = db.conn.lock();
+        conn.execute(
+            "INSERT INTO oplog (op_id, op_type, timestamp, payload, applied) \
+             VALUES ('synth_unknown', 'made_up_op', 0.0, '{}', 0)",
+            [],
+        ).unwrap();
+        drop(conn);
+        assert_eq!(db.count_pending_ops().unwrap(), 1);
+
+        // Drain doesn't apply unknown op types — they stay pending so a
+        // future runtime that knows the op type can drain them.
+        let applied = db.apply_pending_ops_once(10).unwrap();
+        assert_eq!(applied, 0);
+        assert_eq!(db.count_pending_ops().unwrap(), 1, "unknown op_type stays pending");
     }
 }
