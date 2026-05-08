@@ -230,8 +230,16 @@ fn compactor_loop(weak: Weak<YantrikDB>, shutdown: Arc<AtomicBool>) {
             }
         }
 
+        // **Saga task 18 Option 4 (v0.7.2).** Event-driven wait
+        // instead of unconditional sleep. wait_for_compaction_signal
+        // returns immediately when an append/tombstone past the 80%
+        // threshold notify_one()'s the condvar; otherwise the
+        // 250ms timeout backstops the age-trigger path and clean
+        // shutdown. yantrikdb-server bench (msg b9c98a4d) showed
+        // the unconditional sleep racing the delta refill at
+        // 1000 wps; this closes that race.
+        let _ = db.vec_index.wait_for_compaction_signal(COMPACTOR_INTERVAL);
         drop(db);
-        std::thread::sleep(COMPACTOR_INTERVAL);
     }
 
     tracing::debug!("compactor exited");
@@ -375,13 +383,19 @@ mod tests {
     fn compactor_drains_delta_periodically() {
         // Test scaled to DEFAULT_DELTA_MAX = 256 (v0.6.7+):
         //   half-cap (compaction threshold) = 128
+        //   80% wake threshold               = 205   (v0.7.2 Option 4)
         //   backpressure trigger             = 256
         //
-        // Push 250 entries — past half-cap so the compactor's
-        // `should_compact` returns true, but under the backpressure
-        // ceiling so the burst fits in the delta. Compactor wakes every
-        // COMPACTOR_INTERVAL (250ms in v0.6.7+); we wait up to 4s for at least 200 to
-        // land in cold.
+        // **v0.7.2 update:** With Option 4 (event-driven compactor wake)
+        // the compactor wakes within microseconds of the 205th append,
+        // not after the 250ms tick. By the time we finish the loop the
+        // delta is already partially drained — the `delta_len >= 128`
+        // assertion in v0.7.1 was racing the compactor.
+        //
+        // The point of the test is to verify entries land in cold under
+        // the compactor's drain — that contract is unchanged. So we
+        // assert directly on cold_len, which is what we actually care
+        // about. The interim delta_len assertion was always a proxy.
         let db = open_test_db();
         let _guard = spawn_compactor(&db);
 
@@ -392,11 +406,6 @@ mod tests {
             let seq = db.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             db.vec_index.append(format!("rid_{i}"), normalized, seq).unwrap();
         }
-        assert!(
-            db.vec_index.delta_len() >= 128,
-            "delta should have crossed compact threshold (half of 256), got {}",
-            db.vec_index.delta_len()
-        );
 
         let mut tries = 0;
         while db.vec_index.cold_len() < 200 && tries < 40 {

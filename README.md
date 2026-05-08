@@ -34,42 +34,72 @@ That's it. The agent auto-recalls context, auto-remembers decisions, and auto-de
 pip install yantrikdb
 ```
 
+The engine ships a default embedder (`potion-base-2M`, ~7 MB, distilled
+from BGE-base-en-v1.5) — `record_text()` / `recall_text()` work out of
+the box. **No `sentence-transformers` install. No first-run model
+download. No ONNX runtime.** Just one `pip install`.
+
 ```python
 import yantrikdb
 
-# Single file, no server, no config — the engine ships a static-embedding
-# default (potion-base-2M, ~7MB, distilled from BGE) so `record_text()`
-# and `recall_text()` work out of the box without `pip install
-# sentence-transformers` or first-run model download. Call
-# `db.set_embedder(...)` to swap in a higher-quality model when you want.
+# Default: bundled embedder, dim=64. Just works.
 db = yantrikdb.YantrikDB.with_default("memory.db")
 
-# Record memories with importance, domain, and emotional valence
 db.record("Alice is the engineering lead", importance=0.8, domain="people")
 db.record("Project deadline is March 30", importance=0.9, domain="work")
 db.record("User prefers dark mode", importance=0.6, domain="preference")
 
-# Semantic recall — ranked by relevance, recency, importance, and graph proximity
 results = db.recall("who leads the team?", top_k=3)
 # → [{"text": "Alice is the engineering lead", "score": 1.0}, ...]
 
-# Knowledge graph — entity relationships
 db.relate("Alice", "Engineering", "leads")
 db.get_edges("Alice")
-# → [{"src": "Alice", "dst": "Engineering", "rel_type": "leads", "weight": 1.0}]
 
-# Cognitive maintenance — consolidate, detect conflicts, mine patterns
-db.think()
-# → {"consolidation_count": 2, "conflicts_found": 0, "patterns_new": 1}
+db.think()  # consolidate, detect conflicts, mine patterns
 
 db.close()
 ```
+
+#### Want higher-quality embeddings?
+
+Three opt-in upgrade paths, in increasing weight:
+
+```python
+# 1. Larger bundled variant — downloads on first call, caches under
+#    your user data dir. Self-hosted from yantrikos/yantrikdb-models;
+#    no HuggingFace dependency, no rate limits.
+db = yantrikdb.YantrikDB("memory.db", embedding_dim=256)
+db.set_embedder_named("potion-base-8M")   # ~28 MB, ~92% MiniLM
+# or:  db.set_embedder_named("potion-base-32M")  # ~121 MB, ~95% MiniLM
+
+# 2. Bring your own embedder (sentence-transformers, fastembed, custom).
+from sentence_transformers import SentenceTransformer
+db = yantrikdb.YantrikDB("memory.db", embedding_dim=384)
+db.set_embedder(SentenceTransformer("all-MiniLM-L6-v2"))
+
+# 3. Slim build (no bundled embedder, must set_embedder yourself).
+#    For deployments where the ~7 MB bundle is intolerable.
+#    Rust:  yantrikdb = { version = "0.7", default-features = false }
+```
+
+| Path | Quality vs MiniLM | Size on disk | Install network |
+|---|---|---|---|
+| Bundled default (`with_default`) | ~89% | ~7 MB (bundled) | none |
+| `set_embedder_named("potion-base-8M")` | ~92% | ~28 MB (cached) | first call only |
+| `set_embedder_named("potion-base-32M")` | ~95% | ~121 MB (cached) | first call only |
+| `set_embedder(MiniLM)` | 100% (baseline) | ~80 MB | sentence-transformers' own download |
 
 ### As a Rust crate
 
 ```toml
 [dependencies]
-yantrikdb = "0.6"
+yantrikdb = "0.7"
+
+# Want set_embedder_named() for runtime model upgrades?
+# yantrikdb = { version = "0.7", features = ["embedder-download"] }
+
+# Slim build (no bundled embedder, no network code path):
+# yantrikdb = { version = "0.7", default-features = false }
 ```
 
 ## The Problem

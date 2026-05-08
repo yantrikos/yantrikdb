@@ -1001,6 +1001,212 @@ mod pending_ops_tests {
         assert_eq!(v, "25");
     }
 
+    // ── Perf regression tests (added v0.7.1 after the SELECT COUNT incident) ──
+    //
+    // The v0.7.0 → v0.7.1 hotfix story (yantrikdb-server msg b951a2de):
+    // log_op_pending was running `SELECT COUNT(*) FROM oplog WHERE applied=0`
+    // on every foreground call. At 8 writers that's 16 conn acquisitions/sec
+    // just for the backpressure check. v0.7.1 replaced it with an
+    // AtomicI64 cached counter. These tests structurally pin both
+    // properties (atomic stays coherent with SQL truth + backpressure check
+    // is O(1) under load) so a future regression of the same class is
+    // caught BEFORE it ships, not by yantrikdb-server's homelab bench.
+
+    /// Atomic counter must never drift from SQL truth across mixed
+    /// log_op_pending / mark_op_applied / apply_pending_ops_once
+    /// operations. If this drifts, the backpressure check is wrong AND
+    /// `count_pending_ops()` lies to the materializer. Drift = silent
+    /// data loss possibility.
+    #[test]
+    fn pending_op_count_atomic_matches_sql_after_workload() {
+        let db = open_test_db();
+
+        // Phase 1: pure inserts.
+        for i in 0..50 {
+            db.log_op_pending(
+                "record",
+                Some(&format!("rid_w1_{i}")),
+                &serde_json::json!({}),
+                None,
+                None,
+            )
+            .unwrap();
+            assert_eq!(
+                db.count_pending_ops().unwrap(),
+                db.count_pending_ops_sql().unwrap(),
+                "drift after insert #{i}"
+            );
+        }
+
+        // Phase 2: mixed inserts + applies via apply_pending_ops_once
+        // (which exercises the full mark_op_applied → atomic.fetch_sub path).
+        let drained = db.apply_pending_ops_once(20).unwrap();
+        assert!(drained > 0, "drained at least one");
+        assert_eq!(
+            db.count_pending_ops().unwrap(),
+            db.count_pending_ops_sql().unwrap(),
+            "drift after apply_pending_ops_once"
+        );
+
+        // Phase 3: more inserts after partial drain.
+        for i in 0..30 {
+            db.log_op_pending(
+                "record",
+                Some(&format!("rid_w3_{i}")),
+                &serde_json::json!({}),
+                None,
+                None,
+            )
+            .unwrap();
+        }
+        assert_eq!(
+            db.count_pending_ops().unwrap(),
+            db.count_pending_ops_sql().unwrap(),
+            "drift after second-wave inserts"
+        );
+
+        // Phase 4: drain all the rest.
+        loop {
+            let n = db.apply_pending_ops_once(100).unwrap();
+            if n == 0 {
+                break;
+            }
+        }
+        assert_eq!(db.count_pending_ops().unwrap(), 0);
+        assert_eq!(db.count_pending_ops_sql().unwrap(), 0);
+
+        // Phase 5: idempotent re-mark must not double-decrement.
+        let extra_op_id = db
+            .log_op_pending("record", Some("rid_extra"), &serde_json::json!({}), None, None)
+            .unwrap();
+        let first_mark = db.mark_op_applied(&extra_op_id).unwrap();
+        let second_mark = db.mark_op_applied(&extra_op_id).unwrap();
+        assert!(first_mark, "first mark wins the transition");
+        assert!(!second_mark, "second mark is a no-op (idempotent)");
+        assert_eq!(
+            db.count_pending_ops().unwrap(),
+            0,
+            "double-mark must NOT push counter negative"
+        );
+    }
+
+    /// **Regression guard for the v0.7.0 → v0.7.1 hotfix.** Before the
+    /// fix, `log_op_pending` did a SELECT COUNT(*) WHERE applied=0 per
+    /// call. That made the foreground hot path scale O(pending_count)
+    /// despite the partial index. The fix made it a single atomic load.
+    ///
+    /// This test pins the property: insert N pending ops, then time the
+    /// next log_op_pending call. Even with 5000 pending ops in the
+    /// oplog, the call should complete in <10ms (the actual production
+    /// number is ~1µs; the threshold is ~10000× looser to absorb CI
+    /// noise without false positives). If a regression re-introduces
+    /// SELECT COUNT, the call time grows with the count and the
+    /// assertion fires.
+    #[test]
+    fn log_op_pending_is_o1_under_pending_load() {
+        use std::time::Instant;
+
+        let db = open_test_db();
+        // Seed 5000 pending ops. Each insert is a real conn acquire +
+        // INSERT — this is the setup cost, not the test of interest.
+        for i in 0..5000 {
+            db.log_op_pending(
+                "record",
+                Some(&format!("rid_seed_{i}")),
+                &serde_json::json!({}),
+                None,
+                None,
+            )
+            .expect("seed insert");
+        }
+        assert_eq!(db.count_pending_ops().unwrap(), 5000);
+
+        // Time the next call. Pre-v0.7.1 this scanned 5000 oplog rows
+        // via the partial index AND did a separate read_conn acquire.
+        // Post-fix it's an atomic load. We give 10ms headroom for CI
+        // noise; the actual cost should be sub-millisecond.
+        let t0 = Instant::now();
+        let _id = db
+            .log_op_pending(
+                "record",
+                Some("rid_under_load"),
+                &serde_json::json!({}),
+                None,
+                None,
+            )
+            .expect("call under load");
+        let elapsed = t0.elapsed();
+        assert!(
+            elapsed.as_millis() < 10,
+            "log_op_pending should be O(1); 5001st call took {elapsed:?} \
+             (regression: probably SELECT COUNT re-introduced)"
+        );
+    }
+
+    /// Atomic counter must remain non-negative and stable when many
+    /// concurrent workers race on mark_op_applied. The applied=0 filter
+    /// in the SQL guarantees exactly-once SQL transition; the
+    /// `if won { fetch_sub }` guard inside mark_op_applied must
+    /// preserve that into the atomic.
+    #[test]
+    fn pending_op_count_under_concurrent_mark() {
+        use std::sync::Arc;
+        use std::thread;
+
+        let db = Arc::new(open_test_db());
+        for i in 0..100 {
+            db.log_op_pending(
+                "record",
+                Some(&format!("rid_conc_{i}")),
+                &serde_json::json!({}),
+                None,
+                None,
+            )
+            .unwrap();
+        }
+        assert_eq!(db.count_pending_ops().unwrap(), 100);
+
+        // Snapshot all op_ids so each worker can race to mark them.
+        let op_ids: Vec<String> = {
+            let conn = db.read_conn();
+            let mut stmt = conn
+                .prepare("SELECT op_id FROM oplog WHERE applied = 0")
+                .unwrap();
+            stmt.query_map([], |row| row.get::<_, String>(0))
+                .unwrap()
+                .filter_map(|r| r.ok())
+                .collect()
+        };
+
+        // 4 workers each try to mark every op. The applied=0 filter +
+        // bool return + `if won` guard means each op is decremented
+        // exactly once across all workers.
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let db_c = Arc::clone(&db);
+            let ids_c = op_ids.clone();
+            handles.push(thread::spawn(move || {
+                for id in ids_c {
+                    let _ = db_c.mark_op_applied(&id);
+                }
+            }));
+        }
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(
+            db.count_pending_ops().unwrap(),
+            0,
+            "concurrent racing on mark_op_applied must converge atomic to 0"
+        );
+        assert_eq!(
+            db.count_pending_ops_sql().unwrap(),
+            0,
+            "and SQL truth must agree"
+        );
+    }
+
     #[test]
     fn schema_v25_indexes_present() {
         let db = open_test_db();

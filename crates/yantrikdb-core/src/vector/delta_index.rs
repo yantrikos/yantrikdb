@@ -126,6 +126,19 @@ pub struct DeltaIndex {
     /// delta's oldest entry has been sitting longer than this, the
     /// compactor fires regardless of delta size.
     max_dirty_age: std::time::Duration,
+    /// **Saga task 18 Option 4 (v0.7.2).** Event-driven compactor
+    /// wake. `append()` and `tombstone()` signal this condvar when the
+    /// delta crosses ~80% of `delta_max`, so the compactor wakes within
+    /// microseconds of pressure rather than waiting up to its 250ms
+    /// poll tick. The condvar's paired sentinel mutex is `()` — no
+    /// data lives behind it; it's there because parking_lot::Condvar
+    /// requires a guard. The 250ms tick stays as a backstop for the
+    /// age-trigger path and graceful shutdown responsiveness. Confirmed
+    /// architectural pull by yantrikdb-server msg b9c98a4d 2026-05-08
+    /// (90s bench showed read p99 spikes during compactor sleep
+    /// windows; this closes that gap).
+    compactor_wake_cv: parking_lot::Condvar,
+    compactor_wake_mu: parking_lot::Mutex<()>,
 }
 
 impl DeltaIndex {
@@ -157,6 +170,8 @@ impl DeltaIndex {
             dim,
             oldest_dirty_at: parking_lot::Mutex::new(None),
             max_dirty_age,
+            compactor_wake_cv: parking_lot::Condvar::new(),
+            compactor_wake_mu: parking_lot::Mutex::new(()),
         }
     }
 
@@ -182,6 +197,8 @@ impl DeltaIndex {
             dim,
             oldest_dirty_at: parking_lot::Mutex::new(None),
             max_dirty_age,
+            compactor_wake_cv: parking_lot::Condvar::new(),
+            compactor_wake_mu: parking_lot::Mutex::new(()),
         }
     }
 
@@ -240,12 +257,26 @@ impl DeltaIndex {
             seq,
             tombstoned: false,
         });
+        let new_len = delta.len();
+        drop(delta); // release write lock before signaling
+
         // Stamp the dirty-age clock on first non-empty append after every
         // compaction. Subsequent appends within the same dirty window
         // don't touch it — only the oldest entry's age matters for the
         // age-based trigger.
         if was_empty {
             *self.oldest_dirty_at.lock() = Some(std::time::Instant::now());
+        }
+        // **Saga task 18 Option 4 (v0.7.2).** Wake the compactor early
+        // when delta crosses ~80% of capacity. Without this, the
+        // compactor sleeps its 250ms tick and delta can saturate
+        // before the next wake (at 1000 wps + delta_max=256, refill
+        // takes ~256ms — almost exactly one tick, so half the time
+        // the compactor wakes to a saturated delta and reads stall).
+        // Cheap notify_one — no contention since the compactor is
+        // the only waiter.
+        if new_len >= self.delta_max * 80 / 100 {
+            self.compactor_wake_cv.notify_one();
         }
         Ok(())
     }
@@ -280,11 +311,19 @@ impl DeltaIndex {
             seq,
             tombstoned: true,
         });
+        let new_len = delta.len();
+        drop(delta); // release write lock before signaling
+
         // Stamp the dirty-age clock if this tombstone marker is the only
         // entry in the delta (delta was empty before the push). Same rule
         // as append(): only the *oldest* dirty entry's age matters.
         if was_empty {
             *self.oldest_dirty_at.lock() = Some(std::time::Instant::now());
+        }
+        // Saga task 18 Option 4: tombstone-only paths also fill the
+        // delta and should wake the compactor at the same threshold.
+        if new_len >= self.delta_max * 80 / 100 {
+            self.compactor_wake_cv.notify_one();
         }
         false
     }
@@ -510,6 +549,29 @@ impl DeltaIndex {
             Some(t) if self.delta_len() > 0 && t.elapsed() >= self.max_dirty_age => true,
             _ => false,
         }
+    }
+
+    /// **Saga task 18 Option 4 (v0.7.2).** Compactor's wait primitive.
+    /// Blocks for up to `timeout` waiting for either:
+    /// - An `append()`/`tombstone()` that pushed delta past 80% capacity
+    ///   (event-driven wake — wakes within microseconds of pressure).
+    /// - The `timeout` expiring (backstop for the age-trigger path
+    ///   and for graceful shutdown responsiveness).
+    ///
+    /// Pre-v0.7.2 the compactor's loop used `thread::sleep(timeout)`,
+    /// which at 1000 wps + delta_max=256 meant the delta saturated
+    /// inside one tick window, stalling readers. This API replaces
+    /// the sleep with an event-driven wait.
+    ///
+    /// Returns true if woken by signal, false if the timeout fired.
+    /// Caller treats both as "go check should_compact again."
+    pub fn wait_for_compaction_signal(
+        &self,
+        timeout: std::time::Duration,
+    ) -> bool {
+        let mut guard = self.compactor_wake_mu.lock();
+        let result = self.compactor_wake_cv.wait_for(&mut guard, timeout);
+        !result.timed_out()
     }
 }
 

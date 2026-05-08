@@ -252,6 +252,48 @@ impl YantrikDB {
         Self::new(db_path, crate::embedder::BUNDLED_EMBEDDER_DIM)
     }
 
+    /// **Saga task 20 Slice C** — replace the engine's current embedder
+    /// with one downloaded from
+    /// [`yantrikos/yantrikdb-models`](https://github.com/yantrikos/yantrikdb-models).
+    /// Available in default + `embedder-download` builds; compiles out
+    /// when neither feature is on.
+    ///
+    /// Known names (registry hardcoded per release for SHA-256 pinning):
+    /// - `"potion-base-8M"`  — 256-dim, ~92% MiniLM, ~28 MB tarball
+    /// - `"potion-base-32M"` — 512-dim, ~95% MiniLM, ~121 MB tarball
+    ///
+    /// On first call this fetches the tarball, verifies its SHA-256
+    /// against a constant pinned at compile time, extracts to
+    /// `dirs::cache_dir() / "yantrikdb" / "models" /`, and loads via
+    /// `model2vec-rs`. Subsequent calls (this process or any other
+    /// against the same cache dir) hit the cache and skip the network.
+    ///
+    /// **Dimension contract.** The named model's output dim must match
+    /// the engine's `embedding_dim` set at `YantrikDB::new(path, dim)`.
+    /// Mismatch is rejected to prevent silent vector-index corruption.
+    ///
+    /// **Errors.** Returns `Error::InvalidInput` for: unknown name,
+    /// network failure, SHA-256 mismatch, dim mismatch, or filesystem
+    /// errors. The engine's existing embedder (if any) is preserved on
+    /// error — `set_embedder_named` is atomic.
+    #[cfg(feature = "embedder-download")]
+    pub fn set_embedder_named(&mut self, name: &str) -> Result<()> {
+        use crate::embedder::DownloadedEmbedder;
+        let downloaded = DownloadedEmbedder::fetch(name)?;
+        if downloaded.dim() != self.embedding_dim() {
+            return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                "embedder {name:?} dim={} but engine was opened with dim={}; \
+                 either reopen with `YantrikDB::new(path, {})` or pick a \
+                 differently-dimensioned named embedder",
+                downloaded.dim(),
+                self.embedding_dim(),
+                downloaded.dim(),
+            )));
+        }
+        self.set_embedder(Box::new(downloaded));
+        Ok(())
+    }
+
     /// Create a new YantrikDB instance with an explicit actor_id (for sync tests).
     pub fn new_with_actor(db_path: &str, embedding_dim: usize, actor_id: &str) -> Result<Self> {
         let mut db = Self::open(db_path, embedding_dim, Some(actor_id.to_string()), None)?;

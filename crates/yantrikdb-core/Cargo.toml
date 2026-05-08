@@ -1,6 +1,6 @@
 [package]
 name = "yantrikdb"
-version = "0.7.1"
+version = "0.7.2"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Cognitive memory engine for persistent AI systems"
@@ -39,6 +39,18 @@ dashmap = "6"
 # weights, never HF Hub IDs.
 model2vec-rs = { version = "0.1", default-features = false, features = ["fancy-regex"], optional = true }
 
+# **embedder-download** dep — sync HTTP fetcher for Slice C's
+# `set_embedder_named()` runtime-download path. ureq is pure Rust,
+# blocking, no async runtime, ~50 KB. Behind its own feature flag so
+# slim deployments + WASM targets compile out the network code path
+# entirely. `tls-rustls-webpki-roots` so we don't depend on the host
+# OS having a usable certificate store (critical for containers).
+ureq = { version = "2", default-features = false, features = ["tls", "json"], optional = true }
+sha2 = { version = "0.10", optional = true }
+dirs = { version = "5", optional = true }
+tar = { version = "0.4", optional = true }
+flate2 = { version = "1", optional = true }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
 
@@ -50,6 +62,12 @@ js-sys = "0.3"
 # `db.set_embedder()`. See saga task 20 + memory rid 019e0686.
 default = ["bundled-embedder"]
 bundled-embedder = ["dep:model2vec-rs"]
+# **Slice C** — runtime download of larger embedder variants from
+# `yantrikos/yantrikdb-models` GitHub Releases. Off by default (some
+# users prefer fully-offline installs); when on, exposes
+# `db.set_embedder_named()`. Builds on `bundled-embedder` because it
+# reuses the model2vec-rs loader.
+embedder-download = ["bundled-embedder", "dep:ureq", "dep:sha2", "dep:dirs", "dep:tar", "dep:flate2"]
 profiling = []
 
 [dev-dependencies]
