@@ -129,24 +129,22 @@ impl YantrikDB {
         emb_hash: Option<&[u8]>,
         embedding: Option<&[u8]>,
     ) -> Result<String> {
+        use std::sync::atomic::Ordering;
         let op_id = crate::id::new_id();
         let hlc_ts = self.tick_hlc();
         let hlc_bytes = hlc_ts.to_bytes().to_vec();
         let payload_str = serde_json::to_string(payload)?;
 
-        // Backpressure: bound the pending-op set so an unbounded writer
-        // burst can't blow up RSS or starve the materializer.
-        // The bound is intentionally permissive in Phase 1; Phase 3 will
-        // add tunable per-namespace partitioning.
+        // **v0.7.1 perf hotfix.** Backpressure check is now an atomic
+        // load against `pending_op_count` instead of `SELECT COUNT(*) FROM
+        // oplog WHERE applied = 0`. The previous SQL pattern dominated
+        // foreground latency when v0.7.0 wired log_op_pending into the
+        // record() hot path — every write paid a Mutex<Connection> acquire
+        // + index scan + drop just to check the bound. Cached counter
+        // is maintained by `log_op_pending` (fetch_add on insert) and
+        // `mark_op_applied` (fetch_sub on apply-win).
         const MAX_PENDING_OPS: i64 = 10_000;
-        let pending_now: i64 = {
-            let conn = self.read_conn();
-            conn.query_row(
-                "SELECT COUNT(*) FROM oplog WHERE applied = 0",
-                [],
-                |row| row.get(0),
-            )?
-        };
+        let pending_now = self.pending_op_count.load(Ordering::Relaxed);
         if pending_now >= MAX_PENDING_OPS {
             return Err(crate::error::YantrikDbError::Backpressure {
                 pending: pending_now,
@@ -174,6 +172,13 @@ impl YantrikDB {
                 embedding,
             ],
         )?;
+        // **v0.7.1**: maintain the cached counter. INSERT OR IGNORE on
+        // op_id PK means the row may not actually have been added (caller
+        // re-using an op_id is the cluster-replay shape). Check the
+        // changes count to only increment on a real insert.
+        if conn.changes() > 0 {
+            self.pending_op_count.fetch_add(1, Ordering::Relaxed);
+        }
         Ok(op_id)
     }
 
@@ -181,7 +186,24 @@ impl YantrikDB {
     ///
     /// Count of pending oplog entries (applied=0). Used by tests and by the
     /// background materializer to decide whether to wake up.
+    ///
+    /// **v0.7.1 hotfix:** returns the cached `pending_op_count` atomic
+    /// instead of running `SELECT COUNT(*)`. The atomic is maintained by
+    /// `log_op_pending` (`fetch_add` on insert) and `mark_op_applied`
+    /// (`fetch_sub` on apply-win) so it's always coherent with the SQL
+    /// state. Tests that mutate oplog by hand (rare, only in test
+    /// helpers) can still use the SQL form via `count_pending_ops_sql`.
     pub fn count_pending_ops(&self) -> Result<i64> {
+        use std::sync::atomic::Ordering;
+        Ok(self.pending_op_count.load(Ordering::Relaxed))
+    }
+
+    /// SQL-backed count for tests / debug. Same shape as v0.7.0's
+    /// `count_pending_ops` but routed through `read_conn`. Kept as a
+    /// reconciliation oracle for the cached counter; in production paths
+    /// use `count_pending_ops`.
+    #[doc(hidden)]
+    pub fn count_pending_ops_sql(&self) -> Result<i64> {
         let conn = self.read_conn();
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM oplog WHERE applied = 0",
@@ -204,12 +226,21 @@ impl YantrikDB {
     /// — the work is idempotent so double-execution is safe; this filter
     /// just decides which worker gets to claim the apply count.
     pub fn mark_op_applied(&self, op_id: &str) -> Result<bool> {
+        use std::sync::atomic::Ordering;
         let conn = self.conn.lock();
         let changed = conn.execute(
             "UPDATE oplog SET applied = 1 WHERE op_id = ?1 AND applied = 0",
             params![op_id],
         )?;
-        Ok(changed > 0)
+        let won = changed > 0;
+        // **v0.7.1**: decrement the cached counter only when this caller
+        // actually transitioned the row. Mirrors log_op_pending's
+        // increment-only-on-real-insert pattern; keeps the atomic
+        // coherent with SQL applied-state under N concurrent workers.
+        if won {
+            self.pending_op_count.fetch_sub(1, Ordering::Relaxed);
+        }
+        Ok(won)
     }
 
     /// **Decoupled write path RFC, Phase 3 scaffolding.**
@@ -846,13 +877,22 @@ mod pending_ops_tests {
         }
 
         // After draining one, the next push must succeed (proves backpressure
-        // is reactive, not sticky).
-        let conn = db.conn.lock();
-        conn.execute(
-            "UPDATE oplog SET applied = 1 WHERE op_id IN (SELECT op_id FROM oplog WHERE applied = 0 LIMIT 1)",
-            [],
-        ).unwrap();
-        drop(conn);
+        // is reactive, not sticky). v0.7.1: drain via the public
+        // `mark_op_applied` API so the cached `pending_op_count` atomic
+        // stays coherent. Bypassing it with raw SQL (the v0.7.0 shape)
+        // wouldn't decrement the counter and would falsely keep
+        // backpressure engaged — the new test path verifies the
+        // atomic counter contract end-to-end.
+        let one_op_id: String = {
+            let conn = db.read_conn();
+            conn.query_row(
+                "SELECT op_id FROM oplog WHERE applied = 0 LIMIT 1",
+                [],
+                |row| row.get(0),
+            ).unwrap()
+        };
+        let was_unset = db.mark_op_applied(&one_op_id).unwrap();
+        assert!(was_unset, "mark_op_applied should win the transition");
         db.log_op_pending("record", Some("rid_after_drain"), &serde_json::json!({}), None, None)
             .expect("succeeds after one drained");
     }
@@ -900,14 +940,18 @@ mod pending_ops_tests {
     #[test]
     fn apply_pending_skips_unknown_op_type() {
         let db = open_test_db();
-        // Direct INSERT bypassing log_op_pending so we can use a synthetic op_type.
-        let conn = db.conn.lock();
-        conn.execute(
-            "INSERT INTO oplog (op_id, op_type, timestamp, payload, applied) \
-             VALUES ('synth_unknown', 'made_up_op', 0.0, '{}', 0)",
-            [],
+        // v0.7.1: enqueue via log_op_pending with a synthetic op_type so
+        // the cached `pending_op_count` atomic increments. v0.7.0 used
+        // direct SQL INSERT here, but that bypasses the counter and
+        // mismatches the public-API count_pending_ops contract — fixed
+        // alongside the perf hotfix.
+        db.log_op_pending(
+            "made_up_op",
+            Some("synth_unknown"),
+            &serde_json::json!({}),
+            None,
+            None,
         ).unwrap();
-        drop(conn);
         assert_eq!(db.count_pending_ops().unwrap(), 1);
 
         // Drain doesn't apply unknown op types — they stay pending so a

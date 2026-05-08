@@ -126,6 +126,22 @@ pub struct YantrikDB {
     /// Used by Phase 6 RYW (recall_with_seq); also feeds DeltaIndex's
     /// per-entry seq tag for compaction ordering.
     pub(crate) vec_seq: std::sync::atomic::AtomicU64,
+    /// **v0.7.1 perf hotfix.** Cached pending-oplog count for foreground
+    /// `log_op_pending` backpressure check. Replaces the per-call
+    /// `SELECT COUNT(*) FROM oplog WHERE applied = 0` index scan that
+    /// dominated v0.7.0's foreground write path under sustained load
+    /// (5× tput drop diagnosed via yantrikdb-server msg `b951a2de`).
+    ///
+    /// Maintained by:
+    /// - `open()`: initialize from one-time SQL `SELECT COUNT(...)` at boot.
+    /// - `log_op_pending`: `fetch_add(1)` after a successful insert.
+    /// - `mark_op_applied`: `fetch_sub(1)` only when the row transitioned
+    ///   from `applied=0` to `applied=1` (the bool the method now returns).
+    ///
+    /// Backpressure check on the foreground hot path becomes a single
+    /// `Relaxed` atomic load instead of a Mutex<Connection> acquire +
+    /// index scan + drop.
+    pub(crate) pending_op_count: std::sync::atomic::AtomicI64,
     /// **Phase 6 RYW**: per-namespace high-water mark of applied seqs.
     /// Updated by record/record_with_rid (and siblings) after the write
     /// has materialized into the in-memory delta. `recall_with_seq` waits
@@ -492,6 +508,20 @@ impl YantrikDB {
             );
         }
 
+        // **v0.7.1 perf hotfix.** Boot-time SQL count of pending oplog
+        // entries; thereafter the counter is maintained in-memory by
+        // log_op_pending (increments) and mark_op_applied (decrements).
+        // The partial idx_oplog_pending makes this single boot read O(N_pending)
+        // — a fixed cost we pay once, in exchange for never paying it again
+        // on the foreground hot path.
+        let initial_pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM oplog WHERE applied = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
+
         Ok(Self {
             conn: Mutex::new(conn),
             read_conns,
@@ -517,6 +547,7 @@ impl YantrikDB {
                 )
             },
             vec_seq: std::sync::atomic::AtomicU64::new(0),
+            pending_op_count: std::sync::atomic::AtomicI64::new(initial_pending),
             visible_seq: dashmap::DashMap::new(),
             visible_seq_cv: parking_lot::Condvar::new(),
             visible_seq_wait_mu: parking_lot::Mutex::new(()),
