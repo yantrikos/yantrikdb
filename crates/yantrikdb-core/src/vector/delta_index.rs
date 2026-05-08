@@ -70,8 +70,19 @@ pub struct DeltaEntry {
 /// Default soft cap on delta size. Hitting this triggers backpressure on
 /// `append()`. Phase 5 compaction will keep the delta below this in steady
 /// state by sealing + swapping when it crosses the cap. Tunable per
-/// deployment via `DeltaIndex::with_capacity`.
-pub const DEFAULT_DELTA_MAX: usize = 1024;
+/// deployment via `DeltaIndex::with_capacity` or the `YANTRIKDB_DELTA_MAX`
+/// environment variable.
+///
+/// **Default 256 (was 1024 in v0.6.6).** Cross-platform empirical study by
+/// yantrikdb-server (2026-05-07): at `delta_max=256` vs the previous 1024,
+/// write throughput rose from ~586/s to ~996/s (+70% over v0.6.6, ≈2.2× over
+/// v0.6.5) while read p50 dropped from ~300ms to ~141ms — better than even
+/// v0.6.5's pre-wedge baseline. The intuition is that a smaller delta keeps
+/// per-search linear scans cheap and triggers compaction often enough that the
+/// cold HNSW absorbs most of the working set, so most reads never touch the
+/// hot path's RwLock at all. Larger caps amortize compaction overhead but pay
+/// for it in steady-state read latency.
+pub const DEFAULT_DELTA_MAX: usize = 256;
 
 /// Per-DB two-tier vector index used by the decoupled write path.
 ///
