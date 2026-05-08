@@ -240,37 +240,104 @@ impl YantrikDB {
         Ok(decayed)
     }
 
-    /// Tombstone a memory. Returns true if the memory was found and tombstoned.
-    #[tracing::instrument(skip(self))]
-    pub fn forget(&self, rid: &str) -> Result<bool> {
-        let ts = now();
-        let changes = {
-            let conn = self.conn();
-            conn.execute(
-                "UPDATE memories SET consolidation_status = 'tombstoned', updated_at = ?1 WHERE rid = ?2",
-                params![ts, rid],
-            )?
-        }; // drop conn before acquiring vec_index/graph_index locks
+    /// **Issue #9 — deterministic tombstone primitive for cluster replication.**
+    ///
+    /// Sibling of `forget()` that takes caller-supplied timestamp + optional
+    /// reason for byte-deterministic follower replay. Used by yantrikdb-server's
+    /// cluster-mode applier so replicated tombstones converge to identical
+    /// engine state across leader + followers.
+    ///
+    /// # Contract
+    ///
+    /// - **Idempotent on missing**: tombstoning a rid that does not exist
+    ///   returns `Ok(())` (NOT an error and NOT a `false` flag — different
+    ///   from `forget()`). Snapshot-install + log replay overlap means
+    ///   double-delete is normal cluster behavior.
+    /// - **Idempotent on already-tombstoned**: re-tombstoning a row that
+    ///   is already tombstoned returns `Ok(())` without emitting a new
+    ///   oplog entry or re-bumping cache state. Replay-safe.
+    /// - **Caller-supplied timestamp**: `requested_at_unix_micros` materialized
+    ///   into `updated_at` (REAL seconds). No engine `now()` call on this path.
+    /// - **Optional reason**: stored in `tombstone_reason TEXT` column (v25).
+    ///   NULL when caller passes None.
+    ///
+    /// Always emits a tombstone marker into the DeltaIndex regardless of
+    /// whether the SQL row was newly tombstoned — followers may have the
+    /// rid in their delta even if SQL is absent.
+    pub fn tombstone_with_rid(
+        &self,
+        rid: &str,
+        reason: Option<&str>,
+        requested_at_unix_micros: i64,
+    ) -> Result<()> {
+        self.tombstone_inner(rid, reason, requested_at_unix_micros)?;
+        Ok(())
+    }
 
-        if changes > 0 {
-            let seq = self.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.vec_index.tombstone(rid, seq);
+    /// Internal helper shared by `tombstone_with_rid` and `forget`. Returns
+    /// `true` iff the row was newly tombstoned (was active or consolidated
+    /// before this call). Returns `false` if rid is missing or already
+    /// tombstoned — both treated as idempotent successful no-ops.
+    fn tombstone_inner(
+        &self,
+        rid: &str,
+        reason: Option<&str>,
+        ts_micros: i64,
+    ) -> Result<bool> {
+        let ts_secs = (ts_micros as f64) / 1_000_000.0;
+
+        // UPDATE with state filter so changes==1 means "was newly tombstoned".
+        // changes==0 means rid missing OR already tombstoned (both: no-op).
+        let was_newly_tombstoned = {
+            let conn = self.conn();
+            let changes = conn.execute(
+                "UPDATE memories SET consolidation_status = 'tombstoned', \
+                 updated_at = ?1, tombstone_reason = ?2 \
+                 WHERE rid = ?3 AND consolidation_status != 'tombstoned'",
+                params![ts_secs, reason, rid],
+            )?;
+            changes > 0
+        };
+
+        // Always emit a delta tombstone so search() filters it out even
+        // before SQL has applied. Cluster followers may have the rid in
+        // their delta from a recent record_with_rid that has not yet
+        // compacted into cold; the tombstone marker covers that window.
+        let seq = self.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.vec_index.tombstone(rid, seq);
+
+        // Engine-internal index updates only when the row was newly tombstoned
+        // (replay-safe: no double-emit on idempotent re-apply).
+        if was_newly_tombstoned {
             self.graph_index.write().unlink_memory(rid);
-            // Remove from scoring cache (tombstoned memories excluded)
             self.cache_remove(rid);
             self.log_op(
                 "forget",
                 Some(rid),
                 &serde_json::json!({
                     "rid": rid,
-                    "updated_at": ts,
+                    "updated_at_unix_micros": ts_micros,
+                    "reason": reason,
                 }),
                 None,
             )?;
-            Ok(true)
-        } else {
-            Ok(false)
         }
+
+        Ok(was_newly_tombstoned)
+    }
+
+    /// Tombstone a memory. Returns `true` if the memory was found in a live
+    /// state and newly tombstoned; `false` if rid was missing or already
+    /// tombstoned (both treated as no-ops).
+    ///
+    /// Stamped with engine-supplied `now()` — for byte-deterministic
+    /// cluster-replicated tombstones use [`tombstone_with_rid`] instead.
+    /// `forget()` delegates to `tombstone_inner` with no reason; the bool
+    /// return is the only behavioral difference.
+    #[tracing::instrument(skip(self))]
+    pub fn forget(&self, rid: &str) -> Result<bool> {
+        let ts_micros = (now() * 1_000_000.0) as i64;
+        self.tombstone_inner(rid, None, ts_micros)
     }
 
     /// User-initiated memory correction.

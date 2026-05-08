@@ -4424,3 +4424,134 @@ fn record_with_rid_makes_recall_find_it() {
         "rid_recall should appear in recall results"
     );
 }
+
+// ── Issue #9 cluster replication API: tombstone_with_rid ──
+
+#[test]
+fn tombstone_with_rid_basic_succeeds() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let emb = vec_seed(1.0, 64);
+    let rid = db.record("to tombstone", "episodic", 0.5, 0.0, 604800.0,
+        &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
+
+    db.tombstone_with_rid(&rid, Some("test reason"), 1_700_000_010_000_000)
+        .expect("tombstone_with_rid succeeds");
+
+    let mem = db.get(&rid).unwrap().unwrap();
+    assert_eq!(mem.consolidation_status, "tombstoned");
+}
+
+#[test]
+fn tombstone_with_rid_persists_reason() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let emb = vec_seed(2.0, 64);
+    let rid = db.record("memory with reason", "episodic", 0.5, 0.0, 604800.0,
+        &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
+    db.tombstone_with_rid(&rid, Some("user requested deletion"), 1_700_000_011_000_000).unwrap();
+
+    let conn = db.read_conn();
+    let reason: Option<String> = conn.query_row(
+        "SELECT tombstone_reason FROM memories WHERE rid = ?1",
+        rusqlite::params![&rid],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(reason.as_deref(), Some("user requested deletion"));
+}
+
+#[test]
+fn tombstone_with_rid_idempotent_on_replay() {
+    // Determinism contract: re-tombstoning a rid that's already tombstoned
+    // returns Ok(()) without emitting a second oplog entry.
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let emb = vec_seed(3.0, 64);
+    let rid = db.record("idempotent tombstone", "episodic", 0.5, 0.0, 604800.0,
+        &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
+
+    for _ in 0..3 {
+        db.tombstone_with_rid(&rid, Some("replay"), 1_700_000_012_000_000)
+            .expect("idempotent re-apply");
+    }
+
+    let conn = db.read_conn();
+    let op_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM oplog WHERE op_type = 'forget' AND target_rid = ?1",
+        rusqlite::params![&rid],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(op_count, 1, "oplog has exactly one forget entry despite 3 calls");
+}
+
+#[test]
+fn tombstone_with_rid_idempotent_on_missing() {
+    // Snapshot-install + log replay overlap means tombstoning a rid that
+    // doesn't exist is normal cluster behavior. Must return Ok(()), not error.
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    db.tombstone_with_rid("rid_never_existed", None, 1_700_000_013_000_000)
+        .expect("must be Ok(()) on missing rid");
+    // Verify no oplog entry created for the missing rid.
+    let conn = db.read_conn();
+    let op_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM oplog WHERE target_rid = ?1",
+        rusqlite::params!["rid_never_existed"],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(op_count, 0);
+}
+
+#[test]
+fn tombstone_with_rid_uses_caller_supplied_timestamp() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let emb = vec_seed(4.0, 64);
+    let rid = db.record("ts test", "episodic", 0.5, 0.0, 604800.0,
+        &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
+    let caller_ts: i64 = 1_700_000_999_000_000;
+    db.tombstone_with_rid(&rid, None, caller_ts).unwrap();
+
+    let conn = db.read_conn();
+    let updated_at: f64 = conn.query_row(
+        "SELECT updated_at FROM memories WHERE rid = ?1",
+        rusqlite::params![&rid],
+        |row| row.get(0),
+    ).unwrap();
+    let expected = (caller_ts as f64) / 1_000_000.0;
+    assert!((updated_at - expected).abs() < 1e-6,
+        "updated_at should reflect caller ts: got {} expected {}", updated_at, expected);
+}
+
+#[test]
+fn forget_still_works_after_refactor() {
+    // Back-compat: forget() must still return Result<bool>, true on first
+    // tombstone of a live row.
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let emb = vec_seed(5.0, 64);
+    let rid = db.record("forget test", "episodic", 0.5, 0.0, 604800.0,
+        &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
+
+    let first = db.forget(&rid).unwrap();
+    assert!(first, "first forget on live row returns true");
+
+    let second = db.forget(&rid).unwrap();
+    assert!(!second, "second forget on already-tombstoned row returns false");
+
+    let missing = db.forget("rid_never_existed").unwrap();
+    assert!(!missing, "forget on missing rid returns false");
+}
+
+#[test]
+fn tombstone_with_rid_hides_from_recall() {
+    // After tombstone_with_rid, the rid must not appear in recall results.
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let emb = vec_seed(6.0, 64);
+    let rid = db.record("hide me", "episodic", 0.5, 0.0, 604800.0,
+        &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
+
+    // Sanity: visible before tombstone.
+    let r = db.recall(&emb, 5, None, None, false, false, None, true, None, None, None).unwrap();
+    assert!(r.iter().any(|x| x.rid == rid), "visible before tombstone");
+
+    db.tombstone_with_rid(&rid, None, 1_700_000_014_000_000).unwrap();
+
+    // Hidden after.
+    let r2 = db.recall(&emb, 5, None, None, false, false, None, true, None, None, None).unwrap();
+    assert!(!r2.iter().any(|x| x.rid == rid), "hidden after tombstone");
+}
