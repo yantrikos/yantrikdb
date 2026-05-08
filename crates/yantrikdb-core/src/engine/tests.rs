@@ -4555,3 +4555,144 @@ fn tombstone_with_rid_hides_from_recall() {
     let r2 = db.recall(&emb, 5, None, None, false, false, None, true, None, None, None).unwrap();
     assert!(!r2.iter().any(|x| x.rid == rid), "hidden after tombstone");
 }
+
+// ── Issue #9 cluster replication API: entity edge methods ──
+
+#[test]
+fn upsert_entity_edge_with_id_basic_succeeds() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    db.upsert_entity_edge_with_id(
+        "edge_1", "Alice", "Acme", "works_at", 0.9, "default",
+        1_700_000_020_000_000,
+    ).expect("upsert succeeds");
+
+    // Verify the claim row exists with caller-supplied edge_id.
+    let conn = db.read_conn();
+    let (cid, src, dst, rel, weight): (String, String, String, String, f64) = conn.query_row(
+        "SELECT claim_id, src, dst, rel_type, weight FROM claims WHERE claim_id = ?1",
+        rusqlite::params!["edge_1"],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+    ).unwrap();
+    assert_eq!(cid, "edge_1");
+    assert_eq!(src, "Alice");
+    assert_eq!(dst, "Acme");
+    assert_eq!(rel, "works_at");
+    assert!((weight - 0.9).abs() < 1e-6);
+}
+
+#[test]
+fn upsert_entity_edge_with_id_is_idempotent_on_replay() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    for _ in 0..3 {
+        db.upsert_entity_edge_with_id(
+            "edge_idem", "Bob", "Beta Corp", "founded", 0.8, "default",
+            1_700_000_021_000_000,
+        ).expect("idempotent");
+    }
+    let conn = db.read_conn();
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM claims WHERE claim_id = ?1",
+        rusqlite::params!["edge_idem"],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(count, 1, "exactly one claim row regardless of replay");
+
+    let op_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM oplog WHERE op_type = 'upsert_entity_edge_with_id' AND target_rid = ?1",
+        rusqlite::params!["edge_idem"],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(op_count, 1, "exactly one oplog entry regardless of replay");
+}
+
+#[test]
+fn upsert_entity_edge_uses_caller_supplied_timestamp() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let caller_ts: i64 = 1_700_000_555_000_000;
+    db.upsert_entity_edge_with_id(
+        "edge_ts", "X", "Y", "knows", 0.5, "default", caller_ts,
+    ).unwrap();
+    let conn = db.read_conn();
+    let created_at: f64 = conn.query_row(
+        "SELECT created_at FROM claims WHERE claim_id = ?1",
+        rusqlite::params!["edge_ts"],
+        |row| row.get(0),
+    ).unwrap();
+    let expected = (caller_ts as f64) / 1_000_000.0;
+    assert!((created_at - expected).abs() < 1e-6,
+        "created_at REAL reflects caller ts: got {} expected {}", created_at, expected);
+}
+
+#[test]
+fn upsert_entity_edge_creates_entities() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    db.upsert_entity_edge_with_id(
+        "edge_ent", "Charlie", "Delta Inc", "ceo_of", 1.0, "default",
+        1_700_000_022_000_000,
+    ).unwrap();
+    let conn = db.read_conn();
+    let charlie: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM entities WHERE name = 'Charlie'",
+        [], |row| row.get(0),
+    ).unwrap();
+    let delta: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM entities WHERE name = 'Delta Inc'",
+        [], |row| row.get(0),
+    ).unwrap();
+    assert_eq!(charlie, 1);
+    assert_eq!(delta, 1);
+}
+
+#[test]
+fn delete_entity_edge_with_id_basic_succeeds() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    db.upsert_entity_edge_with_id(
+        "edge_del", "A", "B", "knows", 0.5, "default",
+        1_700_000_023_000_000,
+    ).unwrap();
+    db.delete_entity_edge_with_id("edge_del", 1_700_000_024_000_000)
+        .expect("delete succeeds");
+    let conn = db.read_conn();
+    let tombstoned: i64 = conn.query_row(
+        "SELECT tombstoned FROM claims WHERE claim_id = ?1",
+        rusqlite::params!["edge_del"],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(tombstoned, 1);
+}
+
+#[test]
+fn delete_entity_edge_with_id_idempotent_on_missing() {
+    // Snapshot-install + log replay overlap means deleting a non-existent
+    // edge_id is normal cluster behavior. Must return Ok(()), not error.
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    db.delete_entity_edge_with_id("edge_never", 1_700_000_025_000_000)
+        .expect("missing edge: ok");
+    let conn = db.read_conn();
+    let op_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM oplog WHERE op_type = 'delete_entity_edge_with_id' AND target_rid = ?1",
+        rusqlite::params!["edge_never"],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(op_count, 0, "no oplog noise for missing edge delete");
+}
+
+#[test]
+fn delete_entity_edge_with_id_idempotent_on_replay() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    db.upsert_entity_edge_with_id(
+        "edge_del2", "P", "Q", "knows", 0.5, "default",
+        1_700_000_026_000_000,
+    ).unwrap();
+    for _ in 0..3 {
+        db.delete_entity_edge_with_id("edge_del2", 1_700_000_027_000_000)
+            .expect("idempotent");
+    }
+    let conn = db.read_conn();
+    let op_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM oplog WHERE op_type = 'delete_entity_edge_with_id' AND target_rid = ?1",
+        rusqlite::params!["edge_del2"],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(op_count, 1, "exactly one delete oplog entry across 3 replays");
+}

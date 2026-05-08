@@ -127,6 +127,165 @@ impl YantrikDB {
         Ok(edge_id)
     }
 
+    /// **Issue #9 — deterministic entity-edge upsert primitive for cluster replication.**
+    ///
+    /// Sibling of `relate()` that takes a caller-assigned `edge_id` (replaces
+    /// today's relate() which generates one) + caller-supplied timestamp.
+    /// Used by yantrikdb-server's cluster-mode applier so replicated edges
+    /// converge to identical engine state across leader + followers.
+    ///
+    /// # Contract
+    ///
+    /// - **Idempotent on edge_id**: a second call with the same edge_id +
+    ///   identical other fields succeeds without error and produces
+    ///   identical engine state. Implementation: INSERT OR IGNORE on
+    ///   the claims primary key (claim_id).
+    /// - **Caller-supplied timestamp**: `created_at_unix_micros` materialized
+    ///   into `claims.created_at` (REAL seconds). No engine `now()` call.
+    /// - **UNIQUE conflict on (src, dst, rel_type, extractor, polarity, namespace)**:
+    ///   if a different edge_id already covers the same logical edge, the
+    ///   second insert silently no-ops. Caller is responsible for using the
+    ///   canonical edge_id chosen by the leader; concurrent leaders are not
+    ///   supported (RFC 010 single-leader assumption).
+    ///
+    /// extractor defaults to 'manual', polarity to 1, modality to 'asserted'
+    /// — same defaults `relate()` uses. The `claims` table backs both APIs.
+    /// Spec uses the name `entity_edges` for the abstract concept; physical
+    /// table is `claims` since RFC 006.
+    #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(skip(self), fields(edge_id, src, dst, rel_type, namespace))]
+    pub fn upsert_entity_edge_with_id(
+        &self,
+        edge_id: &str,
+        src: &str,
+        dst: &str,
+        rel_type: &str,
+        weight: f64,
+        namespace: &str,
+        created_at_unix_micros: i64,
+    ) -> Result<()> {
+        let ts_secs = (created_at_unix_micros as f64) / 1_000_000.0;
+        let (src_type, dst_type) =
+            crate::graph::classify_with_relationship(src, dst, rel_type);
+
+        // SAVEPOINT-guarded conn block. INSERT OR IGNORE on claim_id PK
+        // gives idempotency on edge_id; the UNIQUE(src, dst, rel_type,
+        // extractor, polarity, namespace) acts as a secondary filter.
+        let was_new_row: bool = {
+            let conn = self.conn();
+            conn.execute_batch("SAVEPOINT upsert_edge")?;
+
+            let result: Result<bool> = (|| {
+                let inserted = conn.execute(
+                    "INSERT OR IGNORE INTO claims \
+                     (claim_id, src, dst, rel_type, weight, created_at, namespace) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                    params![edge_id, src, dst, rel_type, weight, ts_secs, namespace],
+                )?;
+                let was_new = inserted == 1;
+
+                if was_new {
+                    // Ensure entities exist with classified entity_type.
+                    for (entity, etype) in [(src, src_type), (dst, dst_type)] {
+                        conn.execute(
+                            "INSERT INTO entities (name, entity_type, first_seen, last_seen) \
+                             VALUES (?1, ?2, ?3, ?3) \
+                             ON CONFLICT(name) DO UPDATE SET last_seen = ?3, mention_count = mention_count + 1, \
+                             entity_type = CASE WHEN entities.entity_type = 'unknown' THEN ?2 ELSE entities.entity_type END",
+                            params![entity, etype, ts_secs],
+                        )?;
+                    }
+                }
+                Ok(was_new)
+            })();
+
+            match result {
+                Ok(b) => { conn.execute_batch("RELEASE upsert_edge")?; b }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK TO upsert_edge");
+                    let _ = conn.execute_batch("RELEASE upsert_edge");
+                    return Err(e);
+                }
+            }
+        };
+
+        // In-memory graph_index update only on first insert (idempotent on
+        // replay since add_entity/add_edge dedupe by name).
+        if was_new_row {
+            let mut gi = self.graph_index.write();
+            gi.add_entity(src, src_type);
+            gi.add_entity(dst, dst_type);
+            gi.add_edge(src, dst, weight as f32);
+        }
+
+        // Skip backfill_memory_entities on cluster path — followers will
+        // receive memory_entities updates via the record_with_rid log
+        // entries that span the same backfill window.
+
+        if was_new_row {
+            self.log_op(
+                "upsert_entity_edge_with_id",
+                Some(edge_id),
+                &serde_json::json!({
+                    "edge_id": edge_id,
+                    "src": src,
+                    "dst": dst,
+                    "rel_type": rel_type,
+                    "weight": weight,
+                    "namespace": namespace,
+                    "created_at_unix_micros": created_at_unix_micros,
+                }),
+                None,
+            )?;
+        }
+
+        Ok(())
+    }
+
+    /// **Issue #9 — deterministic entity-edge delete primitive for cluster replication.**
+    ///
+    /// Tombstones a claim by edge_id. Idempotent on missing — deleting a
+    /// non-existent edge_id returns `Ok(())`, not an error. Snapshot-install +
+    /// log-replay overlap means double-delete is normal cluster behavior.
+    ///
+    /// Note: in-memory `graph_index` retains the edge until the next engine
+    /// restart (no remove_edge primitive yet). The `claims` row is correctly
+    /// tombstoned and the SQL-backed views filter it out. Best-effort recall
+    /// via graph_index may include the stale edge until reload — Phase 4.3 +
+    /// graph_index reload-on-tombstone is a follow-up.
+    #[tracing::instrument(skip(self))]
+    pub fn delete_entity_edge_with_id(
+        &self,
+        edge_id: &str,
+        requested_at_unix_micros: i64,
+    ) -> Result<()> {
+        let ts_secs = (requested_at_unix_micros as f64) / 1_000_000.0;
+        let was_newly_tombstoned = {
+            let conn = self.conn();
+            let changes = conn.execute(
+                "UPDATE claims SET tombstoned = 1, created_at = ?1 \
+                 WHERE claim_id = ?2 AND tombstoned = 0",
+                params![ts_secs, edge_id],
+            )?;
+            changes > 0
+        };
+
+        if was_newly_tombstoned {
+            self.log_op(
+                "delete_entity_edge_with_id",
+                Some(edge_id),
+                &serde_json::json!({
+                    "edge_id": edge_id,
+                    "requested_at_unix_micros": requested_at_unix_micros,
+                }),
+                None,
+            )?;
+        }
+
+        Ok(())
+    }
+
+
     /// Get all edges connected to an entity.
     pub fn get_edges(&self, entity: &str) -> Result<Vec<Edge>> {
         let conn = self.conn.lock();
