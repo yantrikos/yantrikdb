@@ -4317,6 +4317,10 @@ fn record_with_rid_is_idempotent_on_replay() {
             None,
         ).expect("idempotent re-apply");
     }
+    // Phase 4.3 Commit C: entity persistence is enqueued by record_with_rid
+    // and applied by the materializer thread. Drain the queue inline before
+    // asserting on entity-graph state.
+    db.apply_pending_ops_once(100).unwrap();
 
     let conn = db.read_conn();
     let memory_count: i64 = conn.query_row(

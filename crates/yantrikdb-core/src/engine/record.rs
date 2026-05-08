@@ -464,25 +464,12 @@ impl YantrikDB {
                     }
                 }
 
-                // Entity persistence — idempotent INSERT OR IGNORE.
-                for entity in extracted_entities {
-                    let entity_type = crate::graph::classify_entity_type(entity);
-                    conn.execute(
-                        "INSERT INTO entities (name, entity_type, first_seen, last_seen, mention_count) \
-                         VALUES (?1, ?2, ?3, ?3, 1) \
-                         ON CONFLICT(name) DO UPDATE SET \
-                            last_seen = ?3, \
-                            mention_count = CASE WHEN ?4 THEN mention_count + 1 ELSE mention_count END, \
-                            entity_type = CASE \
-                                WHEN entity_type = 'unknown' AND ?2 != 'unknown' THEN ?2 \
-                                ELSE entity_type END",
-                        params![entity, entity_type, ts_secs, was_new_row],
-                    )?;
-                    conn.execute(
-                        "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) VALUES (?1, ?2)",
-                        params![rid, entity],
-                    )?;
-                }
+                // **Phase 4.3 Commit C (saga task 19, 2026-05-08).** The
+                // entity / memory_entities INSERT loop was previously here
+                // inside the SAVEPOINT, holding `db.conn().lock()` for
+                // O(extracted_entities.len()) statements. Now enqueued as
+                // OP_MATERIALIZE_RECORD_WITH_RID_POST after the SAVEPOINT
+                // releases. See docs/phase_4_3_design.md for the contract.
 
                 Ok(was_new_row)
             })();
@@ -528,19 +515,14 @@ impl YantrikDB {
             });
         }
 
-        // Graph index in-memory updates — idempotent (HashMap-backed).
-        if !extracted_entities.is_empty() {
-            let mut gi = self.graph_index.write();
-            for entity in extracted_entities {
-                let entity_type = crate::graph::classify_entity_type(entity);
-                gi.add_entity(entity, entity_type);
-                gi.link_memory(rid, entity);
-            }
-        }
-
         // Op log entry — applied=1 since leader has materialized inline.
         // Followers will receive a separate replicated entry via the
         // cluster sync path; this path never logs applied=0.
+        //
+        // Logged BEFORE the post-record materialization enqueue so
+        // extract_ops_since reports the user-data op in causal order
+        // (record_with_rid arrived, then its entity-link materialization
+        // was queued).
         let emb_hash = embedding_hash(embedding);
         if was_new_row {
             self.log_op(
@@ -564,6 +546,36 @@ impl YantrikDB {
                     "extracted_entities": extracted_entities,
                 }),
                 Some(&emb_hash),
+            )?;
+        }
+
+        // **Phase 4.3 Commit C (saga task 19, 2026-05-08).** Enqueue the
+        // entity / memory_entities / graph_index materialization for the
+        // worker thread. Skip when there are no entities to apply — the
+        // dispatch arm short-circuits the same way, but skipping avoids
+        // a wasteful oplog row in the common no-entity case.
+        //
+        // Cluster determinism: the leader and each follower will both
+        // enqueue + apply this op against their local state. Convergence
+        // on entities + memory_entities is guaranteed by the same
+        // INSERT OR IGNORE / ON CONFLICT idempotency the inline path
+        // had. The convergence *time* differs by the materializer-lag
+        // window (ms-scale), but the converged final state is identical.
+        if !extracted_entities.is_empty() {
+            let entities_json: Vec<&str> = extracted_entities.to_vec();
+            let post_payload = serde_json::json!({
+                "rid": rid,
+                "namespace": namespace,
+                "ts_secs": ts_secs,
+                "extracted_entities": entities_json,
+                "was_new_row": was_new_row,
+            });
+            self.log_op_pending(
+                crate::engine::op_types::OP_MATERIALIZE_RECORD_WITH_RID_POST,
+                Some(rid),
+                &post_payload,
+                None,
+                None,
             )?;
         }
 

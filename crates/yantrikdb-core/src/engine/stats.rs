@@ -283,6 +283,28 @@ impl YantrikDB {
                         }
                     }
                 }
+                // **Phase 4.3 Commit C — saga task 19.** Cluster-mode
+                // sibling of OP_MATERIALIZE_RECORD_POST. Same race-safety
+                // semantics; the difference is the dispatch logic uses
+                // caller-supplied entity list with no extraction.
+                crate::engine::op_types::OP_MATERIALIZE_RECORD_WITH_RID_POST => {
+                    match self.apply_materialize_record_with_rid_post(payload) {
+                        Ok(()) => {
+                            if self.mark_op_applied(op_id)? {
+                                applied += 1;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "yantrikdb::ingest::materialize",
+                                op_id = %op_id,
+                                op_type = %op_type,
+                                error = %e,
+                                "post-record-with-rid materialization failed; leaving pending for retry"
+                            );
+                        }
+                    }
+                }
                 "record" | "forget" | "relate" | "correct" | "consolidate" => {
                     tracing::trace!(
                         target: "yantrikdb::ingest::materialize",
@@ -459,6 +481,96 @@ impl YantrikDB {
             likely_assertion = features.likely_assertion,
             "extraction audit (materialized post-record)"
         );
+
+        Ok(())
+    }
+
+    /// **Phase 4.3 Commit C — apply a queued `materialize_record_with_rid_post` op.**
+    ///
+    /// Cluster-mode sibling of [`Self::apply_materialize_record_post`]. Runs the
+    /// post-INSERT entity / memory_entities / graph_index updates that used
+    /// to live inside the foreground SAVEPOINT block of `record_with_rid()`.
+    ///
+    /// **Why it differs from the heuristic path.** `record_with_rid` is the
+    /// cluster determinism primitive — the leader's apply emits a payload
+    /// containing the explicit `extracted_entities` slice; followers must
+    /// converge to byte-identical SQL state by replaying that same slice.
+    /// Running heuristic extraction on the materializer would risk
+    /// divergence (extractor versions or text edge cases differing across
+    /// nodes). So this dispatch arm uses the caller's entity list verbatim,
+    /// no `extract_heuristic_entities` / `extract_heuristic_relations`
+    /// calls.
+    ///
+    /// `was_new_row` payload field controls whether `entities.mention_count`
+    /// gets bumped on insert. Mirrors the original SQL conditional:
+    ///
+    ///   `mention_count = CASE WHEN ?was_new THEN mention_count + 1 ELSE mention_count END`
+    ///
+    /// This preserves the contract that replayed-but-not-newly-inserted
+    /// memories don't double-count entity mentions.
+    ///
+    /// Idempotent on every loop step (INSERT OR IGNORE, ON CONFLICT DO UPDATE
+    /// with mention_count guarded by `was_new_row`).
+    fn apply_materialize_record_with_rid_post(&self, payload_json: &str) -> Result<()> {
+        let payload: serde_json::Value = serde_json::from_str(payload_json)
+            .map_err(|e| crate::error::YantrikDbError::InvalidInput(format!(
+                "materialize_record_with_rid_post: payload parse failed: {e}"
+            )))?;
+
+        let rid = payload.get("rid").and_then(|v| v.as_str())
+            .ok_or_else(|| crate::error::YantrikDbError::InvalidInput(
+                "materialize_record_with_rid_post: missing rid".into(),
+            ))?;
+        let _namespace = payload.get("namespace").and_then(|v| v.as_str())
+            .unwrap_or("default");
+        let ts_secs = payload.get("ts_secs").and_then(|v| v.as_f64())
+            .unwrap_or_else(super::now);
+        let was_new_row = payload.get("was_new_row").and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let entities: Vec<String> = payload.get("extracted_entities")
+            .and_then(|v| v.as_array())
+            .map(|a| a.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect())
+            .unwrap_or_default();
+
+        if entities.is_empty() {
+            // Nothing to materialize — early return is the cheap idempotent path.
+            return Ok(());
+        }
+
+        // Loop A: entities INSERT (mirrors the inline savepoint block exactly).
+        {
+            let conn = self.conn();
+            for entity in &entities {
+                let entity_type = crate::graph::classify_entity_type(entity);
+                conn.execute(
+                    "INSERT INTO entities (name, entity_type, first_seen, last_seen, mention_count) \
+                     VALUES (?1, ?2, ?3, ?3, 1) \
+                     ON CONFLICT(name) DO UPDATE SET \
+                        last_seen = ?3, \
+                        mention_count = CASE WHEN ?4 THEN mention_count + 1 ELSE mention_count END, \
+                        entity_type = CASE \
+                            WHEN entity_type = 'unknown' AND ?2 != 'unknown' THEN ?2 \
+                            ELSE entity_type END",
+                    params![entity, entity_type, ts_secs, was_new_row],
+                )?;
+                conn.execute(
+                    "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) VALUES (?1, ?2)",
+                    params![rid, entity],
+                )?;
+            }
+        }
+
+        // graph_index in-memory update (idempotent — add_entity/link_memory dedupe).
+        {
+            let mut gi = self.graph_index.write();
+            for entity in &entities {
+                let entity_type = crate::graph::classify_entity_type(entity);
+                gi.add_entity(entity, entity_type);
+                gi.link_memory(rid, entity);
+            }
+        }
 
         Ok(())
     }
