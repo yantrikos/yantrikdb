@@ -50,17 +50,26 @@ jobs:
           # **v0.7.3 hotfix.** ring 0.17.x's pre-generated ARM64
           # assembly files (ghash-neon-armv8, vpaes-armv8, p256-armv8,
           # sha256-armv8, sha512-armv8) `#error` out unless the
-          # assembler has __ARM_ARCH defined, and cc-rs's manylinux
-          # cross-compile toolchain doesn't set it by default. These
-          # cc-rs scoped env vars are no-ops on the x86_64/macOS/
-          # Windows matrix entries (only consulted for the
-          # aarch64-unknown-linux-gnu target build) and unblock the
-          # cross-compile cleanly without changing the dependency
-          # graph or pinning ring. Diagnosed by yantrikdb-server
-          # msg 802c8213 after v0.7.0/0.7.1/0.7.2 all hit the same
-          # CI failure.
+          # assembler has __ARM_ARCH defined. cc-rs's manylinux
+          # cross-compile toolchain doesn't set the macro by default.
+          # `CFLAGS_aarch64_unknown_linux_gnu` is a cc-rs-scoped env
+          # var (only consulted when targeting that triple), so it's
+          # a no-op on the x86_64/macOS/Windows matrix entries and
+          # unblocks the cross-compile cleanly without changing the
+          # dependency graph or pinning ring.
+          #
+          # The first attempt (commit 3825f3d) also set
+          # `CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc` but
+          # that binary doesn't exist at that path inside the
+          # manylinux2014-cross:aarch64 container — the container
+          # ships its own cross-toolchain and cc-rs auto-detects it.
+          # Setting CC_* overrode the auto-detection and pointed at
+          # a non-existent path, breaking the build differently from
+          # the original failure. Removed.
+          #
+          # Diagnosed by yantrikdb-server msg 802c8213 after
+          # v0.7.0/0.7.1/0.7.2 all hit the same CI failure.
           CFLAGS_aarch64_unknown_linux_gnu: "-D__ARM_ARCH=8 -march=armv8-a"
-          CC_aarch64_unknown_linux_gnu: "aarch64-linux-gnu-gcc"
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
