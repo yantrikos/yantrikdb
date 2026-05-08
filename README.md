@@ -132,6 +132,109 @@ At 500 memories, file-based exceeds 32K context windows. At 5,000, it doesn't fi
 4. **Decay Heap** — importance scores that degrade over time, like human memory
 5. **Key-Value Store** — fast facts, session state, scoring weights
 
+### Decoupled Write Path (v0.6.6+)
+
+The vector index is structured as a **two-tier LSM**: a small mutable
+delta and an immutable HNSW cold tier swapped atomically via
+`ArcSwap`. Foreground writes only touch the delta (brief lock,
+O(1) push); HNSW work amortizes on a dedicated compactor thread.
+This is what eliminated the production wedge where sustained writes
+starved readers — see [CONCURRENCY.md](CONCURRENCY.md) and
+[docs/decoupled_write_path_rfc.md](docs/decoupled_write_path_rfc.md).
+
+```mermaid
+flowchart LR
+    subgraph CLIENT["Caller"]
+        C1["record / record_with_rid"]
+        C2["recall / recall_with_seq"]
+    end
+
+    subgraph FG["Foreground — P1, brief locks only"]
+        F1["assign_seq<br/>vec_seq.fetch_add<br/>(or fetch_max for cluster seq)"]
+        F2["DeltaIndex.append<br/>brief RwLock&lt;Vec&gt; push"]
+        F3["bump_visible_seq<br/>DashMap + AtomicU64<br/>(lock-free)"]
+        F4["log_op → SQLite WAL"]
+    end
+
+    subgraph IDX["DeltaIndex (per engine)"]
+        D1[("delta<br/>RwLock&lt;Vec&lt;DeltaEntry&gt;&gt;<br/>cap = delta_max (256)")]
+        D2[("cold<br/>ArcSwap&lt;HnswIndex&gt;<br/>lock-free read")]
+    end
+
+    subgraph BG["Background — P3, dedicated threads"]
+        B1["Compactor (1s tick)<br/>fires when delta past half-cap<br/>OR oldest entry > max_dirty_age"]
+        B2["Materializer pool<br/>N = cores / 2<br/>drains pending oplog ops"]
+    end
+
+    subgraph STORE["SQLite (WAL mode, single file)"]
+        S1["memories"]
+        S2["oplog"]
+        S3["entity_edges, sessions, ..."]
+    end
+
+    C1 --> F1
+    F1 --> F2
+    F2 --> D1
+    F1 --> F3
+    F1 --> F4
+    F4 --> S2
+
+    C2 -.->|"optional<br/>wait_for_visible_seq"| F3
+    C2 --> D1
+    C2 --> D2
+
+    B1 -->|"seal + clone + ArcSwap.store"| D1
+    B1 --> D2
+    B2 --> S2
+    B2 --> S1
+    B2 --> S3
+```
+
+**The structural invariant.** Foreground (P1) and background (P3) do
+not share a lock primitive that holds for non-O(1) work. The cold
+tier is read lock-free via `ArcSwap`; the delta's `RwLock` is held
+for the O(1) push only. This is what makes "no single background
+task can wedge reads, writes, or recovery" enforceable — see
+[CONCURRENCY.md](CONCURRENCY.md) Rules 2 and 3 for the names and
+failure modes if violated.
+
+### Cluster Mode (RFC 010 + Phase 6 RYW)
+
+For multi-node deployments, [yantrikdb-server](https://github.com/yantrikos/yantrikdb-server)
+wraps the engine with [openraft](https://github.com/datafuselabs/openraft)
+for leader-elected replication. The four cluster-mutation primitives
+take the openraft commit-log index as their `seq`, so all nodes
+agree on a single global monotonic sequence — read-your-writes works
+across the cluster, not just within a node.
+
+```mermaid
+flowchart LR
+    L["Leader<br/>HTTP request"]
+    LR["Leader engine<br/>record_with_rid(seq=Some(log_idx))"]
+    OR["openraft<br/>commit log"]
+    F1["Follower 1 applier<br/>record_with_rid(seq=Some(log_idx))"]
+    F2["Follower 2 applier<br/>record_with_rid(seq=Some(log_idx))"]
+    R["Reader on any node<br/>recall_with_seq(min_seq=log_idx)"]
+
+    L --> LR
+    LR --> OR
+    OR -->|replicate + apply| F1
+    OR -->|replicate + apply| F2
+    F1 -.->|visible_seq[ns] reaches log_idx| R
+    F2 -.->|visible_seq[ns] reaches log_idx| R
+    LR -.->|visible_seq[ns] reaches log_idx| R
+```
+
+Each `record_with_rid` / `tombstone_with_rid` /
+`upsert_entity_edge_with_id` / `delete_entity_edge_with_id` accepts
+an optional `seq: Option<u64>`. Single-node callers pass `None` and
+the engine allocates; cluster appliers pass `Some(commit_log_index)`
+and the engine ratchets `vec_seq` up to at least that value via
+`fetch_max`. After apply, `visible_seq[namespace]` reaches the
+log index, so any subsequent `recall_with_seq(min_seq=N)` blocks
+just long enough for the local node to have applied through index
+N — and no longer.
+
 ### Memory Types (Tulving's Taxonomy)
 
 | Type | What it stores | Example |
