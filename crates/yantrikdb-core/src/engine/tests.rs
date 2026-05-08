@@ -4696,3 +4696,69 @@ fn delete_entity_edge_with_id_idempotent_on_replay() {
     ).unwrap();
     assert_eq!(op_count, 1, "exactly one delete oplog entry across 3 replays");
 }
+
+// ── Issue #8 reproduction: tombstoned memories must not appear in recall ──
+
+#[test]
+fn issue_8_tombstoned_memories_excluded_from_recall() {
+    // Repro from yantrikos/yantrikdb#8 (filed 2026-04-30):
+    // 1. record memory, capture rid
+    // 2. forget(rid) → consolidation_status='tombstoned'
+    // 3. recall with semantically-related query → MUST NOT return the rid
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let emb = vec_seed(42.0, 64);
+    let rid = db.record(
+        "memory to forget for issue 8 repro",
+        "episodic",
+        0.5, 0.0, 604800.0,
+        &empty_meta(),
+        &emb,
+        "default",
+        0.8, "general", "user", None,
+    ).unwrap();
+
+    // Sanity: visible before forget.
+    let before = db.recall(&emb, 5, None, None, false, false, None, true, None, None, None).unwrap();
+    assert!(before.iter().any(|r| r.rid == rid),
+        "memory must be findable before forget");
+
+    db.forget(&rid).unwrap();
+
+    // After forget, should NOT appear in recall.
+    let after = db.recall(&emb, 5, None, None, false, false, None, true, None, None, None).unwrap();
+    assert!(!after.iter().any(|r| r.rid == rid),
+        "issue #8: tombstoned memory must NOT appear in recall results");
+}
+
+
+#[test]
+fn issue_8_tombstoned_persists_across_engine_reopen() {
+    // The original bug also manifested across engine restart: rebuild_vec_index
+    // would re-load tombstoned memories from the SQL table. Verify that
+    // build_vec_index_with_enc filters consolidation_status correctly.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("issue8.db");
+    let path_str = path.to_str().unwrap();
+    let emb = vec_seed(44.0, 64);
+    let rid;
+    {
+        let db = YantrikDB::new(path_str, 64).unwrap();
+        rid = db.record(
+            "memory survives reopen test",
+            "episodic",
+            0.5, 0.0, 604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8, "general", "user", None,
+        ).unwrap();
+        db.forget(&rid).unwrap();
+    }
+    // Reopen — engine rebuilds vec_index from disk.
+    {
+        let db2 = YantrikDB::new(path_str, 64).unwrap();
+        let after = db2.recall(&emb, 5, None, None, false, false, None, true, None, None, None).unwrap();
+        assert!(!after.iter().any(|r| r.rid == rid),
+            "tombstoned memory must stay hidden across engine reopen");
+    }
+}
