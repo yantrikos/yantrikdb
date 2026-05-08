@@ -103,14 +103,63 @@ fn run() {
     let meta = serde_json::json!({});
     for i in 0..cfg.warmup_records {
         let emb = vec_seed(i as f32 * 0.37, cfg.dim);
-        db.record(
-            &format!("warmup memory {}", i),
-            if i % 2 == 0 { "episodic" } else { "semantic" },
-            0.5, 0.0, 604800.0, &meta, &emb,
-            "default", 0.8, "general", "user", None,
-        ).expect("warmup record");
+        // v0.6.6: bounded ingest queue surfaces Backpressure when the
+        // materializer thread can't keep up with single-threaded warmup
+        // throughput. Honor retry_after_ms — that's the contract any
+        // real client would follow.
+        loop {
+            let res = db.record(
+                &format!("warmup memory {}", i),
+                if i % 2 == 0 { "episodic" } else { "semantic" },
+                0.5,
+                0.0,
+                604800.0,
+                &meta,
+                &emb,
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            );
+            match res {
+                Ok(_) => break,
+                Err(e) => {
+                    let msg = format!("{e}");
+                    // v0.6.6 ingest queue surfaces backpressure as
+                    // either `Backpressure { ... }` or a free-text
+                    // "ingest queue full ... retry after Nms" depending
+                    // on the path. Match either.
+                    let is_backpressure =
+                        msg.contains("Backpressure") || msg.contains("ingest queue full");
+                    if is_backpressure {
+                        let ms: u64 = msg
+                            .split("retry after ")
+                            .nth(1)
+                            .and_then(|s| s.split("ms").next())
+                            .and_then(|s| s.trim().parse().ok())
+                            .or_else(|| {
+                                msg.split("retry_after_ms:")
+                                    .nth(1)
+                                    .and_then(|s| s.split([' ', ',', '}']).next())
+                                    .and_then(|s| s.trim().parse().ok())
+                            })
+                            .unwrap_or(50);
+                        thread::sleep(std::time::Duration::from_millis(ms));
+                        continue;
+                    } else {
+                        panic!("warmup record (non-backpressure): {e}");
+                    }
+                }
+            }
+        }
         if i > 0 && i % 1000 == 0 {
-            println!("[setup] warmup {}/{} ({:.1}s elapsed)", i, cfg.warmup_records, t0.elapsed().as_secs_f64());
+            println!(
+                "[setup] warmup {}/{} ({:.1}s elapsed)",
+                i,
+                cfg.warmup_records,
+                t0.elapsed().as_secs_f64()
+            );
         }
     }
     println!("[setup] warmup done in {:.1}s — {} records seeded", t0.elapsed().as_secs_f64(), cfg.warmup_records);
