@@ -67,7 +67,7 @@ db.close()
 
 ```toml
 [dependencies]
-yantrikdb = "0.4"
+yantrikdb = "0.6"
 ```
 
 ## The Problem
@@ -220,9 +220,9 @@ flowchart LR
     LR --> OR
     OR -->|replicate + apply| F1
     OR -->|replicate + apply| F2
-    F1 -.->|visible_seq[ns] reaches log_idx| R
-    F2 -.->|visible_seq[ns] reaches log_idx| R
-    LR -.->|visible_seq[ns] reaches log_idx| R
+    F1 -.->|"visible_seq[ns] reaches log_idx"| R
+    F2 -.->|"visible_seq[ns] reaches log_idx"| R
+    LR -.->|"visible_seq[ns] reaches log_idx"| R
 ```
 
 Each `record_with_rid` / `tombstone_with_rid` /
