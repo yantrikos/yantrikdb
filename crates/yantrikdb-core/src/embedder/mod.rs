@@ -26,4 +26,4 @@
 pub mod default;
 
 #[cfg(feature = "bundled-embedder")]
-pub use default::BundledEmbedder;
+pub use default::{BundledEmbedder, BUNDLED_EMBEDDER_DIM};

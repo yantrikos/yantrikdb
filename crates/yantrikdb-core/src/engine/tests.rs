@@ -4998,20 +4998,34 @@ fn recall_with_seq_times_out_on_unreachable() {
 #[cfg(feature = "bundled-embedder")]
 #[test]
 fn bundled_embedder_auto_attaches_on_default_dim() {
-    // dim=384 matches BUNDLED_EMBEDDER_DIM, so the auto-attach fires.
-    let db = YantrikDB::new(":memory:", 384).unwrap();
+    // dim=64 matches BUNDLED_EMBEDDER_DIM (potion-base-2M), so the
+    // auto-attach fires. Updated for Slice B (saga task 20, 2026-05-08):
+    // bundled embedder switched from hash-trick dim=384 to potion-2M dim=64.
+    use crate::embedder::BUNDLED_EMBEDDER_DIM;
+    let db = YantrikDB::new(":memory:", BUNDLED_EMBEDDER_DIM).unwrap();
     assert!(db.has_embedder(),
-        "default-build YantrikDB::new with dim=384 must auto-attach BundledEmbedder");
+        "default-build YantrikDB::new with bundled dim must auto-attach BundledEmbedder");
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn with_default_constructor_attaches_bundled_embedder() {
+    // YantrikDB::with_default(path) is the constructor that lets callers
+    // stay agnostic to the bundled model's dimension. Stays in sync if
+    // a future Slice C swaps the bundle to a different-dim variant.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    assert!(db.has_embedder(),
+        "with_default must auto-attach BundledEmbedder");
 }
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
 fn bundled_embedder_does_not_attach_on_mismatched_dim() {
-    // dim=64 != BUNDLED_EMBEDDER_DIM (384). Auto-attach is silently
+    // dim=384 != BUNDLED_EMBEDDER_DIM (64). Auto-attach is silently
     // skipped — caller must set their own embedder. The skip avoids
     // silent dim-mismatch corruption when a caller is intentionally
-    // running with a non-default dim (e.g. for a custom model).
-    let db = YantrikDB::new(":memory:", 64).unwrap();
+    // running with a non-default dim (e.g. for an external MiniLM).
+    let db = YantrikDB::new(":memory:", 384).unwrap();
     assert!(!db.has_embedder(),
         "dim mismatch should NOT auto-attach (avoids silent corruption)");
 }
@@ -5020,9 +5034,9 @@ fn bundled_embedder_does_not_attach_on_mismatched_dim() {
 #[test]
 fn bundled_embedder_record_text_round_trip() {
     // The integration shape that actually matters: pip install yantrikdb;
-    // YantrikDB::new(...); record_text(...); recall_text(...). All works
-    // without configuration on default builds.
-    let db = YantrikDB::new(":memory:", 384).unwrap();
+    // YantrikDB::with_default(...); record_text(...); recall_text(...).
+    // All works without configuration on default builds.
+    let db = YantrikDB::with_default(":memory:").unwrap();
     let _rid = db.record_text(
         "Alice met Acme yesterday",
         "episodic", 0.5, 0.0, 604800.0, &empty_meta(),
@@ -5031,10 +5045,8 @@ fn bundled_embedder_record_text_round_trip() {
 
     let results = db.recall_text("Alice", 5).expect("recall_text should work");
     assert!(!results.is_empty(), "recall finds the recorded memory");
-    // The hash-trick baseline matches "Alice" lexically — top-1 should
-    // be the record we just made.
     assert!(results[0].text.contains("Alice"),
-        "lexical baseline finds the recorded memory; got: {:?}", results[0].text);
+        "potion-2M finds the recorded memory; got: {:?}", results[0].text);
 }
 
 #[cfg(feature = "bundled-embedder")]
@@ -5047,14 +5059,14 @@ fn explicit_set_embedder_overrides_bundled() {
     impl crate::types::Embedder for DummyEmbedder {
         fn embed(&self, _t: &str) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
             // Distinct sentinel value so we can detect this implementation was used.
-            let mut v = vec![0.0; 384];
+            let mut v = vec![0.0; 64];
             v[0] = 0.7777;
             Ok(v)
         }
-        fn dim(&self) -> usize { 384 }
+        fn dim(&self) -> usize { 64 }
     }
 
-    let mut db = YantrikDB::new(":memory:", 384).unwrap();
+    let mut db = YantrikDB::with_default(":memory:").unwrap();
     assert!(db.has_embedder(), "starts with bundled");
     db.set_embedder(Box::new(DummyEmbedder));
     let v = db.embed("anything").unwrap();

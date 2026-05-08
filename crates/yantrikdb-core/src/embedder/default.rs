@@ -1,43 +1,181 @@
-//! `BundledEmbedder` — Slice A baseline implementation.
+//! `BundledEmbedder` — Slice B (saga task 20, 2026-05-08).
 //!
-//! Hash-trick TF-IDF in pure Rust. Deterministic, zero-allocation per
-//! token, no external models to download. Produces a 384-dim L2-
-//! normalized vector that gives reasonable cosine similarity for
-//! lexically overlapping short texts.
+//! Production default embedder shipped with the engine: a static
+//! lookup-table embedding distilled from `baai/bge-base-en-v1.5` via
+//! [model2vec](https://github.com/MinishLab/model2vec). Inference =
+//! tokenize → embedding-table lookup → mean-pool → L2-normalize. No
+//! transformer inference, no GPU, ~500× faster than sentence-
+//! transformers on CPU.
 //!
-//! Quality is below sentence-transformer baselines (no semantic
-//! understanding — only lexical), but useful enough that
-//! `record_text()` / `recall_text()` are not no-ops out of the box.
-//! Slice B (saga task 20 follow-up) replaces internals with
-//! all-MiniLM-L6-v2 via candle-transformers.
+//! # Quality
+//!
+//! Empirical quality eval (yantrikdb memory rid `019e06a7`, 30
+//! yantrikdb-shaped memories × 10 queries):
+//!
+//! | Embedder        | R@5  | R@10 | MRR  |
+//! |-----------------|------|------|------|
+//! | hash-trick (v1) | 0.75 | 0.85 | 0.71 |
+//! | **potion-2M**   | 0.90 | 0.90 | 0.78 |
+//! | MiniLM-L6 (gold)| 0.95 | 1.00 | 0.90 |
+//!
+//! # Why bundled by default
+//!
+//! See yantrikdb memory rid `019e0686`. The engine's `record_text()` /
+//! `recall_text()` API is half-broken without an embedder — bundling
+//! one ships the SQLite-shape "just works" contract. Users wanting
+//! full sentence-transformer quality call `set_embedder()` with
+//! their own implementation; the bundled default stays out of the way.
+//!
+//! # Model files
+//!
+//! Bundled via `include_bytes!` from `crates/yantrikdb-core/assets/potion-base-2M/`:
+//! `model.safetensors` (~7.2 MB), `tokenizer.json` (~668 KB),
+//! `config.json`, `modules.json`. ~7.9 MB total committed footprint.
+//!
+//! # Why dim=64
+//!
+//! `potion-base-2M`'s output dimension is 64 (fewer params per vocab
+//! entry → smaller model). Engine deployments using the bundled
+//! default initialize `YantrikDB::new(path, 64)` (or use the
+//! `with_default()` constructor sugar). Existing dim=384 deployments
+//! continue to work — they just don't get auto-attached and must
+//! call `set_embedder()` themselves (same as today).
+//!
+//! # Slice C (follow-up)
+//!
+//! `db.set_embedder_named("potion-base-8M")` — downloads the larger,
+//! higher-quality model variants from `yantrikos/yantrikdb-models`
+//! GitHub Releases on first call, caches under the user's data dir.
+//! Not in this commit; tracked under saga task 20 Slice C.
 
 use crate::types::Embedder;
-use std::collections::HashMap;
 
-/// Default 384-dim — matches all-MiniLM-L6-v2 (the planned Slice B
-/// model), so deployments don't need to change `embedding_dim` at the
-/// engine constructor when Slice B lands.
-pub const BUNDLED_EMBEDDER_DIM: usize = 384;
+/// Output dimension of the bundled `potion-base-2M` model. The engine's
+/// `with_default()` constructor opens at this dim; auto-attach in
+/// `YantrikDB::new(path, dim)` matches on this value.
+pub const BUNDLED_EMBEDDER_DIM: usize = 64;
 
-/// **Bundled default embedder.** See [`super`] module docs for the
-/// Slice A vs Slice B split and the architectural framing.
+// ── Bundled model files ──
+//
+// `include_bytes!` paths are relative to the source file. The
+// `assets/potion-base-2M/` directory is committed to the repo so
+// `cargo build` and downstream `cargo install yantrikdb` both bake
+// the bytes into the final binary — no network at install or
+// runtime.
+const POTION_2M_MODEL: &[u8] =
+    include_bytes!("../../assets/potion-base-2M/model.safetensors");
+const POTION_2M_TOKENIZER: &[u8] =
+    include_bytes!("../../assets/potion-base-2M/tokenizer.json");
+const POTION_2M_CONFIG: &[u8] =
+    include_bytes!("../../assets/potion-base-2M/config.json");
+const POTION_2M_MODULES: &[u8] =
+    include_bytes!("../../assets/potion-base-2M/modules.json");
+
+/// **Bundled default embedder.** See [module docs][super] for the
+/// design rationale and the Slice A → B → C arc.
 ///
-/// Stateless — `Default::default()` is the canonical constructor.
-/// Trivially `Send + Sync` since there is no interior state to share.
-#[derive(Debug, Default, Clone)]
-pub struct BundledEmbedder;
+/// Lazy: the model is only loaded on first call to [`embed`] or
+/// [`embed_batch`]. Subsequent calls reuse the loaded `StaticModel`.
+/// Cloning is cheap — clones share the same `Arc<StaticModel>` once
+/// loaded.
+#[derive(Clone)]
+pub struct BundledEmbedder {
+    inner: std::sync::Arc<once_cell_lite::Lazy>,
+}
 
-impl BundledEmbedder {
-    /// Construct a new bundled embedder. Equivalent to `Default::default()`.
-    pub fn new() -> Self {
-        Self
+/// Tiny private shim so we can hand-roll OnceCell semantics with
+/// `std::sync::OnceLock` without depending on `once_cell`. (The std
+/// type is what we need; this module exists just to keep the public
+/// `BundledEmbedder` struct readable.)
+mod once_cell_lite {
+    use model2vec_rs::model::StaticModel;
+    use std::sync::OnceLock;
+
+    pub struct Lazy {
+        // OnceLock<Result<StaticModel, String>> so a load failure is
+        // also memoized — we don't retry forever on a broken bundle.
+        cell: OnceLock<Result<StaticModel, String>>,
     }
 
-    /// Compute the 384-dim embedding for `text` without going through the
-    /// `Embedder` trait — useful when the caller already has `&BundledEmbedder`
-    /// and wants to skip the boxed-error round-trip.
-    pub fn embed_direct(&self, text: &str) -> Vec<f32> {
-        embed_hash_tfidf(text, BUNDLED_EMBEDDER_DIM)
+    impl Lazy {
+        pub fn new() -> Self {
+            Self { cell: OnceLock::new() }
+        }
+
+        /// Get-or-init the model. Extracts the bundled bytes to a
+        /// process-local temp directory on first call, then loads via
+        /// `model2vec_rs::StaticModel::from_pretrained`.
+        pub fn get(&self) -> Result<&StaticModel, &str> {
+            let result = self.cell.get_or_init(|| init_model());
+            match result {
+                Ok(m) => Ok(m),
+                Err(e) => Err(e.as_str()),
+            }
+        }
+    }
+
+    /// Extract the four bundled files into a temp dir and load. Errors
+    /// are returned as owned strings so the OnceLock's stored value is
+    /// `'static` (no borrows escape the closure).
+    fn init_model() -> Result<StaticModel, String> {
+        use std::io::Write;
+        // Per-process unique temp dir so concurrent yantrikdb processes
+        // on the same host don't race on file writes.
+        let temp = std::env::temp_dir()
+            .join("yantrikdb")
+            .join(format!("potion-2M-{}", std::process::id()));
+        std::fs::create_dir_all(&temp)
+            .map_err(|e| format!("create temp dir {}: {e}", temp.display()))?;
+
+        for (name, bytes) in [
+            ("model.safetensors", super::POTION_2M_MODEL),
+            ("tokenizer.json", super::POTION_2M_TOKENIZER),
+            ("config.json", super::POTION_2M_CONFIG),
+            ("modules.json", super::POTION_2M_MODULES),
+        ] {
+            let path = temp.join(name);
+            // Write only if the file doesn't exist with the right
+            // length already — covers re-init within the same process
+            // (shouldn't happen with OnceLock but is cheap insurance).
+            let need_write = match std::fs::metadata(&path) {
+                Ok(m) => m.len() != bytes.len() as u64,
+                Err(_) => true,
+            };
+            if need_write {
+                let mut f = std::fs::File::create(&path)
+                    .map_err(|e| format!("create {}: {e}", path.display()))?;
+                f.write_all(bytes)
+                    .map_err(|e| format!("write {}: {e}", path.display()))?;
+            }
+        }
+
+        StaticModel::from_pretrained(&temp, None, None, None)
+            .map_err(|e| format!("model2vec_rs load: {e}"))
+    }
+}
+
+impl BundledEmbedder {
+    /// Construct a new bundled embedder. Cheap — the model is not
+    /// loaded until the first call to [`embed`] / [`embed_batch`].
+    pub fn new() -> Self {
+        Self {
+            inner: std::sync::Arc::new(once_cell_lite::Lazy::new()),
+        }
+    }
+}
+
+impl Default for BundledEmbedder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl std::fmt::Debug for BundledEmbedder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("BundledEmbedder")
+            .field("model", &"potion-base-2M")
+            .field("dim", &BUNDLED_EMBEDDER_DIM)
+            .finish()
     }
 }
 
@@ -46,7 +184,21 @@ impl Embedder for BundledEmbedder {
         &self,
         text: &str,
     ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(self.embed_direct(text))
+        let model = self.inner.get().map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+            e.to_string().into()
+        })?;
+        Ok(model.encode_single(text))
+    }
+
+    fn embed_batch(
+        &self,
+        texts: &[&str],
+    ) -> std::result::Result<Vec<Vec<f32>>, Box<dyn std::error::Error + Send + Sync>> {
+        let model = self.inner.get().map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
+            e.to_string().into()
+        })?;
+        let owned: Vec<String> = texts.iter().map(|s| (*s).to_string()).collect();
+        Ok(model.encode(&owned))
     }
 
     fn dim(&self) -> usize {
@@ -54,90 +206,33 @@ impl Embedder for BundledEmbedder {
     }
 }
 
-// ── implementation ──
-
-/// Hash-trick TF-IDF baseline. Tokenizes on Unicode word boundaries,
-/// lowercases, hashes each token to a `dim`-bucket index with a weight
-/// derived from log(1 + count), L2-normalizes the result. No
-/// stop-word list, no IDF (single-document); the L2 normalization is
-/// what makes cosine-similarity behave reasonably across documents
-/// of different lengths.
-fn embed_hash_tfidf(text: &str, dim: usize) -> Vec<f32> {
-    // Token frequencies — count duplicates so the TF weighting is real.
-    let mut tf: HashMap<String, u32> = HashMap::new();
-    for token in tokenize(text) {
-        *tf.entry(token).or_insert(0) += 1;
-    }
-
-    // Scatter: each token contributes log(1 + count) to its hashed
-    // bucket. Sign comes from a second hash so cancellation can occur
-    // (the standard hash-trick "feature_hashing with signs" pattern,
-    // reduces collision bias).
-    let mut v = vec![0.0f32; dim];
-    for (token, count) in &tf {
-        let h = stable_hash(token.as_bytes());
-        let bucket = (h % dim as u64) as usize;
-        // Sign bit derived from a different mixing of the hash.
-        let sign: f32 = if (h.rotate_right(33).wrapping_mul(0x9e37_79b9_7f4a_7c15) & 1) == 0 {
-            1.0
-        } else {
-            -1.0
-        };
-        let weight = (1.0 + *count as f32).ln();
-        v[bucket] += sign * weight;
-    }
-
-    // L2 normalize so cosine similarity is meaningful across different
-    // text lengths. Empty / whitespace-only text yields a zero vector
-    // that we leave alone (cosine-of-zero is undefined but the engine's
-    // cosine_distance_f64 returns 1.0 in that case, which is the
-    // "irrelevant" answer).
-    let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm > 0.0 {
-        for x in &mut v {
-            *x /= norm;
-        }
-    }
-    v
-}
-
-/// Tokenize text: split on whitespace and ASCII non-alphanumeric, drop
-/// empty fragments, lowercase. ASCII-only because BundledEmbedder is
-/// the lexical-baseline implementation; Unicode tokenization is
-/// candle-territory for Slice B.
-fn tokenize(text: &str) -> impl Iterator<Item = String> + '_ {
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_lowercase())
-}
-
-/// FxHash-shaped 64-bit stable hash. Matches across runs, processes,
-/// and platforms — required for embedding determinism. Not cryptographic.
-fn stable_hash(bytes: &[u8]) -> u64 {
-    let mut h: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a offset basis
-    for &b in bytes {
-        h ^= b as u64;
-        h = h.wrapping_mul(0x0100_0000_01b3);
-    }
-    h
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn dim_is_384() {
-        assert_eq!(BundledEmbedder::new().dim(), 384);
+    fn dim_is_64() {
+        assert_eq!(BundledEmbedder::new().dim(), BUNDLED_EMBEDDER_DIM);
+        assert_eq!(BUNDLED_EMBEDDER_DIM, 64);
+    }
+
+    #[test]
+    fn embed_returns_64_dim_vector() {
+        let e = BundledEmbedder::new();
+        let v = e.embed("Alice is the engineering lead at Acme").unwrap();
+        assert_eq!(v.len(), 64);
     }
 
     #[test]
     fn embed_returns_l2_normalized_vector() {
+        // potion-base-2M's modules.json includes a Normalize step, so
+        // outputs should be unit norm. Verifies the model.config's
+        // `normalize: true` is honored end-to-end.
         let e = BundledEmbedder::new();
-        let v = e.embed("Alice is the engineering lead").unwrap();
-        assert_eq!(v.len(), 384);
+        let v = e.embed("Project Atlas launches in March").unwrap();
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 1e-5, "expected unit-norm; got {norm}");
+        assert!((norm - 1.0).abs() < 1e-3,
+            "expected unit-norm; got {norm}");
     }
 
     #[test]
@@ -151,21 +246,32 @@ mod tests {
     }
 
     #[test]
-    fn embed_empty_string_returns_zero_vector() {
+    fn embed_batch_matches_single() {
         let e = BundledEmbedder::new();
-        let v = e.embed("").unwrap();
-        assert!(v.iter().all(|x| *x == 0.0), "empty text yields zero vector");
+        let inputs = ["one fish", "two fish", "red fish"];
+        let single: Vec<Vec<f32>> = inputs.iter()
+            .map(|t| e.embed(t).unwrap())
+            .collect();
+        let batch = e.embed_batch(&inputs).unwrap();
+        assert_eq!(single.len(), batch.len());
+        for (s, b) in single.iter().zip(batch.iter()) {
+            assert_eq!(s.len(), b.len(), "dim mismatch single vs batch");
+            for (x, y) in s.iter().zip(b.iter()) {
+                assert!((x - y).abs() < 1e-5,
+                    "single vs batch divergence: {x} vs {y}");
+            }
+        }
     }
 
     #[test]
-    fn lexically_similar_texts_are_more_similar_than_unrelated() {
-        // Sanity: "Alice met Bob at the cafe" vs "Alice and Bob had
-        // coffee" should be closer than vs "the stock market is volatile".
-        // Cosine similarity = dot product (since inputs are L2-normalized).
+    fn semantically_similar_texts_score_higher_than_unrelated() {
+        // Beyond the lexical baseline of Slice A — potion-2M does
+        // semantic matching. "engineering lead" should be closer to
+        // "tech leader" than to "lunch menu".
         let e = BundledEmbedder::new();
-        let a = e.embed("Alice met Bob at the cafe").unwrap();
-        let b = e.embed("Alice and Bob had coffee").unwrap();
-        let c = e.embed("the stock market is volatile").unwrap();
+        let a = e.embed("Alice is the engineering lead").unwrap();
+        let b = e.embed("Alice runs the technical team").unwrap();
+        let c = e.embed("the lunch menu has pasta today").unwrap();
 
         let cos = |x: &[f32], y: &[f32]| -> f32 {
             x.iter().zip(y.iter()).map(|(a, b)| a * b).sum()
@@ -174,16 +280,7 @@ mod tests {
         let sim_ac = cos(&a, &c);
         assert!(
             sim_ab > sim_ac,
-            "lexically similar texts should be more similar than unrelated; \
-             sim_ab={sim_ab} sim_ac={sim_ac}"
+            "semantic match should beat unrelated; sim_ab={sim_ab} sim_ac={sim_ac}"
         );
-    }
-
-    #[test]
-    fn case_insensitive_tokenization() {
-        let e = BundledEmbedder::new();
-        let a = e.embed("ALICE Bob").unwrap();
-        let b = e.embed("alice bob").unwrap();
-        assert_eq!(a, b, "case-insensitive: ALICE and alice hash to same bucket");
     }
 }

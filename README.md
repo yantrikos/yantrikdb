@@ -37,13 +37,12 @@ pip install yantrikdb
 ```python
 import yantrikdb
 
-# Single file, no server, no config — bundled embedder ships with the engine
-# so `record_text()` and `recall_text()` work out of the box. Use
-# `db.set_embedder(...)` to swap in sentence-transformers / a custom
-# model when you want to (the bundled default is a lexical baseline;
-# better-quality MiniLM-via-candle is the v0.7.0 default — see
-# saga task 20 / docs/phase_4_3_design.md).
-db = yantrikdb.YantrikDB("memory.db", embedding_dim=384)
+# Single file, no server, no config — the engine ships a static-embedding
+# default (potion-base-2M, ~7MB, distilled from BGE) so `record_text()`
+# and `recall_text()` work out of the box without `pip install
+# sentence-transformers` or first-run model download. Call
+# `db.set_embedder(...)` to swap in a higher-quality model when you want.
+db = yantrikdb.YantrikDB.with_default("memory.db")
 
 # Record memories with importance, domain, and emotional valence
 db.record("Alice is the engineering lead", importance=0.8, domain="people")

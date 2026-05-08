@@ -220,6 +220,22 @@ impl YantrikDB {
         Ok(db)
     }
 
+    /// **Saga task 20** — convenience constructor that opens with the
+    /// engine's bundled embedder dimension (currently 64 for
+    /// `potion-base-2M`). Equivalent to `YantrikDB::new(path, 64)`
+    /// when the `bundled-embedder` feature is on. Lets callers stay
+    /// agnostic to the bundled model's dimension; if the bundle ever
+    /// changes (e.g. Slice C swaps in a 256-dim variant) the
+    /// `with_default()` users get the new dim automatically without
+    /// having to update their code.
+    ///
+    /// Slim builds (`--no-default-features`) compile this method out
+    /// — there is no bundled embedder to align with.
+    #[cfg(feature = "bundled-embedder")]
+    pub fn with_default(db_path: &str) -> Result<Self> {
+        Self::new(db_path, crate::embedder::BUNDLED_EMBEDDER_DIM)
+    }
+
     /// Create a new YantrikDB instance with an explicit actor_id (for sync tests).
     pub fn new_with_actor(db_path: &str, embedding_dim: usize, actor_id: &str) -> Result<Self> {
         let mut db = Self::open(db_path, embedding_dim, Some(actor_id.to_string()), None)?;
@@ -250,8 +266,8 @@ impl YantrikDB {
     fn auto_attach_bundled_embedder(db: &mut Self) {
         #[cfg(feature = "bundled-embedder")]
         {
-            use crate::embedder::BundledEmbedder;
-            if db.embedding_dim() == BundledEmbedder::new().dim() {
+            use crate::embedder::{BundledEmbedder, BUNDLED_EMBEDDER_DIM};
+            if db.embedding_dim() == BUNDLED_EMBEDDER_DIM {
                 db.set_embedder(Box::new(BundledEmbedder::new()));
             }
         }

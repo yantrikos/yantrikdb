@@ -29,6 +29,16 @@ arc-swap = "1"
 # global lock to avoid contending with concurrent writers.
 dashmap = "6"
 
+# **bundled-embedder** dep — pure-Rust static-embedding inference for
+# `BundledEmbedder` (saga task 20, rid 019e0686). We disable the
+# `default` feature (which is `onig` = oniguruma C lib) and pick
+# `fancy-regex` (pure Rust) so we don't re-introduce the kind of
+# native-build pain we retired with the no-ONNX rule. The crate's
+# tokenizers/http transitive dep is compiled in but never invoked —
+# we only call from_pretrained() with local paths against bundled
+# weights, never HF Hub IDs.
+model2vec-rs = { version = "0.1", default-features = false, features = ["fancy-regex"], optional = true }
+
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
 
@@ -39,7 +49,7 @@ js-sys = "0.3"
 # `--no-default-features` and provide their own embedder via
 # `db.set_embedder()`. See saga task 20 + memory rid 019e0686.
 default = ["bundled-embedder"]
-bundled-embedder = []
+bundled-embedder = ["dep:model2vec-rs"]
 profiling = []
 
 [dev-dependencies]
