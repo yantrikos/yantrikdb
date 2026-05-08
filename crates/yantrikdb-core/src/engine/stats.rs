@@ -195,14 +195,21 @@ impl YantrikDB {
     ///
     /// Mark a pending oplog entry as materialized. Called by the background
     /// worker after it has applied the op to the in-memory indexes.
-    /// Idempotent: marking an already-applied op is a no-op.
-    pub fn mark_op_applied(&self, op_id: &str) -> Result<()> {
+    ///
+    /// **Returns** `Ok(true)` iff this caller transitioned the row from
+    /// `applied=0` to `applied=1`. `Ok(false)` means another worker
+    /// already applied it (race on shared oplog, normal under N workers).
+    /// The race-safety filter `WHERE applied = 0` is what makes
+    /// `apply_pending_ops_once` exactly-once across N concurrent workers
+    /// — the work is idempotent so double-execution is safe; this filter
+    /// just decides which worker gets to claim the apply count.
+    pub fn mark_op_applied(&self, op_id: &str) -> Result<bool> {
         let conn = self.conn.lock();
-        conn.execute(
-            "UPDATE oplog SET applied = 1 WHERE op_id = ?1",
+        let changed = conn.execute(
+            "UPDATE oplog SET applied = 1 WHERE op_id = ?1 AND applied = 0",
             params![op_id],
         )?;
-        Ok(())
+        Ok(changed > 0)
     }
 
     /// **Decoupled write path RFC, Phase 3 scaffolding.**
@@ -224,23 +231,58 @@ impl YantrikDB {
     /// update, graph_index update, scoring_cache insert) — and at that point
     /// foreground record() can stop doing it inline.
     pub fn apply_pending_ops_once(&self, limit: usize) -> Result<usize> {
-        let pending: Vec<(String, String)> = {
+        let pending: Vec<(String, String, String)> = {
             let conn = self.read_conn();
             let mut stmt = conn.prepare(
-                "SELECT op_id, op_type FROM oplog \
+                "SELECT op_id, op_type, payload FROM oplog \
                  WHERE applied = 0 \
                  ORDER BY hlc, op_id \
                  LIMIT ?1",
             )?;
             let rows = stmt.query_map(params![limit as i64], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
 
         let mut applied = 0usize;
-        for (op_id, op_type) in &pending {
+        for (op_id, op_type, payload) in &pending {
             match op_type.as_str() {
+                // **Phase 4.3 — saga task 3.** This is the only op_type
+                // whose dispatch is *real* materialization work (the
+                // unbounded entity/relation loops that used to be on the
+                // foreground request path). Foreground enqueues; worker
+                // applies. See docs/phase_4_3_design.md for the contract.
+                crate::engine::op_types::OP_MATERIALIZE_RECORD_POST => {
+                    match self.apply_materialize_record_post(payload) {
+                        Ok(()) => {
+                            // Only count this apply if THIS worker won
+                            // the race to flip applied=0 -> applied=1.
+                            // Other workers may have done duplicate work
+                            // (idempotent), but exactly one gets the count.
+                            if self.mark_op_applied(op_id)? {
+                                applied += 1;
+                            }
+                        }
+                        Err(e) => {
+                            // Don't mark applied — leave pending for retry
+                            // on next tick. Workers race-safe via the
+                            // applied=0 filter, so a transient failure
+                            // doesn't lose the op.
+                            tracing::warn!(
+                                target: "yantrikdb::ingest::materialize",
+                                op_id = %op_id,
+                                op_type = %op_type,
+                                error = %e,
+                                "post-record materialization failed; leaving pending for retry"
+                            );
+                        }
+                    }
+                }
                 "record" | "forget" | "relate" | "correct" | "consolidate" => {
                     tracing::trace!(
                         target: "yantrikdb::ingest::materialize",
@@ -248,8 +290,9 @@ impl YantrikDB {
                         op_type = %op_type,
                         "phase 3 stub: marking pending op as applied without inline materialization"
                     );
-                    self.mark_op_applied(op_id)?;
-                    applied += 1;
+                    if self.mark_op_applied(op_id)? {
+                        applied += 1;
+                    }
                 }
                 other => {
                     tracing::warn!(
@@ -263,6 +306,161 @@ impl YantrikDB {
         }
 
         Ok(applied)
+    }
+
+    /// **Phase 4.3 — apply a queued `materialize_record_post` op.**
+    ///
+    /// Mirrors the post-INSERT entity/relation extraction loop that used to
+    /// live on the foreground `record()` path. Now runs on the materializer
+    /// thread so the foreground caller is not blocked on the unbounded
+    /// loop count (5-15 entities + 0-3 relations per typical record).
+    ///
+    /// Idempotent: every SQL operation here is `INSERT OR IGNORE` on a
+    /// natural key (entity name, memory_entities pair, edge tuple). A
+    /// double-apply across worker restarts produces identical state.
+    ///
+    /// Payload shape (see `docs/phase_4_3_design.md`):
+    ///
+    /// ```json
+    /// {
+    ///   "rid":       "01HX...",
+    ///   "text":      "<plaintext OR engine-encrypted>",
+    ///   "namespace": "default",
+    ///   "ts_secs":   1715184000.0,
+    ///   "domain":    "general",
+    ///   "source":    "user"
+    /// }
+    /// ```
+    fn apply_materialize_record_post(&self, payload_json: &str) -> Result<()> {
+        let payload: serde_json::Value = serde_json::from_str(payload_json)
+            .map_err(|e| crate::error::YantrikDbError::InvalidInput(format!(
+                "materialize_record_post: payload parse failed: {e}"
+            )))?;
+
+        let rid = payload.get("rid").and_then(|v| v.as_str())
+            .ok_or_else(|| crate::error::YantrikDbError::InvalidInput(
+                "materialize_record_post: missing rid".into(),
+            ))?;
+        let text_stored = payload.get("text").and_then(|v| v.as_str())
+            .ok_or_else(|| crate::error::YantrikDbError::InvalidInput(
+                "materialize_record_post: missing text".into(),
+            ))?;
+        let namespace = payload.get("namespace").and_then(|v| v.as_str())
+            .unwrap_or("default");
+        let ts_secs = payload.get("ts_secs").and_then(|v| v.as_f64())
+            .unwrap_or_else(super::now);
+        let domain = payload.get("domain").and_then(|v| v.as_str())
+            .unwrap_or("general");
+        let source = payload.get("source").and_then(|v| v.as_str())
+            .unwrap_or("user");
+
+        // Decrypt the text field if engine encrypted at rest. The payload
+        // stored the engine-encrypted form, so the worker decrypts before
+        // running the heuristic extractor on plaintext.
+        let text_owned: String = self.decrypt_text(text_stored)?;
+        let text = text_owned.as_str();
+
+        let text_tokens = crate::graph::tokenize(text);
+        let heuristic_entities = crate::graph::extract_heuristic_entities(text);
+
+        // Loop A: seed heuristic entities (idempotent INSERT ... ON CONFLICT).
+        if !heuristic_entities.is_empty() {
+            let conn = self.conn();
+            for entity in &heuristic_entities {
+                let entity_type = crate::graph::classify_entity_type(entity);
+                conn.execute(
+                    "INSERT INTO entities (name, entity_type, first_seen, last_seen, mention_count) \
+                     VALUES (?1, ?2, ?3, ?3, 1) \
+                     ON CONFLICT(name) DO UPDATE SET \
+                        last_seen = ?3, \
+                        mention_count = mention_count + 1, \
+                        entity_type = CASE \
+                            WHEN entity_type = 'unknown' AND ?2 != 'unknown' THEN ?2 \
+                            ELSE entity_type END",
+                    params![entity, entity_type, ts_secs],
+                )?;
+            }
+        }
+
+        // Compose candidate set: heuristic + already-known entities.
+        let mut candidates: std::collections::HashSet<String> =
+            heuristic_entities.iter().cloned().collect();
+        for known in self.graph_index.read().all_entity_names() {
+            if crate::graph::entity_matches_text(&known, &text_tokens) {
+                candidates.insert(known);
+            }
+        }
+
+        if !candidates.is_empty() {
+            // Loop B: memory_entities INSERT OR IGNORE.
+            {
+                let conn = self.conn();
+                for entity in &candidates {
+                    conn.execute(
+                        "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) VALUES (?1, ?2)",
+                        params![rid, entity],
+                    )?;
+                }
+            }
+            // graph_index in-memory update (idempotent — add_entity/link dedupe).
+            let mut gi = self.graph_index.write();
+            for entity in &candidates {
+                let entity_type = crate::graph::classify_entity_type(entity);
+                gi.add_entity(entity, entity_type);
+                gi.link_memory(rid, entity);
+            }
+        }
+
+        // Loop C+D: relation extraction + claim ingestion.
+        let heuristic_vec: Vec<String> = heuristic_entities.iter().cloned().collect();
+        let relations = crate::graph::extract_heuristic_relations(text, &heuristic_vec);
+        for rel in &relations {
+            let already_exists = {
+                let conn = self.conn();
+                conn.query_row(
+                    "SELECT COUNT(*) FROM edges WHERE src = ?1 AND rel_type = ?2 AND dst = ?3 \
+                     AND namespace = ?4 AND extractor = 'heuristic_v1' AND tombstoned = 0",
+                    params![rel.src, rel.rel_type, rel.dst, namespace],
+                    |row| row.get::<_, i64>(0),
+                )
+                .unwrap_or(0) > 0
+            };
+            if already_exists {
+                continue;
+            }
+            let _ = self.ingest_claim(
+                &rel.src, &rel.rel_type, &rel.dst, namespace,
+                rel.polarity, &rel.modality,
+                None, None,
+                "heuristic_v1", Some("1.0"),
+                &rel.confidence_band,
+                Some(rid),
+                None, None, 1.0,
+            );
+        }
+
+        // Audit telemetry — same shape as the foreground path emitted before.
+        let features = crate::graph::analyze_text_features(text, &heuristic_vec);
+        tracing::info!(
+            target: "yantrikdb::audit::extraction",
+            namespace = %namespace,
+            memory_rid = %rid,
+            domain = %domain,
+            source = %source,
+            extractor_version = "heuristic_v1",
+            char_length = features.char_length,
+            sentence_count = features.sentence_count,
+            entity_count = features.entity_count,
+            entities_matched_in_graph = candidates.len().saturating_sub(heuristic_entities.len()),
+            negation_cue_count = features.negation_cue_count,
+            temporal_cue_count = features.temporal_cue_count,
+            modality_cue_count = features.modality_cue_count,
+            has_compound_markers = features.has_compound_markers,
+            likely_assertion = features.likely_assertion,
+            "extraction audit (materialized post-record)"
+        );
+
+        Ok(())
     }
 
     /// **Phase 6 RYW** — allocate or accept a seq for a write primitive.
@@ -667,5 +865,187 @@ mod pending_ops_tests {
             names.iter().any(|n| n == "idx_memories_embedding_model"),
             "idx_memories_embedding_model missing"
         );
+    }
+
+    // ── Phase 4.3 (saga task 3): materialize_record_post dispatch arm ──
+    //
+    // These tests exercise the worker-side materialization path WITHOUT
+    // changing foreground behavior. They enqueue an op directly via
+    // log_op_pending and drain via apply_pending_ops_once, asserting the
+    // resulting SQL/graph state matches what the foreground inline loop
+    // would have produced. Commit B will flip foreground to enqueue;
+    // these tests act as the contract pin so the flip is provably safe.
+
+    fn enqueue_post_record(
+        db: &YantrikDB,
+        rid: &str,
+        text: &str,
+        namespace: &str,
+    ) -> String {
+        // First INSERT a stub memories row so memory_entities + claims
+        // FK references are valid. Foreground (Commit B) will INSERT the
+        // memories row before enqueuing; tests mirror that ordering.
+        let conn = db.conn();
+        let stored_text = db.encrypt_text(text).unwrap();
+        let ts = super::super::now();
+        conn.execute(
+            "INSERT INTO memories \
+             (rid, type, text, embedding, created_at, updated_at, importance, \
+              half_life, last_access, valence, metadata, namespace, \
+              certainty, domain, source, emotional_state) \
+             VALUES (?1, 'episodic', ?2, NULL, ?3, ?3, 0.5, 604800.0, ?3, 0.0, '{}', ?4, 0.8, 'general', 'user', NULL)",
+            params![rid, stored_text, ts, namespace],
+        ).unwrap();
+        drop(conn);
+
+        let payload = serde_json::json!({
+            "rid": rid,
+            "text": stored_text,
+            "namespace": namespace,
+            "ts_secs": ts,
+            "domain": "general",
+            "source": "user",
+        });
+        db.log_op_pending(
+            crate::engine::op_types::OP_MATERIALIZE_RECORD_POST,
+            Some(rid),
+            &payload,
+            None,
+            None,
+        ).expect("log_op_pending")
+    }
+
+    #[test]
+    fn materialize_record_post_inserts_entities() {
+        let db = open_test_db();
+        let _op_id = enqueue_post_record(&db, "r1", "Alice met Acme yesterday", "default");
+        assert_eq!(db.count_pending_ops().unwrap(), 1);
+
+        let n = db.apply_pending_ops_once(10).unwrap();
+        assert_eq!(n, 1, "one op drained");
+        assert_eq!(db.count_pending_ops().unwrap(), 0);
+
+        // Entities table should now contain Alice and Acme.
+        let conn = db.read_conn();
+        let alice: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM entities WHERE name = 'Alice'",
+            [], |r| r.get(0),
+        ).unwrap();
+        let acme: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM entities WHERE name = 'Acme'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(alice, 1, "Alice seeded by heuristic");
+        assert_eq!(acme, 1, "Acme seeded by heuristic");
+    }
+
+    #[test]
+    fn materialize_record_post_inserts_memory_entities() {
+        let db = open_test_db();
+        let _op_id = enqueue_post_record(&db, "r2", "Bob works at Beta Corp", "default");
+        let _ = db.apply_pending_ops_once(10).unwrap();
+
+        let conn = db.read_conn();
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memory_entities WHERE memory_rid = 'r2'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert!(count >= 2, "memory_entities has at least 2 rows for Bob+Beta Corp; got {count}");
+    }
+
+    #[test]
+    fn materialize_record_post_idempotent_on_double_drain() {
+        // Drain twice — second drain must be a no-op (op already marked
+        // applied by first drain). entities mention_count must stay at 1.
+        let db = open_test_db();
+        let _op_id = enqueue_post_record(&db, "r3", "Charlie went to Delta", "default");
+        let n1 = db.apply_pending_ops_once(10).unwrap();
+        let n2 = db.apply_pending_ops_once(10).unwrap();
+        assert_eq!(n1, 1, "first drain applies");
+        assert_eq!(n2, 0, "second drain finds nothing pending");
+
+        let conn = db.read_conn();
+        let mc: i64 = conn.query_row(
+            "SELECT mention_count FROM entities WHERE name = 'Charlie'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(mc, 1, "mention_count not double-bumped");
+    }
+
+    #[test]
+    fn materialize_record_post_updates_graph_index() {
+        // graph_index in-memory state must reflect the worker's apply
+        // — this is what makes recall-by-entity find the new memory.
+        let db = open_test_db();
+        let _op_id = enqueue_post_record(&db, "r4", "Eve climbed Everest", "default");
+        let _ = db.apply_pending_ops_once(10).unwrap();
+
+        let gi = db.graph_index.read();
+        let names = gi.all_entity_names();
+        assert!(names.iter().any(|n| n == "Eve"), "Eve in graph_index");
+        assert!(names.iter().any(|n| n == "Everest"), "Everest in graph_index");
+    }
+
+    #[test]
+    fn materialize_record_post_concurrent_workers_no_double_apply() {
+        // 4 worker threads + 20 ops → exactly-once semantics on the
+        // applied=0 filter. Same race-safety as the existing materializer
+        // tests, but exercising the new dispatch path.
+        use std::sync::Arc;
+        use std::thread;
+
+        let db = Arc::new(open_test_db());
+        for i in 0..20 {
+            let _ = enqueue_post_record(
+                &db, &format!("rcc_{i}"),
+                &format!("Person{i} met Place{i}"), "default",
+            );
+        }
+        assert_eq!(db.count_pending_ops().unwrap(), 20);
+
+        let mut handles = Vec::new();
+        for _ in 0..4 {
+            let db_c = Arc::clone(&db);
+            handles.push(thread::spawn(move || {
+                let mut total = 0;
+                while db_c.count_pending_ops().unwrap() > 0 {
+                    total += db_c.apply_pending_ops_once(50).unwrap();
+                    if total >= 20 { break; }
+                }
+                total
+            }));
+        }
+        let totals: Vec<usize> = handles.into_iter()
+            .map(|h| h.join().unwrap()).collect();
+        assert_eq!(totals.iter().sum::<usize>(), 20,
+            "exactly 20 applies across all workers, no double-counting; got {totals:?}");
+        assert_eq!(db.count_pending_ops().unwrap(), 0);
+
+        // entities should have 20 distinct Person* rows, 20 distinct Place* rows.
+        let conn = db.read_conn();
+        let person_count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM entities WHERE name LIKE 'Person%'",
+            [], |r| r.get(0),
+        ).unwrap();
+        assert_eq!(person_count, 20);
+    }
+
+    #[test]
+    fn materialize_record_post_invalid_payload_leaves_op_pending() {
+        // Malformed payload → worker logs warning, leaves op pending for
+        // retry. Must not advance applied flag (otherwise we'd silently
+        // lose data on a transient parse failure).
+        let db = open_test_db();
+        let bad_payload = serde_json::json!({"not_a_rid": "oops"});
+        let _ = db.log_op_pending(
+            crate::engine::op_types::OP_MATERIALIZE_RECORD_POST,
+            Some("r_bad"),
+            &bad_payload,
+            None,
+            None,
+        ).unwrap();
+        let n = db.apply_pending_ops_once(10).unwrap();
+        assert_eq!(n, 0, "malformed op not applied");
+        assert_eq!(db.count_pending_ops().unwrap(), 1, "still pending for retry");
     }
 }

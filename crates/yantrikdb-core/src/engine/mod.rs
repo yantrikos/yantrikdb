@@ -1,5 +1,6 @@
 mod belief;
 pub mod materializer;
+pub(crate) mod op_types;
 mod cache;
 mod intent;
 mod action;
