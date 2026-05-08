@@ -29,3 +29,5 @@ build/
 *.dylib
 *.dll
 chatgpt
+wedge_*.db
+*.db
