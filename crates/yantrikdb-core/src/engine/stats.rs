@@ -294,25 +294,41 @@ impl YantrikDB {
     /// **Phase 6 RYW** — bump the visible_seq high-water mark for a
     /// namespace. Called by record/record_with_rid and siblings after the
     /// write has been materialized into the in-memory delta. Idempotent:
-    /// only advances the watermark; same-or-lower seqs are no-ops.
+    /// only advances the watermark via `fetch_max`; same-or-lower seqs
+    /// are no-ops.
     ///
     /// Wakes any threads in ``recall_with_seq`` waiting on this namespace
     /// via the paired condvar.
     pub(crate) fn bump_visible_seq(&self, namespace: &str, seq: u64) {
-        {
-            let mut map = self.visible_seq.lock();
-            let entry = map.entry(namespace.to_string()).or_insert(0);
-            if seq > *entry {
-                *entry = seq;
-            }
+        use std::sync::atomic::Ordering;
+        // Fast path: namespace already present — single fetch_max, no
+        // hashmap mutation.
+        if let Some(entry) = self.visible_seq.get(namespace) {
+            entry.fetch_max(seq, Ordering::Release);
+        } else {
+            // First write for this namespace: insert. The DashMap entry
+            // API gives us insert-or-existing semantics atomically per
+            // shard. If two threads race to insert the same namespace
+            // for the first time, one wins and the other's fetch_max
+            // converges anyway.
+            self.visible_seq
+                .entry(namespace.to_string())
+                .or_insert_with(|| std::sync::atomic::AtomicU64::new(0))
+                .fetch_max(seq, Ordering::Release);
         }
         self.visible_seq_cv.notify_all();
     }
 
     /// **Phase 6 RYW** — current visible_seq high-water mark for a namespace.
     /// Returns 0 for namespaces that have never been bumped.
+    ///
+    /// Lock-free in steady state: a DashMap shard read + an atomic load.
     pub fn visible_seq_for(&self, namespace: &str) -> u64 {
-        self.visible_seq.lock().get(namespace).copied().unwrap_or(0)
+        use std::sync::atomic::Ordering;
+        self.visible_seq
+            .get(namespace)
+            .map(|e| e.load(Ordering::Acquire))
+            .unwrap_or(0)
     }
 
     /// **Phase 6 RYW** — wait until visible_seq[namespace] >= min_seq or
@@ -332,9 +348,8 @@ impl YantrikDB {
         timeout: std::time::Duration,
     ) -> Result<()> {
         let deadline = std::time::Instant::now() + timeout;
-        let mut map = self.visible_seq.lock();
         loop {
-            let current = map.get(namespace).copied().unwrap_or(0);
+            let current = self.visible_seq_for(namespace);
             if current >= min_seq {
                 return Ok(());
             }
@@ -348,9 +363,19 @@ impl YantrikDB {
                 });
             }
             let remaining = deadline - now;
-            let result = self.visible_seq_cv.wait_for(&mut map, remaining);
+            // The sentinel mutex is a no-data lock pair for the Condvar.
+            // Critical race-avoidance pattern: re-check the watermark AFTER
+            // acquiring the mutex but BEFORE waiting, because the writer
+            // may have bumped + notified between our outer check and here.
+            let mut guard = self.visible_seq_wait_mu.lock();
+            let recheck = self.visible_seq_for(namespace);
+            if recheck >= min_seq {
+                return Ok(());
+            }
+            let result = self.visible_seq_cv.wait_for(&mut guard, remaining);
+            drop(guard);
             if result.timed_out() {
-                let final_current = map.get(namespace).copied().unwrap_or(0);
+                let final_current = self.visible_seq_for(namespace);
                 if final_current >= min_seq {
                     return Ok(());
                 }

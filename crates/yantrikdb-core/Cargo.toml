@@ -24,6 +24,10 @@ aes-gcm = "0.10"
 base64 = "0.22"
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
 arc-swap = "1"
+# DashMap for lock-free per-namespace visible_seq lookups on the recall
+# hot path. Phase 6 RYW: visible_seq_for() needs to be O(1) with no
+# global lock to avoid contending with concurrent writers.
+dashmap = "6"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"

@@ -131,13 +131,25 @@ pub struct YantrikDB {
     /// until `visible_seq[ns] >= min_seq` before scanning. Strict
     /// read-your-writes is opt-in; default `recall()` keeps current
     /// "delta is always visible" semantics.
-    pub(crate) visible_seq: parking_lot::Mutex<std::collections::HashMap<String, u64>>,
-    /// **Phase 6 RYW**: Condvar paired with `visible_seq` for wake-on-update
-    /// semantics. `record/record_with_rid` notify_all after bumping
-    /// `visible_seq[ns]`; `recall_with_seq` waits on this condvar with a
-    /// timeout. parking_lot Condvar is used here for its non-spurious-wakeup
-    /// guarantee.
+    ///
+    /// `DashMap<String, AtomicU64>` so the read path (`visible_seq_for`)
+    /// is fully lock-free in steady state — a sharded hashmap shard read
+    /// + an atomic load. Writers (`bump_visible_seq`) acquire only the
+    /// sharded entry's lock to insert-on-first-use; subsequent bumps for
+    /// the same namespace are a single shard-shared `fetch_max`. This
+    /// keeps the recall hot path off the global mutex that the previous
+    /// `parking_lot::Mutex<HashMap<...>>` design imposed (msg from
+    /// yantrikdb-server, 2026-05-07: "DashMap eliminates the lock-on-every-
+    /// recall that would dominate at scale").
+    pub(crate) visible_seq: dashmap::DashMap<String, std::sync::atomic::AtomicU64>,
+    /// **Phase 6 RYW**: Condvar + sentinel mutex paired with `visible_seq`
+    /// for wake-on-update semantics in `wait_for_visible_seq`. The mutex
+    /// is a `()` sentinel — no data lives behind it; it exists only
+    /// because parking_lot::Condvar's `wait_for` API requires a guard.
+    /// `record/record_with_rid` notify_all after bumping `visible_seq[ns]`;
+    /// waiters re-check the AtomicU64 after each wakeup.
     pub(crate) visible_seq_cv: parking_lot::Condvar,
+    pub(crate) visible_seq_wait_mu: parking_lot::Mutex<()>,
     pub(crate) graph_index: RwLock<GraphIndex>,
     pub(crate) enc: Option<EncryptionProvider>,
     /// Optional text-to-embedding converter. When set, enables `record_text()`
@@ -454,8 +466,9 @@ impl YantrikDB {
                 crate::vector::delta_index::DeltaIndex::from_cold(vec_index, delta_max)
             },
             vec_seq: std::sync::atomic::AtomicU64::new(0),
-            visible_seq: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            visible_seq: dashmap::DashMap::new(),
             visible_seq_cv: parking_lot::Condvar::new(),
+            visible_seq_wait_mu: parking_lot::Mutex::new(()),
             graph_index: RwLock::new(graph_index),
             enc,
             embedder: None,
