@@ -242,10 +242,11 @@ impl YantrikDB {
 
     /// **Issue #9 — deterministic tombstone primitive for cluster replication.**
     ///
-    /// Sibling of `forget()` that takes caller-supplied timestamp + optional
-    /// reason for byte-deterministic follower replay. Used by yantrikdb-server's
-    /// cluster-mode applier so replicated tombstones converge to identical
-    /// engine state across leader + followers.
+    /// Sibling of `forget()` that takes caller-supplied namespace +
+    /// timestamp + optional reason + optional seq for byte-deterministic
+    /// follower replay. Used by yantrikdb-server's cluster-mode applier so
+    /// replicated tombstones converge to identical engine state across
+    /// leader + followers.
     ///
     /// # Contract
     ///
@@ -256,10 +257,20 @@ impl YantrikDB {
     /// - **Idempotent on already-tombstoned**: re-tombstoning a row that
     ///   is already tombstoned returns `Ok(())` without emitting a new
     ///   oplog entry or re-bumping cache state. Replay-safe.
+    /// - **Caller-supplied namespace**: required for the visible_seq bump
+    ///   regardless of whether the SQL row exists locally — followers
+    ///   apply log entries before the corresponding `record_with_rid` may
+    ///   have arrived (snapshot lag), but the bump must still happen so
+    ///   the cluster-wide visible_seq[ns] is monotonic with the openraft
+    ///   commit-log index.
     /// - **Caller-supplied timestamp**: `requested_at_unix_micros` materialized
     ///   into `updated_at` (REAL seconds). No engine `now()` call on this path.
     /// - **Optional reason**: stored in `tombstone_reason TEXT` column (v25).
     ///   NULL when caller passes None.
+    /// - **Caller-supplied `seq`** (cluster mode): when `Some(n)`, used
+    ///   as the delta-tombstone seq + visible_seq bump value; engine
+    ///   ratchets `vec_seq` to at least `n`. `None` lets the engine
+    ///   allocate (single-node).
     ///
     /// Always emits a tombstone marker into the DeltaIndex regardless of
     /// whether the SQL row was newly tombstoned — followers may have the
@@ -267,10 +278,12 @@ impl YantrikDB {
     pub fn tombstone_with_rid(
         &self,
         rid: &str,
+        namespace: &str,
         reason: Option<&str>,
         requested_at_unix_micros: i64,
+        seq: Option<u64>,
     ) -> Result<()> {
-        self.tombstone_inner(rid, reason, requested_at_unix_micros)?;
+        self.tombstone_inner(rid, Some(namespace), reason, requested_at_unix_micros, seq)?;
         Ok(())
     }
 
@@ -278,33 +291,59 @@ impl YantrikDB {
     /// `true` iff the row was newly tombstoned (was active or consolidated
     /// before this call). Returns `false` if rid is missing or already
     /// tombstoned — both treated as idempotent successful no-ops.
+    ///
+    /// `namespace`:
+    ///   - `Some(ns)`: cluster path — caller has the namespace from the
+    ///     replication payload; we bump `visible_seq[ns]` even if the rid
+    ///     is missing locally (snapshot-lag determinism).
+    ///   - `None`: `forget()` path — we SELECT the namespace from the row.
+    ///     If the row is missing, `visible_seq` is not bumped (no reader
+    ///     would be waiting on a non-existent rid in single-node mode).
     fn tombstone_inner(
         &self,
         rid: &str,
+        namespace: Option<&str>,
         reason: Option<&str>,
         ts_micros: i64,
+        seq: Option<u64>,
     ) -> Result<bool> {
         let ts_secs = (ts_micros as f64) / 1_000_000.0;
 
-        // UPDATE with state filter so changes==1 means "was newly tombstoned".
-        // changes==0 means rid missing OR already tombstoned (both: no-op).
-        let was_newly_tombstoned = {
+        // Resolve namespace + execute the UPDATE in a single conn block.
+        // forget() lookup case: SELECT before UPDATE (the UPDATE may zero
+        // changes when the row is missing or already tombstoned, so we
+        // can't rely on RETURNING — and namespace doesn't change on
+        // tombstone, so a separate SELECT is correct and cheap).
+        let (was_newly_tombstoned, ns_to_bump): (bool, Option<String>) = {
             let conn = self.conn();
+            let resolved_ns: Option<String> = match namespace {
+                Some(ns) => Some(ns.to_string()),
+                None => conn
+                    .query_row(
+                        "SELECT namespace FROM memories WHERE rid = ?1",
+                        params![rid],
+                        |r| r.get::<_, String>(0),
+                    )
+                    .ok(),
+            };
             let changes = conn.execute(
                 "UPDATE memories SET consolidation_status = 'tombstoned', \
                  updated_at = ?1, tombstone_reason = ?2 \
                  WHERE rid = ?3 AND consolidation_status != 'tombstoned'",
                 params![ts_secs, reason, rid],
             )?;
-            changes > 0
+            (changes > 0, resolved_ns)
         };
 
         // Always emit a delta tombstone so search() filters it out even
         // before SQL has applied. Cluster followers may have the rid in
         // their delta from a recent record_with_rid that has not yet
         // compacted into cold; the tombstone marker covers that window.
-        let seq = self.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let seq = self.assign_seq(seq);
         self.vec_index.tombstone(rid, seq);
+        if let Some(ns) = &ns_to_bump {
+            self.bump_visible_seq(ns, seq);
+        }
 
         // Engine-internal index updates only when the row was newly tombstoned
         // (replay-safe: no double-emit on idempotent re-apply).
@@ -332,12 +371,13 @@ impl YantrikDB {
     ///
     /// Stamped with engine-supplied `now()` — for byte-deterministic
     /// cluster-replicated tombstones use [`tombstone_with_rid`] instead.
-    /// `forget()` delegates to `tombstone_inner` with no reason; the bool
-    /// return is the only behavioral difference.
+    /// `forget()` delegates to `tombstone_inner` with namespace lookup
+    /// (the namespace is read from the row); the bool return is the only
+    /// behavioral difference vs the cluster primitive.
     #[tracing::instrument(skip(self))]
     pub fn forget(&self, rid: &str) -> Result<bool> {
         let ts_micros = (now() * 1_000_000.0) as i64;
-        self.tombstone_inner(rid, None, ts_micros)
+        self.tombstone_inner(rid, None, None, ts_micros, None)
     }
 
     /// User-initiated memory correction.

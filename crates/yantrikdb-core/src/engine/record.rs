@@ -457,6 +457,13 @@ impl YantrikDB {
     /// - **Caller supplies embedding_model.** Stored on the row as the
     ///   engine-deterministic-surface version pin. RFC 013 may swap the
     ///   field type later behind the same column name.
+    /// - **Caller-supplied `seq`** (cluster mode): when `Some(n)`, the
+    ///   engine uses `n` as the delta-entry seq and the visible_seq bump
+    ///   value, and ratchets `vec_seq` up to at least `n`. Per design
+    ///   lock 2026-05-07, the seq IS the openraft commit-log index in
+    ///   cluster mode, giving byte-deterministic per-namespace
+    ///   visible_seq across leader + followers. Single-node callers pass
+    ///   `None` and the engine allocates the seq itself.
     ///
     /// # Returns
     ///
@@ -482,6 +489,7 @@ impl YantrikDB {
         created_at_unix_micros: i64,
         extracted_entities: &[&str],
         embedding_model: &str,
+        seq: Option<u64>,
     ) -> Result<()> {
         // Determinism gate: dim must match. Diverged dim = silent corruption.
         if embedding.len() != self.embedding_dim {
@@ -582,11 +590,13 @@ impl YantrikDB {
         };
         // conn dropped
 
-        // DeltaIndex append. Idempotent on (rid, seq); on second call rid
-        // is the same but seq differs (we always allocate a fresh seq).
-        // The compactor's highest-seq-wins rule then converges state
-        // identically on both call paths — first apply or replay.
-        let seq = self.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        // DeltaIndex append. The seq is either caller-supplied (cluster
+        // mode: openraft commit-log index for byte-deterministic replay)
+        // or engine-allocated (single-node). On idempotent replay the rid
+        // is the same and the seq is identical (cluster) or fresh
+        // (single-node retry); the compactor's highest-seq-wins rule
+        // converges state identically on both paths.
+        let seq = self.assign_seq(seq);
         self.vec_index.append(rid.to_string(), embedding.to_vec(), seq)?;
         self.bump_visible_seq(namespace, seq);
 

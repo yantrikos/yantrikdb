@@ -265,6 +265,32 @@ impl YantrikDB {
         Ok(applied)
     }
 
+    /// **Phase 6 RYW** — allocate or accept a seq for a write primitive.
+    ///
+    /// Single-node mode: callers pass `None` and the engine allocates a
+    /// fresh seq via `vec_seq.fetch_add` (1-indexed via `+ 1`).
+    ///
+    /// Cluster mode (RFC 010, design lock 2026-05-07): the applier passes
+    /// `Some(commit_log_index)` so the seq IS the openraft commit-log
+    /// index — leader and followers thereby agree on a single global
+    /// monotonic stream. The engine ratchets `vec_seq` up to at least the
+    /// supplied value (via `fetch_max`) so any future single-node writes
+    /// against the same engine never produce seqs that collide with the
+    /// cluster-supplied stream.
+    ///
+    /// Returns the seq the caller should use to tag the delta entry, the
+    /// oplog row, and the visible_seq bump.
+    pub(crate) fn assign_seq(&self, requested: Option<u64>) -> u64 {
+        use std::sync::atomic::Ordering;
+        match requested {
+            Some(n) => {
+                self.vec_seq.fetch_max(n, Ordering::Relaxed);
+                n
+            }
+            None => self.vec_seq.fetch_add(1, Ordering::Relaxed) + 1,
+        }
+    }
+
     /// **Phase 6 RYW** — bump the visible_seq high-water mark for a
     /// namespace. Called by record/record_with_rid and siblings after the
     /// write has been materialized into the in-memory delta. Idempotent:

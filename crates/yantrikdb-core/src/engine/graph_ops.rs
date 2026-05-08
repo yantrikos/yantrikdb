@@ -152,6 +152,13 @@ impl YantrikDB {
     /// — same defaults `relate()` uses. The `claims` table backs both APIs.
     /// Spec uses the name `entity_edges` for the abstract concept; physical
     /// table is `claims` since RFC 006.
+    ///
+    /// **Caller-supplied `seq`** (cluster mode): when `Some(n)`, used as
+    /// the visible_seq bump value for the namespace; engine ratchets
+    /// `vec_seq` to at least `n`. Per the cluster RYW design lock the seq
+    /// IS the openraft commit-log index, so a follower replaying the
+    /// edge-upsert log entry advances `visible_seq[namespace]` to exactly
+    /// the same watermark the leader did. Single-node callers pass `None`.
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(skip(self), fields(edge_id, src, dst, rel_type, namespace))]
     pub fn upsert_entity_edge_with_id(
@@ -163,6 +170,7 @@ impl YantrikDB {
         weight: f64,
         namespace: &str,
         created_at_unix_micros: i64,
+        seq: Option<u64>,
     ) -> Result<()> {
         let ts_secs = (created_at_unix_micros as f64) / 1_000_000.0;
         let (src_type, dst_type) =
@@ -222,6 +230,14 @@ impl YantrikDB {
         // receive memory_entities updates via the record_with_rid log
         // entries that span the same backfill window.
 
+        // Bump visible_seq for cluster RYW determinism. Even on idempotent
+        // re-apply (was_new_row == false) we bump — followers must reach
+        // the same watermark the leader did regardless of whether the SQL
+        // state is novel; this is what makes recall_with_seq work uniformly
+        // across leader + followers per the design lock.
+        let seq = self.assign_seq(seq);
+        self.bump_visible_seq(namespace, seq);
+
         if was_new_row {
             self.log_op(
                 "upsert_entity_edge_with_id",
@@ -248,6 +264,15 @@ impl YantrikDB {
     /// non-existent edge_id returns `Ok(())`, not an error. Snapshot-install +
     /// log-replay overlap means double-delete is normal cluster behavior.
     ///
+    /// **Caller-supplied namespace** is required for the visible_seq bump
+    /// even when the local row is missing (snapshot-lag determinism on
+    /// followers). The cluster applier always has it from the
+    /// replication payload.
+    ///
+    /// **Caller-supplied `seq`** (cluster mode): when `Some(n)`, used as
+    /// the visible_seq bump value; engine ratchets `vec_seq` to at least
+    /// `n`. Single-node callers pass `None`.
+    ///
     /// Note: in-memory `graph_index` retains the edge until the next engine
     /// restart (no remove_edge primitive yet). The `claims` row is correctly
     /// tombstoned and the SQL-backed views filter it out. Best-effort recall
@@ -257,7 +282,9 @@ impl YantrikDB {
     pub fn delete_entity_edge_with_id(
         &self,
         edge_id: &str,
+        namespace: &str,
         requested_at_unix_micros: i64,
+        seq: Option<u64>,
     ) -> Result<()> {
         let ts_secs = (requested_at_unix_micros as f64) / 1_000_000.0;
         let was_newly_tombstoned = {
@@ -270,12 +297,18 @@ impl YantrikDB {
             changes > 0
         };
 
+        // Bump visible_seq for cluster RYW determinism — see upsert sibling
+        // for rationale. Bump on idempotent re-apply too.
+        let seq = self.assign_seq(seq);
+        self.bump_visible_seq(namespace, seq);
+
         if was_newly_tombstoned {
             self.log_op(
                 "delete_entity_edge_with_id",
                 Some(edge_id),
                 &serde_json::json!({
                     "edge_id": edge_id,
+                    "namespace": namespace,
                     "requested_at_unix_micros": requested_at_unix_micros,
                 }),
                 None,

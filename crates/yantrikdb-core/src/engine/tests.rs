@@ -4246,6 +4246,7 @@ fn record_with_rid_basic_succeeds() {
         1_700_000_000_000_000,
         &[],
         "test-model.v1",
+        None,
     ).expect("record_with_rid succeeds");
 
     let row = db.get("rid_test_1").unwrap().unwrap();
@@ -4270,6 +4271,7 @@ fn record_with_rid_persists_v25_columns() {
         1_700_000_000_000_000,
         &[],
         "bge-base-en-v1.5",
+        None,
     ).unwrap();
 
     let conn = db.read_conn();
@@ -4304,6 +4306,7 @@ fn record_with_rid_is_idempotent_on_replay() {
             1_700_000_001_000_000,
             &entity_refs,
             "test-model.v1",
+            None,
         ).expect("idempotent re-apply");
     }
 
@@ -4356,6 +4359,7 @@ fn record_with_rid_rejects_dimension_mismatch() {
         1_700_000_002_000_000,
         &[],
         "test-model.v1",
+        None,
     ).expect_err("must reject");
     match err {
         crate::error::YantrikDbError::EmbeddingDimensionMismatch { expected, got } => {
@@ -4385,6 +4389,7 @@ fn record_with_rid_uses_caller_supplied_timestamp() {
         caller_ts,
         &[],
         "test-model.v1",
+        None,
     ).unwrap();
     // Verify created_at REAL and created_at_unix_micros INTEGER both
     // reflect the caller-supplied timestamp (no engine-side now() call).
@@ -4416,6 +4421,7 @@ fn record_with_rid_makes_recall_find_it() {
         1_700_000_006_000_000,
         &[],
         "test-model.v1",
+        None,
     ).unwrap();
 
     let results = db.recall(&emb, 5, None, None, false, false, None, true, None, None, None).unwrap();
@@ -4434,7 +4440,7 @@ fn tombstone_with_rid_basic_succeeds() {
     let rid = db.record("to tombstone", "episodic", 0.5, 0.0, 604800.0,
         &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
 
-    db.tombstone_with_rid(&rid, Some("test reason"), 1_700_000_010_000_000)
+    db.tombstone_with_rid(&rid, "default", Some("test reason"), 1_700_000_010_000_000, None)
         .expect("tombstone_with_rid succeeds");
 
     let mem = db.get(&rid).unwrap().unwrap();
@@ -4447,7 +4453,7 @@ fn tombstone_with_rid_persists_reason() {
     let emb = vec_seed(2.0, 64);
     let rid = db.record("memory with reason", "episodic", 0.5, 0.0, 604800.0,
         &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
-    db.tombstone_with_rid(&rid, Some("user requested deletion"), 1_700_000_011_000_000).unwrap();
+    db.tombstone_with_rid(&rid, "default", Some("user requested deletion"), 1_700_000_011_000_000, None).unwrap();
 
     let conn = db.read_conn();
     let reason: Option<String> = conn.query_row(
@@ -4468,7 +4474,7 @@ fn tombstone_with_rid_idempotent_on_replay() {
         &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
 
     for _ in 0..3 {
-        db.tombstone_with_rid(&rid, Some("replay"), 1_700_000_012_000_000)
+        db.tombstone_with_rid(&rid, "default", Some("replay"), 1_700_000_012_000_000, None)
             .expect("idempotent re-apply");
     }
 
@@ -4486,7 +4492,7 @@ fn tombstone_with_rid_idempotent_on_missing() {
     // Snapshot-install + log replay overlap means tombstoning a rid that
     // doesn't exist is normal cluster behavior. Must return Ok(()), not error.
     let db = YantrikDB::new(":memory:", 64).unwrap();
-    db.tombstone_with_rid("rid_never_existed", None, 1_700_000_013_000_000)
+    db.tombstone_with_rid("rid_never_existed", "default", None, 1_700_000_013_000_000, None)
         .expect("must be Ok(()) on missing rid");
     // Verify no oplog entry created for the missing rid.
     let conn = db.read_conn();
@@ -4505,7 +4511,7 @@ fn tombstone_with_rid_uses_caller_supplied_timestamp() {
     let rid = db.record("ts test", "episodic", 0.5, 0.0, 604800.0,
         &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
     let caller_ts: i64 = 1_700_000_999_000_000;
-    db.tombstone_with_rid(&rid, None, caller_ts).unwrap();
+    db.tombstone_with_rid(&rid, "default", None, caller_ts, None).unwrap();
 
     let conn = db.read_conn();
     let updated_at: f64 = conn.query_row(
@@ -4549,7 +4555,7 @@ fn tombstone_with_rid_hides_from_recall() {
     let r = db.recall(&emb, 5, None, None, false, false, None, true, None, None, None).unwrap();
     assert!(r.iter().any(|x| x.rid == rid), "visible before tombstone");
 
-    db.tombstone_with_rid(&rid, None, 1_700_000_014_000_000).unwrap();
+    db.tombstone_with_rid(&rid, "default", None, 1_700_000_014_000_000, None).unwrap();
 
     // Hidden after.
     let r2 = db.recall(&emb, 5, None, None, false, false, None, true, None, None, None).unwrap();
@@ -4564,6 +4570,7 @@ fn upsert_entity_edge_with_id_basic_succeeds() {
     db.upsert_entity_edge_with_id(
         "edge_1", "Alice", "Acme", "works_at", 0.9, "default",
         1_700_000_020_000_000,
+        None,
     ).expect("upsert succeeds");
 
     // Verify the claim row exists with caller-supplied edge_id.
@@ -4587,6 +4594,7 @@ fn upsert_entity_edge_with_id_is_idempotent_on_replay() {
         db.upsert_entity_edge_with_id(
             "edge_idem", "Bob", "Beta Corp", "founded", 0.8, "default",
             1_700_000_021_000_000,
+            None,
         ).expect("idempotent");
     }
     let conn = db.read_conn();
@@ -4611,6 +4619,7 @@ fn upsert_entity_edge_uses_caller_supplied_timestamp() {
     let caller_ts: i64 = 1_700_000_555_000_000;
     db.upsert_entity_edge_with_id(
         "edge_ts", "X", "Y", "knows", 0.5, "default", caller_ts,
+        None,
     ).unwrap();
     let conn = db.read_conn();
     let created_at: f64 = conn.query_row(
@@ -4629,6 +4638,7 @@ fn upsert_entity_edge_creates_entities() {
     db.upsert_entity_edge_with_id(
         "edge_ent", "Charlie", "Delta Inc", "ceo_of", 1.0, "default",
         1_700_000_022_000_000,
+        None,
     ).unwrap();
     let conn = db.read_conn();
     let charlie: i64 = conn.query_row(
@@ -4649,8 +4659,9 @@ fn delete_entity_edge_with_id_basic_succeeds() {
     db.upsert_entity_edge_with_id(
         "edge_del", "A", "B", "knows", 0.5, "default",
         1_700_000_023_000_000,
+        None,
     ).unwrap();
-    db.delete_entity_edge_with_id("edge_del", 1_700_000_024_000_000)
+    db.delete_entity_edge_with_id("edge_del", "default", 1_700_000_024_000_000, None)
         .expect("delete succeeds");
     let conn = db.read_conn();
     let tombstoned: i64 = conn.query_row(
@@ -4666,7 +4677,7 @@ fn delete_entity_edge_with_id_idempotent_on_missing() {
     // Snapshot-install + log replay overlap means deleting a non-existent
     // edge_id is normal cluster behavior. Must return Ok(()), not error.
     let db = YantrikDB::new(":memory:", 64).unwrap();
-    db.delete_entity_edge_with_id("edge_never", 1_700_000_025_000_000)
+    db.delete_entity_edge_with_id("edge_never", "default", 1_700_000_025_000_000, None)
         .expect("missing edge: ok");
     let conn = db.read_conn();
     let op_count: i64 = conn.query_row(
@@ -4683,9 +4694,10 @@ fn delete_entity_edge_with_id_idempotent_on_replay() {
     db.upsert_entity_edge_with_id(
         "edge_del2", "P", "Q", "knows", 0.5, "default",
         1_700_000_026_000_000,
+        None,
     ).unwrap();
     for _ in 0..3 {
-        db.delete_entity_edge_with_id("edge_del2", 1_700_000_027_000_000)
+        db.delete_entity_edge_with_id("edge_del2", "default", 1_700_000_027_000_000, None)
             .expect("idempotent");
     }
     let conn = db.read_conn();
@@ -4695,6 +4707,98 @@ fn delete_entity_edge_with_id_idempotent_on_replay() {
         |row| row.get(0),
     ).unwrap();
     assert_eq!(op_count, 1, "exactly one delete oplog entry across 3 replays");
+}
+
+// ── Phase 6 RYW — caller-supplied seq + visible_seq bump from all 4 primitives ──
+
+#[test]
+fn record_with_rid_uses_caller_supplied_seq_and_bumps_visible() {
+    // Cluster determinism: when caller passes Some(n), the visible_seq for
+    // the namespace must reach exactly n (not n+something) and vec_seq
+    // must ratchet up to at least n.
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let emb = vec_seed(11.0, 64);
+    db.record_with_rid(
+        "rid_seq_supplied", "x", "episodic",
+        0.5, 0.0, 604800.0,
+        &empty_meta(), &emb, "alpha",
+        0.8, "general", "user", None,
+        1_700_000_100_000_000, &[], "test-model.v1",
+        Some(1_000_000),
+    ).unwrap();
+    assert_eq!(db.visible_seq_for("alpha"), 1_000_000,
+        "visible_seq[alpha] equals caller-supplied seq");
+
+    // Subsequent engine-allocated seq for a fresh write must be > 1_000_000
+    // because vec_seq was ratcheted.
+    db.record_with_rid(
+        "rid_after_ratchet", "y", "episodic",
+        0.5, 0.0, 604800.0,
+        &empty_meta(), &vec_seed(12.0, 64), "alpha",
+        0.8, "general", "user", None,
+        1_700_000_101_000_000, &[], "test-model.v1",
+        None,
+    ).unwrap();
+    assert!(db.visible_seq_for("alpha") > 1_000_000,
+        "engine-allocated seq is > ratcheted high-water");
+}
+
+#[test]
+fn tombstone_with_rid_bumps_visible_seq_even_when_rid_missing() {
+    // Cluster determinism: a follower replaying a tombstone for a rid it
+    // does not have locally (snapshot lag) must still bump visible_seq for
+    // the supplied namespace, because the caller waiting on RYW for that
+    // namespace expects the watermark to advance regardless of whether
+    // the local SQL state knows the rid.
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    assert_eq!(db.visible_seq_for("beta"), 0);
+    db.tombstone_with_rid(
+        "rid_unknown_locally", "beta", None, 1_700_000_200_000_000,
+        Some(2_000_000),
+    ).unwrap();
+    assert_eq!(db.visible_seq_for("beta"), 2_000_000,
+        "tombstone_with_rid bumps visible_seq[beta] even on missing rid");
+}
+
+#[test]
+fn upsert_entity_edge_with_id_bumps_visible_seq() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    db.upsert_entity_edge_with_id(
+        "edge_seq", "X", "Y", "knows", 0.5, "gamma",
+        1_700_000_300_000_000,
+        Some(3_000_000),
+    ).unwrap();
+    assert_eq!(db.visible_seq_for("gamma"), 3_000_000);
+
+    // Idempotent re-apply with the SAME seq is a no-op (fetch_max keeps it).
+    db.upsert_entity_edge_with_id(
+        "edge_seq", "X", "Y", "knows", 0.5, "gamma",
+        1_700_000_300_000_000,
+        Some(3_000_000),
+    ).unwrap();
+    assert_eq!(db.visible_seq_for("gamma"), 3_000_000,
+        "same-seq replay does not regress watermark");
+
+    // A larger supplied seq advances. (Edge-replay should never happen with
+    // a smaller seq in cluster mode, but fetch_max protects us regardless.)
+    db.upsert_entity_edge_with_id(
+        "edge_seq2", "P", "Q", "knows", 0.5, "gamma",
+        1_700_000_301_000_000,
+        Some(3_500_000),
+    ).unwrap();
+    assert_eq!(db.visible_seq_for("gamma"), 3_500_000);
+}
+
+#[test]
+fn delete_entity_edge_with_id_bumps_visible_seq_even_when_edge_missing() {
+    // Snapshot-lag follower scenario: edge_id unknown locally, but the
+    // commit-log entry must still advance visible_seq for the namespace.
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    db.delete_entity_edge_with_id(
+        "edge_never", "delta", 1_700_000_400_000_000,
+        Some(4_000_000),
+    ).unwrap();
+    assert_eq!(db.visible_seq_for("delta"), 4_000_000);
 }
 
 // ── Issue #8 reproduction: tombstoned memories must not appear in recall ──

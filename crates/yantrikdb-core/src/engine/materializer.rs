@@ -348,41 +348,45 @@ mod tests {
 
     #[test]
     fn compactor_drains_delta_periodically() {
+        // Test scaled to DEFAULT_DELTA_MAX = 256 (v0.6.7+):
+        //   half-cap (compaction threshold) = 128
+        //   backpressure trigger             = 256
+        //
+        // Push 250 entries — past half-cap so the compactor's
+        // `should_compact` returns true, but under the backpressure
+        // ceiling so the burst fits in the delta. Compactor wakes every
+        // COMPACTOR_INTERVAL (1s); we wait up to 4s for at least 200 to
+        // land in cold.
         let db = open_test_db();
-        // Spawn compactor BEFORE pushing so we can observe the thread
-        // wake-up cycle.
         let _guard = spawn_compactor(&db);
 
-        // Push 600 records directly to the DeltaIndex (bypassing record()).
-        // This isolates the compactor's drain path from foreground SQL work.
-        for i in 0..600 {
+        for i in 0..250 {
             let emb: Vec<f32> = (0..64).map(|j| (i + j) as f32 * 0.001).collect();
             let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
             let normalized: Vec<f32> = emb.iter().map(|x| x / norm).collect();
-            let seq = db.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let seq = db.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             db.vec_index.append(format!("rid_{i}"), normalized, seq).unwrap();
         }
         assert!(
-            db.vec_index.delta_len() >= 512,
-            "delta should have crossed compact threshold, got {}",
+            db.vec_index.delta_len() >= 128,
+            "delta should have crossed compact threshold (half of 256), got {}",
             db.vec_index.delta_len()
         );
 
-        // Compactor wakes every COMPACTOR_INTERVAL (1s). Wait up to 4s.
         let mut tries = 0;
-        while db.vec_index.cold_len() < 512 && tries < 40 {
+        while db.vec_index.cold_len() < 200 && tries < 40 {
             std::thread::sleep(Duration::from_millis(100));
             tries += 1;
         }
 
         assert!(
-            db.vec_index.cold_len() >= 512,
-            "compactor should have moved >=512 entries to cold within 4s, got cold={} delta={}",
+            db.vec_index.cold_len() >= 200,
+            "compactor should have moved >=200 entries to cold within 4s, got cold={} delta={}",
             db.vec_index.cold_len(),
             db.vec_index.delta_len()
         );
         assert!(
-            db.vec_index.delta_len() <= 256,
+            db.vec_index.delta_len() < 128,
             "delta should be drained below half-cap, got {}",
             db.vec_index.delta_len()
         );
