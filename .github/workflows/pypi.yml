@@ -46,6 +46,21 @@ jobs:
 
       - name: Build wheels
         uses: PyO3/maturin-action@v1
+        env:
+          # **v0.7.3 hotfix.** ring 0.17.x's pre-generated ARM64
+          # assembly files (ghash-neon-armv8, vpaes-armv8, p256-armv8,
+          # sha256-armv8, sha512-armv8) `#error` out unless the
+          # assembler has __ARM_ARCH defined, and cc-rs's manylinux
+          # cross-compile toolchain doesn't set it by default. These
+          # cc-rs scoped env vars are no-ops on the x86_64/macOS/
+          # Windows matrix entries (only consulted for the
+          # aarch64-unknown-linux-gnu target build) and unblock the
+          # cross-compile cleanly without changing the dependency
+          # graph or pinning ring. Diagnosed by yantrikdb-server
+          # msg 802c8213 after v0.7.0/0.7.1/0.7.2 all hit the same
+          # CI failure.
+          CFLAGS_aarch64_unknown_linux_gnu: "-D__ARM_ARCH=8 -march=armv8-a"
+          CC_aarch64_unknown_linux_gnu: "aarch64-linux-gnu-gcc"
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
