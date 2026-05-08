@@ -4226,3 +4226,201 @@ fn test_encrypt_embedding_pub_with_encryption_returns_ciphertext() {
         "encrypted blob should be longer than plaintext (nonce + tag overhead)"
     );
 }
+
+
+// ── Issue #9 cluster replication API: record_with_rid ──
+
+#[test]
+fn record_with_rid_basic_succeeds() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let emb = vec_seed(1.0, 64);
+    db.record_with_rid(
+        "rid_test_1",
+        "the quick brown fox",
+        "episodic",
+        0.5, 0.0, 604800.0,
+        &empty_meta(),
+        &emb,
+        "default",
+        0.8, "general", "user", None,
+        1_700_000_000_000_000,
+        &[],
+        "test-model.v1",
+    ).expect("record_with_rid succeeds");
+
+    let row = db.get("rid_test_1").unwrap().unwrap();
+    assert_eq!(row.rid, "rid_test_1");
+    assert_eq!(row.text, "the quick brown fox");
+    assert_eq!(row.memory_type, "episodic");
+}
+
+#[test]
+fn record_with_rid_persists_v25_columns() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let emb = vec_seed(2.0, 64);
+    db.record_with_rid(
+        "rid_v25",
+        "test v25 columns",
+        "semantic",
+        0.5, 0.0, 604800.0,
+        &empty_meta(),
+        &emb,
+        "default",
+        0.8, "general", "user", None,
+        1_700_000_000_000_000,
+        &[],
+        "bge-base-en-v1.5",
+    ).unwrap();
+
+    let conn = db.read_conn();
+    let (cum, model): (i64, Option<String>) = conn.query_row(
+        "SELECT created_at_unix_micros, embedding_model FROM memories WHERE rid = ?1",
+        rusqlite::params!["rid_v25"],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(cum, 1_700_000_000_000_000);
+    assert_eq!(model.as_deref(), Some("bge-base-en-v1.5"));
+}
+
+#[test]
+fn record_with_rid_is_idempotent_on_replay() {
+    // Determinism contract: a second call with identical args yields
+    // identical engine state (no doubles in entities, no doubles in
+    // memory_entities, single oplog entry, single memories row).
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let emb = vec_seed(3.0, 64);
+    let entities = ["Alice", "Acme"];
+    let entity_refs: Vec<&str> = entities.iter().copied().collect();
+    for _ in 0..3 {
+        db.record_with_rid(
+            "rid_idem",
+            "Alice works at Acme",
+            "episodic",
+            0.5, 0.0, 604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8, "general", "user", None,
+            1_700_000_001_000_000,
+            &entity_refs,
+            "test-model.v1",
+        ).expect("idempotent re-apply");
+    }
+
+    let conn = db.read_conn();
+    let memory_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memories WHERE rid = ?1",
+        rusqlite::params!["rid_idem"],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(memory_count, 1, "memories has exactly one row");
+
+    // memory_entities should have one row per (memory, entity) pair.
+    let me_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM memory_entities WHERE memory_rid = ?1",
+        rusqlite::params!["rid_idem"],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(me_count, 2, "memory_entities has 2 rows (Alice, Acme), no doubles");
+
+    // entities row mention_count should equal 1 (only first call counts as a new mention).
+    let mc: i64 = conn.query_row(
+        "SELECT mention_count FROM entities WHERE name = 'Alice'",
+        [],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(mc, 1, "mention_count not bumped on replay");
+
+    // Oplog should have exactly one record_with_rid entry for this rid.
+    let op_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM oplog WHERE op_type = 'record_with_rid' AND target_rid = ?1",
+        rusqlite::params!["rid_idem"],
+        |row| row.get(0),
+    ).unwrap();
+    assert_eq!(op_count, 1, "oplog has exactly one record_with_rid entry");
+}
+
+#[test]
+fn record_with_rid_rejects_dimension_mismatch() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let bad = vec![0.0f32; 32]; // wrong dim
+    let err = db.record_with_rid(
+        "rid_bad_dim",
+        "x",
+        "episodic",
+        0.5, 0.0, 604800.0,
+        &empty_meta(),
+        &bad,
+        "default",
+        0.8, "general", "user", None,
+        1_700_000_002_000_000,
+        &[],
+        "test-model.v1",
+    ).expect_err("must reject");
+    match err {
+        crate::error::YantrikDbError::EmbeddingDimensionMismatch { expected, got } => {
+            assert_eq!(expected, 64);
+            assert_eq!(got, 32);
+        }
+        other => panic!("expected EmbeddingDimensionMismatch, got {other:?}"),
+    }
+    // The DB must NOT have inserted anything despite the failed call.
+    assert!(db.get("rid_bad_dim").unwrap().is_none());
+}
+
+#[test]
+fn record_with_rid_uses_caller_supplied_timestamp() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let emb = vec_seed(4.0, 64);
+    let caller_ts: i64 = 1_700_000_005_000_000;
+    db.record_with_rid(
+        "rid_ts",
+        "test ts",
+        "episodic",
+        0.5, 0.0, 604800.0,
+        &empty_meta(),
+        &emb,
+        "default",
+        0.8, "general", "user", None,
+        caller_ts,
+        &[],
+        "test-model.v1",
+    ).unwrap();
+    // Verify created_at REAL and created_at_unix_micros INTEGER both
+    // reflect the caller-supplied timestamp (no engine-side now() call).
+    let conn = db.read_conn();
+    let (cat_real, cat_micros): (f64, i64) = conn.query_row(
+        "SELECT created_at, created_at_unix_micros FROM memories WHERE rid = ?1",
+        rusqlite::params!["rid_ts"],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap();
+    assert_eq!(cat_micros, caller_ts);
+    let expected_real = (caller_ts as f64) / 1_000_000.0;
+    assert!((cat_real - expected_real).abs() < 1e-6,
+        "created_at REAL should reflect caller timestamp: got {} expected {}", cat_real, expected_real);
+}
+
+#[test]
+fn record_with_rid_makes_recall_find_it() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let emb = vec_seed(7.0, 64);
+    db.record_with_rid(
+        "rid_recall",
+        "memory inserted via record_with_rid",
+        "episodic",
+        0.7, 0.0, 604800.0,
+        &empty_meta(),
+        &emb,
+        "default",
+        0.8, "general", "user", None,
+        1_700_000_006_000_000,
+        &[],
+        "test-model.v1",
+    ).unwrap();
+
+    let results = db.recall(&emb, 5, None, None, false, false, None, true, None, None, None).unwrap();
+    assert!(
+        results.iter().any(|r| r.rid == "rid_recall"),
+        "rid_recall should appear in recall results"
+    );
+}

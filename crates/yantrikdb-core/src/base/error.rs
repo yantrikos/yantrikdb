@@ -52,6 +52,19 @@ pub enum YantrikDbError {
         retry_after_ms: u64,
     },
 
+    /// **Issue #9 — cluster-replication determinism contract.**
+    ///
+    /// `record_with_rid` (and siblings) require the caller's embedding to
+    /// match the engine's configured `embedding_dim`. A dim mismatch is a
+    /// fatal contract violation — usually a sign that the leader and
+    /// follower are running with different embedder model versions, which
+    /// would silently corrupt HNSW state if applied. Reject deterministically.
+    #[error("embedding dimension mismatch: expected {expected}, got {got}")]
+    EmbeddingDimensionMismatch {
+        expected: usize,
+        got: usize,
+    },
+
     #[error("invalid input: {0}")]
     InvalidInput(String),
 }

@@ -425,4 +425,227 @@ impl YantrikDB {
 
         Ok(rids)
     }
+
+    /// **Issue #9 — deterministic mutation primitive for cluster replication.**
+    ///
+    /// Sibling of `record()` that takes a caller-assigned rid + caller-supplied
+    /// embedding + materialized extracted_entities + caller-supplied
+    /// timestamp + embedding_model. Engine does NOT call its own embedder
+    /// or NER. Used by yantrikdb-server's cluster-mode applier so
+    /// replicated writes are byte-deterministic across leader + followers.
+    ///
+    /// # Contract
+    ///
+    /// - **Idempotent on rid**: a second call with the same rid + identical
+    ///   other fields succeeds without error and produces identical engine
+    ///   state (INSERT OR IGNORE on memories, INSERT OR IGNORE on entities,
+    ///   INSERT OR IGNORE on memory_entities, DeltaIndex.append idempotent
+    ///   on rid+seq).
+    /// - **Caller supplies the embedding.** Engine validates dim and rejects
+    ///   `Error::EmbeddingDimensionMismatch` on mismatch — diverged dim is
+    ///   undetectable until a query notices, so we fail loudly.
+    /// - **Caller supplies created_at_unix_micros.** Materialized into both
+    ///   `created_at REAL` (for back-compat scoring) and the v25
+    ///   `created_at_unix_micros INTEGER` column. No engine-side `now()`
+    ///   call on this path — leader stamps once, followers replay verbatim.
+    /// - **Caller supplies extracted_entities.** Engine writes entity_edges
+    ///   accordingly. Empty slice = no edges; engine does NOT fall back to
+    ///   its own NER. (Heuristic NER lives in `crate::knowledge::graph` and
+    ///   is callable directly by the leader if needed — see issue #9 thread.)
+    /// - **Caller supplies embedding_model.** Stored on the row as the
+    ///   engine-deterministic-surface version pin. RFC 013 may swap the
+    ///   field type later behind the same column name.
+    ///
+    /// # Returns
+    ///
+    /// `Ok(())` on success or idempotent re-apply. The rid is the input,
+    /// not the output — caller already owns it.
+    #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(skip(self, metadata, embedding, extracted_entities), fields(rid, memory_type, namespace, embedding_model))]
+    pub fn record_with_rid(
+        &self,
+        rid: &str,
+        text: &str,
+        memory_type: &str,
+        importance: f64,
+        valence: f64,
+        half_life: f64,
+        metadata: &serde_json::Value,
+        embedding: &[f32],
+        namespace: &str,
+        certainty: f64,
+        domain: &str,
+        source: &str,
+        emotional_state: Option<&str>,
+        created_at_unix_micros: i64,
+        extracted_entities: &[&str],
+        embedding_model: &str,
+    ) -> Result<()> {
+        // Determinism gate: dim must match. Diverged dim = silent corruption.
+        if embedding.len() != self.embedding_dim {
+            return Err(crate::error::YantrikDbError::EmbeddingDimensionMismatch {
+                expected: self.embedding_dim,
+                got: embedding.len(),
+            });
+        }
+
+        // Caller-supplied timestamp — NEVER call now() on this path.
+        let ts_secs = (created_at_unix_micros as f64) / 1_000_000.0;
+        let emb_blob = serialize_f32(embedding);
+        let meta_str = serde_json::to_string(metadata)?;
+
+        // Encryption is engine-side and deterministic given the same DEK +
+        // same plaintext bytes (AES-GCM is non-deterministic across IVs but
+        // the encrypt-once-on-leader model means each follower receives the
+        // already-encrypted bytes via the WAL replication path — Phase 4
+        // wires that. For now we encrypt locally; cluster-mode follower
+        // apply will skip this step in a follow-up patch.)
+        let stored_text = self.encrypt_text(text)?;
+        let stored_meta = self.encrypt_text(&meta_str)?;
+        let stored_emb = self.encrypt_embedding(&emb_blob)?;
+
+        let session_id = self.active_sessions.read().get(namespace).cloned();
+
+        // Single conn block: INSERT OR IGNORE on memories (idempotent on rid),
+        // session links, entity persistence. SAVEPOINT for atomicity within
+        // the call.
+        let was_new_row: bool = {
+            let conn = self.conn();
+            conn.execute_batch("SAVEPOINT record_with_rid")?;
+
+            let result: Result<bool> = (|| {
+                let inserted = conn.execute(
+                    "INSERT OR IGNORE INTO memories \
+                     (rid, type, text, embedding, created_at, updated_at, importance, \
+                      half_life, last_access, valence, metadata, namespace, \
+                      certainty, domain, source, emotional_state, \
+                      created_at_unix_micros, embedding_model) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?5, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                    params![
+                        rid, memory_type, stored_text, stored_emb,
+                        ts_secs,
+                        importance, half_life, valence, stored_meta, namespace,
+                        certainty, domain, source, emotional_state,
+                        created_at_unix_micros, embedding_model,
+                    ],
+                )?;
+                let was_new_row = inserted == 1;
+
+                if was_new_row {
+                    // Auto-link only on first insert. Replay should not
+                    // re-bump session memory_count.
+                    if let Some(session_id) = &session_id {
+                        conn.execute(
+                            "UPDATE memories SET session_id = ?1 WHERE rid = ?2",
+                            params![session_id, rid],
+                        )?;
+                        conn.execute(
+                            "UPDATE sessions SET memory_count = memory_count + 1 WHERE session_id = ?1",
+                            params![session_id],
+                        )?;
+                    }
+                }
+
+                // Entity persistence — idempotent INSERT OR IGNORE.
+                for entity in extracted_entities {
+                    let entity_type = crate::graph::classify_entity_type(entity);
+                    conn.execute(
+                        "INSERT INTO entities (name, entity_type, first_seen, last_seen, mention_count) \
+                         VALUES (?1, ?2, ?3, ?3, 1) \
+                         ON CONFLICT(name) DO UPDATE SET \
+                            last_seen = ?3, \
+                            mention_count = CASE WHEN ?4 THEN mention_count + 1 ELSE mention_count END, \
+                            entity_type = CASE \
+                                WHEN entity_type = 'unknown' AND ?2 != 'unknown' THEN ?2 \
+                                ELSE entity_type END",
+                        params![entity, entity_type, ts_secs, was_new_row],
+                    )?;
+                    conn.execute(
+                        "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) VALUES (?1, ?2)",
+                        params![rid, entity],
+                    )?;
+                }
+
+                Ok(was_new_row)
+            })();
+
+            match result {
+                Ok(b) => { conn.execute_batch("RELEASE record_with_rid")?; b }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK TO record_with_rid");
+                    let _ = conn.execute_batch("RELEASE record_with_rid");
+                    return Err(e);
+                }
+            }
+        };
+        // conn dropped
+
+        // DeltaIndex append. Idempotent on (rid, seq); on second call rid
+        // is the same but seq differs (we always allocate a fresh seq).
+        // The compactor's highest-seq-wins rule then converges state
+        // identically on both call paths — first apply or replay.
+        let seq = self.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.vec_index.append(rid.to_string(), embedding.to_vec(), seq)?;
+
+        // Scoring cache (engine-internal; replay safe since insert is
+        // overwrite-on-rid).
+        if was_new_row {
+            self.cache_insert(rid.to_string(), ScoringRow {
+                created_at: ts_secs,
+                importance,
+                half_life,
+                last_access: ts_secs,
+                access_count: 0,
+                valence,
+                consolidation_status: "active".to_string(),
+                memory_type: memory_type.to_string(),
+                namespace: namespace.to_string(),
+                certainty,
+                domain: domain.to_string(),
+                source: source.to_string(),
+                emotional_state: emotional_state.map(|s| s.to_string()),
+            });
+        }
+
+        // Graph index in-memory updates — idempotent (HashMap-backed).
+        if !extracted_entities.is_empty() {
+            let mut gi = self.graph_index.write();
+            for entity in extracted_entities {
+                let entity_type = crate::graph::classify_entity_type(entity);
+                gi.add_entity(entity, entity_type);
+                gi.link_memory(rid, entity);
+            }
+        }
+
+        // Op log entry — applied=1 since leader has materialized inline.
+        // Followers will receive a separate replicated entry via the
+        // cluster sync path; this path never logs applied=0.
+        let emb_hash = embedding_hash(embedding);
+        if was_new_row {
+            self.log_op(
+                "record_with_rid",
+                Some(rid),
+                &serde_json::json!({
+                    "rid": rid,
+                    "type": memory_type,
+                    "text": text,
+                    "importance": importance,
+                    "valence": valence,
+                    "half_life": half_life,
+                    "metadata": metadata,
+                    "created_at_unix_micros": created_at_unix_micros,
+                    "namespace": namespace,
+                    "certainty": certainty,
+                    "domain": domain,
+                    "source": source,
+                    "emotional_state": emotional_state,
+                    "embedding_model": embedding_model,
+                    "extracted_entities": extracted_entities,
+                }),
+                Some(&emb_hash),
+            )?;
+        }
+
+        Ok(())
+    }
 }
