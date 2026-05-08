@@ -143,7 +143,8 @@ pub fn recommended_worker_count() -> usize {
 /// Background thread that periodically calls `db.vec_index.compact()` to
 /// drain the delta tier into the cold tier, bounding read latency growth.
 ///
-/// Polls every `COMPACTOR_INTERVAL` (1s by default). On each tick:
+/// Polls every `COMPACTOR_INTERVAL` (250ms by default in v0.6.7+,
+/// was 1s in v0.6.6). On each tick:
 ///   1. Check `should_compact()` — fires when delta is past half-capacity
 ///      OR the oldest dirty entry has aged past `max_dirty_age` (default
 ///      60s; epic 5 task 13). The age trigger closes the gap where a
@@ -170,7 +171,27 @@ impl Drop for CompactorGuard {
 }
 
 /// How often the compactor wakes to check `should_compact()`.
-const COMPACTOR_INTERVAL: Duration = Duration::from_secs(1);
+///
+/// **v0.6.7+ default 250ms (was 1s in v0.6.6).** Tuned in response to
+/// the 2026-05-08 32-writer empirical run (saga task 18) showing read
+/// p99 regression under sustained writer pressure: `compact()`'s
+/// per-cycle `(*cold.load_full()).clone()` dominates cold-grow cost,
+/// and at 1s intervals the compactor cycle (~5-20ms at cold=7600
+/// entries) couldn't keep pace with delta fill rate, so writes
+/// back-pressured and reads stalled behind delta.read() during seal.
+///
+/// At 250ms the compactor wakes 4× more often, drains smaller batches,
+/// produces shorter pauses. Total clone work per second is unchanged
+/// (same number of entries cycle through delta-then-cold), but the
+/// p99 tail spreads thinner.
+///
+/// CPU cost trade-off: under sustained writer pressure the compactor
+/// is now near-constantly busy. That's intentional — it is a P3
+/// background worker (see CONCURRENCY.md Rule 3) and giving it a
+/// CPU is what the priority hierarchy says to do when the engine is
+/// under load. Idle deployments still pay near-zero CPU because
+/// `should_compact()` short-circuits when delta is empty.
+const COMPACTOR_INTERVAL: Duration = Duration::from_millis(250);
 
 pub fn spawn_compactor(db: &Arc<YantrikDB>) -> CompactorGuard {
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -359,7 +380,7 @@ mod tests {
         // Push 250 entries — past half-cap so the compactor's
         // `should_compact` returns true, but under the backpressure
         // ceiling so the burst fits in the delta. Compactor wakes every
-        // COMPACTOR_INTERVAL (1s); we wait up to 4s for at least 200 to
+        // COMPACTOR_INTERVAL (250ms in v0.6.7+); we wait up to 4s for at least 200 to
         // land in cold.
         let db = open_test_db();
         let _guard = spawn_compactor(&db);
