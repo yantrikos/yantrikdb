@@ -4809,11 +4809,11 @@ fn wait_for_visible_seq_times_out_on_unreachable() {
     let err = db.wait_for_visible_seq("never", 9999, std::time::Duration::from_millis(50))
         .expect_err("must timeout");
     match err {
-        crate::error::YantrikDbError::RyWaitTimeout { namespace, min_seq, visible, timeout_ms } => {
+        crate::error::YantrikDbError::RyWaitTimeout { namespace, requested_seq, observed_seq, waited_ms } => {
             assert_eq!(namespace, "never");
-            assert_eq!(min_seq, 9999);
-            assert_eq!(visible, 0);
-            assert_eq!(timeout_ms, 50);
+            assert_eq!(requested_seq, 9999);
+            assert_eq!(observed_seq, 0);
+            assert_eq!(waited_ms, 50);
         }
         other => panic!("expected RyWaitTimeout, got {other:?}"),
     }

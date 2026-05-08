@@ -316,9 +316,9 @@ impl YantrikDB {
             if now >= deadline {
                 return Err(crate::error::YantrikDbError::RyWaitTimeout {
                     namespace: namespace.to_string(),
-                    min_seq,
-                    visible: current,
-                    timeout_ms: timeout.as_millis() as u64,
+                    requested_seq: min_seq,
+                    observed_seq: current,
+                    waited_ms: timeout.as_millis() as u64,
                 });
             }
             let remaining = deadline - now;
@@ -330,9 +330,9 @@ impl YantrikDB {
                 }
                 return Err(crate::error::YantrikDbError::RyWaitTimeout {
                     namespace: namespace.to_string(),
-                    min_seq,
-                    visible: final_current,
-                    timeout_ms: timeout.as_millis() as u64,
+                    requested_seq: min_seq,
+                    observed_seq: final_current,
+                    waited_ms: timeout.as_millis() as u64,
                 });
             }
             // Spurious wakeup or notify_all — re-check the watermark.

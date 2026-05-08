@@ -57,12 +57,18 @@ pub enum YantrikDbError {
     /// has not yet materialized (legitimate timeout — caller should retry or
     /// fall back to non-strict recall) or the seq is from another namespace
     /// / a different engine instance (caller error — retry will not help).
-    #[error("read-your-writes timeout: visible_seq[{namespace}] = {visible}, requested >= {min_seq} (timeout {timeout_ms}ms)")]
+    ///
+    /// Field naming aligns with the yantrikdb-server cluster RYW design
+    /// (msg 0c2bea4a, 2026-05-07): `requested_seq` is what the caller asked
+    /// to wait for (typically the openraft commit-log index of their write);
+    /// `observed_seq` is what visible_seq[namespace] held when we gave up;
+    /// `waited_ms` is the configured timeout we waited.
+    #[error("read-your-writes timeout: visible_seq[{namespace}] = {observed_seq}, requested >= {requested_seq} (waited {waited_ms}ms)")]
     RyWaitTimeout {
         namespace: String,
-        min_seq: u64,
-        visible: u64,
-        timeout_ms: u64,
+        requested_seq: u64,
+        observed_seq: u64,
+        waited_ms: u64,
     },
 
     /// **Issue #9 — cluster-replication determinism contract.**
