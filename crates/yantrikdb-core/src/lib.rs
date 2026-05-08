@@ -3,6 +3,7 @@ mod base;
 pub mod engine;
 mod cognition;
 mod distributed;
+pub mod embedder;
 mod knowledge;
 mod vector;
 pub(crate) mod time;

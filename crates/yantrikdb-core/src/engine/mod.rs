@@ -215,12 +215,16 @@ pub(crate) struct TextMetadataRow {
 impl YantrikDB {
     /// Create a new YantrikDB instance with auto-generated actor_id.
     pub fn new(db_path: &str, embedding_dim: usize) -> Result<Self> {
-        Self::open(db_path, embedding_dim, None, None)
+        let mut db = Self::open(db_path, embedding_dim, None, None)?;
+        Self::auto_attach_bundled_embedder(&mut db);
+        Ok(db)
     }
 
     /// Create a new YantrikDB instance with an explicit actor_id (for sync tests).
     pub fn new_with_actor(db_path: &str, embedding_dim: usize, actor_id: &str) -> Result<Self> {
-        Self::open(db_path, embedding_dim, Some(actor_id.to_string()), None)
+        let mut db = Self::open(db_path, embedding_dim, Some(actor_id.to_string()), None)?;
+        Self::auto_attach_bundled_embedder(&mut db);
+        Ok(db)
     }
 
     /// Create a new encrypted YantrikDB instance.
@@ -229,7 +233,28 @@ impl YantrikDB {
     /// All text, metadata, and embedding fields are encrypted at rest using AES-256-GCM.
     /// In-memory indexes operate on plaintext for full query performance.
     pub fn new_encrypted(db_path: &str, embedding_dim: usize, master_key: &[u8; 32]) -> Result<Self> {
-        Self::open(db_path, embedding_dim, None, Some(master_key))
+        let mut db = Self::open(db_path, embedding_dim, None, Some(master_key))?;
+        Self::auto_attach_bundled_embedder(&mut db);
+        Ok(db)
+    }
+
+    /// **Saga task 20.** When the `bundled-embedder` feature is on (default),
+    /// attach the engine's own `BundledEmbedder` so `record_text()` and
+    /// `recall_text()` work out of the box. Compiles to a no-op under
+    /// `--no-default-features` — slim deployments must call `set_embedder()`
+    /// explicitly. The auto-attach is a no-op when the engine's
+    /// `embedding_dim` does not match the bundled embedder's dim, so a
+    /// caller running with a non-default dim sees `NoEmbedder` until they
+    /// wire their own (avoids silent dim-mismatch corruption).
+    #[allow(unused_variables)]
+    fn auto_attach_bundled_embedder(db: &mut Self) {
+        #[cfg(feature = "bundled-embedder")]
+        {
+            use crate::embedder::BundledEmbedder;
+            if db.embedding_dim() == BundledEmbedder::new().dim() {
+                db.set_embedder(Box::new(BundledEmbedder::new()));
+            }
+        }
     }
 
     fn open(

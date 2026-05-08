@@ -33,7 +33,13 @@ dashmap = "6"
 js-sys = "0.3"
 
 [features]
-default = []
+# **bundled-embedder** is on by default — the engine ships an Embedder
+# impl so `record_text()` / `recall_text()` Just Work without an external
+# embedder install or first-run download. Slim deployments compile with
+# `--no-default-features` and provide their own embedder via
+# `db.set_embedder()`. See saga task 20 + memory rid 019e0686.
+default = ["bundled-embedder"]
+bundled-embedder = []
 profiling = []
 
 [dev-dependencies]

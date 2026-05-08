@@ -4985,3 +4985,79 @@ fn recall_with_seq_times_out_on_unreachable() {
     ).expect_err("must timeout");
     assert!(matches!(err, crate::error::YantrikDbError::RyWaitTimeout { .. }));
 }
+
+// ── Saga task 20: bundled-embedder auto-attach ──
+//
+// These tests pin the contract that, on default builds (feature
+// `bundled-embedder` is on), `record_text()` and `recall_text()` work
+// out of the box — no `set_embedder()` call required. The
+// architectural decision (memory rid 019e0686) was that the engine
+// ships a default embedder so the user-facing API contract isn't
+// "engine plus required side-installs."
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn bundled_embedder_auto_attaches_on_default_dim() {
+    // dim=384 matches BUNDLED_EMBEDDER_DIM, so the auto-attach fires.
+    let db = YantrikDB::new(":memory:", 384).unwrap();
+    assert!(db.has_embedder(),
+        "default-build YantrikDB::new with dim=384 must auto-attach BundledEmbedder");
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn bundled_embedder_does_not_attach_on_mismatched_dim() {
+    // dim=64 != BUNDLED_EMBEDDER_DIM (384). Auto-attach is silently
+    // skipped — caller must set their own embedder. The skip avoids
+    // silent dim-mismatch corruption when a caller is intentionally
+    // running with a non-default dim (e.g. for a custom model).
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    assert!(!db.has_embedder(),
+        "dim mismatch should NOT auto-attach (avoids silent corruption)");
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn bundled_embedder_record_text_round_trip() {
+    // The integration shape that actually matters: pip install yantrikdb;
+    // YantrikDB::new(...); record_text(...); recall_text(...). All works
+    // without configuration on default builds.
+    let db = YantrikDB::new(":memory:", 384).unwrap();
+    let _rid = db.record_text(
+        "Alice met Acme yesterday",
+        "episodic", 0.5, 0.0, 604800.0, &empty_meta(),
+        "default", 0.8, "general", "user", None,
+    ).expect("record_text should work without explicit set_embedder");
+
+    let results = db.recall_text("Alice", 5).expect("recall_text should work");
+    assert!(!results.is_empty(), "recall finds the recorded memory");
+    // The hash-trick baseline matches "Alice" lexically — top-1 should
+    // be the record we just made.
+    assert!(results[0].text.contains("Alice"),
+        "lexical baseline finds the recorded memory; got: {:?}", results[0].text);
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn explicit_set_embedder_overrides_bundled() {
+    // Slim-build path or custom-model path: set_embedder() after new()
+    // takes precedence. The bundled embedder gets dropped; the user's
+    // takes over.
+    struct DummyEmbedder;
+    impl crate::types::Embedder for DummyEmbedder {
+        fn embed(&self, _t: &str) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
+            // Distinct sentinel value so we can detect this implementation was used.
+            let mut v = vec![0.0; 384];
+            v[0] = 0.7777;
+            Ok(v)
+        }
+        fn dim(&self) -> usize { 384 }
+    }
+
+    let mut db = YantrikDB::new(":memory:", 384).unwrap();
+    assert!(db.has_embedder(), "starts with bundled");
+    db.set_embedder(Box::new(DummyEmbedder));
+    let v = db.embed("anything").unwrap();
+    assert!((v[0] - 0.7777).abs() < 1e-6,
+        "DummyEmbedder's sentinel must be visible — set_embedder overrode bundled");
+}
