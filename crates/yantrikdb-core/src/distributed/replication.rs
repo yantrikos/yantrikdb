@@ -287,7 +287,7 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             let rid = op.payload["rid"].as_str().unwrap_or_default();
             if !rid.is_empty() {
                 db.cache_remove(rid);
-                let _seq = db.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _seq = db.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 db.vec_index.tombstone(rid, _seq);
                 db.graph_index.write().unlink_memory(rid);
             }
@@ -330,7 +330,7 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             if strategy == "keep_a" || strategy == "keep_b" {
                 if let Some(loser) = op.payload["loser_rid"].as_str() {
                     db.cache_remove(loser);
-                    let _seq = db.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    let _seq = db.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                     db.vec_index.tombstone(loser, _seq);
                 }
             }
@@ -359,7 +359,7 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             let original_rid = op.payload["original_rid"].as_str().unwrap_or_default();
             if !original_rid.is_empty() {
                 db.cache_remove(original_rid);
-                let _seq = db.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let _seq = db.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 db.vec_index.tombstone(original_rid, _seq);
             }
         }

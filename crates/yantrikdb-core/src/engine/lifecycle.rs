@@ -303,7 +303,7 @@ impl YantrikDB {
         // before SQL has applied. Cluster followers may have the rid in
         // their delta from a recent record_with_rid that has not yet
         // compacted into cold; the tombstone marker covers that window.
-        let seq = self.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let seq = self.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         self.vec_index.tombstone(rid, seq);
 
         // Engine-internal index updates only when the row was newly tombstoned

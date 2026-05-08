@@ -125,6 +125,19 @@ pub struct YantrikDB {
     /// Used by Phase 6 RYW (recall_with_seq); also feeds DeltaIndex's
     /// per-entry seq tag for compaction ordering.
     pub(crate) vec_seq: std::sync::atomic::AtomicU64,
+    /// **Phase 6 RYW**: per-namespace high-water mark of applied seqs.
+    /// Updated by record/record_with_rid (and siblings) after the write
+    /// has materialized into the in-memory delta. `recall_with_seq` waits
+    /// until `visible_seq[ns] >= min_seq` before scanning. Strict
+    /// read-your-writes is opt-in; default `recall()` keeps current
+    /// "delta is always visible" semantics.
+    pub(crate) visible_seq: parking_lot::Mutex<std::collections::HashMap<String, u64>>,
+    /// **Phase 6 RYW**: Condvar paired with `visible_seq` for wake-on-update
+    /// semantics. `record/record_with_rid` notify_all after bumping
+    /// `visible_seq[ns]`; `recall_with_seq` waits on this condvar with a
+    /// timeout. parking_lot Condvar is used here for its non-spurious-wakeup
+    /// guarantee.
+    pub(crate) visible_seq_cv: parking_lot::Condvar,
     pub(crate) graph_index: RwLock<GraphIndex>,
     pub(crate) enc: Option<EncryptionProvider>,
     /// Optional text-to-embedding converter. When set, enables `record_text()`
@@ -441,6 +454,8 @@ impl YantrikDB {
                 crate::vector::delta_index::DeltaIndex::from_cold(vec_index, delta_max)
             },
             vec_seq: std::sync::atomic::AtomicU64::new(0),
+            visible_seq: parking_lot::Mutex::new(std::collections::HashMap::new()),
+            visible_seq_cv: parking_lot::Condvar::new(),
             graph_index: RwLock::new(graph_index),
             enc,
             embedder: None,

@@ -65,8 +65,9 @@ impl YantrikDB {
         // conn dropped here
 
         // Insert into vector index (lock ordering: conn already dropped)
-        let seq = self.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let seq = self.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         self.vec_index.append(rid.clone(), embedding.to_vec(), seq)?;
+        self.bump_visible_seq(namespace, seq);
 
         // Insert into scoring cache (conn and vec_index dropped)
         self.cache_insert(rid.clone(), ScoringRow {
@@ -386,8 +387,9 @@ impl YantrikDB {
 
         // Append to vec_index (DeltaIndex) after SQL commit
         for (rid, input) in rids.iter().zip(inputs.iter()) {
-            let seq = self.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let seq = self.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
             self.vec_index.append(rid.clone(), input.embedding.clone(), seq)?;
+            self.bump_visible_seq(&input.namespace, seq);
         }
         // vec_index dropped, now scoring_cache
         {
@@ -584,8 +586,9 @@ impl YantrikDB {
         // is the same but seq differs (we always allocate a fresh seq).
         // The compactor's highest-seq-wins rule then converges state
         // identically on both call paths — first apply or replay.
-        let seq = self.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let seq = self.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
         self.vec_index.append(rid.to_string(), embedding.to_vec(), seq)?;
+        self.bump_visible_seq(namespace, seq);
 
         // Scoring cache (engine-internal; replay safe since insert is
         // overwrite-on-rid).

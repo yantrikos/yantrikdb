@@ -4762,3 +4762,110 @@ fn issue_8_tombstoned_persists_across_engine_reopen() {
             "tombstoned memory must stay hidden across engine reopen");
     }
 }
+
+// ── Phase 6 RYW — visible_seq + wait_for_visible_seq + recall_with_seq ──
+
+#[test]
+fn visible_seq_starts_at_zero_for_new_namespace() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    assert_eq!(db.visible_seq_for("never_used"), 0);
+}
+
+#[test]
+fn record_bumps_visible_seq_for_namespace() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let before = db.visible_seq_for("default");
+    let _ = db.record("test", "episodic", 0.5, 0.0, 604800.0,
+        &empty_meta(), &vec_seed(1.0, 64), "default", 0.8, "general", "user", None).unwrap();
+    let after = db.visible_seq_for("default");
+    assert!(after > before, "record() must bump visible_seq[default]");
+}
+
+#[test]
+fn visible_seq_isolated_per_namespace() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    db.record("ns_a memory", "episodic", 0.5, 0.0, 604800.0,
+        &empty_meta(), &vec_seed(1.0, 64), "ns_a", 0.8, "general", "user", None).unwrap();
+    let seq_a = db.visible_seq_for("ns_a");
+    let seq_b = db.visible_seq_for("ns_b");
+    assert!(seq_a > 0);
+    assert_eq!(seq_b, 0, "ns_b unaffected by writes to ns_a");
+}
+
+#[test]
+fn wait_for_visible_seq_succeeds_when_already_reached() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    db.record("set watermark", "episodic", 0.5, 0.0, 604800.0,
+        &empty_meta(), &vec_seed(1.0, 64), "default", 0.8, "general", "user", None).unwrap();
+    let current = db.visible_seq_for("default");
+    // Wait for a seq we've already passed — should return immediately.
+    db.wait_for_visible_seq("default", current, std::time::Duration::from_millis(100))
+        .expect("already-reached watermark");
+}
+
+#[test]
+fn wait_for_visible_seq_times_out_on_unreachable() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let err = db.wait_for_visible_seq("never", 9999, std::time::Duration::from_millis(50))
+        .expect_err("must timeout");
+    match err {
+        crate::error::YantrikDbError::RyWaitTimeout { namespace, min_seq, visible, timeout_ms } => {
+            assert_eq!(namespace, "never");
+            assert_eq!(min_seq, 9999);
+            assert_eq!(visible, 0);
+            assert_eq!(timeout_ms, 50);
+        }
+        other => panic!("expected RyWaitTimeout, got {other:?}"),
+    }
+}
+
+#[test]
+fn wait_for_visible_seq_wakes_on_concurrent_write() {
+    use std::sync::Arc;
+    use std::thread;
+    use std::time::Duration;
+
+    let db = Arc::new(YantrikDB::new(":memory:", 64).unwrap());
+    // Start a waiter that wants seq=1.
+    let db_w = Arc::clone(&db);
+    let waiter = thread::spawn(move || {
+        db_w.wait_for_visible_seq("default", 1, Duration::from_secs(2))
+    });
+
+    // Spawn a writer after a brief delay.
+    let db_writer = Arc::clone(&db);
+    let writer = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(50));
+        db_writer.record("wake the waiter", "episodic", 0.5, 0.0, 604800.0,
+            &empty_meta(), &vec_seed(1.0, 64), "default", 0.8, "general", "user", None).unwrap();
+    });
+
+    writer.join().unwrap();
+    let result = waiter.join().unwrap();
+    assert!(result.is_ok(), "waiter should be notified by the write");
+}
+
+#[test]
+fn recall_with_seq_returns_results_when_seq_reached() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let emb = vec_seed(1.0, 64);
+    let _ = db.record("ryw test", "episodic", 0.5, 0.0, 604800.0,
+        &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
+    let current = db.visible_seq_for("default");
+    let r = db.recall_with_seq(
+        &emb, 5, None, None, false, false, None, true, Some("default"), None, None,
+        current, std::time::Duration::from_millis(100),
+    ).unwrap();
+    assert!(!r.is_empty(), "recall_with_seq returns results once seq reached");
+}
+
+#[test]
+fn recall_with_seq_times_out_on_unreachable() {
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let err = db.recall_with_seq(
+        &vec_seed(1.0, 64), 5, None, None, false, false, None, true,
+        Some("default"), None, None,
+        9999, std::time::Duration::from_millis(50),
+    ).expect_err("must timeout");
+    assert!(matches!(err, crate::error::YantrikDbError::RyWaitTimeout { .. }));
+}

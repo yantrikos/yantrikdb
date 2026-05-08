@@ -1525,6 +1525,60 @@ impl YantrikDB {
         Ok(scored)
     }
 
+    /// **Phase 6 RYW** — `recall()` with strict read-your-writes guard.
+    ///
+    /// Waits up to ``timeout`` for ``visible_seq[namespace] >= min_seq``,
+    /// then runs the standard ``recall()`` pipeline. If the watermark is
+    /// reached, search proceeds normally; if the timeout expires before
+    /// the watermark, returns ``Error::RyWaitTimeout`` rather than
+    /// returning a possibly-incomplete result set.
+    ///
+    /// **When to use**: caller has just performed a write (record /
+    /// record_with_rid) and wants to be SURE the next recall sees that
+    /// write. The default ``recall()`` is "delta is always visible" via
+    /// the search merge, but during a compaction-in-progress window or
+    /// cluster follower-apply lag, that guarantee can have gaps. ``recall_with_seq``
+    /// closes those gaps for callers that explicitly opt in.
+    ///
+    /// ``min_seq`` should come from the seq returned by the prior write
+    /// (Phase 6 will expose seq on record() return — coming in v0.7.0).
+    /// ``namespace`` MUST be the namespace the write went into; passing
+    /// a different namespace will time out (visible_seq is per-namespace).
+    #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(skip(self, query_embedding), fields(top_k, min_seq, namespace))]
+    pub fn recall_with_seq(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        time_window: Option<(f64, f64)>,
+        memory_type: Option<&str>,
+        include_consolidated: bool,
+        expand_entities: bool,
+        query_text: Option<&str>,
+        skip_reinforce: bool,
+        namespace: Option<&str>,
+        domain: Option<&str>,
+        source: Option<&str>,
+        min_seq: u64,
+        timeout: std::time::Duration,
+    ) -> Result<Vec<RecallResult>> {
+        let ns = namespace.unwrap_or("default");
+        self.wait_for_visible_seq(ns, min_seq, timeout)?;
+        self.recall(
+            query_embedding,
+            top_k,
+            time_window,
+            memory_type,
+            include_consolidated,
+            expand_entities,
+            query_text,
+            skip_reinforce,
+            namespace,
+            domain,
+            source,
+        )
+    }
+
     /// Execute a recall query built with the `RecallQuery` builder.
     ///
     /// ```rust,ignore

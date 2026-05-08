@@ -52,6 +52,19 @@ pub enum YantrikDbError {
         retry_after_ms: u64,
     },
 
+    /// **Phase 6 RYW**: caller-requested visible_seq was not reached within
+    /// the timeout window. Either the write that should have bumped the seq
+    /// has not yet materialized (legitimate timeout — caller should retry or
+    /// fall back to non-strict recall) or the seq is from another namespace
+    /// / a different engine instance (caller error — retry will not help).
+    #[error("read-your-writes timeout: visible_seq[{namespace}] = {visible}, requested >= {min_seq} (timeout {timeout_ms}ms)")]
+    RyWaitTimeout {
+        namespace: String,
+        min_seq: u64,
+        visible: u64,
+        timeout_ms: u64,
+    },
+
     /// **Issue #9 — cluster-replication determinism contract.**
     ///
     /// `record_with_rid` (and siblings) require the caller's embedding to

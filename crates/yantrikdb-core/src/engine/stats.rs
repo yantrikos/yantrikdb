@@ -264,6 +264,80 @@ impl YantrikDB {
 
         Ok(applied)
     }
+
+    /// **Phase 6 RYW** — bump the visible_seq high-water mark for a
+    /// namespace. Called by record/record_with_rid and siblings after the
+    /// write has been materialized into the in-memory delta. Idempotent:
+    /// only advances the watermark; same-or-lower seqs are no-ops.
+    ///
+    /// Wakes any threads in ``recall_with_seq`` waiting on this namespace
+    /// via the paired condvar.
+    pub(crate) fn bump_visible_seq(&self, namespace: &str, seq: u64) {
+        {
+            let mut map = self.visible_seq.lock();
+            let entry = map.entry(namespace.to_string()).or_insert(0);
+            if seq > *entry {
+                *entry = seq;
+            }
+        }
+        self.visible_seq_cv.notify_all();
+    }
+
+    /// **Phase 6 RYW** — current visible_seq high-water mark for a namespace.
+    /// Returns 0 for namespaces that have never been bumped.
+    pub fn visible_seq_for(&self, namespace: &str) -> u64 {
+        self.visible_seq.lock().get(namespace).copied().unwrap_or(0)
+    }
+
+    /// **Phase 6 RYW** — wait until visible_seq[namespace] >= min_seq or
+    /// the timeout expires. Returns ``Ok(())`` on watermark reached;
+    /// ``Err(Error::RyWaitTimeout)`` on timeout.
+    ///
+    /// Callers requesting strict read-your-writes pass a seq from a prior
+    /// write to gate a subsequent recall. Default ``recall()`` does not
+    /// call this — the delta is always visible by virtue of being scanned
+    /// during search; this primitive is only needed when the caller wants
+    /// to wait through a compaction-in-progress window or a cluster
+    /// follower-apply-lag window.
+    pub fn wait_for_visible_seq(
+        &self,
+        namespace: &str,
+        min_seq: u64,
+        timeout: std::time::Duration,
+    ) -> Result<()> {
+        let deadline = std::time::Instant::now() + timeout;
+        let mut map = self.visible_seq.lock();
+        loop {
+            let current = map.get(namespace).copied().unwrap_or(0);
+            if current >= min_seq {
+                return Ok(());
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Err(crate::error::YantrikDbError::RyWaitTimeout {
+                    namespace: namespace.to_string(),
+                    min_seq,
+                    visible: current,
+                    timeout_ms: timeout.as_millis() as u64,
+                });
+            }
+            let remaining = deadline - now;
+            let result = self.visible_seq_cv.wait_for(&mut map, remaining);
+            if result.timed_out() {
+                let final_current = map.get(namespace).copied().unwrap_or(0);
+                if final_current >= min_seq {
+                    return Ok(());
+                }
+                return Err(crate::error::YantrikDbError::RyWaitTimeout {
+                    namespace: namespace.to_string(),
+                    min_seq,
+                    visible: final_current,
+                    timeout_ms: timeout.as_millis() as u64,
+                });
+            }
+            // Spurious wakeup or notify_all — re-check the watermark.
+        }
+    }
 }
 
 #[cfg(test)]
