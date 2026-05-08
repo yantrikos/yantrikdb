@@ -543,6 +543,32 @@ impl YantrikDB {
         &self.actor_id
     }
 
+    /// **Engine-pressure surface for external schedulers.**
+    ///
+    /// Returns the soft cap on the delta tier (i.e. the post-v0.6.7
+    /// `DEFAULT_DELTA_MAX` of 256, or whatever the operator set via the
+    /// `YANTRIKDB_DELTA_MAX` env var). Used by yantrikdb-server's tick
+    /// loop to scale the enrichment-pause threshold proportionally to
+    /// engine capacity — see CONCURRENCY.md and the cross-stack rule
+    /// "engine pressure suppresses enrichment" (saga task 16).
+    pub fn delta_max(&self) -> usize {
+        self.vec_index.delta_max()
+    }
+
+    /// Current delta-tier length (live entries + tombstone markers).
+    /// Pairs with `delta_max()` for pressure-ratio computation.
+    pub fn delta_len(&self) -> usize {
+        self.vec_index.delta_len()
+    }
+
+    /// Current cold-tier length (entries that have been merged into
+    /// the HNSW). Useful for ops dashboards that want to see the
+    /// hot/cold split — most reads against a healthy engine should
+    /// hit cold rather than the linear delta scan.
+    pub fn cold_len(&self) -> usize {
+        self.vec_index.cold_len()
+    }
+
     /// Get the embedding dimension.
     pub fn embedding_dim(&self) -> usize {
         self.embedding_dim

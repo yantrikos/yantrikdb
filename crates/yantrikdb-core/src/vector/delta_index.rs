@@ -190,6 +190,15 @@ impl DeltaIndex {
         self.dim
     }
 
+    /// Soft cap on delta size before backpressure fires. Exposed so
+    /// callers (notably yantrikdb-server's tick loop, RFC scheduler
+    /// pressure rule) can scale enrichment thresholds proportionally
+    /// rather than hard-coding a count that's wrong for non-default
+    /// `delta_max` deployments.
+    pub fn delta_max(&self) -> usize {
+        self.delta_max
+    }
+
     /// Append an entry to the delta tier.
     ///
     /// Backpressure: if the delta is at or above `delta_max`, returns
