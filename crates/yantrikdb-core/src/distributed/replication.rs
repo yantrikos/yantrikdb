@@ -59,10 +59,18 @@ pub fn extract_ops_since(
     exclude_actor: Option<&str>,
     limit: usize,
 ) -> Result<Vec<OplogEntry>> {
+    // Exclude engine-internal materialization op_types — those exist
+    // only to deflect work off the foreground request path on the local
+    // node (Phase 4.3) and have no cross-node replication semantics.
+    // Each node generates its own materialization queue from its own
+    // user-data ops; replicating these would double-do work and was
+    // never the cluster sync contract. The `materialize_` prefix is a
+    // soft namespace for future siblings (saga task 3 follow-ons).
     let select_cols = "SELECT op_id, op_type, timestamp, target_rid, payload, \
                        actor_id, hlc, embedding_hash, origin_actor \
                        FROM oplog \
-                       WHERE hlc IS NOT NULL";
+                       WHERE hlc IS NOT NULL \
+                         AND op_type NOT LIKE 'materialize\\_%' ESCAPE '\\'";
 
     let (sql, param_values) = match (since_hlc, since_op_id) {
         (Some(hlc), Some(op_id)) => {

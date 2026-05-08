@@ -86,128 +86,10 @@ impl YantrikDB {
             emotional_state: emotional_state.map(|s| s.to_string()),
         });
 
-        // Auto-link memory to entities. Two passes:
-        //   1. Heuristic extraction from text — seeds new proper-noun entities
-        //      into `entities` + `graph_index` so conflict detection has data
-        //      to scan even when the user never calls `/v1/relate`.
-        //   2. Match against all known entities in `graph_index` (catches
-        //      entities relate()d earlier whose names don't follow the
-        //      capitalization heuristic, e.g. lowercase product names).
-        {
-            let text_tokens = crate::graph::tokenize(text);
-            let heuristic_entities = crate::graph::extract_heuristic_entities(text);
-
-            // Seed heuristic entities into the `entities` table (idempotent).
-            if !heuristic_entities.is_empty() {
-                let conn = self.conn();
-                for entity in &heuristic_entities {
-                    let entity_type = crate::graph::classify_entity_type(entity);
-                    conn.execute(
-                        "INSERT INTO entities (name, entity_type, first_seen, last_seen, mention_count) \
-                         VALUES (?1, ?2, ?3, ?3, 1) \
-                         ON CONFLICT(name) DO UPDATE SET \
-                            last_seen = ?3, \
-                            mention_count = mention_count + 1, \
-                            entity_type = CASE \
-                                WHEN entity_type = 'unknown' AND ?2 != 'unknown' THEN ?2 \
-                                ELSE entity_type END",
-                        params![entity, entity_type, ts],
-                    )?;
-                }
-            }
-
-            // Compose the candidate set: heuristic + already-known entities.
-            let mut candidates: std::collections::HashSet<String> =
-                heuristic_entities.iter().cloned().collect();
-            for known in self.graph_index.read().all_entity_names() {
-                if crate::graph::entity_matches_text(&known, &text_tokens) {
-                    candidates.insert(known);
-                }
-            }
-
-            if !candidates.is_empty() {
-                {
-                    let conn = self.conn();
-                    for entity in &candidates {
-                        conn.execute(
-                            "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) VALUES (?1, ?2)",
-                            params![rid, entity],
-                        )?;
-                    }
-                }
-                let mut gi = self.graph_index.write();
-                for entity in &candidates {
-                    let entity_type = crate::graph::classify_entity_type(entity);
-                    gi.add_entity(entity, entity_type);
-                    gi.link_memory(&rid, entity);
-                }
-            }
-
-            // RFC 006 Phase 1: extract relations and auto-create claims.
-            // Uses entity pairs as anchors + keyword patterns between them.
-            let heuristic_vec: Vec<String> = heuristic_entities.iter().cloned().collect();
-            let relations = crate::graph::extract_heuristic_relations(text, &heuristic_vec);
-            for rel in &relations {
-                // RFC 006 Phase 2: dedup check — skip if an identical claim
-                // (same src+rel_type+dst+extractor) already exists in this
-                // namespace. The ON CONFLICT in ingest_claim would UPDATE
-                // the existing row, but we prefer to NOT overwrite the
-                // original source_memory_rid provenance.
-                let already_exists = {
-                    let conn = self.conn();
-                    conn.query_row(
-                        "SELECT COUNT(*) FROM edges WHERE src = ?1 AND rel_type = ?2 AND dst = ?3 \
-                         AND namespace = ?4 AND extractor = 'heuristic_v1' AND tombstoned = 0",
-                        params![rel.src, rel.rel_type, rel.dst, namespace],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .unwrap_or(0) > 0
-                };
-                if already_exists {
-                    continue; // Claim already exists — don't overwrite provenance
-                }
-
-                let _ = self.ingest_claim(
-                    &rel.src,
-                    &rel.rel_type,
-                    &rel.dst,
-                    namespace,
-                    rel.polarity,
-                    &rel.modality,
-                    None, // valid_from — heuristic doesn't extract dates yet
-                    None, // valid_to
-                    "heuristic_v1",
-                    Some("1.0"),
-                    &rel.confidence_band,
-                    Some(&rid),
-                    None, // span_start
-                    None, // span_end
-                    1.0,
-                );
-            }
-
-            // RFC 006 Phase 0: emit extraction audit telemetry.
-            let features = crate::graph::analyze_text_features(text, &heuristic_vec);
-            tracing::info!(
-                target: "yantrikdb::audit::extraction",
-                namespace = %namespace,
-                memory_rid = %rid,
-                domain = %domain,
-                source = %source,
-                extractor_version = "heuristic_v1",
-                char_length = features.char_length,
-                sentence_count = features.sentence_count,
-                entity_count = features.entity_count,
-                entities_matched_in_graph = candidates.len().saturating_sub(heuristic_entities.len()),
-                negation_cue_count = features.negation_cue_count,
-                temporal_cue_count = features.temporal_cue_count,
-                modality_cue_count = features.modality_cue_count,
-                has_compound_markers = features.has_compound_markers,
-                likely_assertion = features.likely_assertion,
-                "extraction audit"
-            );
-        }
-
+        // Log the user-facing "record" op FIRST so external consumers
+        // (replication extract_ops_since, oplog inspectors) see records
+        // in their natural causal order: the record came before any
+        // post-record materialization queued in its wake.
         let emb_hash = embedding_hash(embedding);
         self.log_op(
             "record",
@@ -230,6 +112,32 @@ impl YantrikDB {
             }),
             Some(&emb_hash),
         )?;
+
+        // **Phase 4.3 Commit B (saga task 3, 2026-05-08).** The
+        // unbounded entity / memory_entities / claims loops that used
+        // to live here are now enqueued for the materializer thread to
+        // run off the request path. See docs/phase_4_3_design.md for
+        // the contract change (synchronous read-after-write of
+        // entity-graph queries shifts from immediate to ms-scale; the
+        // delta-recall path is unaffected since DeltaIndex.append
+        // happened above on the foreground thread).
+        {
+            let post_payload = serde_json::json!({
+                "rid": rid,
+                "text": stored_text,
+                "namespace": namespace,
+                "ts_secs": ts,
+                "domain": domain,
+                "source": source,
+            });
+            self.log_op_pending(
+                crate::engine::op_types::OP_MATERIALIZE_RECORD_POST,
+                Some(&rid),
+                &post_payload,
+                None,
+                None,
+            )?;
+        }
 
         Ok(rid)
     }

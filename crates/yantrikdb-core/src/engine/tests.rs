@@ -58,6 +58,11 @@ fn test_record_auto_extracts_entities() {
         )
         .unwrap();
 
+    // Phase 4.3: entity persistence is enqueued by record() and applied by
+    // the materializer thread. In tests we drain the queue inline before
+    // asserting on entity-graph state.
+    db.apply_pending_ops_once(100).unwrap();
+
     let entities: Vec<String> = {
         let conn = db.conn();
         let mut stmt = conn
@@ -2950,6 +2955,9 @@ fn test_relationship_depth_basic() {
               &empty_meta(), &emb, "default", 0.8, "work", "user", None).unwrap();
     db.record("Alice prefers async communication", "semantic", 0.6, 0.0, 604800.0,
               &empty_meta(), &vec_seed(2.0, 8), "default", 0.8, "preference", "user", None).unwrap();
+    // Phase 4.3: drain the post-record materialization queue so the
+    // memory_entities link is visible to relationship_depth.
+    db.apply_pending_ops_once(100).unwrap();
 
     let depth = db.relationship_depth("Alice", None).unwrap();
     assert_eq!(depth.entity, "Alice");
