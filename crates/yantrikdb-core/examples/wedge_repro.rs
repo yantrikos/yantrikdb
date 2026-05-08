@@ -34,6 +34,51 @@ use std::time::{Duration, Instant};
 use yantrikdb::YantrikDB;
 use yantrikdb::engine::materializer::spawn_compactor;
 
+/// **Phase 7 soak prep — RSS instrumentation.**
+///
+/// Read this process's resident set size in bytes. Linux reads
+/// `/proc/self/status`'s `VmRSS:` line; other platforms return `None`
+/// (the harness still runs, just prints `rss=  N/A` in those rows).
+///
+/// The soak validation acceptance gate from
+/// `docs/decoupled_write_path_rfc.md` includes "RSS bounded over 1h
+/// sustained load". Without this hook the operator has to read RSS
+/// out-of-band (htop / Get-Process); inline per-second capture means
+/// the wedge_repro output is the single source of truth for the run.
+#[cfg(target_os = "linux")]
+fn read_rss_bytes() -> Option<u64> {
+    let status = std::fs::read_to_string("/proc/self/status").ok()?;
+    for line in status.lines() {
+        if let Some(rest) = line.strip_prefix("VmRSS:") {
+            // Format: "VmRSS:    123456 kB"
+            let kb: u64 = rest
+                .split_whitespace()
+                .next()?
+                .parse()
+                .ok()?;
+            return Some(kb * 1024);
+        }
+    }
+    None
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_rss_bytes() -> Option<u64> {
+    // Windows + macOS not wired here. The Phase 7 soak runs on the
+    // Linux homelab (CT 168 reference), and adding a sysinfo or
+    // windows-sys dep is heavier than the value warrants for dev
+    // runs. If you need RSS on Windows interactively, watch
+    // `Get-Process` in another pane.
+    None
+}
+
+fn fmt_mib(bytes: Option<u64>) -> String {
+    match bytes {
+        Some(b) => format!("{}", b / (1024 * 1024)),
+        None => "N/A".to_string(),
+    }
+}
+
 #[derive(Clone, Copy)]
 struct Config {
     writers: usize,
@@ -235,9 +280,14 @@ fn run() {
     }
 
     // ── Per-second progress printer ──
-    println!("\n {:>4} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
-        "sec", "w/s", "r/s", "w_p50us", "w_p99us", "r_p50us", "r_p99us");
+    // RSS column is right-aligned MiB (or N/A on non-Linux). Tracks
+    // the soak acceptance gate "RSS bounded over 1h sustained load".
+    println!("\n {:>4} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8}",
+        "sec", "w/s", "r/s", "w_p50us", "w_p99us", "r_p50us", "r_p99us",
+        "delta", "rss_MiB");
 
+    let rss_baseline = read_rss_bytes();
+    let mut rss_peak = rss_baseline.unwrap_or(0);
     let mut prev_w = 0u64;
     let mut prev_r = 0u64;
     for sec in 0..cfg.duration_secs {
@@ -259,8 +309,14 @@ fn run() {
         }
         let (w_p50, w_p99) = pcts_us(&mut w_durs);
         let (r_p50, r_p99) = pcts_us(&mut r_durs);
-        println!(" {:>4} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10}",
-            sec + 1, w - prev_w, r - prev_r, w_p50, w_p99, r_p50, r_p99);
+        let delta_now = db.delta_len();
+        let rss_now = read_rss_bytes();
+        if let Some(b) = rss_now {
+            if b > rss_peak { rss_peak = b; }
+        }
+        println!(" {:>4} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8}",
+            sec + 1, w - prev_w, r - prev_r, w_p50, w_p99, r_p50, r_p99,
+            delta_now, fmt_mib(rss_now));
         prev_w = w;
         prev_r = r;
     }
@@ -290,6 +346,18 @@ fn run() {
     let elapsed = started_at.elapsed().as_secs_f64();
     println!("wall: {:.1}s | write tput: {:.0}/s | read tput: {:.0}/s",
         elapsed, all_w.len() as f64 / elapsed, all_r.len() as f64 / elapsed);
+
+    // RSS summary — soak acceptance gate "RSS bounded".
+    let rss_final = read_rss_bytes();
+    println!(
+        "rss: baseline={} MiB peak={} MiB final={} MiB | delta={} cold={} (engine pressure: {:.1}%)",
+        fmt_mib(rss_baseline),
+        fmt_mib(Some(rss_peak)),
+        fmt_mib(rss_final),
+        db.delta_len(),
+        db.cold_len(),
+        100.0 * db.delta_len() as f64 / db.delta_max() as f64,
+    );
 }
 
 fn pcts_us(durs: &mut [u64]) -> (u64, u64) {

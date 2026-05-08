@@ -213,18 +213,75 @@ can run a periodic deadlock check.
 
 ---
 
+## Cross-stack rule — engine pressure suppresses enrichment, NEVER decay
+
+This rule lives in yantrikdb-server's tick loop (it's the consumer of
+the engine's pressure signal), but the *invariant* is owned jointly
+and recorded here so the engine and server stay in sync.
+
+**The rule.** When `db.delta_len() / db.delta_max() > 0.75` (or the
+operator-configured `enrichment_pause_threshold`), the server's tick
+loop pauses cognitive enrichment work for that tick:
+
+  PAUSE on engine pressure (cluster RYW lock 2026-05-08, msg 73ae78b2):
+    - consolidation
+    - conflict_scan
+    - pattern_mining
+    - personality (derive_personality_traits)
+    - graph_enrichment
+
+  KEEP RUNNING regardless of pressure:
+    - decay_loop
+    - snapshot scheduler
+    - WAL checkpoint
+    - health probes / metrics tick
+    - any observability / correctness-related work
+
+**Why decay is exempt.** Memory aging is a function of wall-clock time,
+not engine load. Pausing decay creates timeline divergence between
+engines that are nominally tracking the same logical clock — a memory
+that "should have decayed by now" suddenly snaps back to high score
+when pressure clears. That's a correctness bug, not an optimization.
+
+Decay touches the SQL `last_access` and `consolidation_status` columns
+which are also touched by enrichment, so the temptation to bundle
+them is real. Resist it. They run on different cadences for different
+reasons.
+
+**Why these specific enrichment jobs pause.** They do additional work
+on top of the foreground load: extra recall queries, extra entity
+edge writes, extra graph index updates. Under sustained ingest
+pressure (the wedge scenario), they compound the pressure they should
+back off from. The "user-visible correctness beats optimization beats
+enrichment" priority law from ChatGPT's 2026-05-08 review (saga epic
+5) is the right framing.
+
+**Engine surface.** `db.delta_max()`, `db.delta_len()`, `db.cold_len()`
+are public getters (commit bcf1c78, 2026-05-08). `db.count_pending_ops()`
+predates them. The server reads these; the engine never knows or cares
+what the server does with them.
+
+**Anti-goal.** Do NOT add a `should_run_enrichment_now()` method to
+the engine. The engine publishes pressure signals; the consumer
+decides how to interpret them. Coupling the decision into the engine
+silently couples cognitive scheduling to engine internals — the wrong
+direction.
+
+See saga epic 4 task 16 for the cross-team coordination thread.
+
+---
+
 ## What this document is NOT
 
 This is the *engine-layer* invariants doc. It does NOT cover:
 
 - Server-layer concurrency (HTTP handlers, openraft state machine,
   tick loop) — that belongs in yantrikdb-server.
-- Cognitive-layer scheduling (consolidation, contradiction,
-  personality) — those are background workers in yantrikdb-server's
-  tick loop. ChatGPT's 2026-05-08 review framed the right rule
-  (`max_enrichment_jobs_when_ingest_lag_high = 0`) but that lives in
-  the server, gated on `engine.count_pending_ops()`. See saga epic 4
-  task 16.
+- The full cognitive-layer scheduling cadence (consolidation,
+  contradiction, personality) beyond the cross-stack rule above —
+  those workers live in yantrikdb-server's tick loop. The
+  pressure-pause behavior is documented here because it spans both
+  stacks and must stay aligned; the rest is server-internal.
 
 If you find yourself adding a "scheduler" or "priority queue" to the
 engine layer, stop and re-read Rule 3. The engine has one foreground
