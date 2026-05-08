@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 24;
+pub const SCHEMA_VERSION: i32 = 25;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -41,7 +41,12 @@ CREATE TABLE IF NOT EXISTS memories (
     -- Session & temporal (V13)
     session_id TEXT,                          -- FK to sessions.session_id (nullable)
     due_at REAL,                              -- unix timestamp for upcoming() queries
-    temporal_kind TEXT                         -- deadline | reminder | event | follow_up
+    temporal_kind TEXT,                        -- deadline | reminder | event | follow_up
+
+    -- v25 (RFC issue #9): cluster-replication determinism columns
+    tombstone_reason TEXT,                     -- caller-supplied reason for tombstone_with_rid (NULL for live rows)
+    created_at_unix_micros INTEGER NOT NULL DEFAULT 0, -- caller-supplied i64 micros, materialized at leader for byte-deterministic follower replay
+    embedding_model TEXT                       -- engine-deterministic-surface version pin (e.g. 'bge-base-en-v1.5'); RFC 013 may swap for richer type
 );
 
 -- Session tracking (V13)
@@ -708,6 +713,9 @@ CREATE INDEX IF NOT EXISTS idx_oplog_timestamp ON oplog(timestamp);
 CREATE INDEX IF NOT EXISTS idx_oplog_target ON oplog(target_rid);
 CREATE INDEX IF NOT EXISTS idx_oplog_hlc ON oplog(hlc);
 CREATE INDEX IF NOT EXISTS idx_oplog_actor ON oplog(origin_actor);
+-- v25 (RFC issue #9): cluster-replication determinism column indexes
+CREATE INDEX IF NOT EXISTS idx_memories_created_at_micros ON memories(created_at_unix_micros);
+CREATE INDEX IF NOT EXISTS idx_memories_embedding_model ON memories(embedding_model) WHERE embedding_model IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_entities_type ON entities(entity_type);
 CREATE INDEX IF NOT EXISTS idx_consolidation_source ON consolidation_members(source_rid);
 CREATE INDEX IF NOT EXISTS idx_conflicts_status ON conflicts(status);
@@ -1833,4 +1841,36 @@ CREATE INDEX IF NOT EXISTS idx_contest_status ON contest_state(state_status);
 pub const MIGRATE_V23_TO_V24: &str = "
 ALTER TABLE oplog ADD COLUMN embedding BLOB;
 CREATE INDEX IF NOT EXISTS idx_oplog_pending ON oplog(applied) WHERE applied = 0;
+";
+
+/// v24 → v25: cluster-replication determinism columns on memories
+/// (issue yantrikos/yantrikdb#9).
+///
+/// Three additive columns on `memories`:
+///   - tombstone_reason TEXT NULL — caller-supplied reason for
+///     tombstone_with_rid; queryable for cluster incident debugging.
+///   - created_at_unix_micros INTEGER NOT NULL — caller-supplied i64
+///     micros, materialized at the leader so follower apply is
+///     byte-deterministic. Backfill: cast (created_at * 1_000_000) as
+///     INTEGER for existing rows.
+///   - embedding_model TEXT NULL — engine-deterministic-surface version
+///     pin. RFC 013 (HNSW lifecycle + embedder model migration) may
+///     swap for a richer typed alias later.
+///
+/// Schema decisions locked via swarm exchange dd2e0439 / 2c465959 with
+/// yantrikdb-server. Rationale:
+///   - tombstone_reason on row (not audit-only): cluster incident debug
+///     queries should not require a join.
+///   - created_at_unix_micros as new column (not coercion of existing
+///     created_at REAL): keeps the i64 contract end-to-end and avoids
+///     touching back-compat scoring paths.
+///   - embedding_model as String for v0.7.0; RFC 013 can introduce
+///     a typed alias later behind the same column name.
+pub const MIGRATE_V24_TO_V25: &str = "
+ALTER TABLE memories ADD COLUMN tombstone_reason TEXT;
+ALTER TABLE memories ADD COLUMN created_at_unix_micros INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE memories ADD COLUMN embedding_model TEXT;
+UPDATE memories SET created_at_unix_micros = CAST(created_at * 1000000 AS INTEGER) WHERE created_at_unix_micros = 0;
+CREATE INDEX IF NOT EXISTS idx_memories_created_at_micros ON memories(created_at_unix_micros);
+CREATE INDEX IF NOT EXISTS idx_memories_embedding_model ON memories(embedding_model) WHERE embedding_model IS NOT NULL;
 ";

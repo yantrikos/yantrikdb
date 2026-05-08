@@ -481,4 +481,66 @@ mod pending_ops_tests {
         assert_eq!(applied, 0);
         assert_eq!(db.count_pending_ops().unwrap(), 1, "unknown op_type stays pending");
     }
+
+    #[test]
+    fn schema_v25_columns_present() {
+        // Open a fresh DB so the canonical SCHEMA_SQL runs and creates
+        // memories with the v25 columns. Then verify column metadata.
+        let db = open_test_db();
+        let conn = db.read_conn();
+        let mut stmt = conn.prepare("PRAGMA table_info(memories)").unwrap();
+        let cols: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(1))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(
+            cols.contains(&"tombstone_reason".to_string()),
+            "tombstone_reason missing — schema v25 not applied"
+        );
+        assert!(
+            cols.contains(&"created_at_unix_micros".to_string()),
+            "created_at_unix_micros missing — schema v25 not applied"
+        );
+        assert!(
+            cols.contains(&"embedding_model".to_string()),
+            "embedding_model missing — schema v25 not applied"
+        );
+    }
+
+    #[test]
+    fn schema_version_meta_at_25() {
+        let db = open_test_db();
+        let conn = db.read_conn();
+        let v: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'schema_version'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(v, "25");
+    }
+
+    #[test]
+    fn schema_v25_indexes_present() {
+        let db = open_test_db();
+        let conn = db.read_conn();
+        let mut stmt = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='memories'")
+            .unwrap();
+        let names: Vec<String> = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .filter_map(|r| r.ok())
+            .collect();
+        assert!(
+            names.iter().any(|n| n == "idx_memories_created_at_micros"),
+            "idx_memories_created_at_micros missing"
+        );
+        assert!(
+            names.iter().any(|n| n == "idx_memories_embedding_model"),
+            "idx_memories_embedding_model missing"
+        );
+    }
 }
