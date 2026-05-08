@@ -144,7 +144,11 @@ pub fn recommended_worker_count() -> usize {
 /// drain the delta tier into the cold tier, bounding read latency growth.
 ///
 /// Polls every `COMPACTOR_INTERVAL` (1s by default). On each tick:
-///   1. Check `should_compact()` — fires when delta is past half-capacity.
+///   1. Check `should_compact()` — fires when delta is past half-capacity
+///      OR the oldest dirty entry has aged past `max_dirty_age` (default
+///      60s; epic 5 task 13). The age trigger closes the gap where a
+///      low-write namespace's delta sits forever and reads pay the
+///      linear scan indefinitely.
 ///   2. Run `compact()` — clone-rebuild cold from old cold + sealed delta,
 ///      then ArcSwap the new cold in.
 ///

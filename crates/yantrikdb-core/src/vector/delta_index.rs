@@ -84,6 +84,25 @@ pub struct DeltaEntry {
 /// for it in steady-state read latency.
 pub const DEFAULT_DELTA_MAX: usize = 256;
 
+/// Default max dirty age before age-based compaction fires.
+///
+/// **The aging gap.** The size-based trigger (`delta_len >= delta_max/2`)
+/// only fires when a namespace is actively writing. A namespace whose
+/// delta sits at e.g. 50 dirty entries with no new writes will *never*
+/// hit the size threshold, so reads against it pay the linear delta scan
+/// indefinitely. ChatGPT's 2026-05-08 review (epic 5 task 13) flagged
+/// aging as the single biggest concrete gap in our scheduler-by-
+/// construction design.
+///
+/// Fix: the compactor also fires when the *oldest* entry in a non-empty
+/// delta has been sitting for more than this duration. 60s is a starting
+/// default — long enough that bursty workloads still rely on the size
+/// trigger (avoiding compaction churn), short enough that idle namespaces
+/// merge into cold within a window where read latency hasn't deteriorated
+/// noticeably. Tunable per deployment via `DeltaIndex::with_capacity_and_age`
+/// or the `YANTRIKDB_MAX_DIRTY_AGE_SECS` environment variable.
+pub const DEFAULT_MAX_DIRTY_AGE: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Per-DB two-tier vector index used by the decoupled write path.
 ///
 /// Wraps an `HnswIndex` cold tier (atomically swapped via ArcSwap at
@@ -94,6 +113,19 @@ pub struct DeltaIndex {
     delta: RwLock<Vec<DeltaEntry>>,
     delta_max: usize,
     dim: usize,
+    /// Wall-clock instant when the delta most recently transitioned from
+    /// empty to non-empty. Cleared (set to `None`) at every successful
+    /// `seal_delta_for_compaction`. The compactor reads this to decide
+    /// whether the age-based trigger fires.
+    ///
+    /// Lives on `DeltaIndex` rather than per-`DeltaEntry` so a busy
+    /// workload with frequent appends doesn't pay one Instant per entry —
+    /// we only care about the *oldest* unflushed entry's age.
+    oldest_dirty_at: parking_lot::Mutex<Option<std::time::Instant>>,
+    /// Compaction trigger threshold for `oldest_dirty_at` — once the
+    /// delta's oldest entry has been sitting longer than this, the
+    /// compactor fires regardless of delta size.
+    max_dirty_age: std::time::Duration,
 }
 
 impl DeltaIndex {
@@ -105,11 +137,26 @@ impl DeltaIndex {
 
     /// Create a new `DeltaIndex` with a custom delta capacity.
     pub fn with_capacity(dim: usize, delta_max: usize) -> Self {
+        Self::with_capacity_and_age(dim, delta_max, DEFAULT_MAX_DIRTY_AGE)
+    }
+
+    /// Create a new `DeltaIndex` with a custom delta capacity AND a custom
+    /// age-based compaction trigger. Used by tests that need to exercise
+    /// the age trigger in seconds rather than the production-default 60s,
+    /// and by the engine constructor when reading the
+    /// `YANTRIKDB_MAX_DIRTY_AGE_SECS` env override.
+    pub fn with_capacity_and_age(
+        dim: usize,
+        delta_max: usize,
+        max_dirty_age: std::time::Duration,
+    ) -> Self {
         Self {
             cold: ArcSwap::new(Arc::new(HnswIndex::new(dim))),
             delta: RwLock::new(Vec::with_capacity(delta_max.min(4096))),
             delta_max,
             dim,
+            oldest_dirty_at: parking_lot::Mutex::new(None),
+            max_dirty_age,
         }
     }
 
@@ -117,12 +164,24 @@ impl DeltaIndex {
     /// Used during engine open() when the index is rebuilt from the
     /// SQLite source of truth on disk.
     pub fn from_cold(cold: HnswIndex, delta_max: usize) -> Self {
+        Self::from_cold_with_age(cold, delta_max, DEFAULT_MAX_DIRTY_AGE)
+    }
+
+    /// `from_cold` sibling that also takes a custom max_dirty_age — used
+    /// by the engine constructor when honoring YANTRIKDB_MAX_DIRTY_AGE_SECS.
+    pub fn from_cold_with_age(
+        cold: HnswIndex,
+        delta_max: usize,
+        max_dirty_age: std::time::Duration,
+    ) -> Self {
         let dim = cold.dim();
         Self {
             cold: ArcSwap::new(Arc::new(cold)),
             delta: RwLock::new(Vec::with_capacity(delta_max.min(4096))),
             delta_max,
             dim,
+            oldest_dirty_at: parking_lot::Mutex::new(None),
+            max_dirty_age,
         }
     }
 
@@ -165,12 +224,20 @@ impl DeltaIndex {
             });
         }
 
+        let was_empty = delta.is_empty();
         delta.push(DeltaEntry {
             rid,
             embedding,
             seq,
             tombstoned: false,
         });
+        // Stamp the dirty-age clock on first non-empty append after every
+        // compaction. Subsequent appends within the same dirty window
+        // don't touch it — only the oldest entry's age matters for the
+        // age-based trigger.
+        if was_empty {
+            *self.oldest_dirty_at.lock() = Some(std::time::Instant::now());
+        }
         Ok(())
     }
 
@@ -186,10 +253,14 @@ impl DeltaIndex {
     /// will not return `rid`.
     pub fn tombstone(&self, rid: &str, seq: u64) -> bool {
         let mut delta = self.delta.write();
+        let was_empty = delta.is_empty();
         for entry in delta.iter_mut() {
             if entry.rid == rid && !entry.tombstoned {
                 entry.tombstoned = true;
                 entry.seq = seq;
+                // In-place mutation — delta was non-empty already, so the
+                // dirty-age clock is already stamped from the original
+                // append. Nothing to do.
                 return true;
             }
         }
@@ -200,6 +271,12 @@ impl DeltaIndex {
             seq,
             tombstoned: true,
         });
+        // Stamp the dirty-age clock if this tombstone marker is the only
+        // entry in the delta (delta was empty before the push). Same rule
+        // as append(): only the *oldest* dirty entry's age matters.
+        if was_empty {
+            *self.oldest_dirty_at.lock() = Some(std::time::Instant::now());
+        }
         false
     }
 
@@ -315,9 +392,18 @@ impl DeltaIndex {
     /// Atomically swap the current delta for a fresh empty one.
     /// Returns the sealed delta for the compactor to merge into cold.
     /// Phase 5 wires this into the compaction scheduler.
+    ///
+    /// Also clears the dirty-age clock — once entries are sealed, the
+    /// next append against the now-empty delta restarts the age window.
     pub fn seal_delta_for_compaction(&self) -> Vec<DeltaEntry> {
         let mut delta = self.delta.write();
-        std::mem::replace(&mut *delta, Vec::with_capacity(self.delta_max.min(4096)))
+        let sealed =
+            std::mem::replace(&mut *delta, Vec::with_capacity(self.delta_max.min(4096)));
+        // Reset the dirty-age clock under the same write lock so the
+        // age-trigger calculation can never observe a stale stamp paired
+        // with an empty delta.
+        *self.oldest_dirty_at.lock() = None;
+        sealed
     }
 
     /// Atomically install a new cold tier (post-compaction).
@@ -388,10 +474,33 @@ impl DeltaIndex {
         Ok(applied)
     }
 
-    /// Whether the delta has reached its compaction threshold.
-    /// Phase 5 compactor polls this.
+    /// Whether the delta should be compacted on the next compactor tick.
+    ///
+    /// Two triggers, ORed:
+    ///
+    /// 1. **Size trigger** — `delta_len() >= delta_max / 2`. The
+    ///    classic Phase 5 trigger; protects read latency under bursty
+    ///    write workloads.
+    ///
+    /// 2. **Age trigger** — `delta_len() > 0` AND the oldest entry has
+    ///    been sitting longer than `max_dirty_age` (default 60s). Closes
+    ///    the gap where a low-write namespace's delta sits at, say, 50
+    ///    dirty entries forever and reads pay the linear scan
+    ///    indefinitely. Bolt-on per epic 5 task 13 (ChatGPT review
+    ///    2026-05-08) — explicitly NOT a multi-factor scoring formula.
+    ///
+    /// The compactor polls this each tick (every COMPACTOR_INTERVAL).
     pub fn should_compact(&self) -> bool {
-        self.delta_len() >= self.delta_max / 2
+        // Size trigger.
+        if self.delta_len() >= self.delta_max / 2 {
+            return true;
+        }
+        // Age trigger.
+        let stamp = *self.oldest_dirty_at.lock();
+        match stamp {
+            Some(t) if self.delta_len() > 0 && t.elapsed() >= self.max_dirty_age => true,
+            _ => false,
+        }
     }
 }
 
@@ -427,6 +536,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::thread;
+    use std::time::Duration;
 
     fn vec_seed(seed: f32, dim: usize) -> Vec<f32> {
         let raw: Vec<f32> = (0..dim).map(|i| (seed + i as f32) * 0.1).collect();
@@ -595,6 +705,95 @@ mod tests {
         new_cold.insert("rid_b", &vec_seed(2.0, 64)).unwrap();
         idx.install_cold(new_cold);
         assert_eq!(idx.cold_len(), 2);
+    }
+
+    // ── Epic 5 task 13: age-based compaction trigger ──
+    //
+    // The size-based trigger fires only when delta_len >= delta_max/2.
+    // Without an age trigger, a low-write namespace whose delta sits at
+    // e.g. 10 dirty entries with no new writes will *never* compact, so
+    // reads against it pay the linear delta scan indefinitely. These
+    // tests exercise the age-trigger path that closes that gap.
+    //
+    // We use `with_capacity_and_age` to set `max_dirty_age` to ~50ms
+    // so the test wall-clock waits stay bounded; the production default
+    // is 60s.
+
+    #[test]
+    fn age_trigger_does_not_fire_on_empty_delta() {
+        // Empty delta + no oldest_dirty_at stamp => should_compact == false
+        // even after waiting past max_dirty_age.
+        let idx = DeltaIndex::with_capacity_and_age(64, 256, Duration::from_millis(20));
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(!idx.should_compact(), "empty delta never triggers age compaction");
+    }
+
+    #[test]
+    fn age_trigger_fires_after_max_dirty_age_elapses() {
+        // 10 entries (well under half-cap of 128) sitting for >50ms with
+        // a 20ms max_dirty_age must trigger compaction by the age path.
+        let idx = DeltaIndex::with_capacity_and_age(64, 256, Duration::from_millis(20));
+        for i in 0..10 {
+            idx.append(format!("rid_{i}"), vec_seed(i as f32, 64), i as u64).unwrap();
+        }
+        assert_eq!(idx.delta_len(), 10);
+        assert!(!idx.should_compact(),
+            "below half-cap and within max_dirty_age window must NOT trigger");
+        std::thread::sleep(Duration::from_millis(50));
+        assert!(idx.should_compact(),
+            "10 entries sitting for >max_dirty_age must trigger age path");
+    }
+
+    #[test]
+    fn age_trigger_resets_on_seal() {
+        // After seal_delta_for_compaction, the oldest_dirty_at clock
+        // resets — a subsequent append starts a fresh age window.
+        let idx = DeltaIndex::with_capacity_and_age(64, 256, Duration::from_millis(20));
+        idx.append("rid_a".to_string(), vec_seed(1.0, 64), 1).unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(idx.should_compact(), "first window: age trigger fires");
+
+        let _ = idx.seal_delta_for_compaction();
+        assert!(!idx.should_compact(), "seal cleared dirty-age clock");
+
+        // New append after seal: fresh age window, must NOT trigger immediately.
+        idx.append("rid_b".to_string(), vec_seed(2.0, 64), 2).unwrap();
+        assert!(!idx.should_compact(), "fresh window after seal");
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(idx.should_compact(), "second window: age trigger fires again");
+    }
+
+    #[test]
+    fn age_trigger_compacts_low_write_namespace_end_to_end() {
+        // The "end-to-end" test: 10 entries, sit for >max_dirty_age,
+        // run compact() (simulating the compactor tick), entries land in cold.
+        let idx = DeltaIndex::with_capacity_and_age(64, 256, Duration::from_millis(20));
+        for i in 0..10 {
+            idx.append(format!("rid_{i}"), vec_seed(i as f32, 64), i as u64).unwrap();
+        }
+        std::thread::sleep(Duration::from_millis(40));
+        assert!(idx.should_compact(), "age trigger ready");
+        let n = idx.compact().unwrap();
+        assert_eq!(n, 10, "all 10 entries applied to cold");
+        assert_eq!(idx.delta_len(), 0, "delta drained");
+        assert_eq!(idx.cold_len(), 10, "cold absorbed all entries");
+        // After compact, the dirty-age clock is reset (seal cleared it).
+        assert!(!idx.should_compact(), "post-compact: nothing to do");
+    }
+
+    #[test]
+    fn age_trigger_tombstone_only_delta_also_fires() {
+        // Edge case: delta contains only a tombstone marker (no live
+        // append). The age trigger must still fire — readers care about
+        // the tombstone reaching cold so the rid no longer surfaces in
+        // recall. Same `delta_len > 0` rule applies.
+        let idx = DeltaIndex::with_capacity_and_age(64, 256, Duration::from_millis(20));
+        // tombstone() against a rid not in delta appends a marker.
+        let was_live = idx.tombstone("rid_remote", 1);
+        assert!(!was_live, "tombstone of unknown rid is appended as marker");
+        assert_eq!(idx.delta_len(), 1);
+        std::thread::sleep(Duration::from_millis(30));
+        assert!(idx.should_compact(), "tombstone-only delta also fires by age");
     }
 
     #[test]

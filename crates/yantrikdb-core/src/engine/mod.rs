@@ -463,7 +463,16 @@ impl YantrikDB {
                     .ok()
                     .and_then(|v| v.parse::<usize>().ok())
                     .unwrap_or(crate::vector::delta_index::DEFAULT_DELTA_MAX);
-                crate::vector::delta_index::DeltaIndex::from_cold(vec_index, delta_max)
+                let max_dirty_age = std::env::var("YANTRIKDB_MAX_DIRTY_AGE_SECS")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .map(std::time::Duration::from_secs)
+                    .unwrap_or(crate::vector::delta_index::DEFAULT_MAX_DIRTY_AGE);
+                crate::vector::delta_index::DeltaIndex::from_cold_with_age(
+                    vec_index,
+                    delta_max,
+                    max_dirty_age,
+                )
             },
             vec_seq: std::sync::atomic::AtomicU64::new(0),
             visible_seq: dashmap::DashMap::new(),
