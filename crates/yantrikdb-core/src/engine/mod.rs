@@ -630,7 +630,7 @@ impl YantrikDB {
 
     /// Run a migration SQL batch with statement-level idempotency.
     ///
-    /// **v0.7.3 fix for migration-replay duplicate-column class of bugs.**
+    /// **v0.7.3 / v0.7.8 fix for migration-replay class of bugs.**
     /// `conn.execute_batch` aborts on the first error, so a single ALTER TABLE
     /// ADD COLUMN on a column that already exists fails the whole migration —
     /// even though the rest of the batch (CREATE INDEX IF NOT EXISTS, UPDATE,
@@ -640,11 +640,40 @@ impl YantrikDB {
     ///
     /// This helper splits the batch on `;`, executes each statement
     /// individually, and swallows specific errors that mean "the change is
-    /// already applied":
-    ///   - `duplicate column name: <X>` (re-running ALTER TABLE ADD COLUMN)
-    ///   - `<X> already exists` (re-running CREATE TABLE/INDEX without IF
-    ///     NOT EXISTS — defensive; our migrations already use IF NOT EXISTS
-    ///     for the CREATE side)
+    /// already applied or superseded":
+    ///   - `duplicate column name: <X>` — re-running ALTER TABLE ADD COLUMN
+    ///     on a column already present (v0.7.3 case: V23→V24 embedding column
+    ///     on a rewound-meta DB).
+    ///   - `<X> already exists` — re-running CREATE TABLE/INDEX without IF
+    ///     NOT EXISTS (defensive; our migrations already use IF NOT EXISTS
+    ///     for CREATE).
+    ///   - `Cannot add a column to a view` — running an ALTER TABLE on a
+    ///     name that's been superseded into a backward-compat VIEW by a
+    ///     later migration. Hits when meta is rewound to a version BEFORE
+    ///     the rename-to-view (V14→V15 case: edges-as-table got renamed to
+    ///     claims and replaced with an edges-as-view in V16→V17, but a DB
+    ///     with meta rewound to v14 sees on-disk view+claims state and
+    ///     can't ADD COLUMN to the view). Safe to skip because: the view
+    ///     exists only if a later migration already moved the underlying
+    ///     state past where these columns matter. Issue #10 (2026-05-09).
+    ///   - `there is already another table or index with this name: <X>` —
+    ///     ALTER TABLE ... RENAME TO target where target already exists
+    ///     (V16→V17 case on rewound meta: `ALTER TABLE edges RENAME TO claims`
+    ///     fails because claims already exists from a prior application of
+    ///     this same migration). Safe to skip because: target exists only
+    ///     if rename already happened.
+    ///   - `no such column: <X>` — ALTER TABLE ... RENAME COLUMN src TO dst
+    ///     where src has already been renamed (V16→V17:
+    ///     `RENAME COLUMN edge_id TO claim_id` fails on second run because
+    ///     edge_id no longer exists). Safe to skip because: column rename
+    ///     already happened. False-positive risk (a real "no such column"
+    ///     elsewhere) is bounded by the fact that we only swallow per-
+    ///     statement; if a later statement legitimately needs that column,
+    ///     it still fails.
+    ///   - `no such table: <X>` — DROP/ALTER TABLE on a name that's been
+    ///     renamed away (V17→V18 mid-cascade: `DROP TABLE claims` after a
+    ///     prior partial run already moved it). Safe with the same bounded
+    ///     false-positive argument as no-such-column.
     ///
     /// Any other error propagates. This makes every entry in the migration
     /// chain replay-safe retroactively, healing deployments whose
@@ -655,20 +684,53 @@ impl YantrikDB {
     /// authored in this crate — none of the statements contain `;` inside
     /// string literals. If that changes, switch to a sqlite tokenizer pass.
     ///
+    /// **Long-term proper fix** (issue #10 suggestion): refactor the
+    /// migration runner to introspect schema state via `PRAGMA table_info`
+    /// before each ALTER, only run statements whose target column doesn't
+    /// already exist. Larger change; tracked separately. The error-swallow
+    /// list is the v0.7.x stopgap that heals existing deployments.
+    ///
     /// Diagnosed via yantrikdb-server v0.8.13 cluster upgrade incident
-    /// (swarm msg 3467c556 → response fa070846).
+    /// (swarm msg 3467c556 → response fa070846, v0.7.3 commit a5de0f2) and
+    /// extended for issue #10 view case in v0.7.8.
     fn run_migration_idempotent(conn: &Connection, batch: &str) -> Result<()> {
-        for raw in batch.split(';') {
+        // Strip `-- ... \n` line comments before splitting on `;`. The
+        // naive split otherwise breaks on comment text containing
+        // semicolons (e.g. MIGRATE_V21_V22 has "ALTER; we add plain-
+        // typed columns" inside a comment which would split the next
+        // ALTER mid-line). Migration SQL is authored in this crate; no
+        // string literals contain `--`, so a simple per-line truncate
+        // at the first `--` is safe.
+        let stripped: String = batch
+            .lines()
+            .map(|line| match line.find("--") {
+                Some(idx) => &line[..idx],
+                None => line,
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        for raw in stripped.split(';') {
             let stmt = raw.trim();
             if stmt.is_empty() {
                 continue;
             }
-            match conn.execute(stmt, []) {
+            // Use execute_batch for the per-statement run because some
+            // migration statements are not single-row DDL — V17_V18 has
+            // INSERT INTO ... SELECT which rusqlite's execute() rejects
+            // with ApiMisuse if it returns rows from a sub-select. Per
+            // SQLite semantics execute_batch handles the full statement
+            // grammar uniformly.
+            match conn.execute_batch(stmt) {
                 Ok(_) => {}
                 Err(e) => {
                     let msg = e.to_string();
                     let is_idempotent_replay = msg.contains("duplicate column name")
-                        || msg.contains("already exists");
+                        || msg.contains("already exists")
+                        || msg.contains("Cannot add a column to a view")
+                        || msg.contains("there is already another table or index with this name")
+                        || msg.contains("no such column")
+                        || msg.contains("no such table");
                     if is_idempotent_replay {
                         tracing::debug!(
                             statement = %stmt,

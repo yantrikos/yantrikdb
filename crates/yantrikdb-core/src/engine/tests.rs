@@ -5140,6 +5140,71 @@ fn migration_replay_does_not_trip_on_already_present_column() {
 }
 
 #[test]
+fn migration_replay_does_not_trip_on_alter_table_against_view() {
+    // Regression test for issue #10 (2026-05-09): a DB with meta rewound to
+    // v14 hits "Cannot add a column to a view" when MIGRATE_V14_TO_V15 runs
+    // `ALTER TABLE edges ADD COLUMN ...` against the backward-compat VIEW
+    // that V16_TO_V17 created when it renamed edges to claims. Same root
+    // cause as issue closed by v0.7.3 (rewound-meta DBs replay migrations
+    // against on-disk schema that's already past them) but a different
+    // error class from "duplicate column name".
+    //
+    // Pre-v0.7.8 the runner only swallowed "duplicate column name" and
+    // "already exists"; the view error propagated and broke open(). Post-fix
+    // run_migration_idempotent also swallows "Cannot add a column to a view"
+    // since it definitionally means the schema is already past where those
+    // columns mattered (else edges wouldn't be a view).
+    use tempfile::NamedTempFile;
+    let tmp = NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap();
+
+    // First open: creates DB at current SCHEMA_VERSION. Edges exists as a
+    // VIEW (renamed from table by V16_V17 migration) and claims is the
+    // real backing table.
+    {
+        let _db = YantrikDB::new(path, 8).unwrap();
+    }
+
+    // Sanity check: edges is indeed a view in the current-schema state.
+    {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        let kind: String = conn.query_row(
+            "SELECT type FROM sqlite_master WHERE name = 'edges'",
+            [],
+            |row| row.get(0),
+        ).unwrap();
+        assert_eq!(kind, "view",
+            "fixture precondition: at current schema, edges should be a backward-compat view");
+    }
+
+    // Rewind meta to 14 — simulates the issue #10 production state where
+    // an older binary briefly ran against a newer DB (or any other path
+    // that rewound meta while disk schema stayed advanced).
+    {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '14')",
+            [],
+        ).unwrap();
+    }
+
+    // Re-open: existing_version=14, migration loop runs V14_V15 which does
+    // `ALTER TABLE edges ADD COLUMN polarity ...` against the view. Pre-fix
+    // returns Err("Cannot add a column to a view"); post-fix succeeds
+    // because run_migration_idempotent now swallows that specific error
+    // class as already-applied.
+    let db = YantrikDB::new(path, 8)
+        .expect("v0.7.8 idempotent runner must heal rewound-meta DBs that hit ALTER-on-view");
+
+    // Sanity: post-heal write still works end-to-end.
+    db.record(
+        "post-heal smoke (issue 10)", "episodic",
+        0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8),
+        "default", 0.8, "general", "user", None,
+    ).unwrap();
+}
+
+#[test]
 fn migration_meta_stamp_does_not_downgrade() {
     // Forward arm of the same fix. Without the MAX guard, a binary whose
     // SCHEMA_VERSION constant is *behind* the on-disk DB silently rewinds
