@@ -6,7 +6,7 @@ mod sync;
 
 use std::sync::Arc;
 
-use pyo3::exceptions::{PyRuntimeError, PyValueError};
+use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 
@@ -242,9 +242,105 @@ impl PyYantrikDB {
         Ok(db.has_embedder())
     }
 
-    fn set_embedder(&mut self, embedder: PyObject) -> PyResult<()> {
+    /// Attach a Python-callable embedder. Must implement
+    /// `encode(text: str) -> list[float] | numpy.ndarray`.
+    ///
+    /// **v0.7.5 hostile-input guard.** Previously this method accepted any
+    /// PyObject without validation, then silently failed at first
+    /// `record_text()` / `recall_text()` call with a confusing downstream
+    /// error. The classic trap (reported by yantrikdb-hermes-agent msg
+    /// c8734310) was passing a string by mistake — Python strings have a
+    /// `.encode(charset)` method that interprets the argument as a charset
+    /// name, raising `LookupError: unknown encoding: <text>` from deep
+    /// inside the embed path.
+    ///
+    /// Now we probe the embedder at set time with a sentinel string and
+    /// reject anything that doesn't return a numeric vector. Costs one
+    /// extra `encode()` call up front in exchange for a clear,
+    /// localized error.
+    fn set_embedder(&mut self, py: Python<'_>, embedder: PyObject) -> PyResult<()> {
+        // Probe with a sentinel — if encode() doesn't produce a numeric
+        // vector, the embedder is bogus and we raise immediately.
+        let probe = embedder.call_method1(py, "encode", ("__yantrikdb_probe__",))
+            .map_err(|e| PyTypeError::new_err(format!(
+                "embedder must implement encode(text: str) -> list[float] \
+                 (calling .encode('__yantrikdb_probe__') raised: {e}). \
+                 Hint: pass a sentence-transformers SentenceTransformer or \
+                 any object with a compatible encode() method, OR use \
+                 YantrikDB.with_default(path) for the bundled embedder."
+            )))?;
+
+        // Numeric-vector check. Tolerates list[float] and numpy.ndarray
+        // (via .tolist()) since both are common embedder output types.
+        let numeric_ok = probe.extract::<Vec<f32>>(py).is_ok()
+            || probe.call_method0(py, "tolist")
+                .and_then(|l| l.extract::<Vec<f32>>(py))
+                .is_ok();
+        if !numeric_ok {
+            return Err(PyTypeError::new_err(
+                "embedder.encode(text) must return list[float] or numpy.ndarray; \
+                 got non-numeric. Common cause: passing a str (str.encode is a \
+                 charset codec, not an embedder)."
+            ));
+        }
+
         self.embedder = Some(embedder);
         Ok(())
+    }
+
+    /// **v0.7.5 — Slice C exposed in Python.** Replace the engine's current
+    /// embedder with one downloaded from
+    /// [`yantrikos/yantrikdb-models`](https://github.com/yantrikos/yantrikdb-models).
+    ///
+    /// Known names (registry pinned per release for SHA-256 verification):
+    /// - `"potion-base-8M"`  — 256-dim, ~92% MiniLM, ~28 MB tarball
+    /// - `"potion-base-32M"` — 512-dim, ~95% MiniLM, ~121 MB tarball
+    ///
+    /// First call fetches + verifies SHA-256 + extracts to
+    /// `dirs::cache_dir() / "yantrikdb" / "models" /`. Subsequent calls
+    /// (this process or any other against the same cache dir) hit the
+    /// cache and skip the network.
+    ///
+    /// **Dimension contract.** The engine's `embedding_dim` (set at
+    /// construction) must match the named model's output dim. Use
+    /// `YantrikDB.with_default(...)` (dim=64 for bundled potion-2M) and
+    /// then call `set_embedder_named` only with another 64-dim model
+    /// (none currently published) — OR construct with the matching dim:
+    /// `YantrikDB(":memory:", embedding_dim=256)` then
+    /// `db.set_embedder_named("potion-base-8M")`.
+    ///
+    /// Raises `RuntimeError` if the wheel was built with
+    /// `--no-default-features` (the `embedder-download` Cargo feature is
+    /// off) or if exclusive access to the engine isn't available (e.g.
+    /// any `_conn` proxy is still live — drop it first).
+    #[cfg(feature = "embedder-download")]
+    fn set_embedder_named(&mut self, name: &str) -> PyResult<()> {
+        let arc = self.inner.as_mut().ok_or_else(|| {
+            PyRuntimeError::new_err("YantrikDB is closed")
+        })?;
+        let engine = Arc::get_mut(arc).ok_or_else(|| {
+            PyRuntimeError::new_err(
+                "set_embedder_named requires exclusive access to the engine; \
+                 drop any ConnectionProxy / cloned YantrikDB references before calling"
+            )
+        })?;
+        engine.set_embedder_named(name).map_err(map_err)
+    }
+
+    /// Slim-build stub. When the Python crate is built with
+    /// `--no-default-features` the embedder-download path compiles out
+    /// entirely; this stub raises so callers get a clear actionable error
+    /// instead of `AttributeError: 'YantrikDB' object has no attribute
+    /// 'set_embedder_named'` (which is the wrong shape — they didn't
+    /// mistype, the feature is just absent).
+    #[cfg(not(feature = "embedder-download"))]
+    fn set_embedder_named(&mut self, _name: &str) -> PyResult<()> {
+        Err(PyRuntimeError::new_err(
+            "set_embedder_named requires the 'embedder-download' Cargo feature, \
+             which is on by default. This wheel was built --no-default-features. \
+             Either rebuild with default features or use YantrikDB.with_default() \
+             for the bundled potion-base-2M embedder."
+        ))
     }
 
     /// The _conn property — returns a ConnectionProxy for test compatibility.

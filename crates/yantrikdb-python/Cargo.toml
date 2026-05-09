@@ -1,6 +1,6 @@
 [package]
 name = "yantrikdb-python"
-version = "0.7.4"
+version = "0.7.5"
 edition = "2021"
 license = "AGPL-3.0-only"
 description = "Python bindings for YantrikDB cognitive memory engine"
@@ -17,4 +17,16 @@ rusqlite = { version = "0.37", features = ["bundled"] }
 serde_json = "1"
 
 [features]
-default = []
+# **v0.7.5 — embedder-download ON by default.** The default `pip install
+# yantrikdb` wheel can now `db.set_embedder_named("potion-base-8M" |
+# "potion-base-32M")` to download larger embedder variants from
+# yantrikos/yantrikdb-models on first call (cached under
+# dirs::cache_dir() afterward, SHA-256 pinned). Adds ~0.5-1 MB to the
+# wheel for ureq + sha2 + dirs + tar + flate2 — all pure-Rust, no
+# native-extension compile time. Slim builds (`--no-default-features`)
+# get a runtime stub that raises with a clear actionable error.
+#
+# Coordinated with yantrikdb-hermes-agent v0.2 plugin (msg c8734310)
+# for the "potion-2M out of the box, opt into 8M/32M" UX arc.
+default = ["embedder-download"]
+embedder-download = ["yantrikdb-core/embedder-download"]
