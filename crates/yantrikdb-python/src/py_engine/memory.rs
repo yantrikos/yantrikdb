@@ -125,20 +125,52 @@ impl PyYantrikDB {
             .map_err(map_err)
     }
 
-    /// **v0.7.4** — recall memories by text query, auto-embedding via the
-    /// engine's configured embedder.
+    /// **v0.7.4 / v0.7.7-extended** — recall memories by text query,
+    /// auto-embedding via the engine's configured embedder.
     ///
-    /// Mirrors `YantrikDB::recall_text` on the Rust side: same defaults
-    /// (no time window, no memory_type filter, expand_entities=true,
-    /// skip_reinforce=false). For richer filtering (namespace, domain,
-    /// memory_type, time window), use `recall(query=...)` which exposes
-    /// the full surface.
-    #[pyo3(signature = (query, top_k=10))]
+    /// Mirrors `YantrikDB::recall_text` / `YantrikDB::recall_text_filtered`
+    /// on the Rust side: same defaults for unfiltered calls (no time
+    /// window, no memory_type filter, expand_entities=true,
+    /// skip_reinforce=false). v0.7.7 added keyword-only `namespace` /
+    /// `domain` / `source` filters so consumers can isolate retrieval
+    /// to a specific subspace without reaching for the full `recall()`
+    /// surface.
+    ///
+    /// **Skill-search use case (v0.3.0+ plugin pattern).** YantrikDB
+    /// stores skills by convention as records in
+    /// `namespace="skill_substrate"` with
+    /// `metadata.record_type="skill"`. To search only skills:
+    ///
+    /// ```python
+    /// hits = db.recall_text(
+    ///     "how to handle JSON parsing edge cases",
+    ///     top_k=5,
+    ///     namespace="skill_substrate",
+    /// )
+    /// ```
+    ///
+    /// For richer filtering (memory_type, time window,
+    /// include_consolidated, etc.) continue to use `recall(query=...)`
+    /// which exposes the full engine surface. This method's namespace +
+    /// domain + source kwargs cover the subspace-isolation case
+    /// specifically.
+    ///
+    /// **Surface design.** All three filter args are keyword-only
+    /// (after the `*`). Adding them as positionals would have shifted
+    /// `top_k`'s meaning for callers passing it positionally — this
+    /// keeps `recall_text(query, 5)` working unchanged. Coordinated
+    /// with yantrikdb-hermes-agent v0.3.0 (swarm msg 8994b0a1) on the
+    /// "pyo3 surfaces should be Pythonic, not transcriptions of the
+    /// Rust signature" principle.
+    #[pyo3(signature = (query, top_k=10, *, namespace=None, domain=None, source=None))]
     fn recall_text(
         &self,
         py: Python<'_>,
         query: &str,
         top_k: usize,
+        namespace: Option<&str>,
+        domain: Option<&str>,
+        source: Option<&str>,
     ) -> PyResult<Vec<PyObject>> {
         let db = self.inner.as_ref().ok_or_else(|| {
             PyRuntimeError::new_err("YantrikDB is closed")
@@ -146,8 +178,27 @@ impl PyYantrikDB {
 
         let emb = self.embed_text(py, query)?;
 
+        // Dispatch via recall() directly so we can pass all three filter
+        // args in one call. Engine's recall_text_filtered only takes
+        // domain + source (no namespace) and recall_text takes none —
+        // recall() is the one with all three positional. Same defaults
+        // as recall_text on the Rust side: time_window=None,
+        // memory_type=None, include_consolidated=false,
+        // expand_entities=true, skip_reinforce=false.
         let results = db
-            .recall(&emb, top_k, None, None, false, true, Some(query), false, None, None, None)
+            .recall(
+                &emb,
+                top_k,
+                None,           // time_window
+                None,           // memory_type
+                false,          // include_consolidated
+                true,           // expand_entities
+                Some(query),
+                false,          // skip_reinforce
+                namespace,
+                domain,
+                source,
+            )
             .map_err(map_err)?;
 
         results
