@@ -410,7 +410,7 @@ impl YantrikDB {
         if let Some(v) = existing_version {
             for &(from_v, sql) in migrations {
                 if v <= from_v {
-                    conn.execute_batch(sql)?;
+                    Self::run_migration_idempotent(&conn, sql)?;
                 }
             }
         }
@@ -424,10 +424,26 @@ impl YantrikDB {
         // with canonical vocabulary (idempotent INSERT OR IGNORE).
         crate::engine::moves::seed_registries_inner(&conn)?;
 
-        // Set schema version
+        // Set schema version — never downgrade.
+        //
+        // **v0.7.3 migration-resilience fix.** Previously this unconditionally
+        // wrote SCHEMA_VERSION, which meant a single accidental run of an
+        // older binary against a newer DB (rollback during incident response,
+        // testing an older release, container image swap) would silently
+        // rewind meta.schema_version while leaving the on-disk schema at the
+        // higher version. The next forward upgrade then re-ran already-applied
+        // migrations (e.g. ALTER TABLE oplog ADD COLUMN embedding) and
+        // tripped on "duplicate column name". Diagnosed via yantrikdb-server
+        // homelab v0.8.13 cluster upgrade failure (msg 3467c556).
+        //
+        // MAX-stamp guarantees forward-only progress on the version meta even
+        // if the running binary is older than the on-disk schema. Combined
+        // with run_migration_idempotent below, both prevents new occurrences
+        // (forward) and heals existing corrupted-meta deployments (replay).
+        let stamp = std::cmp::max(existing_version.unwrap_or(0), SCHEMA_VERSION);
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
-            params![SCHEMA_VERSION.to_string()],
+            params![stamp.to_string()],
         )?;
 
         // Resolve actor_id: explicit > stored in meta > generate new
@@ -610,6 +626,62 @@ impl YantrikDB {
             },
         )
         .ok()
+    }
+
+    /// Run a migration SQL batch with statement-level idempotency.
+    ///
+    /// **v0.7.3 fix for migration-replay duplicate-column class of bugs.**
+    /// `conn.execute_batch` aborts on the first error, so a single ALTER TABLE
+    /// ADD COLUMN on a column that already exists fails the whole migration —
+    /// even though the rest of the batch (CREATE INDEX IF NOT EXISTS, UPDATE,
+    /// etc.) is idempotent and safe to re-run. SQLite has no `IF NOT EXISTS`
+    /// for ALTER TABLE ADD COLUMN, so we have to detect the harmless cases at
+    /// runtime.
+    ///
+    /// This helper splits the batch on `;`, executes each statement
+    /// individually, and swallows specific errors that mean "the change is
+    /// already applied":
+    ///   - `duplicate column name: <X>` (re-running ALTER TABLE ADD COLUMN)
+    ///   - `<X> already exists` (re-running CREATE TABLE/INDEX without IF
+    ///     NOT EXISTS — defensive; our migrations already use IF NOT EXISTS
+    ///     for the CREATE side)
+    ///
+    /// Any other error propagates. This makes every entry in the migration
+    /// chain replay-safe retroactively, healing deployments whose
+    /// meta.schema_version was rewound (e.g. by an old-binary downgrade)
+    /// without manual intervention.
+    ///
+    /// Splitting on bare `;` is acceptable here because the migration SQL is
+    /// authored in this crate — none of the statements contain `;` inside
+    /// string literals. If that changes, switch to a sqlite tokenizer pass.
+    ///
+    /// Diagnosed via yantrikdb-server v0.8.13 cluster upgrade incident
+    /// (swarm msg 3467c556 → response fa070846).
+    fn run_migration_idempotent(conn: &Connection, batch: &str) -> Result<()> {
+        for raw in batch.split(';') {
+            let stmt = raw.trim();
+            if stmt.is_empty() {
+                continue;
+            }
+            match conn.execute(stmt, []) {
+                Ok(_) => {}
+                Err(e) => {
+                    let msg = e.to_string();
+                    let is_idempotent_replay = msg.contains("duplicate column name")
+                        || msg.contains("already exists");
+                    if is_idempotent_replay {
+                        tracing::debug!(
+                            statement = %stmt,
+                            error = %msg,
+                            "migration: skipping already-applied statement (idempotent replay)"
+                        );
+                        continue;
+                    }
+                    return Err(e.into());
+                }
+            }
+        }
+        Ok(())
     }
 
     fn load_active_sessions(conn: &Connection) -> Result<HashMap<String, String>> {

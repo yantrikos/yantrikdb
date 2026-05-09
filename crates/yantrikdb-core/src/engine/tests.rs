@@ -5073,3 +5073,103 @@ fn explicit_set_embedder_overrides_bundled() {
     assert!((v[0] - 0.7777).abs() < 1e-6,
         "DummyEmbedder's sentinel must be visible — set_embedder overrode bundled");
 }
+
+// ============================================================================
+// v0.7.3 — migration replay resilience (regression test for the v0.8.13
+// homelab cluster upgrade incident, swarm msg 3467c556).
+//
+// Reproduction: a deployment whose meta.schema_version was rewound (e.g. by
+// an old binary briefly running against a newer DB) ends up in a state where
+// the on-disk schema is at a higher version than the meta stamp. On the next
+// forward upgrade, the migration loop re-runs already-applied migrations and
+// trips on `ALTER TABLE ... ADD COLUMN` (not idempotent in SQLite).
+//
+// The fix has two halves:
+//   1. run_migration_idempotent — swallows "duplicate column name" / "already
+//      exists" so any migration is replay-safe at statement level.
+//   2. MAX-stamp meta.schema_version on every open — stops downgrades from
+//      ever rewinding the version stamp going forward.
+//
+// These tests cover both halves directly.
+// ============================================================================
+
+#[test]
+fn migration_replay_does_not_trip_on_already_present_column() {
+    // Reproduces the yantrikdb-server v0.8.13 cluster upgrade failure:
+    // open a current-schema DB, manually rewind meta.schema_version to 23
+    // (simulating the rewind-then-upgrade path), then re-open. With the
+    // v0.7.3 fix the second open() succeeds; without it, V23_TO_V24's
+    // `ALTER TABLE oplog ADD COLUMN embedding BLOB` trips on duplicate.
+    use tempfile::NamedTempFile;
+    let tmp = NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap();
+
+    // First open: creates DB at current SCHEMA_VERSION with all columns.
+    {
+        let _db = YantrikDB::new(path, 8).unwrap();
+        // db drops here, conn closed
+    }
+
+    // Simulate a rewound meta stamp (the precondition that turns a forward
+    // upgrade into a re-run of an already-applied migration). Direct SQL —
+    // we explicitly need the corruption.
+    {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '23')",
+            [],
+        ).unwrap();
+    }
+
+    // Second open: migration loop sees existing_version=23 and tries to
+    // re-run V23_TO_V24, which ADDs a column that already exists. Pre-fix
+    // this returns Err("duplicate column name: embedding"). Post-fix it
+    // succeeds because run_migration_idempotent swallows that specific
+    // error class.
+    let db = YantrikDB::new(path, 8)
+        .expect("v0.7.3 idempotent migration runner must heal rewound-meta deployments");
+
+    // Sanity: a write through the freshly healed DB still works end-to-end
+    // (the column is reachable, the migration didn't leave the schema in a
+    // partial state).
+    db.record(
+        "post-heal smoke", "episodic",
+        0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8),
+        "default", 0.8, "general", "user", None,
+    ).unwrap();
+}
+
+#[test]
+fn migration_meta_stamp_does_not_downgrade() {
+    // Forward arm of the same fix. Without the MAX guard, a binary whose
+    // SCHEMA_VERSION constant is *behind* the on-disk DB silently rewinds
+    // the meta stamp — re-creating the precondition for the previous test.
+    // This locks the invariant at the meta-write site.
+    use tempfile::NamedTempFile;
+    let tmp = NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap();
+
+    // Pre-stamp the DB at a version GREATER than current SCHEMA_VERSION.
+    // Direct SQL because we're simulating "ran a future binary first".
+    {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '999');"
+        ).unwrap();
+    }
+
+    // Open with the current binary — should NOT rewind 999 down to
+    // SCHEMA_VERSION.
+    let _db = YantrikDB::new(path, 8).unwrap();
+
+    let stamped: String = {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'", [],
+            |row| row.get(0),
+        ).unwrap()
+    };
+    assert_eq!(stamped, "999",
+        "MAX-stamp invariant: open() must never rewind meta.schema_version below the on-disk value");
+}
