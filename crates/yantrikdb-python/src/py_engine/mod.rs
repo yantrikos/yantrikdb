@@ -206,11 +206,40 @@ impl PyYantrikDB {
         })
     }
 
+    /// **v0.7.4** — open with the engine's bundled embedder pre-attached.
+    ///
+    /// Mirrors `YantrikDB::with_default` on the Rust side: opens the DB at
+    /// the bundled embedder's dimension (currently 64 for `potion-base-2M`)
+    /// and auto-attaches the bundled embedder so `record(text=...)`,
+    /// `recall(query=...)`, `record_text()`, and `recall_text()` work
+    /// without any external sentence-transformers install or first-run
+    /// model download. This is the "Just Works" entry point for Python.
+    ///
+    /// Slim wheels built with `--no-default-features` will raise at the
+    /// engine level (the bundled embedder is feature-gated). Default PyPI
+    /// wheels include it.
+    #[staticmethod]
+    fn with_default(db_path: &str) -> PyResult<Self> {
+        let inner = YantrikDB::with_default(db_path).map_err(map_err)?;
+        Ok(Self {
+            inner: Some(Arc::new(inner)),
+            embedder: None,
+        })
+    }
+
     /// Whether this instance has encryption enabled.
     #[getter]
     fn is_encrypted(&self) -> PyResult<bool> {
         let db = self.get_inner()?;
         Ok(db.is_encrypted())
+    }
+
+    /// Whether the engine has a Rust-native embedder configured (bundled
+    /// or downloaded). True after `with_default()` on default builds; also
+    /// true after any successful `set_embedder_named()` call.
+    fn has_embedder(&self) -> PyResult<bool> {
+        let db = self.get_inner()?;
+        Ok(db.has_embedder())
     }
 
     fn set_embedder(&mut self, embedder: PyObject) -> PyResult<()> {

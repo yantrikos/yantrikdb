@@ -81,6 +81,81 @@ impl PyYantrikDB {
             .collect()
     }
 
+    /// **v0.7.4** — record a memory, auto-embedding via the engine's
+    /// configured embedder.
+    ///
+    /// Mirrors `YantrikDB::record_text` on the Rust side. The text is
+    /// embedded using whatever Rust-native embedder is attached (bundled
+    /// or downloaded via `set_embedder_named`); raises `RuntimeError` if
+    /// no embedder is configured. For Python-callable embedders (passed
+    /// at construction), prefer `record(text=..., embedding=None)` which
+    /// also dispatches via `embed_text()`.
+    ///
+    /// Identical semantics to `record(text=..., embedding=None)` when an
+    /// embedder is attached; provided as an explicit surface that mirrors
+    /// the engine's `record_text` for users coming from the Rust API.
+    #[pyo3(signature = (text, memory_type="episodic", importance=0.5, valence=0.0, half_life=604800.0, metadata=None, namespace="default", certainty=0.8, domain="general", source="user", emotional_state=None))]
+    fn record_text(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        memory_type: &str,
+        importance: f64,
+        valence: f64,
+        half_life: f64,
+        metadata: Option<&Bound<'_, PyDict>>,
+        namespace: &str,
+        certainty: f64,
+        domain: &str,
+        source: &str,
+        emotional_state: Option<&str>,
+    ) -> PyResult<String> {
+        let db = self.inner.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("YantrikDB is closed")
+        })?;
+
+        let emb = self.embed_text(py, text)?;
+
+        let meta = match metadata {
+            Some(d) => py_to_json(&d.as_any())?,
+            None => serde_json::json!({}),
+        };
+
+        db.record(text, memory_type, importance, valence, half_life, &meta, &emb, namespace, certainty, domain, source, emotional_state)
+            .map_err(map_err)
+    }
+
+    /// **v0.7.4** — recall memories by text query, auto-embedding via the
+    /// engine's configured embedder.
+    ///
+    /// Mirrors `YantrikDB::recall_text` on the Rust side: same defaults
+    /// (no time window, no memory_type filter, expand_entities=true,
+    /// skip_reinforce=false). For richer filtering (namespace, domain,
+    /// memory_type, time window), use `recall(query=...)` which exposes
+    /// the full surface.
+    #[pyo3(signature = (query, top_k=10))]
+    fn recall_text(
+        &self,
+        py: Python<'_>,
+        query: &str,
+        top_k: usize,
+    ) -> PyResult<Vec<PyObject>> {
+        let db = self.inner.as_ref().ok_or_else(|| {
+            PyRuntimeError::new_err("YantrikDB is closed")
+        })?;
+
+        let emb = self.embed_text(py, query)?;
+
+        let results = db
+            .recall(&emb, top_k, None, None, false, true, Some(query), false, None, None, None)
+            .map_err(map_err)?;
+
+        results
+            .iter()
+            .map(|r| recall_result_to_dict(py, r))
+            .collect()
+    }
+
     /// Recall with response including confidence scoring and refinement hints.
     #[pyo3(signature = (query=None, query_embedding=None, top_k=10, time_window=None, memory_type=None, include_consolidated=false, expand_entities=true, skip_reinforce=false, namespace=None, domain=None, source=None))]
     fn recall_with_response(
