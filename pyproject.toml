@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "yantrikdb"
-version = "0.7.5"
+version = "0.7.6"
 description = "A Cognitive Memory Engine for Persistent AI Systems"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -26,14 +26,31 @@ classifiers = [
     "Topic :: Database",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+# **v0.7.6 — bundled-embedder respect.** Default install is just the
+# wheel itself plus tiny CLI/UUID utils. The bundled potion-base-2M
+# embedder runs entirely in-Rust (no Python embedder needed) so the
+# default `pip install yantrikdb` is ~10 MB total and finishes in
+# seconds, matching the bundled-embedder docstring promise. Users
+# wanting the legacy sentence-transformers BYO path opt in via
+# `pip install yantrikdb[sentence-transformers]` (see optional below).
+#
+# Audit basis: numpy is not imported anywhere under src/yantrikdb/;
+# sentence-transformers is only imported lazily inside function
+# bodies in api.py / cli.py / mcp/server.py / eval scripts — none of
+# which execute on a default `from yantrikdb import YantrikDB` path.
 dependencies = [
-    "sentence-transformers>=3.0.0",
-    "numpy>=1.26.0",
     "uuid-utils>=0.9.0",
     "click>=8.0.0",
 ]
 
 [project.optional-dependencies]
+# **v0.7.6 new.** Pulls in sentence-transformers (and its torch +
+# transformers + scipy + scikit-learn transitive closure, ~2 GB
+# disk) for callers who BYO an external embedder. Required by the
+# `yantrikdb-server` and `yantrikdb` (CLI with --model) entry
+# points. NOT required for the bundled-embedder Just-Works path:
+# `db = YantrikDB.with_default(path); db.record_text(...)`.
+sentence-transformers = ["sentence-transformers>=3.0.0", "numpy>=1.26.0"]
 server = ["fastapi>=0.110.0", "uvicorn[standard]>=0.29.0"]
 sync = ["websockets>=12.0"]
 langchain = ["langchain-core>=0.2.0"]
@@ -41,7 +58,7 @@ openai = ["openai>=1.0.0"]
 crewai = ["crewai>=0.40.0"]
 agent = ["httpx>=0.27.0", "pyyaml>=6.0"]
 all = [
-    "yantrikdb[server,sync,langchain,openai,agent]",
+    "yantrikdb[sentence-transformers,server,sync,langchain,openai,agent]",
 ]
 dev = [
     "pytest>=8.0.0",

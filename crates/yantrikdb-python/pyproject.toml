@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "yantrikdb"
-version = "0.7.5"
+version = "0.7.6"
 description = "A Cognitive Memory Engine for Persistent AI Systems"
 readme = "../../README.md"
 license = "AGPL-3.0-only"
@@ -26,14 +26,15 @@ classifiers = [
     "Topic :: Database",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
+# v0.7.6: see ../../pyproject.toml for the rationale comment. Mirror
+# image of the root manifest's dep list.
 dependencies = [
-    "sentence-transformers>=3.0.0",
-    "numpy>=1.26.0",
     "uuid-utils>=0.9.0",
     "click>=8.0.0",
 ]
 
 [project.optional-dependencies]
+sentence-transformers = ["sentence-transformers>=3.0.0", "numpy>=1.26.0"]
 server = ["fastapi>=0.110.0", "uvicorn[standard]>=0.29.0"]
 sync = ["websockets>=12.0"]
 langchain = ["langchain-core>=0.2.0"]
@@ -41,7 +42,7 @@ openai = ["openai>=1.0.0"]
 crewai = ["crewai>=0.40.0"]
 agent = ["httpx>=0.27.0", "pyyaml>=6.0"]
 all = [
-    "yantrikdb[server,sync,langchain,openai,agent]",
+    "yantrikdb[sentence-transformers,server,sync,langchain,openai,agent]",
 ]
 dev = [
     "pytest>=8.0.0",
