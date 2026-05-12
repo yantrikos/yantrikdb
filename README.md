@@ -409,8 +409,16 @@ cargo run --example showcase_wirecard
 
 ## Research & Publications
 
+### 📄 Skill as Memory, Not Document (May 2026)
+
+[Sarkar, P. (2026). *Skill as Memory, Not Document: A Database-Native Substrate for Agent Skill Catalogs*. Zenodo.](https://doi.org/10.5281/zenodo.20128887)
+
+A measurement paper at 5K-skill scale: token cost vs filesystem catalogs (with the honest 1.49× ablation), retrieval latency (87.3 ms p50), and invalid-skill admission (0% YantrikDB vs 97% document-only baseline). Reproducible scripts + raw CSVs at [yantrikdb-server/benchmarks/skill_recall/](https://github.com/yantrikos/yantrikdb-server/tree/main/benchmarks/skill_recall). Companion blog: [yantrikdb.com/papers/skill-substrate](https://yantrikdb.com/papers/skill-substrate/).
+
+### Earlier work
+
 - **U.S. Patent Application 19/573,392** (March 2026): "Cognitive Memory Database System with Relevance-Conditioned Scoring and Autonomous Knowledge Management"
-- **Zenodo:** [YantrikDB: A Cognitive Memory Engine for Persistent AI Systems](https://zenodo.org/records/14933693)
+- **Zenodo (software):** [YantrikDB: A Cognitive Memory Engine for Persistent AI Systems](https://doi.org/10.5281/zenodo.18793952)
 
 ## Author
 
