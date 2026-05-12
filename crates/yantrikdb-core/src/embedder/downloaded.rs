@@ -56,12 +56,31 @@ fn registry(name: &str) -> Option<DownloadableModel> {
             dim: 256,
         }),
         // potion-base-32M — 512-dim, ~95% MiniLM. Largest English
-        // variant before multilingual jumps to 488 MB.
+        // variant before multilingual jumps to ~460 MB.
         "potion-base-32M" => Some(DownloadableModel {
             release_tag: "v0.1.0",
             asset: "potion-base-32M.tar.gz",
             sha256: "428163e9aa596b38bf98f6d41ff7cb1b3d7e6d21f58e1edc8124cd9d180f93ad",
             dim: 512,
+        }),
+        // potion-multilingual-128M — 256-dim, BGE-M3 tokenizer, 101
+        // languages. ~460 MB tarball; large but a single download
+        // unlocks multilingual semantic recall without needing a
+        // transformer or external sentence-transformers install. Same
+        // model2vec static-embedding architecture as the English
+        // variants, just trained against a multilingual corpus +
+        // tokenizer. dim=256 matches potion-base-8M, so existing
+        // dim=256 callers can swap to this without reopening the DB.
+        //
+        // Added in engine v0.7.9 in response to yantrikdb-hermes-plugin
+        // Issue #1 (alienos) — first real user request for multilingual
+        // support. Coordinated with plugin v0.4.0 env-var embedder
+        // selection.
+        "potion-multilingual-128M" => Some(DownloadableModel {
+            release_tag: "v0.2.0",
+            asset: "potion-multilingual-128M.tar.gz",
+            sha256: "bbd9b15fa1303538206911f82c85b5d52e3fa0a334479f988e8a370b0e2e7a52",
+            dim: 256,
         }),
         _ => None,
     }
