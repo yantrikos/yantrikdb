@@ -9,6 +9,7 @@ use std::sync::Arc;
 use pyo3::exceptions::{PyRuntimeError, PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
+type PyObject = pyo3::Py<pyo3::PyAny>;
 
 use yantrikdb_core::YantrikDB;
 

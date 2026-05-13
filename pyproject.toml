@@ -4,7 +4,7 @@ build-backend = "maturin"
 
 [project]
 name = "yantrikdb"
-version = "0.7.10"
+version = "0.7.11"
 description = "A Cognitive Memory Engine for Persistent AI Systems"
 readme = "README.md"
 license = "AGPL-3.0-only"
@@ -23,6 +23,7 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Topic :: Database",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]

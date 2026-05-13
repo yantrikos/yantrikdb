@@ -73,7 +73,7 @@ jobs:
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
-          args: --release --out dist -i python3.10 python3.11 python3.12 python3.13
+          args: --release --out dist -i python3.10 python3.11 python3.12 python3.13 python3.14
           sccache: "true"
 
       - name: Upload wheels

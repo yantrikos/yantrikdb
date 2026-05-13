@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
+type PyObject = pyo3::Py<pyo3::PyAny>;
 
 use yantrikdb_core::YantrikDB;
 

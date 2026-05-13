@@ -1,5 +1,8 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+// pyo3 0.28 removed the `PyObject` top-level alias. Reintroduce locally —
+// `Py<PyAny>` is the equivalent owned reference.
+type PyObject = pyo3::Py<pyo3::PyAny>;
 
 use yantrikdb_core::types::MemoryWithEmbedding;
 

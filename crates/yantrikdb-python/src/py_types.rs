@@ -1,5 +1,6 @@
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
+type PyObject = pyo3::Py<pyo3::PyAny>;
 
 /// Convert an yantrikdb-core Memory to a Python dict matching the Python engine's output exactly.
 pub fn memory_to_dict(py: Python<'_>, mem: &yantrikdb_core::Memory) -> PyResult<PyObject> {

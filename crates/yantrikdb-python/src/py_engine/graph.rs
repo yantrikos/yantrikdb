@@ -1,4 +1,5 @@
 use pyo3::prelude::*;
+type PyObject = pyo3::Py<pyo3::PyAny>;
 
 use crate::py_types::*;
 
