@@ -55,6 +55,9 @@ jobs:
       - name: Build tests and Rust components
         run: cargo build --verbose
 
+      - name: Run Rust Tests (slim)
+        run: cargo test --workspace --no-default-features --verbose
+
       - name: Run Rust Tests
         run: cargo test --workspace --verbose
 
