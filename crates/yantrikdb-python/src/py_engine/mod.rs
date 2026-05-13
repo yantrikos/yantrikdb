@@ -234,12 +234,33 @@ impl PyYantrikDB {
         Ok(db.is_encrypted())
     }
 
-    /// Whether the engine has a Rust-native embedder configured (bundled
-    /// or downloaded). True after `with_default()` on default builds; also
-    /// true after any successful `set_embedder_named()` call.
+    /// Whether ANY embedder is configured (Rust-native or Python-side).
+    ///
+    /// **v0.7.10 fix for issue yantrikos/yantrikdb-hermes-plugin#4
+    /// (alienos 2026-05-13).** The pyo3 wrapper stores embedders in TWO
+    /// places: `self.inner.embedder` (Rust-native, set via the engine's
+    /// own `set_embedder()` from `with_default()`, `auto_attach_bundled
+    /// _embedder()`, and `set_embedder_named()`) and `self.embedder`
+    /// (Python `PyObject` set via the pyo3 `set_embedder(obj)` method
+    /// when the caller passes their own Python embedder like a
+    /// `SentenceTransformer` or `Model2VecEmbedder`). Both work in
+    /// `embed_text()` — it tries the Rust path first, then falls back
+    /// to the Python path.
+    ///
+    /// Pre-v0.7.10 `has_embedder()` only checked the Rust side, so a
+    /// caller who attached a Python embedder via `set_embedder(...)`
+    /// would see `has_embedder() == False` despite having a fully
+    /// functional embedder — and `record_text()` / `recall_text()`
+    /// would work correctly. The asymmetry blocked the Hermes plugin's
+    /// startup precondition check (its embedded.py raised on
+    /// `not has_embedder()`).
+    ///
+    /// True if EITHER side has an embedder. Functionally equivalent to
+    /// "can `embed_text(...)` succeed?", which is the actual question
+    /// any caller running this check is trying to answer.
     fn has_embedder(&self) -> PyResult<bool> {
         let db = self.get_inner()?;
-        Ok(db.has_embedder())
+        Ok(db.has_embedder() || self.embedder.is_some())
     }
 
     /// Attach a Python-callable embedder. Must implement
