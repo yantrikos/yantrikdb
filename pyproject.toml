@@ -4,10 +4,19 @@ build-backend = "maturin"
 
 [project]
 name = "yantrikdb"
-version = "0.7.14"
+version = "0.7.15"
 description = "A Cognitive Memory Engine for Persistent AI Systems"
 readme = "README.md"
 license = "AGPL-3.0-only"
+# Explicitly declare the LICENSE file for PEP 639 compliance. Without
+# this, maturin's sdist auto-detection found the duplicate copy at
+# crates/yantrikdb-python/LICENSE and packaged it at that nested path
+# (yantrikdb-0.7.14/crates/yantrikdb-python/LICENSE inside the sdist).
+# PyPI's metadata validator expects the License-File at the sdist root
+# (yantrikdb-0.7.14/LICENSE), and rejected v0.7.12/v0.7.13/v0.7.14
+# sdists with "License-File LICENSE does not exist in distribution
+# file." Closes #(this PR fixes the v0.7.14 sdist publish failure).
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 authors = [
     { name = "Pranab Sarkar", email = "developer@pranab.co.in" },
