@@ -378,11 +378,15 @@ def _import_db(db, data: dict, merge: bool = False) -> dict:
         )
         counts["entities"] += 1
 
-    # Import edges
+    # Import edges. The `edges` name is a backward-compat VIEW since
+    # V16→V17 (RFC 006 Phase 5) — real backing table is `claims` with
+    # `claim_id` instead of `edge_id`. Write to `claims` so the INSERT
+    # actually lands; the existing export side reads through the view,
+    # which still works fine because the view aliases claim_id → edge_id.
     for e in data.get("edges", []):
         conn.execute(
-            "INSERT OR IGNORE INTO edges "
-            "(edge_id, src, dst, rel_type, weight, created_at, tombstoned) "
+            "INSERT OR IGNORE INTO claims "
+            "(claim_id, src, dst, rel_type, weight, created_at, tombstoned) "
             "VALUES (?, ?, ?, ?, ?, ?, 0)",
             (e["edge_id"], e["src"], e["dst"], e["rel_type"],
              e["weight"], e["created_at"]),
