@@ -1,7 +1,7 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::time::Duration;
-use yantrikdb_core::bench_utils::{query_embedding, seed_db_scaled, vec_seed_dim};
-use yantrikdb_core::{RecordInput, YantrikDB};
+use yantrikdb::bench_utils::{query_embedding, seed_db_scaled, vec_seed_dim};
+use yantrikdb::{RecordInput, YantrikDB};
 
 fn vec_seed(seed: f32, dim: usize) -> Vec<f32> {
     let raw: Vec<f32> = (0..dim).map(|i| (seed + i as f32) * 0.1).collect();
@@ -80,6 +80,8 @@ fn bench_recall(c: &mut Criterion) {
                     false,
                     None,
                     false,
+                    None,
+                    None,
                     None,
                 )
                 .unwrap()
@@ -311,6 +313,8 @@ fn bench_recall_scaled(c: &mut Criterion) {
                     None,
                     true,
                     None,
+                    None,
+                    None,
                 )
                 .unwrap()
             })
@@ -346,6 +350,8 @@ fn bench_recall_dim_comparison(c: &mut Criterion) {
                             false,
                             None,
                             true,
+                            None,
+                            None,
                             None,
                         )
                         .unwrap()
@@ -384,6 +390,8 @@ fn bench_recall_100k(c: &mut Criterion) {
                     None,
                     true,
                     None,
+                    None,
+                    None,
                 )
                 .unwrap()
             })
@@ -415,6 +423,8 @@ fn bench_recall_with_graph(c: &mut Criterion) {
                     Some("Memory about Entity_5 involving Entity_10"),
                     true,
                     None,
+                    None,
+                    None,
                 )
                 .unwrap()
             })
@@ -431,6 +441,8 @@ fn bench_recall_with_graph(c: &mut Criterion) {
                     false,
                     None,
                     true,
+                    None,
+                    None,
                     None,
                 )
                 .unwrap()
@@ -466,6 +478,8 @@ fn bench_reinforce_overhead(c: &mut Criterion) {
                     None,
                     false,
                     None,
+                    None,
+                    None,
                 )
                 .unwrap()
         })
@@ -483,6 +497,8 @@ fn bench_reinforce_overhead(c: &mut Criterion) {
                     false,
                     None,
                     true,
+                    None,
+                    None,
                     None,
                 )
                 .unwrap()

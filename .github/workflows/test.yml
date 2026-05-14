@@ -52,14 +52,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install "maturin>=1.5" pytest pytest-benchmark
 
-      # Skip yantrikdb-python here too: maturin handles its cdylib build
-      # in pypi.yml with the right macOS linker flags
-      # (-undefined dynamic_lookup). Stock `cargo build` without those
-      # flags fails on macOS at link time with "symbol(s) not found"
-      # for __Py_NoneStruct + friends because pyo3 extension-module
-      # doesn't link against libpython statically.
+      # v0.7.14 (closes #19): yantrikdb-python now includes a build.rs
+      # that emits `-undefined dynamic_lookup` on macOS targets, so
+      # stock `cargo build` works on macOS without external tooling.
+      # No more `--exclude yantrikdb-python` on the build step (still
+      # excluded from cargo test below because pyo3 extension-module +
+      # cargo test = link error on ALL platforms, since no Python
+      # interpreter exists at test-link time).
       - name: Build tests and Rust components
-        run: cargo build --workspace --exclude yantrikdb-python --verbose
+        run: cargo build --workspace --verbose
 
       # `yantrikdb-python` is a pyo3 extension-module crate — `cargo test`
       # tries to link a test binary against the Python C ABI but

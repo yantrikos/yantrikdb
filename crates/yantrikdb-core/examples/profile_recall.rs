@@ -12,8 +12,8 @@
 #[cfg(feature = "profiling")]
 fn main() {
     use std::time::Instant;
-    use yantrikdb_core::bench_utils::{query_embedding, seed_db_scaled};
-    use yantrikdb_core::{RecallTimings, YantrikDB};
+    use yantrikdb::bench_utils::{query_embedding, seed_db_scaled};
+    use yantrikdb::{RecallTimings, YantrikDB};
 
     let n: usize = std::env::var("PROFILE_N")
         .ok()
@@ -74,7 +74,7 @@ fn main() {
     for i in 0..iters {
         let result = db
             .recall_profiled(
-                &query, top_k, None, None, false, with_graph, query_text, false,
+                &query, top_k, None, None, false, with_graph, query_text, false, None, None, None,
             )
             .unwrap();
         println!(
@@ -163,7 +163,7 @@ fn main() {
 
     // Stats summary
     println!();
-    let stats = db.stats().unwrap();
+    let stats = db.stats(None).unwrap();
     println!("=== Database Stats ===");
     println!("  Active memories: {}", stats.active_memories);
     println!("  Entities: {}", stats.entities);

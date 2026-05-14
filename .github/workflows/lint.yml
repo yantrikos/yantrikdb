@@ -65,9 +65,10 @@ jobs:
       # yantrikdb-python excluded — pyo3 extension-module test linking
       # fails on missing Python C ABI symbols (handled by maturin/pytest
       # instead).
-      # Targets: lib + tests + bins only. Examples and benches have
-      # accumulated their own compile drift across the v0.7.x arc (signatures
-      # changed in lib, examples didn't catch up). Tracked separately as
-      # cleanup; this gate covers shipping artifacts (lib + tests + bins).
+      # v0.7.14: re-enabled --all-targets after fixing example + bench
+      # compile drift (closes #18). The `yantrikdb_core::` references in
+      # benches/engine_bench.rs and examples/profile_recall.rs were stale
+      # (crate is named `yantrikdb`); 8 bench `db.recall(...)` call sites
+      # were missing the v0.7.6-added domain + source params.
       - name: Run Clippy
-        run: cargo clippy --lib --tests --bins --all-features --workspace --exclude yantrikdb-python -- --cap-lints warn
+        run: cargo clippy --all-targets --all-features --workspace --exclude yantrikdb-python -- --cap-lints warn
