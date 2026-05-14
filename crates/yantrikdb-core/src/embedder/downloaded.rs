@@ -252,6 +252,21 @@ fn fetch_and_extract(model: &DownloadableModel, name: &str) -> Result<PathBuf> {
         YantrikDbError::InvalidInput(format!("mkdir tmp {}: {e}", tmp_dir.display()))
     })?;
 
+    // **Closes #26.** Restored the call to extract_tarball_to that PR #23's
+    // refactor accidentally swallowed. The helper was correctly defined +
+    // unit-tested for both v0.1.0-prefix and v0.2.0-files-at-root layouts,
+    // but never invoked from fetch_and_extract — so cache_is_populated()
+    // always failed and set_embedder_named() returned "expected files
+    // missing" for ALL named models in v0.7.13/v0.7.14, not just the
+    // multilingual one. Same class of gap as v0.7.9's user-side-smoke
+    // failure that filed #15 in the first place. The cleanup-on-error
+    // arm leaves no half-written tmp_dir lying around if extraction
+    // fails partway.
+    extract_tarball_to(&bytes, &tmp_dir).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        e
+    })?;
+
     // Final move: rename tmp_dir → final_dir. If a concurrent process
     // beat us to it, both renames may run; the second one fails and we
     // accept whatever's already there.
