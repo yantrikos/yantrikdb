@@ -31,3 +31,7 @@ build/
 chatgpt
 wedge_*.db
 *.db
+src/yantrikdb/_yantrikdb_rust*.pyd
+src/yantrikdb/_yantrikdb_rust*.pdb
+src/yantrikdb/_yantrikdb_rust*.so
+src/yantrikdb/_yantrikdb_rust*.dylib
