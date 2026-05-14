@@ -31,8 +31,8 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use yantrikdb::YantrikDB;
 use yantrikdb::engine::materializer::spawn_compactor;
+use yantrikdb::YantrikDB;
 
 /// **Phase 7 soak prep — RSS instrumentation.**
 ///
@@ -51,11 +51,7 @@ fn read_rss_bytes() -> Option<u64> {
     for line in status.lines() {
         if let Some(rest) = line.strip_prefix("VmRSS:") {
             // Format: "VmRSS:    123456 kB"
-            let kb: u64 = rest
-                .split_whitespace()
-                .next()?
-                .parse()
-                .ok()?;
+            let kb: u64 = rest.split_whitespace().next()?.parse().ok()?;
             return Some(kb * 1024);
         }
     }
@@ -101,17 +97,45 @@ fn parse_args() -> (Config, String) {
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
-            "--writers" => { cfg.writers = args[i + 1].parse().unwrap(); i += 2; }
-            "--readers" => { cfg.readers = args[i + 1].parse().unwrap(); i += 2; }
-            "--duration-secs" => { cfg.duration_secs = args[i + 1].parse().unwrap(); i += 2; }
-            "--dim" => { cfg.dim = args[i + 1].parse().unwrap(); i += 2; }
-            "--warmup-records" => { cfg.warmup_records = args[i + 1].parse().unwrap(); i += 2; }
-            "--db-path" => { db_path = args[i + 1].clone(); i += 2; }
+            "--writers" => {
+                cfg.writers = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--readers" => {
+                cfg.readers = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--duration-secs" => {
+                cfg.duration_secs = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--dim" => {
+                cfg.dim = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--warmup-records" => {
+                cfg.warmup_records = args[i + 1].parse().unwrap();
+                i += 2;
+            }
+            "--db-path" => {
+                db_path = args[i + 1].clone();
+                i += 2;
+            }
             "--help" | "-h" => {
-                println!("{}", include_str!("wedge_repro.rs").lines().take(28).collect::<Vec<_>>().join("\n"));
+                println!(
+                    "{}",
+                    include_str!("wedge_repro.rs")
+                        .lines()
+                        .take(28)
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                );
                 std::process::exit(0);
             }
-            other => { eprintln!("unknown arg: {}", other); std::process::exit(2); }
+            other => {
+                eprintln!("unknown arg: {}", other);
+                std::process::exit(2);
+            }
         }
     }
     (cfg, db_path)
@@ -131,8 +155,10 @@ type LatencySample = (u64, u64);
 fn run() {
     let (cfg, db_path) = parse_args();
     println!("=== wedge_repro ===");
-    println!("config: writers={} readers={} duration={}s dim={} warmup={} db={}",
-        cfg.writers, cfg.readers, cfg.duration_secs, cfg.dim, cfg.warmup_records, db_path);
+    println!(
+        "config: writers={} readers={} duration={}s dim={} warmup={} db={}",
+        cfg.writers, cfg.readers, cfg.duration_secs, cfg.dim, cfg.warmup_records, db_path
+    );
 
     // Clean slate
     let _ = std::fs::remove_file(&db_path);
@@ -207,16 +233,22 @@ fn run() {
             );
         }
     }
-    println!("[setup] warmup done in {:.1}s — {} records seeded", t0.elapsed().as_secs_f64(), cfg.warmup_records);
+    println!(
+        "[setup] warmup done in {:.1}s — {} records seeded",
+        t0.elapsed().as_secs_f64(),
+        cfg.warmup_records
+    );
 
     let stop = Arc::new(AtomicBool::new(false));
     let started_at = Instant::now();
 
     // Per-thread sample storage
-    let writer_samples: Vec<Arc<Mutex<Vec<LatencySample>>>> =
-        (0..cfg.writers).map(|_| Arc::new(Mutex::new(Vec::with_capacity(100_000)))).collect();
-    let reader_samples: Vec<Arc<Mutex<Vec<LatencySample>>>> =
-        (0..cfg.readers).map(|_| Arc::new(Mutex::new(Vec::with_capacity(100_000)))).collect();
+    let writer_samples: Vec<Arc<Mutex<Vec<LatencySample>>>> = (0..cfg.writers)
+        .map(|_| Arc::new(Mutex::new(Vec::with_capacity(100_000))))
+        .collect();
+    let reader_samples: Vec<Arc<Mutex<Vec<LatencySample>>>> = (0..cfg.readers)
+        .map(|_| Arc::new(Mutex::new(Vec::with_capacity(100_000))))
+        .collect();
 
     let writes_total = Arc::new(AtomicU64::new(0));
     let reads_total = Arc::new(AtomicU64::new(0));
@@ -239,8 +271,8 @@ fn run() {
                 let text = format!("writer {} seq {}", w_id, local_seq);
                 let t = Instant::now();
                 let _ = db_c.record(
-                    &text, "episodic", 0.5, 0.0, 604800.0, &meta, &emb,
-                    "default", 0.8, "general", "user", None,
+                    &text, "episodic", 0.5, 0.0, 604800.0, &meta, &emb, "default", 0.8, "general",
+                    "user", None,
                 );
                 let dur_ns = t.elapsed().as_nanos() as u64;
                 let bucket = started.elapsed().as_secs();
@@ -282,9 +314,10 @@ fn run() {
     // ── Per-second progress printer ──
     // RSS column is right-aligned MiB (or N/A on non-Linux). Tracks
     // the soak acceptance gate "RSS bounded over 1h sustained load".
-    println!("\n {:>4} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8}",
-        "sec", "w/s", "r/s", "w_p50us", "w_p99us", "r_p50us", "r_p99us",
-        "delta", "rss_MiB");
+    println!(
+        "\n {:>4} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8}",
+        "sec", "w/s", "r/s", "w_p50us", "w_p99us", "r_p50us", "r_p99us", "delta", "rss_MiB"
+    );
 
     let rss_baseline = read_rss_bytes();
     let mut rss_peak = rss_baseline.unwrap_or(0);
@@ -298,13 +331,17 @@ fn run() {
         let mut w_durs: Vec<u64> = Vec::new();
         for s in &writer_samples {
             for (b, d) in s.lock().unwrap().iter() {
-                if *b == sec { w_durs.push(*d); }
+                if *b == sec {
+                    w_durs.push(*d);
+                }
             }
         }
         let mut r_durs: Vec<u64> = Vec::new();
         for s in &reader_samples {
             for (b, d) in s.lock().unwrap().iter() {
-                if *b == sec { r_durs.push(*d); }
+                if *b == sec {
+                    r_durs.push(*d);
+                }
             }
         }
         let (w_p50, w_p99) = pcts_us(&mut w_durs);
@@ -312,40 +349,69 @@ fn run() {
         let delta_now = db.delta_len();
         let rss_now = read_rss_bytes();
         if let Some(b) = rss_now {
-            if b > rss_peak { rss_peak = b; }
+            if b > rss_peak {
+                rss_peak = b;
+            }
         }
-        println!(" {:>4} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8}",
-            sec + 1, w - prev_w, r - prev_r, w_p50, w_p99, r_p50, r_p99,
-            delta_now, fmt_mib(rss_now));
+        println!(
+            " {:>4} {:>10} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8} {:>8}",
+            sec + 1,
+            w - prev_w,
+            r - prev_r,
+            w_p50,
+            w_p99,
+            r_p50,
+            r_p99,
+            delta_now,
+            fmt_mib(rss_now)
+        );
         prev_w = w;
         prev_r = r;
     }
 
     // ── Stop and join ──
     stop.store(true, Ordering::Relaxed);
-    for h in writer_handles { let _ = h.join(); }
-    for h in reader_handles { let _ = h.join(); }
+    for h in writer_handles {
+        let _ = h.join();
+    }
+    for h in reader_handles {
+        let _ = h.join();
+    }
 
     // ── Summary ──
     let mut all_w: Vec<u64> = Vec::new();
-    for s in &writer_samples { all_w.extend(s.lock().unwrap().iter().map(|(_, d)| *d)); }
+    for s in &writer_samples {
+        all_w.extend(s.lock().unwrap().iter().map(|(_, d)| *d));
+    }
     let mut all_r: Vec<u64> = Vec::new();
-    for s in &reader_samples { all_r.extend(s.lock().unwrap().iter().map(|(_, d)| *d)); }
+    for s in &reader_samples {
+        all_r.extend(s.lock().unwrap().iter().map(|(_, d)| *d));
+    }
 
     println!("\n=== summary ===");
     println!("total writes: {}", all_w.len());
     println!("total reads:  {}", all_r.len());
     if !all_w.is_empty() {
         let (p50, p95, p99, p999) = quad_pcts_us(&mut all_w);
-        println!("writes p50={}us p95={}us p99={}us p99.9={}us", p50, p95, p99, p999);
+        println!(
+            "writes p50={}us p95={}us p99={}us p99.9={}us",
+            p50, p95, p99, p999
+        );
     }
     if !all_r.is_empty() {
         let (p50, p95, p99, p999) = quad_pcts_us(&mut all_r);
-        println!("reads  p50={}us p95={}us p99={}us p99.9={}us", p50, p95, p99, p999);
+        println!(
+            "reads  p50={}us p95={}us p99={}us p99.9={}us",
+            p50, p95, p99, p999
+        );
     }
     let elapsed = started_at.elapsed().as_secs_f64();
-    println!("wall: {:.1}s | write tput: {:.0}/s | read tput: {:.0}/s",
-        elapsed, all_w.len() as f64 / elapsed, all_r.len() as f64 / elapsed);
+    println!(
+        "wall: {:.1}s | write tput: {:.0}/s | read tput: {:.0}/s",
+        elapsed,
+        all_w.len() as f64 / elapsed,
+        all_r.len() as f64 / elapsed
+    );
 
     // RSS summary — soak acceptance gate "RSS bounded".
     let rss_final = read_rss_bytes();
@@ -361,7 +427,9 @@ fn run() {
 }
 
 fn pcts_us(durs: &mut [u64]) -> (u64, u64) {
-    if durs.is_empty() { return (0, 0); }
+    if durs.is_empty() {
+        return (0, 0);
+    }
     durs.sort_unstable();
     let p = |q: f64| -> u64 {
         let idx = ((durs.len() as f64 * q) as usize).min(durs.len() - 1);
@@ -371,7 +439,9 @@ fn pcts_us(durs: &mut [u64]) -> (u64, u64) {
 }
 
 fn quad_pcts_us(durs: &mut [u64]) -> (u64, u64, u64, u64) {
-    if durs.is_empty() { return (0, 0, 0, 0); }
+    if durs.is_empty() {
+        return (0, 0, 0, 0);
+    }
     durs.sort_unstable();
     let p = |q: f64| -> u64 {
         let idx = ((durs.len() as f64 * q) as usize).min(durs.len() - 1);
@@ -380,4 +450,6 @@ fn quad_pcts_us(durs: &mut [u64]) -> (u64, u64, u64, u64) {
     (p(0.50), p(0.95), p(0.99), p(0.999))
 }
 
-fn main() { run(); }
+fn main() {
+    run();
+}

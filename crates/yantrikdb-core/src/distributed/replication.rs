@@ -79,10 +79,8 @@ pub fn extract_ops_since(
                 "{select_cols} \
                  AND ((hlc > ?1) OR (hlc = ?1 AND op_id > ?2))"
             );
-            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![
-                Box::new(hlc.to_vec()),
-                Box::new(op_id.to_string()),
-            ];
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
+                vec![Box::new(hlc.to_vec()), Box::new(op_id.to_string())];
 
             if let Some(actor) = exclude_actor {
                 sql.push_str(" AND origin_actor != ?3");
@@ -98,8 +96,7 @@ pub fn extract_ops_since(
             // the boundary HLC; pass the matching op_id too if you need
             // exact dedup.
             let mut sql = format!("{select_cols} AND hlc > ?1");
-            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> =
-                vec![Box::new(hlc.to_vec())];
+            let mut params: Vec<Box<dyn rusqlite::types::ToSql>> = vec![Box::new(hlc.to_vec())];
 
             if let Some(actor) = exclude_actor {
                 sql.push_str(" AND origin_actor != ?2");
@@ -251,21 +248,35 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             // Update scoring cache with new record
             let rid = op.payload["rid"].as_str().unwrap_or_default();
             if !rid.is_empty() {
-                db.cache_insert(rid.to_string(), ScoringRow {
-                    created_at: op.payload["created_at"].as_f64().unwrap_or(0.0),
-                    importance: op.payload["importance"].as_f64().unwrap_or(0.5),
-                    half_life: op.payload["half_life"].as_f64().unwrap_or(604800.0),
-                    last_access: op.payload["created_at"].as_f64().unwrap_or(0.0),
-                    access_count: 0,
-                    valence: op.payload["valence"].as_f64().unwrap_or(0.0),
-                    consolidation_status: "active".to_string(),
-                    memory_type: op.payload["type"].as_str().unwrap_or("episodic").to_string(),
-                    namespace: op.payload["namespace"].as_str().unwrap_or("default").to_string(),
-                    certainty: op.payload["certainty"].as_f64().unwrap_or(0.8),
-                    domain: op.payload["domain"].as_str().unwrap_or("general").to_string(),
-                    source: op.payload["source"].as_str().unwrap_or("user").to_string(),
-                    emotional_state: op.payload["emotional_state"].as_str().map(|s| s.to_string()),
-                });
+                db.cache_insert(
+                    rid.to_string(),
+                    ScoringRow {
+                        created_at: op.payload["created_at"].as_f64().unwrap_or(0.0),
+                        importance: op.payload["importance"].as_f64().unwrap_or(0.5),
+                        half_life: op.payload["half_life"].as_f64().unwrap_or(604800.0),
+                        last_access: op.payload["created_at"].as_f64().unwrap_or(0.0),
+                        access_count: 0,
+                        valence: op.payload["valence"].as_f64().unwrap_or(0.0),
+                        consolidation_status: "active".to_string(),
+                        memory_type: op.payload["type"]
+                            .as_str()
+                            .unwrap_or("episodic")
+                            .to_string(),
+                        namespace: op.payload["namespace"]
+                            .as_str()
+                            .unwrap_or("default")
+                            .to_string(),
+                        certainty: op.payload["certainty"].as_f64().unwrap_or(0.8),
+                        domain: op.payload["domain"]
+                            .as_str()
+                            .unwrap_or("general")
+                            .to_string(),
+                        source: op.payload["source"].as_str().unwrap_or("user").to_string(),
+                        emotional_state: op.payload["emotional_state"]
+                            .as_str()
+                            .map(|s| s.to_string()),
+                    },
+                );
             }
         }
         "relate" => {
@@ -285,7 +296,11 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
                 drop(gi);
                 // V2: detect edge conflicts during sync
                 let _ = crate::conflict::detect_edge_conflicts(
-                    db, src, dst, rel_type, op.target_rid.as_deref(),
+                    db,
+                    src,
+                    dst,
+                    rel_type,
+                    op.target_rid.as_deref(),
                 );
             }
         }
@@ -295,7 +310,10 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             let rid = op.payload["rid"].as_str().unwrap_or_default();
             if !rid.is_empty() {
                 db.cache_remove(rid);
-                let _seq = db.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                let _seq = db
+                    .vec_seq
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
                 db.vec_index.tombstone(rid, _seq);
                 db.graph_index.write().unlink_memory(rid);
             }
@@ -306,21 +324,27 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             let consolidated_rid = op.payload["consolidated_rid"].as_str().unwrap_or_default();
             let text = op.payload["text"].as_str().unwrap_or("");
             if !consolidated_rid.is_empty() && !text.is_empty() {
-                db.cache_insert(consolidated_rid.to_string(), ScoringRow {
-                    created_at: op.timestamp,
-                    importance: op.payload["importance"].as_f64().unwrap_or(0.5),
-                    half_life: op.payload["half_life"].as_f64().unwrap_or(604800.0),
-                    last_access: op.timestamp,
-                    access_count: 0,
-                    valence: op.payload["valence"].as_f64().unwrap_or(0.0),
-                    consolidation_status: "active".to_string(),
-                    memory_type: "semantic".to_string(),
-                    namespace: op.payload["namespace"].as_str().unwrap_or("default").to_string(),
-                    certainty: 0.8,
-                    domain: "general".to_string(),
-                    source: "user".to_string(),
-                    emotional_state: None,
-                });
+                db.cache_insert(
+                    consolidated_rid.to_string(),
+                    ScoringRow {
+                        created_at: op.timestamp,
+                        importance: op.payload["importance"].as_f64().unwrap_or(0.5),
+                        half_life: op.payload["half_life"].as_f64().unwrap_or(604800.0),
+                        last_access: op.timestamp,
+                        access_count: 0,
+                        valence: op.payload["valence"].as_f64().unwrap_or(0.0),
+                        consolidation_status: "active".to_string(),
+                        memory_type: "semantic".to_string(),
+                        namespace: op.payload["namespace"]
+                            .as_str()
+                            .unwrap_or("default")
+                            .to_string(),
+                        certainty: 0.8,
+                        domain: "general".to_string(),
+                        source: "user".to_string(),
+                        emotional_state: None,
+                    },
+                );
             }
             if let Some(source_rids) = op.payload["source_rids"].as_array() {
                 for rid_val in source_rids {
@@ -330,7 +354,9 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
                 }
             }
         }
-        "conflict_detect" => materialize_conflict_detect(&*db.conn(), &op.payload, &op.hlc, &op.origin_actor)?,
+        "conflict_detect" => {
+            materialize_conflict_detect(&*db.conn(), &op.payload, &op.hlc, &op.origin_actor)?
+        }
         "conflict_resolve" => {
             materialize_conflict_resolve(&*db.conn(), &op.payload)?;
             // If keep_a or keep_b, remove the loser from cache + vec index
@@ -338,7 +364,10 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             if strategy == "keep_a" || strategy == "keep_b" {
                 if let Some(loser) = op.payload["loser_rid"].as_str() {
                     db.cache_remove(loser);
-                    let _seq = db.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    let _seq = db
+                        .vec_seq
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                        + 1;
                     db.vec_index.tombstone(loser, _seq);
                 }
             }
@@ -348,34 +377,55 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             // Cache: insert new corrected memory, remove original
             let new_rid = op.payload["new_rid"].as_str().unwrap_or_default();
             if !new_rid.is_empty() {
-                db.cache_insert(new_rid.to_string(), ScoringRow {
-                    created_at: op.payload["created_at"].as_f64().unwrap_or(0.0),
-                    importance: op.payload["importance"].as_f64().unwrap_or(0.5),
-                    half_life: op.payload["half_life"].as_f64().unwrap_or(604800.0),
-                    last_access: op.payload["created_at"].as_f64().unwrap_or(0.0),
-                    access_count: 0,
-                    valence: op.payload["valence"].as_f64().unwrap_or(0.0),
-                    consolidation_status: "active".to_string(),
-                    memory_type: op.payload["type"].as_str().unwrap_or("episodic").to_string(),
-                    namespace: op.payload["namespace"].as_str().unwrap_or("default").to_string(),
-                    certainty: op.payload["certainty"].as_f64().unwrap_or(0.8),
-                    domain: op.payload["domain"].as_str().unwrap_or("general").to_string(),
-                    source: op.payload["source"].as_str().unwrap_or("user").to_string(),
-                    emotional_state: op.payload["emotional_state"].as_str().map(|s| s.to_string()),
-                });
+                db.cache_insert(
+                    new_rid.to_string(),
+                    ScoringRow {
+                        created_at: op.payload["created_at"].as_f64().unwrap_or(0.0),
+                        importance: op.payload["importance"].as_f64().unwrap_or(0.5),
+                        half_life: op.payload["half_life"].as_f64().unwrap_or(604800.0),
+                        last_access: op.payload["created_at"].as_f64().unwrap_or(0.0),
+                        access_count: 0,
+                        valence: op.payload["valence"].as_f64().unwrap_or(0.0),
+                        consolidation_status: "active".to_string(),
+                        memory_type: op.payload["type"]
+                            .as_str()
+                            .unwrap_or("episodic")
+                            .to_string(),
+                        namespace: op.payload["namespace"]
+                            .as_str()
+                            .unwrap_or("default")
+                            .to_string(),
+                        certainty: op.payload["certainty"].as_f64().unwrap_or(0.8),
+                        domain: op.payload["domain"]
+                            .as_str()
+                            .unwrap_or("general")
+                            .to_string(),
+                        source: op.payload["source"].as_str().unwrap_or("user").to_string(),
+                        emotional_state: op.payload["emotional_state"]
+                            .as_str()
+                            .map(|s| s.to_string()),
+                    },
+                );
             }
             let original_rid = op.payload["original_rid"].as_str().unwrap_or_default();
             if !original_rid.is_empty() {
                 db.cache_remove(original_rid);
-                let _seq = db.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                let _seq = db
+                    .vec_seq
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
                 db.vec_index.tombstone(original_rid, _seq);
             }
         }
-        "trigger_fire" => materialize_trigger_fire(&*db.conn(), &op.payload, &op.hlc, &op.origin_actor)?,
+        "trigger_fire" => {
+            materialize_trigger_fire(&*db.conn(), &op.payload, &op.hlc, &op.origin_actor)?
+        }
         "trigger_deliver" | "trigger_ack" | "trigger_act" | "trigger_dismiss" => {
             materialize_trigger_lifecycle(&*db.conn(), &op.payload)?;
         }
-        "pattern_upsert" => materialize_pattern(&*db.conn(), &op.payload, &op.hlc, &op.origin_actor)?,
+        "pattern_upsert" => {
+            materialize_pattern(&*db.conn(), &op.payload, &op.hlc, &op.origin_actor)?
+        }
         "reinforce" | "think" => {
             // Local-only ops; skip during replication
         }
@@ -388,7 +438,11 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
 }
 
 /// Materialize a "record" op: INSERT OR IGNORE into memories.
-fn materialize_record(conn: &Connection, payload: &serde_json::Value, _embedding_dim: usize) -> Result<()> {
+fn materialize_record(
+    conn: &Connection,
+    payload: &serde_json::Value,
+    _embedding_dim: usize,
+) -> Result<()> {
     let rid = payload["rid"].as_str().unwrap_or_default();
     let mem_type = payload["type"].as_str().unwrap_or("episodic");
     let text = payload["text"].as_str().unwrap_or("");
@@ -415,8 +469,8 @@ fn materialize_record(conn: &Connection, payload: &serde_json::Value, _embedding
           half_life, last_access, valence, metadata, namespace) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
-            rid, mem_type, text, created_at, updated_at, importance,
-            half_life, created_at, valence, metadata, namespace,
+            rid, mem_type, text, created_at, updated_at, importance, half_life, created_at,
+            valence, metadata, namespace,
         ],
     )?;
 
@@ -527,8 +581,16 @@ fn materialize_consolidate(
               half_life, last_access, valence, metadata, namespace) \
              VALUES (?1, 'semantic', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
-                consolidated_rid, text, ts, ts, importance,
-                half_life, ts, valence, metadata, namespace,
+                consolidated_rid,
+                text,
+                ts,
+                ts,
+                importance,
+                half_life,
+                ts,
+                valence,
+                metadata,
+                namespace,
             ],
         )?;
     }
@@ -670,8 +732,8 @@ fn materialize_correct(conn: &Connection, payload: &serde_json::Value) -> Result
           half_life, last_access, valence, metadata, namespace)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
-            new_rid, mem_type, text, created_at, created_at, importance,
-            half_life, created_at, valence, metadata, namespace,
+            new_rid, mem_type, text, created_at, created_at, importance, half_life, created_at,
+            valence, metadata, namespace,
         ],
     )?;
 
@@ -692,16 +754,14 @@ fn materialize_correct(conn: &Connection, payload: &serde_json::Value) -> Result
 // ── Watermark tracking for delta sync ──
 
 /// Get the watermark for a specific peer (last synced HLC + op_id).
-pub fn get_peer_watermark(conn: &Connection, peer_actor: &str) -> Result<Option<(Vec<u8>, String)>> {
+pub fn get_peer_watermark(
+    conn: &Connection,
+    peer_actor: &str,
+) -> Result<Option<(Vec<u8>, String)>> {
     match conn.query_row(
         "SELECT last_synced_hlc, last_synced_op_id FROM sync_peers WHERE peer_actor = ?1",
         params![peer_actor],
-        |row| {
-            Ok((
-                row.get::<_, Vec<u8>>(0)?,
-                row.get::<_, String>(1)?,
-            ))
-        },
+        |row| Ok((row.get::<_, Vec<u8>>(0)?, row.get::<_, String>(1)?)),
     ) {
         Ok(wm) => Ok(Some(wm)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -760,8 +820,14 @@ fn materialize_trigger_fire(
             payload["urgency"].as_f64().unwrap_or(0.0),
             payload["reason"].as_str().unwrap_or(""),
             payload["suggested_action"].as_str().unwrap_or(""),
-            payload.get("source_rids").map(|v| v.to_string()).unwrap_or("[]".to_string()),
-            payload.get("context").map(|v| v.to_string()).unwrap_or("{}".to_string()),
+            payload
+                .get("source_rids")
+                .map(|v| v.to_string())
+                .unwrap_or("[]".to_string()),
+            payload
+                .get("context")
+                .map(|v| v.to_string())
+                .unwrap_or("{}".to_string()),
             payload["created_at"].as_f64().unwrap_or(0.0),
             payload["expires_at"].as_f64(),
             payload["cooldown_key"].as_str().unwrap_or(""),
@@ -786,10 +852,7 @@ fn materialize_trigger_fire(
 }
 
 /// Materialize a trigger lifecycle transition (deliver/ack/act/dismiss).
-fn materialize_trigger_lifecycle(
-    conn: &Connection,
-    payload: &serde_json::Value,
-) -> Result<()> {
+fn materialize_trigger_lifecycle(conn: &Connection, payload: &serde_json::Value) -> Result<()> {
     let trigger_id = payload["trigger_id"].as_str().unwrap_or_default();
     if trigger_id.is_empty() {
         return Ok(());
@@ -855,9 +918,18 @@ fn materialize_pattern(
             payload["status"].as_str().unwrap_or("active"),
             payload["confidence"].as_f64().unwrap_or(0.0),
             payload["description"].as_str().unwrap_or(""),
-            payload.get("evidence_rids").map(|v| v.to_string()).unwrap_or("[]".to_string()),
-            payload.get("entity_names").map(|v| v.to_string()).unwrap_or("[]".to_string()),
-            payload.get("context").map(|v| v.to_string()).unwrap_or("{}".to_string()),
+            payload
+                .get("evidence_rids")
+                .map(|v| v.to_string())
+                .unwrap_or("[]".to_string()),
+            payload
+                .get("entity_names")
+                .map(|v| v.to_string())
+                .unwrap_or("[]".to_string()),
+            payload
+                .get("context")
+                .map(|v| v.to_string())
+                .unwrap_or("{}".to_string()),
             payload["first_seen"].as_f64().unwrap_or(0.0),
             payload["last_confirmed"].as_f64().unwrap_or(0.0),
             payload["occurrence_count"].as_i64().unwrap_or(1),
@@ -916,7 +988,21 @@ mod tests {
     #[test]
     fn test_extract_ops_after_record() {
         let db = YantrikDB::new(":memory:", 8).unwrap();
-        db.record("hello", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+        db.record(
+            "hello",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
         let ops = extract_ops_since(&*db.conn(), None, None, None, 100).unwrap();
         // record + reinforce (from recall? no — just record op)
@@ -928,7 +1014,21 @@ mod tests {
     #[test]
     fn test_apply_ops_idempotent() {
         let a = YantrikDB::new_with_actor(":memory:", 8, "A").unwrap();
-        a.record("from A", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+        a.record(
+            "from A",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
         let ops = extract_ops_since(&*a.conn(), None, None, None, 100).unwrap();
 
@@ -947,7 +1047,22 @@ mod tests {
     #[test]
     fn test_materialize_record() {
         let a = YantrikDB::new_with_actor(":memory:", 8, "A").unwrap();
-        let rid = a.record("test mem", "semantic", 0.8, 0.2, 1000.0, &serde_json::json!({"k": "v"}), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+        let rid = a
+            .record(
+                "test mem",
+                "semantic",
+                0.8,
+                0.2,
+                1000.0,
+                &serde_json::json!({"k": "v"}),
+                &vec_seed(1.0, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
 
         let ops = extract_ops_since(&*a.conn(), None, None, None, 100).unwrap();
         let record_op = ops.iter().find(|o| o.op_type == "record").unwrap();
@@ -967,7 +1082,22 @@ mod tests {
     #[test]
     fn test_tombstone_wins() {
         let a = YantrikDB::new_with_actor(":memory:", 8, "A").unwrap();
-        let rid = a.record("doomed", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+        let rid = a
+            .record(
+                "doomed",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &vec_seed(1.0, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
         a.forget(&rid).unwrap();
 
         let ops = extract_ops_since(&*a.conn(), None, None, None, 100).unwrap();
@@ -1055,7 +1185,21 @@ mod tests {
     #[test]
     fn test_extract_with_exclude_actor() {
         let db = YantrikDB::new_with_actor(":memory:", 8, "A").unwrap();
-        db.record("from A", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+        db.record(
+            "from A",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
         // Extracting while excluding actor "A" should return nothing
         let ops = extract_ops_since(&*db.conn(), None, None, Some("A"), 100).unwrap();
@@ -1069,11 +1213,40 @@ mod tests {
     #[test]
     fn test_consolidation_members_replicate() {
         let a = YantrikDB::new_with_actor(":memory:", 8, "A").unwrap();
-        a.record("mem1", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
-        a.record("mem2", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.1, 8), "default", 0.8, "general", "user", None).unwrap();
+        a.record(
+            "mem1",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+        a.record(
+            "mem2",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.1, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
         // Consolidate on A
-        let consolidated = crate::consolidate::consolidate(&a, 0.0, 365.0, 2, 10000, false, false).unwrap();
+        let consolidated =
+            crate::consolidate::consolidate(&a, 0.0, 365.0, 2, 10000, false, false).unwrap();
         assert!(!consolidated.is_empty());
 
         // Extract all ops and apply to B
@@ -1082,11 +1255,12 @@ mod tests {
         apply_ops(&b, &ops).unwrap();
 
         // Check that B has the consolidation_members entries
-        let count: i64 = b.conn().query_row(
-            "SELECT COUNT(*) FROM consolidation_members",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let count: i64 = b
+            .conn()
+            .query_row("SELECT COUNT(*) FROM consolidation_members", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert!(count >= 2); // At least 2 source_rids
     }
 
@@ -1104,40 +1278,84 @@ mod tests {
 
         // Batch 1: two ops, save the second as the watermark.
         db.record(
-            "I love coffee", "semantic", 0.5, 0.0, 604800.0,
-            &empty_meta(), &vec_seed(1.0, 8),
-            "default", 0.8, "general", "user", None,
-        ).unwrap();
+            "I love coffee",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
         db.record(
-            "I go hiking on weekends", "episodic", 0.6, 0.0, 604800.0,
-            &empty_meta(), &vec_seed(2.0, 8),
-            "default", 0.8, "general", "user", None,
-        ).unwrap();
+            "I go hiking on weekends",
+            "episodic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
         let batch1 = extract_ops_since(&*db.conn(), None, None, None, 100).unwrap();
-        assert_eq!(batch1.len(), 2, "batch1 should contain exactly the 2 record ops");
+        assert_eq!(
+            batch1.len(),
+            2,
+            "batch1 should contain exactly the 2 record ops"
+        );
         let wm = batch1.last().unwrap().clone();
         let wm_op_id = wm.op_id.clone();
         let wm_hlc = wm.hlc.clone();
 
         // Batch 2: two more ops.
         db.record(
-            "I work in software", "semantic", 0.7, 0.0, 604800.0,
-            &empty_meta(), &vec_seed(3.0, 8),
-            "default", 0.8, "general", "user", None,
-        ).unwrap();
+            "I work in software",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(3.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
         db.record(
-            "Saturdays are for chores", "episodic", 0.4, 0.0, 604800.0,
-            &empty_meta(), &vec_seed(4.0, 8),
-            "default", 0.8, "general", "user", None,
-        ).unwrap();
+            "Saturdays are for chores",
+            "episodic",
+            0.4,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(4.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
         // 1. op_id-only watermark: should return ONLY the 2 new ops.
-        let after_op_id = extract_ops_since(
-            &*db.conn(), None, Some(wm_op_id.as_str()), None, 100,
-        ).unwrap();
+        let after_op_id =
+            extract_ops_since(&*db.conn(), None, Some(wm_op_id.as_str()), None, 100).unwrap();
         assert_eq!(
-            after_op_id.len(), 2,
+            after_op_id.len(),
+            2,
             "since_op_id alone must filter; got {} ops, expected 2",
             after_op_id.len()
         );
@@ -1146,21 +1364,29 @@ mod tests {
         }
 
         // 2. hlc-only watermark: should return ONLY the 2 new ops.
-        let after_hlc = extract_ops_since(
-            &*db.conn(), Some(wm_hlc.as_slice()), None, None, 100,
-        ).unwrap();
+        let after_hlc =
+            extract_ops_since(&*db.conn(), Some(wm_hlc.as_slice()), None, None, 100).unwrap();
         assert_eq!(
-            after_hlc.len(), 2,
+            after_hlc.len(),
+            2,
             "since_hlc alone must filter; got {} ops, expected 2",
             after_hlc.len()
         );
 
         // 3. Both watermarks together (the originally-working path): same result.
         let after_both = extract_ops_since(
-            &*db.conn(), Some(wm_hlc.as_slice()), Some(wm_op_id.as_str()),
-            None, 100,
-        ).unwrap();
-        assert_eq!(after_both.len(), 2, "compound cursor must filter equivalently");
+            &*db.conn(),
+            Some(wm_hlc.as_slice()),
+            Some(wm_op_id.as_str()),
+            None,
+            100,
+        )
+        .unwrap();
+        assert_eq!(
+            after_both.len(),
+            2,
+            "compound cursor must filter equivalently"
+        );
 
         // 4. No watermark: should return all 4 ops.
         let all = extract_ops_since(&*db.conn(), None, None, None, 100).unwrap();

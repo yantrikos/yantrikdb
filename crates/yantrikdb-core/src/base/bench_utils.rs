@@ -1,6 +1,6 @@
 //! Shared utilities for benchmarks and profiling.
 
-use crate::{YantrikDB, RecordInput};
+use crate::{RecordInput, YantrikDB};
 
 /// Generate a deterministic unit-norm embedding of given dimension.
 ///
@@ -29,9 +29,7 @@ pub fn query_embedding(dim: usize) -> Vec<f32> {
 pub fn seed_db_scaled(db: &YantrikDB, n: usize, dim: usize, with_graph: bool) {
     let batch_size = 500;
     let num_entities = (n / 100).max(10).min(200);
-    let entity_names: Vec<String> = (0..num_entities)
-        .map(|i| format!("Entity_{}", i))
-        .collect();
+    let entity_names: Vec<String> = (0..num_entities).map(|i| format!("Entity_{}", i)).collect();
 
     // Insert memories in batches
     for chunk_start in (0..n).step_by(batch_size) {
@@ -43,7 +41,10 @@ pub fn seed_db_scaled(db: &YantrikDB, n: usize, dim: usize, with_graph: bool) {
                 RecordInput {
                     text: format!(
                         "Memory {} about topic {} involving {} in context {}",
-                        i, topic, entity_names[entity_idx], i % 50
+                        i,
+                        topic,
+                        entity_names[entity_idx],
+                        i % 50
                     ),
                     memory_type: match i % 4 {
                         0 => "episodic",
@@ -79,8 +80,13 @@ pub fn seed_db_scaled(db: &YantrikDB, n: usize, dim: usize, with_graph: bool) {
                 .unwrap();
             if i % 3 == 0 && entity_names.len() > 3 {
                 let skip = (i + entity_names.len() / 3) % entity_names.len();
-                db.relate(&entity_names[i], &entity_names[skip], "associated_with", 0.5)
-                    .unwrap();
+                db.relate(
+                    &entity_names[i],
+                    &entity_names[skip],
+                    "associated_with",
+                    0.5,
+                )
+                .unwrap();
             }
         }
 

@@ -47,11 +47,11 @@ impl GraphIndex {
         let mut idx = Self::new();
 
         // Load entities
-        let mut stmt = conn.prepare(
-            "SELECT name, entity_type, mention_count FROM entities"
-        )?;
+        let mut stmt = conn.prepare("SELECT name, entity_type, mention_count FROM entities")?;
         let entities: Vec<(String, String, u32)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? as u32)))?
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? as u32))
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         for (name, etype, mc) in &entities {
@@ -59,11 +59,11 @@ impl GraphIndex {
         }
 
         // Load non-tombstoned edges
-        let mut stmt = conn.prepare(
-            "SELECT src, dst, weight FROM edges WHERE tombstoned = 0"
-        )?;
+        let mut stmt = conn.prepare("SELECT src, dst, weight FROM edges WHERE tombstoned = 0")?;
         let edges: Vec<(String, String, f32)> = stmt
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get::<_, f64>(2)? as f32)))?
+            .query_map([], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get::<_, f64>(2)? as f32))
+            })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         for (src, dst, weight) in &edges {
@@ -78,16 +78,17 @@ impl GraphIndex {
         }
 
         // Load memory-entity links
-        let mut stmt = conn.prepare(
-            "SELECT memory_rid, entity_name FROM memory_entities"
-        )?;
+        let mut stmt = conn.prepare("SELECT memory_rid, entity_name FROM memory_entities")?;
         let links: Vec<(String, String)> = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         for (rid, entity_name) in &links {
             if let Some(&eid) = idx.entity_to_id.get(entity_name) {
-                idx.memory_to_entities.entry(rid.clone()).or_default().push(eid);
+                idx.memory_to_entities
+                    .entry(rid.clone())
+                    .or_default()
+                    .push(eid);
                 idx.entity_to_memories[eid as usize].push(rid.clone());
             }
         }
@@ -256,7 +257,10 @@ impl GraphIndex {
     /// Get entity names linked to a memory.
     pub fn entities_for_memory(&self, rid: &str) -> Vec<&str> {
         match self.memory_to_entities.get(rid) {
-            Some(ids) => ids.iter().map(|&id| self.id_to_entity[id as usize].as_str()).collect(),
+            Some(ids) => ids
+                .iter()
+                .map(|&id| self.id_to_entity[id as usize].as_str())
+                .collect(),
             None => vec![],
         }
     }
@@ -349,9 +353,54 @@ mod tests {
         db.relate("Dave", "ProjectX", "works_on", 0.9).unwrap();
 
         let emb = vec![1.0f32, 0.0, 0.0, 0.0];
-        let r1 = db.record("Alice discussed the plan", "episodic", 0.5, 0.0, 604800.0, &serde_json::json!({}), &emb, "default", 0.8, "general", "user", None).unwrap();
-        let r2 = db.record("Bob reviewed the code", "episodic", 0.5, 0.0, 604800.0, &serde_json::json!({}), &emb, "default", 0.8, "general", "user", None).unwrap();
-        let r3 = db.record("Charlie deployed to production", "episodic", 0.5, 0.0, 604800.0, &serde_json::json!({}), &emb, "default", 0.8, "general", "user", None).unwrap();
+        let r1 = db
+            .record(
+                "Alice discussed the plan",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &emb,
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+        let r2 = db
+            .record(
+                "Bob reviewed the code",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &emb,
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+        let r3 = db
+            .record(
+                "Charlie deployed to production",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &emb,
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
 
         db.link_memory_entity(&r1, "Alice").unwrap();
         db.link_memory_entity(&r1, "ProjectX").unwrap();
@@ -430,9 +479,14 @@ mod tests {
         let db = setup_db();
         let idx = GraphIndex::build_from_db(&*db.conn()).unwrap();
 
-        let rid: String = db.conn().query_row(
-            "SELECT rid FROM memories ORDER BY created_at LIMIT 1", [], |row| row.get(0),
-        ).unwrap();
+        let rid: String = db
+            .conn()
+            .query_row(
+                "SELECT rid FROM memories ORDER BY created_at LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         let mut expanded = HashMap::new();
         expanded.insert("Alice".to_string(), (0u8, 1.0f64));
@@ -447,9 +501,14 @@ mod tests {
         let db = setup_db();
         let idx = GraphIndex::build_from_db(&*db.conn()).unwrap();
 
-        let rid: String = db.conn().query_row(
-            "SELECT rid FROM memories ORDER BY created_at LIMIT 1", [], |row| row.get(0),
-        ).unwrap();
+        let rid: String = db
+            .conn()
+            .query_row(
+                "SELECT rid FROM memories ORDER BY created_at LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         let expanded = graph::expand_entities_nhop(&*db.conn(), &["Alice"], 1, 20).unwrap();
         let expanded_map: HashMap<String, (u8, f64)> = expanded
@@ -467,9 +526,14 @@ mod tests {
         let db = setup_db();
         let idx = GraphIndex::build_from_db(&*db.conn()).unwrap();
 
-        let rid: String = db.conn().query_row(
-            "SELECT rid FROM memories ORDER BY created_at LIMIT 1", [], |row| row.get(0),
-        ).unwrap();
+        let rid: String = db
+            .conn()
+            .query_row(
+                "SELECT rid FROM memories ORDER BY created_at LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         let entities = idx.entities_for_memories(&[&rid]);
         assert!(entities.contains(&"Alice".to_string()));
@@ -520,7 +584,12 @@ mod tests {
 
         let x_id = idx.entity_to_id["X"];
         let y_id = idx.entity_to_id["Y"];
-        let w = idx.neighbors(x_id).iter().find(|&&(n, _)| n == y_id).unwrap().1;
+        let w = idx
+            .neighbors(x_id)
+            .iter()
+            .find(|&&(n, _)| n == y_id)
+            .unwrap()
+            .1;
         assert!((w - 0.9).abs() < 1e-6);
     }
 

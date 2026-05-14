@@ -4,8 +4,8 @@
 //! persist agenda state and run open loop detection against the DB.
 
 use crate::agenda::{
-    self, Agenda, AgendaConfig, AgendaId, AgendaKind, AgendaItem,
-    DetectedLoop, OpenLoopScanResult, TickResult, UrgencyFn,
+    self, Agenda, AgendaConfig, AgendaId, AgendaItem, AgendaKind, DetectedLoop, OpenLoopScanResult,
+    TickResult, UrgencyFn,
 };
 use crate::error::Result;
 use crate::state::{CognitiveNode, NodeKind};
@@ -25,13 +25,11 @@ impl YantrikDB {
         // methods (which re-acquire conn) will self-deadlock.
         let meta = Self::get_meta(&self.conn(), AGENDA_META_KEY)?;
         match meta {
-            Some(json) => {
-                serde_json::from_str(&json).map_err(|e| {
-                    crate::error::YantrikDbError::Database(
-                        rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-                    )
-                })
-            }
+            Some(json) => serde_json::from_str(&json).map_err(|e| {
+                crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                    Box::new(e),
+                ))
+            }),
             None => Ok(Agenda::new()),
         }
     }
@@ -39,9 +37,9 @@ impl YantrikDB {
     /// Persist the agenda to the database.
     pub fn save_agenda(&self, agenda: &Agenda) -> Result<()> {
         let json = serde_json::to_string(agenda).map_err(|e| {
-            crate::error::YantrikDbError::Database(
-                rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-            )
+            crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                Box::new(e),
+            ))
         })?;
         self.conn().execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -65,7 +63,13 @@ impl YantrikDB {
         let config = AgendaConfig::default();
         let ts = now();
         let id = agenda.add_item_at(
-            source_node, kind, urgency_fn, due_at, description, ts, &config,
+            source_node,
+            kind,
+            urgency_fn,
+            due_at,
+            description,
+            ts,
+            &config,
         );
         self.save_agenda(&agenda)?;
         Ok(id)
@@ -190,13 +194,15 @@ mod tests {
         db.persist_node_id_allocator(&alloc).unwrap();
 
         // Add agenda item
-        let id = db.agenda_add(
-            goal_id,
-            AgendaKind::StalledIntent,
-            UrgencyFn::Constant { value: 0.7 },
-            None,
-            "Stalled goal".to_string(),
-        ).unwrap();
+        let id = db
+            .agenda_add(
+                goal_id,
+                AgendaKind::StalledIntent,
+                UrgencyFn::Constant { value: 0.7 },
+                None,
+                "Stalled goal".to_string(),
+            )
+            .unwrap();
 
         // Load and verify
         let agenda = db.load_agenda().unwrap();
@@ -211,13 +217,15 @@ mod tests {
         let mut alloc = NodeIdAllocator::new();
         let goal_id = alloc.alloc(NodeKind::Goal);
 
-        let id = db.agenda_add(
-            goal_id,
-            AgendaKind::PendingCommitment,
-            UrgencyFn::Constant { value: 0.5 },
-            None,
-            "Commitment".to_string(),
-        ).unwrap();
+        let id = db
+            .agenda_add(
+                goal_id,
+                AgendaKind::PendingCommitment,
+                UrgencyFn::Constant { value: 0.5 },
+                None,
+                "Commitment".to_string(),
+            )
+            .unwrap();
 
         db.agenda_resolve(id).unwrap();
 
@@ -251,6 +259,9 @@ mod tests {
 
         let scan = db.agenda_detect_loops().unwrap();
         // Should detect the stale task
-        assert!(scan.new_loops.iter().any(|l| l.kind == AgendaKind::AbandonedTask));
+        assert!(scan
+            .new_loops
+            .iter()
+            .any(|l| l.kind == AgendaKind::AbandonedTask));
     }
 }

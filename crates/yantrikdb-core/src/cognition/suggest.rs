@@ -243,7 +243,8 @@ pub fn suggest_next_step(
 
     action_config.max_total_candidates = mode.max_candidates();
 
-    let schema_nodes: Vec<&CognitiveNode> = nodes.iter()
+    let schema_nodes: Vec<&CognitiveNode> = nodes
+        .iter()
         .filter(|n| n.kind() == NodeKind::ActionSchema)
         .copied()
         .collect();
@@ -265,12 +266,8 @@ pub fn suggest_next_step(
 
     eval_config.max_results = mode.max_results();
 
-    let eval_result = evaluator::evaluate_candidates(
-        &candidate_result.candidates,
-        nodes,
-        edges,
-        &eval_config,
-    );
+    let eval_result =
+        evaluator::evaluate_candidates(&candidate_result.candidates, nodes, edges, &eval_config);
     let eval_us = eval_start.elapsed().as_micros() as u64;
 
     // ── Stage 4: Policy Selection (CK-1.9) ──
@@ -307,7 +304,9 @@ pub fn suggest_next_step(
     match policy_result.decision {
         PolicyDecision::Act(selected) => {
             let chosen = action_to_proposal(&selected.action);
-            let alternatives: Vec<ActionProposal> = selected.alternatives.iter()
+            let alternatives: Vec<ActionProposal> = selected
+                .alternatives
+                .iter()
                 .map(adjusted_to_proposal)
                 .collect();
 
@@ -320,26 +319,22 @@ pub fn suggest_next_step(
                 metrics,
             }
         }
-        PolicyDecision::EscalateToLlm { .. } => {
-            NextStepResponse {
-                chosen: None,
-                alternatives: vec![],
-                confidence: 0.0,
-                should_call_llm: true,
-                trace: policy_result.trace,
-                metrics,
-            }
-        }
-        PolicyDecision::Wait { .. } => {
-            NextStepResponse {
-                chosen: None,
-                alternatives: vec![],
-                confidence: 0.0,
-                should_call_llm: false,
-                trace: policy_result.trace,
-                metrics,
-            }
-        }
+        PolicyDecision::EscalateToLlm { .. } => NextStepResponse {
+            chosen: None,
+            alternatives: vec![],
+            confidence: 0.0,
+            should_call_llm: true,
+            trace: policy_result.trace,
+            metrics,
+        },
+        PolicyDecision::Wait { .. } => NextStepResponse {
+            chosen: None,
+            alternatives: vec![],
+            confidence: 0.0,
+            should_call_llm: false,
+            trace: policy_result.trace,
+            metrics,
+        },
     }
 }
 
@@ -434,7 +429,11 @@ mod tests {
             desc.to_string(),
             NodePayload::Constraint(ConstraintPayload {
                 description: desc.to_string(),
-                constraint_type: if hard { ConstraintType::Hard } else { ConstraintType::Soft },
+                constraint_type: if hard {
+                    ConstraintType::Hard
+                } else {
+                    ConstraintType::Soft
+                },
                 condition: desc.to_lowercase(),
                 imposed_by: "user".to_string(),
             }),
@@ -490,7 +489,10 @@ mod tests {
 
         // Higher urgency goal should produce higher-ranked actions
         if let Some(ref chosen) = resp.chosen {
-            assert!(chosen.utility > 0.0, "chosen action should have positive utility");
+            assert!(
+                chosen.utility > 0.0,
+                "chosen action should have positive utility"
+            );
         }
     }
 
@@ -565,12 +567,17 @@ mod tests {
         let resp = suggest_next_step(&req, &nodes, &[]);
 
         // Most proactive actions should be filtered during quiet hours
-        let quiet_rejections = resp.trace.rejected_candidates.iter()
+        let quiet_rejections = resp
+            .trace
+            .rejected_candidates
+            .iter()
             .filter(|r| matches!(r.rejection_reason, policy::RejectionReason::QuietHours))
             .count();
         // We expect some rejections during quiet hours
-        assert!(quiet_rejections > 0 || resp.chosen.is_none(),
-            "quiet hours should filter proactive actions or result in no action");
+        assert!(
+            quiet_rejections > 0 || resp.chosen.is_none(),
+            "quiet hours should filter proactive actions or result in no action"
+        );
     }
 
     #[test]
@@ -585,9 +592,11 @@ mod tests {
         let resp = suggest_next_step(&req, &nodes, &[]);
 
         // DND should block proactive actions
-        assert!(resp.trace.rejected_candidates.iter().any(|r| {
-            matches!(r.rejection_reason, policy::RejectionReason::QuietHours)
-        }));
+        assert!(resp
+            .trace
+            .rejected_candidates
+            .iter()
+            .any(|r| { matches!(r.rejection_reason, policy::RejectionReason::QuietHours) }));
     }
 
     #[test]
@@ -606,11 +615,17 @@ mod tests {
         let resp_distressed = suggest_next_step(&req_distressed, &nodes, &[]);
 
         // Distressed should have emotional sensitivity factors
-        let has_emo_factor = resp_distressed.trace.active_factors.iter()
+        let has_emo_factor = resp_distressed
+            .trace
+            .active_factors
+            .iter()
             .any(|f| f.factor == "emotional_sensitivity");
 
         if resp_distressed.chosen.is_some() {
-            assert!(has_emo_factor, "high distress should trigger emotional sensitivity");
+            assert!(
+                has_emo_factor,
+                "high distress should trigger emotional sensitivity"
+            );
         }
     }
 
@@ -716,8 +731,10 @@ mod tests {
         let resp = suggest_next_step(&req, &nodes, &[]);
 
         if resp.metrics.candidates_count > 0 {
-            assert!(resp.should_call_llm,
-                "should escalate to LLM when all above-threshold candidates are filtered");
+            assert!(
+                resp.should_call_llm,
+                "should escalate to LLM when all above-threshold candidates are filtered"
+            );
             assert!(resp.chosen.is_none());
         }
     }
@@ -735,8 +752,10 @@ mod tests {
 
         // Alternatives should be sorted by utility
         for w in resp.alternatives.windows(2) {
-            assert!(w[0].utility >= w[1].utility,
-                "alternatives should be sorted by utility descending");
+            assert!(
+                w[0].utility >= w[1].utility,
+                "alternatives should be sorted by utility descending"
+            );
         }
     }
 
@@ -819,8 +838,10 @@ mod tests {
 
         // All candidates should be filtered by anti-spam
         if resp.metrics.candidates_count > 0 {
-            assert!(resp.chosen.is_none() || resp.should_call_llm,
-                "anti-spam should prevent new suggestions");
+            assert!(
+                resp.chosen.is_none() || resp.should_call_llm,
+                "anti-spam should prevent new suggestions"
+            );
         }
     }
 
@@ -837,9 +858,15 @@ mod tests {
 
         // In shared context, sensitive schemas should be filtered
         if let Some(ref chosen) = resp.chosen {
-            let sensitive = ["emotional_check_in", "health_reminder", "personal_reflection"];
-            assert!(!sensitive.contains(&chosen.schema_name.as_str()),
-                "sensitive actions should not be chosen in shared context");
+            let sensitive = [
+                "emotional_check_in",
+                "health_reminder",
+                "personal_reflection",
+            ];
+            assert!(
+                !sensitive.contains(&chosen.schema_name.as_str()),
+                "sensitive actions should not be chosen in shared context"
+            );
         }
     }
 }

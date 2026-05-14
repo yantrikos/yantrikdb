@@ -546,9 +546,7 @@ impl YantrikDB {
         )?;
 
         let edges = stmt
-            .query_map(params![kind.as_str()], |row| {
-                Ok(row_to_cognitive_edge(row))
-            })?
+            .query_map(params![kind.as_str()], |row| Ok(row_to_cognitive_edge(row)))?
             .filter_map(|r| r.ok().flatten())
             .collect();
 
@@ -606,9 +604,8 @@ impl YantrikDB {
     /// so that newly allocated IDs never collide with persisted ones.
     pub fn load_node_id_allocator(&self) -> Result<NodeIdAllocator> {
         let conn = self.conn();
-        let mut stmt = conn.prepare_cached(
-            "SELECT kind, high_water_mark FROM cognitive_node_hwm",
-        )?;
+        let mut stmt =
+            conn.prepare_cached("SELECT kind, high_water_mark FROM cognitive_node_hwm")?;
 
         let marks: Vec<(NodeKind, u32)> = stmt
             .query_map([], |row| {
@@ -617,9 +614,8 @@ impl YantrikDB {
                 Ok((kind_str, hwm as u32))
             })?
             .filter_map(|r| {
-                r.ok().and_then(|(k, h)| {
-                    NodeKind::from_str(&k).map(|kind| (kind, h))
-                })
+                r.ok()
+                    .and_then(|(k, h)| NodeKind::from_str(&k).map(|kind| (kind, h)))
             })
             .collect();
 
@@ -695,9 +691,7 @@ impl YantrikDB {
         let edges: Vec<CognitiveEdge> = stmt
             .query_map([], |row| Ok(row_to_cognitive_edge(row)))?
             .filter_map(|r| r.ok().flatten())
-            .filter(|e| {
-                node_ids.contains(&e.src.to_raw()) && node_ids.contains(&e.dst.to_raw())
-            })
+            .filter(|e| node_ids.contains(&e.src.to_raw()) && node_ids.contains(&e.dst.to_raw()))
             .collect();
 
         for edge in edges {
@@ -931,7 +925,10 @@ impl YantrikDB {
     pub fn cognitive_evidence_for(
         &self,
         id: NodeId,
-    ) -> Result<(Vec<(CognitiveNode, CognitiveEdge)>, Vec<(CognitiveNode, CognitiveEdge)>)> {
+    ) -> Result<(
+        Vec<(CognitiveNode, CognitiveEdge)>,
+        Vec<(CognitiveNode, CognitiveEdge)>,
+    )> {
         let incoming = self.load_cognitive_edges_to(id)?;
         let mut supporting = Vec::new();
         let mut contradicting = Vec::new();
@@ -955,7 +952,8 @@ impl YantrikDB {
         goal_id: NodeId,
     ) -> Result<(Vec<CognitiveNode>, Vec<CognitiveEdge>)> {
         let mut visited = std::collections::HashSet::new();
-        let mut edge_set: std::collections::HashSet<(u32, u32, &str)> = std::collections::HashSet::new();
+        let mut edge_set: std::collections::HashSet<(u32, u32, &str)> =
+            std::collections::HashSet::new();
         let mut queue = vec![goal_id];
         let mut nodes = Vec::new();
         let mut edges = Vec::new();
@@ -1029,20 +1027,18 @@ impl YantrikDB {
 
         // Average activation across all nodes
         let conn = self.conn();
-        let avg_activation: f64 = conn
-            .query_row(
-                "SELECT COALESCE(AVG(activation), 0.0) FROM cognitive_nodes WHERE tombstoned = 0",
-                [],
-                |row| row.get(0),
-            )?;
+        let avg_activation: f64 = conn.query_row(
+            "SELECT COALESCE(AVG(activation), 0.0) FROM cognitive_nodes WHERE tombstoned = 0",
+            [],
+            |row| row.get(0),
+        )?;
 
         // Highest urgency node
-        let max_urgency: f64 = conn
-            .query_row(
-                "SELECT COALESCE(MAX(urgency), 0.0) FROM cognitive_nodes WHERE tombstoned = 0",
-                [],
-                |row| row.get(0),
-            )?;
+        let max_urgency: f64 = conn.query_row(
+            "SELECT COALESCE(MAX(urgency), 0.0) FROM cognitive_nodes WHERE tombstoned = 0",
+            [],
+            |row| row.get(0),
+        )?;
 
         Ok(CognitiveGraphStats {
             total_nodes,
@@ -1144,8 +1140,8 @@ fn row_to_cognitive_edge(row: &rusqlite::Row<'_>) -> Option<CognitiveEdge> {
 mod tests {
     use super::*;
     use crate::state::{
-        EntityPayload, BeliefPayload, GoalPayload, GoalStatus, TaskPayload, TaskStatus,
-        Priority, IntentPayload, NodePayload,
+        BeliefPayload, EntityPayload, GoalPayload, GoalStatus, IntentPayload, NodePayload,
+        Priority, TaskPayload, TaskStatus,
     };
 
     fn test_db() -> YantrikDB {
@@ -1234,8 +1230,18 @@ mod tests {
         let n1 = alloc.alloc(NodeKind::Belief);
         let n2 = alloc.alloc(NodeKind::Belief);
 
-        db.persist_cognitive_node(&CognitiveNode::new(n1, "Earth is round".into(), make_belief("Earth is round"))).unwrap();
-        db.persist_cognitive_node(&CognitiveNode::new(n2, "Gravity exists".into(), make_belief("Gravity exists"))).unwrap();
+        db.persist_cognitive_node(&CognitiveNode::new(
+            n1,
+            "Earth is round".into(),
+            make_belief("Earth is round"),
+        ))
+        .unwrap();
+        db.persist_cognitive_node(&CognitiveNode::new(
+            n2,
+            "Gravity exists".into(),
+            make_belief("Gravity exists"),
+        ))
+        .unwrap();
 
         let edge = CognitiveEdge::new(n1, n2, CognitiveEdgeKind::Supports, 0.8);
         db.persist_cognitive_edge(&edge).unwrap();
@@ -1259,8 +1265,14 @@ mod tests {
         let n1 = alloc.alloc(NodeKind::Entity);
         let n2 = alloc.alloc(NodeKind::Entity);
 
-        db.persist_cognitive_node(&CognitiveNode::new(n1, "Alice".into(), make_entity("alice"))).unwrap();
-        db.persist_cognitive_node(&CognitiveNode::new(n2, "Bob".into(), make_entity("bob"))).unwrap();
+        db.persist_cognitive_node(&CognitiveNode::new(
+            n1,
+            "Alice".into(),
+            make_entity("alice"),
+        ))
+        .unwrap();
+        db.persist_cognitive_node(&CognitiveNode::new(n2, "Bob".into(), make_entity("bob")))
+            .unwrap();
 
         let edge = CognitiveEdge::new(n1, n2, CognitiveEdgeKind::AssociatedWith, 0.5);
         db.persist_cognitive_edge(&edge).unwrap();
@@ -1279,14 +1291,21 @@ mod tests {
         let nodes: Vec<CognitiveNode> = (0..10)
             .map(|i| {
                 let id = alloc.alloc(NodeKind::Entity);
-                CognitiveNode::new(id, format!("Entity_{i}"), make_entity(&format!("entity_{i}")))
+                CognitiveNode::new(
+                    id,
+                    format!("Entity_{i}"),
+                    make_entity(&format!("entity_{i}")),
+                )
             })
             .collect();
 
         let count = db.persist_cognitive_nodes(&nodes).unwrap();
         assert_eq!(count, 10);
         assert_eq!(db.count_cognitive_nodes(None).unwrap(), 10);
-        assert_eq!(db.count_cognitive_nodes(Some(NodeKind::Entity)).unwrap(), 10);
+        assert_eq!(
+            db.count_cognitive_nodes(Some(NodeKind::Entity)).unwrap(),
+            10
+        );
     }
 
     #[test]
@@ -1321,7 +1340,8 @@ mod tests {
         let mut nodes = Vec::new();
         for i in 0..5u32 {
             let id = alloc.alloc(NodeKind::Goal);
-            let mut node = CognitiveNode::new(id, format!("Goal_{i}"), make_goal(&format!("Do thing {i}")));
+            let mut node =
+                CognitiveNode::new(id, format!("Goal_{i}"), make_goal(&format!("Do thing {i}")));
             node.attrs.activation = i as f64 * 0.2;
             node.attrs.urgency = (4 - i) as f64 * 0.2;
             nodes.push(node);
@@ -1329,21 +1349,25 @@ mod tests {
         db.persist_cognitive_nodes(&nodes).unwrap();
 
         // activation >= 0.3 → i=2(0.4), i=3(0.6), i=4(0.8)
-        let high_activation = db.query_cognitive_nodes(&CognitiveNodeFilter {
-            min_activation: 0.3,
-            order_by: CognitiveNodeOrder::Activation,
-            limit: 10,
-            ..Default::default()
-        }).unwrap();
+        let high_activation = db
+            .query_cognitive_nodes(&CognitiveNodeFilter {
+                min_activation: 0.3,
+                order_by: CognitiveNodeOrder::Activation,
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(high_activation.len(), 3);
 
         // urgency >= 0.5 → i=0(0.8), i=1(0.6)
-        let urgent = db.query_cognitive_nodes(&CognitiveNodeFilter {
-            min_urgency: 0.5,
-            order_by: CognitiveNodeOrder::Urgency,
-            limit: 10,
-            ..Default::default()
-        }).unwrap();
+        let urgent = db
+            .query_cognitive_nodes(&CognitiveNodeFilter {
+                min_urgency: 0.5,
+                order_by: CognitiveNodeOrder::Urgency,
+                limit: 10,
+                ..Default::default()
+            })
+            .unwrap();
         assert_eq!(urgent.len(), 2);
     }
 
@@ -1357,8 +1381,16 @@ mod tests {
         let goal_id = alloc.alloc(NodeKind::Goal);
 
         let entity = CognitiveNode::new(entity_id, "Coffee".into(), make_entity("coffee"));
-        let belief = CognitiveNode::new(belief_id, "Coffee helps focus".into(), make_belief("Coffee helps focus"));
-        let goal = CognitiveNode::new(goal_id, "Improve focus".into(), make_goal("Improve focus during work hours"));
+        let belief = CognitiveNode::new(
+            belief_id,
+            "Coffee helps focus".into(),
+            make_belief("Coffee helps focus"),
+        );
+        let goal = CognitiveNode::new(
+            goal_id,
+            "Improve focus".into(),
+            make_goal("Improve focus during work hours"),
+        );
 
         db.persist_cognitive_nodes(&[entity, belief, goal]).unwrap();
         db.persist_node_id_allocator(&alloc).unwrap();
@@ -1386,7 +1418,10 @@ mod tests {
         assert_eq!(result.nodes_inserted, 4);
         assert_eq!(result.edges_inserted, 2);
 
-        let loaded = db.load_cognitive_node(new_id).unwrap().expect("new node not found");
+        let loaded = db
+            .load_cognitive_node(new_id)
+            .unwrap()
+            .expect("new node not found");
         assert_eq!(loaded.label, "Tea");
     }
 
@@ -1412,7 +1447,13 @@ mod tests {
         node3.attrs.urgency = 0.5;
 
         db.persist_cognitive_nodes(&[node1, node2, node3]).unwrap();
-        db.persist_cognitive_edge(&CognitiveEdge::new(n1, n2, CognitiveEdgeKind::Supports, 0.7)).unwrap();
+        db.persist_cognitive_edge(&CognitiveEdge::new(
+            n1,
+            n2,
+            CognitiveEdgeKind::Supports,
+            0.7,
+        ))
+        .unwrap();
 
         let stats = db.cognitive_graph_stats().unwrap();
         assert_eq!(stats.total_nodes, 3);
@@ -1434,11 +1475,23 @@ mod tests {
         let n3 = alloc.alloc(NodeKind::Entity);
 
         for (id, name) in [(n1, "A"), (n2, "B"), (n3, "C")] {
-            db.persist_cognitive_node(&CognitiveNode::new(id, name.into(), make_entity(&name.to_lowercase()))).unwrap();
+            db.persist_cognitive_node(&CognitiveNode::new(
+                id,
+                name.into(),
+                make_entity(&name.to_lowercase()),
+            ))
+            .unwrap();
         }
 
-        db.persist_cognitive_edge(&CognitiveEdge::new(n1, n2, CognitiveEdgeKind::Causes, 0.8)).unwrap();
-        db.persist_cognitive_edge(&CognitiveEdge::new(n1, n3, CognitiveEdgeKind::Supports, 0.6)).unwrap();
+        db.persist_cognitive_edge(&CognitiveEdge::new(n1, n2, CognitiveEdgeKind::Causes, 0.8))
+            .unwrap();
+        db.persist_cognitive_edge(&CognitiveEdge::new(
+            n1,
+            n3,
+            CognitiveEdgeKind::Supports,
+            0.6,
+        ))
+        .unwrap();
 
         assert_eq!(db.cognitive_neighbors(n1).unwrap().len(), 2);
 
@@ -1446,7 +1499,9 @@ mod tests {
         assert_eq!(preds.len(), 1);
         assert_eq!(preds[0].0.label, "A");
 
-        let causes_only = db.cognitive_neighbors_by_edge_kind(n1, CognitiveEdgeKind::Causes).unwrap();
+        let causes_only = db
+            .cognitive_neighbors_by_edge_kind(n1, CognitiveEdgeKind::Causes)
+            .unwrap();
         assert_eq!(causes_only.len(), 1);
         assert_eq!(causes_only[0].0.label, "B");
     }
@@ -1465,11 +1520,24 @@ mod tests {
             (supporter, "Supporting evidence", "Y implies X"),
             (contraditor, "Counter evidence", "Z contradicts X"),
         ] {
-            db.persist_cognitive_node(&CognitiveNode::new(id, label.into(), make_belief(prop))).unwrap();
+            db.persist_cognitive_node(&CognitiveNode::new(id, label.into(), make_belief(prop)))
+                .unwrap();
         }
 
-        db.persist_cognitive_edge(&CognitiveEdge::new(supporter, target, CognitiveEdgeKind::Supports, 0.8)).unwrap();
-        db.persist_cognitive_edge(&CognitiveEdge::new(contraditor, target, CognitiveEdgeKind::Contradicts, -0.7)).unwrap();
+        db.persist_cognitive_edge(&CognitiveEdge::new(
+            supporter,
+            target,
+            CognitiveEdgeKind::Supports,
+            0.8,
+        ))
+        .unwrap();
+        db.persist_cognitive_edge(&CognitiveEdge::new(
+            contraditor,
+            target,
+            CognitiveEdgeKind::Contradicts,
+            -0.7,
+        ))
+        .unwrap();
 
         let (supporting, contradicting) = db.cognitive_evidence_for(target).unwrap();
         assert_eq!(supporting.len(), 1);
@@ -1487,14 +1555,32 @@ mod tests {
         let task1 = alloc.alloc(NodeKind::Task);
         let task2 = alloc.alloc(NodeKind::Task);
 
-        db.persist_cognitive_node(&CognitiveNode::new(goal, "Ship v1".into(), make_goal("Ship v1.0 release"))).unwrap();
+        db.persist_cognitive_node(&CognitiveNode::new(
+            goal,
+            "Ship v1".into(),
+            make_goal("Ship v1.0 release"),
+        ))
+        .unwrap();
 
         for (id, label) in [(task1, "Write tests"), (task2, "Deploy")] {
-            db.persist_cognitive_node(&CognitiveNode::new(id, label.into(), make_task(label))).unwrap();
+            db.persist_cognitive_node(&CognitiveNode::new(id, label.into(), make_task(label)))
+                .unwrap();
         }
 
-        db.persist_cognitive_edge(&CognitiveEdge::new(task1, goal, CognitiveEdgeKind::SubtaskOf, 0.9)).unwrap();
-        db.persist_cognitive_edge(&CognitiveEdge::new(task2, goal, CognitiveEdgeKind::SubtaskOf, 0.9)).unwrap();
+        db.persist_cognitive_edge(&CognitiveEdge::new(
+            task1,
+            goal,
+            CognitiveEdgeKind::SubtaskOf,
+            0.9,
+        ))
+        .unwrap();
+        db.persist_cognitive_edge(&CognitiveEdge::new(
+            task2,
+            goal,
+            CognitiveEdgeKind::SubtaskOf,
+            0.9,
+        ))
+        .unwrap();
 
         let (nodes, edges) = db.cognitive_goal_subgraph(goal).unwrap();
         assert_eq!(nodes.len(), 3);

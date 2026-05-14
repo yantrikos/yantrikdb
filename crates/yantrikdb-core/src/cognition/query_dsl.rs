@@ -112,9 +112,8 @@ impl CognitivePipeline {
 
     /// Revise beliefs based on new evidence.
     pub fn believe(mut self, evidence: EvidenceInput) -> Self {
-        self.operators.push(CognitiveOperator::Believe(BelieveOp {
-            evidence,
-        }));
+        self.operators
+            .push(CognitiveOperator::Believe(BelieveOp { evidence }));
         self
     }
 
@@ -138,26 +137,22 @@ impl CognitivePipeline {
 
     /// Filter candidates by policy constraints.
     pub fn constrain(mut self, policies: Vec<PolicyConstraint>) -> Self {
-        self.operators.push(CognitiveOperator::Constrain(ConstrainOp {
-            policies,
-        }));
+        self.operators
+            .push(CognitiveOperator::Constrain(ConstrainOp { policies }));
         self
     }
 
     /// Check anticipatory items within a timeframe.
     pub fn anticipate(mut self, horizon_secs: f64) -> Self {
-        self.operators.push(CognitiveOperator::Anticipate(AnticipateOp {
-            horizon_secs,
-        }));
+        self.operators
+            .push(CognitiveOperator::Anticipate(AnticipateOp { horizon_secs }));
         self
     }
 
     /// Plan toward a goal using means-ends reasoning.
     pub fn plan(mut self, goal_id: NodeId, max_depth: u32) -> Self {
-        self.operators.push(CognitiveOperator::Plan(PlanOp {
-            goal_id,
-            max_depth,
-        }));
+        self.operators
+            .push(CognitiveOperator::Plan(PlanOp { goal_id, max_depth }));
         self
     }
 
@@ -319,9 +314,9 @@ impl ProjectionHorizon {
     pub fn seconds(&self) -> f64 {
         match self {
             Self::OneStep => 60.0,
-            Self::ShortTerm => 600.0,      // 10 minutes
-            Self::MediumTerm => 7200.0,     // 2 hours
-            Self::LongTerm => 86400.0,      // 1 day
+            Self::ShortTerm => 600.0,   // 10 minutes
+            Self::MediumTerm => 7200.0, // 2 hours
+            Self::LongTerm => 86400.0,  // 1 day
         }
     }
 }
@@ -480,13 +475,9 @@ pub enum StepOutput {
         confidence_delta: f64,
     },
     /// Project: predicted consequences.
-    Project {
-        predictions: Vec<Prediction>,
-    },
+    Project { predictions: Vec<Prediction> },
     /// Compare: ranked candidates.
-    Compare {
-        ranked: Vec<RankedCandidate>,
-    },
+    Compare { ranked: Vec<RankedCandidate> },
     /// Constrain: filtered candidates.
     Constrain {
         passed: usize,
@@ -494,9 +485,7 @@ pub enum StepOutput {
         violations: Vec<ConstraintViolation>,
     },
     /// Anticipate: upcoming items.
-    Anticipate {
-        items: Vec<AnticipatedItem>,
-    },
+    Anticipate { items: Vec<AnticipatedItem> },
     /// Plan: generated plan.
     Plan {
         plan_found: bool,
@@ -515,13 +504,9 @@ pub enum StepOutput {
         stale_nodes: usize,
     },
     /// Operator was skipped (budget).
-    Skipped {
-        reason: String,
-    },
+    Skipped { reason: String },
     /// Operator failed.
-    Error {
-        message: String,
-    },
+    Error { message: String },
 }
 
 /// A recalled memory match.
@@ -619,7 +604,9 @@ pub fn execute_pipeline(
     let execution_order: Vec<usize> = if pipeline.mode == ExecutionMode::Budgeted {
         let mut indices: Vec<usize> = (0..pipeline.operators.len()).collect();
         indices.sort_by(|a, b| {
-            pipeline.operators[*b].priority().cmp(&pipeline.operators[*a].priority())
+            pipeline.operators[*b]
+                .priority()
+                .cmp(&pipeline.operators[*a].priority())
         });
         indices
     } else {
@@ -714,41 +701,113 @@ pub trait PipelineExecutor {
 
 fn format_step_trace(op: &CognitiveOperator, output: &StepOutput) -> String {
     match (op, output) {
-        (CognitiveOperator::Attend(a), StepOutput::Attend { nodes_activated, .. }) => {
-            format!("Spread activation from {} seeds → {} nodes activated",
-                a.seeds.len(), nodes_activated)
+        (
+            CognitiveOperator::Attend(a),
+            StepOutput::Attend {
+                nodes_activated, ..
+            },
+        ) => {
+            format!(
+                "Spread activation from {} seeds → {} nodes activated",
+                a.seeds.len(),
+                nodes_activated
+            )
         }
-        (CognitiveOperator::Recall(r), StepOutput::Recall { memories_retrieved, .. }) => {
-            format!("Retrieved {} memories (top_k={})",
-                memories_retrieved, r.top_k)
+        (
+            CognitiveOperator::Recall(r),
+            StepOutput::Recall {
+                memories_retrieved, ..
+            },
+        ) => {
+            format!(
+                "Retrieved {} memories (top_k={})",
+                memories_retrieved, r.top_k
+            )
         }
-        (CognitiveOperator::Believe(_), StepOutput::Believe { beliefs_updated, confidence_delta, .. }) => {
-            format!("Updated {} beliefs (Δconf={:+.3})", beliefs_updated, confidence_delta)
+        (
+            CognitiveOperator::Believe(_),
+            StepOutput::Believe {
+                beliefs_updated,
+                confidence_delta,
+                ..
+            },
+        ) => {
+            format!(
+                "Updated {} beliefs (Δconf={:+.3})",
+                beliefs_updated, confidence_delta
+            )
         }
         (CognitiveOperator::Project(p), StepOutput::Project { predictions, .. }) => {
-            format!("Projected {:?} → {} predictions", p.horizon, predictions.len())
+            format!(
+                "Projected {:?} → {} predictions",
+                p.horizon,
+                predictions.len()
+            )
         }
         (CognitiveOperator::Compare(_), StepOutput::Compare { ranked, .. }) => {
-            format!("Compared {} candidates → top: {}",
+            format!(
+                "Compared {} candidates → top: {}",
                 ranked.len(),
-                ranked.first().map(|r| r.description.as_str()).unwrap_or("none"))
+                ranked
+                    .first()
+                    .map(|r| r.description.as_str())
+                    .unwrap_or("none")
+            )
         }
-        (CognitiveOperator::Constrain(_), StepOutput::Constrain { passed, filtered_out, .. }) => {
-            format!("{} passed, {} filtered by constraints", passed, filtered_out)
+        (
+            CognitiveOperator::Constrain(_),
+            StepOutput::Constrain {
+                passed,
+                filtered_out,
+                ..
+            },
+        ) => {
+            format!(
+                "{} passed, {} filtered by constraints",
+                passed, filtered_out
+            )
         }
-        (CognitiveOperator::Plan(_), StepOutput::Plan { plan_found, steps, score, .. }) => {
+        (
+            CognitiveOperator::Plan(_),
+            StepOutput::Plan {
+                plan_found,
+                steps,
+                score,
+                ..
+            },
+        ) => {
             if *plan_found {
                 format!("Plan found: {} steps, score {:.2}", steps, score)
             } else {
                 "No viable plan found".to_string()
             }
         }
-        (CognitiveOperator::Assess, StepOutput::Assess { overall_confidence, coverage_gaps, .. }) => {
-            format!("Meta-cognitive confidence: {:.2}, {} coverage gaps",
-                overall_confidence, coverage_gaps)
+        (
+            CognitiveOperator::Assess,
+            StepOutput::Assess {
+                overall_confidence,
+                coverage_gaps,
+                ..
+            },
+        ) => {
+            format!(
+                "Meta-cognitive confidence: {:.2}, {} coverage gaps",
+                overall_confidence, coverage_gaps
+            )
         }
-        (CognitiveOperator::CoherenceCheck, StepOutput::Coherence { score, conflicts, stale_nodes, .. }) => {
-            format!("Coherence: {:.2}, {} conflicts, {} stale", score, conflicts, stale_nodes)
+        (
+            CognitiveOperator::CoherenceCheck,
+            StepOutput::Coherence {
+                score,
+                conflicts,
+                stale_nodes,
+                ..
+            },
+        ) => {
+            format!(
+                "Coherence: {:.2}, {} conflicts, {} stale",
+                score, conflicts, stale_nodes
+            )
         }
         (_, StepOutput::Skipped { reason }) => {
             format!("Skipped: {}", reason)
@@ -761,25 +820,33 @@ fn format_step_trace(op: &CognitiveOperator, output: &StepOutput) -> String {
 }
 
 fn build_explanation(steps: &[StepResult]) -> ExplanationTrace {
-    let explanation_steps: Vec<ExplanationStep> = steps.iter().enumerate()
+    let explanation_steps: Vec<ExplanationStep> = steps
+        .iter()
+        .enumerate()
         .filter(|(_, s)| s.success)
-        .map(|(i, s)| {
-            ExplanationStep {
-                step_number: i + 1,
-                operator: s.operator.clone(),
-                description: s.trace.clone().unwrap_or_else(|| format!("{}: completed", s.operator)),
-                key_insight: extract_key_insight(&s.output),
-            }
+        .map(|(i, s)| ExplanationStep {
+            step_number: i + 1,
+            operator: s.operator.clone(),
+            description: s
+                .trace
+                .clone()
+                .unwrap_or_else(|| format!("{}: completed", s.operator)),
+            key_insight: extract_key_insight(&s.output),
         })
         .collect();
 
     let summary = if explanation_steps.is_empty() {
         "No reasoning steps executed.".to_string()
     } else {
-        let op_names: Vec<&str> = explanation_steps.iter()
+        let op_names: Vec<&str> = explanation_steps
+            .iter()
             .map(|s| s.operator.as_str())
             .collect();
-        format!("Reasoning pipeline: {} steps ({})", explanation_steps.len(), op_names.join(" → "))
+        format!(
+            "Reasoning pipeline: {} steps ({})",
+            explanation_steps.len(),
+            op_names.join(" → ")
+        )
     };
 
     ExplanationTrace {
@@ -790,19 +857,22 @@ fn build_explanation(steps: &[StepResult]) -> ExplanationTrace {
 
 fn extract_key_insight(output: &StepOutput) -> Option<String> {
     match output {
-        StepOutput::Compare { ranked, .. } if !ranked.is_empty() => {
-            Some(format!("Best candidate: {} (score {:.2})",
-                ranked[0].description, ranked[0].score))
-        }
-        StepOutput::Assess { overall_confidence, .. } if *overall_confidence < 0.5 => {
+        StepOutput::Compare { ranked, .. } if !ranked.is_empty() => Some(format!(
+            "Best candidate: {} (score {:.2})",
+            ranked[0].description, ranked[0].score
+        )),
+        StepOutput::Assess {
+            overall_confidence, ..
+        } if *overall_confidence < 0.5 => {
             Some("Low meta-cognitive confidence — consider escalating".to_string())
         }
         StepOutput::Coherence { score, .. } if *score < 0.5 => {
             Some("Coherence degraded — enforcement may be needed".to_string())
         }
-        StepOutput::Constrain { filtered_out, .. } if *filtered_out > 0 => {
-            Some(format!("{} candidates filtered by policy constraints", filtered_out))
-        }
+        StepOutput::Constrain { filtered_out, .. } if *filtered_out > 0 => Some(format!(
+            "{} candidates filtered by policy constraints",
+            filtered_out
+        )),
         _ => None,
     }
 }
@@ -935,7 +1005,10 @@ impl PipelineExecutor for StubExecutor {
                 }],
             },
             CognitiveOperator::Compare(c) => {
-                let ranked: Vec<RankedCandidate> = c.candidates.iter().enumerate()
+                let ranked: Vec<RankedCandidate> = c
+                    .candidates
+                    .iter()
+                    .enumerate()
                     .map(|(i, cand)| RankedCandidate {
                         description: cand.description.clone(),
                         score: cand.confidence * 0.9,
@@ -1070,7 +1143,9 @@ mod tests {
         assert_eq!(result.status, PipelineStatus::Complete);
 
         // Check that coherence result is present.
-        let coherence_step = result.steps.iter()
+        let coherence_step = result
+            .steps
+            .iter()
             .find(|s| s.operator == "coherence_check")
             .unwrap();
         assert!(coherence_step.success);
@@ -1079,9 +1154,7 @@ mod tests {
     #[test]
     fn test_deep_reasoning_pattern() {
         let goal_id = NodeId::new(NodeKind::Goal, 1);
-        let pipeline = PipelinePatterns::deep_reasoning(
-            seed_ids(), goal_id, test_candidates(),
-        );
+        let pipeline = PipelinePatterns::deep_reasoning(seed_ids(), goal_id, test_candidates());
 
         assert!(pipeline.len() >= 6);
         let result = execute_pipeline(&pipeline, &StubExecutor);
@@ -1090,20 +1163,38 @@ mod tests {
 
     #[test]
     fn test_operator_priority_ordering() {
-        assert!(CognitiveOperator::Attend(AttendOp {
-            seeds: vec![], max_hops: 1, decay: 0.5,
-        }).priority() > CognitiveOperator::Assess.priority());
+        assert!(
+            CognitiveOperator::Attend(AttendOp {
+                seeds: vec![],
+                max_hops: 1,
+                decay: 0.5,
+            })
+            .priority()
+                > CognitiveOperator::Assess.priority()
+        );
 
-        assert!(CognitiveOperator::Recall(RecallOp {
-            top_k: 5, query: None, domain: None,
-        }).priority() > CognitiveOperator::CoherenceCheck.priority());
+        assert!(
+            CognitiveOperator::Recall(RecallOp {
+                top_k: 5,
+                query: None,
+                domain: None,
+            })
+            .priority()
+                > CognitiveOperator::CoherenceCheck.priority()
+        );
     }
 
     #[test]
     fn test_operator_names() {
-        assert_eq!(CognitiveOperator::Attend(AttendOp {
-            seeds: vec![], max_hops: 1, decay: 0.5,
-        }).name(), "attend");
+        assert_eq!(
+            CognitiveOperator::Attend(AttendOp {
+                seeds: vec![],
+                max_hops: 1,
+                decay: 0.5,
+            })
+            .name(),
+            "attend"
+        );
         assert_eq!(CognitiveOperator::Assess.name(), "assess");
         assert_eq!(CognitiveOperator::CoherenceCheck.name(), "coherence_check");
     }
@@ -1158,8 +1249,7 @@ mod tests {
             source: "user".to_string(),
         };
 
-        let pipeline = CognitivePipeline::new()
-            .believe(evidence);
+        let pipeline = CognitivePipeline::new().believe(evidence);
 
         assert_eq!(pipeline.len(), 1);
 
@@ -1180,12 +1270,14 @@ mod tests {
             },
             PolicyConstraint {
                 name: "quiet_hours".to_string(),
-                kind: ConstraintKind::QuietHours { start_hour: 22, end_hour: 7 },
+                kind: ConstraintKind::QuietHours {
+                    start_hour: 22,
+                    end_hour: 7,
+                },
             },
         ];
 
-        let pipeline = CognitivePipeline::new()
-            .constrain(constraints);
+        let pipeline = CognitivePipeline::new().constrain(constraints);
 
         assert_eq!(pipeline.len(), 1);
     }

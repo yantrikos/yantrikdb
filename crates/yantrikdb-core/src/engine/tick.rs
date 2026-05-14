@@ -5,8 +5,8 @@
 
 use crate::error::Result;
 use crate::tick::{
-    cognitive_tick, next_tick_interval_ms, Anomaly, CachedSuggestion,
-    TickConfig, TickReport, TickState,
+    cognitive_tick, next_tick_interval_ms, Anomaly, CachedSuggestion, TickConfig, TickReport,
+    TickState,
 };
 
 use super::{now, YantrikDB};
@@ -27,9 +27,9 @@ impl YantrikDB {
         let meta = Self::get_meta(&self.conn(), TICK_STATE_META_KEY)?;
         match meta {
             Some(json) => serde_json::from_str(&json).map_err(|e| {
-                crate::error::YantrikDbError::Database(
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-                )
+                crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                    Box::new(e),
+                ))
             }),
             None => Ok(TickState::new()),
         }
@@ -38,9 +38,9 @@ impl YantrikDB {
     /// Persist the tick state to the database.
     pub fn save_tick_state(&self, state: &TickState) -> Result<()> {
         let json = serde_json::to_string(state).map_err(|e| {
-            crate::error::YantrikDbError::Database(
-                rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-            )
+            crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                Box::new(e),
+            ))
         })?;
         self.conn().execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -57,9 +57,9 @@ impl YantrikDB {
         let meta = Self::get_meta(&self.conn(), TICK_CONFIG_META_KEY)?;
         match meta {
             Some(json) => serde_json::from_str(&json).map_err(|e| {
-                crate::error::YantrikDbError::Database(
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-                )
+                crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                    Box::new(e),
+                ))
             }),
             None => Ok(TickConfig::default()),
         }
@@ -68,9 +68,9 @@ impl YantrikDB {
     /// Persist the tick config to the database.
     pub fn save_tick_config(&self, config: &TickConfig) -> Result<()> {
         let json = serde_json::to_string(config).map_err(|e| {
-            crate::error::YantrikDbError::Database(
-                rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-            )
+            crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                Box::new(e),
+            ))
         })?;
         self.conn().execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -142,7 +142,11 @@ impl YantrikDB {
     pub fn tick_cached_suggestions(&self) -> Result<Vec<CachedSuggestion>> {
         let state = self.load_tick_state()?;
         let ts = now();
-        Ok(state.cached_suggestions.into_iter().filter(|s| s.is_valid(ts)).collect())
+        Ok(state
+            .cached_suggestions
+            .into_iter()
+            .filter(|s| s.is_valid(ts))
+            .collect())
     }
 
     /// Get the current tick count.
@@ -177,8 +181,7 @@ impl YantrikDB {
     /// Wraps the consolidation module — finds candidates and consolidates.
     fn run_consolidation(&self) -> Result<()> {
         let _ = crate::consolidate::consolidate(
-            self,
-            0.85,  // similarity threshold
+            self, 0.85,  // similarity threshold
             30.0,  // time window days
             2,     // min cluster size
             100,   // consolidation limit

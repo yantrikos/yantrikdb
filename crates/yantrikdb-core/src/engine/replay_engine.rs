@@ -3,12 +3,11 @@
 //! Wires the replay module into `YantrikDB`, persisting the replay
 //! engine state (buffer, stats, budget) and exposing the dream cycle.
 
-use crate::replay::{
-    ReplayEngine, ReplaySummary, DreamReport, ActionRecord, OutcomeData,
-    add_to_buffer, should_replay, reprioritize_buffer,
-    run_replay_cycle, buffer_maintenance, replay_summary,
-};
 use crate::error::Result;
+use crate::replay::{
+    add_to_buffer, buffer_maintenance, replay_summary, reprioritize_buffer, run_replay_cycle,
+    should_replay, ActionRecord, DreamReport, OutcomeData, ReplayEngine, ReplaySummary,
+};
 use crate::state::NodeId;
 
 use super::YantrikDB;
@@ -26,9 +25,9 @@ impl YantrikDB {
         let meta = Self::get_meta(&self.conn(), REPLAY_ENGINE_META_KEY)?;
         match meta {
             Some(json) => serde_json::from_str(&json).map_err(|e| {
-                crate::error::YantrikDbError::Database(
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-                )
+                crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                    Box::new(e),
+                ))
             }),
             None => Ok(ReplayEngine::new()),
         }
@@ -37,9 +36,9 @@ impl YantrikDB {
     /// Persist the replay engine state.
     pub fn save_replay_engine(&self, engine: &ReplayEngine) -> Result<()> {
         let json = serde_json::to_string(engine).map_err(|e| {
-            crate::error::YantrikDbError::Database(
-                rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-            )
+            crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                Box::new(e),
+            ))
         })?;
         self.conn().execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -63,7 +62,14 @@ impl YantrikDB {
         now_ms: u64,
     ) -> Result<()> {
         let mut engine = self.load_replay_engine()?;
-        add_to_buffer(&mut engine, episode_id, expected_utility, action, outcome, now_ms);
+        add_to_buffer(
+            &mut engine,
+            episode_id,
+            expected_utility,
+            action,
+            outcome,
+            now_ms,
+        );
         self.save_replay_engine(&engine)?;
         Ok(())
     }

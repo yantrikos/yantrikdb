@@ -5,9 +5,9 @@
 
 use crate::error::Result;
 use crate::personality_bias::{
-    compute_bias, dampen_personality, personality_impact, ActionProperties,
-    BiasConfig, BondLevel, PersonalityBiasResult, PersonalityBiasStore,
-    PersonalityBiasVector, PersonalityImpactReport, PersonalityPreset,
+    compute_bias, dampen_personality, personality_impact, ActionProperties, BiasConfig, BondLevel,
+    PersonalityBiasResult, PersonalityBiasStore, PersonalityBiasVector, PersonalityImpactReport,
+    PersonalityPreset,
 };
 
 use super::YantrikDB;
@@ -26,9 +26,9 @@ impl YantrikDB {
         let meta = Self::get_meta(&self.conn(), PERSONALITY_BIAS_STORE_META_KEY)?;
         match meta {
             Some(json) => serde_json::from_str(&json).map_err(|e| {
-                crate::error::YantrikDbError::Database(
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-                )
+                crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                    Box::new(e),
+                ))
             }),
             None => Ok(PersonalityBiasStore::new()),
         }
@@ -37,9 +37,9 @@ impl YantrikDB {
     /// Persist the personality bias store.
     pub fn save_personality_bias_store(&self, store: &PersonalityBiasStore) -> Result<()> {
         let json = serde_json::to_string(store).map_err(|e| {
-            crate::error::YantrikDbError::Database(
-                rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-            )
+            crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                Box::new(e),
+            ))
         })?;
         self.conn().execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -87,11 +87,7 @@ impl YantrikDB {
     }
 
     /// Record user feedback and evolve personality.
-    pub fn record_personality_feedback(
-        &self,
-        dimension_idx: usize,
-        adjustment: f64,
-    ) -> Result<()> {
+    pub fn record_personality_feedback(&self, dimension_idx: usize, adjustment: f64) -> Result<()> {
         let mut store = self.load_personality_bias_store()?;
         store.record_feedback(dimension_idx, adjustment, super::now());
         self.save_personality_bias_store(&store)
@@ -103,7 +99,8 @@ impl YantrikDB {
         actions: &[(&str, &ActionProperties)],
     ) -> Result<PersonalityImpactReport> {
         let store = self.load_personality_bias_store()?;
-        let profile_name = store.base_preset
+        let profile_name = store
+            .base_preset
             .map(|p| format!("{:?}", p))
             .unwrap_or_else(|| "Custom".to_string());
 
@@ -123,8 +120,7 @@ impl YantrikDB {
 mod tests {
     use crate::engine::YantrikDB;
     use crate::personality_bias::{
-        ActionProperties, BondLevel, PersonalityBiasStore, PersonalityBiasVector,
-        PersonalityPreset,
+        ActionProperties, BondLevel, PersonalityBiasStore, PersonalityBiasVector, PersonalityPreset,
     };
 
     fn test_db() -> YantrikDB {
@@ -147,7 +143,8 @@ mod tests {
     fn test_set_preset() {
         let db = test_db();
 
-        db.set_personality_preset(PersonalityPreset::Guardian).unwrap();
+        db.set_personality_preset(PersonalityPreset::Guardian)
+            .unwrap();
 
         let bias = db.get_personality_bias().unwrap();
         assert!((bias.caution - 0.9).abs() < f64::EPSILON);
@@ -178,7 +175,8 @@ mod tests {
     #[test]
     fn test_apply_bias() {
         let db = test_db();
-        db.set_personality_preset(PersonalityPreset::Guardian).unwrap();
+        db.set_personality_preset(PersonalityPreset::Guardian)
+            .unwrap();
         db.set_bond_level(BondLevel::Trusted).unwrap();
 
         let action = ActionProperties {
@@ -194,7 +192,8 @@ mod tests {
     #[test]
     fn test_record_feedback() {
         let db = test_db();
-        db.set_personality_preset(PersonalityPreset::Assistant).unwrap();
+        db.set_personality_preset(PersonalityPreset::Assistant)
+            .unwrap();
         db.set_bond_level(BondLevel::Bonded).unwrap();
 
         let original = db.get_personality_bias().unwrap().curiosity;
@@ -211,7 +210,8 @@ mod tests {
     #[test]
     fn test_impact_report() {
         let db = test_db();
-        db.set_personality_preset(PersonalityPreset::Companion).unwrap();
+        db.set_personality_preset(PersonalityPreset::Companion)
+            .unwrap();
         db.set_bond_level(BondLevel::Familiar).unwrap();
 
         let action_a = ActionProperties {
@@ -223,9 +223,9 @@ mod tests {
             ..Default::default()
         };
 
-        let report = db.personality_impact_report(
-            &[("Comfort user", &action_a), ("Risky action", &action_b)],
-        ).unwrap();
+        let report = db
+            .personality_impact_report(&[("Comfort user", &action_a), ("Risky action", &action_b)])
+            .unwrap();
 
         assert_eq!(report.action_biases.len(), 2);
         assert_eq!(report.profile_name, "Companion");

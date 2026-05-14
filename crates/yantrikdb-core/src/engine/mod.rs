@@ -1,59 +1,59 @@
-mod belief;
-pub mod materializer;
-pub(crate) mod op_types;
-mod cache;
-mod intent;
 mod action;
-mod evaluator;
-mod policy;
-mod suggest;
 mod agenda;
-mod temporal;
-mod hawkes;
-mod receptivity;
-mod tick;
-mod surfacing;
-mod observer;
-mod flywheel;
-mod world_model;
-mod experimenter;
-mod skills;
-mod extractor;
+mod analogy_engine;
+mod belief;
+mod belief_network_engine;
+mod cache;
 mod calibration;
-mod introspection;
 mod causal;
-mod planner;
 mod cognition;
 mod coherence;
-mod metacognition;
-mod personality_bias;
-mod query_dsl;
 mod conflict;
-mod analogy_engine;
-mod schema_induction_engine;
-mod narrative_engine;
 mod counterfactual_engine;
-mod belief_network_engine;
-mod replay_engine;
-mod perspective_engine;
+mod evaluator;
+mod experimenter;
+mod extractor;
 mod feedback;
-pub mod graph_state;
+mod flywheel;
 mod graph_ops;
+pub mod graph_state;
+mod hawkes;
 mod indices;
+mod intent;
+mod introspection;
 mod learning;
 mod lifecycle;
-mod recall;
-mod record;
+pub mod materializer;
+mod metacognition;
+pub mod moves;
+mod narrative_engine;
+mod observer;
+pub(crate) mod op_types;
+mod personality_bias;
+mod perspective_engine;
+mod planner;
+mod policy;
 mod procedural;
+mod query_dsl;
+mod recall;
+mod receptivity;
+mod record;
+mod replay_engine;
+mod schema_induction_engine;
 mod session;
+mod skills;
 mod stats;
 mod storage;
+mod suggest;
+mod surfacing;
+mod temporal;
 mod temporal_helpers;
-mod warrant;
-pub mod moves;
 pub mod tenant;
 #[cfg(test)]
 mod tests;
+mod tick;
+mod warrant;
+mod world_model;
 
 use std::collections::HashMap;
 // parking_lot::Mutex and RwLock: non-poisoning (no PoisonError on panic),
@@ -70,17 +70,17 @@ use rand::Rng;
 use rusqlite::{params, Connection};
 
 use crate::encryption::{self, EncryptionProvider};
-use crate::error::{YantrikDbError, Result};
+use crate::error::{Result, YantrikDbError};
 use crate::graph_index::GraphIndex;
 use crate::hlc::{HLCTimestamp, HLC};
 use crate::hnsw::HnswIndex;
 use crate::schema::{
-    MIGRATE_V1_TO_V2, MIGRATE_V2_TO_V3, MIGRATE_V3_TO_V4, MIGRATE_V4_TO_V5,
-    MIGRATE_V5_TO_V6, MIGRATE_V6_TO_V7, MIGRATE_V7_TO_V8, MIGRATE_V8_TO_V9,
-    MIGRATE_V9_TO_V10, MIGRATE_V10_TO_V11, MIGRATE_V11_TO_V12, MIGRATE_V12_TO_V13,
-    MIGRATE_V13_TO_V14, MIGRATE_V14_TO_V15, MIGRATE_V15_TO_V16, MIGRATE_V16_TO_V17,
-    MIGRATE_V17_TO_V18, MIGRATE_V18_TO_V19, MIGRATE_V19_TO_V20, MIGRATE_V20_TO_V21,
-    MIGRATE_V21_TO_V22, MIGRATE_V22_TO_V23, MIGRATE_V23_TO_V24, MIGRATE_V24_TO_V25, SCHEMA_SQL, SCHEMA_VERSION,
+    MIGRATE_V10_TO_V11, MIGRATE_V11_TO_V12, MIGRATE_V12_TO_V13, MIGRATE_V13_TO_V14,
+    MIGRATE_V14_TO_V15, MIGRATE_V15_TO_V16, MIGRATE_V16_TO_V17, MIGRATE_V17_TO_V18,
+    MIGRATE_V18_TO_V19, MIGRATE_V19_TO_V20, MIGRATE_V1_TO_V2, MIGRATE_V20_TO_V21,
+    MIGRATE_V21_TO_V22, MIGRATE_V22_TO_V23, MIGRATE_V23_TO_V24, MIGRATE_V24_TO_V25,
+    MIGRATE_V2_TO_V3, MIGRATE_V3_TO_V4, MIGRATE_V4_TO_V5, MIGRATE_V5_TO_V6, MIGRATE_V6_TO_V7,
+    MIGRATE_V7_TO_V8, MIGRATE_V8_TO_V9, MIGRATE_V9_TO_V10, SCHEMA_SQL, SCHEMA_VERSION,
 };
 use crate::types::*;
 
@@ -306,7 +306,11 @@ impl YantrikDB {
     /// The 32-byte `master_key` is used to wrap/unwrap a per-database Data Encryption Key (DEK).
     /// All text, metadata, and embedding fields are encrypted at rest using AES-256-GCM.
     /// In-memory indexes operate on plaintext for full query performance.
-    pub fn new_encrypted(db_path: &str, embedding_dim: usize, master_key: &[u8; 32]) -> Result<Self> {
+    pub fn new_encrypted(
+        db_path: &str,
+        embedding_dim: usize,
+        master_key: &[u8; 32],
+    ) -> Result<Self> {
         let mut db = Self::open(db_path, embedding_dim, None, Some(master_key))?;
         Self::auto_attach_bundled_embedder(&mut db);
         Ok(db)
@@ -365,9 +369,9 @@ impl YantrikDB {
         // Verify critical pragmas actually took effect. SQLite silently
         // ignores some pragmas in certain modes (e.g. journal_mode on
         // read-only or in-memory databases). Log a warning if any mismatch.
-        let actual_journal: String = conn.query_row(
-            "PRAGMA journal_mode", [], |row| row.get(0),
-        ).unwrap_or_default();
+        let actual_journal: String = conn
+            .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+            .unwrap_or_default();
         if actual_journal != "wal" && db_path != ":memory:" {
             tracing::warn!(
                 expected = "wal",
@@ -573,11 +577,9 @@ impl YantrikDB {
         // — a fixed cost we pay once, in exchange for never paying it again
         // on the foreground hot path.
         let initial_pending: i64 = conn
-            .query_row(
-                "SELECT COUNT(*) FROM oplog WHERE applied = 0",
-                [],
-                |row| row.get(0),
-            )
+            .query_row("SELECT COUNT(*) FROM oplog WHERE applied = 0", [], |row| {
+                row.get(0)
+            })
             .unwrap_or(0);
 
         Ok(Self {
@@ -749,9 +751,9 @@ impl YantrikDB {
     fn load_active_sessions(conn: &Connection) -> Result<HashMap<String, String>> {
         let mut map = HashMap::new();
         // Table may not exist yet during initial schema creation
-        let mut stmt = match conn.prepare(
-            "SELECT namespace, session_id FROM sessions WHERE status = 'active'",
-        ) {
+        let mut stmt = match conn
+            .prepare("SELECT namespace, session_id FROM sessions WHERE status = 'active'")
+        {
             Ok(s) => s,
             Err(_) => return Ok(map),
         };
@@ -941,11 +943,7 @@ impl YantrikDB {
     }
 
     /// Recall memories by text query with automatic embedding.
-    pub fn recall_text(
-        &self,
-        query: &str,
-        top_k: usize,
-    ) -> Result<Vec<RecallResult>> {
+    pub fn recall_text(&self, query: &str, top_k: usize) -> Result<Vec<RecallResult>> {
         let embedding = self.embed(query)?;
         self.recall(
             &embedding,

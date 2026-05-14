@@ -115,7 +115,15 @@ fn mine_temporal_clusters(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<
     let stddev = variance.sqrt();
     let threshold = mean + 2.0 * stddev;
 
-    let day_names = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
+    let day_names = [
+        "Monday",
+        "Tuesday",
+        "Wednesday",
+        "Thursday",
+        "Friday",
+        "Saturday",
+        "Sunday",
+    ];
     let mut patterns = Vec::new();
 
     for (hour, bucket) in buckets.iter().enumerate() {
@@ -128,12 +136,14 @@ fn mine_temporal_clusters(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<
                 bucket.iter().map(|(_, v)| v).sum::<f64>() / bucket.len() as f64;
             let rids: Vec<String> = bucket.iter().map(|(r, _)| r.clone()).collect();
 
-            let mut description = format!(
-                "Memories cluster around {label} ({} events)",
-                bucket.len()
-            );
+            let mut description =
+                format!("Memories cluster around {label} ({} events)", bucket.len());
             if mean_valence.abs() > 0.3 {
-                let tone = if mean_valence > 0.0 { "positive" } else { "negative" };
+                let tone = if mean_valence > 0.0 {
+                    "positive"
+                } else {
+                    "negative"
+                };
                 description.push_str(&format!(" with {tone} emotional tone"));
             }
 
@@ -240,7 +250,19 @@ fn mine_topic_clusters(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<Raw
          LIMIT 200",
     )?;
 
-    let raw_rows: Vec<(String, String, String, Vec<u8>, f64, f64, f64, f64, f64, String, String)> = stmt
+    let raw_rows: Vec<(
+        String,
+        String,
+        String,
+        Vec<u8>,
+        f64,
+        f64,
+        f64,
+        f64,
+        f64,
+        String,
+        String,
+    )> = stmt
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>("rid")?,
@@ -259,20 +281,41 @@ fn mine_topic_clusters(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<Raw
         .collect::<std::result::Result<Vec<_>, _>>()?;
 
     // Decrypt text, embedding, and metadata if encrypted
-    let memories: Vec<MemoryWithEmbedding> = raw_rows.into_iter()
-        .map(|(rid, memory_type, stored_text, stored_emb, created_at, importance, valence, half_life, last_access, stored_meta, namespace)| {
-            let text = db.decrypt_text(&stored_text)?;
-            let meta_str = db.decrypt_text(&stored_meta)?;
-            let emb_blob = db.decrypt_embedding(&stored_emb)?;
-            Ok(MemoryWithEmbedding {
-                rid, memory_type, text,
-                embedding: deserialize_f32(&emb_blob),
-                created_at, importance, valence, half_life, last_access,
-                metadata: serde_json::from_str(&meta_str)
-                    .unwrap_or(serde_json::Value::Object(Default::default())),
+    let memories: Vec<MemoryWithEmbedding> = raw_rows
+        .into_iter()
+        .map(
+            |(
+                rid,
+                memory_type,
+                stored_text,
+                stored_emb,
+                created_at,
+                importance,
+                valence,
+                half_life,
+                last_access,
+                stored_meta,
                 namespace,
-            })
-        })
+            )| {
+                let text = db.decrypt_text(&stored_text)?;
+                let meta_str = db.decrypt_text(&stored_meta)?;
+                let emb_blob = db.decrypt_embedding(&stored_emb)?;
+                Ok(MemoryWithEmbedding {
+                    rid,
+                    memory_type,
+                    text,
+                    embedding: deserialize_f32(&emb_blob),
+                    created_at,
+                    importance,
+                    valence,
+                    half_life,
+                    last_access,
+                    metadata: serde_json::from_str(&meta_str)
+                        .unwrap_or(serde_json::Value::Object(Default::default())),
+                    namespace,
+                })
+            },
+        )
         .collect::<Result<Vec<_>>>()?;
 
     if memories.len() < 5 {
@@ -289,11 +332,7 @@ fn mine_topic_clusters(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<Raw
     );
 
     let mut patterns = Vec::new();
-    let max_size = cluster_indices
-        .iter()
-        .map(|c| c.len())
-        .max()
-        .unwrap_or(1);
+    let max_size = cluster_indices.iter().map(|c| c.len()).max().unwrap_or(1);
 
     for indices in cluster_indices {
         if indices.len() < 5 {
@@ -413,7 +452,8 @@ fn mine_cross_domain_patterns(db: &YantrikDB, config: &PatternConfig) -> Result<
         |row| row.get::<_, i64>(0),
     )? as f64;
 
-    let mut domain_counts: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    let mut domain_counts: std::collections::HashMap<String, f64> =
+        std::collections::HashMap::new();
     for d in &domains {
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM memories WHERE consolidation_status = 'active' AND domain = ?1",
@@ -488,7 +528,8 @@ fn mine_cross_domain_patterns(db: &YantrikDB, config: &PatternConfig) -> Result<
         std::collections::HashMap::new();
 
     // Build rid→domain lookup
-    let mut rid_domain: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut rid_domain: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for (rid, domain, _) in &candidates {
         rid_domain.insert(rid.clone(), domain.clone());
     }
@@ -546,13 +587,15 @@ fn mine_cross_domain_patterns(db: &YantrikDB, config: &PatternConfig) -> Result<
             let domain_surprise = 1.0 - co_occurrence_rate.min(1.0);
 
             // Check shared entities for entity_support
-            let shared_entities: i64 = conn.query_row(
-                "SELECT COUNT(*) FROM memory_entities me1 \
+            let shared_entities: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM memory_entities me1 \
                  JOIN memory_entities me2 ON me1.entity_name = me2.entity_name \
                  WHERE me1.memory_rid = ?1 AND me2.memory_rid = ?2",
-                params![rid_a, rid_b],
-                |row| row.get(0),
-            ).unwrap_or(0);
+                    params![rid_a, rid_b],
+                    |row| row.get(0),
+                )
+                .unwrap_or(0);
             let entity_support = 1.0 + 0.5 * shared_entities as f64;
 
             let score = similarity as f64 * domain_surprise * entity_support;
@@ -588,7 +631,11 @@ fn mine_cross_domain_patterns(db: &YantrikDB, config: &PatternConfig) -> Result<
     }
 
     // Sort by score descending, keep top results
-    patterns.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+    patterns.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     patterns.truncate(config.max_patterns);
 
     Ok(patterns)
@@ -630,11 +677,9 @@ fn mine_entity_bridges(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<Raw
     let mut patterns = Vec::new();
 
     // Total entity count for IDF
-    let total_entities: f64 = conn.query_row(
-        "SELECT COUNT(*) FROM entities",
-        [],
-        |row| row.get::<_, i64>(0),
-    )? as f64;
+    let total_entities: f64 = conn.query_row("SELECT COUNT(*) FROM entities", [], |row| {
+        row.get::<_, i64>(0)
+    })? as f64;
 
     for (entity, domain_counts) in &entity_domains {
         if domain_counts.len() < min_domains {
@@ -650,17 +695,25 @@ fn mine_entity_bridges(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<Raw
             .iter()
             .map(|(_, c)| {
                 let p = *c as f64 / total;
-                if p > 0.0 { -p * p.ln() } else { 0.0 }
+                if p > 0.0 {
+                    -p * p.ln()
+                } else {
+                    0.0
+                }
             })
             .sum();
 
         // IDF: penalize very common entities
-        let mention_count: i64 = conn.query_row(
-            "SELECT mention_count FROM entities WHERE name = ?1",
-            params![entity],
-            |row| row.get(0),
-        ).unwrap_or(1);
-        let idf = (total_entities / (1.0 + mention_count as f64)).ln().max(0.1);
+        let mention_count: i64 = conn
+            .query_row(
+                "SELECT mention_count FROM entities WHERE name = ?1",
+                params![entity],
+                |row| row.get(0),
+            )
+            .unwrap_or(1);
+        let idf = (total_entities / (1.0 + mention_count as f64))
+            .ln()
+            .max(0.1);
 
         let bridge_score = domain_count.ln() * entropy * idf;
 
@@ -690,7 +743,11 @@ fn mine_entity_bridges(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<Raw
     }
 
     // Sort by score descending, keep top 10
-    patterns.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+    patterns.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     patterns.truncate(10);
 
     Ok(patterns)
@@ -891,7 +948,8 @@ pub fn get_patterns(
     param_values.push(Box::new(limit as i64));
 
     let mut stmt = conn.prepare(&sql)?;
-    let params_ref: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
     let rows = stmt
         .query_map(params_ref.as_slice(), |row| {
             let evidence_str: String = row.get("evidence_rids")?;
@@ -923,10 +981,7 @@ mod tests {
 
     fn vec_seed(seed: f32, dim: usize) -> Vec<f32> {
         let raw: Vec<f32> = (0..dim)
-            .map(|i| {
-                (seed * (i as f32 + 1.0) * 1.7).sin()
-                    + (seed * (i as f32 + 2.0) * 0.3).cos()
-            })
+            .map(|i| (seed * (i as f32 + 1.0) * 1.7).sin() + (seed * (i as f32 + 2.0) * 0.3).cos())
             .collect();
         let norm: f32 = raw.iter().map(|x| x * x).sum::<f32>().sqrt();
         raw.iter().map(|x| x / norm).collect()
@@ -1038,11 +1093,17 @@ mod tests {
             let rid = db
                 .record(
                     &format!("baseline {i}"),
-                    "episodic", 0.5, 0.0, 604800.0,
+                    "episodic",
+                    0.5,
+                    0.0,
+                    604800.0,
                     &serde_json::json!({}),
                     &vec_seed(i as f32, 8),
                     "default",
-                    0.8, "general", "user", None,
+                    0.8,
+                    "general",
+                    "user",
+                    None,
                 )
                 .unwrap();
             let age = 86400.0 * (14.0 + i as f64); // 14-24 days ago
@@ -1059,11 +1120,17 @@ mod tests {
             let rid = db
                 .record(
                     &format!("recent negative {i}"),
-                    "episodic", 0.5, -0.8, 604800.0,
+                    "episodic",
+                    0.5,
+                    -0.8,
+                    604800.0,
                     &serde_json::json!({}),
                     &vec_seed(100.0 + i as f32, 8),
                     "default",
-                    0.8, "general", "user", None,
+                    0.8,
+                    "general",
+                    "user",
+                    None,
                 )
                 .unwrap();
             let age = 86400.0 * (1.0 + i as f64); // 1-5 days ago

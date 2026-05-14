@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 use crate::attention::WorkingSet;
 use crate::contradiction::BeliefConflict;
 use crate::state::{
-    CognitiveEdge, CognitiveEdgeKind, CognitiveNode, GoalPayload, GoalStatus,
-    NodeId, NodeKind, NodePayload, TaskPayload, TaskStatus,
+    CognitiveEdge, CognitiveEdgeKind, CognitiveNode, GoalPayload, GoalStatus, NodeId, NodeKind,
+    NodePayload, TaskPayload, TaskStatus,
 };
 
 // ── §1: Coherence report ────────────────────────────────────────────
@@ -377,9 +377,7 @@ pub fn plan_enforcement(
     let max_resolutions = if emergency { 5 } else { 2 };
     for contradiction in sorted_contradictions.iter().take(max_resolutions) {
         // Pick the belief with lower evidence count to demote.
-        let (target, description) = pick_contradiction_loser(
-            contradiction, ws,
-        );
+        let (target, description) = pick_contradiction_loser(contradiction, ws);
         actions.push(EnforcementAction {
             kind: EnforcementKind::ResolveContradiction,
             target,
@@ -529,10 +527,7 @@ impl CoherenceHistory {
 // ── §7: Internal — goal conflict detection ──────────────────────────
 
 /// Detect conflicting active goals.
-fn detect_goal_conflicts(
-    ws: &WorkingSet,
-    edges: &[CognitiveEdge],
-) -> Vec<GoalConflict> {
+fn detect_goal_conflicts(ws: &WorkingSet, edges: &[CognitiveEdge]) -> Vec<GoalConflict> {
     let mut conflicts = Vec::new();
 
     let goals: Vec<&CognitiveNode> = ws.nodes_of_kind(NodeKind::Goal);
@@ -679,11 +674,7 @@ fn compute_fragmentation(ws: &WorkingSet) -> f64 {
 // ── §10: Internal — stale detection ─────────────────────────────────
 
 /// Detect nodes with high activation but no recent updates.
-fn detect_stale_nodes(
-    ws: &WorkingSet,
-    now: f64,
-    config: &CoherenceConfig,
-) -> Vec<StaleNode> {
+fn detect_stale_nodes(ws: &WorkingSet, now: f64, config: &CoherenceConfig) -> Vec<StaleNode> {
     let now_ms = (now * 1000.0) as u64;
 
     ws.iter()
@@ -705,10 +696,7 @@ fn detect_stale_nodes(
 // ── §11: Internal — orphan detection ────────────────────────────────
 
 /// Detect items with no supporting edges.
-fn detect_orphans(
-    ws: &WorkingSet,
-    edges: &[CognitiveEdge],
-) -> Vec<OrphanedItem> {
+fn detect_orphans(ws: &WorkingSet, edges: &[CognitiveEdge]) -> Vec<OrphanedItem> {
     let connected: HashSet<u32> = edges
         .iter()
         .flat_map(|e| [e.src.to_raw(), e.dst.to_raw()])
@@ -744,10 +732,7 @@ fn detect_orphans(
 /// Detect circular dependencies in the goal/task graph.
 ///
 /// Uses DFS-based cycle detection on Requires and SubtaskOf edges.
-fn detect_cycles(
-    ws: &WorkingSet,
-    edges: &[CognitiveEdge],
-) -> Vec<DependencyCycle> {
+fn detect_cycles(ws: &WorkingSet, edges: &[CognitiveEdge]) -> Vec<DependencyCycle> {
     // Build adjacency for dependency edges only.
     let mut adj: HashMap<u32, Vec<(u32, f64)>> = HashMap::new();
     for e in edges {
@@ -818,11 +803,7 @@ fn dfs_cycle(
                     if cycle_nodes.len() >= 2 {
                         cycles.push(DependencyCycle {
                             nodes: cycle_nodes,
-                            weakest_edge_weight: if weakest.is_infinite() {
-                                0.0
-                            } else {
-                                weakest
-                            },
+                            weakest_edge_weight: if weakest.is_infinite() { 0.0 } else { weakest },
                         });
                     }
                 }
@@ -886,8 +867,7 @@ fn compute_coherence_score(
     } else {
         0.0
     };
-    let overload_penalty =
-        config.w_overload * (cognitive_load - config.load_target).max(0.0);
+    let overload_penalty = config.w_overload * (cognitive_load - config.load_target).max(0.0);
 
     let score = 1.0
         - conflict_penalty
@@ -928,9 +908,9 @@ mod tests {
     use super::*;
     use crate::attention::{AttentionConfig, WorkingSet};
     use crate::state::{
-        CognitiveAttrs, CognitiveEdge, CognitiveEdgeKind, CognitiveNode, GoalPayload,
-        GoalStatus, NodeId, NodeKind, NodePayload, Priority, Provenance,
-        TaskPayload, TaskStatus, BeliefPayload,
+        BeliefPayload, CognitiveAttrs, CognitiveEdge, CognitiveEdgeKind, CognitiveNode,
+        GoalPayload, GoalStatus, NodeId, NodeKind, NodePayload, Priority, Provenance, TaskPayload,
+        TaskStatus,
     };
 
     fn default_attrs(activation: f64, last_updated_ms: u64) -> CognitiveAttrs {
@@ -961,7 +941,13 @@ mod tests {
         })
     }
 
-    fn goal_node(id: u32, desc: &str, status: GoalStatus, activation: f64, ts_ms: u64) -> CognitiveNode {
+    fn goal_node(
+        id: u32,
+        desc: &str,
+        status: GoalStatus,
+        activation: f64,
+        ts_ms: u64,
+    ) -> CognitiveNode {
         CognitiveNode {
             id: NodeId::new(NodeKind::Goal, id),
             attrs: default_attrs(activation, ts_ms),
@@ -997,7 +983,13 @@ mod tests {
         }
     }
 
-    fn belief_node(id: u32, label: &str, activation: f64, evidence: u32, ts_ms: u64) -> CognitiveNode {
+    fn belief_node(
+        id: u32,
+        label: &str,
+        activation: f64,
+        evidence: u32,
+        ts_ms: u64,
+    ) -> CognitiveNode {
         CognitiveNode {
             id: NodeId::new(NodeKind::Belief, id),
             attrs: {
@@ -1130,7 +1122,13 @@ mod tests {
 
         // Add 4 nodes (80% load).
         for i in 0..4 {
-            ws.insert(goal_node(i, &format!("Goal {}", i), GoalStatus::Active, 0.5, 1_000_000));
+            ws.insert(goal_node(
+                i,
+                &format!("Goal {}", i),
+                GoalStatus::Active,
+                0.5,
+                1_000_000,
+            ));
         }
 
         let config = CoherenceConfig::default();
@@ -1152,7 +1150,13 @@ mod tests {
 
         // All nodes with similar activation → high fragmentation.
         for i in 0..5 {
-            ws.insert(goal_node(i, &format!("G{}", i), GoalStatus::Active, 0.5, 1_000_000));
+            ws.insert(goal_node(
+                i,
+                &format!("G{}", i),
+                GoalStatus::Active,
+                0.5,
+                1_000_000,
+            ));
         }
 
         let frag = compute_fragmentation(&ws);
@@ -1161,7 +1165,13 @@ mod tests {
 
         // Now with one dominant node.
         let mut ws2 = make_ws();
-        ws2.insert(goal_node(10, "Dominant", GoalStatus::Active, 0.9, 1_000_000));
+        ws2.insert(goal_node(
+            10,
+            "Dominant",
+            GoalStatus::Active,
+            0.9,
+            1_000_000,
+        ));
         ws2.insert(goal_node(11, "Minor1", GoalStatus::Active, 0.05, 1_000_000));
         ws2.insert(goal_node(12, "Minor2", GoalStatus::Active, 0.05, 1_000_000));
 

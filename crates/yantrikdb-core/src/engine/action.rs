@@ -3,9 +3,7 @@
 //! Wires the action schema library and candidate generator into `YantrikDB`
 //! methods that operate on the persistent cognitive graph.
 
-use crate::action::{
-    self, ActionCandidate, ActionConfig, CandidateGenerationResult,
-};
+use crate::action::{self, ActionCandidate, ActionConfig, CandidateGenerationResult};
 use crate::error::Result;
 use crate::intent::{IntentConfig, ScoredIntent};
 use crate::state::{CognitiveNode, NodeKind};
@@ -53,10 +51,8 @@ impl YantrikDB {
         action_config: &ActionConfig,
     ) -> Result<(Vec<ScoredIntent>, CandidateGenerationResult)> {
         let intent_result = self.infer_intents(intent_config)?;
-        let action_result = self.generate_action_candidates(
-            &intent_result.hypotheses,
-            action_config,
-        )?;
+        let action_result =
+            self.generate_action_candidates(&intent_result.hypotheses, action_config)?;
         Ok((intent_result.hypotheses, action_result))
     }
 
@@ -121,12 +117,15 @@ mod tests {
         let intent_config = IntentConfig::default();
         let action_config = ActionConfig::default();
 
-        let (intents, actions) = db.infer_and_generate_actions(
-            &intent_config, &action_config,
-        ).unwrap();
+        let (intents, actions) = db
+            .infer_and_generate_actions(&intent_config, &action_config)
+            .unwrap();
 
         assert!(!intents.is_empty(), "should generate intents");
-        assert!(!actions.candidates.is_empty(), "should generate action candidates");
+        assert!(
+            !actions.candidates.is_empty(),
+            "should generate action candidates"
+        );
 
         // Candidates should be sorted by relevance
         for w in actions.candidates.windows(2) {
@@ -157,7 +156,9 @@ mod tests {
         db.persist_cognitive_node(&node).unwrap();
         db.persist_node_id_allocator(&alloc).unwrap();
 
-        let top = db.top_action(&IntentConfig::default(), &ActionConfig::default()).unwrap();
+        let top = db
+            .top_action(&IntentConfig::default(), &ActionConfig::default())
+            .unwrap();
         assert!(top.is_some());
     }
 }

@@ -4,9 +4,9 @@
 
 use crate::error::Result;
 use crate::experimenter::{
-    assign_variant_round_robin, check_experiments, conclude_experiment,
-    design_experiment, record_trial, ExperimentId, ExperimentRegistry,
-    ExperimentVariable, SafetyBound, TrialOutcome, VariantValue,
+    assign_variant_round_robin, check_experiments, conclude_experiment, design_experiment,
+    record_trial, ExperimentId, ExperimentRegistry, ExperimentVariable, SafetyBound, TrialOutcome,
+    VariantValue,
 };
 
 use super::{now, YantrikDB};
@@ -25,9 +25,9 @@ impl YantrikDB {
         let meta = Self::get_meta(&self.conn(), EXPERIMENT_REGISTRY_META_KEY)?;
         match meta {
             Some(json) => serde_json::from_str(&json).map_err(|e| {
-                crate::error::YantrikDbError::Database(
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-                )
+                crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                    Box::new(e),
+                ))
             }),
             None => Ok(ExperimentRegistry::new()),
         }
@@ -36,9 +36,9 @@ impl YantrikDB {
     /// Persist the experiment registry.
     pub fn save_experiment_registry(&self, registry: &ExperimentRegistry) -> Result<()> {
         let json = serde_json::to_string(registry).map_err(|e| {
-            crate::error::YantrikDbError::Database(
-                rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-            )
+            crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                Box::new(e),
+            ))
         })?;
         self.conn().execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -152,9 +152,7 @@ impl YantrikDB {
 #[cfg(test)]
 mod tests {
     use crate::engine::YantrikDB;
-    use crate::experimenter::{
-        ExperimentVariable, SafetyBound, TrialOutcome, VariantValue,
-    };
+    use crate::experimenter::{ExperimentVariable, SafetyBound, TrialOutcome, VariantValue};
 
     fn test_db() -> YantrikDB {
         YantrikDB::new(":memory:", 8).unwrap()
@@ -211,9 +209,13 @@ mod tests {
             .unwrap();
 
         // 3 consecutive rejections → abort
-        db.record_experiment_trial(id, 0, TrialOutcome::Negative).unwrap();
-        db.record_experiment_trial(id, 0, TrialOutcome::Negative).unwrap();
-        let cont = db.record_experiment_trial(id, 0, TrialOutcome::Negative).unwrap();
+        db.record_experiment_trial(id, 0, TrialOutcome::Negative)
+            .unwrap();
+        db.record_experiment_trial(id, 0, TrialOutcome::Negative)
+            .unwrap();
+        let cont = db
+            .record_experiment_trial(id, 0, TrialOutcome::Negative)
+            .unwrap();
         assert!(!cont, "Should signal stop after 3 rejections");
 
         let (active, _, aborted) = db.experiment_stats().unwrap();

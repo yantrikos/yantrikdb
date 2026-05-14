@@ -7,9 +7,21 @@ use crate::types::*;
 
 /// Compute cosine similarity between two vectors.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
-    let dot: f64 = a.iter().zip(b.iter()).map(|(&x, &y)| x as f64 * y as f64).sum();
-    let norm_a: f64 = a.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
-    let norm_b: f64 = b.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+    let dot: f64 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| x as f64 * y as f64)
+        .sum();
+    let norm_a: f64 = a
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        .sqrt();
+    let norm_b: f64 = b
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        .sqrt();
     if norm_a == 0.0 || norm_b == 0.0 {
         return 0.0;
     }
@@ -169,7 +181,19 @@ pub fn find_consolidation_candidates(
     // `&YantrikDB`. decrypt_text/decrypt_embedding don't currently take
     // db.conn(), but a future refactor could, and that silent deadlock
     // would be expensive to find.
-    type RawRow = (String, String, String, Vec<u8>, f64, f64, f64, f64, f64, String, String);
+    type RawRow = (
+        String,
+        String,
+        String,
+        Vec<u8>,
+        f64,
+        f64,
+        f64,
+        f64,
+        f64,
+        String,
+        String,
+    );
     let raw_rows: Vec<RawRow> = {
         let conn = db.conn();
         let sql = format!(
@@ -204,20 +228,41 @@ pub fn find_consolidation_candidates(
 
     // Phase 2: decrypt. Safe to call `db.decrypt_*` now because no conn
     // guard is held.
-    let memories: Vec<MemoryWithEmbedding> = raw_rows.into_iter()
-        .map(|(rid, memory_type, stored_text, stored_emb, created_at, importance, valence, half_life, last_access, stored_meta, namespace)| {
-            let text = db.decrypt_text(&stored_text)?;
-            let meta_str = db.decrypt_text(&stored_meta)?;
-            let emb_blob = db.decrypt_embedding(&stored_emb)?;
-            Ok(MemoryWithEmbedding {
-                rid, memory_type, text,
-                embedding: deserialize_f32(&emb_blob),
-                created_at, importance, valence, half_life, last_access,
-                metadata: serde_json::from_str(&meta_str)
-                    .unwrap_or(serde_json::Value::Object(Default::default())),
+    let memories: Vec<MemoryWithEmbedding> = raw_rows
+        .into_iter()
+        .map(
+            |(
+                rid,
+                memory_type,
+                stored_text,
+                stored_emb,
+                created_at,
+                importance,
+                valence,
+                half_life,
+                last_access,
+                stored_meta,
                 namespace,
-            })
-        })
+            )| {
+                let text = db.decrypt_text(&stored_text)?;
+                let meta_str = db.decrypt_text(&stored_meta)?;
+                let emb_blob = db.decrypt_embedding(&stored_emb)?;
+                Ok(MemoryWithEmbedding {
+                    rid,
+                    memory_type,
+                    text,
+                    embedding: deserialize_f32(&emb_blob),
+                    created_at,
+                    importance,
+                    valence,
+                    half_life,
+                    last_access,
+                    metadata: serde_json::from_str(&meta_str)
+                        .unwrap_or(serde_json::Value::Object(Default::default())),
+                    namespace,
+                })
+            },
+        )
         .collect::<Result<Vec<_>>>()?;
 
     // Load memory→entities map (single query) so the entity-overlap guard
@@ -254,7 +299,10 @@ pub fn find_consolidation_candidates(
     // Group memories by namespace to prevent cross-namespace consolidation
     let mut by_namespace: HashMap<String, Vec<MemoryWithEmbedding>> = HashMap::new();
     for mem in memories {
-        by_namespace.entry(mem.namespace.clone()).or_default().push(mem);
+        by_namespace
+            .entry(mem.namespace.clone())
+            .or_default()
+            .push(mem);
     }
 
     let mut result: Vec<Vec<MemoryWithEmbedding>> = Vec::new();
@@ -268,7 +316,12 @@ pub fn find_consolidation_candidates(
             10,
         );
         for indices in cluster_indices {
-            result.push(indices.into_iter().map(|i| ns_memories[i].clone()).collect());
+            result.push(
+                indices
+                    .into_iter()
+                    .map(|i| ns_memories[i].clone())
+                    .collect(),
+            );
         }
     }
 
@@ -321,10 +374,7 @@ pub fn consolidate(
         let mean_emb = mean_embedding(cluster);
 
         // 3. Aggregate importance
-        let max_importance = cluster
-            .iter()
-            .map(|m| m.importance)
-            .fold(0.0f64, f64::max);
+        let max_importance = cluster.iter().map(|m| m.importance).fold(0.0f64, f64::max);
         let consolidated_importance = (max_importance * 1.1).min(1.0);
 
         // Mean valence
@@ -332,10 +382,7 @@ pub fn consolidate(
             cluster.iter().map(|m| m.valence).sum::<f64>() / cluster.len() as f64;
 
         // Longer half-life for consolidated memories
-        let max_half_life = cluster
-            .iter()
-            .map(|m| m.half_life)
-            .fold(0.0f64, f64::max);
+        let max_half_life = cluster.iter().map(|m| m.half_life).fold(0.0f64, f64::max);
         let consolidated_half_life = max_half_life * 1.5;
 
         // 4. Record the new consolidated memory
@@ -345,7 +392,10 @@ pub fn consolidate(
             "consolidation_time": ts,
         });
 
-        let cluster_namespace = cluster.first().map(|m| m.namespace.as_str()).unwrap_or("default");
+        let cluster_namespace = cluster
+            .first()
+            .map(|m| m.namespace.as_str())
+            .unwrap_or("default");
         let consolidated_rid = db.record(
             &summary_text,
             "semantic",
@@ -441,7 +491,13 @@ pub fn consolidate(
 mod tests {
     use super::*;
 
-    fn make_mem(rid: &str, text: &str, embedding: Vec<f32>, created_at: f64, importance: f64) -> MemoryWithEmbedding {
+    fn make_mem(
+        rid: &str,
+        text: &str,
+        embedding: Vec<f32>,
+        created_at: f64,
+        importance: f64,
+    ) -> MemoryWithEmbedding {
         MemoryWithEmbedding {
             rid: rid.to_string(),
             memory_type: "episodic".to_string(),
@@ -504,8 +560,14 @@ mod tests {
             make_mem("b", "Sarah is CTO", vec_seed(1.02, 8), now + 100.0, 0.5),
         ];
         let mut entities: HashMap<String, HashSet<String>> = HashMap::new();
-        entities.insert("a".to_string(), ["Alice"].iter().map(|s| s.to_string()).collect());
-        entities.insert("b".to_string(), ["Sarah"].iter().map(|s| s.to_string()).collect());
+        entities.insert(
+            "a".to_string(),
+            ["Alice"].iter().map(|s| s.to_string()).collect(),
+        );
+        entities.insert(
+            "b".to_string(),
+            ["Sarah"].iter().map(|s| s.to_string()).collect(),
+        );
 
         // Without guard: would cluster (high cosine).
         let unguarded = find_clusters(&mems, None, 0.9, 7.0, 2, 10);
@@ -521,10 +583,19 @@ mod tests {
         let now = 1000000.0;
         let mems = vec![
             make_mem("a", "Alice is CEO", vec_seed(1.0, 8), now, 0.5),
-            make_mem("b", "Acme's CEO is Alice", vec_seed(1.02, 8), now + 100.0, 0.5),
+            make_mem(
+                "b",
+                "Acme's CEO is Alice",
+                vec_seed(1.02, 8),
+                now + 100.0,
+                0.5,
+            ),
         ];
         let mut entities: HashMap<String, HashSet<String>> = HashMap::new();
-        entities.insert("a".to_string(), ["Alice"].iter().map(|s| s.to_string()).collect());
+        entities.insert(
+            "a".to_string(),
+            ["Alice"].iter().map(|s| s.to_string()).collect(),
+        );
         entities.insert(
             "b".to_string(),
             ["Alice", "Acme"].iter().map(|s| s.to_string()).collect(),
@@ -545,7 +616,11 @@ mod tests {
         ];
         let entities: HashMap<String, HashSet<String>> = HashMap::new();
         let clusters = find_clusters(&mems, Some(&entities), 0.9, 7.0, 2, 10);
-        assert_eq!(clusters.len(), 1, "empty entity map falls back to cosine-only");
+        assert_eq!(
+            clusters.len(),
+            1,
+            "empty entity map falls back to cosine-only"
+        );
     }
 
     #[test]

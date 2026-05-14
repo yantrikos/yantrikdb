@@ -4,12 +4,8 @@
 //! that operate on the persistent cognitive graph.
 
 use crate::error::Result;
-use crate::intent::{
-    self, IntentConfig, IntentInferenceResult, ScoredIntent,
-};
-use crate::state::{
-    CognitiveEdge, CognitiveEdgeKind, CognitiveNode, NodeKind,
-};
+use crate::intent::{self, IntentConfig, IntentInferenceResult, ScoredIntent};
+use crate::state::{CognitiveEdge, CognitiveEdgeKind, CognitiveNode, NodeKind};
 
 use super::{now, YantrikDB};
 
@@ -179,7 +175,10 @@ mod tests {
         let result = db.infer_intents(&config).unwrap();
 
         assert!(result.total_generated >= 1);
-        assert!(result.hypotheses.iter().any(|h| h.description.contains("quarterly report")));
+        assert!(result
+            .hypotheses
+            .iter()
+            .any(|h| h.description.contains("quarterly report")));
     }
 
     #[test]

@@ -9,50 +9,67 @@ impl YantrikDB {
     /// Get engine statistics. Optionally filter memory counts by namespace.
     pub fn stats(&self, namespace: Option<&str>) -> Result<Stats> {
         let conn = self.conn.lock();
-        let ns_filter = namespace.map(|ns| format!(" AND namespace = '{}'", ns.replace('\'', "''"))).unwrap_or_default();
+        let ns_filter = namespace
+            .map(|ns| format!(" AND namespace = '{}'", ns.replace('\'', "''")))
+            .unwrap_or_default();
         let active = conn.query_row(
-            &format!("SELECT COUNT(*) FROM memories WHERE consolidation_status = 'active'{}", ns_filter),
-            [], |row| row.get(0),
+            &format!(
+                "SELECT COUNT(*) FROM memories WHERE consolidation_status = 'active'{}",
+                ns_filter
+            ),
+            [],
+            |row| row.get(0),
         )?;
         let consolidated = conn.query_row(
-            &format!("SELECT COUNT(*) FROM memories WHERE consolidation_status = 'consolidated'{}", ns_filter),
-            [], |row| row.get(0),
+            &format!(
+                "SELECT COUNT(*) FROM memories WHERE consolidation_status = 'consolidated'{}",
+                ns_filter
+            ),
+            [],
+            |row| row.get(0),
         )?;
         let tombstoned = conn.query_row(
-            &format!("SELECT COUNT(*) FROM memories WHERE consolidation_status = 'tombstoned'{}", ns_filter),
-            [], |row| row.get(0),
+            &format!(
+                "SELECT COUNT(*) FROM memories WHERE consolidation_status = 'tombstoned'{}",
+                ns_filter
+            ),
+            [],
+            |row| row.get(0),
         )?;
         let archived = conn.query_row(
-            &format!("SELECT COUNT(*) FROM memories WHERE storage_tier = 'cold'{}", ns_filter),
-            [], |row| row.get(0),
+            &format!(
+                "SELECT COUNT(*) FROM memories WHERE storage_tier = 'cold'{}",
+                ns_filter
+            ),
+            [],
+            |row| row.get(0),
         )?;
         let edges = conn.query_row(
             "SELECT COUNT(*) FROM edges WHERE tombstoned = 0",
-            [], |row| row.get(0),
+            [],
+            |row| row.get(0),
         )?;
-        let entities = conn.query_row(
-            "SELECT COUNT(*) FROM entities",
-            [], |row| row.get(0),
-        )?;
-        let operations = conn.query_row(
-            "SELECT COUNT(*) FROM oplog",
-            [], |row| row.get(0),
-        )?;
+        let entities = conn.query_row("SELECT COUNT(*) FROM entities", [], |row| row.get(0))?;
+        let operations = conn.query_row("SELECT COUNT(*) FROM oplog", [], |row| row.get(0))?;
         let open_conflicts = conn.query_row(
             "SELECT COUNT(*) FROM conflicts WHERE status = 'open'",
-            [], |row| row.get(0),
+            [],
+            |row| row.get(0),
         )?;
         let resolved_conflicts = conn.query_row(
             "SELECT COUNT(*) FROM conflicts WHERE status IN ('resolved', 'dismissed')",
-            [], |row| row.get(0),
+            [],
+            |row| row.get(0),
         )?;
         let pending_triggers = conn.query_row(
             "SELECT COUNT(*) FROM trigger_log WHERE status = 'pending'",
-            [], |row| row.get(0),
+            [],
+            |row| row.get(0),
         )?;
         let active_patterns = conn.query_row(
             "SELECT COUNT(*) FROM patterns WHERE status = 'active'",
-            [], |row| row.get(0),
+            [],
+            |row| row.get(0),
         )?;
         drop(conn);
 
@@ -205,11 +222,10 @@ impl YantrikDB {
     #[doc(hidden)]
     pub fn count_pending_ops_sql(&self) -> Result<i64> {
         let conn = self.read_conn();
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM oplog WHERE applied = 0",
-            [],
-            |row| row.get(0),
-        )?;
+        let count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM oplog WHERE applied = 0", [], |row| {
+                row.get(0)
+            })?;
         Ok(count)
     }
 
@@ -385,26 +401,40 @@ impl YantrikDB {
     /// }
     /// ```
     fn apply_materialize_record_post(&self, payload_json: &str) -> Result<()> {
-        let payload: serde_json::Value = serde_json::from_str(payload_json)
-            .map_err(|e| crate::error::YantrikDbError::InvalidInput(format!(
+        let payload: serde_json::Value = serde_json::from_str(payload_json).map_err(|e| {
+            crate::error::YantrikDbError::InvalidInput(format!(
                 "materialize_record_post: payload parse failed: {e}"
-            )))?;
+            ))
+        })?;
 
-        let rid = payload.get("rid").and_then(|v| v.as_str())
-            .ok_or_else(|| crate::error::YantrikDbError::InvalidInput(
+        let rid = payload.get("rid").and_then(|v| v.as_str()).ok_or_else(|| {
+            crate::error::YantrikDbError::InvalidInput(
                 "materialize_record_post: missing rid".into(),
-            ))?;
-        let text_stored = payload.get("text").and_then(|v| v.as_str())
-            .ok_or_else(|| crate::error::YantrikDbError::InvalidInput(
-                "materialize_record_post: missing text".into(),
-            ))?;
-        let namespace = payload.get("namespace").and_then(|v| v.as_str())
+            )
+        })?;
+        let text_stored = payload
+            .get("text")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                crate::error::YantrikDbError::InvalidInput(
+                    "materialize_record_post: missing text".into(),
+                )
+            })?;
+        let namespace = payload
+            .get("namespace")
+            .and_then(|v| v.as_str())
             .unwrap_or("default");
-        let ts_secs = payload.get("ts_secs").and_then(|v| v.as_f64())
+        let ts_secs = payload
+            .get("ts_secs")
+            .and_then(|v| v.as_f64())
             .unwrap_or_else(super::now);
-        let domain = payload.get("domain").and_then(|v| v.as_str())
+        let domain = payload
+            .get("domain")
+            .and_then(|v| v.as_str())
             .unwrap_or("general");
-        let source = payload.get("source").and_then(|v| v.as_str())
+        let source = payload
+            .get("source")
+            .and_then(|v| v.as_str())
             .unwrap_or("user");
 
         // Decrypt the text field if engine encrypted at rest. The payload
@@ -476,19 +506,28 @@ impl YantrikDB {
                     params![rel.src, rel.rel_type, rel.dst, namespace],
                     |row| row.get::<_, i64>(0),
                 )
-                .unwrap_or(0) > 0
+                .unwrap_or(0)
+                    > 0
             };
             if already_exists {
                 continue;
             }
             let _ = self.ingest_claim(
-                &rel.src, &rel.rel_type, &rel.dst, namespace,
-                rel.polarity, &rel.modality,
-                None, None,
-                "heuristic_v1", Some("1.0"),
+                &rel.src,
+                &rel.rel_type,
+                &rel.dst,
+                namespace,
+                rel.polarity,
+                &rel.modality,
+                None,
+                None,
+                "heuristic_v1",
+                Some("1.0"),
                 &rel.confidence_band,
                 Some(rid),
-                None, None, 1.0,
+                None,
+                None,
+                1.0,
             );
         }
 
@@ -543,26 +582,37 @@ impl YantrikDB {
     /// Idempotent on every loop step (INSERT OR IGNORE, ON CONFLICT DO UPDATE
     /// with mention_count guarded by `was_new_row`).
     fn apply_materialize_record_with_rid_post(&self, payload_json: &str) -> Result<()> {
-        let payload: serde_json::Value = serde_json::from_str(payload_json)
-            .map_err(|e| crate::error::YantrikDbError::InvalidInput(format!(
+        let payload: serde_json::Value = serde_json::from_str(payload_json).map_err(|e| {
+            crate::error::YantrikDbError::InvalidInput(format!(
                 "materialize_record_with_rid_post: payload parse failed: {e}"
-            )))?;
+            ))
+        })?;
 
-        let rid = payload.get("rid").and_then(|v| v.as_str())
-            .ok_or_else(|| crate::error::YantrikDbError::InvalidInput(
+        let rid = payload.get("rid").and_then(|v| v.as_str()).ok_or_else(|| {
+            crate::error::YantrikDbError::InvalidInput(
                 "materialize_record_with_rid_post: missing rid".into(),
-            ))?;
-        let _namespace = payload.get("namespace").and_then(|v| v.as_str())
+            )
+        })?;
+        let _namespace = payload
+            .get("namespace")
+            .and_then(|v| v.as_str())
             .unwrap_or("default");
-        let ts_secs = payload.get("ts_secs").and_then(|v| v.as_f64())
+        let ts_secs = payload
+            .get("ts_secs")
+            .and_then(|v| v.as_f64())
             .unwrap_or_else(super::now);
-        let was_new_row = payload.get("was_new_row").and_then(|v| v.as_bool())
+        let was_new_row = payload
+            .get("was_new_row")
+            .and_then(|v| v.as_bool())
             .unwrap_or(false);
-        let entities: Vec<String> = payload.get("extracted_entities")
+        let entities: Vec<String> = payload
+            .get("extracted_entities")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter()
-                .filter_map(|x| x.as_str().map(|s| s.to_string()))
-                .collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
             .unwrap_or_default();
 
         if entities.is_empty() {
@@ -752,7 +802,11 @@ mod pending_ops_tests {
     #[test]
     fn pending_op_round_trip() {
         let db = open_test_db();
-        assert_eq!(db.count_pending_ops().unwrap(), 0, "fresh db has no pending");
+        assert_eq!(
+            db.count_pending_ops().unwrap(),
+            0,
+            "fresh db has no pending"
+        );
 
         let payload = serde_json::json!({
             "rid": "test_rid_1",
@@ -761,10 +815,20 @@ mod pending_ops_tests {
         });
         let emb_bytes = fake_embedding(1.0, 64);
         let op_id = db
-            .log_op_pending("record", Some("test_rid_1"), &payload, None, Some(&emb_bytes))
+            .log_op_pending(
+                "record",
+                Some("test_rid_1"),
+                &payload,
+                None,
+                Some(&emb_bytes),
+            )
             .expect("log_op_pending");
 
-        assert_eq!(db.count_pending_ops().unwrap(), 1, "one pending op after append");
+        assert_eq!(
+            db.count_pending_ops().unwrap(),
+            1,
+            "one pending op after append"
+        );
 
         db.mark_op_applied(&op_id).expect("mark applied");
         assert_eq!(db.count_pending_ops().unwrap(), 0, "no pending after mark");
@@ -842,8 +906,14 @@ mod pending_ops_tests {
         );
 
         // log_op_pending writes applied=0.
-        db.log_op_pending("record", Some("rid_new"), &serde_json::json!({}), None, None)
-            .unwrap();
+        db.log_op_pending(
+            "record",
+            Some("rid_new"),
+            &serde_json::json!({}),
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(db.count_pending_ops().unwrap(), 1);
     }
 
@@ -865,10 +935,20 @@ mod pending_ops_tests {
         assert_eq!(db.count_pending_ops().unwrap(), 10_000);
 
         let err = db
-            .log_op_pending("record", Some("rid_overflow"), &serde_json::json!({}), None, None)
+            .log_op_pending(
+                "record",
+                Some("rid_overflow"),
+                &serde_json::json!({}),
+                None,
+                None,
+            )
             .expect_err("11k must fail with backpressure");
         match err {
-            crate::error::YantrikDbError::Backpressure { pending, max, retry_after_ms } => {
+            crate::error::YantrikDbError::Backpressure {
+                pending,
+                max,
+                retry_after_ms,
+            } => {
                 assert_eq!(max, 10_000);
                 assert_eq!(pending, 10_000);
                 assert!(retry_after_ms > 0, "retry hint must be non-zero");
@@ -889,19 +969,30 @@ mod pending_ops_tests {
                 "SELECT op_id FROM oplog WHERE applied = 0 LIMIT 1",
                 [],
                 |row| row.get(0),
-            ).unwrap()
+            )
+            .unwrap()
         };
         let was_unset = db.mark_op_applied(&one_op_id).unwrap();
         assert!(was_unset, "mark_op_applied should win the transition");
-        db.log_op_pending("record", Some("rid_after_drain"), &serde_json::json!({}), None, None)
-            .expect("succeeds after one drained");
+        db.log_op_pending(
+            "record",
+            Some("rid_after_drain"),
+            &serde_json::json!({}),
+            None,
+            None,
+        )
+        .expect("succeeds after one drained");
     }
 
     #[test]
     fn apply_pending_drains_then_marks() {
         let db = open_test_db();
         // Seed 3 pending ops of various types.
-        for (op_type, target) in [("record", "rid_1"), ("forget", "rid_2"), ("relate", "rid_3")] {
+        for (op_type, target) in [
+            ("record", "rid_1"),
+            ("forget", "rid_2"),
+            ("relate", "rid_3"),
+        ] {
             db.log_op_pending(op_type, Some(target), &serde_json::json!({}), None, None)
                 .unwrap();
         }
@@ -916,8 +1007,14 @@ mod pending_ops_tests {
     fn apply_pending_respects_limit() {
         let db = open_test_db();
         for i in 0..5 {
-            db.log_op_pending("record", Some(&format!("rid_{i}")), &serde_json::json!({}), None, None)
-                .unwrap();
+            db.log_op_pending(
+                "record",
+                Some(&format!("rid_{i}")),
+                &serde_json::json!({}),
+                None,
+                None,
+            )
+            .unwrap();
         }
         let applied = db.apply_pending_ops_once(2).unwrap();
         assert_eq!(applied, 2, "only 2 of 5 drained when limit=2");
@@ -951,14 +1048,19 @@ mod pending_ops_tests {
             &serde_json::json!({}),
             None,
             None,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(db.count_pending_ops().unwrap(), 1);
 
         // Drain doesn't apply unknown op types — they stay pending so a
         // future runtime that knows the op type can drain them.
         let applied = db.apply_pending_ops_once(10).unwrap();
         assert_eq!(applied, 0);
-        assert_eq!(db.count_pending_ops().unwrap(), 1, "unknown op_type stays pending");
+        assert_eq!(
+            db.count_pending_ops().unwrap(),
+            1,
+            "unknown op_type stays pending"
+        );
     }
 
     #[test]
@@ -1077,7 +1179,13 @@ mod pending_ops_tests {
 
         // Phase 5: idempotent re-mark must not double-decrement.
         let extra_op_id = db
-            .log_op_pending("record", Some("rid_extra"), &serde_json::json!({}), None, None)
+            .log_op_pending(
+                "record",
+                Some("rid_extra"),
+                &serde_json::json!({}),
+                None,
+                None,
+            )
             .unwrap();
         let first_mark = db.mark_op_applied(&extra_op_id).unwrap();
         let second_mark = db.mark_op_applied(&extra_op_id).unwrap();
@@ -1238,12 +1346,7 @@ mod pending_ops_tests {
     // would have produced. Commit B will flip foreground to enqueue;
     // these tests act as the contract pin so the flip is provably safe.
 
-    fn enqueue_post_record(
-        db: &YantrikDB,
-        rid: &str,
-        text: &str,
-        namespace: &str,
-    ) -> String {
+    fn enqueue_post_record(db: &YantrikDB, rid: &str, text: &str, namespace: &str) -> String {
         // First INSERT a stub memories row so memory_entities + claims
         // FK references are valid. Foreground (Commit B) will INSERT the
         // memories row before enqueuing; tests mirror that ordering.
@@ -1274,7 +1377,8 @@ mod pending_ops_tests {
             &payload,
             None,
             None,
-        ).expect("log_op_pending")
+        )
+        .expect("log_op_pending")
     }
 
     #[test]
@@ -1289,14 +1393,20 @@ mod pending_ops_tests {
 
         // Entities table should now contain Alice and Acme.
         let conn = db.read_conn();
-        let alice: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM entities WHERE name = 'Alice'",
-            [], |r| r.get(0),
-        ).unwrap();
-        let acme: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM entities WHERE name = 'Acme'",
-            [], |r| r.get(0),
-        ).unwrap();
+        let alice: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entities WHERE name = 'Alice'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let acme: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entities WHERE name = 'Acme'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(alice, 1, "Alice seeded by heuristic");
         assert_eq!(acme, 1, "Acme seeded by heuristic");
     }
@@ -1308,11 +1418,17 @@ mod pending_ops_tests {
         let _ = db.apply_pending_ops_once(10).unwrap();
 
         let conn = db.read_conn();
-        let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM memory_entities WHERE memory_rid = 'r2'",
-            [], |r| r.get(0),
-        ).unwrap();
-        assert!(count >= 2, "memory_entities has at least 2 rows for Bob+Beta Corp; got {count}");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_entities WHERE memory_rid = 'r2'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            count >= 2,
+            "memory_entities has at least 2 rows for Bob+Beta Corp; got {count}"
+        );
     }
 
     #[test]
@@ -1327,10 +1443,13 @@ mod pending_ops_tests {
         assert_eq!(n2, 0, "second drain finds nothing pending");
 
         let conn = db.read_conn();
-        let mc: i64 = conn.query_row(
-            "SELECT mention_count FROM entities WHERE name = 'Charlie'",
-            [], |r| r.get(0),
-        ).unwrap();
+        let mc: i64 = conn
+            .query_row(
+                "SELECT mention_count FROM entities WHERE name = 'Charlie'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(mc, 1, "mention_count not double-bumped");
     }
 
@@ -1345,7 +1464,10 @@ mod pending_ops_tests {
         let gi = db.graph_index.read();
         let names = gi.all_entity_names();
         assert!(names.iter().any(|n| n == "Eve"), "Eve in graph_index");
-        assert!(names.iter().any(|n| n == "Everest"), "Everest in graph_index");
+        assert!(
+            names.iter().any(|n| n == "Everest"),
+            "Everest in graph_index"
+        );
     }
 
     #[test]
@@ -1359,8 +1481,10 @@ mod pending_ops_tests {
         let db = Arc::new(open_test_db());
         for i in 0..20 {
             let _ = enqueue_post_record(
-                &db, &format!("rcc_{i}"),
-                &format!("Person{i} met Place{i}"), "default",
+                &db,
+                &format!("rcc_{i}"),
+                &format!("Person{i} met Place{i}"),
+                "default",
             );
         }
         assert_eq!(db.count_pending_ops().unwrap(), 20);
@@ -1372,23 +1496,30 @@ mod pending_ops_tests {
                 let mut total = 0;
                 while db_c.count_pending_ops().unwrap() > 0 {
                     total += db_c.apply_pending_ops_once(50).unwrap();
-                    if total >= 20 { break; }
+                    if total >= 20 {
+                        break;
+                    }
                 }
                 total
             }));
         }
-        let totals: Vec<usize> = handles.into_iter()
-            .map(|h| h.join().unwrap()).collect();
-        assert_eq!(totals.iter().sum::<usize>(), 20,
-            "exactly 20 applies across all workers, no double-counting; got {totals:?}");
+        let totals: Vec<usize> = handles.into_iter().map(|h| h.join().unwrap()).collect();
+        assert_eq!(
+            totals.iter().sum::<usize>(),
+            20,
+            "exactly 20 applies across all workers, no double-counting; got {totals:?}"
+        );
         assert_eq!(db.count_pending_ops().unwrap(), 0);
 
         // entities should have 20 distinct Person* rows, 20 distinct Place* rows.
         let conn = db.read_conn();
-        let person_count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM entities WHERE name LIKE 'Person%'",
-            [], |r| r.get(0),
-        ).unwrap();
+        let person_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entities WHERE name LIKE 'Person%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(person_count, 20);
     }
 
@@ -1399,15 +1530,21 @@ mod pending_ops_tests {
         // lose data on a transient parse failure).
         let db = open_test_db();
         let bad_payload = serde_json::json!({"not_a_rid": "oops"});
-        let _ = db.log_op_pending(
-            crate::engine::op_types::OP_MATERIALIZE_RECORD_POST,
-            Some("r_bad"),
-            &bad_payload,
-            None,
-            None,
-        ).unwrap();
+        let _ = db
+            .log_op_pending(
+                crate::engine::op_types::OP_MATERIALIZE_RECORD_POST,
+                Some("r_bad"),
+                &bad_payload,
+                None,
+                None,
+            )
+            .unwrap();
         let n = db.apply_pending_ops_once(10).unwrap();
         assert_eq!(n, 0, "malformed op not applied");
-        assert_eq!(db.count_pending_ops().unwrap(), 1, "still pending for retry");
+        assert_eq!(
+            db.count_pending_ops().unwrap(),
+            1,
+            "still pending for retry"
+        );
     }
 }

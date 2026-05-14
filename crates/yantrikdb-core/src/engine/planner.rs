@@ -5,13 +5,13 @@
 
 use crate::error::Result;
 use crate::planner::{
-    detect_blockers, instantiate_plan, next_plan_step, Blocker, ConstraintEntry,
-    GoalEntry, Plan, PlanProposal, PlanStep, PlanStore, PlannerConfig, SchemaEntry,
-    SkillStepInfo, SkillTemplate, TaskEntry, PlanningContext,
+    detect_blockers, instantiate_plan, next_plan_step, Blocker, ConstraintEntry, GoalEntry, Plan,
+    PlanProposal, PlanStep, PlanStore, PlannerConfig, PlanningContext, SchemaEntry, SkillStepInfo,
+    SkillTemplate, TaskEntry,
 };
 use crate::state::{
-    CognitiveEdgeKind, CognitiveNode, ConstraintPayload, GoalPayload, NodeId,
-    NodeKind, NodePayload, ActionSchemaPayload, TaskPayload,
+    ActionSchemaPayload, CognitiveEdgeKind, CognitiveNode, ConstraintPayload, GoalPayload, NodeId,
+    NodeKind, NodePayload, TaskPayload,
 };
 
 use super::{now, YantrikDB};
@@ -32,9 +32,9 @@ impl YantrikDB {
         let meta = Self::get_meta(&self.conn(), PLAN_STORE_META_KEY)?;
         match meta {
             Some(json) => serde_json::from_str(&json).map_err(|e| {
-                crate::error::YantrikDbError::Database(
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-                )
+                crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                    Box::new(e),
+                ))
             }),
             None => Ok(PlanStore::new()),
         }
@@ -43,9 +43,9 @@ impl YantrikDB {
     /// Persist the plan store.
     pub fn save_plan_store(&self, store: &PlanStore) -> Result<()> {
         let json = serde_json::to_string(store).map_err(|e| {
-            crate::error::YantrikDbError::Database(
-                rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-            )
+            crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                Box::new(e),
+            ))
         })?;
         self.conn().execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -62,9 +62,9 @@ impl YantrikDB {
         let meta = Self::get_meta(&self.conn(), PLANNER_CONFIG_META_KEY)?;
         match meta {
             Some(json) => serde_json::from_str(&json).map_err(|e| {
-                crate::error::YantrikDbError::Database(
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-                )
+                crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                    Box::new(e),
+                ))
             }),
             None => Ok(PlannerConfig::default()),
         }
@@ -73,9 +73,9 @@ impl YantrikDB {
     /// Persist the planner configuration.
     pub fn save_planner_config(&self, config: &PlannerConfig) -> Result<()> {
         let json = serde_json::to_string(config).map_err(|e| {
-            crate::error::YantrikDbError::Database(
-                rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-            )
+            crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                Box::new(e),
+            ))
         })?;
         self.conn().execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -92,8 +92,7 @@ impl YantrikDB {
     /// the HTN-lite planner.
     pub fn plan_for_goal(&self, goal_id: NodeId) -> Result<PlanProposal> {
         let config = self.load_planner_config()?;
-        let (schemas, goals, tasks, constraints, edges, skills) =
-            self.load_planning_inputs()?;
+        let (schemas, goals, tasks, constraints, edges, skills) = self.load_planning_inputs()?;
 
         let ctx = PlanningContext {
             schemas: &schemas,
@@ -135,8 +134,7 @@ impl YantrikDB {
 
         // Generate fresh.
         let config = self.load_planner_config()?;
-        let (schemas, goals, tasks, constraints, edges, skills) =
-            self.load_planning_inputs()?;
+        let (schemas, goals, tasks, constraints, edges, skills) = self.load_planning_inputs()?;
 
         let ctx = PlanningContext {
             schemas: &schemas,
@@ -155,8 +153,7 @@ impl YantrikDB {
     /// Detect all blockers preventing goal achievement.
     pub fn detect_goal_blockers(&self, goal_id: NodeId) -> Result<Vec<Blocker>> {
         let config = self.load_planner_config()?;
-        let (schemas, goals, tasks, constraints, edges, skills) =
-            self.load_planning_inputs()?;
+        let (schemas, goals, tasks, constraints, edges, skills) = self.load_planning_inputs()?;
 
         let ctx = PlanningContext {
             schemas: &schemas,

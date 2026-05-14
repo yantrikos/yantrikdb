@@ -50,12 +50,7 @@ pub fn run_analogy_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     // Test 2: Analogical opportunity detection.
     let start = Instant::now();
     let node_refs: Vec<&CognitiveNode> = scenario.nodes.iter().collect();
-    let opportunities = detect_analogical_opportunities(
-        &node_refs,
-        &scenario.edges,
-        &groups,
-        0.3,
-    );
+    let opportunities = detect_analogical_opportunities(&node_refs, &scenario.edges, &groups, 0.3);
     run.add(BenchResult {
         category: "analogy".into(),
         test_name: "opportunity_detection".into(),
@@ -487,9 +482,7 @@ pub fn run_counterfactual_tests(run: &mut BenchRun, scenario: &PersonaScenario) 
         metric_value: Some(config.max_horizon as f64),
         details: Some(format!(
             "horizon={} conf_decay={:.2} hop_decay={:.2}",
-            config.max_horizon,
-            config.confidence_decay,
-            config.hop_decay,
+            config.max_horizon, config.confidence_decay, config.hop_decay,
         )),
     });
 
@@ -556,12 +549,7 @@ pub fn run_counterfactual_tests(run: &mut BenchRun, scenario: &PersonaScenario) 
     let start = Instant::now();
     let mut comparison_valid = true;
     if edge_list.len() >= 2 {
-        let diff = compare_alternatives(
-            &edge_list[0].cause,
-            &edge_list[1].cause,
-            &store,
-            &config,
-        );
+        let diff = compare_alternatives(&edge_list[0].cause, &edge_list[1].cause, &store, &config);
         if diff.is_nan() {
             comparison_valid = false;
         }
@@ -651,10 +639,7 @@ pub fn run_belief_network_tests(run: &mut BenchRun, scenario: &PersonaScenario) 
     let persona = Some(scenario.name.clone());
 
     // Build a belief network from persona belief nodes and edges.
-    let (network, var_ids) = build_belief_network_from_scenario(
-        &scenario.nodes,
-        &scenario.edges,
-    );
+    let (network, var_ids) = build_belief_network_from_scenario(&scenario.nodes, &scenario.edges);
 
     // Test 1: Network construction.
     let start = Instant::now();
@@ -703,7 +688,9 @@ pub fn run_belief_network_tests(run: &mut BenchRun, scenario: &PersonaScenario) 
         metric_value: Some(health.avg_confidence),
         details: Some(format!(
             "components={} extreme_priors={} instabilities={}",
-            health.components, health.extreme_priors.len(), health.potential_instabilities.len(),
+            health.components,
+            health.extreme_priors.len(),
+            health.potential_instabilities.len(),
         )),
     });
 
@@ -760,7 +747,10 @@ pub fn run_belief_network_tests(run: &mut BenchRun, scenario: &PersonaScenario) 
 fn build_belief_network_from_scenario(
     nodes: &[CognitiveNode],
     edges: &[CognitiveEdge],
-) -> (super::belief_network::BeliefNetwork, Vec<super::belief_network::VariableId>) {
+) -> (
+    super::belief_network::BeliefNetwork,
+    Vec<super::belief_network::VariableId>,
+) {
     use super::belief_network::*;
 
     // Extract beliefs: (node_id, label, log_odds from confidence).
@@ -796,9 +786,7 @@ fn build_belief_network_from_scenario(
         .collect();
 
     let network = build_network_from_edges(&belief_refs, &edge_data);
-    let var_ids: Vec<VariableId> = (0..beliefs.len())
-        .map(|i| VariableId(i as u64))
-        .collect();
+    let var_ids: Vec<VariableId> = (0..beliefs.len()).map(|i| VariableId(i as u64)).collect();
 
     (network, var_ids)
 }
@@ -918,9 +906,7 @@ pub fn run_replay_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         metric_value: Some(report.replays_executed as f64),
         details: Some(format!(
             "beliefs={} causal={} assoc={}",
-            report.beliefs_updated,
-            report.causal_updates,
-            report.new_associations,
+            report.beliefs_updated, report.causal_updates, report.new_associations,
         )),
     });
 
@@ -993,10 +979,7 @@ pub fn run_perspective_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     let start = Instant::now();
     let mut all_valid = true;
     for node in &scenario.nodes {
-        let domain = node
-            .metadata
-            .get("domain")
-            .and_then(|v| v.as_str());
+        let domain = node.metadata.get("domain").and_then(|v| v.as_str());
         let tags: Vec<String> = node
             .metadata
             .get("tags")
@@ -1007,15 +990,7 @@ pub fn run_perspective_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
                     .collect()
             })
             .unwrap_or_default();
-        let resolved = resolve_salience(
-            &stack,
-            node.id,
-            node.kind(),
-            domain,
-            &tags,
-            1.0,
-            &store,
-        );
+        let resolved = resolve_salience(&stack, node.id, node.kind(), domain, &tags, 1.0, &store);
         if resolved < 0.0 || resolved > 10.0 {
             all_valid = false;
         }
@@ -1070,9 +1045,7 @@ pub fn run_perspective_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         metric_value: Some(style.exploration_vs_exploitation),
         details: Some(format!(
             "risk={:.2} abstraction={:.2} social={:.2}",
-            style.risk_tolerance,
-            style.abstraction_level,
-            style.social_weight,
+            style.risk_tolerance, style.abstraction_level, style.social_weight,
         )),
     });
 

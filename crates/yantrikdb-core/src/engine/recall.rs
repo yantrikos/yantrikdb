@@ -19,14 +19,34 @@ fn simple_stem(word: &str) -> Option<String> {
     }
     // Ordered longest-first so we strip the most specific suffix.
     let suffixes: &[(&str, usize)] = &[
-        ("ations", 3), ("ation", 3), ("tions", 3), ("ments", 3),
-        ("tion", 3), ("sion", 3), ("ment", 3), ("ence", 3),
-        ("ance", 3), ("ness", 3), ("ible", 3), ("able", 3),
-        ("ful", 3), ("ous", 3), ("ive", 3), ("ary", 3),
-        ("ery", 3), ("ory", 3), ("ing", 3), ("ble", 3),
-        ("ity", 3), ("ish", 3),
-        ("ed", 3), ("er", 3), ("ly", 3), ("al", 3),
-        ("es", 3), ("s", 3),
+        ("ations", 3),
+        ("ation", 3),
+        ("tions", 3),
+        ("ments", 3),
+        ("tion", 3),
+        ("sion", 3),
+        ("ment", 3),
+        ("ence", 3),
+        ("ance", 3),
+        ("ness", 3),
+        ("ible", 3),
+        ("able", 3),
+        ("ful", 3),
+        ("ous", 3),
+        ("ive", 3),
+        ("ary", 3),
+        ("ery", 3),
+        ("ory", 3),
+        ("ing", 3),
+        ("ble", 3),
+        ("ity", 3),
+        ("ish", 3),
+        ("ed", 3),
+        ("er", 3),
+        ("ly", 3),
+        ("al", 3),
+        ("es", 3),
+        ("s", 3),
     ];
     for &(suffix, min_stem) in suffixes {
         if word.ends_with(suffix) && word.len() - suffix.len() >= min_stem {
@@ -167,35 +187,48 @@ impl YantrikDB {
 
                 // Filter: consolidation_status
                 let status_ok = if include_consolidated {
-                    row.consolidation_status == "active" || row.consolidation_status == "consolidated"
+                    row.consolidation_status == "active"
+                        || row.consolidation_status == "consolidated"
                 } else {
                     row.consolidation_status == "active"
                 };
-                if !status_ok { continue; }
+                if !status_ok {
+                    continue;
+                }
 
                 // Filter: memory_type
                 if let Some(mt) = memory_type {
-                    if row.memory_type != mt { continue; }
+                    if row.memory_type != mt {
+                        continue;
+                    }
                 }
 
                 // Filter: time_window
                 if let Some((start, end)) = time_window {
-                    if row.created_at < start || row.created_at > end { continue; }
+                    if row.created_at < start || row.created_at > end {
+                        continue;
+                    }
                 }
 
                 // Filter: namespace
                 if let Some(ns) = namespace {
-                    if row.namespace != ns { continue; }
+                    if row.namespace != ns {
+                        continue;
+                    }
                 }
 
                 // Filter: domain (V10)
                 if let Some(d) = domain {
-                    if row.domain != d { continue; }
+                    if row.domain != d {
+                        continue;
+                    }
                 }
 
                 // Filter: source (V10)
                 if let Some(s) = source {
-                    if row.source != s { continue; }
+                    if row.source != s {
+                        continue;
+                    }
                 }
 
                 let sim_score = (1.0 - distance).max(0.0);
@@ -203,15 +236,29 @@ impl YantrikDB {
                 let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
                 let age = ts - row.created_at;
                 let recency = scoring::recency_score(age);
-                let composite = scoring::adaptive_composite_score(sim_score, decay, recency, row.importance, row.valence, query_sentiment, &learned_weights);
+                let composite = scoring::adaptive_composite_score(
+                    sim_score,
+                    decay,
+                    recency,
+                    row.importance,
+                    row.valence,
+                    query_sentiment,
+                    &learned_weights,
+                );
                 let why = scoring::build_why(sim_score, recency, decay, row.valence);
-                let contributions = scoring::adaptive_contributions(sim_score, decay, recency, row.importance, &learned_weights);
+                let contributions = scoring::adaptive_contributions(
+                    sim_score,
+                    decay,
+                    recency,
+                    row.importance,
+                    &learned_weights,
+                );
                 let valence_multiplier = scoring::query_valence_boost(row.valence, query_sentiment);
 
                 scored.push(RecallResult {
                     rid: rid.clone(),
                     memory_type: row.memory_type.clone(),
-                    text: String::new(),  // hydrated after top_k selection
+                    text: String::new(), // hydrated after top_k selection
                     created_at: row.created_at,
                     importance: row.importance,
                     valence: row.valence,
@@ -226,7 +273,7 @@ impl YantrikDB {
                         valence_multiplier,
                     },
                     why_retrieved: why,
-                    metadata: serde_json::Value::Null,  // hydrated after top_k selection
+                    metadata: serde_json::Value::Null, // hydrated after top_k selection
                     namespace: row.namespace.clone(),
                     certainty: row.certainty,
                     domain: row.domain.clone(),
@@ -259,9 +306,8 @@ impl YantrikDB {
                             && row.consolidation_status == "active"
                             && !existing_rids.contains(rid.as_str())
                             && memory_type.map_or(true, |mt| row.memory_type == mt)
-                            && time_window.map_or(true, |(s, e)| {
-                                row.created_at >= s && row.created_at <= e
-                            })
+                            && time_window
+                                .map_or(true, |(s, e)| row.created_at >= s && row.created_at <= e)
                             && namespace.map_or(true, |ns| row.namespace == ns)
                             && domain.map_or(true, |d| row.domain == d)
                             && source.map_or(true, |s| row.source == s)
@@ -276,24 +322,40 @@ impl YantrikDB {
                 let cache = self.scoring_cache.read();
                 for rid in &important_rids {
                     let Some(row) = cache.get(rid) else { continue };
-                    let Some(emb_blob) = emb_map.get(rid.as_str()) else { continue };
+                    let Some(emb_blob) = emb_map.get(rid.as_str()) else {
+                        continue;
+                    };
                     let mem_emb = crate::serde_helpers::deserialize_f32(emb_blob);
                     let sim_score =
                         crate::consolidate::cosine_similarity(query_embedding, &mem_emb) as f64;
 
-                    if sim_score < min_sim_for_fallback { continue; }
+                    if sim_score < min_sim_for_fallback {
+                        continue;
+                    }
 
                     let elapsed = ts - row.last_access;
                     let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
                     let age = ts - row.created_at;
                     let recency = scoring::recency_score(age);
                     let composite = scoring::adaptive_composite_score(
-                        sim_score, decay, recency, row.importance, row.valence, query_sentiment, &learned_weights,
+                        sim_score,
+                        decay,
+                        recency,
+                        row.importance,
+                        row.valence,
+                        query_sentiment,
+                        &learned_weights,
                     );
                     let why = scoring::build_why(sim_score, recency, decay, row.valence);
-                    let contributions =
-                        scoring::adaptive_contributions(sim_score, decay, recency, row.importance, &learned_weights);
-                    let valence_multiplier = scoring::query_valence_boost(row.valence, query_sentiment);
+                    let contributions = scoring::adaptive_contributions(
+                        sim_score,
+                        decay,
+                        recency,
+                        row.importance,
+                        &learned_weights,
+                    );
+                    let valence_multiplier =
+                        scoring::query_valence_boost(row.valence, query_sentiment);
 
                     scored.push(RecallResult {
                         rid: rid.clone(),
@@ -337,16 +399,13 @@ impl YantrikDB {
             const FTS_MIN_SIM: f64 = 0.05;
 
             const STOPWORDS: &[&str] = &[
-                "a", "an", "the", "is", "are", "am", "was", "were", "be", "been",
-                "what", "who", "how", "when", "where", "which", "why",
-                "do", "did", "does", "have", "has", "had",
-                "i", "me", "my", "mine", "we", "our", "you", "your",
-                "to", "of", "in", "on", "at", "by", "for", "with", "from",
-                "about", "tell", "and", "or", "but", "not", "no",
-                "it", "its", "that", "this", "there", "s",
-                "she", "her", "he", "his", "they", "them",
-                "most", "each", "any", "all", "every", "been", "being",
-                "up", "out", "so", "if", "than", "very", "just", "also",
+                "a", "an", "the", "is", "are", "am", "was", "were", "be", "been", "what", "who",
+                "how", "when", "where", "which", "why", "do", "did", "does", "have", "has", "had",
+                "i", "me", "my", "mine", "we", "our", "you", "your", "to", "of", "in", "on", "at",
+                "by", "for", "with", "from", "about", "tell", "and", "or", "but", "not", "no",
+                "it", "its", "that", "this", "there", "s", "she", "her", "he", "his", "they",
+                "them", "most", "each", "any", "all", "every", "been", "being", "up", "out", "so",
+                "if", "than", "very", "just", "also",
             ];
 
             {
@@ -391,7 +450,11 @@ impl YantrikDB {
                                 .filter(|kw| !person_tokens.contains(&kw.to_lowercase()))
                                 .cloned()
                                 .collect();
-                            if filtered.is_empty() { raw_keywords } else { filtered }
+                            if filtered.is_empty() {
+                                raw_keywords
+                            } else {
+                                filtered
+                            }
                         }
                     };
 
@@ -404,8 +467,15 @@ impl YantrikDB {
                     // enter the scoring pool with keyword_match boost.
                     {
                         const GROUP_FTS_WORDS: &[&str] = &[
-                            "team", "group", "colleagues", "coworkers", "friends",
-                            "family", "staff", "members", "people",
+                            "team",
+                            "group",
+                            "colleagues",
+                            "coworkers",
+                            "friends",
+                            "family",
+                            "staff",
+                            "members",
+                            "people",
                         ];
                         let qt_lower = qt.to_lowercase();
                         if GROUP_FTS_WORDS.iter().any(|kw| qt_lower.contains(kw)) {
@@ -480,8 +550,7 @@ impl YantrikDB {
                         };
                         let fts_query_or = keyword_groups.join(" OR ");
                         // Primary query: AND if available, else OR
-                        let fts_query = fts_query_and.as_deref()
-                            .unwrap_or(&fts_query_or);
+                        let fts_query = fts_query_and.as_deref().unwrap_or(&fts_query_or);
 
                         // Adaptive FTS limit: scales with database size.
                         // Small DBs (<3K): 30 is enough. Large DBs (15K+): need 150+
@@ -519,7 +588,11 @@ impl YantrikDB {
                                  {} \
                                  ORDER BY rank * (0.5 + m.importance) \
                                  LIMIT {}",
-                                if namespace.is_some() { "AND m.namespace = ?3" } else { "" },
+                                if namespace.is_some() {
+                                    "AND m.namespace = ?3"
+                                } else {
+                                    ""
+                                },
                                 fts_limit,
                             )
                         } else {
@@ -531,7 +604,11 @@ impl YantrikDB {
                                  {} \
                                  ORDER BY rank * (0.5 + m.importance) \
                                  LIMIT {}",
-                                if namespace.is_some() { "AND m.namespace = ?2" } else { "" },
+                                if namespace.is_some() {
+                                    "AND m.namespace = ?2"
+                                } else {
+                                    ""
+                                },
                                 fts_limit,
                             )
                         };
@@ -541,28 +618,26 @@ impl YantrikDB {
                             let conn = self.read_conn();
                             let mut stmt = conn.prepare_cached(&fts_sql).ok();
                             if let Some(ref mut stmt) = stmt {
-                                let result: std::result::Result<Vec<String>, _> = if let Some(mt) = memory_type {
+                                let result: std::result::Result<Vec<String>, _> = if let Some(mt) =
+                                    memory_type
+                                {
                                     if let Some(ns) = namespace {
-                                        stmt.query_map(
-                                            params![q, mt, ns],
-                                            |row| row.get::<_, String>(0),
-                                        ).map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                        stmt.query_map(params![q, mt, ns], |row| {
+                                            row.get::<_, String>(0)
+                                        })
+                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                     } else {
-                                        stmt.query_map(
-                                            params![q, mt],
-                                            |row| row.get::<_, String>(0),
-                                        ).map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                        stmt.query_map(params![q, mt], |row| {
+                                            row.get::<_, String>(0)
+                                        })
+                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                     }
                                 } else if let Some(ns) = namespace {
-                                    stmt.query_map(
-                                        params![q, ns],
-                                        |row| row.get::<_, String>(0),
-                                    ).map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                    stmt.query_map(params![q, ns], |row| row.get::<_, String>(0))
+                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                 } else {
-                                    stmt.query_map(
-                                        params![q],
-                                        |row| row.get::<_, String>(0),
-                                    ).map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                    stmt.query_map(params![q], |row| row.get::<_, String>(0))
+                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                 };
                                 result.unwrap_or_default()
                             } else {
@@ -599,7 +674,11 @@ impl YantrikDB {
                                      {} \
                                      ORDER BY m.importance DESC \
                                      LIMIT 100",
-                                    if namespace.is_some() { "AND m.namespace = ?4" } else { "" },
+                                    if namespace.is_some() {
+                                        "AND m.namespace = ?4"
+                                    } else {
+                                        ""
+                                    },
                                 )
                             } else {
                                 format!(
@@ -611,7 +690,11 @@ impl YantrikDB {
                                      {} \
                                      ORDER BY m.importance DESC \
                                      LIMIT 100",
-                                    if namespace.is_some() { "AND m.namespace = ?3" } else { "" },
+                                    if namespace.is_some() {
+                                        "AND m.namespace = ?3"
+                                    } else {
+                                        ""
+                                    },
                                 )
                             };
 
@@ -620,29 +703,32 @@ impl YantrikDB {
                                 let conn = self.read_conn();
                                 let mut stmt = conn.prepare_cached(&imp_fts_sql).ok();
                                 if let Some(ref mut stmt) = stmt {
-                                    let result: std::result::Result<Vec<String>, _> = if let Some(mt) = memory_type {
-                                        if let Some(ns) = namespace {
-                                            stmt.query_map(
-                                                params![q, mean_importance, mt, ns],
-                                                |row| row.get::<_, String>(0),
-                                            ).map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                    let result: std::result::Result<Vec<String>, _> =
+                                        if let Some(mt) = memory_type {
+                                            if let Some(ns) = namespace {
+                                                stmt.query_map(
+                                                    params![q, mean_importance, mt, ns],
+                                                    |row| row.get::<_, String>(0),
+                                                )
+                                                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                            } else {
+                                                stmt.query_map(
+                                                    params![q, mean_importance, mt],
+                                                    |row| row.get::<_, String>(0),
+                                                )
+                                                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                            }
+                                        } else if let Some(ns) = namespace {
+                                            stmt.query_map(params![q, mean_importance, ns], |row| {
+                                                row.get::<_, String>(0)
+                                            })
+                                            .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                         } else {
-                                            stmt.query_map(
-                                                params![q, mean_importance, mt],
-                                                |row| row.get::<_, String>(0),
-                                            ).map(|rows| rows.filter_map(|r| r.ok()).collect())
-                                        }
-                                    } else if let Some(ns) = namespace {
-                                        stmt.query_map(
-                                            params![q, mean_importance, ns],
-                                            |row| row.get::<_, String>(0),
-                                        ).map(|rows| rows.filter_map(|r| r.ok()).collect())
-                                    } else {
-                                        stmt.query_map(
-                                            params![q, mean_importance],
-                                            |row| row.get::<_, String>(0),
-                                        ).map(|rows| rows.filter_map(|r| r.ok()).collect())
-                                    };
+                                            stmt.query_map(params![q, mean_importance], |row| {
+                                                row.get::<_, String>(0)
+                                            })
+                                            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                        };
                                     result.unwrap_or_default()
                                 } else {
                                     vec![]
@@ -655,9 +741,8 @@ impl YantrikDB {
                                 let or_rids = run_fts_phase2(&fts_query_or);
                                 let existing: std::collections::HashSet<String> =
                                     imp_rids.iter().cloned().collect();
-                                imp_rids.extend(
-                                    or_rids.into_iter().filter(|r| !existing.contains(r))
-                                );
+                                imp_rids
+                                    .extend(or_rids.into_iter().filter(|r| !existing.contains(r)));
                             }
 
                             // Merge Phase 2 into Phase 1 results (dedup).
@@ -691,7 +776,11 @@ impl YantrikDB {
                                      {} \
                                      ORDER BY m.importance DESC \
                                      LIMIT 10",
-                                    if namespace.is_some() { "AND m.namespace = ?3" } else { "" },
+                                    if namespace.is_some() {
+                                        "AND m.namespace = ?3"
+                                    } else {
+                                        ""
+                                    },
                                 )
                             } else {
                                 format!(
@@ -703,7 +792,11 @@ impl YantrikDB {
                                      {} \
                                      ORDER BY m.importance DESC \
                                      LIMIT 10",
-                                    if namespace.is_some() { "AND m.namespace = ?2" } else { "" },
+                                    if namespace.is_some() {
+                                        "AND m.namespace = ?2"
+                                    } else {
+                                        ""
+                                    },
                                 )
                             };
 
@@ -715,29 +808,34 @@ impl YantrikDB {
                                     let conn = self.read_conn();
                                     let mut stmt = conn.prepare_cached(&anchor_fts_sql).ok();
                                     if let Some(ref mut stmt) = stmt {
-                                        let result: std::result::Result<Vec<String>, _> = if let Some(mt) = memory_type {
-                                            if let Some(ns) = namespace {
-                                                stmt.query_map(
-                                                    params![group, mt, ns],
-                                                    |row| row.get::<_, String>(0),
-                                                ).map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                        let result: std::result::Result<Vec<String>, _> =
+                                            if let Some(mt) = memory_type {
+                                                if let Some(ns) = namespace {
+                                                    stmt.query_map(params![group, mt, ns], |row| {
+                                                        row.get::<_, String>(0)
+                                                    })
+                                                    .map(|rows| {
+                                                        rows.filter_map(|r| r.ok()).collect()
+                                                    })
+                                                } else {
+                                                    stmt.query_map(params![group, mt], |row| {
+                                                        row.get::<_, String>(0)
+                                                    })
+                                                    .map(|rows| {
+                                                        rows.filter_map(|r| r.ok()).collect()
+                                                    })
+                                                }
+                                            } else if let Some(ns) = namespace {
+                                                stmt.query_map(params![group, ns], |row| {
+                                                    row.get::<_, String>(0)
+                                                })
+                                                .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                             } else {
-                                                stmt.query_map(
-                                                    params![group, mt],
-                                                    |row| row.get::<_, String>(0),
-                                                ).map(|rows| rows.filter_map(|r| r.ok()).collect())
-                                            }
-                                        } else if let Some(ns) = namespace {
-                                            stmt.query_map(
-                                                params![group, ns],
-                                                |row| row.get::<_, String>(0),
-                                            ).map(|rows| rows.filter_map(|r| r.ok()).collect())
-                                        } else {
-                                            stmt.query_map(
-                                                params![group],
-                                                |row| row.get::<_, String>(0),
-                                            ).map(|rows| rows.filter_map(|r| r.ok()).collect())
-                                        };
+                                                stmt.query_map(params![group], |row| {
+                                                    row.get::<_, String>(0)
+                                                })
+                                                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                            };
                                         result.unwrap_or_default()
                                     } else {
                                         vec![]
@@ -763,7 +861,8 @@ impl YantrikDB {
                                     && !result.why_retrieved.iter().any(|w| w == "keyword_match")
                                 {
                                     let sim = result.scores.similarity;
-                                    let boost = learned_weights.keyword_boost * (1.0 - sim).max(0.2);
+                                    let boost =
+                                        learned_weights.keyword_boost * (1.0 - sim).max(0.2);
                                     result.score += boost;
                                     result.why_retrieved.push("keyword_match".to_string());
                                 }
@@ -773,12 +872,14 @@ impl YantrikDB {
                         // Add new FTS candidates not already in the pool
                         let existing_rids: std::collections::HashSet<String> =
                             scored.iter().map(|r| r.rid.clone()).collect();
-                        let new_fts_rids: Vec<String> = fts_rids.into_iter()
+                        let new_fts_rids: Vec<String> = fts_rids
+                            .into_iter()
                             .filter(|r| !existing_rids.contains(r))
                             .collect();
 
                         if !new_fts_rids.is_empty() {
-                            let rid_refs: Vec<&str> = new_fts_rids.iter().map(|r| r.as_str()).collect();
+                            let rid_refs: Vec<&str> =
+                                new_fts_rids.iter().map(|r| r.as_str()).collect();
                             let emb_map = self.fetch_embeddings_by_rids(&rid_refs)?;
 
                             let cache = self.scoring_cache.read();
@@ -786,38 +887,62 @@ impl YantrikDB {
                                 let Some(row) = cache.get(rid) else { continue };
 
                                 let status_ok = if include_consolidated {
-                                    row.consolidation_status == "active" || row.consolidation_status == "consolidated"
+                                    row.consolidation_status == "active"
+                                        || row.consolidation_status == "consolidated"
                                 } else {
                                     row.consolidation_status == "active"
                                 };
-                                if !status_ok { continue; }
+                                if !status_ok {
+                                    continue;
+                                }
                                 if let Some((start, end)) = time_window {
-                                    if row.created_at < start || row.created_at > end { continue; }
+                                    if row.created_at < start || row.created_at > end {
+                                        continue;
+                                    }
                                 }
 
-                                let Some(emb_blob) = emb_map.get(rid.as_str()) else { continue };
+                                let Some(emb_blob) = emb_map.get(rid.as_str()) else {
+                                    continue;
+                                };
                                 let mem_emb = crate::serde_helpers::deserialize_f32(emb_blob);
                                 let sim_score = crate::consolidate::cosine_similarity(
-                                    query_embedding, &mem_emb,
+                                    query_embedding,
+                                    &mem_emb,
                                 ) as f64;
 
-                                if sim_score < FTS_MIN_SIM { continue; }
+                                if sim_score < FTS_MIN_SIM {
+                                    continue;
+                                }
 
                                 let elapsed = ts - row.last_access;
-                                let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
+                                let decay =
+                                    scoring::decay_score(row.importance, row.half_life, elapsed);
                                 let age = ts - row.created_at;
                                 let recency = scoring::recency_score(age);
                                 let composite = scoring::adaptive_composite_score(
-                                    sim_score, decay, recency, row.importance, row.valence, query_sentiment, &learned_weights,
+                                    sim_score,
+                                    decay,
+                                    recency,
+                                    row.importance,
+                                    row.valence,
+                                    query_sentiment,
+                                    &learned_weights,
                                 );
-                                let kw_boost = learned_weights.keyword_boost * (1.0 - sim_score).max(0.2);
-                                let mut why = scoring::build_why(sim_score, recency, decay, row.valence);
+                                let kw_boost =
+                                    learned_weights.keyword_boost * (1.0 - sim_score).max(0.2);
+                                let mut why =
+                                    scoring::build_why(sim_score, recency, decay, row.valence);
                                 why.push("keyword_match".to_string());
                                 why.push("fts_sourced".to_string());
                                 let contributions = scoring::adaptive_contributions(
-                                    sim_score, decay, recency, row.importance, &learned_weights,
+                                    sim_score,
+                                    decay,
+                                    recency,
+                                    row.importance,
+                                    &learned_weights,
                                 );
-                                let valence_multiplier = scoring::query_valence_boost(row.valence, query_sentiment);
+                                let valence_multiplier =
+                                    scoring::query_valence_boost(row.valence, query_sentiment);
 
                                 scored.push(RecallResult {
                                     rid: rid.clone(),
@@ -858,8 +983,8 @@ impl YantrikDB {
         // low semantic overlap. These memories are important for emotional retrieval.
         if query_sentiment.abs() > 0.5 {
             const VALENCE_SCAN_THRESHOLD: f64 = 0.4; // min |valence| to consider
-            const VALENCE_SCAN_MAX: usize = 30;      // max new candidates
-            const VALENCE_MIN_SIM: f64 = 0.02;       // very low floor — valence is the signal
+            const VALENCE_SCAN_MAX: usize = 30; // max new candidates
+            const VALENCE_MIN_SIM: f64 = 0.02; // very low floor — valence is the signal
 
             let existing_rids: std::collections::HashSet<&str> =
                 scored.iter().map(|r| r.rid.as_str()).collect();
@@ -889,8 +1014,13 @@ impl YantrikDB {
                         (rid.clone(), rank)
                     })
                     .collect();
-                candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                candidates.into_iter().take(VALENCE_SCAN_MAX).map(|(rid, _)| rid).collect()
+                candidates
+                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                candidates
+                    .into_iter()
+                    .take(VALENCE_SCAN_MAX)
+                    .map(|(rid, _)| rid)
+                    .collect()
             };
 
             if !valence_rids.is_empty() {
@@ -899,19 +1029,29 @@ impl YantrikDB {
                 let cache = self.scoring_cache.read();
                 for rid in &valence_rids {
                     let Some(row) = cache.get(rid) else { continue };
-                    let Some(emb_blob) = emb_map.get(rid.as_str()) else { continue };
+                    let Some(emb_blob) = emb_map.get(rid.as_str()) else {
+                        continue;
+                    };
                     let mem_emb = crate::serde_helpers::deserialize_f32(emb_blob);
                     let sim_score =
                         crate::consolidate::cosine_similarity(query_embedding, &mem_emb) as f64;
 
-                    if sim_score < VALENCE_MIN_SIM { continue; }
+                    if sim_score < VALENCE_MIN_SIM {
+                        continue;
+                    }
 
                     let elapsed = ts - row.last_access;
                     let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
                     let age = ts - row.created_at;
                     let recency = scoring::recency_score(age);
                     let composite = scoring::adaptive_composite_score(
-                        sim_score, decay, recency, row.importance, row.valence, query_sentiment, &learned_weights,
+                        sim_score,
+                        decay,
+                        recency,
+                        row.importance,
+                        row.valence,
+                        query_sentiment,
+                        &learned_weights,
                     );
                     // Additive valence boost: helps valence-matched memories compete
                     // when cosine similarity is low. Scaled by |valence| * importance
@@ -919,9 +1059,15 @@ impl YantrikDB {
                     let valence_additive = 0.20 * row.valence.abs() * row.importance;
                     let mut why = scoring::build_why(sim_score, recency, decay, row.valence);
                     why.push("valence_match".to_string());
-                    let contributions =
-                        scoring::adaptive_contributions(sim_score, decay, recency, row.importance, &learned_weights);
-                    let valence_multiplier = scoring::query_valence_boost(row.valence, query_sentiment);
+                    let contributions = scoring::adaptive_contributions(
+                        sim_score,
+                        decay,
+                        recency,
+                        row.importance,
+                        &learned_weights,
+                    );
+                    let valence_multiplier =
+                        scoring::query_valence_boost(row.valence, query_sentiment);
 
                     scored.push(RecallResult {
                         rid: rid.clone(),
@@ -972,14 +1118,13 @@ impl YantrikDB {
                         .filter(|s| !s.is_empty() && s.len() > 1)
                         .filter(|s| {
                             const STOP: &[&str] = &[
-                                "a","an","the","is","are","am","was","were","be","been",
-                                "what","who","how","when","where","which","why",
-                                "do","did","does","have","has","had",
-                                "i","me","my","mine","we","our","you","your",
-                                "to","of","in","on","at","by","for","with","from",
-                                "about","tell","and","or","but","not","no",
-                                "it","its","that","this","there","s",
-                                "she","her","he","his","they","them",
+                                "a", "an", "the", "is", "are", "am", "was", "were", "be", "been",
+                                "what", "who", "how", "when", "where", "which", "why", "do", "did",
+                                "does", "have", "has", "had", "i", "me", "my", "mine", "we", "our",
+                                "you", "your", "to", "of", "in", "on", "at", "by", "for", "with",
+                                "from", "about", "tell", "and", "or", "but", "not", "no", "it",
+                                "its", "that", "this", "there", "s", "she", "her", "he", "his",
+                                "they", "them",
                             ];
                             !STOP.contains(&s.to_lowercase().as_str())
                         })
@@ -1015,7 +1160,11 @@ impl YantrikDB {
                                  {} \
                                  ORDER BY m.importance DESC \
                                  LIMIT {}",
-                                if namespace.is_some() { "AND m.namespace = ?3" } else { "" },
+                                if namespace.is_some() {
+                                    "AND m.namespace = ?3"
+                                } else {
+                                    ""
+                                },
                                 COLD_MAX_CANDIDATES,
                             )
                         } else {
@@ -1028,7 +1177,11 @@ impl YantrikDB {
                                  {} \
                                  ORDER BY m.importance DESC \
                                  LIMIT {}",
-                                if namespace.is_some() { "AND m.namespace = ?2" } else { "" },
+                                if namespace.is_some() {
+                                    "AND m.namespace = ?2"
+                                } else {
+                                    ""
+                                },
                                 COLD_MAX_CANDIDATES,
                             )
                         };
@@ -1037,28 +1190,28 @@ impl YantrikDB {
                             let conn = self.read_conn();
                             let mut stmt = conn.prepare_cached(&cold_sql).ok();
                             if let Some(ref mut stmt) = stmt {
-                                let result: std::result::Result<Vec<String>, _> = if let Some(mt) = memory_type {
+                                let result: std::result::Result<Vec<String>, _> = if let Some(mt) =
+                                    memory_type
+                                {
                                     if let Some(ns) = namespace {
-                                        stmt.query_map(
-                                            params![cold_fts, mt, ns],
-                                            |row| row.get::<_, String>(0),
-                                        ).map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                        stmt.query_map(params![cold_fts, mt, ns], |row| {
+                                            row.get::<_, String>(0)
+                                        })
+                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                     } else {
-                                        stmt.query_map(
-                                            params![cold_fts, mt],
-                                            |row| row.get::<_, String>(0),
-                                        ).map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                        stmt.query_map(params![cold_fts, mt], |row| {
+                                            row.get::<_, String>(0)
+                                        })
+                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                     }
                                 } else if let Some(ns) = namespace {
-                                    stmt.query_map(
-                                        params![cold_fts, ns],
-                                        |row| row.get::<_, String>(0),
-                                    ).map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                    stmt.query_map(params![cold_fts, ns], |row| {
+                                        row.get::<_, String>(0)
+                                    })
+                                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                 } else {
-                                    stmt.query_map(
-                                        params![cold_fts],
-                                        |row| row.get::<_, String>(0),
-                                    ).map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                    stmt.query_map(params![cold_fts], |row| row.get::<_, String>(0))
+                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                 };
                                 result.unwrap_or_default()
                             } else {
@@ -1069,7 +1222,8 @@ impl YantrikDB {
                         // Score cold candidates — filter to new RIDs only
                         let existing_rids: std::collections::HashSet<String> =
                             scored.iter().map(|r| r.rid.clone()).collect();
-                        let new_cold: Vec<String> = cold_rids.into_iter()
+                        let new_cold: Vec<String> = cold_rids
+                            .into_iter()
                             .filter(|r| !existing_rids.contains(r))
                             .collect();
 
@@ -1080,29 +1234,47 @@ impl YantrikDB {
 
                             for rid in &new_cold {
                                 let Some(row) = cache.get(rid) else { continue };
-                                let Some(emb_blob) = emb_map.get(rid.as_str()) else { continue };
+                                let Some(emb_blob) = emb_map.get(rid.as_str()) else {
+                                    continue;
+                                };
                                 let mem_emb = crate::serde_helpers::deserialize_f32(emb_blob);
                                 let sim_score = crate::consolidate::cosine_similarity(
-                                    query_embedding, &mem_emb,
+                                    query_embedding,
+                                    &mem_emb,
                                 ) as f64;
 
-                                if sim_score < COLD_MIN_SIM { continue; }
+                                if sim_score < COLD_MIN_SIM {
+                                    continue;
+                                }
 
                                 let elapsed = ts - row.last_access;
-                                let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
+                                let decay =
+                                    scoring::decay_score(row.importance, row.half_life, elapsed);
                                 let age = ts - row.created_at;
                                 let recency = scoring::recency_score(age);
                                 let composite = scoring::adaptive_composite_score(
-                                    sim_score, decay, recency, row.importance, row.valence, query_sentiment, &learned_weights,
+                                    sim_score,
+                                    decay,
+                                    recency,
+                                    row.importance,
+                                    row.valence,
+                                    query_sentiment,
+                                    &learned_weights,
                                 );
                                 // Cold memory bonus: these haven't been surfaced before
                                 let cold_boost = 0.15 * row.importance;
-                                let mut why = scoring::build_why(sim_score, recency, decay, row.valence);
+                                let mut why =
+                                    scoring::build_why(sim_score, recency, decay, row.valence);
                                 why.push("cold_memory".to_string());
                                 let contributions = scoring::adaptive_contributions(
-                                    sim_score, decay, recency, row.importance, &learned_weights,
+                                    sim_score,
+                                    decay,
+                                    recency,
+                                    row.importance,
+                                    &learned_weights,
                                 );
-                                let valence_multiplier = scoring::query_valence_boost(row.valence, query_sentiment);
+                                let valence_multiplier =
+                                    scoring::query_valence_boost(row.valence, query_sentiment);
 
                                 scored.push(RecallResult {
                                     rid: rid.clone(),
@@ -1147,7 +1319,11 @@ impl YantrikDB {
                 vec![]
             };
 
-            let (mut base_boost, mut seed_entities, entity_idfs): (f64, Vec<String>, std::collections::HashMap<String, f64>) = if !query_entities.is_empty() {
+            let (mut base_boost, mut seed_entities, entity_idfs): (
+                f64,
+                Vec<String>,
+                std::collections::HashMap<String, f64>,
+            ) = if !query_entities.is_empty() {
                 let has_person = query_entities.iter().any(|(_, etype, _)| etype == "person");
                 let factor = if has_person {
                     0.20
@@ -1168,9 +1344,16 @@ impl YantrikDB {
             } else if query_text.is_none() {
                 // Embedding-only search (no query text): seed from top results
                 let mut seed_sorted = scored.clone();
-                seed_sorted.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                seed_sorted.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
                 let seed_count = 3.min(seed_sorted.len());
-                let seed_rids: Vec<&str> = seed_sorted[..seed_count].iter().map(|r| r.rid.as_str()).collect();
+                let seed_rids: Vec<&str> = seed_sorted[..seed_count]
+                    .iter()
+                    .map(|r| r.rid.as_str())
+                    .collect();
                 let seeds = gi.entities_for_memories(&seed_rids);
                 (0.05, seeds, std::collections::HashMap::new())
             } else {
@@ -1186,15 +1369,23 @@ impl YantrikDB {
             // actually connected to the subject (e.g., Priya → Arjun, Meera,
             // Appa, Amma for "family"; Priya → Deepa, Neha for "team").
             const GROUP_KEYWORDS: &[&str] = &[
-                "team", "group", "colleagues", "coworkers", "friends", "family",
-                "staff", "members", "people",
+                "team",
+                "group",
+                "colleagues",
+                "coworkers",
+                "friends",
+                "family",
+                "staff",
+                "members",
+                "people",
             ];
             if let Some(qt) = query_text {
                 let qt_lower = qt.to_lowercase();
                 if GROUP_KEYWORDS.iter().any(|kw| qt_lower.contains(kw)) {
                     if !seed_entities.is_empty() {
                         // BFS from query entities to find connected person entities
-                        let query_seeds: Vec<&str> = seed_entities.iter().map(|s| s.as_str()).collect();
+                        let query_seeds: Vec<&str> =
+                            seed_entities.iter().map(|s| s.as_str()).collect();
                         let nearby = gi.expand_bfs(&query_seeds, 2, 50);
                         for (name, hops, _) in &nearby {
                             if *hops > 0
@@ -1239,13 +1430,20 @@ impl YantrikDB {
                 for result in &mut scored {
                     let prox = gi.graph_proximity(&result.rid, &expanded_map);
                     if prox > 0.0 {
-                        let mem_entities: Vec<String> = gi.entities_for_memory(&result.rid).into_iter().map(|s| s.to_string()).collect();
+                        let mem_entities: Vec<String> = gi
+                            .entities_for_memory(&result.rid)
+                            .into_iter()
+                            .map(|s| s.to_string())
+                            .collect();
 
                         let mut best_idf = 1.0f64;
                         let mut connecting_entity = String::new();
                         for entity in &mem_entities {
                             if expanded_map.contains_key(entity) {
-                                let idf = entity_idfs.get(&entity.to_lowercase()).copied().unwrap_or(1.0);
+                                let idf = entity_idfs
+                                    .get(&entity.to_lowercase())
+                                    .copied()
+                                    .unwrap_or(1.0);
                                 if connecting_entity.is_empty() || idf > best_idf {
                                     best_idf = idf;
                                     connecting_entity = entity.clone();
@@ -1255,8 +1453,15 @@ impl YantrikDB {
 
                         // Consolidation penalty: use consolidation_status as proxy
                         let cache = self.scoring_cache.read();
-                        let consolidation_factor = cache.get(&result.rid)
-                            .map(|r| if r.consolidation_status == "consolidated" { 0.5 } else { 1.0 })
+                        let consolidation_factor = cache
+                            .get(&result.rid)
+                            .map(|r| {
+                                if r.consolidation_status == "consolidated" {
+                                    0.5
+                                } else {
+                                    1.0
+                                }
+                            })
                             .unwrap_or(1.0);
                         drop(cache);
 
@@ -1265,17 +1470,21 @@ impl YantrikDB {
                         result.scores.graph_proximity = prox;
                         result.score += boost;
                         if !connecting_entity.is_empty() {
-                            result.why_retrieved.push(format!("graph-connected via {connecting_entity}"));
+                            result
+                                .why_retrieved
+                                .push(format!("graph-connected via {connecting_entity}"));
                         }
                     }
                 }
 
                 // (b) Graph-only candidates: score from cache + batch embedding fetch
                 let max_graph_only = ((MAX_GRAPH_FRACTION * top_k as f64).ceil() as usize).max(1);
-                let all_entity_names: Vec<&str> = expanded.iter().map(|(n, _, _)| n.as_str()).collect();
+                let all_entity_names: Vec<&str> =
+                    expanded.iter().map(|(n, _, _)| n.as_str()).collect();
                 let graph_rids = gi.memories_for_entities(&all_entity_names);
 
-                let existing_rids: std::collections::HashSet<&str> = scored.iter().map(|r| r.rid.as_str()).collect();
+                let existing_rids: std::collections::HashSet<&str> =
+                    scored.iter().map(|r| r.rid.as_str()).collect();
                 let new_rids: Vec<String> = graph_rids
                     .into_iter()
                     .filter(|r| !existing_rids.contains(r.as_str()))
@@ -1287,31 +1496,46 @@ impl YantrikDB {
                 let preselect_pool = max_graph_only * 5; // fetch more, let full scoring pick best
                 let filtered_rids: Vec<String> = {
                     let cache = self.scoring_cache.read();
-                    let mut candidates: Vec<(String, f64)> = new_rids.into_iter()
+                    let mut candidates: Vec<(String, f64)> = new_rids
+                        .into_iter()
                         .filter_map(|rid| {
                             let row = cache.get(&rid)?;
                             let status_ok = if include_consolidated {
-                                row.consolidation_status == "active" || row.consolidation_status == "consolidated"
+                                row.consolidation_status == "active"
+                                    || row.consolidation_status == "consolidated"
                             } else {
                                 row.consolidation_status == "active"
                             };
-                            if !status_ok { return None; }
+                            if !status_ok {
+                                return None;
+                            }
                             if let Some(mt) = memory_type {
-                                if row.memory_type != mt { return None; }
+                                if row.memory_type != mt {
+                                    return None;
+                                }
                             }
                             if let Some((start, end)) = time_window {
-                                if row.created_at < start || row.created_at > end { return None; }
+                                if row.created_at < start || row.created_at > end {
+                                    return None;
+                                }
                             }
                             if let Some(ns) = namespace {
-                                if row.namespace != ns { return None; }
+                                if row.namespace != ns {
+                                    return None;
+                                }
                             }
                             let prox = gi.graph_proximity(&rid, &expanded_map);
                             let rank = row.importance * (0.3 + 0.7 * prox);
                             Some((rid, rank))
                         })
                         .collect();
-                    candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                    candidates.into_iter().take(preselect_pool).map(|(rid, _)| rid).collect()
+                    candidates
+                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    candidates
+                        .into_iter()
+                        .take(preselect_pool)
+                        .map(|(rid, _)| rid)
+                        .collect()
                 };
 
                 if !filtered_rids.is_empty() {
@@ -1322,10 +1546,14 @@ impl YantrikDB {
                     let cache = self.scoring_cache.read();
                     for rid in &filtered_rids {
                         let Some(row) = cache.get(rid) else { continue };
-                        let Some(emb_blob_row) = embeddings.get(rid) else { continue };
+                        let Some(emb_blob_row) = embeddings.get(rid) else {
+                            continue;
+                        };
 
                         let mem_embedding = crate::serde_helpers::deserialize_f32(emb_blob_row);
-                        let sim_score = crate::consolidate::cosine_similarity(query_embedding, &mem_embedding) as f64;
+                        let sim_score =
+                            crate::consolidate::cosine_similarity(query_embedding, &mem_embedding)
+                                as f64;
 
                         let elapsed = ts - row.last_access;
                         let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
@@ -1334,13 +1562,32 @@ impl YantrikDB {
 
                         let prox = gi.graph_proximity(rid, &expanded_map);
                         let composite = scoring::adaptive_graph_composite_score(
-                            sim_score, decay, recency, row.importance, row.valence, prox, query_sentiment, &learned_weights,
+                            sim_score,
+                            decay,
+                            recency,
+                            row.importance,
+                            row.valence,
+                            prox,
+                            query_sentiment,
+                            &learned_weights,
                         );
-                        let contributions = scoring::adaptive_graph_contributions(sim_score, decay, recency, row.importance, prox, &learned_weights);
-                        let valence_multiplier = scoring::query_valence_boost(row.valence, query_sentiment);
+                        let contributions = scoring::adaptive_graph_contributions(
+                            sim_score,
+                            decay,
+                            recency,
+                            row.importance,
+                            prox,
+                            &learned_weights,
+                        );
+                        let valence_multiplier =
+                            scoring::query_valence_boost(row.valence, query_sentiment);
 
                         let mut why = scoring::build_why(sim_score, recency, decay, row.valence);
-                        let mem_entities: Vec<String> = gi.entities_for_memory(rid).into_iter().map(|s| s.to_string()).collect();
+                        let mem_entities: Vec<String> = gi
+                            .entities_for_memory(rid)
+                            .into_iter()
+                            .map(|s| s.to_string())
+                            .collect();
                         for entity in &mem_entities {
                             if expanded_map.contains_key(entity) {
                                 why.push(format!("graph-connected via {entity}"));
@@ -1390,7 +1637,11 @@ impl YantrikDB {
         // step 4 where keyword_reserved items are exempt from MMR diversity
         // penalty, guaranteeing they survive into the final results.
         {
-            scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            scored.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
 
             let cutoff_idx = top_k.min(scored.len()).saturating_sub(1);
             let cutoff_score = scored.get(cutoff_idx).map(|r| r.score).unwrap_or(0.0);
@@ -1398,7 +1649,9 @@ impl YantrikDB {
             const KEYWORD_RESERVE_SLOTS: usize = 3;
             const KEYWORD_RESERVE_MIN_SIM: f64 = 0.25;
             // Find keyword-matched candidates ranked below cutoff, sorted by similarity
-            let mut kw_below: Vec<(usize, f64)> = scored.iter().enumerate()
+            let mut kw_below: Vec<(usize, f64)> = scored
+                .iter()
+                .enumerate()
                 .filter(|(_, r)| {
                     r.why_retrieved.iter().any(|w| w == "keyword_match")
                         && r.scores.similarity >= KEYWORD_RESERVE_MIN_SIM
@@ -1411,7 +1664,9 @@ impl YantrikDB {
             // Boost best keyword candidates just above the cutoff
             for (idx, _) in kw_below.into_iter().take(KEYWORD_RESERVE_SLOTS) {
                 scored[idx].score = cutoff_score + 0.001;
-                scored[idx].why_retrieved.push("keyword_reserved".to_string());
+                scored[idx]
+                    .why_retrieved
+                    .push("keyword_reserved".to_string());
             }
         }
 
@@ -1421,7 +1676,11 @@ impl YantrikDB {
         // "Arjun cooked X today" x50) dominate all K result slots. MMR ensures
         // each result adds new information by penalizing candidates too similar
         // to already-selected results.
-        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let min_pool_for_mmr = (top_k * 3).max(20);
         if scored.len() > top_k && scored.len() >= min_pool_for_mmr {
@@ -1433,10 +1692,14 @@ impl YantrikDB {
             let emb_map = self.fetch_embeddings_by_rids(&pool_rids)?;
 
             // Parse embeddings for each candidate
-            let pool_embeddings: Vec<Option<Vec<f32>>> = scored.iter().map(|r| {
-                emb_map.get(r.rid.as_str())
-                    .map(|blob| crate::serde_helpers::deserialize_f32(blob))
-            }).collect();
+            let pool_embeddings: Vec<Option<Vec<f32>>> = scored
+                .iter()
+                .map(|r| {
+                    emb_map
+                        .get(r.rid.as_str())
+                        .map(|blob| crate::serde_helpers::deserialize_f32(blob))
+                })
+                .collect();
 
             // Greedy MMR: λ * relevance - (1-λ) * max_sim_to_selected
             const LAMBDA: f64 = 0.7;
@@ -1459,19 +1722,26 @@ impl YantrikDB {
                 let mut best_mmr = f64::NEG_INFINITY;
 
                 for (idx, result) in scored.iter().enumerate() {
-                    if selected.contains(&idx) { continue; }
+                    if selected.contains(&idx) {
+                        continue;
+                    }
 
                     let relevance = result.score;
                     let max_sim = if let Some(Some(ref cand_emb)) = pool_embeddings.get(idx) {
-                        selected_embeddings.iter()
-                            .map(|sel_emb| crate::consolidate::cosine_similarity(cand_emb, sel_emb) as f64)
+                        selected_embeddings
+                            .iter()
+                            .map(|sel_emb| {
+                                crate::consolidate::cosine_similarity(cand_emb, sel_emb) as f64
+                            })
                             .fold(0.0f64, f64::max)
                     } else {
                         0.0
                     };
 
                     // Skip near-duplicates entirely
-                    if max_sim > SIM_THRESHOLD { continue; }
+                    if max_sim > SIM_THRESHOLD {
+                        continue;
+                    }
 
                     let mmr = LAMBDA * relevance - (1.0 - LAMBDA) * max_sim;
                     if mmr > best_mmr {
@@ -1623,9 +1893,17 @@ impl YantrikDB {
         source: Option<&str>,
     ) -> Result<RecallResponse> {
         let results = self.recall(
-            query_embedding, top_k, time_window, memory_type,
-            include_consolidated, expand_entities, query_text,
-            skip_reinforce, namespace, domain, source,
+            query_embedding,
+            top_k,
+            time_window,
+            memory_type,
+            include_consolidated,
+            expand_entities,
+            query_text,
+            skip_reinforce,
+            namespace,
+            domain,
+            source,
         )?;
 
         // Determine which retrieval sources were used
@@ -1646,24 +1924,26 @@ impl YantrikDB {
         // Candidate count: approximate from scoring cache filtered by same criteria
         let candidate_count = {
             let cache = self.scoring_cache.read();
-            cache.values().filter(|row| {
-                let status_ok = if include_consolidated {
-                    row.consolidation_status == "active" || row.consolidation_status == "consolidated"
-                } else {
-                    row.consolidation_status == "active"
-                };
-                status_ok
-                    && memory_type.map_or(true, |mt| row.memory_type == mt)
-                    && namespace.map_or(true, |ns| row.namespace == ns)
-                    && domain.map_or(true, |d| row.domain == d)
-                    && source.map_or(true, |s| row.source == s)
-            }).count()
+            cache
+                .values()
+                .filter(|row| {
+                    let status_ok = if include_consolidated {
+                        row.consolidation_status == "active"
+                            || row.consolidation_status == "consolidated"
+                    } else {
+                        row.consolidation_status == "active"
+                    };
+                    status_ok
+                        && memory_type.map_or(true, |mt| row.memory_type == mt)
+                        && namespace.map_or(true, |ns| row.namespace == ns)
+                        && domain.map_or(true, |d| row.domain == d)
+                        && source.map_or(true, |s| row.source == s)
+                })
+                .count()
         };
 
         // Compute retrieval summary
-        let top_similarity = results.first()
-            .map(|r| r.scores.similarity)
-            .unwrap_or(0.0);
+        let top_similarity = results.first().map(|r| r.scores.similarity).unwrap_or(0.0);
         let score_spread = if results.len() >= 2 {
             results.first().unwrap().score - results.last().unwrap().score
         } else {
@@ -1689,18 +1969,23 @@ impl YantrikDB {
         let signal_diversity = sources_used.len() as f64 / 4.0; // max 4 sources
         let signal_density = (results.len() as f64 / top_k as f64).min(1.0);
 
-        let confidence = (0.35 * signal_sim + 0.25 * signal_gap + 0.20 * signal_diversity + 0.20 * signal_density)
+        let confidence = (0.35 * signal_sim
+            + 0.25 * signal_gap
+            + 0.20 * signal_diversity
+            + 0.20 * signal_density)
             .clamp(0.0, 1.0);
 
         // Build certainty reasons explaining the confidence score
         let mut certainty_reasons = Vec::new();
         if signal_sim >= 0.7 {
             certainty_reasons.push(format!(
-                "Strong semantic match (top similarity: {:.0}%)", signal_sim * 100.0
+                "Strong semantic match (top similarity: {:.0}%)",
+                signal_sim * 100.0
             ));
         } else if signal_sim >= 0.4 {
             certainty_reasons.push(format!(
-                "Moderate semantic match (top similarity: {:.0}%)", signal_sim * 100.0
+                "Moderate semantic match (top similarity: {:.0}%)",
+                signal_sim * 100.0
             ));
         } else if signal_sim > 0.0 {
             certainty_reasons.push(format!(
@@ -1712,41 +1997,43 @@ impl YantrikDB {
         }
 
         if results.is_empty() {
-            certainty_reasons.push(format!(
-                "No results from {} candidates", candidate_count
-            ));
+            certainty_reasons.push(format!("No results from {} candidates", candidate_count));
         } else if signal_density < 0.5 {
             certainty_reasons.push(format!(
-                "Sparse results: only {}/{} slots filled", results.len(), top_k
+                "Sparse results: only {}/{} slots filled",
+                results.len(),
+                top_k
             ));
         }
 
         if signal_gap > 0.3 {
-            certainty_reasons.push(
-                "Clear winner: top result stands out from the rest".to_string()
-            );
+            certainty_reasons.push("Clear winner: top result stands out from the rest".to_string());
         } else if signal_gap < 0.05 && results.len() >= 2 {
             certainty_reasons.push(
-                "Ambiguous: multiple results scored similarly — consider refining query".to_string()
+                "Ambiguous: multiple results scored similarly — consider refining query"
+                    .to_string(),
             );
         }
 
         if sources_used.contains(&"graph".to_string()) {
-            certainty_reasons.push(
-                "Graph expansion contributed entity-linked memories".to_string()
-            );
+            certainty_reasons
+                .push("Graph expansion contributed entity-linked memories".to_string());
         }
 
         // Check for stale results (last accessed > 30 days ago)
         let ts = now();
-        let stale_count = results.iter().filter(|r| {
-            // Use created_at as a proxy since we don't have last_access in RecallResult
-            ts - r.created_at > 30.0 * 86400.0
-        }).count();
+        let stale_count = results
+            .iter()
+            .filter(|r| {
+                // Use created_at as a proxy since we don't have last_access in RecallResult
+                ts - r.created_at > 30.0 * 86400.0
+            })
+            .count();
         if stale_count > results.len() / 2 && !results.is_empty() {
             certainty_reasons.push(format!(
                 "Note: {}/{} results are older than 30 days — information may be outdated",
-                stale_count, results.len()
+                stale_count,
+                results.len()
             ));
         }
 
@@ -1755,7 +2042,8 @@ impl YantrikDB {
         if low_certainty_count > 0 {
             certainty_reasons.push(format!(
                 "{}/{} results have low memory certainty (<50%) — treat with caution",
-                low_certainty_count, results.len()
+                low_certainty_count,
+                results.len()
             ));
         }
 
@@ -1803,7 +2091,8 @@ impl YantrikDB {
             let gi = self.graph_index.read();
             let matched = gi.entity_matches_query(&query_tokens);
             // Suggest entities that matched the query but whose memories aren't in results
-            let result_rids: std::collections::HashSet<&str> = results.iter().map(|r| r.rid.as_str()).collect();
+            let result_rids: std::collections::HashSet<&str> =
+                results.iter().map(|r| r.rid.as_str()).collect();
             let mut entity_suggestions = Vec::new();
             for (name, _etype, _score) in &matched {
                 // Find memories linked to this entity
@@ -1827,13 +2116,20 @@ impl YantrikDB {
 
         // Hint 3: Time range — if results span a wide time range
         if results.len() >= 2 {
-            let min_ts = results.iter().map(|r| r.created_at).fold(f64::INFINITY, f64::min);
-            let max_ts = results.iter().map(|r| r.created_at).fold(f64::NEG_INFINITY, f64::max);
+            let min_ts = results
+                .iter()
+                .map(|r| r.created_at)
+                .fold(f64::INFINITY, f64::min);
+            let max_ts = results
+                .iter()
+                .map(|r| r.created_at)
+                .fold(f64::NEG_INFINITY, f64::max);
             let span_days = (max_ts - min_ts) / 86400.0;
             if span_days > 30.0 {
                 hints.push(RefinementHint {
                     hint_type: "time_range".to_string(),
-                    suggestion: "Results span a wide time range. Try specifying a time period.".to_string(),
+                    suggestion: "Results span a wide time range. Try specifying a time period."
+                        .to_string(),
                     related_entities: vec![],
                 });
             }
@@ -1892,7 +2188,8 @@ impl YantrikDB {
                 if !has_procedural {
                     // Check if procedural memories exist at all
                     let cache = self.scoring_cache.read();
-                    let procedural_count = cache.values()
+                    let procedural_count = cache
+                        .values()
                         .filter(|r| r.memory_type == "procedural")
                         .count();
                     if procedural_count > 0 {
@@ -1929,7 +2226,9 @@ impl YantrikDB {
         source: Option<&str>,
     ) -> Result<RecallResponse> {
         // Combine embeddings: 0.4 * original + 0.6 * refinement
-        let dim = original_query_embedding.len().min(refinement_embedding.len());
+        let dim = original_query_embedding
+            .len()
+            .min(refinement_embedding.len());
         let mut combined = vec![0.0f32; dim];
         for i in 0..dim {
             combined[i] = 0.4 * original_query_embedding[i] + 0.6 * refinement_embedding[i];
@@ -1944,14 +2243,17 @@ impl YantrikDB {
 
         // Run recall with combined embedding
         let mut response = self.recall_with_response(
-            &combined, top_k, None, None,
-            false, false, None, true,  // skip_reinforce=true for refinement
+            &combined, top_k, None, None, false, false, None,
+            true, // skip_reinforce=true for refinement
             namespace, domain, source,
         )?;
 
         // Exclude already-seen RIDs
-        let exclude: std::collections::HashSet<&str> = original_rids.iter().map(|s| s.as_str()).collect();
-        response.results.retain(|r| !exclude.contains(r.rid.as_str()));
+        let exclude: std::collections::HashSet<&str> =
+            original_rids.iter().map(|s| s.as_str()).collect();
+        response
+            .results
+            .retain(|r| !exclude.contains(r.rid.as_str()));
 
         Ok(response)
     }
@@ -2018,25 +2320,38 @@ impl YantrikDB {
                 let Some(row) = cache.get(rid) else { continue };
 
                 let status_ok = if include_consolidated {
-                    row.consolidation_status == "active" || row.consolidation_status == "consolidated"
+                    row.consolidation_status == "active"
+                        || row.consolidation_status == "consolidated"
                 } else {
                     row.consolidation_status == "active"
                 };
-                if !status_ok { continue; }
+                if !status_ok {
+                    continue;
+                }
                 if let Some(mt) = memory_type {
-                    if row.memory_type != mt { continue; }
+                    if row.memory_type != mt {
+                        continue;
+                    }
                 }
                 if let Some((start, end)) = time_window {
-                    if row.created_at < start || row.created_at > end { continue; }
+                    if row.created_at < start || row.created_at > end {
+                        continue;
+                    }
                 }
                 if let Some(ns) = namespace {
-                    if row.namespace != ns { continue; }
+                    if row.namespace != ns {
+                        continue;
+                    }
                 }
                 if let Some(d) = domain {
-                    if row.domain != d { continue; }
+                    if row.domain != d {
+                        continue;
+                    }
                 }
                 if let Some(s) = source {
-                    if row.source != s { continue; }
+                    if row.source != s {
+                        continue;
+                    }
                 }
 
                 let sim_score = (1.0 - distance).max(0.0);
@@ -2044,9 +2359,23 @@ impl YantrikDB {
                 let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
                 let age = ts - row.created_at;
                 let recency = scoring::recency_score(age);
-                let composite = scoring::adaptive_composite_score(sim_score, decay, recency, row.importance, row.valence, query_sentiment, &learned_weights);
+                let composite = scoring::adaptive_composite_score(
+                    sim_score,
+                    decay,
+                    recency,
+                    row.importance,
+                    row.valence,
+                    query_sentiment,
+                    &learned_weights,
+                );
                 let why = scoring::build_why(sim_score, recency, decay, row.valence);
-                let contributions = scoring::adaptive_contributions(sim_score, decay, recency, row.importance, &learned_weights);
+                let contributions = scoring::adaptive_contributions(
+                    sim_score,
+                    decay,
+                    recency,
+                    row.importance,
+                    &learned_weights,
+                );
                 let valence_multiplier = scoring::query_valence_boost(row.valence, query_sentiment);
 
                 scored.push(RecallResult {
@@ -2095,9 +2424,8 @@ impl YantrikDB {
                             && row.consolidation_status == "active"
                             && !existing_rids.contains(rid.as_str())
                             && memory_type.map_or(true, |mt| row.memory_type == mt)
-                            && time_window.map_or(true, |(s, e)| {
-                                row.created_at >= s && row.created_at <= e
-                            })
+                            && time_window
+                                .map_or(true, |(s, e)| row.created_at >= s && row.created_at <= e)
                             && namespace.map_or(true, |ns| row.namespace == ns)
                             && domain.map_or(true, |d| row.domain == d)
                             && source.map_or(true, |s| row.source == s)
@@ -2112,23 +2440,39 @@ impl YantrikDB {
                 let cache = self.scoring_cache.read();
                 for rid in &important_rids {
                     let Some(row) = cache.get(rid) else { continue };
-                    let Some(emb_blob) = emb_map.get(rid.as_str()) else { continue };
+                    let Some(emb_blob) = emb_map.get(rid.as_str()) else {
+                        continue;
+                    };
                     let mem_emb = crate::serde_helpers::deserialize_f32(emb_blob);
                     let sim_score =
                         crate::consolidate::cosine_similarity(query_embedding, &mem_emb) as f64;
-                    if sim_score < min_sim_for_fallback { continue; }
+                    if sim_score < min_sim_for_fallback {
+                        continue;
+                    }
 
                     let elapsed = ts - row.last_access;
                     let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
                     let age = ts - row.created_at;
                     let recency = scoring::recency_score(age);
                     let composite = scoring::adaptive_composite_score(
-                        sim_score, decay, recency, row.importance, row.valence, query_sentiment, &learned_weights,
+                        sim_score,
+                        decay,
+                        recency,
+                        row.importance,
+                        row.valence,
+                        query_sentiment,
+                        &learned_weights,
                     );
                     let why = scoring::build_why(sim_score, recency, decay, row.valence);
-                    let contributions =
-                        scoring::adaptive_contributions(sim_score, decay, recency, row.importance, &learned_weights);
-                    let valence_multiplier = scoring::query_valence_boost(row.valence, query_sentiment);
+                    let contributions = scoring::adaptive_contributions(
+                        sim_score,
+                        decay,
+                        recency,
+                        row.importance,
+                        &learned_weights,
+                    );
+                    let valence_multiplier =
+                        scoring::query_valence_boost(row.valence, query_sentiment);
 
                     scored.push(RecallResult {
                         rid: rid.clone(),
@@ -2167,16 +2511,13 @@ impl YantrikDB {
             const FTS_MIN_SIM: f64 = 0.05;
 
             const STOPWORDS: &[&str] = &[
-                "a", "an", "the", "is", "are", "am", "was", "were", "be", "been",
-                "what", "who", "how", "when", "where", "which", "why",
-                "do", "did", "does", "have", "has", "had",
-                "i", "me", "my", "mine", "we", "our", "you", "your",
-                "to", "of", "in", "on", "at", "by", "for", "with", "from",
-                "about", "tell", "and", "or", "but", "not", "no",
-                "it", "its", "that", "this", "there", "s",
-                "she", "her", "he", "his", "they", "them",
-                "most", "each", "any", "all", "every", "been", "being",
-                "up", "out", "so", "if", "than", "very", "just", "also",
+                "a", "an", "the", "is", "are", "am", "was", "were", "be", "been", "what", "who",
+                "how", "when", "where", "which", "why", "do", "did", "does", "have", "has", "had",
+                "i", "me", "my", "mine", "we", "our", "you", "your", "to", "of", "in", "on", "at",
+                "by", "for", "with", "from", "about", "tell", "and", "or", "but", "not", "no",
+                "it", "its", "that", "this", "there", "s", "she", "her", "he", "his", "they",
+                "them", "most", "each", "any", "all", "every", "been", "being", "up", "out", "so",
+                "if", "than", "very", "just", "also",
             ];
 
             {
@@ -2215,15 +2556,26 @@ impl YantrikDB {
                                 .filter(|kw| !person_tokens.contains(&kw.to_lowercase()))
                                 .cloned()
                                 .collect();
-                            if filtered.is_empty() { raw_keywords } else { filtered }
+                            if filtered.is_empty() {
+                                raw_keywords
+                            } else {
+                                filtered
+                            }
                         }
                     };
 
                     // Entity-seeded FTS for group/aggregation queries (mirrors recall())
                     {
                         const GROUP_FTS_WORDS: &[&str] = &[
-                            "team", "group", "colleagues", "coworkers", "friends",
-                            "family", "staff", "members", "people",
+                            "team",
+                            "group",
+                            "colleagues",
+                            "coworkers",
+                            "friends",
+                            "family",
+                            "staff",
+                            "members",
+                            "people",
                         ];
                         let qt_lower = qt.to_lowercase();
                         if GROUP_FTS_WORDS.iter().any(|kw| qt_lower.contains(kw)) {
@@ -2283,8 +2635,7 @@ impl YantrikDB {
                             None
                         };
                         let fts_query_or = keyword_groups.join(" OR ");
-                        let fts_query = fts_query_and.as_deref()
-                            .unwrap_or(&fts_query_or);
+                        let fts_query = fts_query_and.as_deref().unwrap_or(&fts_query_or);
 
                         let total_memories = self.scoring_cache.read().len();
                         let fts_limit = (total_memories / 100).max(30).min(200);
@@ -2310,7 +2661,11 @@ impl YantrikDB {
                                  {} \
                                  ORDER BY rank * (0.5 + m.importance) \
                                  LIMIT {}",
-                                if namespace.is_some() { "AND m.namespace = ?3" } else { "" },
+                                if namespace.is_some() {
+                                    "AND m.namespace = ?3"
+                                } else {
+                                    ""
+                                },
                                 fts_limit,
                             )
                         } else {
@@ -2322,7 +2677,11 @@ impl YantrikDB {
                                  {} \
                                  ORDER BY rank * (0.5 + m.importance) \
                                  LIMIT {}",
-                                if namespace.is_some() { "AND m.namespace = ?2" } else { "" },
+                                if namespace.is_some() {
+                                    "AND m.namespace = ?2"
+                                } else {
+                                    ""
+                                },
                                 fts_limit,
                             )
                         };
@@ -2331,28 +2690,26 @@ impl YantrikDB {
                             let conn = self.read_conn();
                             let mut stmt = conn.prepare_cached(&fts_sql).ok();
                             if let Some(ref mut stmt) = stmt {
-                                let result: std::result::Result<Vec<String>, _> = if let Some(mt) = memory_type {
+                                let result: std::result::Result<Vec<String>, _> = if let Some(mt) =
+                                    memory_type
+                                {
                                     if let Some(ns) = namespace {
-                                        stmt.query_map(
-                                            params![q, mt, ns],
-                                            |row| row.get::<_, String>(0),
-                                        ).map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                        stmt.query_map(params![q, mt, ns], |row| {
+                                            row.get::<_, String>(0)
+                                        })
+                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                     } else {
-                                        stmt.query_map(
-                                            params![q, mt],
-                                            |row| row.get::<_, String>(0),
-                                        ).map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                        stmt.query_map(params![q, mt], |row| {
+                                            row.get::<_, String>(0)
+                                        })
+                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                     }
                                 } else if let Some(ns) = namespace {
-                                    stmt.query_map(
-                                        params![q, ns],
-                                        |row| row.get::<_, String>(0),
-                                    ).map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                    stmt.query_map(params![q, ns], |row| row.get::<_, String>(0))
+                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                 } else {
-                                    stmt.query_map(
-                                        params![q],
-                                        |row| row.get::<_, String>(0),
-                                    ).map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                    stmt.query_map(params![q], |row| row.get::<_, String>(0))
+                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                 };
                                 result.unwrap_or_default()
                             } else {
@@ -2379,7 +2736,11 @@ impl YantrikDB {
                                      {} \
                                      ORDER BY m.importance DESC \
                                      LIMIT 100",
-                                    if namespace.is_some() { "AND m.namespace = ?4" } else { "" },
+                                    if namespace.is_some() {
+                                        "AND m.namespace = ?4"
+                                    } else {
+                                        ""
+                                    },
                                 )
                             } else {
                                 format!(
@@ -2391,7 +2752,11 @@ impl YantrikDB {
                                      {} \
                                      ORDER BY m.importance DESC \
                                      LIMIT 100",
-                                    if namespace.is_some() { "AND m.namespace = ?3" } else { "" },
+                                    if namespace.is_some() {
+                                        "AND m.namespace = ?3"
+                                    } else {
+                                        ""
+                                    },
                                 )
                             };
 
@@ -2399,29 +2764,32 @@ impl YantrikDB {
                                 let conn = self.read_conn();
                                 let mut stmt = conn.prepare_cached(&imp_fts_sql).ok();
                                 if let Some(ref mut stmt) = stmt {
-                                    let result: std::result::Result<Vec<String>, _> = if let Some(mt) = memory_type {
-                                        if let Some(ns) = namespace {
-                                            stmt.query_map(
-                                                params![q, mean_importance, mt, ns],
-                                                |row| row.get::<_, String>(0),
-                                            ).map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                    let result: std::result::Result<Vec<String>, _> =
+                                        if let Some(mt) = memory_type {
+                                            if let Some(ns) = namespace {
+                                                stmt.query_map(
+                                                    params![q, mean_importance, mt, ns],
+                                                    |row| row.get::<_, String>(0),
+                                                )
+                                                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                            } else {
+                                                stmt.query_map(
+                                                    params![q, mean_importance, mt],
+                                                    |row| row.get::<_, String>(0),
+                                                )
+                                                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                            }
+                                        } else if let Some(ns) = namespace {
+                                            stmt.query_map(params![q, mean_importance, ns], |row| {
+                                                row.get::<_, String>(0)
+                                            })
+                                            .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                         } else {
-                                            stmt.query_map(
-                                                params![q, mean_importance, mt],
-                                                |row| row.get::<_, String>(0),
-                                            ).map(|rows| rows.filter_map(|r| r.ok()).collect())
-                                        }
-                                    } else if let Some(ns) = namespace {
-                                        stmt.query_map(
-                                            params![q, mean_importance, ns],
-                                            |row| row.get::<_, String>(0),
-                                        ).map(|rows| rows.filter_map(|r| r.ok()).collect())
-                                    } else {
-                                        stmt.query_map(
-                                            params![q, mean_importance],
-                                            |row| row.get::<_, String>(0),
-                                        ).map(|rows| rows.filter_map(|r| r.ok()).collect())
-                                    };
+                                            stmt.query_map(params![q, mean_importance], |row| {
+                                                row.get::<_, String>(0)
+                                            })
+                                            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                        };
                                     result.unwrap_or_default()
                                 } else {
                                     vec![]
@@ -2434,9 +2802,8 @@ impl YantrikDB {
                                 let or_rids = run_fts_phase2(&fts_query_or);
                                 let existing: std::collections::HashSet<String> =
                                     imp_rids.iter().cloned().collect();
-                                imp_rids.extend(
-                                    or_rids.into_iter().filter(|r| !existing.contains(r))
-                                );
+                                imp_rids
+                                    .extend(or_rids.into_iter().filter(|r| !existing.contains(r)));
                             }
 
                             let existing_set: std::collections::HashSet<&str> =
@@ -2461,7 +2828,11 @@ impl YantrikDB {
                                      {} \
                                      ORDER BY m.importance DESC \
                                      LIMIT 10",
-                                    if namespace.is_some() { "AND m.namespace = ?3" } else { "" },
+                                    if namespace.is_some() {
+                                        "AND m.namespace = ?3"
+                                    } else {
+                                        ""
+                                    },
                                 )
                             } else {
                                 format!(
@@ -2473,7 +2844,11 @@ impl YantrikDB {
                                      {} \
                                      ORDER BY m.importance DESC \
                                      LIMIT 10",
-                                    if namespace.is_some() { "AND m.namespace = ?2" } else { "" },
+                                    if namespace.is_some() {
+                                        "AND m.namespace = ?2"
+                                    } else {
+                                        ""
+                                    },
                                 )
                             };
 
@@ -2485,29 +2860,34 @@ impl YantrikDB {
                                     let conn = self.read_conn();
                                     let mut stmt = conn.prepare_cached(&anchor_fts_sql).ok();
                                     if let Some(ref mut stmt) = stmt {
-                                        let result: std::result::Result<Vec<String>, _> = if let Some(mt) = memory_type {
-                                            if let Some(ns) = namespace {
-                                                stmt.query_map(
-                                                    params![group, mt, ns],
-                                                    |row| row.get::<_, String>(0),
-                                                ).map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                        let result: std::result::Result<Vec<String>, _> =
+                                            if let Some(mt) = memory_type {
+                                                if let Some(ns) = namespace {
+                                                    stmt.query_map(params![group, mt, ns], |row| {
+                                                        row.get::<_, String>(0)
+                                                    })
+                                                    .map(|rows| {
+                                                        rows.filter_map(|r| r.ok()).collect()
+                                                    })
+                                                } else {
+                                                    stmt.query_map(params![group, mt], |row| {
+                                                        row.get::<_, String>(0)
+                                                    })
+                                                    .map(|rows| {
+                                                        rows.filter_map(|r| r.ok()).collect()
+                                                    })
+                                                }
+                                            } else if let Some(ns) = namespace {
+                                                stmt.query_map(params![group, ns], |row| {
+                                                    row.get::<_, String>(0)
+                                                })
+                                                .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                             } else {
-                                                stmt.query_map(
-                                                    params![group, mt],
-                                                    |row| row.get::<_, String>(0),
-                                                ).map(|rows| rows.filter_map(|r| r.ok()).collect())
-                                            }
-                                        } else if let Some(ns) = namespace {
-                                            stmt.query_map(
-                                                params![group, ns],
-                                                |row| row.get::<_, String>(0),
-                                            ).map(|rows| rows.filter_map(|r| r.ok()).collect())
-                                        } else {
-                                            stmt.query_map(
-                                                params![group],
-                                                |row| row.get::<_, String>(0),
-                                            ).map(|rows| rows.filter_map(|r| r.ok()).collect())
-                                        };
+                                                stmt.query_map(params![group], |row| {
+                                                    row.get::<_, String>(0)
+                                                })
+                                                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                            };
                                         result.unwrap_or_default()
                                     } else {
                                         vec![]
@@ -2530,7 +2910,8 @@ impl YantrikDB {
                                     && !result.why_retrieved.iter().any(|w| w == "keyword_match")
                                 {
                                     let sim = result.scores.similarity;
-                                    let boost = learned_weights.keyword_boost * (1.0 - sim).max(0.2);
+                                    let boost =
+                                        learned_weights.keyword_boost * (1.0 - sim).max(0.2);
                                     result.score += boost;
                                     result.why_retrieved.push("keyword_match".to_string());
                                 }
@@ -2539,50 +2920,76 @@ impl YantrikDB {
 
                         let existing_rids: std::collections::HashSet<String> =
                             scored.iter().map(|r| r.rid.clone()).collect();
-                        let new_fts_rids: Vec<String> = fts_rids.into_iter()
+                        let new_fts_rids: Vec<String> = fts_rids
+                            .into_iter()
                             .filter(|r| !existing_rids.contains(r))
                             .collect();
 
                         if !new_fts_rids.is_empty() {
-                            let rid_refs: Vec<&str> = new_fts_rids.iter().map(|r| r.as_str()).collect();
+                            let rid_refs: Vec<&str> =
+                                new_fts_rids.iter().map(|r| r.as_str()).collect();
                             let emb_map = self.fetch_embeddings_by_rids(&rid_refs)?;
 
                             let cache = self.scoring_cache.read();
                             for rid in &new_fts_rids {
                                 let Some(row) = cache.get(rid) else { continue };
                                 let status_ok = if include_consolidated {
-                                    row.consolidation_status == "active" || row.consolidation_status == "consolidated"
+                                    row.consolidation_status == "active"
+                                        || row.consolidation_status == "consolidated"
                                 } else {
                                     row.consolidation_status == "active"
                                 };
-                                if !status_ok { continue; }
+                                if !status_ok {
+                                    continue;
+                                }
                                 if let Some((start, end)) = time_window {
-                                    if row.created_at < start || row.created_at > end { continue; }
+                                    if row.created_at < start || row.created_at > end {
+                                        continue;
+                                    }
                                 }
 
-                                let Some(emb_blob) = emb_map.get(rid.as_str()) else { continue };
+                                let Some(emb_blob) = emb_map.get(rid.as_str()) else {
+                                    continue;
+                                };
                                 let mem_emb = crate::serde_helpers::deserialize_f32(emb_blob);
                                 let sim_score = crate::consolidate::cosine_similarity(
-                                    query_embedding, &mem_emb,
+                                    query_embedding,
+                                    &mem_emb,
                                 ) as f64;
 
-                                if sim_score < FTS_MIN_SIM { continue; }
+                                if sim_score < FTS_MIN_SIM {
+                                    continue;
+                                }
 
                                 let elapsed = ts - row.last_access;
-                                let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
+                                let decay =
+                                    scoring::decay_score(row.importance, row.half_life, elapsed);
                                 let age = ts - row.created_at;
                                 let recency = scoring::recency_score(age);
                                 let composite = scoring::adaptive_composite_score(
-                                    sim_score, decay, recency, row.importance, row.valence, query_sentiment, &learned_weights,
+                                    sim_score,
+                                    decay,
+                                    recency,
+                                    row.importance,
+                                    row.valence,
+                                    query_sentiment,
+                                    &learned_weights,
                                 );
-                                let kw_boost = learned_weights.keyword_boost * (1.0 - sim_score).max(0.2);
-                                let mut why = scoring::build_why(sim_score, recency, decay, row.valence);
+                                let kw_boost =
+                                    learned_weights.keyword_boost * (1.0 - sim_score).max(0.2);
+                                let mut why =
+                                    scoring::build_why(sim_score, recency, decay, row.valence);
                                 why.push("keyword_match".to_string());
                                 why.push("fts_sourced".to_string());
                                 let contributions = scoring::adaptive_contributions(
-                                    sim_score, decay, recency, row.importance, &learned_weights,
+                                    sim_score,
+                                    decay,
+                                    recency,
+                                    row.importance,
+                                    &learned_weights,
                                 );
-                                let valence_multiplier = scoring::query_valence_boost(row.valence, query_sentiment);
+                                let valence_multiplier =
+                                    scoring::query_valence_boost(row.valence, query_sentiment);
 
                                 scored.push(RecallResult {
                                     rid: rid.clone(),
@@ -2639,9 +3046,8 @@ impl YantrikDB {
                                 || (query_sentiment < 0.0 && row.valence < -0.2))
                             && row.importance >= 0.5
                             && memory_type.map_or(true, |mt| row.memory_type == mt)
-                            && time_window.map_or(true, |(s, e)| {
-                                row.created_at >= s && row.created_at <= e
-                            })
+                            && time_window
+                                .map_or(true, |(s, e)| row.created_at >= s && row.created_at <= e)
                             && namespace.map_or(true, |ns| row.namespace == ns)
                     })
                     .map(|(rid, row)| {
@@ -2649,8 +3055,13 @@ impl YantrikDB {
                         (rid.clone(), rank)
                     })
                     .collect();
-                candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                candidates.into_iter().take(VALENCE_SCAN_MAX).map(|(rid, _)| rid).collect()
+                candidates
+                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                candidates
+                    .into_iter()
+                    .take(VALENCE_SCAN_MAX)
+                    .map(|(rid, _)| rid)
+                    .collect()
             };
 
             if !valence_rids.is_empty() {
@@ -2659,26 +3070,42 @@ impl YantrikDB {
                 let cache = self.scoring_cache.read();
                 for rid in &valence_rids {
                     let Some(row) = cache.get(rid) else { continue };
-                    let Some(emb_blob) = emb_map.get(rid.as_str()) else { continue };
+                    let Some(emb_blob) = emb_map.get(rid.as_str()) else {
+                        continue;
+                    };
                     let mem_emb = crate::serde_helpers::deserialize_f32(emb_blob);
                     let sim_score =
                         crate::consolidate::cosine_similarity(query_embedding, &mem_emb) as f64;
 
-                    if sim_score < VALENCE_MIN_SIM { continue; }
+                    if sim_score < VALENCE_MIN_SIM {
+                        continue;
+                    }
 
                     let elapsed = ts - row.last_access;
                     let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
                     let age = ts - row.created_at;
                     let recency = scoring::recency_score(age);
                     let composite = scoring::adaptive_composite_score(
-                        sim_score, decay, recency, row.importance, row.valence, query_sentiment, &learned_weights,
+                        sim_score,
+                        decay,
+                        recency,
+                        row.importance,
+                        row.valence,
+                        query_sentiment,
+                        &learned_weights,
                     );
                     let valence_additive = 0.20 * row.valence.abs() * row.importance;
                     let mut why = scoring::build_why(sim_score, recency, decay, row.valence);
                     why.push("valence_match".to_string());
-                    let contributions =
-                        scoring::adaptive_contributions(sim_score, decay, recency, row.importance, &learned_weights);
-                    let valence_multiplier = scoring::query_valence_boost(row.valence, query_sentiment);
+                    let contributions = scoring::adaptive_contributions(
+                        sim_score,
+                        decay,
+                        recency,
+                        row.importance,
+                        &learned_weights,
+                    );
+                    let valence_multiplier =
+                        scoring::query_valence_boost(row.valence, query_sentiment);
 
                     scored.push(RecallResult {
                         rid: rid.clone(),
@@ -2723,14 +3150,13 @@ impl YantrikDB {
                         .filter(|s| !s.is_empty() && s.len() > 1)
                         .filter(|s| {
                             const STOP: &[&str] = &[
-                                "a","an","the","is","are","am","was","were","be","been",
-                                "what","who","how","when","where","which","why",
-                                "do","did","does","have","has","had",
-                                "i","me","my","mine","we","our","you","your",
-                                "to","of","in","on","at","by","for","with","from",
-                                "about","tell","and","or","but","not","no",
-                                "it","its","that","this","there","s",
-                                "she","her","he","his","they","them",
+                                "a", "an", "the", "is", "are", "am", "was", "were", "be", "been",
+                                "what", "who", "how", "when", "where", "which", "why", "do", "did",
+                                "does", "have", "has", "had", "i", "me", "my", "mine", "we", "our",
+                                "you", "your", "to", "of", "in", "on", "at", "by", "for", "with",
+                                "from", "about", "tell", "and", "or", "but", "not", "no", "it",
+                                "its", "that", "this", "there", "s", "she", "her", "he", "his",
+                                "they", "them",
                             ];
                             !STOP.contains(&s.to_lowercase().as_str())
                         })
@@ -2764,7 +3190,11 @@ impl YantrikDB {
                                  {} \
                                  ORDER BY m.importance DESC \
                                  LIMIT {}",
-                                if namespace.is_some() { "AND m.namespace = ?3" } else { "" },
+                                if namespace.is_some() {
+                                    "AND m.namespace = ?3"
+                                } else {
+                                    ""
+                                },
                                 COLD_MAX_CANDIDATES,
                             )
                         } else {
@@ -2777,7 +3207,11 @@ impl YantrikDB {
                                  {} \
                                  ORDER BY m.importance DESC \
                                  LIMIT {}",
-                                if namespace.is_some() { "AND m.namespace = ?2" } else { "" },
+                                if namespace.is_some() {
+                                    "AND m.namespace = ?2"
+                                } else {
+                                    ""
+                                },
                                 COLD_MAX_CANDIDATES,
                             )
                         };
@@ -2786,28 +3220,28 @@ impl YantrikDB {
                             let conn = self.read_conn();
                             let mut stmt = conn.prepare_cached(&cold_sql).ok();
                             if let Some(ref mut stmt) = stmt {
-                                let result: std::result::Result<Vec<String>, _> = if let Some(mt) = memory_type {
+                                let result: std::result::Result<Vec<String>, _> = if let Some(mt) =
+                                    memory_type
+                                {
                                     if let Some(ns) = namespace {
-                                        stmt.query_map(
-                                            params![cold_fts, mt, ns],
-                                            |row| row.get::<_, String>(0),
-                                        ).map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                        stmt.query_map(params![cold_fts, mt, ns], |row| {
+                                            row.get::<_, String>(0)
+                                        })
+                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                     } else {
-                                        stmt.query_map(
-                                            params![cold_fts, mt],
-                                            |row| row.get::<_, String>(0),
-                                        ).map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                        stmt.query_map(params![cold_fts, mt], |row| {
+                                            row.get::<_, String>(0)
+                                        })
+                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                     }
                                 } else if let Some(ns) = namespace {
-                                    stmt.query_map(
-                                        params![cold_fts, ns],
-                                        |row| row.get::<_, String>(0),
-                                    ).map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                    stmt.query_map(params![cold_fts, ns], |row| {
+                                        row.get::<_, String>(0)
+                                    })
+                                    .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                 } else {
-                                    stmt.query_map(
-                                        params![cold_fts],
-                                        |row| row.get::<_, String>(0),
-                                    ).map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                    stmt.query_map(params![cold_fts], |row| row.get::<_, String>(0))
+                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                 };
                                 result.unwrap_or_default()
                             } else {
@@ -2817,7 +3251,8 @@ impl YantrikDB {
 
                         let existing_rids: std::collections::HashSet<String> =
                             scored.iter().map(|r| r.rid.clone()).collect();
-                        let new_cold: Vec<String> = cold_rids.into_iter()
+                        let new_cold: Vec<String> = cold_rids
+                            .into_iter()
                             .filter(|r| !existing_rids.contains(r))
                             .collect();
 
@@ -2828,28 +3263,46 @@ impl YantrikDB {
 
                             for rid in &new_cold {
                                 let Some(row) = cache.get(rid) else { continue };
-                                let Some(emb_blob) = emb_map.get(rid.as_str()) else { continue };
+                                let Some(emb_blob) = emb_map.get(rid.as_str()) else {
+                                    continue;
+                                };
                                 let mem_emb = crate::serde_helpers::deserialize_f32(emb_blob);
                                 let sim_score = crate::consolidate::cosine_similarity(
-                                    query_embedding, &mem_emb,
+                                    query_embedding,
+                                    &mem_emb,
                                 ) as f64;
 
-                                if sim_score < COLD_MIN_SIM { continue; }
+                                if sim_score < COLD_MIN_SIM {
+                                    continue;
+                                }
 
                                 let elapsed = ts - row.last_access;
-                                let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
+                                let decay =
+                                    scoring::decay_score(row.importance, row.half_life, elapsed);
                                 let age = ts - row.created_at;
                                 let recency = scoring::recency_score(age);
                                 let composite = scoring::adaptive_composite_score(
-                                    sim_score, decay, recency, row.importance, row.valence, query_sentiment, &learned_weights,
+                                    sim_score,
+                                    decay,
+                                    recency,
+                                    row.importance,
+                                    row.valence,
+                                    query_sentiment,
+                                    &learned_weights,
                                 );
                                 let cold_boost = 0.15 * row.importance;
-                                let mut why = scoring::build_why(sim_score, recency, decay, row.valence);
+                                let mut why =
+                                    scoring::build_why(sim_score, recency, decay, row.valence);
                                 why.push("cold_memory".to_string());
                                 let contributions = scoring::adaptive_contributions(
-                                    sim_score, decay, recency, row.importance, &learned_weights,
+                                    sim_score,
+                                    decay,
+                                    recency,
+                                    row.importance,
+                                    &learned_weights,
                                 );
-                                let valence_multiplier = scoring::query_valence_boost(row.valence, query_sentiment);
+                                let valence_multiplier =
+                                    scoring::query_valence_boost(row.valence, query_sentiment);
 
                                 scored.push(RecallResult {
                                     rid: rid.clone(),
@@ -2895,9 +3348,19 @@ impl YantrikDB {
                 vec![]
             };
 
-            let (mut base_boost, mut seed_entities, entity_idfs): (f64, Vec<String>, std::collections::HashMap<String, f64>) = if !query_entities.is_empty() {
+            let (mut base_boost, mut seed_entities, entity_idfs): (
+                f64,
+                Vec<String>,
+                std::collections::HashMap<String, f64>,
+            ) = if !query_entities.is_empty() {
                 let has_person = query_entities.iter().any(|(_, etype, _)| etype == "person");
-                let factor = if has_person { 0.20 } else if query_entities.len() >= 2 { 0.15 } else { 0.12 };
+                let factor = if has_person {
+                    0.20
+                } else if query_entities.len() >= 2 {
+                    0.15
+                } else {
+                    0.12
+                };
                 let idfs: std::collections::HashMap<String, f64> = query_entities
                     .iter()
                     .map(|(name, _, mc)| {
@@ -2910,9 +3373,16 @@ impl YantrikDB {
             } else if query_text.is_none() {
                 // Embedding-only search (no query text): seed from top results
                 let mut seed_sorted = scored.clone();
-                seed_sorted.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+                seed_sorted.sort_by(|a, b| {
+                    b.score
+                        .partial_cmp(&a.score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
                 let seed_count = 3.min(seed_sorted.len());
-                let seed_rids: Vec<&str> = seed_sorted[..seed_count].iter().map(|r| r.rid.as_str()).collect();
+                let seed_rids: Vec<&str> = seed_sorted[..seed_count]
+                    .iter()
+                    .map(|r| r.rid.as_str())
+                    .collect();
                 let seeds = gi.entities_for_memories(&seed_rids);
                 (0.05, seeds, std::collections::HashMap::new())
             } else {
@@ -2928,15 +3398,23 @@ impl YantrikDB {
             // actually connected to the subject (e.g., Priya → Arjun, Meera,
             // Appa, Amma for "family"; Priya → Deepa, Neha for "team").
             const GROUP_KEYWORDS: &[&str] = &[
-                "team", "group", "colleagues", "coworkers", "friends", "family",
-                "staff", "members", "people",
+                "team",
+                "group",
+                "colleagues",
+                "coworkers",
+                "friends",
+                "family",
+                "staff",
+                "members",
+                "people",
             ];
             if let Some(qt) = query_text {
                 let qt_lower = qt.to_lowercase();
                 if GROUP_KEYWORDS.iter().any(|kw| qt_lower.contains(kw)) {
                     if !seed_entities.is_empty() {
                         // BFS from query entities to find connected person entities
-                        let query_seeds: Vec<&str> = seed_entities.iter().map(|s| s.as_str()).collect();
+                        let query_seeds: Vec<&str> =
+                            seed_entities.iter().map(|s| s.as_str()).collect();
                         let nearby = gi.expand_bfs(&query_seeds, 2, 50);
                         for (name, hops, _) in &nearby {
                             if *hops > 0
@@ -2979,12 +3457,19 @@ impl YantrikDB {
                 for result in &mut scored {
                     let prox = gi.graph_proximity(&result.rid, &expanded_map);
                     if prox > 0.0 {
-                        let mem_entities: Vec<String> = gi.entities_for_memory(&result.rid).into_iter().map(|s| s.to_string()).collect();
+                        let mem_entities: Vec<String> = gi
+                            .entities_for_memory(&result.rid)
+                            .into_iter()
+                            .map(|s| s.to_string())
+                            .collect();
                         let mut best_idf = 1.0f64;
                         let mut connecting_entity = String::new();
                         for entity in &mem_entities {
                             if expanded_map.contains_key(entity) {
-                                let idf = entity_idfs.get(&entity.to_lowercase()).copied().unwrap_or(1.0);
+                                let idf = entity_idfs
+                                    .get(&entity.to_lowercase())
+                                    .copied()
+                                    .unwrap_or(1.0);
                                 if connecting_entity.is_empty() || idf > best_idf {
                                     best_idf = idf;
                                     connecting_entity = entity.clone();
@@ -2993,23 +3478,35 @@ impl YantrikDB {
                         }
                         let consolidation_factor = {
                             let cache = self.scoring_cache.read();
-                            cache.get(&result.rid)
-                                .map(|r| if r.consolidation_status == "consolidated" { 0.5 } else { 1.0 })
+                            cache
+                                .get(&result.rid)
+                                .map(|r| {
+                                    if r.consolidation_status == "consolidated" {
+                                        0.5
+                                    } else {
+                                        1.0
+                                    }
+                                })
                                 .unwrap_or(1.0)
                         };
-                        let boost = (base_boost * prox * best_idf * consolidation_factor).min(MAX_BOOST_PER_MEMORY);
+                        let boost = (base_boost * prox * best_idf * consolidation_factor)
+                            .min(MAX_BOOST_PER_MEMORY);
                         result.scores.graph_proximity = prox;
                         result.score += boost;
                         if !connecting_entity.is_empty() {
-                            result.why_retrieved.push(format!("graph-connected via {connecting_entity}"));
+                            result
+                                .why_retrieved
+                                .push(format!("graph-connected via {connecting_entity}"));
                         }
                     }
                 }
 
                 let max_graph_only = ((MAX_GRAPH_FRACTION * top_k as f64).ceil() as usize).max(1);
-                let all_entity_names: Vec<&str> = expanded.iter().map(|(n, _, _)| n.as_str()).collect();
+                let all_entity_names: Vec<&str> =
+                    expanded.iter().map(|(n, _, _)| n.as_str()).collect();
                 let graph_rids = gi.memories_for_entities(&all_entity_names);
-                let existing_rids: std::collections::HashSet<&str> = scored.iter().map(|r| r.rid.as_str()).collect();
+                let existing_rids: std::collections::HashSet<&str> =
+                    scored.iter().map(|r| r.rid.as_str()).collect();
 
                 let preselect_pool = max_graph_only * 5;
                 let new_rids: Vec<String> = {
@@ -3020,27 +3517,41 @@ impl YantrikDB {
                         .filter_map(|r| {
                             let row = cache.get(r.as_str())?;
                             let status_ok = if include_consolidated {
-                                row.consolidation_status == "active" || row.consolidation_status == "consolidated"
+                                row.consolidation_status == "active"
+                                    || row.consolidation_status == "consolidated"
                             } else {
                                 row.consolidation_status == "active"
                             };
-                            if !status_ok { return None; }
+                            if !status_ok {
+                                return None;
+                            }
                             if let Some(mt) = memory_type {
-                                if row.memory_type != mt { return None; }
+                                if row.memory_type != mt {
+                                    return None;
+                                }
                             }
                             if let Some((start, end)) = time_window {
-                                if row.created_at < start || row.created_at > end { return None; }
+                                if row.created_at < start || row.created_at > end {
+                                    return None;
+                                }
                             }
                             if let Some(ns) = namespace {
-                                if row.namespace != ns { return None; }
+                                if row.namespace != ns {
+                                    return None;
+                                }
                             }
                             let prox = gi.graph_proximity(&r, &expanded_map);
                             let rank = row.importance * (0.3 + 0.7 * prox);
                             Some((r, rank))
                         })
                         .collect();
-                    candidates.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-                    candidates.into_iter().take(preselect_pool).map(|(rid, _)| rid).collect()
+                    candidates
+                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    candidates
+                        .into_iter()
+                        .take(preselect_pool)
+                        .map(|(rid, _)| rid)
+                        .collect()
                 };
                 graph_expansion_count = new_rids.len();
 
@@ -3050,18 +3561,38 @@ impl YantrikDB {
 
                     let cache = self.scoring_cache.read();
                     for rid in &new_rids {
-                        if let (Some(row), Some(emb_blob)) = (cache.get(rid.as_str()), emb_map.get(rid.as_str())) {
+                        if let (Some(row), Some(emb_blob)) =
+                            (cache.get(rid.as_str()), emb_map.get(rid.as_str()))
+                        {
                             let mem_embedding = crate::serde_helpers::deserialize_f32(emb_blob);
-                            let sim_score = crate::consolidate::cosine_similarity(query_embedding, &mem_embedding) as f64;
+                            let sim_score = crate::consolidate::cosine_similarity(
+                                query_embedding,
+                                &mem_embedding,
+                            ) as f64;
                             let elapsed = ts - row.last_access;
-                            let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
+                            let decay =
+                                scoring::decay_score(row.importance, row.half_life, elapsed);
                             let age = ts - row.created_at;
                             let recency = scoring::recency_score(age);
                             let prox = gi.graph_proximity(rid, &expanded_map);
-                            let composite = scoring::adaptive_graph_composite_score(sim_score, decay, recency, row.importance, row.valence, prox, query_sentiment, &learned_weights);
-                            let mut why = scoring::build_why(sim_score, recency, decay, row.valence);
+                            let composite = scoring::adaptive_graph_composite_score(
+                                sim_score,
+                                decay,
+                                recency,
+                                row.importance,
+                                row.valence,
+                                prox,
+                                query_sentiment,
+                                &learned_weights,
+                            );
+                            let mut why =
+                                scoring::build_why(sim_score, recency, decay, row.valence);
 
-                            let mem_entities: Vec<String> = gi.entities_for_memory(rid).into_iter().map(|s| s.to_string()).collect();
+                            let mem_entities: Vec<String> = gi
+                                .entities_for_memory(rid)
+                                .into_iter()
+                                .map(|s| s.to_string())
+                                .collect();
                             for entity in &mem_entities {
                                 if expanded_map.contains_key(entity) {
                                     why.push(format!("graph-connected via {entity}"));
@@ -3069,8 +3600,16 @@ impl YantrikDB {
                                 }
                             }
 
-                            let contributions = scoring::adaptive_graph_contributions(sim_score, decay, recency, row.importance, prox, &learned_weights);
-                            let valence_multiplier = scoring::query_valence_boost(row.valence, query_sentiment);
+                            let contributions = scoring::adaptive_graph_contributions(
+                                sim_score,
+                                decay,
+                                recency,
+                                row.importance,
+                                prox,
+                                &learned_weights,
+                            );
+                            let valence_multiplier =
+                                scoring::query_valence_boost(row.valence, query_sentiment);
 
                             scored.push(RecallResult {
                                 rid: rid.clone(),
@@ -3106,14 +3645,20 @@ impl YantrikDB {
 
         // ── Phase 3.5: Keyword slot reservation (mirrors recall()) ──
         {
-            scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+            scored.sort_by(|a, b| {
+                b.score
+                    .partial_cmp(&a.score)
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
             let cutoff_idx = top_k.min(scored.len()).saturating_sub(1);
             let cutoff_score = scored.get(cutoff_idx).map(|r| r.score).unwrap_or(0.0);
 
             const KEYWORD_RESERVE_SLOTS: usize = 3;
             const KEYWORD_RESERVE_MIN_SIM: f64 = 0.25;
 
-            let mut kw_below: Vec<(usize, f64)> = scored.iter().enumerate()
+            let mut kw_below: Vec<(usize, f64)> = scored
+                .iter()
+                .enumerate()
                 .filter(|(_, r)| {
                     r.why_retrieved.iter().any(|w| w == "keyword_match")
                         && r.scores.similarity >= KEYWORD_RESERVE_MIN_SIM
@@ -3125,13 +3670,19 @@ impl YantrikDB {
 
             for (idx, _) in kw_below.into_iter().take(KEYWORD_RESERVE_SLOTS) {
                 scored[idx].score = cutoff_score + 0.001;
-                scored[idx].why_retrieved.push("keyword_reserved".to_string());
+                scored[idx]
+                    .why_retrieved
+                    .push("keyword_reserved".to_string());
             }
         }
 
         // ── Phase 4: MMR diversity selection ──
         let t_sort = Instant::now();
-        scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
 
         let min_pool_for_mmr = (top_k * 3).max(20);
         if scored.len() > top_k && scored.len() >= min_pool_for_mmr {
@@ -3141,10 +3692,14 @@ impl YantrikDB {
             let pool_rids: Vec<&str> = scored.iter().map(|r| r.rid.as_str()).collect();
             let emb_map = self.fetch_embeddings_by_rids(&pool_rids)?;
 
-            let pool_embeddings: Vec<Option<Vec<f32>>> = scored.iter().map(|r| {
-                emb_map.get(r.rid.as_str())
-                    .map(|blob| crate::serde_helpers::deserialize_f32(blob))
-            }).collect();
+            let pool_embeddings: Vec<Option<Vec<f32>>> = scored
+                .iter()
+                .map(|r| {
+                    emb_map
+                        .get(r.rid.as_str())
+                        .map(|blob| crate::serde_helpers::deserialize_f32(blob))
+                })
+                .collect();
 
             const LAMBDA: f64 = 0.7;
             const SIM_THRESHOLD: f64 = 0.98;
@@ -3164,18 +3719,25 @@ impl YantrikDB {
                 let mut best_mmr = f64::NEG_INFINITY;
 
                 for (idx, result) in scored.iter().enumerate() {
-                    if selected.contains(&idx) { continue; }
+                    if selected.contains(&idx) {
+                        continue;
+                    }
 
                     let relevance = result.score;
                     let max_sim = if let Some(Some(ref cand_emb)) = pool_embeddings.get(idx) {
-                        selected_embeddings.iter()
-                            .map(|sel_emb| crate::consolidate::cosine_similarity(cand_emb, sel_emb) as f64)
+                        selected_embeddings
+                            .iter()
+                            .map(|sel_emb| {
+                                crate::consolidate::cosine_similarity(cand_emb, sel_emb) as f64
+                            })
                             .fold(0.0f64, f64::max)
                     } else {
                         0.0
                     };
 
-                    if max_sim > SIM_THRESHOLD { continue; }
+                    if max_sim > SIM_THRESHOLD {
+                        continue;
+                    }
 
                     let mmr = LAMBDA * relevance - (1.0 - LAMBDA) * max_sim;
                     if mmr > best_mmr {
@@ -3260,9 +3822,8 @@ impl YantrikDB {
             .map(|i| format!("?{}", i + 1))
             .collect::<Vec<_>>()
             .join(",");
-        let sql = format!(
-            "SELECT rid, type, text, metadata FROM memories WHERE rid IN ({placeholders})"
-        );
+        let sql =
+            format!("SELECT rid, type, text, metadata FROM memories WHERE rid IN ({placeholders})");
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         for r in rids {
             param_values.push(Box::new(r.to_string()));
@@ -3288,7 +3849,14 @@ impl YantrikDB {
         for (rid, stored_text, stored_meta) in rows {
             let text = self.decrypt_text(&stored_text)?;
             let metadata = self.decrypt_text(&stored_meta)?;
-            map.insert(rid.clone(), TextMetadataRow { rid, text, metadata });
+            map.insert(
+                rid.clone(),
+                TextMetadataRow {
+                    rid,
+                    text,
+                    metadata,
+                },
+            );
         }
         Ok(map)
     }
@@ -3305,9 +3873,7 @@ impl YantrikDB {
             .map(|i| format!("?{}", i + 1))
             .collect::<Vec<_>>()
             .join(",");
-        let sql = format!(
-            "SELECT rid, embedding FROM memories WHERE rid IN ({placeholders})"
-        );
+        let sql = format!("SELECT rid, embedding FROM memories WHERE rid IN ({placeholders})");
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         for r in rids {
             param_values.push(Box::new(r.to_string()));

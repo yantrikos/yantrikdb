@@ -163,12 +163,24 @@ impl SkillTrigger {
     /// How many trigger conditions are specified (non-empty).
     pub fn specificity(&self) -> u8 {
         let mut s = 0u8;
-        if !self.time_bins.is_empty() { s += 1; }
-        if self.initiating_app_id.is_some() { s += 1; }
-        if self.preceding_transition.is_some() { s += 1; }
-        if !self.day_of_week.is_empty() { s += 1; }
-        if self.min_session_duration_secs.is_some() { s += 1; }
-        if self.preceded_by_idle.is_some() { s += 1; }
+        if !self.time_bins.is_empty() {
+            s += 1;
+        }
+        if self.initiating_app_id.is_some() {
+            s += 1;
+        }
+        if self.preceding_transition.is_some() {
+            s += 1;
+        }
+        if !self.day_of_week.is_empty() {
+            s += 1;
+        }
+        if self.min_session_duration_secs.is_some() {
+            s += 1;
+        }
+        if self.preceded_by_idle.is_some() {
+            s += 1;
+        }
         s
     }
 
@@ -482,8 +494,8 @@ impl Default for SkillConfig {
             promotion_min_observations: 10,
             promotion_min_success_rate: 0.75,
             candidate_ttl_secs: 14.0 * 86400.0,   // 14 days
-            stale_threshold_secs: 30.0 * 86400.0,  // 30 days
-            max_sequence_gap_ms: 30_000,            // 30 seconds
+            stale_threshold_secs: 30.0 * 86400.0, // 30 days
+            max_sequence_gap_ms: 30_000,          // 30 seconds
             auto_deprecate: true,
             auto_deprecate_threshold: 0.15,
             auto_deprecate_min_offers: 5,
@@ -660,7 +672,11 @@ fn discover_app_sequence_skills(
     result: &mut DiscoveryResult,
 ) {
     // Extract app transition chains from recent events
-    let chains = extract_app_chains(buffer, config.max_sequence_gap_ms, config.max_steps_per_skill);
+    let chains = extract_app_chains(
+        buffer,
+        config.max_sequence_gap_ms,
+        config.max_steps_per_skill,
+    );
 
     // Count occurrences of each chain
     let mut chain_counts: HashMap<Vec<u16>, u32> = HashMap::new();
@@ -668,7 +684,10 @@ fn discover_app_sequence_skills(
     for (chain, timestamp) in &chains {
         if chain.len() >= 2 {
             *chain_counts.entry(chain.clone()).or_insert(0) += 1;
-            chain_times.entry(chain.clone()).or_default().push(*timestamp);
+            chain_times
+                .entry(chain.clone())
+                .or_default()
+                .push(*timestamp);
         }
     }
 
@@ -680,7 +699,11 @@ fn discover_app_sequence_skills(
 
         let dedup_key = format!(
             "app_seq:{}",
-            chain.iter().map(|id| id.to_string()).collect::<Vec<_>>().join("→")
+            chain
+                .iter()
+                .map(|id| id.to_string())
+                .collect::<Vec<_>>()
+                .join("→")
         );
 
         if let Some(skill) = registry.find_mut(&dedup_key) {
@@ -688,16 +711,20 @@ fn discover_app_sequence_skills(
             result.reinforced.push(dedup_key);
         } else {
             // Build steps
-            let steps: Vec<SkillStep> = chain.iter().enumerate().map(|(i, &app_id)| {
-                SkillStep {
-                    ordinal: i as u16,
-                    action_kind: "app_open".to_string(),
-                    app_id: Some(app_id),
-                    tool_name: None,
-                    expected_duration_ms: 0, // Unknown from app opens alone
-                    optional: false,
-                }
-            }).collect();
+            let steps: Vec<SkillStep> = chain
+                .iter()
+                .enumerate()
+                .map(|(i, &app_id)| {
+                    SkillStep {
+                        ordinal: i as u16,
+                        action_kind: "app_open".to_string(),
+                        app_id: Some(app_id),
+                        tool_name: None,
+                        expected_duration_ms: 0, // Unknown from app opens alone
+                        optional: false,
+                    }
+                })
+                .collect();
 
             // Infer trigger context from observation timestamps
             let trigger = infer_trigger_from_timestamps(
@@ -707,7 +734,11 @@ fn discover_app_sequence_skills(
 
             let description = format!(
                 "App workflow: {}",
-                chain.iter().map(|id| format!("app#{}", id)).collect::<Vec<_>>().join(" → ")
+                chain
+                    .iter()
+                    .map(|id| format!("app#{}", id))
+                    .collect::<Vec<_>>()
+                    .join(" → ")
             );
 
             let skill = LearnedSkill::new(
@@ -735,14 +766,21 @@ fn discover_tool_chain_skills(
     now: f64,
     result: &mut DiscoveryResult,
 ) {
-    let chains = extract_tool_chains(buffer, config.max_sequence_gap_ms, config.max_steps_per_skill);
+    let chains = extract_tool_chains(
+        buffer,
+        config.max_sequence_gap_ms,
+        config.max_steps_per_skill,
+    );
 
     let mut chain_counts: HashMap<Vec<String>, u32> = HashMap::new();
     let mut chain_times: HashMap<Vec<String>, Vec<f64>> = HashMap::new();
     for (chain, timestamp) in &chains {
         if chain.len() >= 2 {
             *chain_counts.entry(chain.clone()).or_insert(0) += 1;
-            chain_times.entry(chain.clone()).or_default().push(*timestamp);
+            chain_times
+                .entry(chain.clone())
+                .or_default()
+                .push(*timestamp);
         }
     }
 
@@ -757,21 +795,21 @@ fn discover_tool_chain_skills(
             skill.observe(now);
             result.reinforced.push(dedup_key);
         } else {
-            let steps: Vec<SkillStep> = chain.iter().enumerate().map(|(i, tool)| {
-                SkillStep {
+            let steps: Vec<SkillStep> = chain
+                .iter()
+                .enumerate()
+                .map(|(i, tool)| SkillStep {
                     ordinal: i as u16,
                     action_kind: "tool_call".to_string(),
                     app_id: None,
                     tool_name: Some(tool.clone()),
                     expected_duration_ms: 0,
                     optional: false,
-                }
-            }).collect();
+                })
+                .collect();
 
-            let trigger = infer_trigger_from_timestamps(
-                chain_times.get(chain).unwrap_or(&Vec::new()),
-                None,
-            );
+            let trigger =
+                infer_trigger_from_timestamps(chain_times.get(chain).unwrap_or(&Vec::new()), None);
 
             let description = format!("Tool chain: {}", chain.join(" → "));
 
@@ -812,7 +850,10 @@ fn discover_suggestion_pattern_skills(
         match &event.data {
             SystemEventData::SuggestionAccepted { action_kind, .. } => {
                 *accept_counts.entry(action_kind.clone()).or_insert(0) += 1;
-                accept_times.entry(action_kind.clone()).or_default().push(event.timestamp);
+                accept_times
+                    .entry(action_kind.clone())
+                    .or_default()
+                    .push(event.timestamp);
             }
             SystemEventData::SuggestionRejected { action_kind, .. } => {
                 *reject_counts.entry(action_kind.clone()).or_insert(0) += 1;
@@ -987,7 +1028,9 @@ fn extract_app_chains(
         match &event.data {
             SystemEventData::AppOpened { app_id } => {
                 let gap_ms = ((event.timestamp - last_ts) * 1000.0) as u64;
-                if !current_chain.is_empty() && (gap_ms > max_gap_ms || current_chain.len() >= max_steps) {
+                if !current_chain.is_empty()
+                    && (gap_ms > max_gap_ms || current_chain.len() >= max_steps)
+                {
                     // End current chain, start new one
                     if current_chain.len() >= 2 {
                         chains.push((current_chain.clone(), chain_start));
@@ -1003,7 +1046,9 @@ fn extract_app_chains(
                 }
                 last_ts = event.timestamp;
             }
-            SystemEventData::AppSequence { from_app, to_app, .. } => {
+            SystemEventData::AppSequence {
+                from_app, to_app, ..
+            } => {
                 // Use actual timestamp gap between events to detect chain boundaries
                 let inter_event_gap_ms = if last_ts > 0.0 {
                     ((event.timestamp - last_ts) * 1000.0) as u64
@@ -1064,7 +1109,9 @@ fn extract_tool_chains(
         } = &event.data
         {
             let gap_ms = ((event.timestamp - last_ts) * 1000.0) as u64;
-            if !current_chain.is_empty() && (gap_ms > max_gap_ms || current_chain.len() >= max_steps) {
+            if !current_chain.is_empty()
+                && (gap_ms > max_gap_ms || current_chain.len() >= max_steps)
+            {
                 if current_chain.len() >= 2 {
                     chains.push((current_chain.clone(), chain_start));
                 }
@@ -1299,7 +1346,11 @@ pub fn find_matching_skills(
         .collect();
 
     // Sort by relevance descending
-    matches.sort_by(|a, b| b.relevance.partial_cmp(&a.relevance).unwrap_or(std::cmp::Ordering::Equal));
+    matches.sort_by(|a, b| {
+        b.relevance
+            .partial_cmp(&a.relevance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     matches.truncate(max_results);
     matches
 }
@@ -1332,7 +1383,9 @@ pub fn summarize_skills(registry: &SkillRegistry) -> SkillSummary {
     let mut deprecated = 0usize;
 
     for skill in registry.skills.values() {
-        *by_origin.entry(skill.origin.as_str().to_string()).or_insert(0) += 1;
+        *by_origin
+            .entry(skill.origin.as_str().to_string())
+            .or_insert(0) += 1;
         match skill.stage {
             SkillStage::Candidate => candidates += 1,
             SkillStage::Validated => validated += 1,
@@ -1479,19 +1532,31 @@ mod tests {
         for i in 1..30 {
             skill.observe(ts(i as f64));
         }
-        assert!(skill.confidence > 0.5, "Should gain confidence: {}", skill.confidence);
+        assert!(
+            skill.confidence > 0.5,
+            "Should gain confidence: {}",
+            skill.confidence
+        );
 
         // Acceptances boost faster
         for i in 30..40 {
             skill.record_acceptance(ts(i as f64));
         }
-        assert!(skill.confidence > 0.7, "Should be reliable: {}", skill.confidence);
+        assert!(
+            skill.confidence > 0.7,
+            "Should be reliable: {}",
+            skill.confidence
+        );
 
         // Failures reduce confidence
         for i in 40..50 {
             skill.record_failure(ts(i as f64));
         }
-        assert!(skill.confidence < 0.7, "Failures should reduce confidence: {}", skill.confidence);
+        assert!(
+            skill.confidence < 0.7,
+            "Failures should reduce confidence: {}",
+            skill.confidence
+        );
     }
 
     #[test]
@@ -1563,7 +1628,10 @@ mod tests {
     fn test_trigger_universal() {
         let trigger = SkillTrigger::new();
         let score = trigger.match_score(12, 3, None, None, 0.0, false);
-        assert!((score - 1.0).abs() < 0.01, "Universal trigger should always match");
+        assert!(
+            (score - 1.0).abs() < 0.01,
+            "Universal trigger should always match"
+        );
     }
 
     #[test]
@@ -1684,13 +1752,12 @@ mod tests {
 
         let result = discover_skills(&buffer, &mut registry, &config, ts(500.0));
 
-        let tool_skills: Vec<_> = result.new_skills.iter()
+        let tool_skills: Vec<_> = result
+            .new_skills
+            .iter()
             .filter(|k| k.starts_with("tool_chain:"))
             .collect();
-        assert!(
-            !tool_skills.is_empty(),
-            "Should discover tool chain skills"
-        );
+        assert!(!tool_skills.is_empty(), "Should discover tool chain skills");
     }
 
     #[test]
@@ -1740,13 +1807,21 @@ mod tests {
 
         let result = discover_skills(&buffer, &mut registry, &config, ts(500.0));
 
-        let pattern_skills: Vec<_> = result.new_skills.iter()
+        let pattern_skills: Vec<_> = result
+            .new_skills
+            .iter()
             .filter(|k| k.starts_with("suggestion_pattern:"))
             .collect();
-        assert!(!pattern_skills.is_empty(), "Should discover suggestion pattern");
+        assert!(
+            !pattern_skills.is_empty(),
+            "Should discover suggestion pattern"
+        );
 
         let skill = registry.find("suggestion_pattern:remind").unwrap();
-        assert!(skill.confidence > 0.3, "High acceptance should boost initial confidence");
+        assert!(
+            skill.confidence > 0.3,
+            "High acceptance should boost initial confidence"
+        );
     }
 
     #[test]
@@ -1768,7 +1843,9 @@ mod tests {
         let result = discover_skills(&buffer, &mut registry, &config, ts(500.0));
 
         assert!(
-            !result.new_skills.contains(&"suggestion_pattern:nag".to_string()),
+            !result
+                .new_skills
+                .contains(&"suggestion_pattern:nag".to_string()),
             "Low acceptance should not create skill"
         );
     }
@@ -1790,10 +1867,15 @@ mod tests {
 
         let result = discover_skills(&buffer, &mut registry, &config, ts(500.0));
 
-        let notif_skills: Vec<_> = result.new_skills.iter()
+        let notif_skills: Vec<_> = result
+            .new_skills
+            .iter()
             .filter(|k| k.starts_with("notif_response:"))
             .collect();
-        assert!(!notif_skills.is_empty(), "Should discover notification response skill");
+        assert!(
+            !notif_skills.is_empty(),
+            "Should discover notification response skill"
+        );
 
         let skill = registry.find("notif_response:email→archive").unwrap();
         assert_eq!(skill.origin, SkillOrigin::NotificationResponse);
@@ -1952,12 +2034,13 @@ mod tests {
         registry.skills.insert("test:evening".to_string(), skill2);
 
         // Query in the morning with app 14 open
-        let matches = find_matching_skills(
-            &registry, 9, 2, Some(14), None, 3600.0, false, 0.3, 10,
-        );
+        let matches = find_matching_skills(&registry, 9, 2, Some(14), None, 3600.0, false, 0.3, 10);
 
         assert!(!matches.is_empty());
-        assert_eq!(matches[0].dedup_key, "test:morning", "Morning skill should rank highest");
+        assert_eq!(
+            matches[0].dedup_key, "test:morning",
+            "Morning skill should rank highest"
+        );
         assert!(matches[0].relevance > 0.5);
     }
 
@@ -1977,9 +2060,7 @@ mod tests {
         );
         registry.skills.insert("test:candidate".to_string(), skill);
 
-        let matches = find_matching_skills(
-            &registry, 12, 3, None, None, 0.0, false, 0.0, 10,
-        );
+        let matches = find_matching_skills(&registry, 12, 3, None, None, 0.0, false, 0.0, 10);
 
         assert!(matches.is_empty(), "Candidates should not be matched");
     }
@@ -1993,15 +2074,39 @@ mod tests {
         registry.total_promoted = 1;
         registry.total_deprecated = 1;
 
-        let mut s1 = LearnedSkill::new("A".to_string(), SkillOrigin::AppSequence, "a".to_string(), vec![], SkillTrigger::new(), 1, ts(0.0));
+        let mut s1 = LearnedSkill::new(
+            "A".to_string(),
+            SkillOrigin::AppSequence,
+            "a".to_string(),
+            vec![],
+            SkillTrigger::new(),
+            1,
+            ts(0.0),
+        );
         s1.stage = SkillStage::Reliable;
         registry.skills.insert("a".to_string(), s1);
 
-        let mut s2 = LearnedSkill::new("B".to_string(), SkillOrigin::ToolChain, "b".to_string(), vec![], SkillTrigger::new(), 1, ts(0.0));
+        let mut s2 = LearnedSkill::new(
+            "B".to_string(),
+            SkillOrigin::ToolChain,
+            "b".to_string(),
+            vec![],
+            SkillTrigger::new(),
+            1,
+            ts(0.0),
+        );
         s2.stage = SkillStage::Candidate;
         registry.skills.insert("b".to_string(), s2);
 
-        let mut s3 = LearnedSkill::new("C".to_string(), SkillOrigin::AppSequence, "c".to_string(), vec![], SkillTrigger::new(), 1, ts(0.0));
+        let mut s3 = LearnedSkill::new(
+            "C".to_string(),
+            SkillOrigin::AppSequence,
+            "c".to_string(),
+            vec![],
+            SkillTrigger::new(),
+            1,
+            ts(0.0),
+        );
         s3.deprecated = true;
         s3.stage = SkillStage::Deprecated;
         registry.skills.insert("c".to_string(), s3);
@@ -2022,12 +2127,28 @@ mod tests {
     fn test_registry_queries() {
         let mut registry = SkillRegistry::new();
 
-        let mut s1 = LearnedSkill::new("A".to_string(), SkillOrigin::AppSequence, "a".to_string(), vec![], SkillTrigger::new(), 5, ts(0.0));
+        let mut s1 = LearnedSkill::new(
+            "A".to_string(),
+            SkillOrigin::AppSequence,
+            "a".to_string(),
+            vec![],
+            SkillTrigger::new(),
+            5,
+            ts(0.0),
+        );
         s1.confidence = 0.8;
         s1.stage = SkillStage::Reliable;
         registry.skills.insert("a".to_string(), s1);
 
-        let s2 = LearnedSkill::new("B".to_string(), SkillOrigin::ToolChain, "b".to_string(), vec![], SkillTrigger::new(), 1, ts(0.0));
+        let s2 = LearnedSkill::new(
+            "B".to_string(),
+            SkillOrigin::ToolChain,
+            "b".to_string(),
+            vec![],
+            SkillTrigger::new(),
+            1,
+            ts(0.0),
+        );
         registry.skills.insert("b".to_string(), s2);
 
         assert_eq!(registry.active_count(), 2);
@@ -2055,13 +2176,19 @@ mod tests {
     #[test]
     fn test_trigger_inference() {
         // Events clustered around 9am (hour 9 = second 32400)
-        let timestamps: Vec<f64> = (0..10).map(|i| {
-            86400.0 * (100 + i) as f64 + 32400.0 // 9:00 each day
-        }).collect();
+        let timestamps: Vec<f64> = (0..10)
+            .map(|i| {
+                86400.0 * (100 + i) as f64 + 32400.0 // 9:00 each day
+            })
+            .collect();
 
         let trigger = infer_trigger_from_timestamps(&timestamps, Some(14));
 
-        assert!(trigger.time_bins.contains(&9), "Should detect 9am peak: {:?}", trigger.time_bins);
+        assert!(
+            trigger.time_bins.contains(&9),
+            "Should detect 9am peak: {:?}",
+            trigger.time_bins
+        );
         assert_eq!(trigger.initiating_app_id, Some(14));
     }
 
@@ -2100,7 +2227,10 @@ mod tests {
         let config = SkillConfig::default();
 
         let result = discover_skills(&buffer, &mut registry, &config, ts(500.0));
-        assert!(result.new_skills.is_empty(), "Below min_observations should not create skill");
+        assert!(
+            result.new_skills.is_empty(),
+            "Below min_observations should not create skill"
+        );
     }
 
     #[test]

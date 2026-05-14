@@ -77,11 +77,13 @@ impl YantrikDB {
     /// Get the current feedback count.
     pub fn feedback_count(&self) -> Result<i64> {
         let conn = self.conn.lock();
-        let count: i64 = conn.query_row(
-            "SELECT COALESCE(feedback_count, 0) FROM learned_weights WHERE id = 1",
-            [],
-            |row| row.get(0),
-        ).unwrap_or(0);
+        let count: i64 = conn
+            .query_row(
+                "SELECT COALESCE(feedback_count, 0) FROM learned_weights WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
         Ok(count)
     }
 }

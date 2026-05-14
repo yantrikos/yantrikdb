@@ -295,7 +295,10 @@ pub fn simulate_counterfactual(
         Intervention::SetAction { replacement, .. } => (replacement.clone(), 1.0),
         Intervention::RemoveEvent { node } => (node.clone(), -1.0), // negated = removal
         Intervention::ForceActivation { node, strength } => (node.clone(), *strength),
-        Intervention::ChangeTime { node, time_delta_secs } => {
+        Intervention::ChangeTime {
+            node,
+            time_delta_secs,
+        } => {
             // Time changes attenuate effect proportionally to delay magnitude.
             let attenuation = 1.0 / (1.0 + time_delta_secs.abs() / 3600.0);
             (node.clone(), attenuation)
@@ -361,8 +364,7 @@ pub fn simulate_counterfactual(
             let prop_confidence = confidence * edge.confidence * config.confidence_decay;
 
             // Prune if signal too weak.
-            if prop_confidence < config.min_confidence
-                || prop_strength.abs() < config.min_strength
+            if prop_confidence < config.min_confidence || prop_strength.abs() < config.min_strength
             {
                 if step == 0 {
                     truncated = true;
@@ -446,17 +448,11 @@ pub fn compare_outcomes(
     observation: &Observation,
     counterfactual: &StateSnapshot,
 ) -> OutcomeDifference {
-    let actual_map: HashMap<CausalNode, f64> = observation
-        .actual_outcomes
-        .iter()
-        .cloned()
-        .collect();
+    let actual_map: HashMap<CausalNode, f64> =
+        observation.actual_outcomes.iter().cloned().collect();
 
-    let cf_map: HashMap<CausalNode, f64> = counterfactual
-        .node_activations
-        .iter()
-        .cloned()
-        .collect();
+    let cf_map: HashMap<CausalNode, f64> =
+        counterfactual.node_activations.iter().cloned().collect();
 
     // Find all nodes that appear in either actual or counterfactual.
     let mut all_nodes: HashSet<CausalNode> = HashSet::new();
@@ -503,11 +499,8 @@ pub fn compare_outcomes(
     // Estimate counterfactual utility from activations.
     let cf_utility = estimate_utility_from_activations(&counterfactual.node_activations);
 
-    let narrative_impact = generate_comparison_narrative(
-        observation.actual_utility,
-        cf_utility,
-        &changed_nodes,
-    );
+    let narrative_impact =
+        generate_comparison_narrative(observation.actual_utility, cf_utility, &changed_nodes);
 
     OutcomeDifference {
         actual_utility: observation.actual_utility,
@@ -562,16 +555,10 @@ fn generate_comparison_narrative(
         .collect();
 
     if !improved.is_empty() {
-        parts.push(format!(
-            "{} factor(s) would have improved.",
-            improved.len()
-        ));
+        parts.push(format!("{} factor(s) would have improved.", improved.len()));
     }
     if !worsened.is_empty() {
-        parts.push(format!(
-            "{} factor(s) would have worsened.",
-            worsened.len()
-        ));
+        parts.push(format!("{} factor(s) would have worsened.", worsened.len()));
     }
 
     parts.join(" ")
@@ -591,7 +578,10 @@ fn explain_simulation(
 
     // Describe the intervention.
     match intervention {
-        Intervention::SetAction { original, replacement } => {
+        Intervention::SetAction {
+            original,
+            replacement,
+        } => {
             parts.push(format!(
                 "If {:?} were replaced with {:?}:",
                 original, replacement
@@ -606,7 +596,10 @@ fn explain_simulation(
                 node, strength
             ));
         }
-        Intervention::ChangeTime { node, time_delta_secs } => {
+        Intervention::ChangeTime {
+            node,
+            time_delta_secs,
+        } => {
             let direction = if *time_delta_secs > 0.0 {
                 "later"
             } else {
@@ -684,9 +677,7 @@ pub fn why_not(
         if edge.stage == CausalStage::Refuted {
             continue;
         }
-        if !config.include_hypothesized
-            && !stage_meets_minimum(edge.stage, config.min_edge_stage)
-        {
+        if !config.include_hypothesized && !stage_meets_minimum(edge.stage, config.min_edge_stage) {
             continue;
         }
 
@@ -801,9 +792,7 @@ fn detect_regret_pattern(
     }
 
     // Find the most common tag in regretted decisions.
-    let (top_tag, count) = tag_counts
-        .iter()
-        .max_by_key(|(_, c)| **c)?;
+    let (top_tag, count) = tag_counts.iter().max_by_key(|(_, c)| **c)?;
 
     let rate = *count as f64 / total_decisions as f64;
     if rate > 0.3 {
@@ -934,11 +923,8 @@ pub fn strengthen_causal_model(
     actual_observation: &Observation,
     store: &mut CausalStore,
 ) -> usize {
-    let actual_map: HashMap<CausalNode, f64> = actual_observation
-        .actual_outcomes
-        .iter()
-        .cloned()
-        .collect();
+    let actual_map: HashMap<CausalNode, f64> =
+        actual_observation.actual_outcomes.iter().cloned().collect();
 
     let mut updates = 0;
 
@@ -1011,10 +997,8 @@ pub fn compare_alternatives(
     let result_a = simulate_counterfactual(&query_a, store, config);
     let result_b = simulate_counterfactual(&query_b, store, config);
 
-    let utility_a =
-        estimate_utility_from_activations(&result_a.final_state.node_activations);
-    let utility_b =
-        estimate_utility_from_activations(&result_b.final_state.node_activations);
+    let utility_a = estimate_utility_from_activations(&result_a.final_state.node_activations);
+    let utility_b = estimate_utility_from_activations(&result_b.final_state.node_activations);
 
     utility_a - utility_b
 }
@@ -1026,7 +1010,10 @@ pub fn compare_alternatives(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::causal::{CausalEdge, CausalEvidence, CausalNode, CausalStage, CausalStore, CausalTrace, DiscoveryMethod};
+    use crate::causal::{
+        CausalEdge, CausalEvidence, CausalNode, CausalStage, CausalStore, CausalTrace,
+        DiscoveryMethod,
+    };
     use crate::observer::EventKind;
     use crate::state::NodeId;
     use crate::world_model::ActionKind;
@@ -1196,9 +1183,7 @@ mod tests {
 
         // "What if B never happened?" → should sever B's downstream effects.
         let query = CounterfactualQuery {
-            intervention: Intervention::RemoveEvent {
-                node: signal("B"),
-            },
+            intervention: Intervention::RemoveEvent { node: signal("B") },
             observation: None,
             horizon_steps: 3,
             query_type: CounterfactualType::WhatIf,
@@ -1274,10 +1259,7 @@ mod tests {
     fn test_outcome_comparison() {
         let observation = Observation {
             actual_action: signal("action_A"),
-            actual_outcomes: vec![
-                (signal("goal_1"), 0.3),
-                (signal("goal_2"), 0.8),
-            ],
+            actual_outcomes: vec![(signal("goal_1"), 0.3), (signal("goal_2"), 0.8)],
             actual_utility: 0.5,
             timestamp_ms: 1000000,
         };
@@ -1367,12 +1349,7 @@ mod tests {
 
         let actual = vec![signal("Z")]; // did neither X nor Y
 
-        let results = why_not(
-            &signal("desired"),
-            &actual,
-            &store,
-            &default_config(),
-        );
+        let results = why_not(&signal("desired"), &actual, &store, &default_config());
 
         // Should find X and Y as potential interventions.
         assert_eq!(results.len(), 2);
@@ -1399,12 +1376,7 @@ mod tests {
         // Already tried X.
         let actual = vec![signal("X")];
 
-        let results = why_not(
-            &signal("desired"),
-            &actual,
-            &store,
-            &default_config(),
-        );
+        let results = why_not(&signal("desired"), &actual, &store, &default_config());
 
         // Should only find Y (X was already tried).
         assert_eq!(results.len(), 1);
@@ -1649,12 +1621,7 @@ mod tests {
         ));
 
         let config = default_config();
-        let diff = compare_alternatives(
-            &signal("good"),
-            &signal("bad"),
-            &store,
-            &config,
-        );
+        let diff = compare_alternatives(&signal("good"), &signal("bad"), &store, &config);
 
         // "good" should be better than "bad".
         assert!(diff > 0.0);

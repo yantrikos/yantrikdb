@@ -63,9 +63,18 @@ pub fn check_decay_triggers(
             let mut context = HashMap::new();
             context.insert("text".to_string(), serde_json::json!(text));
             context.insert("type".to_string(), serde_json::json!(mem_type));
-            context.insert("original_importance".to_string(), serde_json::json!(importance));
-            context.insert("current_score".to_string(), serde_json::json!(current_score));
-            context.insert("days_since_access".to_string(), serde_json::json!(days_since));
+            context.insert(
+                "original_importance".to_string(),
+                serde_json::json!(importance),
+            );
+            context.insert(
+                "current_score".to_string(),
+                serde_json::json!(current_score),
+            );
+            context.insert(
+                "days_since_access".to_string(),
+                serde_json::json!(days_since),
+            );
             context.insert("valence".to_string(), serde_json::json!(valence));
 
             triggers.push(Trigger {
@@ -163,7 +172,10 @@ pub fn check_conflict_escalation(db: &YantrikDB) -> Result<Vec<Trigger>> {
 
         let mut context = HashMap::new();
         context.insert("open_count".to_string(), serde_json::json!(open_count));
-        context.insert("critical_aging".to_string(), serde_json::json!(critical_aging));
+        context.insert(
+            "critical_aging".to_string(),
+            serde_json::json!(critical_aging),
+        );
 
         triggers.push(Trigger {
             trigger_type: "conflict_escalation".to_string(),
@@ -253,7 +265,8 @@ pub fn check_redundancy(db: &YantrikDB, _sim_threshold: f64) -> Result<Vec<Trigg
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         // Decrypt text and embeddings if encrypted
-        raw_rows.into_iter()
+        raw_rows
+            .into_iter()
             .map(|(rid, stored_text, stored_emb)| {
                 let text = db.decrypt_text(&stored_text)?;
                 let emb = db.decrypt_embedding(&stored_emb)?;
@@ -292,12 +305,17 @@ pub fn check_redundancy(db: &YantrikDB, _sim_threshold: f64) -> Result<Vec<Trigg
                     (ea, eb)
                 };
 
-                let shared: Vec<&String> = entities_a.iter().filter(|e| entities_b.contains(e)).collect();
+                let shared: Vec<&String> = entities_a
+                    .iter()
+                    .filter(|e| entities_b.contains(e))
+                    .collect();
                 let is_potential_conflict = !shared.is_empty() && sim < 0.98;
 
                 if is_potential_conflict {
-                    context.insert("shared_entities".to_string(),
-                        serde_json::json!(shared.iter().map(|s| s.as_str()).collect::<Vec<_>>()));
+                    context.insert(
+                        "shared_entities".to_string(),
+                        serde_json::json!(shared.iter().map(|s| s.as_str()).collect::<Vec<_>>()),
+                    );
                     triggers.push(Trigger {
                         trigger_type: "potential_conflict".to_string(),
                         reason: format!(
@@ -324,10 +342,15 @@ pub fn check_redundancy(db: &YantrikDB, _sim_threshold: f64) -> Result<Vec<Trigg
                     // Substitution category match -> create actual conflict record
                     let reason = format!(
                         "{} substitution: '{}' vs '{}' (similarity={:.0}%)",
-                        cat_name, token_a, token_b, sim * 100.0
+                        cat_name,
+                        token_a,
+                        token_b,
+                        sim * 100.0
                     );
-                    if !crate::conflict::conflict_exists(db, &rows[i].0, &rows[j].0).unwrap_or(true) {
-                        let conflict_type = crate::distributed::conflict::category_to_conflict_type(&cat_name);
+                    if !crate::conflict::conflict_exists(db, &rows[i].0, &rows[j].0).unwrap_or(true)
+                    {
+                        let conflict_type =
+                            crate::distributed::conflict::category_to_conflict_type(&cat_name);
                         let _ = crate::conflict::create_conflict(
                             db,
                             &conflict_type,
@@ -387,10 +410,15 @@ pub fn check_redundancy(db: &YantrikDB, _sim_threshold: f64) -> Result<Vec<Trigg
                 } {
                     let reason = format!(
                         "{} substitution: '{}' vs '{}' (similarity={:.0}%)",
-                        cat_name, token_a, token_b, sim * 100.0
+                        cat_name,
+                        token_a,
+                        token_b,
+                        sim * 100.0
                     );
-                    if !crate::conflict::conflict_exists(db, &rows[i].0, &rows[j].0).unwrap_or(true) {
-                        let conflict_type = crate::distributed::conflict::category_to_conflict_type(&cat_name);
+                    if !crate::conflict::conflict_exists(db, &rows[i].0, &rows[j].0).unwrap_or(true)
+                    {
+                        let conflict_type =
+                            crate::distributed::conflict::category_to_conflict_type(&cat_name);
                         let _ = crate::conflict::create_conflict(
                             db,
                             &conflict_type,
@@ -537,8 +565,15 @@ pub fn check_entity_anomaly(db: &YantrikDB) -> Result<Vec<Trigger>> {
     )?;
 
     let identity_types: &[&str] = &[
-        "birthday", "age", "lives_in", "works_at", "email", "phone",
-        "full_name", "spouse", "hometown",
+        "birthday",
+        "age",
+        "lives_in",
+        "works_at",
+        "email",
+        "phone",
+        "full_name",
+        "spouse",
+        "hometown",
     ];
     let preference_types: &[&str] = &["prefers", "favorite", "likes", "dislikes"];
 
@@ -590,7 +625,12 @@ pub fn check_all_triggers(
     max_triggers: usize,
 ) -> Result<Vec<Trigger>> {
     let mut triggers = Vec::new();
-    triggers.extend(check_decay_triggers(db, importance_threshold, decay_threshold, max_triggers)?);
+    triggers.extend(check_decay_triggers(
+        db,
+        importance_threshold,
+        decay_threshold,
+        max_triggers,
+    )?);
     triggers.extend(check_consolidation_triggers(db, 10)?);
     triggers.extend(check_conflict_escalation(db)?);
     triggers.extend(check_temporal_drift(db)?);
@@ -833,12 +873,18 @@ fn check_substitution_category_pair(
 ) -> Option<(String, String, String)> {
     let words_a: std::collections::HashSet<String> = text_a
         .split_whitespace()
-        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
         .filter(|w| !w.is_empty())
         .collect();
     let words_b: std::collections::HashSet<String> = text_b
         .split_whitespace()
-        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
         .filter(|w| !w.is_empty())
         .collect();
 
@@ -884,7 +930,21 @@ mod tests {
     #[test]
     fn test_no_trigger_for_fresh() {
         let db = YantrikDB::new(":memory:", 8).unwrap();
-        db.record("fresh", "episodic", 0.9, 0.0, 604800.0, &serde_json::json!({}), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+        db.record(
+            "fresh",
+            "episodic",
+            0.9,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
         let triggers = check_decay_triggers(&db, 0.5, 0.1, 5).unwrap();
         assert!(triggers.is_empty());
     }
@@ -892,12 +952,29 @@ mod tests {
     #[test]
     fn test_decay_trigger_fires() {
         let db = YantrikDB::new(":memory:", 8).unwrap();
-        let rid = db.record("important deadline", "episodic", 0.9, 0.0, 100.0, &serde_json::json!({}), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+        let rid = db
+            .record(
+                "important deadline",
+                "episodic",
+                0.9,
+                0.0,
+                100.0,
+                &serde_json::json!({}),
+                &vec_seed(1.0, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
 
-        db.conn().execute(
-            "UPDATE memories SET last_access = ?1 WHERE rid = ?2",
-            rusqlite::params![now() - 10000.0, rid],
-        ).unwrap();
+        db.conn()
+            .execute(
+                "UPDATE memories SET last_access = ?1 WHERE rid = ?2",
+                rusqlite::params![now() - 10000.0, rid],
+            )
+            .unwrap();
 
         let triggers = check_decay_triggers(&db, 0.5, 0.1, 5).unwrap();
         assert!(!triggers.is_empty());
@@ -911,11 +988,19 @@ mod tests {
         for i in 0..15 {
             db.record(
                 &format!("episodic memory {i}"),
-                "episodic", 0.5, 0.0, 604800.0,
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
                 &serde_json::json!({}),
                 &vec_seed(i as f32, 8),
-                "default", 0.8, "general", "user", None,
-            ).unwrap();
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
         }
 
         let triggers = check_consolidation_triggers(&db, 10).unwrap();
@@ -967,14 +1052,31 @@ mod tests {
     #[test]
     fn test_temporal_drift_fires() {
         let db = YantrikDB::new(":memory:", 8).unwrap();
-        let rid = db.record("works at Google", "semantic", 0.8, 0.0, 604800.0, &serde_json::json!({}), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+        let rid = db
+            .record(
+                "works at Google",
+                "semantic",
+                0.8,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &vec_seed(1.0, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
 
         // Backdate to 120 days ago
         let old_ts = now() - 86400.0 * 120.0;
-        db.conn().execute(
-            "UPDATE memories SET created_at = ?1, last_access = ?1 WHERE rid = ?2",
-            params![old_ts, rid],
-        ).unwrap();
+        db.conn()
+            .execute(
+                "UPDATE memories SET created_at = ?1, last_access = ?1 WHERE rid = ?2",
+                params![old_ts, rid],
+            )
+            .unwrap();
 
         let triggers = check_temporal_drift(&db).unwrap();
         assert!(!triggers.is_empty());
@@ -984,7 +1086,21 @@ mod tests {
     #[test]
     fn test_temporal_drift_skips_recent() {
         let db = YantrikDB::new(":memory:", 8).unwrap();
-        db.record("works at Google", "semantic", 0.8, 0.0, 604800.0, &serde_json::json!({}), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+        db.record(
+            "works at Google",
+            "semantic",
+            0.8,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
         let triggers = check_temporal_drift(&db).unwrap();
         assert!(triggers.is_empty());
@@ -995,7 +1111,8 @@ mod tests {
         let db = YantrikDB::new(":memory:", 8).unwrap();
         // Create a hub entity with 6 edges
         for i in 0..6 {
-            db.relate("Alice", &format!("entity_{i}"), &format!("knows_{i}"), 1.0).unwrap();
+            db.relate("Alice", &format!("entity_{i}"), &format!("knows_{i}"), 1.0)
+                .unwrap();
         }
 
         let triggers = check_relationship_insight(&db).unwrap();

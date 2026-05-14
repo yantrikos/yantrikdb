@@ -32,8 +32,7 @@ use serde::{Deserialize, Serialize};
 
 use super::agenda::{AgendaId, AgendaItem, AgendaKind, AgendaStatus};
 use super::receptivity::{
-    ActivityState, ContextSnapshot, NotificationMode, ReceptivityEstimate,
-    ReceptivityModel,
+    ActivityState, ContextSnapshot, NotificationMode, ReceptivityEstimate, ReceptivityModel,
 };
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -581,13 +580,8 @@ pub fn run_surfacing_pipeline(
         // ── Compute net utility ──
         let importance = reason.base_importance();
         let disruption = mode.disruption_cost();
-        let net_utility = compute_net_utility(
-            urgency,
-            importance,
-            receptivity.score,
-            disruption,
-            config,
-        );
+        let net_utility =
+            compute_net_utility(urgency, importance, receptivity.score, disruption, config);
 
         suggestions.push(ProactiveSuggestion {
             agenda_id: item.id,
@@ -698,22 +692,30 @@ impl SurfacingPreferences {
         let negative = matches!(outcome, SurfaceOutcome::Dismissed | SurfaceOutcome::Annoyed);
 
         // Update kind acceptance
-        let kind_entry = self.kind_acceptance
+        let kind_entry = self
+            .kind_acceptance
             .entry(kind.as_str().to_string())
             .or_insert((0, 0));
-        if acted { kind_entry.0 += 1; }
+        if acted {
+            kind_entry.0 += 1;
+        }
         kind_entry.1 += 1;
 
         // Update mode acceptance
-        let mode_entry = self.mode_acceptance
+        let mode_entry = self
+            .mode_acceptance
             .entry(mode.as_str().to_string())
             .or_insert((0, 0));
-        if acted { mode_entry.0 += 1; }
+        if acted {
+            mode_entry.0 += 1;
+        }
         mode_entry.1 += 1;
 
         // Update hourly acceptance
         let h = (hour as usize).min(23);
-        if acted { self.hourly_acceptance[h].accepted += 1; }
+        if acted {
+            self.hourly_acceptance[h].accepted += 1;
+        }
         self.hourly_acceptance[h].total += 1;
 
         // Adjust threshold
@@ -765,11 +767,15 @@ pub fn run_surfacing_with_preferences(
 ) -> SurfacingResult {
     // Adjust config with learned preferences
     let mut adjusted_config = config.clone();
-    adjusted_config.urgency_threshold =
-        preferences.effective_threshold(config.urgency_threshold);
+    adjusted_config.urgency_threshold = preferences.effective_threshold(config.urgency_threshold);
 
     let mut result = run_surfacing_pipeline(
-        items, now, receptivity, rate_limiter, context, &adjusted_config,
+        items,
+        now,
+        receptivity,
+        rate_limiter,
+        context,
+        &adjusted_config,
     );
 
     // Re-score with acceptance rate boost
@@ -799,9 +805,9 @@ pub fn run_surfacing_with_preferences(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::agenda::{Agenda, AgendaConfig, AgendaKind, UrgencyFn};
     use super::super::state::NodeId;
+    use super::*;
 
     fn make_receptivity(score: f64, quiet: bool) -> ReceptivityEstimate {
         ReceptivityEstimate {
@@ -834,30 +840,46 @@ mod tests {
 
         // High urgency deadline
         agenda.add_item_at(
-            NodeId::NIL, AgendaKind::DeadlineApproaching,
+            NodeId::NIL,
+            AgendaKind::DeadlineApproaching,
             UrgencyFn::Constant { value: 0.9 },
-            Some(now + 300.0), "Submit report".to_string(), now - 3600.0, &config,
+            Some(now + 300.0),
+            "Submit report".to_string(),
+            now - 3600.0,
+            &config,
         );
 
         // Medium urgency follow-up
         agenda.add_item_at(
-            NodeId::NIL, AgendaKind::FollowUpNeeded,
+            NodeId::NIL,
+            AgendaKind::FollowUpNeeded,
             UrgencyFn::Constant { value: 0.6 },
-            None, "Follow up with vendor".to_string(), now - 7200.0, &config,
+            None,
+            "Follow up with vendor".to_string(),
+            now - 7200.0,
+            &config,
         );
 
         // Low urgency routine
         agenda.add_item_at(
-            NodeId::NIL, AgendaKind::RoutineWindowOpening,
+            NodeId::NIL,
+            AgendaKind::RoutineWindowOpening,
             UrgencyFn::Constant { value: 0.45 },
-            None, "Check email".to_string(), now - 600.0, &config,
+            None,
+            "Check email".to_string(),
+            now - 600.0,
+            &config,
         );
 
         // Below threshold
         agenda.add_item_at(
-            NodeId::NIL, AgendaKind::StalledIntent,
+            NodeId::NIL,
+            AgendaKind::StalledIntent,
             UrgencyFn::Constant { value: 0.2 },
-            None, "Organize bookmarks".to_string(), now - 86400.0, &config,
+            None,
+            "Organize bookmarks".to_string(),
+            now - 86400.0,
+            &config,
         );
 
         let items = agenda.items.clone();
@@ -873,16 +895,18 @@ mod tests {
         let config = SurfacingConfig::default();
         let now = 1_700_000_000.0;
 
-        let result = run_surfacing_pipeline(
-            &items, now, &receptivity, &rate_limiter, &context, &config,
-        );
+        let result =
+            run_surfacing_pipeline(&items, now, &receptivity, &rate_limiter, &context, &config);
 
         assert_eq!(result.items_evaluated, 4);
         // Should surface at least the high urgency item
         assert!(!result.suggestions.is_empty());
         // Should NOT surface the below-threshold item
         assert!(
-            !result.suggestions.iter().any(|s| s.description == "Organize bookmarks"),
+            !result
+                .suggestions
+                .iter()
+                .any(|s| s.description == "Organize bookmarks"),
             "Below-threshold item should not surface"
         );
     }
@@ -893,36 +917,46 @@ mod tests {
 
         // Critical urgency deadline → Preempt
         let mode = select_surface_mode(
-            0.96, SurfaceReason::DeadlineImminent,
-            ActivityState::Idle, &config,
+            0.96,
+            SurfaceReason::DeadlineImminent,
+            ActivityState::Idle,
+            &config,
         );
         assert_eq!(mode, SurfaceMode::Preempt);
 
         // High urgency → Alert
         let mode = select_surface_mode(
-            0.85, SurfaceReason::UrgencyThreshold,
-            ActivityState::Idle, &config,
+            0.85,
+            SurfaceReason::UrgencyThreshold,
+            ActivityState::Idle,
+            &config,
         );
         assert_eq!(mode, SurfaceMode::Alert);
 
         // Medium urgency → Nudge
         let mode = select_surface_mode(
-            0.55, SurfaceReason::FollowUpDue,
-            ActivityState::Idle, &config,
+            0.55,
+            SurfaceReason::FollowUpDue,
+            ActivityState::Idle,
+            &config,
         );
         assert_eq!(mode, SurfaceMode::Nudge);
 
         // Low urgency but at natural break → Nudge
         let mode = select_surface_mode(
-            0.42, SurfaceReason::RoutineWindowOpening,
-            ActivityState::Idle, &config,
+            0.42,
+            SurfaceReason::RoutineWindowOpening,
+            ActivityState::Idle,
+            &config,
         );
         assert_eq!(mode, SurfaceMode::Nudge);
 
         // Low urgency in focus → Whisper
         let mode = select_surface_mode(
-            0.42, SurfaceReason::RoutineWindowOpening,
-            ActivityState::FocusedWork, &config,
+            0.42,
+            SurfaceReason::RoutineWindowOpening,
+            ActivityState::FocusedWork,
+            &config,
         );
         assert_eq!(mode, SurfaceMode::Whisper);
     }
@@ -936,15 +970,19 @@ mod tests {
         let config = SurfacingConfig::default();
         let now = 1_700_000_000.0;
 
-        let result = run_surfacing_pipeline(
-            &items, now, &receptivity, &rate_limiter, &context, &config,
-        );
+        let result =
+            run_surfacing_pipeline(&items, now, &receptivity, &rate_limiter, &context, &config);
 
         // All non-critical items should be suppressed
-        let quiet_suppressed: Vec<_> = result.suppressed.iter()
+        let quiet_suppressed: Vec<_> = result
+            .suppressed
+            .iter()
             .filter(|s| s.cause == SuppressionCause::QuietHours)
             .collect();
-        assert!(!quiet_suppressed.is_empty(), "Items should be suppressed during quiet hours");
+        assert!(
+            !quiet_suppressed.is_empty(),
+            "Items should be suppressed during quiet hours"
+        );
     }
 
     #[test]
@@ -956,15 +994,16 @@ mod tests {
         let config = SurfacingConfig::default();
         let now = 1_700_000_000.0;
 
-        let result = run_surfacing_pipeline(
-            &items, now, &receptivity, &rate_limiter, &context, &config,
-        );
+        let result =
+            run_surfacing_pipeline(&items, now, &receptivity, &rate_limiter, &context, &config);
 
         assert!(
             result.suggestions.is_empty(),
             "DND should block all suggestions"
         );
-        let mode_blocked: Vec<_> = result.suppressed.iter()
+        let mode_blocked: Vec<_> = result
+            .suppressed
+            .iter()
             .filter(|s| s.cause == SuppressionCause::NotificationModeBlock)
             .collect();
         assert!(!mode_blocked.is_empty());
@@ -986,12 +1025,13 @@ mod tests {
         rate_limiter.record_surface(now - 60.0);
         rate_limiter.record_surface(now - 30.0);
 
-        let result = run_surfacing_pipeline(
-            &items, now, &receptivity, &rate_limiter, &context, &config,
-        );
+        let result =
+            run_surfacing_pipeline(&items, now, &receptivity, &rate_limiter, &context, &config);
 
         // Most items should be rate-limited
-        let rate_limited: Vec<_> = result.suppressed.iter()
+        let rate_limited: Vec<_> = result
+            .suppressed
+            .iter()
             .filter(|s| s.cause == SuppressionCause::RateLimited)
             .collect();
         assert!(!rate_limited.is_empty(), "Should hit rate limit");
@@ -1004,9 +1044,13 @@ mod tests {
         let now = 1_700_000_000.0;
 
         let id = agenda.add_item_at(
-            NodeId::NIL, AgendaKind::FollowUpNeeded,
+            NodeId::NIL,
+            AgendaKind::FollowUpNeeded,
             UrgencyFn::Constant { value: 0.7 },
-            None, "Nagging item".to_string(), now - 3600.0, &config,
+            None,
+            "Nagging item".to_string(),
+            now - 3600.0,
+            &config,
         );
 
         // Dismiss 3 times
@@ -1022,10 +1066,17 @@ mod tests {
         let surf_config = SurfacingConfig::default();
 
         let result = run_surfacing_pipeline(
-            &items, now, &receptivity, &rate_limiter, &context, &surf_config,
+            &items,
+            now,
+            &receptivity,
+            &rate_limiter,
+            &context,
+            &surf_config,
         );
 
-        let anti_nag: Vec<_> = result.suppressed.iter()
+        let anti_nag: Vec<_> = result
+            .suppressed
+            .iter()
             .filter(|s| s.cause == SuppressionCause::AntiNag)
             .collect();
         assert!(!anti_nag.is_empty(), "Should suppress nagging items");
@@ -1040,11 +1091,12 @@ mod tests {
         let config = SurfacingConfig::default();
         let now = 1_700_000_000.0;
 
-        let result = run_surfacing_pipeline(
-            &items, now, &receptivity, &rate_limiter, &context, &config,
-        );
+        let result =
+            run_surfacing_pipeline(&items, now, &receptivity, &rate_limiter, &context, &config);
 
-        let low_recep: Vec<_> = result.suppressed.iter()
+        let low_recep: Vec<_> = result
+            .suppressed
+            .iter()
             .filter(|s| s.cause == SuppressionCause::LowReceptivity)
             .collect();
         assert!(
@@ -1062,7 +1114,12 @@ mod tests {
         // Low urgency + low receptivity = low utility
         let u2 = compute_net_utility(0.3, 0.4, 0.3, 0.25, &config);
 
-        assert!(u1 > u2, "High urgency should have higher net utility: {} vs {}", u1, u2);
+        assert!(
+            u1 > u2,
+            "High urgency should have higher net utility: {} vs {}",
+            u1,
+            u2
+        );
     }
 
     #[test]
@@ -1070,10 +1127,15 @@ mod tests {
         let config = SurfacingConfig::default();
 
         // Same benefit, different disruption costs
-        let u_low = compute_net_utility(0.7, 0.6, 0.7, 0.05, &config);  // Whisper
+        let u_low = compute_net_utility(0.7, 0.6, 0.7, 0.05, &config); // Whisper
         let u_high = compute_net_utility(0.7, 0.6, 0.7, 0.95, &config); // Preempt
 
-        assert!(u_low > u_high, "Higher disruption should lower utility: {} vs {}", u_low, u_high);
+        assert!(
+            u_low > u_high,
+            "Higher disruption should lower utility: {} vs {}",
+            u_low,
+            u_high
+        );
     }
 
     #[test]
@@ -1088,16 +1150,16 @@ mod tests {
         };
         let now = 1_700_000_000.0;
 
-        let result = run_surfacing_pipeline(
-            &items, now, &receptivity, &rate_limiter, &context, &config,
-        );
+        let result =
+            run_surfacing_pipeline(&items, now, &receptivity, &rate_limiter, &context, &config);
 
         // Verify sorted by net utility descending
         for window in result.suggestions.windows(2) {
             assert!(
                 window[0].net_utility >= window[1].net_utility,
                 "Should be sorted by net utility: {} >= {}",
-                window[0].net_utility, window[1].net_utility,
+                window[0].net_utility,
+                window[1].net_utility,
             );
         }
     }
@@ -1111,9 +1173,13 @@ mod tests {
         // Add 10 high-urgency items
         for i in 0..10 {
             agenda.add_item_at(
-                NodeId::NIL, AgendaKind::FollowUpNeeded,
+                NodeId::NIL,
+                AgendaKind::FollowUpNeeded,
                 UrgencyFn::Constant { value: 0.7 },
-                None, format!("Item {}", i), now - 3600.0, &config,
+                None,
+                format!("Item {}", i),
+                now - 3600.0,
+                &config,
             );
         }
 
@@ -1127,7 +1193,12 @@ mod tests {
         };
 
         let result = run_surfacing_pipeline(
-            &items, now, &receptivity, &rate_limiter, &context, &surf_config,
+            &items,
+            now,
+            &receptivity,
+            &rate_limiter,
+            &context,
+            &surf_config,
         );
 
         assert!(
@@ -1160,10 +1231,20 @@ mod tests {
 
         // Simulate: user likes follow-up nudges at 10am, hates routine whispers at 3am
         for _ in 0..20 {
-            prefs.observe(AgendaKind::FollowUpNeeded, SurfaceMode::Nudge, 10, SurfaceOutcome::Acted);
+            prefs.observe(
+                AgendaKind::FollowUpNeeded,
+                SurfaceMode::Nudge,
+                10,
+                SurfaceOutcome::Acted,
+            );
         }
         for _ in 0..10 {
-            prefs.observe(AgendaKind::RoutineWindowOpening, SurfaceMode::Whisper, 3, SurfaceOutcome::Dismissed);
+            prefs.observe(
+                AgendaKind::RoutineWindowOpening,
+                SurfaceMode::Whisper,
+                3,
+                SurfaceOutcome::Dismissed,
+            );
         }
 
         let follow_up_rate = prefs.kind_rate(AgendaKind::FollowUpNeeded);
@@ -1172,19 +1253,26 @@ mod tests {
         assert!(
             follow_up_rate > routine_rate,
             "Follow-up rate ({:.2}) should exceed routine rate ({:.2})",
-            follow_up_rate, routine_rate,
+            follow_up_rate,
+            routine_rate,
         );
 
         assert!(
             prefs.hour_rate(10) > prefs.hour_rate(3),
             "10am rate ({:.2}) should exceed 3am rate ({:.2})",
-            prefs.hour_rate(10), prefs.hour_rate(3),
+            prefs.hour_rate(10),
+            prefs.hour_rate(3),
         );
 
         // Test threshold direction with only dismissals
         let mut dismiss_prefs = SurfacingPreferences::new();
         for _ in 0..10 {
-            dismiss_prefs.observe(AgendaKind::RoutineWindowOpening, SurfaceMode::Whisper, 3, SurfaceOutcome::Dismissed);
+            dismiss_prefs.observe(
+                AgendaKind::RoutineWindowOpening,
+                SurfaceMode::Whisper,
+                3,
+                SurfaceOutcome::Dismissed,
+            );
         }
         assert!(
             dismiss_prefs.threshold_adjustment > 0.0,
@@ -1197,9 +1285,18 @@ mod tests {
     fn test_notification_mode_filtering() {
         assert!(is_mode_allowed(SurfaceMode::Whisper, NotificationMode::All));
         assert!(is_mode_allowed(SurfaceMode::Alert, NotificationMode::All));
-        assert!(is_mode_allowed(SurfaceMode::Alert, NotificationMode::ImportantOnly));
-        assert!(!is_mode_allowed(SurfaceMode::Nudge, NotificationMode::ImportantOnly));
-        assert!(!is_mode_allowed(SurfaceMode::Preempt, NotificationMode::DoNotDisturb));
+        assert!(is_mode_allowed(
+            SurfaceMode::Alert,
+            NotificationMode::ImportantOnly
+        ));
+        assert!(!is_mode_allowed(
+            SurfaceMode::Nudge,
+            NotificationMode::ImportantOnly
+        ));
+        assert!(!is_mode_allowed(
+            SurfaceMode::Preempt,
+            NotificationMode::DoNotDisturb
+        ));
     }
 
     #[test]
@@ -1225,10 +1322,13 @@ mod tests {
 
         // Critical urgency deadline
         agenda.add_item_at(
-            NodeId::NIL, AgendaKind::DeadlineApproaching,
+            NodeId::NIL,
+            AgendaKind::DeadlineApproaching,
             UrgencyFn::Constant { value: 0.96 },
-            Some(now + 60.0), "Critical deadline in 1 min".to_string(),
-            now - 3600.0, &aconfig,
+            Some(now + 60.0),
+            "Critical deadline in 1 min".to_string(),
+            now - 3600.0,
+            &aconfig,
         );
 
         let items = agenda.items.clone();
@@ -1244,13 +1344,15 @@ mod tests {
             ..Default::default()
         };
 
-        let result = run_surfacing_pipeline(
-            &items, now, &receptivity, &rate_limiter, &context, &config,
-        );
+        let result =
+            run_surfacing_pipeline(&items, now, &receptivity, &rate_limiter, &context, &config);
 
         // Critical item should bypass rate limit
         assert!(
-            result.suggestions.iter().any(|s| s.mode == SurfaceMode::Preempt),
+            result
+                .suggestions
+                .iter()
+                .any(|s| s.mode == SurfaceMode::Preempt),
             "Critical deadline should bypass rate limit and surface as preempt"
         );
     }
@@ -1266,7 +1368,13 @@ mod tests {
         let now = 1_700_000_000.0;
 
         let result = run_surfacing_with_preferences(
-            &items, now, &receptivity, &rate_limiter, &context, &config, &prefs,
+            &items,
+            now,
+            &receptivity,
+            &rate_limiter,
+            &context,
+            &config,
+            &prefs,
         );
 
         // Should still work with default preferences

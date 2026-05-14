@@ -37,9 +37,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use super::state::{
-    GoalStatus, NeedCategory, NodeId, Priority, TaskStatus,
-};
+use super::state::{GoalStatus, NeedCategory, NodeId, Priority, TaskStatus};
 
 // ══════════════════════════════════════════════════════════════════════════════
 // § 1  Cognitive Update Types
@@ -70,10 +68,7 @@ pub enum UpdateOp {
         estimated_minutes: Option<u32>,
     },
     /// Create a new entity node.
-    CreateEntity {
-        name: String,
-        entity_type: String,
-    },
+    CreateEntity { name: String, entity_type: String },
     /// Create a new need node.
     CreateNeed {
         description: String,
@@ -99,23 +94,15 @@ pub enum UpdateOp {
         source: String,
     },
     /// Update a task's status.
-    UpdateTaskStatus {
-        new_status: TaskStatus,
-    },
+    UpdateTaskStatus { new_status: TaskStatus },
     /// Update a goal's status.
-    UpdateGoalStatus {
-        new_status: GoalStatus,
-    },
+    UpdateGoalStatus { new_status: GoalStatus },
     /// Update a goal's progress.
-    UpdateGoalProgress {
-        progress: f64,
-    },
+    UpdateGoalProgress { progress: f64 },
 
     // ── Correction operations ──
     /// Negate a belief (user says it's wrong).
-    CorrectBelief {
-        corrected_proposition: String,
-    },
+    CorrectBelief { corrected_proposition: String },
     /// Mark something as no longer relevant.
     Deprecate,
 
@@ -128,10 +115,7 @@ pub enum UpdateOp {
 
     // ── Emotional/state markers ──
     /// Record an emotional state signal.
-    EmotionalMarker {
-        emotion: String,
-        intensity: f64,
-    },
+    EmotionalMarker { emotion: String, intensity: f64 },
 }
 
 /// How the extraction was derived.
@@ -323,28 +307,44 @@ static PATTERN_RULES: &[PatternRule] = &[
         category: "reminder",
     },
     PatternRule {
-        triggers: &["don't let me forget ", "dont let me forget ", "don't forget to ", "dont forget to "],
+        triggers: &[
+            "don't let me forget ",
+            "dont let me forget ",
+            "don't forget to ",
+            "dont forget to ",
+        ],
         op_template: OpTemplate::DontForgetFromSuffix,
         confidence: 0.90,
         category: "dont_forget",
     },
-
     // ── Corrections ──
     PatternRule {
-        triggers: &["no, that's wrong", "no that's wrong", "that's not right", "actually, ", "i meant ", "no, i meant "],
+        triggers: &[
+            "no, that's wrong",
+            "no that's wrong",
+            "that's not right",
+            "actually, ",
+            "i meant ",
+            "no, i meant ",
+        ],
         op_template: OpTemplate::Correction,
         confidence: 0.75,
         category: "correction",
     },
-
     // ── Task completion ──
     PatternRule {
-        triggers: &["i'm done with ", "i finished ", "i've finished ", "i completed ", "i've completed ", "done with "],
+        triggers: &[
+            "i'm done with ",
+            "i finished ",
+            "i've finished ",
+            "i completed ",
+            "i've completed ",
+            "done with ",
+        ],
         op_template: OpTemplate::TaskCompleted,
         confidence: 0.85,
         category: "task_complete",
     },
-
     // ── Preferences (comparative) ──
     PatternRule {
         triggers: &["i prefer ", "i'd rather "],
@@ -352,7 +352,6 @@ static PATTERN_RULES: &[PatternRule] = &[
         confidence: 0.80,
         category: "preference_comparative",
     },
-
     // ── Preferences (positive) ──
     PatternRule {
         triggers: &["i like ", "i love ", "i enjoy ", "i appreciate "],
@@ -360,23 +359,40 @@ static PATTERN_RULES: &[PatternRule] = &[
         confidence: 0.80,
         category: "preference_positive",
     },
-
     // ── Preferences (negative) ──
     PatternRule {
-        triggers: &["i hate ", "i don't like ", "i dont like ", "i dislike ", "i can't stand ", "i cant stand "],
+        triggers: &[
+            "i hate ",
+            "i don't like ",
+            "i dont like ",
+            "i dislike ",
+            "i can't stand ",
+            "i cant stand ",
+        ],
         op_template: OpTemplate::NegativePreference,
         confidence: 0.80,
         category: "preference_negative",
     },
-
     // ── Periodic routines ──
     PatternRule {
-        triggers: &["every morning ", "every evening ", "every night ", "every monday ", "every tuesday ", "every wednesday ", "every thursday ", "every friday ", "every saturday ", "every sunday ", "every week ", "every day "],
+        triggers: &[
+            "every morning ",
+            "every evening ",
+            "every night ",
+            "every monday ",
+            "every tuesday ",
+            "every wednesday ",
+            "every thursday ",
+            "every friday ",
+            "every saturday ",
+            "every sunday ",
+            "every week ",
+            "every day ",
+        ],
         op_template: OpTemplate::PeriodicRoutine,
         confidence: 0.80,
         category: "periodic_routine",
     },
-
     // ── Routines ──
     PatternRule {
         triggers: &["i always ", "i usually ", "i typically ", "i normally "],
@@ -384,40 +400,62 @@ static PATTERN_RULES: &[PatternRule] = &[
         confidence: 0.70,
         category: "routine",
     },
-
     // ── Goals ──
     PatternRule {
-        triggers: &["my goal is to ", "my goal is ", "i want to achieve ", "i aim to "],
+        triggers: &[
+            "my goal is to ",
+            "my goal is ",
+            "i want to achieve ",
+            "i aim to ",
+        ],
         op_template: OpTemplate::GoalFromSuffix,
         confidence: 0.85,
         category: "goal",
     },
-
     // ── Future tasks ──
     PatternRule {
-        triggers: &["tomorrow i ", "tomorrow i'll ", "next week i ", "later today i ", "tonight i ", "this weekend i "],
+        triggers: &[
+            "tomorrow i ",
+            "tomorrow i'll ",
+            "next week i ",
+            "later today i ",
+            "tonight i ",
+            "this weekend i ",
+        ],
         op_template: OpTemplate::FutureTask,
         confidence: 0.75,
         category: "future_task",
     },
-
     // ── Tasks ──
     // NOTE: "i need to" must come AFTER more specific "i need to know" patterns
     PatternRule {
-        triggers: &["i should ", "i have to ", "i must ", "i gotta ", "i've got to ", "i've gotta "],
+        triggers: &[
+            "i should ",
+            "i have to ",
+            "i must ",
+            "i gotta ",
+            "i've got to ",
+            "i've gotta ",
+        ],
         op_template: OpTemplate::TaskFromSuffix,
         confidence: 0.80,
         category: "task",
     },
-
     // ── Informational needs ──
     PatternRule {
-        triggers: &["i need to know ", "i need information about ", "i need to find out ", "i want to know ", "how do i ", "what is ", "where can i "],
+        triggers: &[
+            "i need to know ",
+            "i need information about ",
+            "i need to find out ",
+            "i want to know ",
+            "how do i ",
+            "what is ",
+            "where can i ",
+        ],
         op_template: OpTemplate::InformationalNeed,
         confidence: 0.70,
         category: "info_need",
     },
-
     // ── Generic "i need to" task (after informational needs) ──
     PatternRule {
         triggers: &["i need to "],
@@ -425,7 +463,6 @@ static PATTERN_RULES: &[PatternRule] = &[
         confidence: 0.80,
         category: "task",
     },
-
     // ── Wants/intentions (lower confidence → goals) ──
     PatternRule {
         triggers: &["i want to ", "i'd like to ", "i wish i could "],
@@ -433,26 +470,58 @@ static PATTERN_RULES: &[PatternRule] = &[
         confidence: 0.65,
         category: "want_goal",
     },
-
     // ── Emotional markers (negative) ──
     PatternRule {
-        triggers: &["i'm stressed", "i'm frustrated", "i'm overwhelmed", "i'm anxious", "i'm worried", "i'm tired", "i'm exhausted", "i'm upset", "i'm angry", "i'm sad"],
+        triggers: &[
+            "i'm stressed",
+            "i'm frustrated",
+            "i'm overwhelmed",
+            "i'm anxious",
+            "i'm worried",
+            "i'm tired",
+            "i'm exhausted",
+            "i'm upset",
+            "i'm angry",
+            "i'm sad",
+        ],
         op_template: OpTemplate::EmotionNegative,
         confidence: 0.85,
         category: "emotion_negative",
     },
-
     // ── Emotional markers (positive) ──
     PatternRule {
-        triggers: &["i'm excited", "i'm happy", "i'm thrilled", "i'm grateful", "i'm relieved", "i'm proud", "i'm motivated", "i'm energized"],
+        triggers: &[
+            "i'm excited",
+            "i'm happy",
+            "i'm thrilled",
+            "i'm grateful",
+            "i'm relieved",
+            "i'm proud",
+            "i'm motivated",
+            "i'm energized",
+        ],
         op_template: OpTemplate::EmotionPositive,
         confidence: 0.85,
         category: "emotion_positive",
     },
-
     // ── Relationships ──
     PatternRule {
-        triggers: &["my sister ", "my brother ", "my mom ", "my mother ", "my dad ", "my father ", "my wife ", "my husband ", "my partner ", "my boss ", "my manager ", "my friend ", "my colleague ", "my coworker "],
+        triggers: &[
+            "my sister ",
+            "my brother ",
+            "my mom ",
+            "my mother ",
+            "my dad ",
+            "my father ",
+            "my wife ",
+            "my husband ",
+            "my partner ",
+            "my boss ",
+            "my manager ",
+            "my friend ",
+            "my colleague ",
+            "my coworker ",
+        ],
         op_template: OpTemplate::RelationshipFromSuffix,
         confidence: 0.75,
         category: "relationship",
@@ -472,14 +541,19 @@ fn tier1_extract(text: &str, _config: &ExtractorConfig) -> Vec<CognitiveUpdate> 
             if let Some(pos) = lower.find(trigger) {
                 let suffix = &text[pos + trigger.len()..];
                 let suffix_trimmed = suffix.trim();
-                if suffix_trimmed.is_empty() && !matches!(
-                    rule.op_template,
-                    OpTemplate::EmotionNegative | OpTemplate::EmotionPositive | OpTemplate::Correction
-                ) {
+                if suffix_trimmed.is_empty()
+                    && !matches!(
+                        rule.op_template,
+                        OpTemplate::EmotionNegative
+                            | OpTemplate::EmotionPositive
+                            | OpTemplate::Correction
+                    )
+                {
                     continue; // Need content after trigger
                 }
 
-                if let Some(op) = build_op_from_template(rule.op_template, trigger, suffix_trimmed) {
+                if let Some(op) = build_op_from_template(rule.op_template, trigger, suffix_trimmed)
+                {
                     updates.push(CognitiveUpdate {
                         op,
                         target: None,
@@ -495,7 +569,11 @@ fn tier1_extract(text: &str, _config: &ExtractorConfig) -> Vec<CognitiveUpdate> 
     }
 
     // Sort by confidence descending
-    updates.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+    updates.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     updates
 }
 
@@ -503,7 +581,12 @@ fn tier1_extract(text: &str, _config: &ExtractorConfig) -> Vec<CognitiveUpdate> 
 fn build_op_from_template(template: OpTemplate, trigger: &str, suffix: &str) -> Option<UpdateOp> {
     // Clean suffix: remove trailing punctuation
     let clean = suffix.trim_end_matches(|c: char| c == '.' || c == '!' || c == '?' || c == ',');
-    if clean.is_empty() && !matches!(template, OpTemplate::EmotionNegative | OpTemplate::EmotionPositive | OpTemplate::Correction) {
+    if clean.is_empty()
+        && !matches!(
+            template,
+            OpTemplate::EmotionNegative | OpTemplate::EmotionPositive | OpTemplate::Correction
+        )
+    {
         return None;
     }
 
@@ -515,12 +598,14 @@ fn build_op_from_template(template: OpTemplate, trigger: &str, suffix: &str) -> 
             estimated_minutes: None,
         }),
 
-        OpTemplate::ReminderFromSuffix | OpTemplate::DontForgetFromSuffix => Some(UpdateOp::CreateTask {
-            description: clean.to_string(),
-            priority: Priority::High,
-            deadline: None,
-            estimated_minutes: None,
-        }),
+        OpTemplate::ReminderFromSuffix | OpTemplate::DontForgetFromSuffix => {
+            Some(UpdateOp::CreateTask {
+                description: clean.to_string(),
+                priority: Priority::High,
+                deadline: None,
+                estimated_minutes: None,
+            })
+        }
 
         OpTemplate::GoalFromSuffix => Some(UpdateOp::CreateGoal {
             description: clean.to_string(),
@@ -547,7 +632,11 @@ fn build_op_from_template(template: OpTemplate, trigger: &str, suffix: &str) -> 
             Some(UpdateOp::SetPreference {
                 domain: infer_preference_domain(&preferred),
                 preferred,
-                dispreferred: if dispreferred.is_empty() { None } else { Some(dispreferred) },
+                dispreferred: if dispreferred.is_empty() {
+                    None
+                } else {
+                    Some(dispreferred)
+                },
             })
         }
 
@@ -615,13 +704,51 @@ fn build_op_from_template(template: OpTemplate, trigger: &str, suffix: &str) -> 
 fn infer_preference_domain(text: &str) -> String {
     let lower = text.to_lowercase();
     let domains = [
-        (&["food", "eat", "drink", "coffee", "tea", "restaurant", "cuisine"][..], "food"),
-        (&["music", "song", "playlist", "album", "band", "artist"], "music"),
-        (&["work", "meeting", "office", "project", "code", "coding", "programming", "deploy"], "work"),
-        (&["exercise", "gym", "run", "walk", "sport", "workout"], "health"),
-        (&["movie", "film", "show", "series", "watch", "book", "read"], "entertainment"),
-        (&["morning", "evening", "night", "schedule", "routine", "time"], "schedule"),
-        (&["notification", "alert", "remind", "email", "message"], "communication"),
+        (
+            &[
+                "food",
+                "eat",
+                "drink",
+                "coffee",
+                "tea",
+                "restaurant",
+                "cuisine",
+            ][..],
+            "food",
+        ),
+        (
+            &["music", "song", "playlist", "album", "band", "artist"],
+            "music",
+        ),
+        (
+            &[
+                "work",
+                "meeting",
+                "office",
+                "project",
+                "code",
+                "coding",
+                "programming",
+                "deploy",
+            ],
+            "work",
+        ),
+        (
+            &["exercise", "gym", "run", "walk", "sport", "workout"],
+            "health",
+        ),
+        (
+            &["movie", "film", "show", "series", "watch", "book", "read"],
+            "entertainment",
+        ),
+        (
+            &["morning", "evening", "night", "schedule", "routine", "time"],
+            "schedule",
+        ),
+        (
+            &["notification", "alert", "remind", "email", "message"],
+            "communication",
+        ),
     ];
 
     for (keywords, domain) in &domains {
@@ -749,7 +876,9 @@ impl TemplateStore {
 
         // Check for existing similar template (>50% keyword overlap)
         for existing in &mut self.templates {
-            if existing.op_template == op_template && keyword_overlap(&existing.keywords, &keywords) > 0.5 {
+            if existing.op_template == op_template
+                && keyword_overlap(&existing.keywords, &keywords) > 0.5
+            {
                 // Reinforce existing template
                 existing.use_count += 1;
                 existing.last_used_at = now;
@@ -779,7 +908,13 @@ impl TemplateStore {
         // Enforce max templates
         if self.templates.len() > max_templates {
             // Remove least-used template
-            if let Some(min_idx) = self.templates.iter().enumerate().min_by_key(|(_, t)| t.use_count).map(|(i, _)| i) {
+            if let Some(min_idx) = self
+                .templates
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, t)| t.use_count)
+                .map(|(i, _)| i)
+            {
                 self.templates.swap_remove(min_idx);
             }
         }
@@ -813,18 +948,14 @@ impl TemplateStore {
 /// Extract meaningful keywords from text (stopword removal + lowering).
 fn extract_keywords(text: &str) -> Vec<String> {
     static STOPWORDS: &[&str] = &[
-        "i", "me", "my", "we", "our", "you", "your", "the", "a", "an",
-        "is", "am", "are", "was", "were", "be", "been", "being",
-        "have", "has", "had", "do", "does", "did", "will", "would",
-        "could", "should", "may", "might", "shall", "can",
-        "to", "of", "in", "for", "on", "with", "at", "by", "from",
-        "up", "about", "into", "through", "during", "before", "after",
-        "and", "but", "or", "nor", "not", "no", "so", "if", "then",
-        "that", "this", "these", "those", "it", "its",
-        "just", "also", "very", "really", "quite", "much",
-        "don't", "dont", "doesn't", "doesnt", "didn't", "didnt",
-        "i'm", "im", "i've", "ive", "i'll", "ill", "i'd", "id",
-        "let", "get", "got", "going", "go", "come", "make",
+        "i", "me", "my", "we", "our", "you", "your", "the", "a", "an", "is", "am", "are", "was",
+        "were", "be", "been", "being", "have", "has", "had", "do", "does", "did", "will", "would",
+        "could", "should", "may", "might", "shall", "can", "to", "of", "in", "for", "on", "with",
+        "at", "by", "from", "up", "about", "into", "through", "during", "before", "after", "and",
+        "but", "or", "nor", "not", "no", "so", "if", "then", "that", "this", "these", "those",
+        "it", "its", "just", "also", "very", "really", "quite", "much", "don't", "dont", "doesn't",
+        "doesnt", "didn't", "didnt", "i'm", "im", "i've", "ive", "i'll", "ill", "i'd", "id", "let",
+        "get", "got", "going", "go", "come", "make",
     ];
 
     text.to_lowercase()
@@ -870,7 +1001,10 @@ fn tier2_extract(text: &str, store: &TemplateStore) -> Vec<CognitiveUpdate> {
 }
 
 /// Build an UpdateOp from a serializable template and input text.
-fn build_op_from_serializable_template(template: &SerializableOpTemplate, text: &str) -> Option<UpdateOp> {
+fn build_op_from_serializable_template(
+    template: &SerializableOpTemplate,
+    text: &str,
+) -> Option<UpdateOp> {
     let clean = text.trim_end_matches(|c: char| c == '.' || c == '!' || c == '?');
 
     match template {
@@ -900,14 +1034,18 @@ fn build_op_from_serializable_template(template: &SerializableOpTemplate, text: 
             description: clean.to_string(),
             action_description: clean.to_string(),
         }),
-        SerializableOpTemplate::EmotionalMarker { emotion, .. } => Some(UpdateOp::EmotionalMarker {
-            emotion: emotion.clone(),
-            intensity: 0.6,
-        }),
-        SerializableOpTemplate::CreateRelationship { relationship } => Some(UpdateOp::CreateRelationship {
-            person_name: first_name_from_suffix(clean),
-            relationship: relationship.clone(),
-        }),
+        SerializableOpTemplate::EmotionalMarker { emotion, .. } => {
+            Some(UpdateOp::EmotionalMarker {
+                emotion: emotion.clone(),
+                intensity: 0.6,
+            })
+        }
+        SerializableOpTemplate::CreateRelationship { relationship } => {
+            Some(UpdateOp::CreateRelationship {
+                person_name: first_name_from_suffix(clean),
+                relationship: relationship.clone(),
+            })
+        }
         SerializableOpTemplate::Correction => Some(UpdateOp::CorrectBelief {
             corrected_proposition: clean.to_string(),
         }),
@@ -962,10 +1100,10 @@ static CONTEXT_PATTERNS: &[(&str, ContextAction)] = &[
 
 #[derive(Debug, Clone, Copy)]
 enum ContextAction {
-    TaskPersistence,    // Acknowledge task still pending
-    TaskInProgress,     // Mark task as in progress
-    TaskCompleted,      // Mark most recent active task as completed
-    TaskCancelled,      // Cancel most recent active task
+    TaskPersistence,     // Acknowledge task still pending
+    TaskInProgress,      // Mark task as in progress
+    TaskCompleted,       // Mark most recent active task as completed
+    TaskCancelled,       // Cancel most recent active task
     PositiveAboutRecent, // Positive preference about recent entity
     NegativeAboutRecent, // Negative preference about recent entity
 }
@@ -1098,7 +1236,9 @@ fn tier4_build_request(text: &str, context: &ExtractionContext) -> LlmExtraction
     let mut context_lines = Vec::new();
 
     if !context.active_tasks.is_empty() {
-        let tasks: Vec<String> = context.active_tasks.iter()
+        let tasks: Vec<String> = context
+            .active_tasks
+            .iter()
             .take(5)
             .map(|(_, desc)| format!("- Task: {}", desc))
             .collect();
@@ -1106,7 +1246,9 @@ fn tier4_build_request(text: &str, context: &ExtractionContext) -> LlmExtraction
     }
 
     if !context.active_goals.is_empty() {
-        let goals: Vec<String> = context.active_goals.iter()
+        let goals: Vec<String> = context
+            .active_goals
+            .iter()
             .take(3)
             .map(|(_, desc)| format!("- Goal: {}", desc))
             .collect();
@@ -1114,7 +1256,9 @@ fn tier4_build_request(text: &str, context: &ExtractionContext) -> LlmExtraction
     }
 
     if !context.recent_entities.is_empty() {
-        let entities: Vec<String> = context.recent_entities.iter()
+        let entities: Vec<String> = context
+            .recent_entities
+            .iter()
             .take(5)
             .map(|(_, name)| name.clone())
             .collect();
@@ -1204,13 +1348,20 @@ pub fn extract(
     all_updates.retain(|u| u.confidence >= config.min_confidence);
 
     // ── Sort by confidence descending ──
-    all_updates.sort_by(|a, b| b.confidence.partial_cmp(&a.confidence).unwrap_or(std::cmp::Ordering::Equal));
+    all_updates.sort_by(|a, b| {
+        b.confidence
+            .partial_cmp(&a.confidence)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // ── Truncate to max updates ──
     all_updates.truncate(config.max_updates);
 
     // ── Tier 4: LLM escalation decision ──
-    let max_confidence = all_updates.iter().map(|u| u.confidence).fold(0.0f64, f64::max);
+    let max_confidence = all_updates
+        .iter()
+        .map(|u| u.confidence)
+        .fold(0.0f64, f64::max);
     let escalation_needed = config.enable_llm_escalation
         && (all_updates.is_empty() || max_confidence < config.escalation_threshold);
 
@@ -1233,9 +1384,9 @@ pub fn extract(
 
 /// Check if an update is semantically similar to any existing update.
 fn has_similar_update(existing: &[CognitiveUpdate], new: &CognitiveUpdate) -> bool {
-    existing.iter().any(|e| {
-        std::mem::discriminant(&e.op) == std::mem::discriminant(&new.op)
-    })
+    existing
+        .iter()
+        .any(|e| std::mem::discriminant(&e.op) == std::mem::discriminant(&new.op))
 }
 
 /// Integrate an LLM extraction response back into the system.
@@ -1258,11 +1409,26 @@ pub fn integrate_llm_response(
 
     for item in &parsed {
         let op_str = item.get("op").and_then(|v| v.as_str()).unwrap_or("");
-        let desc = item.get("description").and_then(|v| v.as_str()).unwrap_or("");
-        let confidence = item.get("confidence").and_then(|v| v.as_f64()).unwrap_or(0.5);
-        let priority_str = item.get("priority").and_then(|v| v.as_str()).unwrap_or("medium");
-        let domain = item.get("domain").and_then(|v| v.as_str()).unwrap_or("general");
-        let emotion = item.get("emotion").and_then(|v| v.as_str()).unwrap_or("neutral");
+        let desc = item
+            .get("description")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let confidence = item
+            .get("confidence")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.5);
+        let priority_str = item
+            .get("priority")
+            .and_then(|v| v.as_str())
+            .unwrap_or("medium");
+        let domain = item
+            .get("domain")
+            .and_then(|v| v.as_str())
+            .unwrap_or("general");
+        let emotion = item
+            .get("emotion")
+            .and_then(|v| v.as_str())
+            .unwrap_or("neutral");
 
         let priority = Priority::from_str(priority_str);
 
@@ -1291,7 +1457,9 @@ pub fn integrate_llm_response(
                     preferred: desc.to_string(),
                     dispreferred: None,
                 },
-                Some(SerializableOpTemplate::SetPreference { domain: domain.to_string() }),
+                Some(SerializableOpTemplate::SetPreference {
+                    domain: domain.to_string(),
+                }),
             ),
             "create_need" => (
                 UpdateOp::CreateNeed {
@@ -1299,7 +1467,9 @@ pub fn integrate_llm_response(
                     category: NeedCategory::Informational,
                     intensity: 0.5,
                 },
-                Some(SerializableOpTemplate::CreateNeed { category: NeedCategory::Informational }),
+                Some(SerializableOpTemplate::CreateNeed {
+                    category: NeedCategory::Informational,
+                }),
             ),
             "create_routine" => (
                 UpdateOp::CreateRoutine {
@@ -1323,7 +1493,9 @@ pub fn integrate_llm_response(
                     person_name: desc.to_string(),
                     relationship: domain.to_string(),
                 },
-                Some(SerializableOpTemplate::CreateRelationship { relationship: domain.to_string() }),
+                Some(SerializableOpTemplate::CreateRelationship {
+                    relationship: domain.to_string(),
+                }),
             ),
             "correct_belief" | "correction" => (
                 UpdateOp::CorrectBelief {
@@ -1338,13 +1510,18 @@ pub fn integrate_llm_response(
                 Some(SerializableOpTemplate::TaskCompleted),
             ),
             "create_entity" => {
-                let etype = item.get("entity_type").and_then(|v| v.as_str()).unwrap_or("unknown");
+                let etype = item
+                    .get("entity_type")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown");
                 (
                     UpdateOp::CreateEntity {
                         name: desc.to_string(),
                         entity_type: etype.to_string(),
                     },
-                    Some(SerializableOpTemplate::CreateEntity { entity_type: etype.to_string() }),
+                    Some(SerializableOpTemplate::CreateEntity {
+                        entity_type: etype.to_string(),
+                    }),
                 )
             }
             "create_belief" => (
@@ -1353,7 +1530,9 @@ pub fn integrate_llm_response(
                     domain: domain.to_string(),
                     initial_log_odds: 1.0,
                 },
-                Some(SerializableOpTemplate::CreateBelief { domain: domain.to_string() }),
+                Some(SerializableOpTemplate::CreateBelief {
+                    domain: domain.to_string(),
+                }),
             ),
             _ => continue,
         };
@@ -1396,7 +1575,12 @@ pub fn summarize_extractor(store: &TemplateStore) -> ExtractorSummary {
     let avg_conf = if store.templates.is_empty() {
         0.0
     } else {
-        store.templates.iter().map(|t| t.avg_confidence()).sum::<f64>() / store.templates.len() as f64
+        store
+            .templates
+            .iter()
+            .map(|t| t.avg_confidence())
+            .sum::<f64>()
+            / store.templates.len() as f64
     };
 
     ExtractorSummary {
@@ -1434,7 +1618,11 @@ mod tests {
         let updates = tier1_extract("I need to call the dentist tomorrow", &default_config());
         assert!(!updates.is_empty(), "Should extract task");
         match &updates[0].op {
-            UpdateOp::CreateTask { description, priority, .. } => {
+            UpdateOp::CreateTask {
+                description,
+                priority,
+                ..
+            } => {
                 assert!(description.contains("call the dentist"));
                 assert_eq!(*priority, Priority::Medium);
             }
@@ -1448,7 +1636,11 @@ mod tests {
         let updates = tier1_extract("Remind me to buy groceries", &default_config());
         assert!(!updates.is_empty());
         match &updates[0].op {
-            UpdateOp::CreateTask { description, priority, .. } => {
+            UpdateOp::CreateTask {
+                description,
+                priority,
+                ..
+            } => {
                 assert!(description.contains("buy groceries"));
                 assert_eq!(*priority, Priority::High);
             }
@@ -1473,7 +1665,9 @@ mod tests {
         let updates = tier1_extract("I love working with Rust", &default_config());
         assert!(!updates.is_empty());
         match &updates[0].op {
-            UpdateOp::SetPreference { preferred, domain, .. } => {
+            UpdateOp::SetPreference {
+                preferred, domain, ..
+            } => {
                 assert!(preferred.contains("working with Rust"));
                 assert_eq!(domain, "work");
             }
@@ -1487,7 +1681,10 @@ mod tests {
         assert!(!updates.is_empty());
         match &updates[0].op {
             UpdateOp::SetPreference { dispreferred, .. } => {
-                assert!(dispreferred.as_ref().unwrap().contains("early morning meetings"));
+                assert!(dispreferred
+                    .as_ref()
+                    .unwrap()
+                    .contains("early morning meetings"));
             }
             other => panic!("Expected SetPreference with dispreferred, got {:?}", other),
         }
@@ -1498,7 +1695,11 @@ mod tests {
         let updates = tier1_extract("I prefer tea over coffee", &default_config());
         assert!(!updates.is_empty());
         match &updates[0].op {
-            UpdateOp::SetPreference { preferred, dispreferred, .. } => {
+            UpdateOp::SetPreference {
+                preferred,
+                dispreferred,
+                ..
+            } => {
                 assert_eq!(preferred, "tea");
                 assert_eq!(dispreferred.as_deref(), Some("coffee"));
             }
@@ -1535,7 +1736,10 @@ mod tests {
         let updates = tier1_extract("My sister Alice is visiting next week", &default_config());
         assert!(!updates.is_empty());
         match &updates[0].op {
-            UpdateOp::CreateRelationship { person_name, relationship } => {
+            UpdateOp::CreateRelationship {
+                person_name,
+                relationship,
+            } => {
                 assert_eq!(person_name, "Alice");
                 assert!(relationship.contains("sister"));
             }
@@ -1545,10 +1749,15 @@ mod tests {
 
     #[test]
     fn test_tier1_routine() {
-        let updates = tier1_extract("I always check email first thing in the morning", &default_config());
+        let updates = tier1_extract(
+            "I always check email first thing in the morning",
+            &default_config(),
+        );
         assert!(!updates.is_empty());
         match &updates[0].op {
-            UpdateOp::CreateRoutine { action_description, .. } => {
+            UpdateOp::CreateRoutine {
+                action_description, ..
+            } => {
                 assert!(action_description.contains("check email"));
             }
             other => panic!("Expected CreateRoutine, got {:?}", other),
@@ -1557,7 +1766,10 @@ mod tests {
 
     #[test]
     fn test_tier1_periodic_routine() {
-        let updates = tier1_extract("Every Monday I review my goals for the week", &default_config());
+        let updates = tier1_extract(
+            "Every Monday I review my goals for the week",
+            &default_config(),
+        );
         assert!(!updates.is_empty());
         match &updates[0].op {
             UpdateOp::CreateRoutine { description, .. } => {
@@ -1572,7 +1784,9 @@ mod tests {
         let updates = tier1_extract("Actually, I meant the blue one", &default_config());
         assert!(!updates.is_empty());
         match &updates[0].op {
-            UpdateOp::CorrectBelief { corrected_proposition } => {
+            UpdateOp::CorrectBelief {
+                corrected_proposition,
+            } => {
                 assert!(corrected_proposition.contains("the blue one"));
             }
             other => panic!("Expected CorrectBelief, got {:?}", other),
@@ -1608,7 +1822,11 @@ mod tests {
         let updates = tier1_extract("Don't let me forget to water the plants", &default_config());
         assert!(!updates.is_empty());
         match &updates[0].op {
-            UpdateOp::CreateTask { description, priority, .. } => {
+            UpdateOp::CreateTask {
+                description,
+                priority,
+                ..
+            } => {
                 assert!(description.contains("water the plants"));
                 assert_eq!(*priority, Priority::High);
             }
@@ -1619,13 +1837,19 @@ mod tests {
     #[test]
     fn test_tier1_no_match() {
         let updates = tier1_extract("Hello, how are you?", &default_config());
-        assert!(updates.is_empty(), "Should not extract from generic greeting");
+        assert!(
+            updates.is_empty(),
+            "Should not extract from generic greeting"
+        );
     }
 
     #[test]
     fn test_tier1_empty_suffix_ignored() {
         let updates = tier1_extract("I need to", &default_config());
-        assert!(updates.is_empty(), "Empty suffix should not produce extraction");
+        assert!(
+            updates.is_empty(),
+            "Empty suffix should not produce extraction"
+        );
     }
 
     // ── Tier 2: Template matching ──
@@ -1635,13 +1859,17 @@ mod tests {
         let mut store = TemplateStore::new();
         store.learn_template(
             "schedule a meeting with the design team",
-            SerializableOpTemplate::CreateTask { priority: Priority::Medium },
+            SerializableOpTemplate::CreateTask {
+                priority: Priority::Medium,
+            },
             1000.0,
             100,
         );
 
         assert_eq!(store.templates.len(), 1);
-        assert!(store.templates[0].keywords.contains(&"schedule".to_string()));
+        assert!(store.templates[0]
+            .keywords
+            .contains(&"schedule".to_string()));
         assert!(store.templates[0].keywords.contains(&"meeting".to_string()));
     }
 
@@ -1650,7 +1878,9 @@ mod tests {
         let mut store = TemplateStore::new();
         store.learn_template(
             "schedule a meeting with the design team",
-            SerializableOpTemplate::CreateTask { priority: Priority::Medium },
+            SerializableOpTemplate::CreateTask {
+                priority: Priority::Medium,
+            },
             1000.0,
             100,
         );
@@ -1663,10 +1893,22 @@ mod tests {
     #[test]
     fn test_tier2_template_reinforcement() {
         let mut store = TemplateStore::new();
-        let tmpl = SerializableOpTemplate::CreateTask { priority: Priority::High };
+        let tmpl = SerializableOpTemplate::CreateTask {
+            priority: Priority::High,
+        };
 
-        store.learn_template("deploy the application to staging environment", tmpl.clone(), 1000.0, 100);
-        store.learn_template("deploy the application to production environment", tmpl, 2000.0, 100);
+        store.learn_template(
+            "deploy the application to staging environment",
+            tmpl.clone(),
+            1000.0,
+            100,
+        );
+        store.learn_template(
+            "deploy the application to production environment",
+            tmpl,
+            2000.0,
+            100,
+        );
 
         // Should merge into existing template (keyword overlap > 50%):
         // "deploy", "application", "environment" overlap; "staging"/"production" differ
@@ -1679,7 +1921,9 @@ mod tests {
         let mut store = TemplateStore::new();
         store.learn_template(
             "organize my photo album from vacation",
-            SerializableOpTemplate::CreateTask { priority: Priority::Low },
+            SerializableOpTemplate::CreateTask {
+                priority: Priority::Low,
+            },
             1000.0,
             100,
         );
@@ -1749,7 +1993,10 @@ mod tests {
     fn test_tier3_no_context_no_match() {
         let context = ExtractionContext::default();
         let results = tier3_extract("I did it!", &context);
-        assert!(results.is_empty(), "No context → no match for anaphoric reference");
+        assert!(
+            results.is_empty(),
+            "No context → no match for anaphoric reference"
+        );
     }
 
     // ── Full cascade ──
@@ -1760,10 +2007,18 @@ mod tests {
         let context = empty_context();
         let store = empty_store();
 
-        let response = extract("I need to call the dentist tomorrow", &context, &store, &config);
+        let response = extract(
+            "I need to call the dentist tomorrow",
+            &context,
+            &store,
+            &config,
+        );
         assert!(!response.updates.is_empty());
         assert!(response.tiers_used.contains(&ExtractorTier::Rule));
-        assert!(!response.escalation_needed, "High-confidence rule match should not escalate");
+        assert!(
+            !response.escalation_needed,
+            "High-confidence rule match should not escalate"
+        );
     }
 
     #[test]
@@ -1773,7 +2028,10 @@ mod tests {
         let store = empty_store();
 
         let response = extract("The weather is nice today", &context, &store, &config);
-        assert!(response.escalation_needed, "No extraction should trigger escalation");
+        assert!(
+            response.escalation_needed,
+            "No extraction should trigger escalation"
+        );
         assert!(response.llm_request.is_some());
     }
 
@@ -1782,7 +2040,9 @@ mod tests {
         let mut store = TemplateStore::new();
         store.learn_template(
             "I need to call the doctor about the results",
-            SerializableOpTemplate::CreateTask { priority: Priority::Medium },
+            SerializableOpTemplate::CreateTask {
+                priority: Priority::Medium,
+            },
             1000.0,
             100,
         );
@@ -1793,8 +2053,15 @@ mod tests {
         // "I need to call the dentist" should match Tier 1 rule AND Tier 2 template
         // But cascade should deduplicate
         let response = extract("I need to call the dentist", &context, &store, &config);
-        let task_count = response.updates.iter().filter(|u| matches!(u.op, UpdateOp::CreateTask { .. })).count();
-        assert_eq!(task_count, 1, "Should deduplicate same-op from different tiers");
+        let task_count = response
+            .updates
+            .iter()
+            .filter(|u| matches!(u.op, UpdateOp::CreateTask { .. }))
+            .count();
+        assert_eq!(
+            task_count, 1,
+            "Should deduplicate same-op from different tiers"
+        );
     }
 
     #[test]
@@ -1809,7 +2076,11 @@ mod tests {
             &store,
             &config,
         );
-        assert!(response.updates.len() >= 2, "Should extract multiple updates: {:?}", response.updates);
+        assert!(
+            response.updates.len() >= 2,
+            "Should extract multiple updates: {:?}",
+            response.updates
+        );
     }
 
     // ── LLM integration (flywheel) ──
@@ -1834,19 +2105,16 @@ mod tests {
         assert_eq!(updates[0].tier, ExtractorTier::Llm);
 
         // Flywheel: templates should have been created
-        assert!(!store.templates.is_empty(), "LLM success should create templates");
+        assert!(
+            !store.templates.is_empty(),
+            "LLM success should create templates"
+        );
     }
 
     #[test]
     fn test_llm_response_invalid_json() {
         let mut store = TemplateStore::new();
-        let updates = integrate_llm_response(
-            "test",
-            "not valid json",
-            &mut store,
-            100,
-            1000.0,
-        );
+        let updates = integrate_llm_response("test", "not valid json", &mut store, 100, 1000.0);
         assert!(updates.is_empty(), "Invalid JSON should return empty");
     }
 
@@ -1868,15 +2136,27 @@ mod tests {
         assert!(kw.contains(&"design".to_string()));
         assert!(kw.contains(&"team".to_string()));
         assert!(!kw.contains(&"the".to_string())); // Stopword
-        assert!(!kw.contains(&"to".to_string()));  // Stopword
+        assert!(!kw.contains(&"to".to_string())); // Stopword
     }
 
     #[test]
     fn test_keyword_overlap() {
-        let a = vec!["meeting".to_string(), "schedule".to_string(), "team".to_string()];
-        let b = vec!["meeting".to_string(), "team".to_string(), "review".to_string()];
+        let a = vec![
+            "meeting".to_string(),
+            "schedule".to_string(),
+            "team".to_string(),
+        ];
+        let b = vec![
+            "meeting".to_string(),
+            "team".to_string(),
+            "review".to_string(),
+        ];
         let overlap = keyword_overlap(&a, &b);
-        assert!((overlap - 2.0 / 3.0).abs() < 0.01, "2/3 overlap: {}", overlap);
+        assert!(
+            (overlap - 2.0 / 3.0).abs() < 0.01,
+            "2/3 overlap: {}",
+            overlap
+        );
     }
 
     #[test]
@@ -1912,7 +2192,9 @@ mod tests {
         for i in 0..5 {
             store.learn_template(
                 &format!("unique phrase number {} with keyword{}", i, i),
-                SerializableOpTemplate::CreateTask { priority: Priority::Medium },
+                SerializableOpTemplate::CreateTask {
+                    priority: Priority::Medium,
+                },
                 i as f64 * 100.0,
                 max,
             );
@@ -1926,7 +2208,9 @@ mod tests {
         let mut store = TemplateStore::new();
         store.learn_template(
             "test template with keywords",
-            SerializableOpTemplate::CreateTask { priority: Priority::Medium },
+            SerializableOpTemplate::CreateTask {
+                priority: Priority::Medium,
+            },
             1000.0,
             100,
         );

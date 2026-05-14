@@ -5,14 +5,12 @@
 //! temporal analysis.
 
 use crate::error::Result;
-use crate::state::{
-    CognitiveEdgeKind, CognitiveNode, NodeId, NodeKind, NodePayload,
-};
+use crate::state::{CognitiveEdgeKind, CognitiveNode, NodeId, NodeKind, NodePayload};
 use crate::temporal::{
-    self, BurstConfig, BurstResult, DeadlineUrgencyConfig, DetectedPeriod,
-    DomainRecencyMap, EwmaTracker, LabeledEvent, MotifConfig, PeriodicityConfig,
-    PeriodicityResult, RecencyConfig, SeasonalHistogram, TemporalEvent,
-    TemporalMotif, TemporalOrder, TemporalRelevanceConfig, TimeInterval,
+    self, BurstConfig, BurstResult, DeadlineUrgencyConfig, DetectedPeriod, DomainRecencyMap,
+    EwmaTracker, LabeledEvent, MotifConfig, PeriodicityConfig, PeriodicityResult, RecencyConfig,
+    SeasonalHistogram, TemporalEvent, TemporalMotif, TemporalOrder, TemporalRelevanceConfig,
+    TimeInterval,
 };
 
 use super::{now, YantrikDB};
@@ -152,8 +150,7 @@ impl YantrikDB {
         let episodes = self.load_cognitive_nodes_by_kind(NodeKind::Episode)?;
         let temporal_edges =
             self.load_cognitive_edges_by_kind(CognitiveEdgeKind::PrecedesTemporally)?;
-        let trigger_edges =
-            self.load_cognitive_edges_by_kind(CognitiveEdgeKind::Triggers)?;
+        let trigger_edges = self.load_cognitive_edges_by_kind(CognitiveEdgeKind::Triggers)?;
 
         // Build predecessor map from edges
         let mut predecessors: std::collections::HashMap<u32, Vec<NodeId>> =
@@ -263,10 +260,7 @@ impl YantrikDB {
             })
             .collect();
 
-        scored.sort_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         Ok(scored)
     }
@@ -277,10 +271,7 @@ impl YantrikDB {
     ///
     /// Returns `(NodeId, description, deadline, urgency)` for nodes
     /// with deadlines within `horizon_secs` of now.
-    pub fn deadline_dashboard(
-        &self,
-        horizon_secs: f64,
-    ) -> Result<Vec<(NodeId, String, f64, f64)>> {
+    pub fn deadline_dashboard(&self, horizon_secs: f64) -> Result<Vec<(NodeId, String, f64, f64)>> {
         let ts = now();
         let config = DeadlineUrgencyConfig::default();
         let mut entries = Vec::new();
@@ -323,10 +314,7 @@ impl YantrikDB {
         }
 
         // Sort by urgency descending
-        entries.sort_by(|a, b| {
-            b.3.partial_cmp(&a.3)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        entries.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
 
         Ok(entries)
     }
@@ -339,15 +327,19 @@ mod tests {
     use crate::engine::YantrikDB;
     use crate::state::*;
     use crate::temporal::{
-        BurstConfig, DeadlineUrgencyConfig, MotifConfig, PeriodicityConfig,
-        TemporalRelevanceConfig,
+        BurstConfig, DeadlineUrgencyConfig, MotifConfig, PeriodicityConfig, TemporalRelevanceConfig,
     };
 
     fn test_db() -> YantrikDB {
         YantrikDB::new(":memory:", 8).unwrap()
     }
 
-    fn persist_episode(db: &YantrikDB, alloc: &mut NodeIdAllocator, summary: &str, occurred_at: f64) -> NodeId {
+    fn persist_episode(
+        db: &YantrikDB,
+        alloc: &mut NodeIdAllocator,
+        summary: &str,
+        occurred_at: f64,
+    ) -> NodeId {
         let id = alloc.alloc(NodeKind::Episode);
         let node = CognitiveNode::new(
             id,
@@ -459,7 +451,9 @@ mod tests {
         db.persist_node_id_allocator(&alloc).unwrap();
 
         let config = TemporalRelevanceConfig::default();
-        let scores = db.temporal_relevance_scores(NodeKind::Task, &config).unwrap();
+        let scores = db
+            .temporal_relevance_scores(NodeKind::Task, &config)
+            .unwrap();
         assert_eq!(scores.len(), 2);
         // Recent task should score higher
         assert_eq!(scores[0].0, recent_id);
@@ -489,11 +483,13 @@ mod tests {
         let motifs = db.mine_episode_motifs(&config).unwrap();
         // Should find the email→calendar motif
         let has_email_cal = motifs.iter().any(|m| {
-            m.sequence.len() >= 2
-                && m.sequence[0] == "email"
-                && m.sequence[1] == "calendar"
+            m.sequence.len() >= 2 && m.sequence[0] == "email" && m.sequence[1] == "calendar"
         });
-        assert!(has_email_cal, "Should detect email→calendar motif: {:?}", motifs);
+        assert!(
+            has_email_cal,
+            "Should detect email→calendar motif: {:?}",
+            motifs
+        );
     }
 
     #[test]
@@ -515,7 +511,8 @@ mod tests {
             observation_count: 1,
             created_at_ms: 100_000,
             last_confirmed_ms: 100_000,
-        }).unwrap();
+        })
+        .unwrap();
         db.persist_cognitive_edge(&CognitiveEdge {
             src: e2,
             dst: e3,
@@ -525,7 +522,8 @@ mod tests {
             observation_count: 1,
             created_at_ms: 200_000,
             last_confirmed_ms: 200_000,
-        }).unwrap();
+        })
+        .unwrap();
         db.persist_node_id_allocator(&alloc).unwrap();
 
         let order = db.temporal_order_episodes().unwrap();

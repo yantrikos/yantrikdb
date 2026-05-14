@@ -6,9 +6,8 @@
 use crate::attention::AttentionConfig;
 use crate::error::Result;
 use crate::query_dsl::{
-    execute_pipeline, CognitivePipeline, CognitiveOperator, PipelineContext,
-    PipelineExecutor, PipelineResult, StepOutput, AnticipatedItem, Prediction,
-    RankedCandidate, RecallMatch,
+    execute_pipeline, AnticipatedItem, CognitiveOperator, CognitivePipeline, PipelineContext,
+    PipelineExecutor, PipelineResult, Prediction, RankedCandidate, RecallMatch, StepOutput,
 };
 
 use super::{now, YantrikDB};
@@ -124,13 +123,14 @@ impl<'a> YantrikExecutor<'a> {
             if self.db.has_embedder() {
                 match self.db.recall_text(query, op.top_k) {
                     Ok(results) => {
-                        let matches: Vec<RecallMatch> = results.iter().map(|r| {
-                            RecallMatch {
+                        let matches: Vec<RecallMatch> = results
+                            .iter()
+                            .map(|r| RecallMatch {
                                 text: r.text.chars().take(200).collect(),
                                 similarity: r.scores.similarity,
                                 memory_type: r.memory_type.clone(),
-                            }
-                        }).collect();
+                            })
+                            .collect();
                         StepOutput::Recall {
                             memories_retrieved: matches.len(),
                             top_matches: matches,
@@ -150,7 +150,10 @@ impl<'a> YantrikExecutor<'a> {
             // No query — just report working set contents.
             match self.db.hydrate_working_set(self.attention_config.clone()) {
                 Ok(ws) => {
-                    let top: Vec<RecallMatch> = ws.by_activation().iter().take(op.top_k)
+                    let top: Vec<RecallMatch> = ws
+                        .by_activation()
+                        .iter()
+                        .take(op.top_k)
                         .map(|n| RecallMatch {
                             text: n.label.clone(),
                             similarity: n.attrs.activation,
@@ -321,9 +324,7 @@ impl<'a> YantrikExecutor<'a> {
 #[cfg(test)]
 mod tests {
     use crate::engine::YantrikDB;
-    use crate::query_dsl::{
-        CognitivePipeline, PipelinePatterns, PipelineStatus, CandidateAction,
-    };
+    use crate::query_dsl::{CandidateAction, CognitivePipeline, PipelinePatterns, PipelineStatus};
     use crate::state::{NodeId, NodeKind};
 
     fn test_db() -> YantrikDB {
@@ -335,23 +336,18 @@ mod tests {
     }
 
     fn test_candidates() -> Vec<CandidateAction> {
-        vec![
-            CandidateAction {
-                description: "Send reminder".to_string(),
-                action_kind: "notify".to_string(),
-                confidence: 0.7,
-                properties: Default::default(),
-            },
-        ]
+        vec![CandidateAction {
+            description: "Send reminder".to_string(),
+            action_kind: "notify".to_string(),
+            confidence: 0.7,
+            properties: Default::default(),
+        }]
     }
 
     #[test]
     fn test_reason_entry_point() {
         let db = test_db();
-        let pipeline = db.reason()
-            .attend(seed_ids())
-            .recall(5)
-            .explain();
+        let pipeline = db.reason().attend(seed_ids()).recall(5).explain();
 
         assert_eq!(pipeline.len(), 2);
     }
@@ -368,9 +364,7 @@ mod tests {
     #[test]
     fn test_execute_attend_recall() {
         let db = test_db();
-        let pipeline = db.reason()
-            .attend(seed_ids())
-            .recall(5);
+        let pipeline = db.reason().attend(seed_ids()).recall(5);
 
         let result = db.execute_pipeline(&pipeline).unwrap();
         assert_eq!(result.status, PipelineStatus::Complete);
@@ -380,10 +374,10 @@ mod tests {
     #[test]
     fn test_execute_compare_with_personality() {
         let db = test_db();
-        db.set_personality_preset(crate::personality_bias::PersonalityPreset::Companion).unwrap();
+        db.set_personality_preset(crate::personality_bias::PersonalityPreset::Companion)
+            .unwrap();
 
-        let pipeline = db.reason()
-            .compare(test_candidates());
+        let pipeline = db.reason().compare(test_candidates());
 
         let result = db.execute_pipeline(&pipeline).unwrap();
         assert_eq!(result.status, PipelineStatus::Complete);
@@ -415,7 +409,10 @@ mod tests {
         let result = db.execute_pipeline(&pipeline).unwrap();
         assert_eq!(result.status, PipelineStatus::Complete);
 
-        if let crate::query_dsl::StepOutput::Assess { overall_confidence, .. } = &result.steps[0].output {
+        if let crate::query_dsl::StepOutput::Assess {
+            overall_confidence, ..
+        } = &result.steps[0].output
+        {
             assert!(*overall_confidence >= 0.0 && *overall_confidence <= 1.0);
         } else {
             panic!("Expected Assess output");
@@ -446,7 +443,8 @@ mod tests {
     fn test_full_pipeline_execution() {
         let db = test_db();
 
-        let pipeline = db.reason()
+        let pipeline = db
+            .reason()
             .attend(seed_ids())
             .recall(3)
             .compare(test_candidates())

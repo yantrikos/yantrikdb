@@ -135,11 +135,9 @@ fn derive_depth(db: &YantrikDB) -> Result<f64> {
     )?;
 
     // Count distinct entities mentioned
-    let entity_count: i64 = db.conn().query_row(
-        "SELECT COUNT(*) FROM entities",
-        [],
-        |row| row.get(0),
-    )?;
+    let entity_count: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM entities", [], |row| row.get(0))?;
 
     // Map: 1 domain → 0.2, 5+ → 0.9
     let domain_score = ((domain_count as f64 - 1.0) / 4.0 * 0.7 + 0.2).clamp(0.1, 0.9);
@@ -176,11 +174,9 @@ fn derive_attentiveness(db: &YantrikDB) -> Result<f64> {
     )?;
 
     // Conflict resolution rate
-    let total_conflicts: i64 = db.conn().query_row(
-        "SELECT COUNT(*) FROM conflicts",
-        [],
-        |row| row.get(0),
-    )?;
+    let total_conflicts: i64 =
+        db.conn()
+            .query_row("SELECT COUNT(*) FROM conflicts", [], |row| row.get(0))?;
     let resolved_conflicts: i64 = db.conn().query_row(
         "SELECT COUNT(*) FROM conflicts WHERE status = 'resolved'",
         [],

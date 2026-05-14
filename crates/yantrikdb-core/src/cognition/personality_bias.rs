@@ -90,8 +90,14 @@ impl PersonalityBiasVector {
 
     /// Dimension names for display and serialization.
     pub const DIMENSION_NAMES: [&'static str; 8] = [
-        "curiosity", "proactivity", "caution", "warmth",
-        "efficiency", "playfulness", "formality", "persistence",
+        "curiosity",
+        "proactivity",
+        "caution",
+        "warmth",
+        "efficiency",
+        "playfulness",
+        "formality",
+        "persistence",
     ];
 
     /// Cosine similarity with another vector ∈ [-1.0, 1.0].
@@ -107,7 +113,11 @@ impl PersonalityBiasVector {
             mag_b += b * b;
         }
         let denom = mag_a.sqrt() * mag_b.sqrt();
-        if denom < 1e-10 { 0.0 } else { dot / denom }
+        if denom < 1e-10 {
+            0.0
+        } else {
+            dot / denom
+        }
     }
 
     /// Euclidean distance to another vector.
@@ -199,7 +209,10 @@ impl PersonalityPreset {
 
     /// All preset variants.
     pub const ALL: [PersonalityPreset; 4] = [
-        Self::Assistant, Self::Companion, Self::Coach, Self::Guardian,
+        Self::Assistant,
+        Self::Companion,
+        Self::Coach,
+        Self::Guardian,
     ];
 }
 
@@ -478,10 +491,10 @@ pub fn evolve_personality(
             let current_val = evolved.dimension(dim_idx);
             let target = (current_val + adjustment).clamp(0.0, 1.0);
             let new_val = current_val + rate * (target - current_val);
-            evolved.set_dimension(dim_idx, new_val.clamp(
-                config.min_trait_value,
-                config.max_trait_value,
-            ));
+            evolved.set_dimension(
+                dim_idx,
+                new_val.clamp(config.min_trait_value, config.max_trait_value),
+            );
         }
     }
 
@@ -557,13 +570,25 @@ pub fn personality_impact(
         });
     }
 
-    let most_boosted = action_biases.iter()
-        .max_by(|a, b| a.bias_result.total_bias.partial_cmp(&b.bias_result.total_bias).unwrap())
+    let most_boosted = action_biases
+        .iter()
+        .max_by(|a, b| {
+            a.bias_result
+                .total_bias
+                .partial_cmp(&b.bias_result.total_bias)
+                .unwrap()
+        })
         .filter(|a| a.bias_result.total_bias > 0.0)
         .map(|a| a.action_description.clone());
 
-    let most_penalized = action_biases.iter()
-        .min_by(|a, b| a.bias_result.total_bias.partial_cmp(&b.bias_result.total_bias).unwrap())
+    let most_penalized = action_biases
+        .iter()
+        .min_by(|a, b| {
+            a.bias_result
+                .total_bias
+                .partial_cmp(&b.bias_result.total_bias)
+                .unwrap()
+        })
         .filter(|a| a.bias_result.total_bias < 0.0)
         .map(|a| a.action_description.clone());
 
@@ -630,12 +655,7 @@ impl PersonalityBiasStore {
     }
 
     /// Record user feedback and evolve personality.
-    pub fn record_feedback(
-        &mut self,
-        dimension_idx: usize,
-        adjustment: f64,
-        now: f64,
-    ) {
+    pub fn record_feedback(&mut self, dimension_idx: usize, adjustment: f64, now: f64) {
         let bounded = adjustment.clamp(-0.2, 0.2);
         self.preferences.adjustments.push((dimension_idx, bounded));
         self.preferences.observation_count += 1;
@@ -721,8 +741,11 @@ mod tests {
         let result = compute_bias(&neutral, &action, &config);
 
         // Neutral personality → zero bias.
-        assert!(result.total_bias.abs() < 1e-10,
-            "Expected ~0 bias from neutral personality, got {}", result.total_bias);
+        assert!(
+            result.total_bias.abs() < 1e-10,
+            "Expected ~0 bias from neutral personality, got {}",
+            result.total_bias
+        );
         assert!(result.confidence_threshold_delta.abs() < 1e-10);
     }
 
@@ -738,7 +761,10 @@ mod tests {
 
         // Caution is 0.9 for Guardian → centered = 0.4.
         // Contribution = -0.4 * 0.9 * 1.0 = -0.36.
-        assert!(result.total_bias < 0.0, "High caution should penalize risky actions");
+        assert!(
+            result.total_bias < 0.0,
+            "High caution should penalize risky actions"
+        );
 
         // Confidence threshold should be raised.
         assert!(result.confidence_threshold_delta > 0.0);
@@ -756,7 +782,10 @@ mod tests {
 
         // Warmth is 0.9 for Companion → centered = 0.4.
         // Contribution = 0.4 * 0.8 * 1.0 = 0.32.
-        assert!(result.total_bias > 0.0, "High warmth should boost emotional actions");
+        assert!(
+            result.total_bias > 0.0,
+            "High warmth should boost emotional actions"
+        );
     }
 
     #[test]

@@ -28,10 +28,8 @@ impl YantrikDB {
         let intent_result = self.infer_intents(intent_config)?;
 
         // CK-1.7: Generate candidates
-        let candidate_result = self.generate_action_candidates(
-            &intent_result.hypotheses,
-            action_config,
-        )?;
+        let candidate_result =
+            self.generate_action_candidates(&intent_result.hypotheses, action_config)?;
 
         // Load context for evaluation
         let mut all_nodes: Vec<CognitiveNode> = Vec::new();
@@ -123,13 +121,18 @@ mod tests {
         db.persist_cognitive_node(&node).unwrap();
         db.persist_node_id_allocator(&alloc).unwrap();
 
-        let result = db.evaluate_actions(
-            &IntentConfig::default(),
-            &ActionConfig::default(),
-            &EvaluatorConfig::default(),
-        ).unwrap();
+        let result = db
+            .evaluate_actions(
+                &IntentConfig::default(),
+                &ActionConfig::default(),
+                &EvaluatorConfig::default(),
+            )
+            .unwrap();
 
-        assert!(!result.actions.is_empty(), "should produce evaluated actions");
+        assert!(
+            !result.actions.is_empty(),
+            "should produce evaluated actions"
+        );
 
         // Should be sorted by utility
         for w in result.actions.windows(2) {
@@ -160,11 +163,13 @@ mod tests {
         db.persist_cognitive_node(&node).unwrap();
         db.persist_node_id_allocator(&alloc).unwrap();
 
-        let best = db.best_action(
-            &IntentConfig::default(),
-            &ActionConfig::default(),
-            &EvaluatorConfig::default(),
-        ).unwrap();
+        let best = db
+            .best_action(
+                &IntentConfig::default(),
+                &ActionConfig::default(),
+                &EvaluatorConfig::default(),
+            )
+            .unwrap();
 
         assert!(best.is_some());
     }

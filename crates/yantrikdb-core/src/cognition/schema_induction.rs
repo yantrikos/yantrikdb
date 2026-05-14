@@ -53,16 +53,10 @@ pub enum SchemaCondition {
     },
 
     /// A numeric attribute must be within a range.
-    AttributeInRange {
-        key: String,
-        min: f64,
-        max: f64,
-    },
+    AttributeInRange { key: String, min: f64, max: f64 },
 
     /// The episode must be within a temporal window of the context.
-    TemporalWindow {
-        recency_ms: u64,
-    },
+    TemporalWindow { recency_ms: u64 },
 
     /// A belief in a category must exceed a confidence threshold.
     BeliefAboveThreshold {
@@ -77,8 +71,14 @@ impl SchemaCondition {
         match (self, other) {
             (SchemaCondition::NodeKindPresent(a), SchemaCondition::NodeKindPresent(b)) => a == b,
             (
-                SchemaCondition::EdgeExists { kind: ka, direction: da },
-                SchemaCondition::EdgeExists { kind: kb, direction: db },
+                SchemaCondition::EdgeExists {
+                    kind: ka,
+                    direction: da,
+                },
+                SchemaCondition::EdgeExists {
+                    kind: kb,
+                    direction: db,
+                },
             ) => ka == kb && (da == db || *da == Direction::Any || *db == Direction::Any),
             (
                 SchemaCondition::AttributeInRange { key: ka, .. },
@@ -108,19 +108,36 @@ impl SchemaCondition {
                 }
             }
             (
-                SchemaCondition::EdgeExists { kind: ka, direction: da },
-                SchemaCondition::EdgeExists { kind: kb, direction: db },
+                SchemaCondition::EdgeExists {
+                    kind: ka,
+                    direction: da,
+                },
+                SchemaCondition::EdgeExists {
+                    kind: kb,
+                    direction: db,
+                },
             ) => {
                 if ka == kb {
                     let dir = if da == db { *da } else { Direction::Any };
-                    Some(SchemaCondition::EdgeExists { kind: *ka, direction: dir })
+                    Some(SchemaCondition::EdgeExists {
+                        kind: *ka,
+                        direction: dir,
+                    })
                 } else {
                     None
                 }
             }
             (
-                SchemaCondition::AttributeInRange { key: ka, min: min_a, max: max_a },
-                SchemaCondition::AttributeInRange { key: kb, min: min_b, max: max_b },
+                SchemaCondition::AttributeInRange {
+                    key: ka,
+                    min: min_a,
+                    max: max_a,
+                },
+                SchemaCondition::AttributeInRange {
+                    key: kb,
+                    min: min_b,
+                    max: max_b,
+                },
             ) => {
                 if ka == kb {
                     Some(SchemaCondition::AttributeInRange {
@@ -139,8 +156,14 @@ impl SchemaCondition {
                 recency_ms: (*a).max(*b), // widen the window
             }),
             (
-                SchemaCondition::BeliefAboveThreshold { category: ca, min_confidence: ma },
-                SchemaCondition::BeliefAboveThreshold { category: cb, min_confidence: mb },
+                SchemaCondition::BeliefAboveThreshold {
+                    category: ca,
+                    min_confidence: ma,
+                },
+                SchemaCondition::BeliefAboveThreshold {
+                    category: cb,
+                    min_confidence: mb,
+                },
             ) => {
                 if ca == cb {
                     Some(SchemaCondition::BeliefAboveThreshold {
@@ -297,8 +320,7 @@ impl InducedSchema {
 
     /// Whether this schema has enough evidence to be considered reliable.
     pub fn is_reliable(&self) -> bool {
-        self.confidence >= 0.7
-            && self.supporting_episodes.len() >= 3
+        self.confidence >= 0.7 && self.supporting_episodes.len() >= 3
     }
 
     /// Total evidence count.
@@ -399,10 +421,7 @@ impl SchemaStore {
         // Index by node kinds in preconditions.
         for cond in &schema.preconditions {
             if let SchemaCondition::NodeKindPresent(kind) = cond {
-                self.precondition_index
-                    .entry(*kind)
-                    .or_default()
-                    .push(idx);
+                self.precondition_index.entry(*kind).or_default().push(idx);
             }
         }
         self.schemas.push(schema);
@@ -432,10 +451,7 @@ impl SchemaStore {
         for (idx, schema) in self.schemas.iter().enumerate() {
             for cond in &schema.preconditions {
                 if let SchemaCondition::NodeKindPresent(kind) = cond {
-                    self.precondition_index
-                        .entry(*kind)
-                        .or_default()
-                        .push(idx);
+                    self.precondition_index.entry(*kind).or_default().push(idx);
                 }
             }
         }
@@ -515,7 +531,10 @@ pub fn observe_episode(episode: &EpisodeData, store: &mut SchemaStore) {
 
 /// Compute how well an episode's conditions match a schema's preconditions.
 /// Returns a score in [0.0, 1.0].
-fn condition_match_score(schema_conds: &[SchemaCondition], episode_conds: &[SchemaCondition]) -> f64 {
+fn condition_match_score(
+    schema_conds: &[SchemaCondition],
+    episode_conds: &[SchemaCondition],
+) -> f64 {
     if schema_conds.is_empty() {
         return 1.0; // No preconditions → matches everything.
     }
@@ -543,10 +562,8 @@ pub fn refine_schema(schema: &mut InducedSchema, episode: &EpisodeData) {
         schema.supporting_episodes.push(episode.episode_id);
 
         // Widen preconditions via generalization.
-        schema.preconditions = generalize_preconditions(&[
-            schema.preconditions.clone(),
-            episode.conditions.clone(),
-        ]);
+        schema.preconditions =
+            generalize_preconditions(&[schema.preconditions.clone(), episode.conditions.clone()]);
 
         // Update generality: more diverse contexts = more general.
         let unique_contexts = schema.supporting_episodes.len();
@@ -570,10 +587,7 @@ pub fn refine_schema(schema: &mut InducedSchema, episode: &EpisodeData) {
 ///
 /// Uses anti-unification: find the most specific generalization that covers
 /// all provided episodes.
-pub fn induce_schema(
-    episodes: &[EpisodeData],
-    store: &mut SchemaStore,
-) -> Option<InducedSchema> {
+pub fn induce_schema(episodes: &[EpisodeData], store: &mut SchemaStore) -> Option<InducedSchema> {
     if episodes.len() < 3 {
         return None;
     }
@@ -585,10 +599,8 @@ pub fn induce_schema(
     }
 
     // Collect all condition sets.
-    let condition_sets: Vec<Vec<SchemaCondition>> = episodes
-        .iter()
-        .map(|e| e.conditions.clone())
-        .collect();
+    let condition_sets: Vec<Vec<SchemaCondition>> =
+        episodes.iter().map(|e| e.conditions.clone()).collect();
 
     // Anti-unify: find common conditions.
     let generalized = generalize_preconditions(&condition_sets);
@@ -689,18 +701,25 @@ fn specialize_on_failure(schema: &mut InducedSchema, failure: &EpisodeData) {
             match fc {
                 SchemaCondition::AttributeInRange { key, min, max } => {
                     // Exclude this range by narrowing.
-                    schema.preconditions.push(SchemaCondition::AttributeInRange {
-                        key: key.clone(),
-                        min: *max, // Set min above the failure range.
-                        max: f64::INFINITY,
-                    });
+                    schema
+                        .preconditions
+                        .push(SchemaCondition::AttributeInRange {
+                            key: key.clone(),
+                            min: *max, // Set min above the failure range.
+                            max: f64::INFINITY,
+                        });
                 }
-                SchemaCondition::BeliefAboveThreshold { category, min_confidence } => {
+                SchemaCondition::BeliefAboveThreshold {
+                    category,
+                    min_confidence,
+                } => {
                     // Require higher confidence than what failed.
-                    schema.preconditions.push(SchemaCondition::BeliefAboveThreshold {
-                        category: category.clone(),
-                        min_confidence: min_confidence + 0.1,
-                    });
+                    schema
+                        .preconditions
+                        .push(SchemaCondition::BeliefAboveThreshold {
+                            category: category.clone(),
+                            min_confidence: min_confidence + 0.1,
+                        });
                 }
                 _ => {
                     // For other types, we can't easily negate, so we note the
@@ -717,21 +736,19 @@ fn specialize_on_failure(schema: &mut InducedSchema, failure: &EpisodeData) {
 
 /// Find applicable schemas for the current context, ranked by
 /// (confidence × generality × recency).
-pub fn match_schemas(
-    context: &ContextSnapshot,
-    store: &SchemaStore,
-) -> Vec<(SchemaId, f64)> {
+pub fn match_schemas(context: &ContextSnapshot, store: &SchemaStore) -> Vec<(SchemaId, f64)> {
     let mut matches: Vec<(SchemaId, f64)> = Vec::new();
 
     for schema in &store.schemas {
         let satisfaction = evaluate_satisfaction(&schema.preconditions, context);
         if satisfaction >= 0.5 {
             // Recency factor: schemas refined recently get a small boost.
-            let age_days = (context.now_ms.saturating_sub(schema.last_refined_at)) as f64
-                / (86_400_000.0);
+            let age_days =
+                (context.now_ms.saturating_sub(schema.last_refined_at)) as f64 / (86_400_000.0);
             let recency = (-age_days / 30.0).exp(); // 30-day half-life
 
-            let score = satisfaction * schema.confidence * (0.5 + 0.3 * schema.generality + 0.2 * recency);
+            let score =
+                satisfaction * schema.confidence * (0.5 + 0.3 * schema.generality + 0.2 * recency);
             matches.push((schema.id, score));
         }
     }
@@ -750,23 +767,25 @@ fn evaluate_satisfaction(preconditions: &[SchemaCondition], context: &ContextSna
     let mut satisfied = 0;
     for cond in preconditions {
         let met = match cond {
-            SchemaCondition::NodeKindPresent(kind) => {
-                context.node_kinds_present.contains(kind)
-            }
-            SchemaCondition::EdgeExists { kind, direction } => {
-                context.edge_kinds_present.iter().any(|(ek, ed)| {
-                    ek == kind && (*direction == Direction::Any || ed == direction)
-                })
-            }
-            SchemaCondition::AttributeInRange { key, min, max } => {
-                context.attributes.get(key).map_or(false, |v| v >= min && v <= max)
-            }
+            SchemaCondition::NodeKindPresent(kind) => context.node_kinds_present.contains(kind),
+            SchemaCondition::EdgeExists { kind, direction } => context
+                .edge_kinds_present
+                .iter()
+                .any(|(ek, ed)| ek == kind && (*direction == Direction::Any || ed == direction)),
+            SchemaCondition::AttributeInRange { key, min, max } => context
+                .attributes
+                .get(key)
+                .map_or(false, |v| v >= min && v <= max),
             SchemaCondition::TemporalWindow { .. } => {
                 true // Temporal conditions are always "met" for matching.
             }
-            SchemaCondition::BeliefAboveThreshold { category, min_confidence } => {
-                context.belief_confidences.get(category).map_or(false, |c| c >= min_confidence)
-            }
+            SchemaCondition::BeliefAboveThreshold {
+                category,
+                min_confidence,
+            } => context
+                .belief_confidences
+                .get(category)
+                .map_or(false, |c| c >= min_confidence),
         };
         if met {
             satisfied += 1;
@@ -797,18 +816,18 @@ pub fn merge_schemas(a: &InducedSchema, b: &InducedSchema) -> Option<InducedSche
     let now = crate::state::now_ms();
 
     // Generalize preconditions.
-    let merged_preconditions = generalize_preconditions(&[
-        a.preconditions.clone(),
-        b.preconditions.clone(),
-    ]);
+    let merged_preconditions =
+        generalize_preconditions(&[a.preconditions.clone(), b.preconditions.clone()]);
 
     // Merge outcomes.
     let mut outcomes = a.expected_outcomes.clone();
     for bo in &b.expected_outcomes {
-        if let Some(existing) = outcomes.iter_mut().find(|o| o.description == bo.description) {
+        if let Some(existing) = outcomes
+            .iter_mut()
+            .find(|o| o.description == bo.description)
+        {
             existing.observation_count += bo.observation_count;
-            existing.probability =
-                (existing.probability + bo.probability) / 2.0;
+            existing.probability = (existing.probability + bo.probability) / 2.0;
             existing.valence = (existing.valence + bo.valence) / 2.0;
         } else {
             outcomes.push(bo.clone());
@@ -870,8 +889,8 @@ pub fn schema_maintenance(
     store.schemas.retain(|s| {
         let has_enough_evidence = s.evidence_count() >= 3;
         let is_low_confidence = s.confidence < 0.25;
-        let is_old_unused = now_ms.saturating_sub(s.last_refined_at) > max_age_ms
-            && s.confidence < 0.5;
+        let is_old_unused =
+            now_ms.saturating_sub(s.last_refined_at) > max_age_ms && s.confidence < 0.5;
 
         if has_enough_evidence && is_low_confidence {
             pruned_low_confidence += 1;
@@ -1028,14 +1047,19 @@ mod tests {
         let episodes = vec![
             make_episode(1, "suggest_break", true, basic_conditions()),
             make_episode(2, "suggest_break", true, variant_conditions()),
-            make_episode(3, "suggest_break", true, vec![
-                SchemaCondition::NodeKindPresent(NodeKind::Goal),
-                SchemaCondition::AttributeInRange {
-                    key: "urgency".to_string(),
-                    min: 0.4,
-                    max: 0.8,
-                },
-            ]),
+            make_episode(
+                3,
+                "suggest_break",
+                true,
+                vec![
+                    SchemaCondition::NodeKindPresent(NodeKind::Goal),
+                    SchemaCondition::AttributeInRange {
+                        key: "urgency".to_string(),
+                        min: 0.4,
+                        max: 0.8,
+                    },
+                ],
+            ),
         ];
 
         let schema = induce_schema(&episodes, &mut store);
@@ -1109,7 +1133,10 @@ mod tests {
         let result = generalize_preconditions(&sets);
         // Task condition should be dropped (not in second set).
         assert_eq!(result.len(), 1);
-        assert!(matches!(result[0], SchemaCondition::NodeKindPresent(NodeKind::Goal)));
+        assert!(matches!(
+            result[0],
+            SchemaCondition::NodeKindPresent(NodeKind::Goal)
+        ));
     }
 
     #[test]
@@ -1255,7 +1282,10 @@ mod tests {
             last_refined_at: now,
             refinement_count: 0,
         };
-        assert!(merge_schemas(&a, &b).is_none(), "Different actions should not merge");
+        assert!(
+            merge_schemas(&a, &b).is_none(),
+            "Different actions should not merge"
+        );
     }
 
     #[test]

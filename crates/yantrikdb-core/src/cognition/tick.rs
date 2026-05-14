@@ -28,7 +28,9 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::agenda::{Agenda, AgendaConfig, AgendaId, AgendaKind, TickResult as AgendaTickResult, UrgencyFn};
+use super::agenda::{
+    Agenda, AgendaConfig, AgendaId, AgendaKind, TickResult as AgendaTickResult, UrgencyFn,
+};
 use super::hawkes::HawkesRegistry;
 use super::state::*;
 
@@ -71,7 +73,7 @@ impl Default for TickConfig {
             anomaly_check_interval: 100,
             suggestion_cache_interval: 50,
             consolidation_interval: 1000,
-            budget_us: 5000,  // 5ms
+            budget_us: 5000, // 5ms
             activation_eviction_threshold: 0.001,
             max_decay_nodes_per_tick: 200,
             anticipation_threshold: 1.5,
@@ -371,10 +373,9 @@ pub fn cognitive_tick(
             if model.total_observations >= 5 {
                 if model.should_anticipate(now, config.anticipation_threshold) {
                     // Check if this routine is already in the agenda
-                    let already_tracked = agenda.items_iter().any(|item| {
-                        item.description.contains(label)
-                            && item.is_surfaceable(now)
-                    });
+                    let already_tracked = agenda
+                        .items_iter()
+                        .any(|item| item.description.contains(label) && item.is_surfaceable(now));
 
                     if !already_tracked {
                         if let Some(pred) = model.predict_next(now, 3600.0, 60.0) {
@@ -383,9 +384,15 @@ pub fn cognitive_tick(
                             agenda.add_item_at(
                                 NodeId::NIL,
                                 AgendaKind::RoutineWindowOpening,
-                                UrgencyFn::Constant { value: pred.confidence * 0.6 },
+                                UrgencyFn::Constant {
+                                    value: pred.confidence * 0.6,
+                                },
                                 Some(pred.predicted_time),
-                                format!("Anticipated: {} (confidence {:.0}%)", label, pred.confidence * 100.0),
+                                format!(
+                                    "Anticipated: {} (confidence {:.0}%)",
+                                    label,
+                                    pred.confidence * 100.0
+                                ),
                                 now,
                                 &agenda_config,
                             );
@@ -541,14 +548,12 @@ pub fn cognitive_tick(
 /// - Idle user: tick every 5 seconds
 /// - Active user: tick every 1 second (catch interactions)
 /// - Urgent items pending: tick every 0.5 seconds
-pub fn next_tick_interval_ms(
-    state: &TickState,
-    agenda: &Agenda,
-    now: f64,
-) -> u64 {
+pub fn next_tick_interval_ms(state: &TickState, agenda: &Agenda, now: f64) -> u64 {
     // Check for urgent items
     let active_items = agenda.get_active(now, 5);
-    let has_urgent = active_items.iter().any(|item| item.current_urgency(now) > 0.8);
+    let has_urgent = active_items
+        .iter()
+        .any(|item| item.current_urgency(now) > 0.8);
 
     if has_urgent {
         500 // 0.5s when urgent items pending
@@ -565,9 +570,9 @@ pub fn next_tick_interval_ms(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::agenda::{Agenda, AgendaConfig, AgendaKind, UrgencyFn};
     use super::super::hawkes::HawkesRegistry;
+    use super::*;
 
     fn make_test_nodes() -> Vec<CognitiveNode> {
         let mut alloc = NodeIdAllocator::new();
@@ -666,7 +671,8 @@ mod tests {
         assert!(
             nodes[0].attrs.activation < initial_activation,
             "Activation should decay: {} -> {}",
-            initial_activation, nodes[0].attrs.activation,
+            initial_activation,
+            nodes[0].attrs.activation,
         );
         assert!(report.nodes_decayed > 0);
     }
@@ -691,7 +697,9 @@ mod tests {
         let now = *timestamps.last().unwrap() + 60.0;
         let report = cognitive_tick(now, &mut state, &mut agenda, &mut nodes, &registry, &config);
 
-        assert!(report.phases_executed.contains(&TickPhase::RoutinePrediction));
+        assert!(report
+            .phases_executed
+            .contains(&TickPhase::RoutinePrediction));
     }
 
     #[test]
@@ -702,14 +710,16 @@ mod tests {
         let registry = HawkesRegistry::new();
         let config = TickConfig {
             anomaly_check_interval: 1, // Run every tick for testing
-            stale_item_hours: 1.0,      // 1 hour threshold
+            stale_item_hours: 1.0,     // 1 hour threshold
             ..Default::default()
         };
 
         let now = 1_700_000_000.0;
         let report = cognitive_tick(now, &mut state, &mut agenda, &mut nodes, &registry, &config);
 
-        assert!(report.phases_executed.contains(&TickPhase::AnomalyDetection));
+        assert!(report
+            .phases_executed
+            .contains(&TickPhase::AnomalyDetection));
         // Should detect stale goal (last_updated_ms = 1000, way old)
         let stale_anomalies: Vec<_> = report
             .anomalies_detected
@@ -806,7 +816,14 @@ mod tests {
         assert!(!report.consolidation_ran);
 
         // Next tick (tick_number=1000) should trigger
-        let report = cognitive_tick(now + 1.0, &mut state, &mut agenda, &mut nodes, &registry, &config);
+        let report = cognitive_tick(
+            now + 1.0,
+            &mut state,
+            &mut agenda,
+            &mut nodes,
+            &registry,
+            &config,
+        );
         assert!(report.consolidation_ran);
     }
 
@@ -819,7 +836,14 @@ mod tests {
         let config = TickConfig::default();
 
         for i in 0..5 {
-            cognitive_tick(1_700_000_000.0 + i as f64, &mut state, &mut agenda, &mut nodes, &registry, &config);
+            cognitive_tick(
+                1_700_000_000.0 + i as f64,
+                &mut state,
+                &mut agenda,
+                &mut nodes,
+                &registry,
+                &config,
+            );
         }
         assert_eq!(state.tick_count, 5);
     }

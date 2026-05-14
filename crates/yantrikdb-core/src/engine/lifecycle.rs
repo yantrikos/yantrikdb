@@ -1,19 +1,17 @@
 use rusqlite::params;
 
-use crate::error::{YantrikDbError, Result};
+use crate::error::{Result, YantrikDbError};
 use crate::scoring;
 use crate::types::*;
 
-use super::{now, embedding_hash, YantrikDB};
+use super::{embedding_hash, now, YantrikDB};
 
 impl YantrikDB {
     /// Get a single memory by RID.
     #[tracing::instrument(skip(self))]
     pub fn get(&self, rid: &str) -> Result<Option<Memory>> {
         let conn = self.conn();
-        let mut stmt = conn.prepare(
-            "SELECT * FROM memories WHERE rid = ?1",
-        )?;
+        let mut stmt = conn.prepare("SELECT * FROM memories WHERE rid = ?1")?;
 
         let result = stmt.query_row(params![rid], |row| {
             Ok((
@@ -472,7 +470,10 @@ impl YantrikDB {
                 "keep_both",
                 Some(&new_rid),
                 None,
-                Some(&format!("Auto-resolved: original memory corrected to '{}'", new_rid)),
+                Some(&format!(
+                    "Auto-resolved: original memory corrected to '{}'",
+                    new_rid
+                )),
             );
         }
 

@@ -111,8 +111,8 @@ impl Default for IntentConfig {
             min_posterior: 0.05,
             max_hypotheses: 8,
             temperature: 1.0,
-            recency_window_secs: 3600.0 * 4.0,  // 4 hours
-            routine_proximity_secs: 1800.0,      // 30 minutes
+            recency_window_secs: 3600.0 * 4.0, // 4 hours
+            routine_proximity_secs: 1800.0,    // 30 minutes
             min_goal_urgency: 0.3,
             min_need_intensity: 0.4,
             include_opportunities: true,
@@ -229,21 +229,27 @@ pub fn extract_goal_features(
 
     // [4] entity_overlap: count edges connecting this goal to recent episodes
     let goal_raw = goal.id.to_raw();
-    let overlap = edges.iter().filter(|e| {
-        let src = e.src.to_raw();
-        let tgt = e.dst.to_raw();
-        (src == goal_raw || tgt == goal_raw)
-            && episodes.iter().any(|ep| ep.id.to_raw() == src || ep.id.to_raw() == tgt)
-    }).count();
+    let overlap = edges
+        .iter()
+        .filter(|e| {
+            let src = e.src.to_raw();
+            let tgt = e.dst.to_raw();
+            (src == goal_raw || tgt == goal_raw)
+                && episodes
+                    .iter()
+                    .any(|ep| ep.id.to_raw() == src || ep.id.to_raw() == tgt)
+        })
+        .count();
     f[feature::ENTITY_OVERLAP] = (overlap as f64 / 5.0).min(1.0);
 
     // [5] valence_match: positive goals feel good
     f[feature::VALENCE_MATCH] = (goal.attrs.valence + 1.0) / 2.0; // normalize [-1,1] → [0,1]
 
     // [6] evidence_strength: number of edges supporting this goal
-    let support = edges.iter().filter(|e| {
-        e.dst.to_raw() == goal_raw && e.kind == CognitiveEdgeKind::AdvancesGoal
-    }).count();
+    let support = edges
+        .iter()
+        .filter(|e| e.dst.to_raw() == goal_raw && e.kind == CognitiveEdgeKind::AdvancesGoal)
+        .count();
     f[feature::EVIDENCE_STRENGTH] = (support as f64 / 5.0).min(1.0);
 
     // [7] need_intensity: 0 for goal-driven (no need involved)
@@ -271,9 +277,10 @@ pub fn extract_routine_features(
     if let NodePayload::Routine(ref rp) = routine.payload {
         // [0] goal_alignment: check if any edge links this routine to a goal
         let routine_raw = routine.id.to_raw();
-        let goal_edges = edges.iter().filter(|e| {
-            e.src.to_raw() == routine_raw && e.kind == CognitiveEdgeKind::AdvancesGoal
-        }).count();
+        let goal_edges = edges
+            .iter()
+            .filter(|e| e.src.to_raw() == routine_raw && e.kind == CognitiveEdgeKind::AdvancesGoal)
+            .count();
         f[feature::GOAL_ALIGNMENT] = (goal_edges as f64 / 3.0).min(1.0);
 
         // [1] temporal_match: how close we are to the next trigger time
@@ -321,9 +328,10 @@ pub fn extract_need_features(
     if let NodePayload::Need(ref np) = need.payload {
         // [0] goal_alignment: check if need links to any goals
         let need_raw = need.id.to_raw();
-        let goal_edges = edges.iter().filter(|e| {
-            e.src.to_raw() == need_raw && e.kind == CognitiveEdgeKind::AdvancesGoal
-        }).count();
+        let goal_edges = edges
+            .iter()
+            .filter(|e| e.src.to_raw() == need_raw && e.kind == CognitiveEdgeKind::AdvancesGoal)
+            .count();
         f[feature::GOAL_ALIGNMENT] = (goal_edges as f64 / 3.0).min(1.0);
 
         // [1] temporal_match: time since last satisfied (longer = more urgent)
@@ -370,9 +378,10 @@ pub fn extract_episode_features(
 
     // [0] goal_alignment: does this episode connect to an active goal?
     let ep_raw = episode.id.to_raw();
-    let goal_edges = edges.iter().filter(|e| {
-        e.src.to_raw() == ep_raw && e.kind == CognitiveEdgeKind::AdvancesGoal
-    }).count();
+    let goal_edges = edges
+        .iter()
+        .filter(|e| e.src.to_raw() == ep_raw && e.kind == CognitiveEdgeKind::AdvancesGoal)
+        .count();
     f[feature::GOAL_ALIGNMENT] = (goal_edges as f64 / 3.0).min(1.0);
 
     // [1] temporal_match: recency is the key signal for episode continuation
@@ -389,12 +398,17 @@ pub fn extract_episode_features(
     f[feature::FREQUENCY] = (related_episodes.len() as f64 / 5.0).min(1.0);
 
     // [4] entity_overlap: shared edges between this episode and others
-    let overlap = edges.iter().filter(|e| {
-        let src = e.src.to_raw();
-        let tgt = e.dst.to_raw();
-        (src == ep_raw || tgt == ep_raw)
-            && related_episodes.iter().any(|r| r.id.to_raw() == src || r.id.to_raw() == tgt)
-    }).count();
+    let overlap = edges
+        .iter()
+        .filter(|e| {
+            let src = e.src.to_raw();
+            let tgt = e.dst.to_raw();
+            (src == ep_raw || tgt == ep_raw)
+                && related_episodes
+                    .iter()
+                    .any(|r| r.id.to_raw() == src || r.id.to_raw() == tgt)
+        })
+        .count();
     f[feature::ENTITY_OVERLAP] = (overlap as f64 / 5.0).min(1.0);
 
     // [5] valence_match
@@ -441,9 +455,10 @@ pub fn extract_opportunity_features(
 
         // [4] entity_overlap: edges to other active nodes
         let op_raw = opportunity.id.to_raw();
-        let connections = edges.iter().filter(|e| {
-            e.src.to_raw() == op_raw || e.dst.to_raw() == op_raw
-        }).count();
+        let connections = edges
+            .iter()
+            .filter(|e| e.src.to_raw() == op_raw || e.dst.to_raw() == op_raw)
+            .count();
         f[feature::ENTITY_OVERLAP] = (connections as f64 / 5.0).min(1.0);
 
         // [6] evidence_strength: expected benefit
@@ -464,7 +479,11 @@ pub fn extract_opportunity_features(
 
 /// Compute raw score from feature vector and weights via dot product.
 pub fn linear_score(features: &[f64], weights: &[f64]) -> f64 {
-    features.iter().zip(weights.iter()).map(|(f, w)| f * w).sum()
+    features
+        .iter()
+        .zip(weights.iter())
+        .map(|(f, w)| f * w)
+        .sum()
 }
 
 /// Softmax normalization with temperature.
@@ -630,19 +649,19 @@ pub fn generate_episode_hypotheses(
     }
 
     // Use the most recent episode as the primary seed
-    let seed = recent
-        .iter()
-        .max_by(|a, b| {
-            let a_time = match &a.payload {
-                NodePayload::Episode(ep) => ep.occurred_at,
-                _ => 0.0,
-            };
-            let b_time = match &b.payload {
-                NodePayload::Episode(ep) => ep.occurred_at,
-                _ => 0.0,
-            };
-            a_time.partial_cmp(&b_time).unwrap_or(std::cmp::Ordering::Equal)
-        });
+    let seed = recent.iter().max_by(|a, b| {
+        let a_time = match &a.payload {
+            NodePayload::Episode(ep) => ep.occurred_at,
+            _ => 0.0,
+        };
+        let b_time = match &b.payload {
+            NodePayload::Episode(ep) => ep.occurred_at,
+            _ => 0.0,
+        };
+        a_time
+            .partial_cmp(&b_time)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     match seed {
         Some(s) => {
@@ -727,34 +746,46 @@ pub fn infer_intents(
     let start = std::time::Instant::now();
 
     // Partition nodes by kind
-    let goals: Vec<&CognitiveNode> = nodes.iter()
+    let goals: Vec<&CognitiveNode> = nodes
+        .iter()
         .filter(|n| n.id.kind() == NodeKind::Goal)
         .copied()
         .collect();
-    let routines: Vec<&CognitiveNode> = nodes.iter()
+    let routines: Vec<&CognitiveNode> = nodes
+        .iter()
         .filter(|n| n.id.kind() == NodeKind::Routine)
         .copied()
         .collect();
-    let needs: Vec<&CognitiveNode> = nodes.iter()
+    let needs: Vec<&CognitiveNode> = nodes
+        .iter()
         .filter(|n| n.id.kind() == NodeKind::Need)
         .copied()
         .collect();
-    let episodes: Vec<&CognitiveNode> = nodes.iter()
+    let episodes: Vec<&CognitiveNode> = nodes
+        .iter()
         .filter(|n| n.id.kind() == NodeKind::Episode)
         .copied()
         .collect();
-    let opportunities: Vec<&CognitiveNode> = nodes.iter()
+    let opportunities: Vec<&CognitiveNode> = nodes
+        .iter()
         .filter(|n| n.id.kind() == NodeKind::Opportunity)
         .copied()
         .collect();
 
     // Generate hypotheses from all sources
     let mut all_hypotheses: Vec<ScoredIntent> = Vec::new();
-    all_hypotheses.extend(generate_goal_hypotheses(&goals, &episodes, edges, now, config));
+    all_hypotheses.extend(generate_goal_hypotheses(
+        &goals, &episodes, edges, now, config,
+    ));
     all_hypotheses.extend(generate_routine_hypotheses(&routines, edges, now, config));
     all_hypotheses.extend(generate_need_hypotheses(&needs, edges, now, config));
     all_hypotheses.extend(generate_episode_hypotheses(&episodes, edges, now, config));
-    all_hypotheses.extend(generate_opportunity_hypotheses(&opportunities, edges, now, config));
+    all_hypotheses.extend(generate_opportunity_hypotheses(
+        &opportunities,
+        edges,
+        now,
+        config,
+    ));
 
     let total_generated = all_hypotheses.len();
 
@@ -883,7 +914,7 @@ mod tests {
             attrs,
             payload: NodePayload::Routine(RoutinePayload {
                 description: desc.to_string(),
-                period_secs: 86400.0,          // daily
+                period_secs: 86400.0,           // daily
                 phase_offset_secs: now + 600.0, // triggers in 10 minutes
                 reliability: 0.85,
                 observation_count: 15,
@@ -965,7 +996,10 @@ mod tests {
         let sharp = softmax(&scores, 0.5);
         let flat = softmax(&scores, 2.0);
         // Sharper temperature → winner takes more
-        assert!(sharp[2] > flat[2], "lower temperature should sharpen distribution");
+        assert!(
+            sharp[2] > flat[2],
+            "lower temperature should sharpen distribution"
+        );
     }
 
     #[test]
@@ -1049,7 +1083,9 @@ mod tests {
 
         // Should pick the most recent episode as the seed
         assert_eq!(hypotheses.len(), 1);
-        assert!(hypotheses[0].description.contains("Debugging test failures"));
+        assert!(hypotheses[0]
+            .description
+            .contains("Debugging test failures"));
         assert_eq!(hypotheses[0].source, IntentSource::EpisodeDriven);
     }
 
@@ -1086,7 +1122,10 @@ mod tests {
         let result = infer_intents(&nodes, &[], now, &config);
 
         assert_eq!(result.total_generated, 5);
-        assert!(!result.hypotheses.is_empty(), "should produce at least one hypothesis");
+        assert!(
+            !result.hypotheses.is_empty(),
+            "should produce at least one hypothesis"
+        );
 
         // Posteriors should sum to ≤ 1.0 (some may be filtered)
         let sum: f64 = result.hypotheses.iter().map(|h| h.posterior).sum();
@@ -1094,7 +1133,10 @@ mod tests {
 
         // Should be sorted by posterior descending
         for w in result.hypotheses.windows(2) {
-            assert!(w[0].posterior >= w[1].posterior, "should be sorted descending");
+            assert!(
+                w[0].posterior >= w[1].posterior,
+                "should be sorted descending"
+            );
         }
     }
 

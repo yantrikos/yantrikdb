@@ -368,10 +368,7 @@ fn check_cooldown(
 }
 
 /// Check anti-spam limit.
-fn check_anti_spam(
-    config: &PolicyConfig,
-    ctx: &PolicyContext,
-) -> Option<RejectionReason> {
+fn check_anti_spam(config: &PolicyConfig, ctx: &PolicyContext) -> Option<RejectionReason> {
     if ctx.suggestions_in_window >= config.max_suggestions_per_window {
         return Some(RejectionReason::AntiSpam {
             count: ctx.suggestions_in_window,
@@ -382,10 +379,7 @@ fn check_anti_spam(
 }
 
 /// Check privacy filter for shared contexts.
-fn check_privacy(
-    ctx: &PolicyContext,
-    action: &EvaluatedAction,
-) -> Option<RejectionReason> {
+fn check_privacy(ctx: &PolicyContext, action: &EvaluatedAction) -> Option<RejectionReason> {
     if !ctx.is_shared_context {
         return None;
     }
@@ -439,10 +433,7 @@ fn check_graph_constraints(
 /// A constraint applies if:
 /// - Its condition matches the action kind (e.g., "no Execute during focus")
 /// - Its condition mentions the action's schema name
-fn is_constraint_applicable(
-    constraint: &ConstraintPayload,
-    action: &EvaluatedAction,
-) -> bool {
+fn is_constraint_applicable(constraint: &ConstraintPayload, action: &EvaluatedAction) -> bool {
     let condition_lower = constraint.condition.to_lowercase();
     let kind_lower = action.candidate.action_kind.as_str().to_lowercase();
     let schema_lower = action.candidate.schema_name.to_lowercase();
@@ -530,7 +521,9 @@ fn compute_repetition_penalty(
     ctx: &PolicyContext,
 ) -> f64 {
     let kind_str = action.candidate.action_kind.as_str().to_string();
-    let recent_same = ctx.recent_actions.iter()
+    let recent_same = ctx
+        .recent_actions
+        .iter()
         .filter(|(k, _)| k == &kind_str)
         .count();
 
@@ -582,10 +575,7 @@ fn compute_load_penalty(
 }
 
 /// Soft constraint penalties from Constraint nodes in the cognitive graph.
-fn compute_graph_soft_penalties(
-    action: &EvaluatedAction,
-    nodes: &[&CognitiveNode],
-) -> f64 {
+fn compute_graph_soft_penalties(action: &EvaluatedAction, nodes: &[&CognitiveNode]) -> f64 {
     let mut penalty = 0.0;
 
     for node in nodes {
@@ -762,13 +752,12 @@ pub fn select_action(
     }
 
     // Sort by adjusted utility descending
-    adjusted.sort_by(|a, b| {
-        b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    adjusted.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
     // ── Phase 3: Threshold filter ──
 
-    let above_threshold: Vec<(f64, &EvaluatedAction)> = adjusted.iter()
+    let above_threshold: Vec<(f64, &EvaluatedAction)> = adjusted
+        .iter()
         .filter(|(u, _)| *u >= config.selection_threshold)
         .cloned()
         .collect();
@@ -801,7 +790,8 @@ pub fn select_action(
     // ── Phase 4: Selection ──
 
     let decision = if let Some((adj_utility, best)) = above_threshold.first() {
-        let alternatives: Vec<AdjustedCandidate> = above_threshold.iter()
+        let alternatives: Vec<AdjustedCandidate> = above_threshold
+            .iter()
             .skip(1)
             .take(6)
             .map(|(u, a)| AdjustedCandidate {
@@ -849,11 +839,16 @@ pub fn select_action(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::action::ActionCandidate;
     use super::super::evaluator::EvaluatedAction;
+    use super::*;
 
-    fn make_evaluated(name: &str, kind: ActionKind, utility: f64, confidence: f64) -> EvaluatedAction {
+    fn make_evaluated(
+        name: &str,
+        kind: ActionKind,
+        utility: f64,
+        confidence: f64,
+    ) -> EvaluatedAction {
         EvaluatedAction {
             candidate: ActionCandidate {
                 schema_name: name.to_string(),
@@ -890,9 +885,12 @@ mod tests {
 
     #[test]
     fn test_select_single_candidate() {
-        let candidates = vec![
-            make_evaluated("send_reminder", ActionKind::Communicate, 0.5, 0.8),
-        ];
+        let candidates = vec![make_evaluated(
+            "send_reminder",
+            ActionKind::Communicate,
+            0.5,
+            0.8,
+        )];
         let config = PolicyConfig::default();
         let ctx = PolicyContext::default();
         let result = select_action(&candidates, &[], &config, &ctx, 1000.0);
@@ -916,7 +914,10 @@ mod tests {
         let result = select_action(&candidates, &[], &config, &ctx, 1000.0);
 
         // send_reminder should be rejected, abstain should pass
-        let rejected_names: Vec<&str> = result.trace.rejected_candidates.iter()
+        let rejected_names: Vec<&str> = result
+            .trace
+            .rejected_candidates
+            .iter()
             .filter(|r| matches!(r.rejection_reason, RejectionReason::QuietHours))
             .map(|r| r.schema_name.as_str())
             .collect();
@@ -925,17 +926,22 @@ mod tests {
 
     #[test]
     fn test_dnd_blocks_proactive() {
-        let candidates = vec![
-            make_evaluated("send_reminder", ActionKind::Communicate, 0.5, 0.8),
-        ];
+        let candidates = vec![make_evaluated(
+            "send_reminder",
+            ActionKind::Communicate,
+            0.5,
+            0.8,
+        )];
         let config = PolicyConfig::default();
         let mut ctx = PolicyContext::default();
         ctx.dnd_active = true;
 
         let result = select_action(&candidates, &[], &config, &ctx, 1000.0);
-        assert!(result.trace.rejected_candidates.iter().any(|r| {
-            matches!(r.rejection_reason, RejectionReason::QuietHours)
-        }));
+        assert!(result
+            .trace
+            .rejected_candidates
+            .iter()
+            .any(|r| { matches!(r.rejection_reason, RejectionReason::QuietHours) }));
     }
 
     #[test]
@@ -948,40 +954,52 @@ mod tests {
         let ctx = PolicyContext::default();
         let result = select_action(&candidates, &[], &config, &ctx, 1000.0);
 
-        assert!(result.trace.rejected_candidates.iter().any(|r| {
-            matches!(r.rejection_reason, RejectionReason::ConfidenceFloor { .. })
-        }));
+        assert!(result
+            .trace
+            .rejected_candidates
+            .iter()
+            .any(|r| { matches!(r.rejection_reason, RejectionReason::ConfidenceFloor { .. }) }));
     }
 
     #[test]
     fn test_cooldown() {
-        let candidates = vec![
-            make_evaluated("send_reminder", ActionKind::Communicate, 0.5, 0.8),
-        ];
+        let candidates = vec![make_evaluated(
+            "send_reminder",
+            ActionKind::Communicate,
+            0.5,
+            0.8,
+        )];
         let config = PolicyConfig::default(); // 300s cooldown
         let mut ctx = PolicyContext::default();
         // Same kind executed 100s ago (must match ActionKind::as_str())
         ctx.recent_actions.push(("communicate".to_string(), 900.0));
 
         let result = select_action(&candidates, &[], &config, &ctx, 1000.0);
-        assert!(result.trace.rejected_candidates.iter().any(|r| {
-            matches!(r.rejection_reason, RejectionReason::Cooldown { .. })
-        }));
+        assert!(result
+            .trace
+            .rejected_candidates
+            .iter()
+            .any(|r| { matches!(r.rejection_reason, RejectionReason::Cooldown { .. }) }));
     }
 
     #[test]
     fn test_anti_spam() {
-        let candidates = vec![
-            make_evaluated("send_reminder", ActionKind::Communicate, 0.5, 0.8),
-        ];
+        let candidates = vec![make_evaluated(
+            "send_reminder",
+            ActionKind::Communicate,
+            0.5,
+            0.8,
+        )];
         let config = PolicyConfig::default(); // max 10 per window
         let mut ctx = PolicyContext::default();
         ctx.suggestions_in_window = 10; // at limit
 
         let result = select_action(&candidates, &[], &config, &ctx, 1000.0);
-        assert!(result.trace.rejected_candidates.iter().any(|r| {
-            matches!(r.rejection_reason, RejectionReason::AntiSpam { .. })
-        }));
+        assert!(result
+            .trace
+            .rejected_candidates
+            .iter()
+            .any(|r| { matches!(r.rejection_reason, RejectionReason::AntiSpam { .. }) }));
     }
 
     #[test]
@@ -1003,9 +1021,12 @@ mod tests {
 
     #[test]
     fn test_emotional_sensitivity_penalty() {
-        let candidates = vec![
-            make_evaluated("send_reminder", ActionKind::Communicate, 0.5, 0.8),
-        ];
+        let candidates = vec![make_evaluated(
+            "send_reminder",
+            ActionKind::Communicate,
+            0.5,
+            0.8,
+        )];
         let config = PolicyConfig::default();
 
         // No distress
@@ -1018,9 +1039,11 @@ mod tests {
         let result_distressed = select_action(&candidates, &[], &config, &ctx_distressed, 1000.0);
 
         // Distressed result should have emotional sensitivity factor
-        assert!(result_distressed.trace.active_factors.iter().any(|f| {
-            f.factor == "emotional_sensitivity"
-        }));
+        assert!(result_distressed
+            .trace
+            .active_factors
+            .iter()
+            .any(|f| { f.factor == "emotional_sensitivity" }));
 
         // If both selected, distressed utility should be lower
         if let (PolicyDecision::Act(ref calm), PolicyDecision::Act(ref distressed)) =
@@ -1035,44 +1058,58 @@ mod tests {
 
     #[test]
     fn test_diversity_penalty() {
-        let candidates = vec![
-            make_evaluated("send_reminder", ActionKind::Communicate, 0.5, 0.8),
-        ];
+        let candidates = vec![make_evaluated(
+            "send_reminder",
+            ActionKind::Communicate,
+            0.5,
+            0.8,
+        )];
         let config = PolicyConfig::default();
         let mut ctx = PolicyContext::default();
         // 3 consecutive communicate actions (must match ActionKind::as_str())
         ctx.recent_actions = vec![
-            ("inform".to_string(), 100.0),         // different kind — breaks streak
+            ("inform".to_string(), 100.0), // different kind — breaks streak
             ("communicate".to_string(), 200.0),
             ("communicate".to_string(), 300.0),
-            ("communicate".to_string(), 400.0),    // 3 consecutive
+            ("communicate".to_string(), 400.0), // 3 consecutive
         ];
 
         let result = select_action(&candidates, &[], &config, &ctx, 1000.0);
-        assert!(result.trace.active_factors.iter().any(|f| {
-            f.factor == "diversity_penalty"
-        }));
+        assert!(result
+            .trace
+            .active_factors
+            .iter()
+            .any(|f| { f.factor == "diversity_penalty" }));
     }
 
     #[test]
     fn test_escalate_to_llm_when_all_filtered() {
-        let candidates = vec![
-            make_evaluated("send_reminder", ActionKind::Communicate, 0.5, 0.8),
-        ];
+        let candidates = vec![make_evaluated(
+            "send_reminder",
+            ActionKind::Communicate,
+            0.5,
+            0.8,
+        )];
         let mut config = PolicyConfig::default();
         config.selection_threshold = 10.0; // impossibly high
         config.escalate_to_llm_on_empty = true;
         let ctx = PolicyContext::default();
 
         let result = select_action(&candidates, &[], &config, &ctx, 1000.0);
-        assert!(matches!(result.decision, PolicyDecision::EscalateToLlm { .. }));
+        assert!(matches!(
+            result.decision,
+            PolicyDecision::EscalateToLlm { .. }
+        ));
     }
 
     #[test]
     fn test_wait_when_escalation_disabled() {
-        let candidates = vec![
-            make_evaluated("send_reminder", ActionKind::Communicate, 0.5, 0.8),
-        ];
+        let candidates = vec![make_evaluated(
+            "send_reminder",
+            ActionKind::Communicate,
+            0.5,
+            0.8,
+        )];
         let mut config = PolicyConfig::default();
         config.selection_threshold = 10.0; // impossibly high
         config.escalate_to_llm_on_empty = false;
@@ -1098,8 +1135,10 @@ mod tests {
             assert_eq!(selected.action.candidate.schema_name, "send_reminder");
             // Alternatives should be in order
             if selected.alternatives.len() >= 2 {
-                assert!(selected.alternatives[0].adjusted_utility
-                    >= selected.alternatives[1].adjusted_utility);
+                assert!(
+                    selected.alternatives[0].adjusted_utility
+                        >= selected.alternatives[1].adjusted_utility
+                );
             }
         }
     }
@@ -1143,9 +1182,7 @@ mod tests {
 
     #[test]
     fn test_warn_overrides_quiet_hours_when_urgent() {
-        let candidates = vec![
-            make_evaluated("risk_alert", ActionKind::Warn, 0.8, 0.9),
-        ];
+        let candidates = vec![make_evaluated("risk_alert", ActionKind::Warn, 0.8, 0.9)];
         let config = PolicyConfig::default();
         let mut ctx = PolicyContext::default();
         ctx.current_hour = 23; // quiet hours
@@ -1158,17 +1195,17 @@ mod tests {
 
     #[test]
     fn test_cognitive_load_penalty() {
-        let candidates = vec![
-            make_evaluated("run_script", ActionKind::Execute, 0.5, 0.9),
-        ];
+        let candidates = vec![make_evaluated("run_script", ActionKind::Execute, 0.5, 0.9)];
         let config = PolicyConfig::default(); // threshold 0.8
         let mut ctx = PolicyContext::default();
         ctx.cognitive_load = 0.95; // well above threshold
 
         let result = select_action(&candidates, &[], &config, &ctx, 1000.0);
-        assert!(result.trace.active_factors.iter().any(|f| {
-            f.factor == "cognitive_load"
-        }));
+        assert!(result
+            .trace
+            .active_factors
+            .iter()
+            .any(|f| { f.factor == "cognitive_load" }));
     }
 
     #[test]
@@ -1183,10 +1220,11 @@ mod tests {
         let result = select_action(&candidates, &[], &config, &ctx, 1000.0);
 
         // Trace should account for all candidates
-        let accounted = result.trace.passed_hard_filter
-            + result.trace.rejected_candidates.len();
-        assert_eq!(accounted, result.total_input,
-            "all candidates should be accounted for in trace");
+        let accounted = result.trace.passed_hard_filter + result.trace.rejected_candidates.len();
+        assert_eq!(
+            accounted, result.total_input,
+            "all candidates should be accounted for in trace"
+        );
         assert!(result.trace.execution_time_us > 0);
     }
 }

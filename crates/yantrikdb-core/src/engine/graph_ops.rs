@@ -57,19 +57,12 @@ fn ensure_proposition(
 impl YantrikDB {
     /// Create or update a relationship between entities.
     #[tracing::instrument(skip(self))]
-    pub fn relate(
-        &self,
-        src: &str,
-        dst: &str,
-        rel_type: &str,
-        weight: f64,
-    ) -> Result<String> {
+    pub fn relate(&self, src: &str, dst: &str, rel_type: &str, weight: f64) -> Result<String> {
         let edge_id = crate::id::new_id();
         let ts = now();
 
         // Classify entity types using relationship semantics
-        let (src_type, dst_type) =
-            crate::graph::classify_with_relationship(src, dst, rel_type);
+        let (src_type, dst_type) = crate::graph::classify_with_relationship(src, dst, rel_type);
 
         // Phase 1: Lock conn for all SQL operations, then drop
         {
@@ -173,8 +166,7 @@ impl YantrikDB {
         seq: Option<u64>,
     ) -> Result<()> {
         let ts_secs = (created_at_unix_micros as f64) / 1_000_000.0;
-        let (src_type, dst_type) =
-            crate::graph::classify_with_relationship(src, dst, rel_type);
+        let (src_type, dst_type) = crate::graph::classify_with_relationship(src, dst, rel_type);
 
         // SAVEPOINT-guarded conn block. INSERT OR IGNORE on claim_id PK
         // gives idempotency on edge_id; the UNIQUE(src, dst, rel_type,
@@ -208,7 +200,10 @@ impl YantrikDB {
             })();
 
             match result {
-                Ok(b) => { conn.execute_batch("RELEASE upsert_edge")?; b }
+                Ok(b) => {
+                    conn.execute_batch("RELEASE upsert_edge")?;
+                    b
+                }
                 Err(e) => {
                     let _ = conn.execute_batch("ROLLBACK TO upsert_edge");
                     let _ = conn.execute_batch("RELEASE upsert_edge");
@@ -318,13 +313,11 @@ impl YantrikDB {
         Ok(())
     }
 
-
     /// Get all edges connected to an entity.
     pub fn get_edges(&self, entity: &str) -> Result<Vec<Edge>> {
         let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "SELECT * FROM edges WHERE (src = ?1 OR dst = ?1) AND tombstoned = 0",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT * FROM edges WHERE (src = ?1 OR dst = ?1) AND tombstoned = 0")?;
 
         let edges = stmt
             .query_map(params![entity], |row| {
@@ -349,45 +342,51 @@ impl YantrikDB {
         entity_type: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Entity>> {
-        let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) = match (pattern, entity_type) {
-            (Some(p), Some(t)) => (
-                "SELECT name, entity_type, first_seen, last_seen, mention_count \
+        let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) =
+            match (pattern, entity_type) {
+                (Some(p), Some(t)) => (
+                    "SELECT name, entity_type, first_seen, last_seen, mention_count \
                  FROM entities WHERE name LIKE ?1 AND entity_type = ?2 \
-                 ORDER BY last_seen DESC LIMIT ?3".to_string(),
-                vec![
-                    Box::new(format!("%{}%", p)) as Box<dyn rusqlite::types::ToSql>,
-                    Box::new(t.to_string()),
-                    Box::new(limit as i64),
-                ],
-            ),
-            (Some(p), None) => (
-                "SELECT name, entity_type, first_seen, last_seen, mention_count \
+                 ORDER BY last_seen DESC LIMIT ?3"
+                        .to_string(),
+                    vec![
+                        Box::new(format!("%{}%", p)) as Box<dyn rusqlite::types::ToSql>,
+                        Box::new(t.to_string()),
+                        Box::new(limit as i64),
+                    ],
+                ),
+                (Some(p), None) => (
+                    "SELECT name, entity_type, first_seen, last_seen, mention_count \
                  FROM entities WHERE name LIKE ?1 \
-                 ORDER BY last_seen DESC LIMIT ?2".to_string(),
-                vec![
-                    Box::new(format!("%{}%", p)) as Box<dyn rusqlite::types::ToSql>,
-                    Box::new(limit as i64),
-                ],
-            ),
-            (None, Some(t)) => (
-                "SELECT name, entity_type, first_seen, last_seen, mention_count \
+                 ORDER BY last_seen DESC LIMIT ?2"
+                        .to_string(),
+                    vec![
+                        Box::new(format!("%{}%", p)) as Box<dyn rusqlite::types::ToSql>,
+                        Box::new(limit as i64),
+                    ],
+                ),
+                (None, Some(t)) => (
+                    "SELECT name, entity_type, first_seen, last_seen, mention_count \
                  FROM entities WHERE entity_type = ?1 \
-                 ORDER BY last_seen DESC LIMIT ?2".to_string(),
-                vec![
-                    Box::new(t.to_string()) as Box<dyn rusqlite::types::ToSql>,
-                    Box::new(limit as i64),
-                ],
-            ),
-            (None, None) => (
-                "SELECT name, entity_type, first_seen, last_seen, mention_count \
-                 FROM entities ORDER BY last_seen DESC LIMIT ?1".to_string(),
-                vec![Box::new(limit as i64) as Box<dyn rusqlite::types::ToSql>],
-            ),
-        };
+                 ORDER BY last_seen DESC LIMIT ?2"
+                        .to_string(),
+                    vec![
+                        Box::new(t.to_string()) as Box<dyn rusqlite::types::ToSql>,
+                        Box::new(limit as i64),
+                    ],
+                ),
+                (None, None) => (
+                    "SELECT name, entity_type, first_seen, last_seen, mention_count \
+                 FROM entities ORDER BY last_seen DESC LIMIT ?1"
+                        .to_string(),
+                    vec![Box::new(limit as i64) as Box<dyn rusqlite::types::ToSql>],
+                ),
+            };
 
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(&sql)?;
-        let param_refs: Vec<&dyn rusqlite::types::ToSql> = params_vec.iter().map(|p| p.as_ref()).collect();
+        let param_refs: Vec<&dyn rusqlite::types::ToSql> =
+            params_vec.iter().map(|p| p.as_ref()).collect();
         let entities = stmt
             .query_map(param_refs.as_slice(), |row| {
                 Ok(Entity {
@@ -415,7 +414,9 @@ impl YantrikDB {
         } // conn dropped
 
         // Phase 2: Lock graph_index write for in-memory update
-        self.graph_index.write().link_memory(memory_rid, entity_name);
+        self.graph_index
+            .write()
+            .link_memory(memory_rid, entity_name);
         Ok(())
     }
 
@@ -434,7 +435,7 @@ impl YantrikDB {
             let mut stmt = conn.prepare_cached(
                 "SELECT rid, text FROM memories \
                  WHERE consolidation_status = 'active' \
-                 AND rid NOT IN (SELECT memory_rid FROM memory_entities WHERE entity_name = ?1)"
+                 AND rid NOT IN (SELECT memory_rid FROM memory_entities WHERE entity_name = ?1)",
             )?;
             for &entity in entity_names {
                 let entity_tokens = crate::graph::tokenize(entity);
@@ -449,7 +450,9 @@ impl YantrikDB {
 
                 // Phase 2: Compute matches (decrypt_text doesn't need conn)
                 for (rid, stored_text) in &rows {
-                    let text = self.decrypt_text(stored_text).unwrap_or_else(|_| stored_text.clone());
+                    let text = self
+                        .decrypt_text(stored_text)
+                        .unwrap_or_else(|_| stored_text.clone());
                     let text_tokens = crate::graph::tokenize(&text);
                     if crate::graph::entity_matches_text(entity, &text_tokens) {
                         candidates.push(LinkCandidate {
@@ -497,21 +500,24 @@ impl YantrikDB {
 
         {
             let conn = self.conn.lock();
-            entities = conn.prepare(
-                "SELECT name FROM entities",
-            )?.query_map([], |row| row.get(0))?.collect::<std::result::Result<Vec<_>, _>>()?;
+            entities = conn
+                .prepare("SELECT name FROM entities")?
+                .query_map([], |row| row.get(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
 
             if entities.is_empty() {
                 return Ok(0);
             }
 
-            raw_memories = conn.prepare(
-                "SELECT rid, text FROM memories WHERE consolidation_status = 'active'",
-            )?.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<std::result::Result<Vec<_>, _>>()?;
+            raw_memories = conn
+                .prepare("SELECT rid, text FROM memories WHERE consolidation_status = 'active'")?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
         } // conn dropped
 
         // Phase 2: Compute matches (decrypt_text doesn't need conn)
-        let memories: Vec<(String, String)> = raw_memories.into_iter()
+        let memories: Vec<(String, String)> = raw_memories
+            .into_iter()
             .map(|(rid, stored_text)| {
                 let text = self.decrypt_text(&stored_text)?;
                 Ok((rid, text))
@@ -663,7 +669,8 @@ impl YantrikDB {
             // RFC 007 Phase 0: every claim must point at a canonical proposition.
             // Ensure the (src, rel_type, dst, namespace) proposition exists and
             // get its id — create atomically if missing.
-            proposition_id = ensure_proposition(&conn, &src_resolved, rel_type, &dst_resolved, namespace, ts)?;
+            proposition_id =
+                ensure_proposition(&conn, &src_resolved, rel_type, &dst_resolved, namespace, ts)?;
 
             // RFC 006: uniqueness is scoped to (src, dst, rel_type, extractor, polarity, namespace)
             // so multiple sources can make conflicting claims about the same fact. Only an
@@ -816,9 +823,10 @@ impl YantrikDB {
         let conflict_rids: std::collections::HashSet<String> = {
             let mut stmt = conn.prepare(
                 "SELECT memory_a FROM conflicts WHERE status = 'open' \
-                 UNION SELECT memory_b FROM conflicts WHERE status = 'open'"
+                 UNION SELECT memory_b FROM conflicts WHERE status = 'open'",
             )?;
-            let rows: Vec<String> = stmt.query_map([], |row| row.get::<_, String>(0))?
+            let rows: Vec<String> = stmt
+                .query_map([], |row| row.get::<_, String>(0))?
                 .filter_map(|r| r.ok())
                 .collect();
             drop(stmt);
@@ -837,9 +845,15 @@ impl YantrikDB {
                 let status = if polarity == -1 {
                     "negative"
                 } else if let Some(vt) = valid_to {
-                    if vt < now { "historical" } else { "superseded" }
+                    if vt < now {
+                        "historical"
+                    } else {
+                        "superseded"
+                    }
                 } else if conflict_rids.contains(&claim_id)
-                    || source_rid.as_ref().map_or(false, |r| conflict_rids.contains(r))
+                    || source_rid
+                        .as_ref()
+                        .map_or(false, |r| conflict_rids.contains(r))
                 {
                     "conflicted"
                 } else {

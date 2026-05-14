@@ -28,29 +28,96 @@ use crate::error::{Result, YantrikDbError};
 /// this list is a normal operation; the registry is a soft reference, not
 /// a schema CHECK.
 pub const SEED_MOVE_TYPES: &[(&str, &str, Option<i64>)] = &[
-    ("analogy", "Cross-domain pattern transfer from known claims to a target", Some(60_000)),
-    ("decomposition", "Split a claim into case-wise sub-claims", Some(30_000)),
-    ("aggregate_back", "Recombine case-wise sub-claims into an aggregate (dual of decomposition)", Some(30_000)),
-    ("negate_and_test", "Generate the negation of a claim and actively seek disconfirming evidence", Some(300_000)),
-    ("source_audit", "Inspect and reweight claims from a shared source (requires ψ_ancestral < 1.0)", Some(900_000)),
-    ("ladder_up", "Abstract a specific claim to a more general proposition", Some(60_000)),
-    ("contradiction_triage", "Structured evaluation of a Γ(c) contest signature", Some(120_000)),
-    ("source_downgrade", "Reduce the weight of claims from a specific source", None),
-    ("source_upgrade", "Increase the weight of claims from a specific source", None),
-    ("regime_transfer", "Transport a claim/mobility state across regimes", Some(300_000)),
-    ("compression", "Consolidate a source span into a compressed artifact", Some(604_800_000)),
-    ("hypothesis_generation", "Escrow a candidate explanation (stress-residual minimization)", Some(2_592_000_000)),
-    ("quarantine", "Flag a claim-neighborhood for isolation from downstream reasoning", None),
+    (
+        "analogy",
+        "Cross-domain pattern transfer from known claims to a target",
+        Some(60_000),
+    ),
+    (
+        "decomposition",
+        "Split a claim into case-wise sub-claims",
+        Some(30_000),
+    ),
+    (
+        "aggregate_back",
+        "Recombine case-wise sub-claims into an aggregate (dual of decomposition)",
+        Some(30_000),
+    ),
+    (
+        "negate_and_test",
+        "Generate the negation of a claim and actively seek disconfirming evidence",
+        Some(300_000),
+    ),
+    (
+        "source_audit",
+        "Inspect and reweight claims from a shared source (requires ψ_ancestral < 1.0)",
+        Some(900_000),
+    ),
+    (
+        "ladder_up",
+        "Abstract a specific claim to a more general proposition",
+        Some(60_000),
+    ),
+    (
+        "contradiction_triage",
+        "Structured evaluation of a Γ(c) contest signature",
+        Some(120_000),
+    ),
+    (
+        "source_downgrade",
+        "Reduce the weight of claims from a specific source",
+        None,
+    ),
+    (
+        "source_upgrade",
+        "Increase the weight of claims from a specific source",
+        None,
+    ),
+    (
+        "regime_transfer",
+        "Transport a claim/mobility state across regimes",
+        Some(300_000),
+    ),
+    (
+        "compression",
+        "Consolidate a source span into a compressed artifact",
+        Some(604_800_000),
+    ),
+    (
+        "hypothesis_generation",
+        "Escrow a candidate explanation (stress-residual minimization)",
+        Some(2_592_000_000),
+    ),
+    (
+        "quarantine",
+        "Flag a claim-neighborhood for isolation from downstream reasoning",
+        None,
+    ),
 ];
 
 /// Seed vocabulary for inference_basis_registry. Only relevant when
 /// observability = 'inferred'.
 pub const SEED_INFERENCE_BASES: &[(&str, &str)] = &[
-    ("structural_pattern_match", "Output claims match the structural signature of a known move type"),
-    ("temporal_correlation", "Time-proximity between a trigger and observed effects suggests a move"),
-    ("source_lineage_inference", "Source lineage patterns imply a move was applied"),
-    ("operator_signature_match", "Operator-specific side effects (e.g. compression artifact shape) were observed"),
-    ("human_annotation", "A curator declared the move retrospectively"),
+    (
+        "structural_pattern_match",
+        "Output claims match the structural signature of a known move type",
+    ),
+    (
+        "temporal_correlation",
+        "Time-proximity between a trigger and observed effects suggests a move",
+    ),
+    (
+        "source_lineage_inference",
+        "Source lineage patterns imply a move was applied",
+    ),
+    (
+        "operator_signature_match",
+        "Operator-specific side effects (e.g. compression artifact shape) were observed",
+    ),
+    (
+        "human_annotation",
+        "A curator declared the move retrospectively",
+    ),
 ];
 
 /// Lifecycle status values for adversarial instances.
@@ -218,8 +285,12 @@ impl crate::engine::YantrikDB {
                 ));
             }
         }
-        if ![observability::OBSERVED, observability::SELF_REPORTED, observability::INFERRED]
-            .contains(&input.observability.as_str())
+        if ![
+            observability::OBSERVED,
+            observability::SELF_REPORTED,
+            observability::INFERRED,
+        ]
+        .contains(&input.observability.as_str())
         {
             return Err(YantrikDbError::InvalidInput(format!(
                 "observability must be one of observed|self_reported|inferred, got '{}'",
@@ -231,7 +302,10 @@ impl crate::engine::YantrikDB {
         let now_ts = super::now();
         let hlc = self.tick_hlc();
         let origin_actor = self.actor_id().to_string();
-        let regime = input.context_regime.clone().unwrap_or_else(|| "default".to_string());
+        let regime = input
+            .context_regime
+            .clone()
+            .unwrap_or_else(|| "default".to_string());
 
         let conn = self.conn.lock();
 
@@ -289,8 +363,8 @@ impl crate::engine::YantrikDB {
             .inference_basis
             .as_ref()
             .map(|b| serde_json::to_string(b).unwrap_or_else(|_| "[]".into()));
-        let dependencies_json = serde_json::to_string(&input.dependencies)
-            .unwrap_or_else(|_| "[]".into());
+        let dependencies_json =
+            serde_json::to_string(&input.dependencies).unwrap_or_else(|_| "[]".into());
         let yield_json = input.yield_json.clone().unwrap_or_else(|| "{}".into());
         let hlc_bytes = hlc.to_bytes();
 
@@ -316,21 +390,35 @@ impl crate::engine::YantrikDB {
                 now_ts, hlc_bytes.as_slice(), self.actor_id(),
             ],
         )?;
-        for ClaimRef { claim_id, role, ordinal } in &input.inputs {
+        for ClaimRef {
+            claim_id,
+            role,
+            ordinal,
+        } in &input.inputs
+        {
             tx.execute(
                 "INSERT INTO move_input_edge (move_id, claim_id, input_role, ordinal) \
                  VALUES (?1, ?2, ?3, ?4)",
                 params![move_id, claim_id, role, ordinal],
             )?;
         }
-        for ClaimRef { claim_id, role, ordinal } in &input.outputs {
+        for ClaimRef {
+            claim_id,
+            role,
+            ordinal,
+        } in &input.outputs
+        {
             tx.execute(
                 "INSERT INTO move_output_edge (move_id, claim_id, output_role, ordinal) \
                  VALUES (?1, ?2, ?3, ?4)",
                 params![move_id, claim_id, role, ordinal],
             )?;
         }
-        for SideEffectRef { claim_id, effect_kind } in &input.side_effects {
+        for SideEffectRef {
+            claim_id,
+            effect_kind,
+        } in &input.side_effects
+        {
             tx.execute(
                 "INSERT INTO move_side_effect_edge (move_id, claim_id, effect_kind) \
                  VALUES (?1, ?2, ?3)",
@@ -411,7 +499,8 @@ impl crate::engine::YantrikDB {
         // Governance rule (M5a spec): automatic systems create `candidate`
         // status with traced_root_cause only; generalized_lesson and
         // lesson_scope_json are left NULL until a curator promotes.
-        if outcome == posthoc_outcome::RETRACTED || outcome == posthoc_outcome::HARMFUL_SIDE_EFFECT {
+        if outcome == posthoc_outcome::RETRACTED || outcome == posthoc_outcome::HARMFUL_SIDE_EFFECT
+        {
             let instance_id = crate::id::new_id();
             let discovered_via = if outcome == posthoc_outcome::RETRACTED {
                 "retraction"
@@ -481,9 +570,14 @@ impl crate::engine::YantrikDB {
              corrected_context_regime, correction_reason, corrected_by_actor_id, corrected_at) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
             params![
-                correction_id, original_move_id,
-                corrected_move_type, corrected_operator_version, corrected_context_regime,
-                correction_reason, corrected_by_actor_id, now_ts,
+                correction_id,
+                original_move_id,
+                corrected_move_type,
+                corrected_operator_version,
+                corrected_context_regime,
+                correction_reason,
+                corrected_by_actor_id,
+                now_ts,
             ],
         )?;
         Ok(correction_id)
@@ -499,12 +593,20 @@ impl crate::engine::YantrikDB {
 
     /// All moves that consumed a given claim as an input. Ordered by
     /// created_at ASC (earliest first).
-    pub fn list_moves_consuming_claim(&self, claim_id: &str, limit: usize) -> Result<Vec<MoveEvent>> {
+    pub fn list_moves_consuming_claim(
+        &self,
+        claim_id: &str,
+        limit: usize,
+    ) -> Result<Vec<MoveEvent>> {
         self.list_moves_by_edge("move_input_edge", claim_id, limit)
     }
 
     /// All moves that produced a given claim as an output.
-    pub fn list_moves_producing_claim(&self, claim_id: &str, limit: usize) -> Result<Vec<MoveEvent>> {
+    pub fn list_moves_producing_claim(
+        &self,
+        claim_id: &str,
+        limit: usize,
+    ) -> Result<Vec<MoveEvent>> {
         self.list_moves_by_edge("move_output_edge", claim_id, limit)
     }
 
@@ -686,10 +788,7 @@ impl crate::engine::YantrikDB {
             )
             .unwrap_or(false);
         if !exists {
-            return Err(YantrikDbError::NotFound(format!(
-                "move_event: {}",
-                move_id
-            )));
+            return Err(YantrikDbError::NotFound(format!("move_event: {}", move_id)));
         }
         let instance_id = crate::id::new_id();
         let now_ts = super::now();
@@ -698,7 +797,13 @@ impl crate::engine::YantrikDB {
              instance_id, move_id, status, discovered_via, traced_root_cause, \
              discovered_at, created_at) \
              VALUES (?1, ?2, 'candidate', ?3, ?4, ?5, ?5)",
-            params![instance_id, move_id, discovered_via, traced_root_cause, now_ts],
+            params![
+                instance_id,
+                move_id,
+                discovered_via,
+                traced_root_cause,
+                now_ts
+            ],
         )?;
         Ok(instance_id)
     }
@@ -746,7 +851,12 @@ impl crate::engine::YantrikDB {
             "UPDATE move_adversarial_instance SET \
              status = 'confirmed', generalized_lesson = ?1, lesson_scope_json = ?2, \
              curation_actor_id = ?3 WHERE instance_id = ?4",
-            params![generalized_lesson, lesson_scope_json, curation_actor_id, instance_id],
+            params![
+                generalized_lesson,
+                lesson_scope_json,
+                curation_actor_id,
+                instance_id
+            ],
         )?;
         Ok(())
     }
@@ -795,10 +905,7 @@ impl crate::engine::YantrikDB {
     }
 
     /// List adversarial instances for a given move.
-    pub fn list_adversarial_for_move(
-        &self,
-        move_id: &str,
-    ) -> Result<Vec<AdversarialInstance>> {
+    pub fn list_adversarial_for_move(&self, move_id: &str) -> Result<Vec<AdversarialInstance>> {
         let conn = self.conn.lock();
         let mut stmt = conn.prepare(
             "SELECT instance_id, move_id, status, discovered_via, traced_root_cause, \
@@ -945,7 +1052,12 @@ impl crate::engine::YantrikDB {
         };
         let matches: Vec<&'static Axiom> = AXIOMS
             .iter()
-            .filter(|ax| matches!(ax.kind, AxiomKind::ApproxIdentity | AxiomKind::NonCommutative))
+            .filter(|ax| {
+                matches!(
+                    ax.kind,
+                    AxiomKind::ApproxIdentity | AxiomKind::NonCommutative
+                )
+            })
             .filter(|ax| {
                 ax.left_move_type == Some(l.move_type.as_str())
                     && ax.right_move_type == Some(r.move_type.as_str())
@@ -1102,9 +1214,27 @@ impl crate::engine::YantrikDB {
         )?;
 
         // Per-outcome counters.
-        let corroborated_count = self.count_by_outcome(&conn, move_type, operator_version, context_regime, "corroborated")?;
-        let retracted_count = self.count_by_outcome(&conn, move_type, operator_version, context_regime, "retracted")?;
-        let harmful_side_effect_count = self.count_by_outcome(&conn, move_type, operator_version, context_regime, "harmful_side_effect")?;
+        let corroborated_count = self.count_by_outcome(
+            &conn,
+            move_type,
+            operator_version,
+            context_regime,
+            "corroborated",
+        )?;
+        let retracted_count = self.count_by_outcome(
+            &conn,
+            move_type,
+            operator_version,
+            context_regime,
+            "retracted",
+        )?;
+        let harmful_side_effect_count = self.count_by_outcome(
+            &conn,
+            move_type,
+            operator_version,
+            context_regime,
+            "harmful_side_effect",
+        )?;
 
         // Rates — only well-defined when there are resolved moves.
         let contradiction_introduction_rate = if resolved_count > 0 {
@@ -1147,11 +1277,19 @@ impl crate::engine::YantrikDB {
              calibration_gain_avg = excluded.calibration_gain_avg, \
              last_updated = excluded.last_updated",
             params![
-                move_type, operator_version, context_regime,
-                uses_count, resolved_count,
-                corroborated_count, retracted_count, harmful_side_effect_count,
-                contradiction_introduction_rate, avg_mobility_shift,
-                predictive_gain_avg, calibration_gain_avg, last_updated,
+                move_type,
+                operator_version,
+                context_regime,
+                uses_count,
+                resolved_count,
+                corroborated_count,
+                retracted_count,
+                harmful_side_effect_count,
+                contradiction_introduction_rate,
+                avg_mobility_shift,
+                predictive_gain_avg,
+                calibration_gain_avg,
+                last_updated,
             ],
         )?;
 

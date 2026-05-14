@@ -412,12 +412,7 @@ impl TransitionModel {
     }
 
     /// Record a transition: given state + action, observed outcome.
-    pub fn record(
-        &mut self,
-        features: StateFeatures,
-        action: ActionKind,
-        outcome: ActionOutcome,
-    ) {
+    pub fn record(&mut self, features: StateFeatures, action: ActionKind, outcome: ActionOutcome) {
         let key = (features, action);
         if let Some(&idx) = self.index.get(&key) {
             self.entries[idx].distribution.observe(outcome);
@@ -439,11 +434,7 @@ impl TransitionModel {
     /// Predict the outcome distribution for a (state, action) pair.
     ///
     /// Falls back to uninformative prior if no data for this specific pair.
-    pub fn predict(
-        &self,
-        features: &StateFeatures,
-        action: ActionKind,
-    ) -> OutcomeDistribution {
+    pub fn predict(&self, features: &StateFeatures, action: ActionKind) -> OutcomeDistribution {
         self.index
             .get(&(*features, action))
             .map(|&idx| self.entries[idx].distribution.clone())
@@ -466,8 +457,7 @@ impl TransitionModel {
         }
 
         // Blend: use global as fallback with weight proportional to data scarcity
-        let specific_weight =
-            specific.total_observations() as f64 / min_observations as f64;
+        let specific_weight = specific.total_observations() as f64 / min_observations as f64;
         let global_weight = 1.0 - specific_weight;
 
         let s_posteriors = specific.all_posteriors();
@@ -476,8 +466,7 @@ impl TransitionModel {
         let mut blended_prior = [0.0f64; ActionOutcome::COUNT];
         for i in 0..ActionOutcome::COUNT {
             blended_prior[i] =
-                (s_posteriors[i] * specific_weight + g_posteriors[i] * global_weight)
-                    .max(0.001);
+                (s_posteriors[i] * specific_weight + g_posteriors[i] * global_weight).max(0.001);
         }
 
         // Return a distribution with the blended prior and no new counts
@@ -493,7 +482,11 @@ impl TransitionModel {
     }
 
     /// Get the best action (highest positive rate) for a given state.
-    pub fn best_action(&self, features: &StateFeatures, actions: &[ActionKind]) -> Option<ActionKind> {
+    pub fn best_action(
+        &self,
+        features: &StateFeatures,
+        actions: &[ActionKind],
+    ) -> Option<ActionKind> {
         actions
             .iter()
             .max_by(|&&a, &&b| {
@@ -778,7 +771,11 @@ mod tests {
         let features = noon_features();
 
         // Record small sample for specific pair
-        model.record(features, ActionKind::SurfaceSuggestion, ActionOutcome::Accepted);
+        model.record(
+            features,
+            ActionKind::SurfaceSuggestion,
+            ActionOutcome::Accepted,
+        );
 
         // Also record a lot of global data with rejections
         for _ in 0..50 {
@@ -811,11 +808,19 @@ mod tests {
 
         // Suggestions get accepted at noon
         for _ in 0..10 {
-            model.record(features, ActionKind::SurfaceSuggestion, ActionOutcome::Accepted);
+            model.record(
+                features,
+                ActionKind::SurfaceSuggestion,
+                ActionOutcome::Accepted,
+            );
         }
         // Notifications get rejected at noon
         for _ in 0..10 {
-            model.record(features, ActionKind::SendNotification, ActionOutcome::Rejected);
+            model.record(
+                features,
+                ActionKind::SendNotification,
+                ActionOutcome::Rejected,
+            );
         }
 
         let actions = [ActionKind::SurfaceSuggestion, ActionKind::SendNotification];
@@ -845,9 +850,21 @@ mod tests {
     fn test_global_outcomes() {
         let mut model = TransitionModel::new();
 
-        model.record(noon_features(), ActionKind::ExecuteTool, ActionOutcome::Succeeded);
-        model.record(morning_features(), ActionKind::SurfaceSuggestion, ActionOutcome::Accepted);
-        model.record(noon_features(), ActionKind::SendNotification, ActionOutcome::Rejected);
+        model.record(
+            noon_features(),
+            ActionKind::ExecuteTool,
+            ActionOutcome::Succeeded,
+        );
+        model.record(
+            morning_features(),
+            ActionKind::SurfaceSuggestion,
+            ActionOutcome::Accepted,
+        );
+        model.record(
+            noon_features(),
+            ActionKind::SendNotification,
+            ActionOutcome::Rejected,
+        );
 
         assert_eq!(model.global_outcomes.total_observations(), 3);
     }
@@ -857,10 +874,18 @@ mod tests {
         let mut model = TransitionModel::new();
 
         for _ in 0..10 {
-            model.record(noon_features(), ActionKind::ExecuteTool, ActionOutcome::Succeeded);
+            model.record(
+                noon_features(),
+                ActionKind::ExecuteTool,
+                ActionOutcome::Succeeded,
+            );
         }
         for _ in 0..5 {
-            model.record(morning_features(), ActionKind::SurfaceSuggestion, ActionOutcome::Accepted);
+            model.record(
+                morning_features(),
+                ActionKind::SurfaceSuggestion,
+                ActionOutcome::Accepted,
+            );
         }
 
         let top = model.top_pairs(2);
@@ -874,7 +899,11 @@ mod tests {
     fn test_world_model_summary() {
         let mut model = TransitionModel::new();
         for _ in 0..20 {
-            model.record(noon_features(), ActionKind::ExecuteTool, ActionOutcome::Succeeded);
+            model.record(
+                noon_features(),
+                ActionKind::ExecuteTool,
+                ActionOutcome::Succeeded,
+            );
         }
 
         let summary = summarize_world_model(&model);

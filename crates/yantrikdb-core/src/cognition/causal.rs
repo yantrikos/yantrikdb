@@ -294,14 +294,16 @@ impl CausalStore {
 
     /// Find a specific edge by cause and effect.
     pub fn find_edge(&self, cause: &CausalNode, effect: &CausalNode) -> Option<&CausalEdge> {
-        self.cause_index
-            .get(cause)
-            .and_then(|indices| {
-                indices.iter().find_map(|&i| {
-                    let e = &self.edges[i];
-                    if &e.effect == effect { Some(e) } else { None }
-                })
+        self.cause_index.get(cause).and_then(|indices| {
+            indices.iter().find_map(|&i| {
+                let e = &self.edges[i];
+                if &e.effect == effect {
+                    Some(e)
+                } else {
+                    None
+                }
             })
+        })
     }
 
     /// Find a specific edge by cause and effect (mutable).
@@ -311,7 +313,10 @@ impl CausalStore {
         effect: &CausalNode,
     ) -> Option<&mut CausalEdge> {
         let idx = self.cause_index.get(cause).and_then(|indices| {
-            indices.iter().find(|&&i| &self.edges[i].effect == effect).copied()
+            indices
+                .iter()
+                .find(|&&i| &self.edges[i].effect == effect)
+                .copied()
         });
         idx.map(|i| &mut self.edges[i])
     }
@@ -448,8 +453,7 @@ pub fn discover_temporal_patterns(
                 let min_t = ct + config.min_lag_secs;
                 let max_t = ct + config.max_lag_window_secs;
 
-                let start = effect_times
-                    .partition_point(|&t| t < min_t);
+                let start = effect_times.partition_point(|&t| t < min_t);
 
                 if start < effect_times.len() && effect_times[start] <= max_t {
                     lags.push(effect_times[start] - ct);
@@ -515,15 +519,17 @@ pub fn integrate_temporal_patterns(
             existing.updated_at = now;
 
             // Blend confidence with existing.
-            existing.confidence =
-                0.7 * existing.confidence + 0.3 * confidence;
+            existing.confidence = 0.7 * existing.confidence + 0.3 * confidence;
 
             // Add temporal evidence.
-            existing.trace.evidence.push(CausalEvidence::TemporalPrecedence {
-                co_occurrences: pattern.co_occurrences,
-                avg_lag_secs: pattern.avg_lag_secs,
-                lag_stddev_secs: pattern.lag_stddev_secs,
-            });
+            existing
+                .trace
+                .evidence
+                .push(CausalEvidence::TemporalPrecedence {
+                    co_occurrences: pattern.co_occurrences,
+                    avg_lag_secs: pattern.avg_lag_secs,
+                    lag_stddev_secs: pattern.lag_stddev_secs,
+                });
 
             // Stage transitions.
             update_stage(existing, &config);
@@ -590,12 +596,15 @@ pub fn record_intervention(
         let failures = existing.non_occurrence_count as f64;
         let posterior_mean = (successes + 1.0) / (successes + failures + 2.0);
 
-        existing.trace.evidence.push(CausalEvidence::InterventionOutcome {
-            action,
-            successes: existing.intervention_count,
-            failures: existing.non_occurrence_count,
-            posterior_mean,
-        });
+        existing
+            .trace
+            .evidence
+            .push(CausalEvidence::InterventionOutcome {
+                action,
+                successes: existing.intervention_count,
+                failures: existing.non_occurrence_count,
+                posterior_mean,
+            });
 
         // Intervention evidence strongly updates confidence.
         existing.confidence = 0.4 * existing.confidence + 0.6 * posterior_mean;
@@ -605,7 +614,11 @@ pub fn record_intervention(
         update_stage(existing, &config);
     } else {
         // First intervention for this pair — create a new hypothesis.
-        let posterior_mean = if effect_observed { 2.0 / 3.0 } else { 1.0 / 3.0 };
+        let posterior_mean = if effect_observed {
+            2.0 / 3.0
+        } else {
+            1.0 / 3.0
+        };
         let edge = CausalEdge {
             cause: cause.clone(),
             effect: expected_effect,
@@ -657,7 +670,11 @@ pub fn granger_test(
     }
 
     // Find the time range.
-    let all_times: Vec<f64> = cause_times.iter().chain(effect_times.iter()).copied().collect();
+    let all_times: Vec<f64> = cause_times
+        .iter()
+        .chain(effect_times.iter())
+        .copied()
+        .collect();
     let t_min = all_times.iter().cloned().fold(f64::INFINITY, f64::min);
     let t_max = all_times.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
     let range = t_max - t_min;
@@ -688,7 +705,9 @@ pub fn granger_test(
 
         total_windows += 1;
 
-        let effect_in_next = effect_times.iter().any(|&t| t >= next_start && t < next_end);
+        let effect_in_next = effect_times
+            .iter()
+            .any(|&t| t >= next_start && t < next_end);
 
         // Baseline: predict based on rate.
         let baseline_predicts = effect_rate > 0.5;
@@ -791,10 +810,7 @@ pub fn apply_granger_evidence(
 ///
 /// Looks for existing `Causes`, `Predicts`, `Prevents` edges and
 /// converts them to CausalEdge entries.
-pub fn extract_graph_causal_edges(
-    graph_edges: &[CognitiveEdge],
-    now: f64,
-) -> Vec<CausalEdge> {
+pub fn extract_graph_causal_edges(graph_edges: &[CognitiveEdge], now: f64) -> Vec<CausalEdge> {
     let mut results = Vec::new();
 
     for ge in graph_edges {
@@ -861,9 +877,11 @@ pub fn estimate_effect(
 
     // Weigh evidence types differently.
     let has_intervention = edge.intervention_count > 0;
-    let has_granger = edge.trace.evidence.iter().any(|e| {
-        matches!(e, CausalEvidence::GrangerPrecedence { .. })
-    });
+    let has_granger = edge
+        .trace
+        .evidence
+        .iter()
+        .any(|e| matches!(e, CausalEvidence::GrangerPrecedence { .. }));
     let evidence_quality = if has_intervention {
         EvidenceQuality::Interventional
     } else if has_granger {
@@ -1145,11 +1163,8 @@ pub fn discover_local_causality(
 
     // 1. Temporal pattern discovery from recent events.
     let recent = events.recent(1000);
-    let temporal_patterns = discover_temporal_patterns(
-        &recent,
-        &config,
-        config.min_observations_candidate,
-    );
+    let temporal_patterns =
+        discover_temporal_patterns(&recent, &config, config.min_observations_candidate);
     let temporal_count = temporal_patterns.len();
     integrate_temporal_patterns(store, temporal_patterns, now);
 
@@ -1341,19 +1356,14 @@ pub fn explain_causal_edge(
                 successes + failures,
                 posterior_mean
             ),
-            CausalEvidence::ConditionalTest {
-                survived, ..
-            } => format!(
+            CausalEvidence::ConditionalTest { survived, .. } => format!(
                 "Conditional independence test: {}",
                 if *survived { "SURVIVED" } else { "FAILED" }
             ),
             CausalEvidence::DoseResponse {
                 correlation,
                 sample_size,
-            } => format!(
-                "Dose-response: r={:.2} (n={})",
-                correlation, sample_size
-            ),
+            } => format!("Dose-response: r={:.2} (n={})", correlation, sample_size),
             CausalEvidence::GraphPath {
                 intermediates,
                 path_weight,
@@ -1715,10 +1725,34 @@ mod tests {
         let effect = CausalNode::Event(EventKind::ToolCallCompleted);
 
         // 3 successes, 1 failure.
-        record_intervention(&mut store, ActionKind::ExecuteTool, effect.clone(), true, 1000.0);
-        record_intervention(&mut store, ActionKind::ExecuteTool, effect.clone(), true, 1001.0);
-        record_intervention(&mut store, ActionKind::ExecuteTool, effect.clone(), true, 1002.0);
-        record_intervention(&mut store, ActionKind::ExecuteTool, effect.clone(), false, 1003.0);
+        record_intervention(
+            &mut store,
+            ActionKind::ExecuteTool,
+            effect.clone(),
+            true,
+            1000.0,
+        );
+        record_intervention(
+            &mut store,
+            ActionKind::ExecuteTool,
+            effect.clone(),
+            true,
+            1001.0,
+        );
+        record_intervention(
+            &mut store,
+            ActionKind::ExecuteTool,
+            effect.clone(),
+            true,
+            1002.0,
+        );
+        record_intervention(
+            &mut store,
+            ActionKind::ExecuteTool,
+            effect.clone(),
+            false,
+            1003.0,
+        );
 
         assert_eq!(store.edge_count(), 1);
         let edge = store.find_edge(&cause, &effect).unwrap();
@@ -1910,7 +1944,11 @@ mod tests {
             ..CausalConfig::default()
         });
 
-        let kinds = [EventKind::AppOpened, EventKind::AppClosed, EventKind::UserTyping];
+        let kinds = [
+            EventKind::AppOpened,
+            EventKind::AppClosed,
+            EventKind::UserTyping,
+        ];
         for (i, &kind) in kinds.iter().enumerate() {
             store.upsert(CausalEdge {
                 cause: CausalNode::Event(EventKind::ErrorOccurred),
@@ -1969,9 +2007,24 @@ mod tests {
             stage,
         };
 
-        store.upsert(make(EventKind::UserTyping, CausalStage::Established, 0.9, 20));
-        store.upsert(make(EventKind::ErrorOccurred, CausalStage::Hypothesized, 0.3, 3));
-        store.upsert(make(EventKind::SuggestionAccepted, CausalStage::Candidate, 0.6, 8));
+        store.upsert(make(
+            EventKind::UserTyping,
+            CausalStage::Established,
+            0.9,
+            20,
+        ));
+        store.upsert(make(
+            EventKind::ErrorOccurred,
+            CausalStage::Hypothesized,
+            0.3,
+            3,
+        ));
+        store.upsert(make(
+            EventKind::SuggestionAccepted,
+            CausalStage::Candidate,
+            0.6,
+            8,
+        ));
 
         let summary = causal_summary(&store);
         assert_eq!(summary.total_edges, 3);

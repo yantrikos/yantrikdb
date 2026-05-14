@@ -365,8 +365,7 @@ impl DeltaIndex {
                 }
             }
         }
-        let mut tombstoned: std::collections::HashSet<&str> =
-            std::collections::HashSet::new();
+        let mut tombstoned: std::collections::HashSet<&str> = std::collections::HashSet::new();
         let mut delta_live: Vec<(&DeltaEntry, f64)> = Vec::with_capacity(winner_per_rid.len());
         for (rid, entry) in &winner_per_rid {
             if entry.tombstoned {
@@ -384,12 +383,11 @@ impl DeltaIndex {
 
         // Merge: cold + delta, drop cold rids that are in delta_live (delta
         // wins) or tombstoned in delta.
-        let delta_rid_set: std::collections::HashSet<&str> = delta_live
-            .iter()
-            .map(|(e, _)| e.rid.as_str())
-            .collect();
+        let delta_rid_set: std::collections::HashSet<&str> =
+            delta_live.iter().map(|(e, _)| e.rid.as_str()).collect();
 
-        let mut merged: Vec<(String, f64)> = Vec::with_capacity(cold_results.len() + delta_live.len());
+        let mut merged: Vec<(String, f64)> =
+            Vec::with_capacity(cold_results.len() + delta_live.len());
         for (rid, dist) in &cold_results {
             if tombstoned.contains(rid.as_str()) || delta_rid_set.contains(rid.as_str()) {
                 continue;
@@ -445,8 +443,7 @@ impl DeltaIndex {
     /// next append against the now-empty delta restarts the age window.
     pub fn seal_delta_for_compaction(&self) -> Vec<DeltaEntry> {
         let mut delta = self.delta.write();
-        let sealed =
-            std::mem::replace(&mut *delta, Vec::with_capacity(self.delta_max.min(4096)));
+        let sealed = std::mem::replace(&mut *delta, Vec::with_capacity(self.delta_max.min(4096)));
         // Reset the dirty-age clock under the same write lock so the
         // age-trigger calculation can never observe a stale stamp paired
         // with an empty delta.
@@ -565,10 +562,7 @@ impl DeltaIndex {
     ///
     /// Returns true if woken by signal, false if the timeout fired.
     /// Caller treats both as "go check should_compact again."
-    pub fn wait_for_compaction_signal(
-        &self,
-        timeout: std::time::Duration,
-    ) -> bool {
+    pub fn wait_for_compaction_signal(&self, timeout: std::time::Duration) -> bool {
         let mut guard = self.compactor_wake_mu.lock();
         let result = self.compactor_wake_cv.wait_for(&mut guard, timeout);
         !result.timed_out()
@@ -677,8 +671,10 @@ mod tests {
     #[test]
     fn tombstone_hides_rid_from_search() {
         let idx = DeltaIndex::new(64);
-        idx.append("rid_keep".to_string(), vec_seed(1.0, 64), 1).unwrap();
-        idx.append("rid_drop".to_string(), vec_seed(2.0, 64), 2).unwrap();
+        idx.append("rid_keep".to_string(), vec_seed(1.0, 64), 1)
+            .unwrap();
+        idx.append("rid_drop".to_string(), vec_seed(2.0, 64), 2)
+            .unwrap();
 
         let query = vec_seed(2.0, 64);
         let r_before = idx.search(&query, 5).unwrap();
@@ -719,7 +715,8 @@ mod tests {
         cold.insert("rid_cold", &vec_seed(1.0, 64)).unwrap();
         idx.install_cold(cold);
 
-        idx.append("rid_delta".to_string(), vec_seed(2.0, 64), 1).unwrap();
+        idx.append("rid_delta".to_string(), vec_seed(2.0, 64), 1)
+            .unwrap();
 
         let r = idx.search(&vec_seed(1.5, 64), 5).unwrap();
         let rids: Vec<&str> = r.iter().map(|(rid, _)| rid.as_str()).collect();
@@ -796,7 +793,10 @@ mod tests {
         // even after waiting past max_dirty_age.
         let idx = DeltaIndex::with_capacity_and_age(64, 256, Duration::from_millis(20));
         std::thread::sleep(Duration::from_millis(40));
-        assert!(!idx.should_compact(), "empty delta never triggers age compaction");
+        assert!(
+            !idx.should_compact(),
+            "empty delta never triggers age compaction"
+        );
     }
 
     #[test]
@@ -805,14 +805,19 @@ mod tests {
         // a 20ms max_dirty_age must trigger compaction by the age path.
         let idx = DeltaIndex::with_capacity_and_age(64, 256, Duration::from_millis(20));
         for i in 0..10 {
-            idx.append(format!("rid_{i}"), vec_seed(i as f32, 64), i as u64).unwrap();
+            idx.append(format!("rid_{i}"), vec_seed(i as f32, 64), i as u64)
+                .unwrap();
         }
         assert_eq!(idx.delta_len(), 10);
-        assert!(!idx.should_compact(),
-            "below half-cap and within max_dirty_age window must NOT trigger");
+        assert!(
+            !idx.should_compact(),
+            "below half-cap and within max_dirty_age window must NOT trigger"
+        );
         std::thread::sleep(Duration::from_millis(50));
-        assert!(idx.should_compact(),
-            "10 entries sitting for >max_dirty_age must trigger age path");
+        assert!(
+            idx.should_compact(),
+            "10 entries sitting for >max_dirty_age must trigger age path"
+        );
     }
 
     #[test]
@@ -820,7 +825,8 @@ mod tests {
         // After seal_delta_for_compaction, the oldest_dirty_at clock
         // resets — a subsequent append starts a fresh age window.
         let idx = DeltaIndex::with_capacity_and_age(64, 256, Duration::from_millis(20));
-        idx.append("rid_a".to_string(), vec_seed(1.0, 64), 1).unwrap();
+        idx.append("rid_a".to_string(), vec_seed(1.0, 64), 1)
+            .unwrap();
         std::thread::sleep(Duration::from_millis(30));
         assert!(idx.should_compact(), "first window: age trigger fires");
 
@@ -828,10 +834,14 @@ mod tests {
         assert!(!idx.should_compact(), "seal cleared dirty-age clock");
 
         // New append after seal: fresh age window, must NOT trigger immediately.
-        idx.append("rid_b".to_string(), vec_seed(2.0, 64), 2).unwrap();
+        idx.append("rid_b".to_string(), vec_seed(2.0, 64), 2)
+            .unwrap();
         assert!(!idx.should_compact(), "fresh window after seal");
         std::thread::sleep(Duration::from_millis(30));
-        assert!(idx.should_compact(), "second window: age trigger fires again");
+        assert!(
+            idx.should_compact(),
+            "second window: age trigger fires again"
+        );
     }
 
     #[test]
@@ -840,7 +850,8 @@ mod tests {
         // run compact() (simulating the compactor tick), entries land in cold.
         let idx = DeltaIndex::with_capacity_and_age(64, 256, Duration::from_millis(20));
         for i in 0..10 {
-            idx.append(format!("rid_{i}"), vec_seed(i as f32, 64), i as u64).unwrap();
+            idx.append(format!("rid_{i}"), vec_seed(i as f32, 64), i as u64)
+                .unwrap();
         }
         std::thread::sleep(Duration::from_millis(40));
         assert!(idx.should_compact(), "age trigger ready");
@@ -864,7 +875,10 @@ mod tests {
         assert!(!was_live, "tombstone of unknown rid is appended as marker");
         assert_eq!(idx.delta_len(), 1);
         std::thread::sleep(Duration::from_millis(30));
-        assert!(idx.should_compact(), "tombstone-only delta also fires by age");
+        assert!(
+            idx.should_compact(),
+            "tombstone-only delta also fires by age"
+        );
     }
 
     #[test]
@@ -946,7 +960,8 @@ mod tests {
                 .unwrap();
         }
         assert!(!idx.should_compact(), "below half cap");
-        idx.append("rid_5".to_string(), vec_seed(5.0, 64), 5).unwrap();
+        idx.append("rid_5".to_string(), vec_seed(5.0, 64), 5)
+            .unwrap();
         assert!(idx.should_compact(), "at half cap = should compact");
     }
 
@@ -954,7 +969,8 @@ mod tests {
     fn compact_drains_delta_into_cold() {
         let idx = DeltaIndex::new(64);
         for i in 0..10 {
-            idx.append(format!("rid_{i}"), vec_seed(i as f32, 64), i as u64).unwrap();
+            idx.append(format!("rid_{i}"), vec_seed(i as f32, 64), i as u64)
+                .unwrap();
         }
         assert_eq!(idx.delta_len(), 10);
         assert_eq!(idx.cold_len(), 0);
@@ -1001,9 +1017,11 @@ mod tests {
         //   3. hydrate(rid)        -> append at seq=3
         // Compact must produce a cold where rid_X is LIVE (highest seq wins).
         let idx = DeltaIndex::new(64);
-        idx.append("rid_X".to_string(), vec_seed(5.0, 64), 1).unwrap();
+        idx.append("rid_X".to_string(), vec_seed(5.0, 64), 1)
+            .unwrap();
         idx.tombstone("rid_X", 2);
-        idx.append("rid_X".to_string(), vec_seed(5.0, 64), 3).unwrap();
+        idx.append("rid_X".to_string(), vec_seed(5.0, 64), 3)
+            .unwrap();
 
         let n = idx.compact().unwrap();
         assert_eq!(n, 1, "highest-seq winner applied once");
@@ -1028,7 +1046,8 @@ mod tests {
         // sealed entries.
         let idx = DeltaIndex::new(64);
         for i in 0..5 {
-            idx.append(format!("before_{i}"), vec_seed(i as f32, 64), i as u64).unwrap();
+            idx.append(format!("before_{i}"), vec_seed(i as f32, 64), i as u64)
+                .unwrap();
         }
         // Seal manually + start "compaction" but before applying, append more.
         let sealed = idx.seal_delta_for_compaction();
@@ -1036,9 +1055,18 @@ mod tests {
         assert_eq!(idx.delta_len(), 0, "fresh delta after seal");
 
         for i in 0..3 {
-            idx.append(format!("after_{i}"), vec_seed((100 + i) as f32, 64), (100 + i) as u64).unwrap();
+            idx.append(
+                format!("after_{i}"),
+                vec_seed((100 + i) as f32, 64),
+                (100 + i) as u64,
+            )
+            .unwrap();
         }
-        assert_eq!(idx.delta_len(), 3, "after-seal writes accumulate in new delta");
+        assert_eq!(
+            idx.delta_len(),
+            3,
+            "after-seal writes accumulate in new delta"
+        );
 
         // Note: the actual compactor (compact()) does seal+apply in one step.
         // This test exercises the seal-only primitive to prove the swap
@@ -1055,7 +1083,8 @@ mod tests {
             if idx.should_compact() {
                 idx.compact().unwrap();
             }
-            idx.append(format!("rid_{i}"), vec_seed(i as f32, 64), i as u64).unwrap();
+            idx.append(format!("rid_{i}"), vec_seed(i as f32, 64), i as u64)
+                .unwrap();
         }
         // After 50 inserts with periodic compaction, cold has all 50.
         idx.compact().unwrap(); // drain final delta

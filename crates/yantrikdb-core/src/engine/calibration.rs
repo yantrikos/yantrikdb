@@ -28,9 +28,9 @@ impl YantrikDB {
         let meta = Self::get_meta(&self.conn(), LEARNING_STATE_META_KEY)?;
         match meta {
             Some(json) => serde_json::from_str(&json).map_err(|e| {
-                crate::error::YantrikDbError::Database(
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-                )
+                crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                    Box::new(e),
+                ))
             }),
             None => {
                 // Check for persisted config to apply to new state
@@ -46,9 +46,9 @@ impl YantrikDB {
     /// Persist the learning state.
     pub fn save_learning_state(&self, state: &LearningState) -> Result<()> {
         let json = serde_json::to_string(state).map_err(|e| {
-            crate::error::YantrikDbError::Database(
-                rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-            )
+            crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                Box::new(e),
+            ))
         })?;
         self.conn().execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -65,9 +65,9 @@ impl YantrikDB {
         let meta = Self::get_meta(&self.conn(), LEARNING_CONFIG_META_KEY)?;
         match meta {
             Some(json) => serde_json::from_str(&json).map_err(|e| {
-                crate::error::YantrikDbError::Database(
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-                )
+                crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                    Box::new(e),
+                ))
             }),
             None => Ok(LearningConfig::default()),
         }
@@ -76,9 +76,9 @@ impl YantrikDB {
     /// Persist the learning configuration.
     pub fn save_learning_config(&self, config: &LearningConfig) -> Result<()> {
         let json = serde_json::to_string(config).map_err(|e| {
-            crate::error::YantrikDbError::Database(
-                rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-            )
+            crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                Box::new(e),
+            ))
         })?;
         self.conn().execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -319,7 +319,10 @@ mod tests {
         let db = test_db();
 
         let snap = db.weight_snapshot().unwrap();
-        let sum = snap.effect_weight + snap.intent_weight + snap.preference_weight + snap.simulation_weight;
+        let sum = snap.effect_weight
+            + snap.intent_weight
+            + snap.preference_weight
+            + snap.simulation_weight;
         assert!((sum - 1.0).abs() < 0.01, "Weights should sum to ~1.0");
         assert_eq!(snap.update_count, 0);
     }

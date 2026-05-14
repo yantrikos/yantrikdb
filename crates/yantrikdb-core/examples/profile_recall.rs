@@ -12,19 +12,30 @@
 #[cfg(feature = "profiling")]
 fn main() {
     use std::time::Instant;
-    use yantrikdb_core::bench_utils::{seed_db_scaled, query_embedding};
-    use yantrikdb_core::{YantrikDB, RecallTimings};
+    use yantrikdb_core::bench_utils::{query_embedding, seed_db_scaled};
+    use yantrikdb_core::{RecallTimings, YantrikDB};
 
     let n: usize = std::env::var("PROFILE_N")
-        .ok().and_then(|s| s.parse().ok()).unwrap_or(100_000);
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(100_000);
     let dim: usize = std::env::var("PROFILE_DIM")
-        .ok().and_then(|s| s.parse().ok()).unwrap_or(384);
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(384);
     let iters: usize = std::env::var("PROFILE_ITERS")
-        .ok().and_then(|s| s.parse().ok()).unwrap_or(10);
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10);
     let top_k: usize = std::env::var("PROFILE_TOP_K")
-        .ok().and_then(|s| s.parse().ok()).unwrap_or(10);
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10);
     let with_graph: bool = std::env::var("PROFILE_GRAPH")
-        .ok().and_then(|s| s.parse::<u8>().ok()).unwrap_or(0) != 0;
+        .ok()
+        .and_then(|s| s.parse::<u8>().ok())
+        .unwrap_or(0)
+        != 0;
 
     println!("=== YantrikDB Recall Profiling ===");
     println!("N={n}, dim={dim}, iters={iters}, top_k={top_k}, graph={with_graph}");
@@ -32,7 +43,10 @@ fn main() {
 
     // Estimate memory usage
     let emb_bytes = n * dim * 4;
-    println!("Estimated embedding storage: {:.1} MB", emb_bytes as f64 / 1_048_576.0);
+    println!(
+        "Estimated embedding storage: {:.1} MB",
+        emb_bytes as f64 / 1_048_576.0
+    );
     println!();
 
     // Seed database
@@ -41,8 +55,10 @@ fn main() {
     let db = YantrikDB::new(":memory:", dim).unwrap();
     seed_db_scaled(&db, n, dim, with_graph);
     let seed_secs = t_seed.elapsed().as_secs_f64();
-    println!("  Seeded {n} memories in {seed_secs:.1}s ({:.0} records/sec)",
-        n as f64 / seed_secs);
+    println!(
+        "  Seeded {n} memories in {seed_secs:.1}s ({:.0} records/sec)",
+        n as f64 / seed_secs
+    );
     println!();
 
     // Run profiled recall iterations
@@ -56,10 +72,11 @@ fn main() {
     let mut all_timings: Vec<RecallTimings> = Vec::with_capacity(iters);
 
     for i in 0..iters {
-        let result = db.recall_profiled(
-            &query, top_k, None, None,
-            false, with_graph, query_text, false,
-        ).unwrap();
+        let result = db
+            .recall_profiled(
+                &query, top_k, None, None, false, with_graph, query_text, false,
+            )
+            .unwrap();
         println!(
             "  iter {:>2}: total={:>8.2}ms  vec={:>8.2}ms  cache_score={:>6.2}ms  fetch={:>6.2}ms  graph={:>6.2}ms  reinforce={:>6.2}ms  candidates={}  results={}",
             i,
@@ -78,17 +95,25 @@ fn main() {
     // Aggregate statistics
     println!();
     println!("=== Timing Summary (ms) ===");
-    println!("{:<20} {:>8} {:>8} {:>8} {:>8}",
-        "Phase", "Mean", "Median", "Min", "Max");
+    println!(
+        "{:<20} {:>8} {:>8} {:>8} {:>8}",
+        "Phase", "Mean", "Median", "Min", "Max"
+    );
     println!("{}", "-".repeat(60));
 
     let phases: Vec<(&str, Box<dyn Fn(&RecallTimings) -> f64>)> = vec![
         ("vec_search", Box::new(|t: &RecallTimings| t.vec_search_ms)),
-        ("cache_score", Box::new(|t: &RecallTimings| t.cache_score_ms)),
+        (
+            "cache_score",
+            Box::new(|t: &RecallTimings| t.cache_score_ms),
+        ),
         ("fetch_topk", Box::new(|t: &RecallTimings| t.fetch_ms)),
         ("graph", Box::new(|t: &RecallTimings| t.graph_ms)),
         ("reinforce", Box::new(|t: &RecallTimings| t.reinforce_ms)),
-        ("sort_truncate", Box::new(|t: &RecallTimings| t.sort_truncate_ms)),
+        (
+            "sort_truncate",
+            Box::new(|t: &RecallTimings| t.sort_truncate_ms),
+        ),
         ("TOTAL", Box::new(|t: &RecallTimings| t.total_ms)),
     ];
 
@@ -99,7 +124,10 @@ fn main() {
         let median = vals[vals.len() / 2];
         let min = vals[0];
         let max = vals[vals.len() - 1];
-        println!("{:<20} {:>8.2} {:>8.2} {:>8.2} {:>8.2}", name, mean, median, min, max);
+        println!(
+            "{:<20} {:>8.2} {:>8.2} {:>8.2} {:>8.2}",
+            name, mean, median, min, max
+        );
     }
 
     // Percentage breakdown
@@ -109,16 +137,26 @@ fn main() {
 
     let breakdown_phases: Vec<(&str, Box<dyn Fn(&RecallTimings) -> f64>)> = vec![
         ("vec_search", Box::new(|t: &RecallTimings| t.vec_search_ms)),
-        ("cache_score", Box::new(|t: &RecallTimings| t.cache_score_ms)),
+        (
+            "cache_score",
+            Box::new(|t: &RecallTimings| t.cache_score_ms),
+        ),
         ("fetch_topk", Box::new(|t: &RecallTimings| t.fetch_ms)),
         ("graph", Box::new(|t: &RecallTimings| t.graph_ms)),
         ("reinforce", Box::new(|t: &RecallTimings| t.reinforce_ms)),
-        ("sort_truncate", Box::new(|t: &RecallTimings| t.sort_truncate_ms)),
+        (
+            "sort_truncate",
+            Box::new(|t: &RecallTimings| t.sort_truncate_ms),
+        ),
     ];
 
     for (name, extractor) in &breakdown_phases {
         let mean_phase = all_timings.iter().map(|t| extractor(t)).sum::<f64>() / iters as f64;
-        let pct = if mean_total > 0.0 { mean_phase / mean_total * 100.0 } else { 0.0 };
+        let pct = if mean_total > 0.0 {
+            mean_phase / mean_total * 100.0
+        } else {
+            0.0
+        };
         let bar = "#".repeat((pct / 2.0) as usize);
         println!("  {:<16} {:>5.1}%  {}", name, pct, bar);
     }

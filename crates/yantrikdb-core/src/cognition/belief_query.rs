@@ -9,8 +9,8 @@
 use std::collections::HashMap;
 
 use crate::state::{
-    BeliefPayload, CognitiveEdge, CognitiveEdgeKind, CognitiveNode,
-    EvidenceEntry, NodeId, NodeKind, NodePayload, Provenance,
+    BeliefPayload, CognitiveEdge, CognitiveEdgeKind, CognitiveNode, EvidenceEntry, NodeId,
+    NodeKind, NodePayload, Provenance,
 };
 
 // ── Query Types ──
@@ -187,32 +187,30 @@ pub fn query_beliefs<'a>(
     match pattern.order {
         BeliefOrder::ByConfidence => {
             results.sort_by(|a, b| {
-                b.attrs.confidence
+                b.attrs
+                    .confidence
                     .partial_cmp(&a.attrs.confidence)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
         }
         BeliefOrder::ByRecency => {
-            results.sort_by(|a, b| {
-                b.attrs.last_updated_ms
-                    .cmp(&a.attrs.last_updated_ms)
-            });
+            results.sort_by(|a, b| b.attrs.last_updated_ms.cmp(&a.attrs.last_updated_ms));
         }
         BeliefOrder::ByEvidenceCount => {
-            results.sort_by(|a, b| {
-                b.attrs.evidence_count.cmp(&a.attrs.evidence_count)
-            });
+            results.sort_by(|a, b| b.attrs.evidence_count.cmp(&a.attrs.evidence_count));
         }
         BeliefOrder::BySalience => {
             results.sort_by(|a, b| {
-                b.attrs.salience
+                b.attrs
+                    .salience
                     .partial_cmp(&a.attrs.salience)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
         }
         BeliefOrder::ByVolatility => {
             results.sort_by(|a, b| {
-                b.attrs.volatility
+                b.attrs
+                    .volatility
                     .partial_cmp(&a.attrs.volatility)
                     .unwrap_or(std::cmp::Ordering::Equal)
             });
@@ -363,7 +361,9 @@ pub fn belief_inventory(nodes: &[&CognitiveNode]) -> BeliefInventory {
     strongest_heap.sort_by(|a, b| {
         let dist_a = (a.2 - 0.5).abs();
         let dist_b = (b.2 - 0.5).abs();
-        dist_b.partial_cmp(&dist_a).unwrap_or(std::cmp::Ordering::Equal)
+        dist_b
+            .partial_cmp(&dist_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
     inv.strongest = strongest_heap.into_iter().take(5).collect();
 
@@ -371,7 +371,9 @@ pub fn belief_inventory(nodes: &[&CognitiveNode]) -> BeliefInventory {
     contested_heap.sort_by(|a, b| {
         let uncertainty_a = (a.2 - 0.5).abs();
         let uncertainty_b = (b.2 - 0.5).abs();
-        uncertainty_a.partial_cmp(&uncertainty_b).unwrap_or(std::cmp::Ordering::Equal)
+        uncertainty_a
+            .partial_cmp(&uncertainty_b)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
     inv.most_contested = contested_heap.into_iter().take(5).collect();
 
@@ -389,11 +391,16 @@ fn compute_confidence_trend(evidence: &[EvidenceEntry]) -> f64 {
 
     // Split evidence into halves by time
     let mut sorted: Vec<&EvidenceEntry> = evidence.iter().collect();
-    sorted.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        a.timestamp
+            .partial_cmp(&b.timestamp)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     let mid = sorted.len() / 2;
     let early_avg: f64 = sorted[..mid].iter().map(|e| e.weight).sum::<f64>() / mid as f64;
-    let late_avg: f64 = sorted[mid..].iter().map(|e| e.weight).sum::<f64>() / (sorted.len() - mid) as f64;
+    let late_avg: f64 =
+        sorted[mid..].iter().map(|e| e.weight).sum::<f64>() / (sorted.len() - mid) as f64;
 
     late_avg - early_avg
 }
@@ -405,7 +412,12 @@ mod tests {
     use super::*;
     use crate::state::{sigmoid, NodeIdAllocator};
 
-    fn make_belief(alloc: &mut NodeIdAllocator, prop: &str, log_odds: f64, domain: &str) -> CognitiveNode {
+    fn make_belief(
+        alloc: &mut NodeIdAllocator,
+        prop: &str,
+        log_odds: f64,
+        domain: &str,
+    ) -> CognitiveNode {
         let id = alloc.alloc(NodeKind::Belief);
         let mut node = CognitiveNode::new(
             id,
@@ -444,8 +456,8 @@ mod tests {
     fn test_query_by_probability_range() {
         let mut alloc = NodeIdAllocator::new();
         let strong = make_belief(&mut alloc, "Strong", 3.0, "test"); // P ≈ 0.95
-        let weak = make_belief(&mut alloc, "Weak", 0.2, "test");     // P ≈ 0.55
-        let negative = make_belief(&mut alloc, "No", -2.0, "test");  // P ≈ 0.12
+        let weak = make_belief(&mut alloc, "Weak", 0.2, "test"); // P ≈ 0.55
+        let negative = make_belief(&mut alloc, "No", -2.0, "test"); // P ≈ 0.12
 
         let nodes = vec![strong, weak, negative];
         let pattern = BeliefPattern {
@@ -536,10 +548,26 @@ mod tests {
     #[test]
     fn test_confidence_trend() {
         let evidence = vec![
-            EvidenceEntry { source: "old".into(), weight: -0.5, timestamp: 100.0 },
-            EvidenceEntry { source: "old2".into(), weight: -0.3, timestamp: 200.0 },
-            EvidenceEntry { source: "new".into(), weight: 1.0, timestamp: 800.0 },
-            EvidenceEntry { source: "new2".into(), weight: 0.8, timestamp: 900.0 },
+            EvidenceEntry {
+                source: "old".into(),
+                weight: -0.5,
+                timestamp: 100.0,
+            },
+            EvidenceEntry {
+                source: "old2".into(),
+                weight: -0.3,
+                timestamp: 200.0,
+            },
+            EvidenceEntry {
+                source: "new".into(),
+                weight: 1.0,
+                timestamp: 800.0,
+            },
+            EvidenceEntry {
+                source: "new2".into(),
+                weight: 0.8,
+                timestamp: 900.0,
+            },
         ];
 
         let trend = compute_confidence_trend(&evidence);

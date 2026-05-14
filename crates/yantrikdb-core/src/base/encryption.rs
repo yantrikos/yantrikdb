@@ -7,7 +7,6 @@
 ///   - All sensitive fields (text, metadata, embeddings) are encrypted with the DEK.
 ///   - In-memory indexes (HNSW, scoring cache, graph) operate on plaintext.
 ///   - Only the SQLite persistence layer stores ciphertext.
-
 use aes_gcm::{
     aead::{Aead, KeyInit},
     Aes256Gcm, Nonce,
@@ -15,7 +14,7 @@ use aes_gcm::{
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
 use rand::Rng;
 
-use crate::error::{YantrikDbError, Result};
+use crate::error::{Result, YantrikDbError};
 
 const NONCE_LEN: usize = 12;
 

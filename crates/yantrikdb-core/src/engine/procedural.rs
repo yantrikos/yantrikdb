@@ -37,15 +37,15 @@ impl YantrikDB {
         self.recall(
             query_embedding,
             top_k,
-            None,                     // no time window
-            Some("procedural"),       // filter to procedural type
-            false,                    // don't include consolidated
-            query_text.is_some(),     // expand entities if we have query text
+            None,                 // no time window
+            Some("procedural"),   // filter to procedural type
+            false,                // don't include consolidated
+            query_text.is_some(), // expand entities if we have query text
             query_text,
-            true,                     // skip_reinforce — we'll reinforce manually below
+            true, // skip_reinforce — we'll reinforce manually below
             namespace,
             domain,
-            None,                     // no source filter
+            None, // no source filter
         )
     }
 
@@ -73,15 +73,15 @@ impl YantrikDB {
         self.record(
             text,
             "procedural",
-            effectiveness.clamp(0.0, 1.0),  // importance = effectiveness
-            0.0,                             // neutral valence
-            604800.0 * 4.0,                  // 4-week half life (procedures are long-lived)
+            effectiveness.clamp(0.0, 1.0), // importance = effectiveness
+            0.0,                           // neutral valence
+            604800.0 * 4.0,                // 4-week half life (procedures are long-lived)
             &metadata,
             embedding,
             namespace,
-            effectiveness.clamp(0.0, 1.0),   // certainty = effectiveness
+            effectiveness.clamp(0.0, 1.0), // certainty = effectiveness
             domain,
-            "inference",                      // source = inference (learned by the system)
+            "inference", // source = inference (learned by the system)
             None,
         )
     }
@@ -94,7 +94,7 @@ impl YantrikDB {
     pub fn reinforce_procedural(
         &self,
         rid: &str,
-        outcome: f64,   // 1.0 = fully successful, 0.0 = not useful
+        outcome: f64, // 1.0 = fully successful, 0.0 = not useful
     ) -> Result<bool> {
         let ts = now();
         let conn = self.conn();
@@ -150,10 +150,7 @@ impl YantrikDB {
     }
 
     /// Get procedural memory statistics: count by domain, average effectiveness.
-    pub fn procedural_stats(
-        &self,
-        namespace: Option<&str>,
-    ) -> Result<Vec<(String, i64, f64)>> {
+    pub fn procedural_stats(&self, namespace: Option<&str>) -> Result<Vec<(String, i64, f64)>> {
         let sql = if namespace.is_some() {
             "SELECT domain, COUNT(*), AVG(importance) FROM memories \
              WHERE type = 'procedural' AND consolidation_status = 'active' \
@@ -169,12 +166,20 @@ impl YantrikDB {
         let mut stmt = conn.prepare(sql)?;
         let rows = if let Some(ns) = namespace {
             stmt.query_map(params![ns], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, f64>(2)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?
         } else {
             stmt.query_map([], |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?, row.get::<_, f64>(2)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, f64>(2)?,
+                ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?
         };
