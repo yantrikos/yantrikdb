@@ -109,6 +109,8 @@ jobs:
       url: https://pypi.org/p/yantrikdb
     permissions:
       id-token: write
+      attestations: write
+      contents: read
     steps:
       - name: Download all wheels
         uses: actions/download-artifact@v4
@@ -117,11 +119,19 @@ jobs:
           merge-multiple: true
           path: dist
 
-      - name: Publish to PyPI
-        uses: PyO3/maturin-action@v1
+      # Generate Sigstore/SLSA build provenance attestation for each artifact.
+      # Surfaces on PyPI as a verifiable attestation badge and lets downstream
+      # consumers prove the wheel came from this specific workflow run. Added
+      # 2026-05-13 — donbowman contribution via PR #12.
+      - name: Generate artifact attestation
+        uses: actions/attest-build-provenance@v2
         with:
-          command: upload
-          args: --non-interactive --skip-existing dist/*
+          subject-path: 'dist/*'
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          skip-existing: true
 
   publish-crates:
     name: Publish to crates.io
