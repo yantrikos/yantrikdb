@@ -330,7 +330,7 @@ def main():
     @click.option("--interval", default=30.0, help="Sync interval in seconds")
     def run(db: str, port: int, peer: tuple, interval: float):
         """Run YantrikDB sync server + daemon."""
-        from _yantrikdb_rust import YantrikDB
+        from yantrikdb._yantrikdb_rust import YantrikDB
 
         engine = YantrikDB(db)
 
@@ -350,4 +350,8 @@ def main():
 
         asyncio.run(_run())
 
+    # pylint: disable=no-value-for-parameter
+    # `run` is decorated with @click.command/@click.option; Click reads the
+    # args from sys.argv at call time. Pylint sees the bare function
+    # signature and (incorrectly) thinks we're missing args.
     run()

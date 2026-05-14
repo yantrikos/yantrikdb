@@ -1,0 +1,24 @@
+[MASTER]
+# Compiled Rust extension — pylint can't introspect a .pyd/.so file to find
+# names, so E0611 (no-name-in-module) fires false-positive for every import
+# from this module. Adding it to the allow-list tells pylint to trust at
+# face value rather than parse-and-verify.
+extension-pkg-allow-list=yantrikdb._yantrikdb_rust
+
+# Same module — if pylint can't even import it during analysis (e.g. when
+# the wheel hasn't been installed in pylint's env), don't fail. Runtime
+# import correctness is verified by pytest.
+ignored-modules=yantrikdb._yantrikdb_rust,_yantrikdb_rust
+
+[MESSAGES CONTROL]
+# E1120 (no-value-for-parameter) is a known Click false-positive class:
+# `@click.command` + `@click.option(...)` decorators turn a function into
+# a Click command that reads args from argv at call time, but pylint sees
+# the bare function signature and complains when the command is invoked
+# with `cmd()`. Used by:
+#   - src/yantrikdb/cli.py (main CLI entry)
+#   - src/yantrikdb/sync/transport.py (sync subcommand entry)
+# Disabling globally; real "missing arg" bugs in non-Click code paths
+# unfortunately become uncatchable, but the trade is small relative to
+# Click coverage across the codebase.
+disable=no-value-for-parameter
