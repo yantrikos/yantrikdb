@@ -52,18 +52,31 @@ jobs:
           python -m pip install --upgrade pip
           pip install "maturin>=1.5" pytest pytest-benchmark
 
+      # Skip yantrikdb-python here too: maturin handles its cdylib build
+      # in pypi.yml with the right macOS linker flags
+      # (-undefined dynamic_lookup). Stock `cargo build` without those
+      # flags fails on macOS at link time with "symbol(s) not found"
+      # for __Py_NoneStruct + friends because pyo3 extension-module
+      # doesn't link against libpython statically.
       - name: Build tests and Rust components
-        run: cargo build --verbose
+        run: cargo build --workspace --exclude yantrikdb-python --verbose
+
+      # `yantrikdb-python` is a pyo3 extension-module crate — `cargo test`
+      # tries to link a test binary against the Python C ABI but
+      # `extension-module` feature tells pyo3 NOT to embed the interpreter,
+      # so the test binary fails to link with `undefined symbol:
+      # PyGILState_Release` and friends. Python tests run via pytest below
+      # against the maturin-built wheel, which is the correct surface. So
+      # exclude the python crate from cargo test.
 
       # Slim build path (`--no-default-features`) is a real deployment
       # surface — users who want to BYO their own embedder strip the
-      # bundled-embedder + embedder-download Cargo features. Test the path
-      # to catch feature-gate breakage.
+      # bundled-embedder + embedder-download Cargo features.
       - name: Run Rust Tests (slim, --no-default-features)
-        run: cargo test --workspace --no-default-features --verbose
+        run: cargo test --workspace --exclude yantrikdb-python --no-default-features --verbose
 
       - name: Run Rust Tests
-        run: cargo test --workspace --verbose
+        run: cargo test --workspace --exclude yantrikdb-python --verbose
 
       - name: Install Python package
         run: pip install -e ".[all,dev]"

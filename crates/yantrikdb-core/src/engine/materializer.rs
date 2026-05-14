@@ -412,15 +412,22 @@ mod tests {
                 .unwrap();
         }
 
+        // Bumped from 40×100ms (4s) to 120×100ms (12s) after macos-14
+        // ARM CI runner consistently slower than Ubuntu x86 — the 4s
+        // deadline was right on the edge and intermittently missed
+        // (failed PR #14 CI on commit 50f2c9c with cold=162 delta=88,
+        // meaning the compactor WAS draining, just hadn't hit 200 in 4s).
+        // 12s gives generous headroom while still failing if the
+        // compactor is actually broken.
         let mut tries = 0;
-        while db.vec_index.cold_len() < 200 && tries < 40 {
+        while db.vec_index.cold_len() < 200 && tries < 120 {
             std::thread::sleep(Duration::from_millis(100));
             tries += 1;
         }
 
         assert!(
             db.vec_index.cold_len() >= 200,
-            "compactor should have moved >=200 entries to cold within 4s, got cold={} delta={}",
+            "compactor should have moved >=200 entries to cold within 12s, got cold={} delta={}",
             db.vec_index.cold_len(),
             db.vec_index.delta_len()
         );

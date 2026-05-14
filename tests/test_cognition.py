@@ -27,11 +27,16 @@ class TestThink:
     def test_think_returns_dict(self, db):
         result = db.think()
         assert isinstance(result, dict)
+        # Engine ThinkResult additions are backward-compat additions, so we
+        # assert subset rather than equality. The test fails honestly only
+        # if any expected key DISAPPEARS, not when a new one shows up.
         expected_keys = {
             "triggers", "consolidation_count", "conflicts_found",
             "patterns_new", "patterns_updated", "expired_triggers", "duration_ms",
         }
-        assert set(result.keys()) == expected_keys
+        assert expected_keys.issubset(result.keys()), (
+            f"missing keys: {expected_keys - set(result.keys())}"
+        )
 
     def test_think_empty_db(self, db):
         result = db.think()

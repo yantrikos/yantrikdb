@@ -2806,10 +2806,15 @@ impl YantrikDB {
                                     .extend(or_rids.into_iter().filter(|r| !existing.contains(r)));
                             }
 
-                            let existing_set: std::collections::HashSet<&str> =
-                                fts_rids.iter().map(|r| r.as_str()).collect();
+                            // Own the set so it doesn't borrow `fts_rids` —
+                            // we push into `fts_rids` below, which requires
+                            // a mutable borrow that conflicts with any live
+                            // immutable borrow. (E0502 caught by clippy
+                            // --all-features in CI 2026-05-14.)
+                            let existing_set: std::collections::HashSet<String> =
+                                fts_rids.iter().cloned().collect();
                             for rid in imp_rids {
-                                if !existing_set.contains(rid.as_str()) {
+                                if !existing_set.contains(&rid) {
                                     fts_rids.push(rid);
                                 }
                             }

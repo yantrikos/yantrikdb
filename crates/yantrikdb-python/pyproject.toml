@@ -42,8 +42,9 @@ langchain = ["langchain-core>=0.2.0"]
 openai = ["openai>=1.0.0"]
 crewai = ["crewai>=0.40.0"]
 agent = ["httpx>=0.27.0", "pyyaml>=6.0"]
+mcp = ["mcp>=1.0.0"]
 all = [
-    "yantrikdb[sentence-transformers,server,sync,langchain,openai,agent]",
+    "yantrikdb[sentence-transformers,server,sync,langchain,openai,agent,mcp]",
 ]
 dev = [
     "pytest>=8.0.0",

@@ -58,8 +58,15 @@ langchain = ["langchain-core>=0.2.0"]
 openai = ["openai>=1.0.0"]
 crewai = ["crewai>=0.40.0"]
 agent = ["httpx>=0.27.0", "pyyaml>=6.0"]
+# **v0.7.x late.** Optional MCP (Model Context Protocol) integration —
+# `yantrikdb.mcp.{server,tools,resources}` modules import
+# `mcp.server.fastmcp` to expose YantrikDB as an MCP tool/resource
+# provider for Claude Desktop, Hermes Agent, and other MCP clients.
+# Not required for engine use; only for users wiring yantrikdb behind
+# an MCP server.
+mcp = ["mcp>=1.0.0"]
 all = [
-    "yantrikdb[sentence-transformers,server,sync,langchain,openai,agent]",
+    "yantrikdb[sentence-transformers,server,sync,langchain,openai,agent,mcp]",
 ]
 dev = [
     "pytest>=8.0.0",

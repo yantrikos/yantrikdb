@@ -1,6 +1,10 @@
 """Tests for YantrikDB MCP tool functions.
 
 Tests the tool logic directly with an in-memory YantrikDB, bypassing MCP transport.
+
+Requires the optional `mcp` extra: `pip install yantrikdb[mcp]`. Without it,
+the whole file is skipped (rather than ImportError-failing) so users running
+the test suite without the MCP integration installed get a clean skip.
 """
 
 import json
@@ -8,6 +12,9 @@ import math
 import threading
 
 import pytest
+
+# Skip the entire module if mcp isn't installed (optional extra).
+pytest.importorskip("mcp")
 
 from yantrikdb import YantrikDB
 
