@@ -1,7 +1,7 @@
+use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use std::time::Duration;
-use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
-use yantrikdb_core::{YantrikDB, RecordInput};
-use yantrikdb_core::bench_utils::{vec_seed_dim, seed_db_scaled, query_embedding};
+use yantrikdb_core::bench_utils::{query_embedding, seed_db_scaled, vec_seed_dim};
+use yantrikdb_core::{RecordInput, YantrikDB};
 
 fn vec_seed(seed: f32, dim: usize) -> Vec<f32> {
     let raw: Vec<f32> = (0..dim).map(|i| (seed + i as f32) * 0.1).collect();
@@ -22,7 +22,10 @@ fn seed_db(db: &YantrikDB, n: usize, dim: usize) {
             &meta,
             &emb,
             "default",
-            0.8, "general", "user", None,
+            0.8,
+            "general",
+            "user",
+            None,
         )
         .unwrap();
     }
@@ -46,7 +49,10 @@ fn bench_record(c: &mut Criterion) {
                 &meta,
                 &emb,
                 "default",
-                0.8, "general", "user", None,
+                0.8,
+                "general",
+                "user",
+                None,
             )
             .unwrap();
             i += 1;
@@ -64,7 +70,20 @@ fn bench_recall(c: &mut Criterion) {
         let query = vec_seed(999.0, dim);
 
         group.bench_with_input(BenchmarkId::new("top10", n), &n, |b, _| {
-            b.iter(|| db.recall(black_box(&query), 10, None, None, false, false, None, false, None).unwrap())
+            b.iter(|| {
+                db.recall(
+                    black_box(&query),
+                    10,
+                    None,
+                    None,
+                    false,
+                    false,
+                    None,
+                    false,
+                    None,
+                )
+                .unwrap()
+            })
         });
     }
     group.finish();
@@ -75,12 +94,23 @@ fn bench_get(c: &mut Criterion) {
     let db = YantrikDB::new(":memory:", dim).unwrap();
     let meta = serde_json::json!({});
     let rid = db
-        .record("lookup target", "episodic", 0.5, 0.0, 604800.0, &meta, &vec_seed(1.0, dim), "default", 0.8, "general", "user", None)
+        .record(
+            "lookup target",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &meta,
+            &vec_seed(1.0, dim),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
         .unwrap();
 
-    c.bench_function("get", |b| {
-        b.iter(|| db.get(black_box(&rid)).unwrap())
-    });
+    c.bench_function("get", |b| b.iter(|| db.get(black_box(&rid)).unwrap()));
 }
 
 fn bench_stats(c: &mut Criterion) {
@@ -88,9 +118,7 @@ fn bench_stats(c: &mut Criterion) {
     let db = YantrikDB::new(":memory:", dim).unwrap();
     seed_db(&db, 100, dim);
 
-    c.bench_function("stats_100", |b| {
-        b.iter(|| db.stats(None).unwrap())
-    });
+    c.bench_function("stats_100", |b| b.iter(|| db.stats(None).unwrap()));
 }
 
 fn bench_relate(c: &mut Criterion) {
@@ -141,7 +169,10 @@ fn bench_bulk_insert(c: &mut Criterion) {
                     &meta,
                     &emb,
                     "default",
-                    0.8, "general", "user", None,
+                    0.8,
+                    "general",
+                    "user",
+                    None,
                 )
                 .unwrap();
             }
@@ -155,20 +186,22 @@ fn bench_record_batch(c: &mut Criterion) {
     c.bench_function("record_batch_500", |b| {
         b.iter(|| {
             let db = YantrikDB::new(":memory:", dim).unwrap();
-            let inputs: Vec<RecordInput> = (0..500).map(|i| RecordInput {
-                text: format!("batch memory {i}"),
-                memory_type: "episodic".to_string(),
-                importance: 0.5,
-                valence: 0.0,
-                half_life: 604800.0,
-                metadata: serde_json::json!({}),
-                embedding: vec_seed(i as f32 * 0.37, dim),
-                namespace: "default".to_string(),
-                certainty: 0.8,
-                domain: "general".to_string(),
-                source: "user".to_string(),
-                emotional_state: None,
-            }).collect();
+            let inputs: Vec<RecordInput> = (0..500)
+                .map(|i| RecordInput {
+                    text: format!("batch memory {i}"),
+                    memory_type: "episodic".to_string(),
+                    importance: 0.5,
+                    valence: 0.0,
+                    half_life: 604800.0,
+                    metadata: serde_json::json!({}),
+                    embedding: vec_seed(i as f32 * 0.37, dim),
+                    namespace: "default".to_string(),
+                    certainty: 0.8,
+                    domain: "general".to_string(),
+                    source: "user".to_string(),
+                    emotional_state: None,
+                })
+                .collect();
             db.record_batch(black_box(&inputs)).unwrap();
         })
     });
@@ -183,8 +216,22 @@ fn bench_archive(c: &mut Criterion) {
                 // Setup: create a DB with one hot memory
                 let db = YantrikDB::new(":memory:", dim).unwrap();
                 let emb = vec_seed(42.0, dim);
-                let rid = db.record("archive target", "episodic", 0.5, 0.0, 604800.0,
-                    &serde_json::json!({}), &emb, "default", 0.8, "general", "user", None).unwrap();
+                let rid = db
+                    .record(
+                        "archive target",
+                        "episodic",
+                        0.5,
+                        0.0,
+                        604800.0,
+                        &serde_json::json!({}),
+                        &emb,
+                        "default",
+                        0.8,
+                        "general",
+                        "user",
+                        None,
+                    )
+                    .unwrap();
                 (db, rid)
             },
             |(db, rid)| {
@@ -204,8 +251,22 @@ fn bench_hydrate(c: &mut Criterion) {
                 // Setup: create a DB with one archived memory
                 let db = YantrikDB::new(":memory:", dim).unwrap();
                 let emb = vec_seed(42.0, dim);
-                let rid = db.record("hydrate target", "episodic", 0.5, 0.0, 604800.0,
-                    &serde_json::json!({}), &emb, "default", 0.8, "general", "user", None).unwrap();
+                let rid = db
+                    .record(
+                        "hydrate target",
+                        "episodic",
+                        0.5,
+                        0.0,
+                        604800.0,
+                        &serde_json::json!({}),
+                        &emb,
+                        "default",
+                        0.8,
+                        "general",
+                        "user",
+                        None,
+                    )
+                    .unwrap();
                 db.archive(&rid).unwrap();
                 (db, rid)
             },
@@ -239,7 +300,20 @@ fn bench_recall_scaled(c: &mut Criterion) {
         let query = vec_seed(999.0, dim);
 
         group.bench_with_input(BenchmarkId::new("top10", n), &n, |b, _| {
-            b.iter(|| db.recall(black_box(&query), 10, None, None, false, false, None, true, None).unwrap())
+            b.iter(|| {
+                db.recall(
+                    black_box(&query),
+                    10,
+                    None,
+                    None,
+                    false,
+                    false,
+                    None,
+                    true,
+                    None,
+                )
+                .unwrap()
+            })
         });
     }
     group.finish();
@@ -263,8 +337,18 @@ fn bench_recall_dim_comparison(c: &mut Criterion) {
                 &n,
                 |b, _| {
                     b.iter(|| {
-                        db.recall(black_box(&query), 10, None, None, false, false, None, true, None)
-                            .unwrap()
+                        db.recall(
+                            black_box(&query),
+                            10,
+                            None,
+                            None,
+                            false,
+                            false,
+                            None,
+                            true,
+                            None,
+                        )
+                        .unwrap()
                     })
                 },
             );
@@ -288,16 +372,22 @@ fn bench_recall_100k(c: &mut Criterion) {
     eprintln!("Seeding complete.");
 
     for &top_k in &[10, 50] {
-        group.bench_with_input(
-            BenchmarkId::new("no_graph", top_k),
-            &top_k,
-            |b, &k| {
-                b.iter(|| {
-                    db.recall(black_box(&query), k, None, None, false, false, None, true, None)
-                        .unwrap()
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("no_graph", top_k), &top_k, |b, &k| {
+            b.iter(|| {
+                db.recall(
+                    black_box(&query),
+                    k,
+                    None,
+                    None,
+                    false,
+                    false,
+                    None,
+                    true,
+                    None,
+                )
+                .unwrap()
+            })
+        });
     }
     group.finish();
 }
@@ -313,32 +403,39 @@ fn bench_recall_with_graph(c: &mut Criterion) {
         seed_db_scaled(&db, n, dim, true);
         let query = query_embedding(dim);
 
-        group.bench_with_input(
-            BenchmarkId::new("graph_expand", n),
-            &n,
-            |b, _| {
-                b.iter(|| {
-                    db.recall(
-                        black_box(&query), 10, None, None,
-                        false, true,
-                        Some("Memory about Entity_5 involving Entity_10"),
-                        true,
-                        None,
-                    ).unwrap()
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("graph_expand", n), &n, |b, _| {
+            b.iter(|| {
+                db.recall(
+                    black_box(&query),
+                    10,
+                    None,
+                    None,
+                    false,
+                    true,
+                    Some("Memory about Entity_5 involving Entity_10"),
+                    true,
+                    None,
+                )
+                .unwrap()
+            })
+        });
 
-        group.bench_with_input(
-            BenchmarkId::new("no_graph", n),
-            &n,
-            |b, _| {
-                b.iter(|| {
-                    db.recall(black_box(&query), 10, None, None, false, false, None, true, None)
-                        .unwrap()
-                })
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("no_graph", n), &n, |b, _| {
+            b.iter(|| {
+                db.recall(
+                    black_box(&query),
+                    10,
+                    None,
+                    None,
+                    false,
+                    false,
+                    None,
+                    true,
+                    None,
+                )
+                .unwrap()
+            })
+        });
     }
     group.finish();
 }
@@ -358,14 +455,36 @@ fn bench_reinforce_overhead(c: &mut Criterion) {
 
     group.bench_function("with_reinforce", |b| {
         b.iter(|| {
-            db_with.recall(black_box(&query), 10, None, None, false, false, None, false, None)
+            db_with
+                .recall(
+                    black_box(&query),
+                    10,
+                    None,
+                    None,
+                    false,
+                    false,
+                    None,
+                    false,
+                    None,
+                )
                 .unwrap()
         })
     });
 
     group.bench_function("without_reinforce", |b| {
         b.iter(|| {
-            db_without.recall(black_box(&query), 10, None, None, false, false, None, true, None)
+            db_without
+                .recall(
+                    black_box(&query),
+                    10,
+                    None,
+                    None,
+                    false,
+                    false,
+                    None,
+                    true,
+                    None,
+                )
                 .unwrap()
         })
     });
@@ -395,9 +514,19 @@ fn bench_record_scaled(c: &mut Criterion) {
                     let emb = vec_seed_dim(i as f32 * 0.37 + 100000.0, dim);
                     db.record(
                         black_box(&format!("bench scaled record {}", i)),
-                        "episodic", 0.5, 0.0, 604800.0, &meta, &emb, "default",
-                        0.8, "general", "user", None,
-                    ).unwrap();
+                        "episodic",
+                        0.5,
+                        0.0,
+                        604800.0,
+                        &meta,
+                        &emb,
+                        "default",
+                        0.8,
+                        "general",
+                        "user",
+                        None,
+                    )
+                    .unwrap();
                     i += 1;
                 })
             },
@@ -418,20 +547,22 @@ fn bench_record_batch_scaled(c: &mut Criterion) {
             |b, &bs| {
                 b.iter(|| {
                     let db = YantrikDB::new(":memory:", dim).unwrap();
-                    let inputs: Vec<RecordInput> = (0..bs).map(|i| RecordInput {
-                        text: format!("batch memory {i}"),
-                        memory_type: "episodic".to_string(),
-                        importance: 0.5,
-                        valence: 0.0,
-                        half_life: 604800.0,
-                        metadata: serde_json::json!({}),
-                        embedding: vec_seed_dim(i as f32 * 0.37, dim),
-                        namespace: "default".to_string(),
-                        certainty: 0.8,
-                        domain: "general".to_string(),
-                        source: "user".to_string(),
-                        emotional_state: None,
-                    }).collect();
+                    let inputs: Vec<RecordInput> = (0..bs)
+                        .map(|i| RecordInput {
+                            text: format!("batch memory {i}"),
+                            memory_type: "episodic".to_string(),
+                            importance: 0.5,
+                            valence: 0.0,
+                            half_life: 604800.0,
+                            metadata: serde_json::json!({}),
+                            embedding: vec_seed_dim(i as f32 * 0.37, dim),
+                            namespace: "default".to_string(),
+                            certainty: 0.8,
+                            domain: "general".to_string(),
+                            source: "user".to_string(),
+                            emotional_state: None,
+                        })
+                        .collect();
                     db.record_batch(black_box(&inputs)).unwrap();
                 })
             },

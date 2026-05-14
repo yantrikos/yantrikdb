@@ -112,16 +112,16 @@ pub type FeatureVector = [f64; FEATURE_COUNT];
 /// Create a default feature vector (neutral/idle state).
 pub fn default_features() -> FeatureVector {
     [
-        0.5,  // Circadian: average
-        0.0,  // Activity: idle
-        0.0,  // Interaction: none
-        0.0,  // Dismissal: none
-        0.5,  // Idle: moderate
-        0.0,  // Fatigue: fresh
-        0.5,  // Day: average
-        0.5,  // Emotion: neutral (mapped from 0.0)
-        0.0,  // Budget: unused
-        0.0,  // Notification: all allowed
+        0.5, // Circadian: average
+        0.0, // Activity: idle
+        0.0, // Interaction: none
+        0.0, // Dismissal: none
+        0.5, // Idle: moderate
+        0.0, // Fatigue: fresh
+        0.5, // Day: average
+        0.5, // Emotion: neutral (mapped from 0.0)
+        0.0, // Budget: unused
+        0.0, // Notification: all allowed
     ]
 }
 
@@ -252,12 +252,10 @@ impl ContextSnapshot {
 
         // F0: Circadian receptivity from learned hour-of-day pattern
         let hour = super::temporal::hour_of_day_utc(self.now);
-        features[FeatureIndex::CircadianReceptivity as usize] =
-            model.circadian_receptivity[hour];
+        features[FeatureIndex::CircadianReceptivity as usize] = model.circadian_receptivity[hour];
 
         // F1: Activity level
-        features[FeatureIndex::ActivityLevel as usize] =
-            self.activity.activity_level();
+        features[FeatureIndex::ActivityLevel as usize] = self.activity.activity_level();
 
         // F2: Interaction frequency (normalize: 20+ interactions = 1.0)
         features[FeatureIndex::InteractionFrequency as usize] =
@@ -282,25 +280,20 @@ impl ContextSnapshot {
 
         // F6: Day-of-week receptivity
         let dow = super::temporal::day_of_week_utc(self.now);
-        features[FeatureIndex::DayOfWeekReceptivity as usize] =
-            model.dow_receptivity[dow];
+        features[FeatureIndex::DayOfWeekReceptivity as usize] = model.dow_receptivity[dow];
 
         // F7: Emotional valence → [0, 1] (from [-1, 1])
-        features[FeatureIndex::EmotionalValence as usize] =
-            (self.emotional_valence + 1.0) / 2.0;
+        features[FeatureIndex::EmotionalValence as usize] = (self.emotional_valence + 1.0) / 2.0;
 
         // F8: Budget utilization
-        features[FeatureIndex::BudgetUtilization as usize] =
-            if self.session_suggestion_budget > 0 {
-                self.session_suggestions_accepted as f64
-                    / self.session_suggestion_budget as f64
-            } else {
-                0.0
-            };
+        features[FeatureIndex::BudgetUtilization as usize] = if self.session_suggestion_budget > 0 {
+            self.session_suggestions_accepted as f64 / self.session_suggestion_budget as f64
+        } else {
+            0.0
+        };
 
         // F9: Notification mode
-        features[FeatureIndex::NotificationMode as usize] =
-            self.notification_mode.feature_value();
+        features[FeatureIndex::NotificationMode as usize] = self.notification_mode.feature_value();
 
         features
     }
@@ -363,16 +356,16 @@ impl ReceptivityModel {
     /// - Circadian/DOW are neutral until learned
     pub fn new() -> Self {
         let mut weights = [0.0; FEATURE_COUNT];
-        weights[FeatureIndex::CircadianReceptivity as usize] = 1.5;    // Positive: good time → receptive
-        weights[FeatureIndex::ActivityLevel as usize] = -3.0;           // Negative: busy → not receptive
-        weights[FeatureIndex::InteractionFrequency as usize] = 2.0;     // Positive: engaged → receptive
-        weights[FeatureIndex::DismissalRate as usize] = -4.0;           // Strong negative: dismissing → not receptive
-        weights[FeatureIndex::IdleDuration as usize] = -1.0;            // Mildly negative: too idle → might have left
-        weights[FeatureIndex::SessionFatigue as usize] = -1.5;          // Negative: fatigued → less receptive
-        weights[FeatureIndex::DayOfWeekReceptivity as usize] = 1.0;     // Positive: good day → receptive
-        weights[FeatureIndex::EmotionalValence as usize] = 1.5;         // Positive: good mood → receptive
-        weights[FeatureIndex::BudgetUtilization as usize] = -2.5;       // Negative: budget depleted → stop
-        weights[FeatureIndex::NotificationMode as usize] = -5.0;        // Strong negative: DND → don't interrupt
+        weights[FeatureIndex::CircadianReceptivity as usize] = 1.5; // Positive: good time → receptive
+        weights[FeatureIndex::ActivityLevel as usize] = -3.0; // Negative: busy → not receptive
+        weights[FeatureIndex::InteractionFrequency as usize] = 2.0; // Positive: engaged → receptive
+        weights[FeatureIndex::DismissalRate as usize] = -4.0; // Strong negative: dismissing → not receptive
+        weights[FeatureIndex::IdleDuration as usize] = -1.0; // Mildly negative: too idle → might have left
+        weights[FeatureIndex::SessionFatigue as usize] = -1.5; // Negative: fatigued → less receptive
+        weights[FeatureIndex::DayOfWeekReceptivity as usize] = 1.0; // Positive: good day → receptive
+        weights[FeatureIndex::EmotionalValence as usize] = 1.5; // Positive: good mood → receptive
+        weights[FeatureIndex::BudgetUtilization as usize] = -2.5; // Negative: budget depleted → stop
+        weights[FeatureIndex::NotificationMode as usize] = -5.0; // Strong negative: DND → don't interrupt
 
         Self {
             weights,
@@ -381,7 +374,7 @@ impl ReceptivityModel {
             l2_lambda: 0.001,
             training_count: 0,
             circadian_receptivity: [0.5; 24], // Neutral until learned
-            dow_receptivity: [0.5; 7],         // Neutral until learned
+            dow_receptivity: [0.5; 7],        // Neutral until learned
             quiet_hours: QuietHoursConfig::default(),
             attention_budget: AttentionBudgetConfig::default(),
         }
@@ -499,11 +492,7 @@ impl ReceptivityModel {
     }
 
     /// Update circadian and day-of-week patterns from feedback.
-    pub fn learn_temporal_pattern(
-        &mut self,
-        timestamp: f64,
-        outcome: SuggestionOutcome,
-    ) {
+    pub fn learn_temporal_pattern(&mut self, timestamp: f64, outcome: SuggestionOutcome) {
         let hour = super::temporal::hour_of_day_utc(timestamp);
         let dow = super::temporal::day_of_week_utc(timestamp);
         let lr = 0.05;
@@ -520,11 +509,7 @@ impl ReceptivityModel {
     }
 
     /// Combined learn: update both the weights and the temporal patterns.
-    pub fn observe_outcome(
-        &mut self,
-        context: &ContextSnapshot,
-        outcome: SuggestionOutcome,
-    ) {
+    pub fn observe_outcome(&mut self, context: &ContextSnapshot, outcome: SuggestionOutcome) {
         let features = context.to_features(self);
         self.learn(&features, outcome);
         self.learn_temporal_pattern(context.now, outcome);
@@ -574,24 +559,20 @@ impl ReceptivityEstimate {
 
     /// The single most negative factor (biggest reason not to interrupt).
     pub fn top_blocker(&self) -> Option<&ReceptivityFactor> {
-        self.factors
-            .iter()
-            .min_by(|a, b| {
-                a.contribution
-                    .partial_cmp(&b.contribution)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+        self.factors.iter().min_by(|a, b| {
+            a.contribution
+                .partial_cmp(&b.contribution)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     }
 
     /// The single most positive factor (biggest reason to interrupt).
     pub fn top_enabler(&self) -> Option<&ReceptivityFactor> {
-        self.factors
-            .iter()
-            .max_by(|a, b| {
-                a.contribution
-                    .partial_cmp(&b.contribution)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+        self.factors.iter().max_by(|a, b| {
+            a.contribution
+                .partial_cmp(&b.contribution)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        })
     }
 }
 
@@ -612,54 +593,94 @@ pub struct ReceptivityFactor {
 fn factor_description(idx: FeatureIndex, value: f64) -> String {
     match idx {
         FeatureIndex::CircadianReceptivity => {
-            if value > 0.7 { "Peak receptivity time of day".into() }
-            else if value < 0.3 { "Low receptivity time of day".into() }
-            else { "Average time of day".into() }
+            if value > 0.7 {
+                "Peak receptivity time of day".into()
+            } else if value < 0.3 {
+                "Low receptivity time of day".into()
+            } else {
+                "Average time of day".into()
+            }
         }
         FeatureIndex::ActivityLevel => {
-            if value > 0.7 { "User in deep focus — avoid interrupting".into() }
-            else if value > 0.4 { "User moderately active".into() }
-            else { "User idle or lightly active".into() }
+            if value > 0.7 {
+                "User in deep focus — avoid interrupting".into()
+            } else if value > 0.4 {
+                "User moderately active".into()
+            } else {
+                "User idle or lightly active".into()
+            }
         }
         FeatureIndex::InteractionFrequency => {
-            if value > 0.5 { "User actively engaged".into() }
-            else if value > 0.1 { "Some recent interaction".into() }
-            else { "No recent interaction".into() }
+            if value > 0.5 {
+                "User actively engaged".into()
+            } else if value > 0.1 {
+                "Some recent interaction".into()
+            } else {
+                "No recent interaction".into()
+            }
         }
         FeatureIndex::DismissalRate => {
-            if value > 0.5 { "High dismissal rate — user rejecting suggestions".into() }
-            else if value > 0.2 { "Moderate dismissal rate".into() }
-            else { "Low dismissal rate — user open to suggestions".into() }
+            if value > 0.5 {
+                "High dismissal rate — user rejecting suggestions".into()
+            } else if value > 0.2 {
+                "Moderate dismissal rate".into()
+            } else {
+                "Low dismissal rate — user open to suggestions".into()
+            }
         }
         FeatureIndex::IdleDuration => {
-            if value > 0.7 { "User has been idle for a while — may have left".into() }
-            else if value > 0.3 { "User recently active".into() }
-            else { "User just interacted".into() }
+            if value > 0.7 {
+                "User has been idle for a while — may have left".into()
+            } else if value > 0.3 {
+                "User recently active".into()
+            } else {
+                "User just interacted".into()
+            }
         }
         FeatureIndex::SessionFatigue => {
-            if value > 0.7 { "Extended session — user may be fatigued".into() }
-            else if value > 0.3 { "Moderate session length".into() }
-            else { "Fresh session".into() }
+            if value > 0.7 {
+                "Extended session — user may be fatigued".into()
+            } else if value > 0.3 {
+                "Moderate session length".into()
+            } else {
+                "Fresh session".into()
+            }
         }
         FeatureIndex::DayOfWeekReceptivity => {
-            if value > 0.7 { "Historically receptive day".into() }
-            else if value < 0.3 { "Historically unreceptive day".into() }
-            else { "Average day".into() }
+            if value > 0.7 {
+                "Historically receptive day".into()
+            } else if value < 0.3 {
+                "Historically unreceptive day".into()
+            } else {
+                "Average day".into()
+            }
         }
         FeatureIndex::EmotionalValence => {
-            if value > 0.7 { "Positive emotional state".into() }
-            else if value < 0.3 { "Negative emotional state".into() }
-            else { "Neutral emotional state".into() }
+            if value > 0.7 {
+                "Positive emotional state".into()
+            } else if value < 0.3 {
+                "Negative emotional state".into()
+            } else {
+                "Neutral emotional state".into()
+            }
         }
         FeatureIndex::BudgetUtilization => {
-            if value > 0.8 { "Attention budget nearly depleted".into() }
-            else if value > 0.5 { "Attention budget half used".into() }
-            else { "Attention budget available".into() }
+            if value > 0.8 {
+                "Attention budget nearly depleted".into()
+            } else if value > 0.5 {
+                "Attention budget half used".into()
+            } else {
+                "Attention budget available".into()
+            }
         }
         FeatureIndex::NotificationMode => {
-            if value > 0.7 { "Do Not Disturb mode".into() }
-            else if value > 0.3 { "Important notifications only".into() }
-            else { "All notifications allowed".into() }
+            if value > 0.7 {
+                "Do Not Disturb mode".into()
+            } else if value > 0.3 {
+                "Important notifications only".into()
+            } else {
+                "All notifications allowed".into()
+            }
         }
     }
 }
@@ -812,10 +833,7 @@ mod tests {
     fn test_default_features_bounds() {
         let features = default_features();
         for (i, &f) in features.iter().enumerate() {
-            assert!(
-                f >= 0.0 && f <= 1.0,
-                "Feature {i} out of bounds: {f}"
-            );
+            assert!(f >= 0.0 && f <= 1.0, "Feature {i} out of bounds: {f}");
         }
     }
 
@@ -842,7 +860,10 @@ mod tests {
             assert!(
                 w[0].interruption_cost() <= w[1].interruption_cost(),
                 "{:?} ({}) should cost <= {:?} ({})",
-                w[0], w[0].interruption_cost(), w[1], w[1].interruption_cost()
+                w[0],
+                w[0].interruption_cost(),
+                w[1],
+                w[1].interruption_cost()
             );
         }
     }
@@ -868,7 +889,8 @@ mod tests {
         let estimate = model.estimate(&context);
         assert!(
             estimate.score > 0.5,
-            "Idle user should be receptive: {}", estimate.score
+            "Idle user should be receptive: {}",
+            estimate.score
         );
         assert!(!estimate.is_quiet_hours);
     }
@@ -892,7 +914,8 @@ mod tests {
         let estimate = model.estimate(&context);
         assert!(
             estimate.score < 0.3,
-            "Focused user should not be receptive: {}", estimate.score
+            "Focused user should not be receptive: {}",
+            estimate.score
         );
     }
 
@@ -942,7 +965,8 @@ mod tests {
         assert!(
             pred_after > pred_before,
             "Training on accepts should increase prediction: {} -> {}",
-            pred_before, pred_after
+            pred_before,
+            pred_after
         );
     }
 
@@ -960,7 +984,8 @@ mod tests {
         assert!(
             pred_after < pred_before,
             "Training on dismissals should decrease prediction: {} -> {}",
-            pred_before, pred_after
+            pred_before,
+            pred_after
         );
     }
 
@@ -982,7 +1007,8 @@ mod tests {
         assert!(
             morning_receptivity > night_receptivity,
             "Morning should be more receptive than 3am: {} vs {}",
-            morning_receptivity, night_receptivity
+            morning_receptivity,
+            night_receptivity
         );
     }
 
@@ -1068,7 +1094,8 @@ mod tests {
         assert!(
             urgent < base,
             "Urgent actions should have lower cost: {} vs {}",
-            urgent, base
+            urgent,
+            base
         );
     }
 
@@ -1079,7 +1106,8 @@ mod tests {
         assert!(
             important < base,
             "Important actions should have lower cost: {} vs {}",
-            important, base
+            important,
+            base
         );
     }
 
@@ -1096,7 +1124,10 @@ mod tests {
                     assert!(
                         cost >= 0.0 && cost <= 1.0,
                         "Cost out of bounds: {} for {:?}, u={}, i={}",
-                        cost, activity, urgency, importance
+                        cost,
+                        activity,
+                        urgency,
+                        importance
                     );
                 }
             }

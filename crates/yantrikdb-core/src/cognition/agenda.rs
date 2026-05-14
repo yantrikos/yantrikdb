@@ -71,10 +71,7 @@ impl Default for AgendaIdAllocator {
 pub enum UrgencyFn {
     /// Linear ramp: `base + slope × (now - created_at)`.
     /// Useful for items that steadily become more important.
-    Linear {
-        base: f64,
-        slope: f64,
-    },
+    Linear { base: f64, slope: f64 },
 
     /// Sigmoid approaching deadline:
     /// `1 / (1 + exp(-steepness × (deadline - now - offset)))`.
@@ -87,22 +84,14 @@ pub enum UrgencyFn {
 
     /// Step function: 0 until `deadline - buffer_secs`, then 1.0.
     /// Binary urgency for hard deadlines.
-    StepAtDeadline {
-        deadline: f64,
-        buffer_secs: f64,
-    },
+    StepAtDeadline { deadline: f64, buffer_secs: f64 },
 
     /// Starts at `initial`, multiplied by `decay_factor` per dismissal.
     /// Items the user keeps dismissing become less urgent.
-    DecayIfIgnored {
-        initial: f64,
-        decay_factor: f64,
-    },
+    DecayIfIgnored { initial: f64, decay_factor: f64 },
 
     /// Fixed urgency, never changes with time.
-    Constant {
-        value: f64,
-    },
+    Constant { value: f64 },
 }
 
 impl UrgencyFn {
@@ -118,14 +107,21 @@ impl UrgencyFn {
                 base + slope * elapsed
             }
 
-            Self::Sigmoid { deadline, steepness, offset } => {
+            Self::Sigmoid {
+                deadline,
+                steepness,
+                offset,
+            } => {
                 // Urgency increases as now approaches deadline.
                 // time_until > 0 means deadline is in the future.
                 let time_until = deadline - now - offset;
                 1.0 / (1.0 + (steepness * time_until).exp())
             }
 
-            Self::StepAtDeadline { deadline, buffer_secs } => {
+            Self::StepAtDeadline {
+                deadline,
+                buffer_secs,
+            } => {
                 if now >= deadline - buffer_secs {
                     1.0
                 } else {
@@ -133,9 +129,10 @@ impl UrgencyFn {
                 }
             }
 
-            Self::DecayIfIgnored { initial, decay_factor } => {
-                initial * decay_factor.powi(dismiss_count as i32)
-            }
+            Self::DecayIfIgnored {
+                initial,
+                decay_factor,
+            } => initial * decay_factor.powi(dismiss_count as i32),
 
             Self::Constant { value } => *value,
         };
@@ -271,16 +268,15 @@ pub struct AgendaItem {
 impl AgendaItem {
     /// Compute current urgency for this item.
     pub fn current_urgency(&self, now: f64) -> f64 {
-        self.urgency_fn.evaluate(self.created_at, now, self.dismiss_count)
+        self.urgency_fn
+            .evaluate(self.created_at, now, self.dismiss_count)
     }
 
     /// Whether this item is surfaceable right now.
     pub fn is_surfaceable(&self, now: f64) -> bool {
         match self.status {
             AgendaStatus::Active => true,
-            AgendaStatus::Snoozed => {
-                self.snoozed_until.map_or(false, |until| now >= until)
-            }
+            AgendaStatus::Snoozed => self.snoozed_until.map_or(false, |until| now >= until),
             _ => false,
         }
     }
@@ -294,7 +290,10 @@ impl AgendaItem {
     pub fn is_suppressed(&self, hour: u8, cognitive_load: f64, is_shared: bool) -> bool {
         for rule in &self.suppression_rules {
             match &rule.condition {
-                SuppressionCondition::TimeRange { start_hour, end_hour } => {
+                SuppressionCondition::TimeRange {
+                    start_hour,
+                    end_hour,
+                } => {
                     let in_range = if start_hour > end_hour {
                         hour >= *start_hour || hour < *end_hour
                     } else {
@@ -356,7 +355,7 @@ impl Default for AgendaConfig {
         Self {
             surface_threshold: 0.5,
             default_max_surfaces: 5,
-            default_snooze_secs: 3600.0,  // 1 hour
+            default_snooze_secs: 3600.0,         // 1 hour
             stale_task_threshold_secs: 172800.0, // 48 hours
             stale_goal_threshold_secs: 259200.0, // 72 hours
             max_active_items: 100,
@@ -582,7 +581,9 @@ impl Agenda {
 
     /// Get active items sorted by current urgency (descending).
     pub fn get_active(&self, now: f64, limit: usize) -> Vec<&AgendaItem> {
-        let mut active: Vec<&AgendaItem> = self.items.iter()
+        let mut active: Vec<&AgendaItem> = self
+            .items
+            .iter()
             .filter(|i| i.is_surfaceable(now))
             .collect();
 
@@ -597,7 +598,8 @@ impl Agenda {
 
     /// Count active items.
     pub fn active_count(&self) -> usize {
-        self.items.iter()
+        self.items
+            .iter()
             .filter(|i| matches!(i.status, AgendaStatus::Active | AgendaStatus::Snoozed))
             .count()
     }
@@ -744,7 +746,8 @@ pub fn detect_open_loops(
             (NodePayload::Task(task), NodeKind::Task) => {
                 if let Some(deadline) = task.deadline {
                     let time_until = deadline - now;
-                    if time_until > 0.0 && time_until < 86400.0
+                    if time_until > 0.0
+                        && time_until < 86400.0
                         && task.status != TaskStatus::Completed
                         && task.status != TaskStatus::Cancelled
                     {
@@ -803,7 +806,11 @@ mod tests {
         )
     }
 
-    fn make_task_node(alloc: &mut NodeIdAllocator, desc: &str, status: TaskStatus) -> CognitiveNode {
+    fn make_task_node(
+        alloc: &mut NodeIdAllocator,
+        desc: &str,
+        status: TaskStatus,
+    ) -> CognitiveNode {
         let id = alloc.alloc(NodeKind::Task);
         CognitiveNode::new(
             id,
@@ -824,13 +831,19 @@ mod tests {
 
     #[test]
     fn test_linear_urgency() {
-        let f = UrgencyFn::Linear { base: 0.1, slope: 0.0001 };
+        let f = UrgencyFn::Linear {
+            base: 0.1,
+            slope: 0.0001,
+        };
         // At creation
         assert!((f.evaluate(1000.0, 1000.0, 0) - 0.1).abs() < 0.001);
         // After 1 hour
         assert!((f.evaluate(1000.0, 4600.0, 0) - 0.46).abs() < 0.01);
         // Clamped to 1.0
-        let high_slope = UrgencyFn::Linear { base: 0.5, slope: 1.0 };
+        let high_slope = UrgencyFn::Linear {
+            base: 0.5,
+            slope: 1.0,
+        };
         assert_eq!(high_slope.evaluate(0.0, 100.0, 0), 1.0);
     }
 
@@ -846,7 +859,10 @@ mod tests {
         let far = f.evaluate(0.0, 1000.0, 0);
         // Near deadline — high urgency
         let near = f.evaluate(0.0, 9500.0, 0);
-        assert!(near > far, "urgency should increase near deadline: near={near} far={far}");
+        assert!(
+            near > far,
+            "urgency should increase near deadline: near={near} far={far}"
+        );
     }
 
     #[test]
@@ -892,9 +908,13 @@ mod tests {
         let config = default_config();
 
         let id = agenda.add_item_at(
-            node.id, AgendaKind::StalledIntent,
+            node.id,
+            AgendaKind::StalledIntent,
             UrgencyFn::Constant { value: 0.6 },
-            None, "Test item".to_string(), 1000.0, &config,
+            None,
+            "Test item".to_string(),
+            1000.0,
+            &config,
         );
 
         assert_eq!(agenda.active_count(), 1);
@@ -911,9 +931,12 @@ mod tests {
         let config = default_config();
 
         let id = agenda.add_item(
-            node.id, AgendaKind::PendingCommitment,
+            node.id,
+            AgendaKind::PendingCommitment,
             UrgencyFn::Constant { value: 0.5 },
-            None, "Commitment".to_string(), &config,
+            None,
+            "Commitment".to_string(),
+            &config,
         );
 
         assert!(agenda.resolve(id));
@@ -929,9 +952,13 @@ mod tests {
         let config = default_config();
 
         let id = agenda.add_item_at(
-            node.id, AgendaKind::FollowUpNeeded,
+            node.id,
+            AgendaKind::FollowUpNeeded,
             UrgencyFn::Constant { value: 0.7 },
-            None, "Follow up".to_string(), 1000.0, &config,
+            None,
+            "Follow up".to_string(),
+            1000.0,
+            &config,
         );
 
         // Snooze for 1 hour
@@ -956,9 +983,16 @@ mod tests {
         let config = default_config();
 
         let id = agenda.add_item_at(
-            node.id, AgendaKind::UnresolvedQuestion,
-            UrgencyFn::DecayIfIgnored { initial: 0.8, decay_factor: 0.5 },
-            None, "Question".to_string(), 1000.0, &config,
+            node.id,
+            AgendaKind::UnresolvedQuestion,
+            UrgencyFn::DecayIfIgnored {
+                initial: 0.8,
+                decay_factor: 0.5,
+            },
+            None,
+            "Question".to_string(),
+            1000.0,
+            &config,
         );
 
         let u_before = agenda.find(id).unwrap().current_urgency(2000.0);
@@ -968,7 +1002,10 @@ mod tests {
         agenda.find_mut(id).unwrap().status = AgendaStatus::Active;
         let u_after = agenda.find(id).unwrap().current_urgency(2000.0);
 
-        assert!(u_after < u_before, "urgency should decrease after dismissal");
+        assert!(
+            u_after < u_before,
+            "urgency should decrease after dismissal"
+        );
     }
 
     #[test]
@@ -980,17 +1017,25 @@ mod tests {
 
         // Item below threshold
         agenda.add_item_at(
-            node.id, AgendaKind::StalledIntent,
+            node.id,
+            AgendaKind::StalledIntent,
             UrgencyFn::Constant { value: 0.3 },
-            None, "Low urgency".to_string(), 1000.0, &config,
+            None,
+            "Low urgency".to_string(),
+            1000.0,
+            &config,
         );
 
         let node2 = make_goal_node(&mut alloc, "Goal 2");
         // Item above threshold
         agenda.add_item_at(
-            node2.id, AgendaKind::DeadlineApproaching,
+            node2.id,
+            AgendaKind::DeadlineApproaching,
             UrgencyFn::Constant { value: 0.8 },
-            None, "High urgency".to_string(), 1000.0, &config,
+            None,
+            "High urgency".to_string(),
+            1000.0,
+            &config,
         );
 
         let result = agenda.tick(2000.0, &config);
@@ -1007,9 +1052,13 @@ mod tests {
         config.default_max_surfaces = 3;
 
         let id = agenda.add_item_at(
-            node.id, AgendaKind::FollowUpNeeded,
+            node.id,
+            AgendaKind::FollowUpNeeded,
             UrgencyFn::Constant { value: 0.9 },
-            None, "Nagging item".to_string(), 1000.0, &config,
+            None,
+            "Nagging item".to_string(),
+            1000.0,
+            &config,
         );
 
         // Surface 3 times
@@ -1033,12 +1082,33 @@ mod tests {
         let n2 = make_goal_node(&mut alloc, "High");
         let n3 = make_goal_node(&mut alloc, "Mid");
 
-        agenda.add_item_at(n1.id, AgendaKind::AbandonedTask,
-            UrgencyFn::Constant { value: 0.3 }, None, "Low".into(), 1000.0, &config);
-        agenda.add_item_at(n2.id, AgendaKind::DeadlineApproaching,
-            UrgencyFn::Constant { value: 0.9 }, None, "High".into(), 1000.0, &config);
-        agenda.add_item_at(n3.id, AgendaKind::FollowUpNeeded,
-            UrgencyFn::Constant { value: 0.6 }, None, "Mid".into(), 1000.0, &config);
+        agenda.add_item_at(
+            n1.id,
+            AgendaKind::AbandonedTask,
+            UrgencyFn::Constant { value: 0.3 },
+            None,
+            "Low".into(),
+            1000.0,
+            &config,
+        );
+        agenda.add_item_at(
+            n2.id,
+            AgendaKind::DeadlineApproaching,
+            UrgencyFn::Constant { value: 0.9 },
+            None,
+            "High".into(),
+            1000.0,
+            &config,
+        );
+        agenda.add_item_at(
+            n3.id,
+            AgendaKind::FollowUpNeeded,
+            UrgencyFn::Constant { value: 0.6 },
+            None,
+            "Mid".into(),
+            1000.0,
+            &config,
+        );
 
         let active = agenda.get_active(2000.0, 10);
         assert_eq!(active.len(), 3);
@@ -1067,9 +1137,7 @@ mod tests {
                 },
                 SuppressionRule {
                     description: "Not when busy".to_string(),
-                    condition: SuppressionCondition::HighCognitiveLoad {
-                        threshold: 0.8,
-                    },
+                    condition: SuppressionCondition::HighCognitiveLoad { threshold: 0.8 },
                 },
             ],
             last_surfaced_at: None,
@@ -1165,7 +1233,10 @@ mod tests {
         let nodes: Vec<&CognitiveNode> = vec![&goal];
         let result = detect_open_loops(&nodes, &agenda, now, &config);
 
-        assert!(result.new_loops.iter().any(|l| l.kind == AgendaKind::DeadlineApproaching));
+        assert!(result
+            .new_loops
+            .iter()
+            .any(|l| l.kind == AgendaKind::DeadlineApproaching));
     }
 
     #[test]
@@ -1182,9 +1253,13 @@ mod tests {
 
         // Add existing item for this node
         agenda.add_item_at(
-            task.id, AgendaKind::AbandonedTask,
+            task.id,
+            AgendaKind::AbandonedTask,
             UrgencyFn::Constant { value: 0.5 },
-            None, "Already tracked".to_string(), 1000.0, &config,
+            None,
+            "Already tracked".to_string(),
+            1000.0,
+            &config,
         );
 
         let now = 100000.0;
@@ -1206,9 +1281,13 @@ mod tests {
         };
 
         let id = agenda.add_item_at(
-            node.id, AgendaKind::DeadlineApproaching,
+            node.id,
+            AgendaKind::DeadlineApproaching,
             UrgencyFn::Constant { value: 0.9 },
-            None, "Urgent".to_string(), 1000.0, &config,
+            None,
+            "Urgent".to_string(),
+            1000.0,
+            &config,
         );
 
         // First tick — should surface

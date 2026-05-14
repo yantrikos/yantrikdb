@@ -1,12 +1,11 @@
+use base64::{engine::general_purpose::STANDARD as B64, Engine};
+use rand::Rng;
 /// Secure credential vault baked into YantrikDB.
 ///
 /// Uses AES-256-GCM encryption with an auto-generated vault-specific DEK.
 /// Credentials are encrypted at rest — only the service name and metadata
 /// are stored in plaintext for listing/search.
-
 use rusqlite::Connection;
-use rand::Rng;
-use base64::{engine::general_purpose::STANDARD as B64, Engine};
 
 use super::encryption::{self, EncryptionProvider};
 use super::error::Result;
@@ -26,12 +25,14 @@ pub fn vault_encryption(conn: &Connection) -> Result<EncryptionProvider> {
         .ok();
 
     if let Some(b64_dek) = existing {
-        let dek_bytes = B64.decode(&b64_dek)
-            .map_err(|e| super::error::YantrikDbError::Encryption(format!("vault DEK decode: {e}")))?;
+        let dek_bytes = B64.decode(&b64_dek).map_err(|e| {
+            super::error::YantrikDbError::Encryption(format!("vault DEK decode: {e}"))
+        })?;
         if dek_bytes.len() != 32 {
-            return Err(super::error::YantrikDbError::Encryption(
-                format!("vault DEK wrong length: {}", dek_bytes.len()),
-            ));
+            return Err(super::error::YantrikDbError::Encryption(format!(
+                "vault DEK wrong length: {}",
+                dek_bytes.len()
+            )));
         }
         let mut dek = [0u8; 32];
         dek.copy_from_slice(&dek_bytes);
@@ -111,9 +112,7 @@ pub fn store(
 
     let username_enc = enc.encrypt_string(username)?;
     let password_enc = enc.encrypt_string(password)?;
-    let notes_enc = notes
-        .map(|n| enc.encrypt_string(n))
-        .transpose()?;
+    let notes_enc = notes.map(|n| enc.encrypt_string(n)).transpose()?;
     let cat = category.unwrap_or("general");
 
     // Try UPDATE first for upsert — ON CONFLICT doesn't match NULLs in url
@@ -121,7 +120,15 @@ pub fn store(
         "UPDATE vault_entries SET username_enc = ?1, password_enc = ?2, \
          notes_enc = ?3, category = ?4, updated_at = ?5 \
          WHERE service = ?6 AND (url IS ?7)",
-        rusqlite::params![username_enc, password_enc, notes_enc, cat, now, service, url],
+        rusqlite::params![
+            username_enc,
+            password_enc,
+            notes_enc,
+            cat,
+            now,
+            service,
+            url
+        ],
     )?;
     if updated == 0 {
         conn.execute(
@@ -137,11 +144,7 @@ pub fn store(
 }
 
 /// Retrieve a credential by service name (decrypted).
-pub fn get(
-    conn: &Connection,
-    enc: &EncryptionProvider,
-    service: &str,
-) -> Result<Vec<VaultEntry>> {
+pub fn get(conn: &Connection, enc: &EncryptionProvider, service: &str) -> Result<Vec<VaultEntry>> {
     let mut stmt = conn.prepare(
         "SELECT id, service, username_enc, password_enc, url, notes_enc, category, created_at, updated_at
          FROM vault_entries WHERE service = ?1 ORDER BY updated_at DESC"
@@ -185,11 +188,7 @@ pub fn get(
 }
 
 /// Search vault entries by service name pattern (case-insensitive).
-pub fn search(
-    conn: &Connection,
-    enc: &EncryptionProvider,
-    query: &str,
-) -> Result<Vec<VaultEntry>> {
+pub fn search(conn: &Connection, enc: &EncryptionProvider, query: &str) -> Result<Vec<VaultEntry>> {
     let pattern = format!("%{query}%");
     let mut stmt = conn.prepare(
         "SELECT id, service, username_enc, password_enc, url, notes_enc, category, created_at, updated_at
@@ -237,7 +236,7 @@ pub fn search(
 pub fn list(conn: &Connection) -> Result<Vec<VaultListEntry>> {
     let mut stmt = conn.prepare(
         "SELECT id, service, url, category, updated_at
-         FROM vault_entries ORDER BY service ASC"
+         FROM vault_entries ORDER BY service ASC",
     )?;
 
     let rows = stmt.query_map([], |row| {
@@ -250,9 +249,7 @@ pub fn list(conn: &Connection) -> Result<Vec<VaultListEntry>> {
         })
     })?;
 
-    rows.into_iter()
-        .map(|r| Ok(r?))
-        .collect()
+    rows.into_iter().map(|r| Ok(r?)).collect()
 }
 
 /// Delete a vault entry by ID.
@@ -316,10 +313,7 @@ pub fn has_pin(conn: &Connection) -> bool {
 
 /// Remove the vault PIN.
 pub fn remove_pin(conn: &Connection) -> Result<()> {
-    conn.execute(
-        "DELETE FROM vault_security WHERE key = 'pin_hash'",
-        [],
-    )?;
+    conn.execute("DELETE FROM vault_security WHERE key = 'pin_hash'", [])?;
     Ok(())
 }
 
@@ -328,9 +322,9 @@ pub fn generate_password(length: usize, include_special: bool) -> String {
     let length = length.clamp(8, 128);
     let mut rng = rand::thread_rng();
 
-    let lowercase = b"abcdefghijkmnopqrstuvwxyz";  // no l (ambiguous)
-    let uppercase = b"ABCDEFGHJKLMNPQRSTUVWXYZ";    // no I, O (ambiguous)
-    let digits = b"23456789";                       // no 0, 1 (ambiguous)
+    let lowercase = b"abcdefghijkmnopqrstuvwxyz"; // no l (ambiguous)
+    let uppercase = b"ABCDEFGHJKLMNPQRSTUVWXYZ"; // no I, O (ambiguous)
+    let digits = b"23456789"; // no 0, 1 (ambiguous)
     let special = b"!@#$%^&*-_=+?";
 
     let mut charset: Vec<u8> = Vec::new();
@@ -379,7 +373,17 @@ mod tests {
     #[test]
     fn test_store_and_get() {
         let (conn, enc) = setup();
-        store(&conn, &enc, "github.com", "user123", "pass456", Some("https://github.com"), None, None).unwrap();
+        store(
+            &conn,
+            &enc,
+            "github.com",
+            "user123",
+            "pass456",
+            Some("https://github.com"),
+            None,
+            None,
+        )
+        .unwrap();
         let entries = get(&conn, &enc, "github.com").unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].username, "user123");
@@ -390,8 +394,28 @@ mod tests {
     #[test]
     fn test_upsert() {
         let (conn, enc) = setup();
-        store(&conn, &enc, "gmail", "old@gmail.com", "old_pass", None, None, None).unwrap();
-        store(&conn, &enc, "gmail", "new@gmail.com", "new_pass", None, None, None).unwrap();
+        store(
+            &conn,
+            &enc,
+            "gmail",
+            "old@gmail.com",
+            "old_pass",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+        store(
+            &conn,
+            &enc,
+            "gmail",
+            "new@gmail.com",
+            "new_pass",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         let entries = get(&conn, &enc, "gmail").unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].username, "new@gmail.com");
@@ -401,8 +425,28 @@ mod tests {
     #[test]
     fn test_list_no_passwords() {
         let (conn, enc) = setup();
-        store(&conn, &enc, "github.com", "user", "secret", None, None, Some("dev")).unwrap();
-        store(&conn, &enc, "gmail.com", "user@gmail.com", "secret2", None, None, Some("email")).unwrap();
+        store(
+            &conn,
+            &enc,
+            "github.com",
+            "user",
+            "secret",
+            None,
+            None,
+            Some("dev"),
+        )
+        .unwrap();
+        store(
+            &conn,
+            &enc,
+            "gmail.com",
+            "user@gmail.com",
+            "secret2",
+            None,
+            None,
+            Some("email"),
+        )
+        .unwrap();
         let list_entries = list(&conn).unwrap();
         assert_eq!(list_entries.len(), 2);
     }
@@ -441,7 +485,17 @@ mod tests {
     #[test]
     fn test_wrong_key_cant_decrypt() {
         let (conn, enc) = setup();
-        store(&conn, &enc, "secret_service", "admin", "super_secret", None, None, None).unwrap();
+        store(
+            &conn,
+            &enc,
+            "secret_service",
+            "admin",
+            "super_secret",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         let other_key = generate_key();
         let other_enc = EncryptionProvider::from_dek(&other_key);

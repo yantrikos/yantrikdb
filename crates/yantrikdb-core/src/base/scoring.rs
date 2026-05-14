@@ -23,22 +23,55 @@ pub fn valence_boost(valence: f64) -> f64 {
 
 /// Negative sentiment keywords for query-aware valence matching.
 const NEGATIVE_QUERY_WORDS: &[&str] = &[
-    "sad", "frustrated", "angry", "bad", "worst", "low", "lows", "difficult",
-    "hard", "struggle", "pain", "stress", "anxious", "upset", "failed",
-    "failure", "problem", "negative", "stressing", "worried", "tough",
+    "sad",
+    "frustrated",
+    "angry",
+    "bad",
+    "worst",
+    "low",
+    "lows",
+    "difficult",
+    "hard",
+    "struggle",
+    "pain",
+    "stress",
+    "anxious",
+    "upset",
+    "failed",
+    "failure",
+    "problem",
+    "negative",
+    "stressing",
+    "worried",
+    "tough",
 ];
 
 /// Positive sentiment keywords for query-aware valence matching.
 const POSITIVE_QUERY_WORDS: &[&str] = &[
-    "happy", "joy", "great", "best", "high", "good", "wonderful", "excited",
-    "proud", "success", "achievement", "positive", "celebration", "love",
+    "happy",
+    "joy",
+    "great",
+    "best",
+    "high",
+    "good",
+    "wonderful",
+    "excited",
+    "proud",
+    "success",
+    "achievement",
+    "positive",
+    "celebration",
+    "love",
 ];
 
 /// Simple suffix stripping for sentiment detection.
 /// "proudest" → "proud", "happiest" → "happi" → matched via prefix.
 fn sentiment_stem(word: &str) -> &str {
     // Strip common inflectional suffixes (ordered longest first)
-    for suffix in &["iest", "ness", "ment", "ful", "est", "ing", "ous", "ive", "ity", "ed", "er", "ly", "al", "es", "s"] {
+    for suffix in &[
+        "iest", "ness", "ment", "ful", "est", "ing", "ous", "ive", "ity", "ed", "er", "ly", "al",
+        "es", "s",
+    ] {
         if word.len() > suffix.len() + 2 && word.ends_with(suffix) {
             return &word[..word.len() - suffix.len()];
         }
@@ -137,13 +170,22 @@ pub fn graph_composite_score_with_sentiment(
     query_sentiment: f64,
 ) -> f64 {
     if graph_proximity > 0.0 {
-        let base_rel = GW_SIM * similarity + GW_DECAY * decay + GW_RECENCY * recency
+        let base_rel = GW_SIM * similarity
+            + GW_DECAY * decay
+            + GW_RECENCY * recency
             + GW_GRAPH * graph_proximity;
         let gate = importance_gate(similarity);
         let imp_mult = 1.0 + gate * GW_ALPHA_IMP * importance.min(1.0);
         base_rel * imp_mult * query_valence_boost(valence, query_sentiment)
     } else {
-        composite_score_with_sentiment(similarity, decay, recency, importance, valence, query_sentiment)
+        composite_score_with_sentiment(
+            similarity,
+            decay,
+            recency,
+            importance,
+            valence,
+            query_sentiment,
+        )
     }
 }
 
@@ -253,7 +295,9 @@ pub fn graph_composite_score(
     graph_proximity: f64,
 ) -> f64 {
     if graph_proximity > 0.0 {
-        let base_rel = GW_SIM * similarity + GW_DECAY * decay + GW_RECENCY * recency
+        let base_rel = GW_SIM * similarity
+            + GW_DECAY * decay
+            + GW_RECENCY * recency
             + GW_GRAPH * graph_proximity;
         let gate = importance_gate(similarity);
         let imp_mult = 1.0 + gate * GW_ALPHA_IMP * importance.min(1.0);
@@ -325,7 +369,8 @@ pub fn adaptive_composite_score(
     query_sentiment: f64,
     weights: &crate::types::LearnedWeights,
 ) -> f64 {
-    let base_rel = weights.w_sim * similarity + weights.w_decay * decay + weights.w_recency * recency;
+    let base_rel =
+        weights.w_sim * similarity + weights.w_decay * decay + weights.w_recency * recency;
     let gate = sigmoid(GATE_K * (similarity - weights.gate_tau));
     let imp_mult = 1.0 + gate * weights.alpha_imp * importance.min(1.0);
     base_rel * imp_mult * query_valence_boost(valence, query_sentiment)
@@ -378,7 +423,9 @@ pub fn adaptive_graph_composite_score(
         } else {
             (GW_SIM, GW_DECAY, GW_RECENCY)
         };
-        let base_rel = gw_sim * similarity + gw_decay * decay + gw_recency * recency
+        let base_rel = gw_sim * similarity
+            + gw_decay * decay
+            + gw_recency * recency
             + graph_weight * graph_proximity;
         // Scale alpha_imp by same ratio as hardcoded (GW_ALPHA_IMP / ALPHA_IMP)
         let graph_alpha = weights.alpha_imp * (GW_ALPHA_IMP / ALPHA_IMP);
@@ -386,7 +433,15 @@ pub fn adaptive_graph_composite_score(
         let imp_mult = 1.0 + gate * graph_alpha * importance.min(1.0);
         base_rel * imp_mult * query_valence_boost(valence, query_sentiment)
     } else {
-        adaptive_composite_score(similarity, decay, recency, importance, valence, query_sentiment, weights)
+        adaptive_composite_score(
+            similarity,
+            decay,
+            recency,
+            importance,
+            valence,
+            query_sentiment,
+            weights,
+        )
     }
 }
 
@@ -495,7 +550,10 @@ mod tests {
     fn test_importance_gate_at_threshold() {
         // sim=τ → gate = 0.5
         let gate = importance_gate(GATE_TAU);
-        assert!((gate - 0.5).abs() < 1e-10, "gate at sim=τ should be 0.5, got {gate}");
+        assert!(
+            (gate - 0.5).abs() < 1e-10,
+            "gate at sim=τ should be 0.5, got {gate}"
+        );
     }
 
     #[test]
@@ -524,8 +582,10 @@ mod tests {
         // When both are relevant, importance should still help
         let important = composite_score(0.70, 0.5, 0.5, 0.9, 0.0);
         let normal = composite_score(0.70, 0.5, 0.5, 0.3, 0.0);
-        assert!(important > normal,
-            "when both relevant, higher importance should win: {important:.4} vs {normal:.4}");
+        assert!(
+            important > normal,
+            "when both relevant, higher importance should win: {important:.4} vs {normal:.4}"
+        );
     }
 
     #[test]
@@ -535,7 +595,10 @@ mod tests {
         let base = W_SIM + W_DECAY + W_RECENCY;
         let gate = importance_gate(1.0);
         let expected = base * (1.0 + gate * ALPHA_IMP);
-        assert!((score - expected).abs() < 1e-10, "expected {expected}, got {score}");
+        assert!(
+            (score - expected).abs() < 1e-10,
+            "expected {expected}, got {score}"
+        );
     }
 
     #[test]
@@ -560,7 +623,10 @@ mod tests {
         let base = GW_SIM + GW_DECAY + GW_RECENCY + GW_GRAPH;
         let gate = importance_gate(1.0);
         let expected = base * (1.0 + gate * GW_ALPHA_IMP);
-        assert!((score - expected).abs() < 1e-10, "expected {expected}, got {score}");
+        assert!(
+            (score - expected).abs() < 1e-10,
+            "expected {expected}, got {score}"
+        );
     }
 
     // ── Monotonicity & property invariants ──
@@ -577,7 +643,10 @@ mod tests {
         // At moderate similarity (gate ≈ 0.88), importance should still matter
         let low = composite_score(0.5, 0.5, 0.5, 0.2, 0.0);
         let high = composite_score(0.5, 0.5, 0.5, 0.9, 0.0);
-        assert!(high > low, "higher importance should yield higher score (when sim>τ)");
+        assert!(
+            high > low,
+            "higher importance should yield higher score (when sim>τ)"
+        );
     }
 
     #[test]
@@ -595,7 +664,11 @@ mod tests {
     #[test]
     fn test_valence_always_geq_1() {
         for v in [-1.0, -0.5, 0.0, 0.5, 1.0] {
-            assert!(valence_boost(v) >= 1.0, "valence_boost({v}) = {} < 1.0", valence_boost(v));
+            assert!(
+                valence_boost(v) >= 1.0,
+                "valence_boost({v}) = {} < 1.0",
+                valence_boost(v)
+            );
         }
     }
 
@@ -607,7 +680,10 @@ mod tests {
                     for &imp in &[0.0, 0.5, 1.0] {
                         for &val in &[-1.0, 0.0, 1.0] {
                             let s = composite_score(sim, dec, rec, imp, val);
-                            assert!(s >= 0.0, "composite_score({sim},{dec},{rec},{imp},{val}) = {s} < 0");
+                            assert!(
+                                s >= 0.0,
+                                "composite_score({sim},{dec},{rec},{imp},{val}) = {s} < 0"
+                            );
                         }
                     }
                 }
@@ -619,7 +695,10 @@ mod tests {
     fn test_graph_composite_non_negative() {
         for &prox in &[0.0, 0.25, 0.5, 1.0] {
             let s = graph_composite_score(0.5, 0.5, 0.5, 0.5, 0.0, prox);
-            assert!(s >= 0.0, "graph_composite with prox={prox} should be non-negative");
+            assert!(
+                s >= 0.0,
+                "graph_composite with prox={prox} should be non-negative"
+            );
         }
     }
 
@@ -627,8 +706,10 @@ mod tests {
     fn test_graph_proximity_increases_score() {
         let without = graph_composite_score(0.3, 0.8, 0.7, 0.6, 0.0, 0.0);
         let with = graph_composite_score(0.3, 0.8, 0.7, 0.6, 0.0, 0.8);
-        assert!(with > without,
-            "graph proximity (0.8) should increase score: without={without}, with={with}");
+        assert!(
+            with > without,
+            "graph proximity (0.8) should increase score: without={without}, with={with}"
+        );
     }
 
     #[test]
@@ -652,7 +733,10 @@ mod tests {
     #[test]
     fn test_build_why_always_nonempty() {
         let why = build_why(0.0, 0.0, 0.0, 0.0);
-        assert!(!why.is_empty(), "build_why should always produce at least one reason");
+        assert!(
+            !why.is_empty(),
+            "build_why should always produce at least one reason"
+        );
         assert_eq!(why[0], "matched query");
     }
 
@@ -666,7 +750,10 @@ mod tests {
     fn test_importance_capped_at_1() {
         let capped = composite_score(0.5, 0.5, 0.5, 5.0, 0.0);
         let at_one = composite_score(0.5, 0.5, 0.5, 1.0, 0.0);
-        assert!((capped - at_one).abs() < 1e-10, "importance should be capped at 1.0");
+        assert!(
+            (capped - at_one).abs() < 1e-10,
+            "importance should be capped at 1.0"
+        );
     }
 
     #[test]
@@ -675,11 +762,17 @@ mod tests {
         assert!((score - 1.0).abs() < 1e-10, "max inputs should give 1.0");
 
         let score_zero = eviction_score(0.0, 0.0);
-        assert!((score_zero - 0.0).abs() < 1e-10, "zero inputs should give 0.0");
+        assert!(
+            (score_zero - 0.0).abs() < 1e-10,
+            "zero inputs should give 0.0"
+        );
 
         let low = eviction_score(0.1, 0.5);
         let high = eviction_score(0.9, 0.5);
-        assert!(high > low, "higher decay should yield higher eviction score");
+        assert!(
+            high > low,
+            "higher decay should yield higher eviction score"
+        );
     }
 
     // ── Regression: the "Staff Engineer domination" bug ──
@@ -695,29 +788,46 @@ mod tests {
         // Simulates: "Made pasta for dinner" for "What did I cook?"
         // sim=0.65 (relevant), imp=0.2, decay=0.6, recency=0.8
         let daily = composite_score(0.65, 0.6, 0.8, 0.2, 0.0);
-        assert!(daily > anchor,
-            "relevant daily ({daily:.4}) should beat irrelevant anchor ({anchor:.4})");
+        assert!(
+            daily > anchor,
+            "relevant daily ({daily:.4}) should beat irrelevant anchor ({anchor:.4})"
+        );
     }
 
     // ── Query-aware valence tests ──
 
     #[test]
     fn test_detect_query_sentiment_negative() {
-        assert_eq!(detect_query_sentiment("What failures and problems have been stressing me out?"), -1.0);
-        assert_eq!(detect_query_sentiment("Tell me about my emotional lows"), -1.0);
-        assert_eq!(detect_query_sentiment("What was difficult this year?"), -1.0);
+        assert_eq!(
+            detect_query_sentiment("What failures and problems have been stressing me out?"),
+            -1.0
+        );
+        assert_eq!(
+            detect_query_sentiment("Tell me about my emotional lows"),
+            -1.0
+        );
+        assert_eq!(
+            detect_query_sentiment("What was difficult this year?"),
+            -1.0
+        );
     }
 
     #[test]
     fn test_detect_query_sentiment_positive() {
         assert_eq!(detect_query_sentiment("What good things happened?"), 1.0);
         assert_eq!(detect_query_sentiment("Tell me about happy moments"), 1.0);
-        assert_eq!(detect_query_sentiment("What was my greatest achievement?"), 1.0);
+        assert_eq!(
+            detect_query_sentiment("What was my greatest achievement?"),
+            1.0
+        );
     }
 
     #[test]
     fn test_detect_query_sentiment_neutral() {
-        assert_eq!(detect_query_sentiment("What happened at work recently?"), 0.0);
+        assert_eq!(
+            detect_query_sentiment("What happened at work recently?"),
+            0.0
+        );
         assert_eq!(detect_query_sentiment("Tell me about my family"), 0.0);
     }
 
@@ -756,7 +866,10 @@ mod tests {
         for &v in &[-1.0, -0.5, 0.0, 0.5, 1.0] {
             for &s in &[-1.0, 0.0, 1.0] {
                 let boost = query_valence_boost(v, s);
-                assert!(boost >= 0.8, "query_valence_boost({v}, {s}) = {boost} should be positive");
+                assert!(
+                    boost >= 0.8,
+                    "query_valence_boost({v}, {s}) = {boost} should be positive"
+                );
             }
         }
     }
@@ -766,8 +879,10 @@ mod tests {
         // composite_score_with_sentiment with sentiment=0.0 should match composite_score
         let original = composite_score(0.6, 0.5, 0.7, 0.8, 0.3);
         let with_sent = composite_score_with_sentiment(0.6, 0.5, 0.7, 0.8, 0.3, 0.0);
-        assert!((original - with_sent).abs() < 1e-10,
-            "neutral sentiment should match original: {original} vs {with_sent}");
+        assert!(
+            (original - with_sent).abs() < 1e-10,
+            "neutral sentiment should match original: {original} vs {with_sent}"
+        );
     }
 
     #[test]

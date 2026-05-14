@@ -582,10 +582,7 @@ impl CircadianHistogram {
         if total == 0 {
             return None;
         }
-        let (hour, _) = dist
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, &count)| count)?;
+        let (hour, _) = dist.iter().enumerate().max_by_key(|(_, &count)| count)?;
         Some(hour as u8)
     }
 
@@ -1053,15 +1050,10 @@ pub fn compute_derived_signals(buffer: &EventBuffer, since: f64, now: f64) -> De
 /// Detect app transition sequences from a series of AppOpened events.
 ///
 /// Emits AppSequence events for consecutive app opens within `max_gap_ms`.
-pub fn detect_app_sequences(
-    buffer: &EventBuffer,
-    since: f64,
-    max_gap_ms: u64,
-) -> Vec<SystemEvent> {
-    let opens: Vec<&SystemEvent> = buffer
-        .filter(usize::MAX, |e| {
-            e.timestamp >= since && matches!(e.data, SystemEventData::AppOpened { .. })
-        });
+pub fn detect_app_sequences(buffer: &EventBuffer, since: f64, max_gap_ms: u64) -> Vec<SystemEvent> {
+    let opens: Vec<&SystemEvent> = buffer.filter(usize::MAX, |e| {
+        e.timestamp >= since && matches!(e.data, SystemEventData::AppOpened { .. })
+    });
 
     // Opens are newest-first, reverse for chronological order
     let mut chronological: Vec<_> = opens.into_iter().collect();

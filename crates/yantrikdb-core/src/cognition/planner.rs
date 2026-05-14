@@ -301,10 +301,7 @@ pub struct RejectedSchema {
 /// 3. Decomposes using skills when available
 /// 4. Scores and ranks plans via beam search
 /// 5. Returns top-k plans with blockers
-pub fn instantiate_plan(
-    goal_id: NodeId,
-    ctx: &PlanningContext,
-) -> PlanProposal {
+pub fn instantiate_plan(goal_id: NodeId, ctx: &PlanningContext) -> PlanProposal {
     let config = ctx.config;
 
     // Find the target goal.
@@ -424,10 +421,7 @@ pub fn instantiate_plan(
     for plan in &mut candidate_plans {
         let constraint_blockers = check_constraints(plan, ctx);
         plan.blockers.extend(constraint_blockers);
-        plan.viable = plan
-            .blockers
-            .iter()
-            .all(|b| b.severity < 0.9);
+        plan.viable = plan.blockers.iter().all(|b| b.severity < 0.9);
     }
 
     PlanProposal {
@@ -444,22 +438,17 @@ pub fn instantiate_plan(
 ///
 /// Generates a plan (or uses a cached one) and returns the first
 /// unblocked step.
-pub fn next_plan_step(
-    goal_id: NodeId,
-    ctx: &PlanningContext,
-) -> Option<PlanStep> {
+pub fn next_plan_step(goal_id: NodeId, ctx: &PlanningContext) -> Option<PlanStep> {
     let proposal = instantiate_plan(goal_id, ctx);
     let best_plan = proposal.plans.into_iter().find(|p| p.viable)?;
 
     // Return first step without fatal blockers.
-    best_plan
-        .steps
-        .into_iter()
-        .find(|step| {
-            !best_plan.blockers.iter().any(|b| {
-                b.step_ordinal == Some(step.ordinal) && b.severity >= 0.9
-            })
-        })
+    best_plan.steps.into_iter().find(|step| {
+        !best_plan
+            .blockers
+            .iter()
+            .any(|b| b.step_ordinal == Some(step.ordinal) && b.severity >= 0.9)
+    })
 }
 
 // ── §6: Plan evaluation ─────────────────────────────────────────────
@@ -470,16 +459,16 @@ pub fn evaluate_plan(plan: &Plan, config: &PlannerConfig) -> PlanScore {
 }
 
 /// Detect all blockers preventing goal achievement.
-pub fn detect_blockers(
-    goal_id: NodeId,
-    ctx: &PlanningContext,
-) -> Vec<Blocker> {
+pub fn detect_blockers(goal_id: NodeId, ctx: &PlanningContext) -> Vec<Blocker> {
     let proposal = instantiate_plan(goal_id, ctx);
     let mut all_blockers = proposal.global_blockers;
 
     for plan in &proposal.plans {
         for b in &plan.blockers {
-            if !all_blockers.iter().any(|existing| existing.description == b.description) {
+            if !all_blockers
+                .iter()
+                .any(|existing| existing.description == b.description)
+            {
                 all_blockers.push(b.clone());
             }
         }
@@ -493,10 +482,7 @@ pub fn detect_blockers(
 /// Find schemas that advance a given goal.
 ///
 /// Uses cognitive graph edges (AdvancesGoal) and effect matching.
-fn find_advancing_schemas<'a>(
-    goal_id: NodeId,
-    ctx: &'a PlanningContext,
-) -> Vec<&'a SchemaEntry> {
+fn find_advancing_schemas<'a>(goal_id: NodeId, ctx: &'a PlanningContext) -> Vec<&'a SchemaEntry> {
     let mut result = Vec::new();
 
     // Method 1: Explicit graph edges from schema → goal.
@@ -536,10 +522,7 @@ fn find_advancing_schemas<'a>(
 }
 
 /// Find tasks associated with a goal.
-fn find_tasks_for_goal<'a>(
-    goal_id: NodeId,
-    ctx: &'a PlanningContext,
-) -> Vec<&'a TaskEntry> {
+fn find_tasks_for_goal<'a>(goal_id: NodeId, ctx: &'a PlanningContext) -> Vec<&'a TaskEntry> {
     ctx.tasks
         .iter()
         .filter(|t| t.payload.goal_id == Some(goal_id))
@@ -570,10 +553,7 @@ fn build_plan_step(
             } else {
                 blockers.push(Blocker {
                     step_ordinal: Some(ordinal),
-                    description: format!(
-                        "Required precondition not met: {}",
-                        pc.description
-                    ),
+                    description: format!("Required precondition not met: {}", pc.description),
                     severity: 0.8,
                     kind: BlockerKind::UnsatisfiedPrecondition,
                     resolution: Some(format!("Satisfy: {}", pc.description)),
@@ -642,10 +622,10 @@ fn check_precondition(
         }
         // Generic: node exists with reasonable confidence.
         // (We don't have direct access to all nodes here, so we check edges.)
-        let has_support = ctx.edges.iter().any(|e| {
-            (e.src == node_ref || e.dst == node_ref)
-                && e.confidence > 0.5
-        });
+        let has_support = ctx
+            .edges
+            .iter()
+            .any(|e| (e.src == node_ref || e.dst == node_ref) && e.confidence > 0.5);
         return (has_support, Some(node_ref));
     }
 
@@ -676,7 +656,10 @@ fn decompose_via_skill(
 
         // Try to match skill step to an action schema.
         let matching_schema = ctx.schemas.iter().find(|s| {
-            s.payload.name.to_lowercase().contains(&skill_step.action_kind.to_lowercase())
+            s.payload
+                .name
+                .to_lowercase()
+                .contains(&skill_step.action_kind.to_lowercase())
                 || format!("{:?}", s.payload.action_kind)
                     .to_lowercase()
                     .contains(&skill_step.action_kind.to_lowercase())
@@ -757,10 +740,7 @@ fn build_task_chain_plan(
             if !prereq_done {
                 blockers.push(Blocker {
                     step_ordinal: Some(i as u32),
-                    description: format!(
-                        "Prerequisite task {:?} not completed",
-                        prereq_id
-                    ),
+                    description: format!("Prerequisite task {:?} not completed", prereq_id),
                     severity: 0.7,
                     kind: BlockerKind::PrerequisiteIncomplete,
                     resolution: Some("Complete prerequisite task first".to_string()),
@@ -771,7 +751,13 @@ fn build_task_chain_plan(
         // Try to find a schema that matches this task.
         let matching_schema = ctx.schemas.iter().find(|s| {
             s.payload.description.to_lowercase().contains(
-                &task.payload.description.to_lowercase().split_whitespace().next().unwrap_or(""),
+                &task
+                    .payload
+                    .description
+                    .to_lowercase()
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or(""),
             )
         });
 
@@ -1016,7 +1002,7 @@ fn score_plan(steps: &[PlanStep], config: &PlannerConfig) -> PlanScore {
         expected_utility,
         simplicity,
         schema_success_rate,
-        urgency: 0.0, // Set by build_plan from goal urgency.
+        urgency: 0.0,   // Set by build_plan from goal urgency.
         composite: 0.0, // Computed in build_plan.
         estimated_total_secs,
     }
@@ -1099,16 +1085,12 @@ fn check_constraints(plan: &Plan, ctx: &PlanningContext) -> Vec<Blocker> {
 
                 blockers.push(Blocker {
                     step_ordinal: Some(step.ordinal),
-                    description: format!(
-                        "Constraint violated: {}",
-                        constraint.payload.description
-                    ),
+                    description: format!("Constraint violated: {}", constraint.payload.description),
                     severity,
                     kind: BlockerKind::ConstraintViolation,
                     resolution: Some(format!(
                         "Imposed by: {}. Condition: {}",
-                        constraint.payload.imposed_by,
-                        constraint.payload.condition
+                        constraint.payload.imposed_by, constraint.payload.condition
                     )),
                 });
             }
@@ -1328,9 +1310,10 @@ mod tests {
 
         let proposal = instantiate_plan(goal.node_id, &ctx);
         assert!(proposal.plans.is_empty());
-        assert!(proposal.global_blockers.iter().any(|b| {
-            matches!(b.kind, BlockerKind::GoalInactive)
-        }));
+        assert!(proposal
+            .global_blockers
+            .iter()
+            .any(|b| { matches!(b.kind, BlockerKind::GoalInactive) }));
     }
 
     #[test]
@@ -1612,9 +1595,10 @@ mod tests {
         // Plan should exist but be non-viable due to constraint.
         if !proposal.plans.is_empty() {
             let plan = &proposal.plans[0];
-            assert!(plan.blockers.iter().any(|b| {
-                matches!(b.kind, BlockerKind::ConstraintViolation)
-            }));
+            assert!(plan
+                .blockers
+                .iter()
+                .any(|b| { matches!(b.kind, BlockerKind::ConstraintViolation) }));
             assert!(!plan.viable);
         }
     }
@@ -1711,9 +1695,9 @@ mod tests {
         };
 
         let blockers = detect_blockers(goal.node_id, &ctx);
-        assert!(blockers.iter().any(|b| {
-            matches!(b.kind, BlockerKind::DeadlinePressure)
-        }));
+        assert!(blockers
+            .iter()
+            .any(|b| { matches!(b.kind, BlockerKind::DeadlinePressure) }));
     }
 
     #[test]
@@ -1817,8 +1801,16 @@ mod tests {
         schema_weak.payload.success_rate = 0.3;
 
         let edges = vec![
-            edge(schema_good.node_id, goal.node_id, CognitiveEdgeKind::AdvancesGoal),
-            edge(schema_weak.node_id, goal.node_id, CognitiveEdgeKind::AdvancesGoal),
+            edge(
+                schema_good.node_id,
+                goal.node_id,
+                CognitiveEdgeKind::AdvancesGoal,
+            ),
+            edge(
+                schema_weak.node_id,
+                goal.node_id,
+                CognitiveEdgeKind::AdvancesGoal,
+            ),
         ];
 
         let ctx = PlanningContext {

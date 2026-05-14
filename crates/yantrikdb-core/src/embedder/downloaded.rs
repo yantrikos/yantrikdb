@@ -101,7 +101,10 @@ fn cache_dir_for(name: &str, release_tag: &str) -> Result<PathBuf> {
             "could not resolve user cache dir; set XDG_CACHE_HOME or HOME".into(),
         )
     })?;
-    Ok(base.join("yantrikdb").join("models").join(format!("{name}-{release_tag}")))
+    Ok(base
+        .join("yantrikdb")
+        .join("models")
+        .join(format!("{name}-{release_tag}")))
 }
 
 /// Returns true iff the cache dir exists with all four expected files
@@ -109,7 +112,12 @@ fn cache_dir_for(name: &str, release_tag: &str) -> Result<PathBuf> {
 /// re-verify SHA-256 on each cache hit (we trust the filesystem to
 /// preserve what we wrote).
 fn cache_is_populated(dir: &std::path::Path) -> bool {
-    for f in &["model.safetensors", "tokenizer.json", "config.json", "modules.json"] {
+    for f in &[
+        "model.safetensors",
+        "tokenizer.json",
+        "config.json",
+        "modules.json",
+    ] {
         match std::fs::metadata(dir.join(f)) {
             Ok(m) if m.len() > 0 => continue,
             _ => return false,
@@ -143,7 +151,10 @@ fn fetch_and_extract(model: &DownloadableModel, name: &str) -> Result<PathBuf> {
     // would save peak RSS, but the simpler path is fine for the user-
     // initiated, infrequent case set_embedder_named is called in.
     let resp = ureq::get(&url)
-        .set("User-Agent", concat!("yantrikdb/", env!("CARGO_PKG_VERSION")))
+        .set(
+            "User-Agent",
+            concat!("yantrikdb/", env!("CARGO_PKG_VERSION")),
+        )
         .call()
         .map_err(|e| YantrikDbError::InvalidInput(format!("download {url}: {e}")))?;
 
@@ -167,9 +178,9 @@ fn fetch_and_extract(model: &DownloadableModel, name: &str) -> Result<PathBuf> {
 
     // Extract under a temp sibling dir, then atomic rename. Avoids
     // exposing a half-written cache to a concurrent process.
-    let parent = final_dir.parent().ok_or_else(|| {
-        YantrikDbError::InvalidInput("cache dir has no parent".into())
-    })?;
+    let parent = final_dir
+        .parent()
+        .ok_or_else(|| YantrikDbError::InvalidInput("cache dir has no parent".into()))?;
     std::fs::create_dir_all(parent)
         .map_err(|e| YantrikDbError::InvalidInput(format!("mkdir {}: {e}", parent.display())))?;
     let tmp_dir = parent.join(format!(
@@ -179,28 +190,26 @@ fn fetch_and_extract(model: &DownloadableModel, name: &str) -> Result<PathBuf> {
         std::process::id()
     ));
     let _ = std::fs::remove_dir_all(&tmp_dir); // cleanup any prior crash
-    std::fs::create_dir_all(&tmp_dir)
-        .map_err(|e| YantrikDbError::InvalidInput(format!("mkdir tmp {}: {e}", tmp_dir.display())))?;
+    std::fs::create_dir_all(&tmp_dir).map_err(|e| {
+        YantrikDbError::InvalidInput(format!("mkdir tmp {}: {e}", tmp_dir.display()))
+    })?;
 
     let gz = flate2::read::GzDecoder::new(&bytes[..]);
     let mut archive = tar::Archive::new(gz);
     // The tarball entries are scoped under e.g. `potion-base-8M/...`.
     // We want the inner files at the cache dir root, so we strip the
     // leading directory component.
-    for entry in archive.entries().map_err(|e| {
-        YantrikDbError::InvalidInput(format!("tar open: {e}"))
-    })? {
-        let mut entry = entry.map_err(|e| {
-            YantrikDbError::InvalidInput(format!("tar entry: {e}"))
-        })?;
-        let path = entry.path().map_err(|e| {
-            YantrikDbError::InvalidInput(format!("tar path: {e}"))
-        })?;
+    for entry in archive
+        .entries()
+        .map_err(|e| YantrikDbError::InvalidInput(format!("tar open: {e}")))?
+    {
+        let mut entry =
+            entry.map_err(|e| YantrikDbError::InvalidInput(format!("tar entry: {e}")))?;
+        let path = entry
+            .path()
+            .map_err(|e| YantrikDbError::InvalidInput(format!("tar path: {e}")))?;
         // Strip the leading dir component if present.
-        let stripped: PathBuf = path
-            .components()
-            .skip(1)
-            .collect();
+        let stripped: PathBuf = path.components().skip(1).collect();
         if stripped.as_os_str().is_empty() {
             continue;
         }
@@ -209,10 +218,7 @@ fn fetch_and_extract(model: &DownloadableModel, name: &str) -> Result<PathBuf> {
             std::fs::create_dir_all(parent).ok();
         }
         entry.unpack(&dest).map_err(|e| {
-            YantrikDbError::InvalidInput(format!(
-                "tar unpack {}: {e}",
-                dest.display()
-            ))
+            YantrikDbError::InvalidInput(format!("tar unpack {}: {e}", dest.display()))
         })?;
     }
 
@@ -269,10 +275,7 @@ impl DownloadedEmbedder {
         })?;
         let dir = fetch_and_extract(&model, name)?;
         let static_model = StaticModel::from_pretrained(&dir, None, None, None).map_err(|e| {
-            YantrikDbError::InvalidInput(format!(
-                "model2vec_rs load from {}: {e}",
-                dir.display()
-            ))
+            YantrikDbError::InvalidInput(format!("model2vec_rs load from {}: {e}", dir.display()))
         })?;
         Ok(Self {
             model: std::sync::Arc::new(static_model),
@@ -340,8 +343,7 @@ mod tests {
         if std::env::var_os("YANTRIKDB_TEST_LIVE_DOWNLOAD").is_none() {
             return; // skip silently
         }
-        let e = DownloadedEmbedder::fetch("potion-base-8M")
-            .expect("fetch potion-base-8M live");
+        let e = DownloadedEmbedder::fetch("potion-base-8M").expect("fetch potion-base-8M live");
         assert_eq!(e.dim(), 256);
         let v = e.embed("Alice met Acme yesterday").unwrap();
         assert_eq!(v.len(), 256);

@@ -54,11 +54,7 @@ impl YantrikDB {
     }
 
     /// Get learning milestones within a time range.
-    pub fn learning_milestones(
-        &self,
-        since: f64,
-        until: f64,
-    ) -> Result<Vec<LearningMilestone>> {
+    pub fn learning_milestones(&self, since: f64, until: f64) -> Result<Vec<LearningMilestone>> {
         let belief_store = self.load_belief_store()?;
         let event_buffer = self.load_event_buffer()?;
         let skill_registry = self.load_skill_registry()?;

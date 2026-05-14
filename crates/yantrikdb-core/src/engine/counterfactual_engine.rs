@@ -3,13 +3,12 @@
 //! Wires the counterfactual module into `YantrikDB`, loading
 //! the causal store for simulation and persisting regret history.
 
-use crate::counterfactual::{
-    CounterfactualConfig, CounterfactualQuery, CounterfactualResult, DecisionRecord,
-    RegretReport, SensitivityEntry,
-    compare_alternatives, detect_regret_opportunities, sensitivity_analysis,
-    simulate_counterfactual, why_not,
-};
 use crate::causal::CausalNode;
+use crate::counterfactual::{
+    compare_alternatives, detect_regret_opportunities, sensitivity_analysis,
+    simulate_counterfactual, why_not, CounterfactualConfig, CounterfactualQuery,
+    CounterfactualResult, DecisionRecord, RegretReport, SensitivityEntry,
+};
 use crate::error::Result;
 
 use super::YantrikDB;
@@ -28,9 +27,9 @@ impl YantrikDB {
         let meta = Self::get_meta(&self.conn(), COUNTERFACTUAL_CONFIG_META_KEY)?;
         match meta {
             Some(json) => serde_json::from_str(&json).map_err(|e| {
-                crate::error::YantrikDbError::Database(
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-                )
+                crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                    Box::new(e),
+                ))
             }),
             None => Ok(CounterfactualConfig::default()),
         }
@@ -39,9 +38,9 @@ impl YantrikDB {
     /// Persist counterfactual configuration.
     pub fn save_counterfactual_config(&self, config: &CounterfactualConfig) -> Result<()> {
         let json = serde_json::to_string(config).map_err(|e| {
-            crate::error::YantrikDbError::Database(
-                rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-            )
+            crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                Box::new(e),
+            ))
         })?;
         self.conn().execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -58,9 +57,9 @@ impl YantrikDB {
         let meta = Self::get_meta(&self.conn(), REGRET_HISTORY_META_KEY)?;
         match meta {
             Some(json) => serde_json::from_str(&json).map_err(|e| {
-                crate::error::YantrikDbError::Database(
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-                )
+                crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                    Box::new(e),
+                ))
             }),
             None => Ok(Vec::new()),
         }
@@ -69,9 +68,9 @@ impl YantrikDB {
     /// Persist regret history.
     pub fn save_regret_history(&self, history: &[RegretReport]) -> Result<()> {
         let json = serde_json::to_string(history).map_err(|e| {
-            crate::error::YantrikDbError::Database(
-                rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-            )
+            crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                Box::new(e),
+            ))
         })?;
         self.conn().execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -83,20 +82,14 @@ impl YantrikDB {
     // ── API ──
 
     /// Run a counterfactual simulation using the persisted causal store.
-    pub fn run_counterfactual(
-        &self,
-        query: &CounterfactualQuery,
-    ) -> Result<CounterfactualResult> {
+    pub fn run_counterfactual(&self, query: &CounterfactualQuery) -> Result<CounterfactualResult> {
         let store = self.load_causal_store()?;
         let config = self.load_counterfactual_config()?;
         Ok(simulate_counterfactual(query, &store, &config))
     }
 
     /// Detect regret opportunities from recent decisions.
-    pub fn detect_regrets(
-        &self,
-        decisions: &[DecisionRecord],
-    ) -> Result<RegretReport> {
+    pub fn detect_regrets(&self, decisions: &[DecisionRecord]) -> Result<RegretReport> {
         let store = self.load_causal_store()?;
         let config = self.load_counterfactual_config()?;
         let report = detect_regret_opportunities(decisions, &store, &config);
@@ -148,8 +141,8 @@ impl YantrikDB {
 
 #[cfg(test)]
 mod tests {
-    use crate::engine::YantrikDB;
     use crate::counterfactual::CounterfactualConfig;
+    use crate::engine::YantrikDB;
 
     fn test_db() -> YantrikDB {
         YantrikDB::new(":memory:", 8).unwrap()

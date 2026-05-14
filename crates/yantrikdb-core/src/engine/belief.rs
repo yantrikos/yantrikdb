@@ -7,19 +7,13 @@
 use std::collections::HashMap;
 
 use crate::belief::{
-    self, assert_evidence, apply_staleness_decay, propagate_evidence,
-    BeliefRevisionConfig, Evidence, EvidenceResult, RevisionSummary,
+    self, apply_staleness_decay, assert_evidence, propagate_evidence, BeliefRevisionConfig,
+    Evidence, EvidenceResult, RevisionSummary,
 };
-use crate::belief_query::{
-    self, BeliefExplanation, BeliefInventory, BeliefPattern,
-};
-use crate::contradiction::{
-    self, ContradictionConfig, ContradictionScanResult,
-};
+use crate::belief_query::{self, BeliefExplanation, BeliefInventory, BeliefPattern};
+use crate::contradiction::{self, ContradictionConfig, ContradictionScanResult};
 use crate::error::Result;
-use crate::state::{
-    CognitiveEdgeKind, CognitiveNode, NodeId, NodeKind, NodePayload,
-};
+use crate::state::{CognitiveEdgeKind, CognitiveNode, NodeId, NodeKind, NodePayload};
 
 use super::{now, YantrikDB};
 
@@ -65,10 +59,7 @@ impl YantrikDB {
 
             if !epistemic_edges.is_empty() {
                 // Load downstream belief nodes
-                let dst_ids: Vec<NodeId> = epistemic_edges
-                    .iter()
-                    .map(|e| e.dst)
-                    .collect();
+                let dst_ids: Vec<NodeId> = epistemic_edges.iter().map(|e| e.dst).collect();
 
                 let mut downstream: HashMap<NodeId, CognitiveNode> = HashMap::new();
                 for &dst_id in &dst_ids {
@@ -145,10 +136,7 @@ impl YantrikDB {
     /// Run belief revision on all persistent beliefs: staleness decay + ceiling.
     ///
     /// This should be called during the `think()` loop to keep beliefs current.
-    pub fn revise_all_beliefs(
-        &self,
-        config: &BeliefRevisionConfig,
-    ) -> Result<RevisionSummary> {
+    pub fn revise_all_beliefs(&self, config: &BeliefRevisionConfig) -> Result<RevisionSummary> {
         let now_secs = now();
 
         // Load all belief nodes
@@ -196,20 +184,15 @@ impl YantrikDB {
             node_map.insert(n.id, n);
         }
 
-        let ref_map: HashMap<NodeId, &CognitiveNode> = node_map
-            .iter()
-            .map(|(id, n)| (*id, n))
-            .collect();
+        let ref_map: HashMap<NodeId, &CognitiveNode> =
+            node_map.iter().map(|(id, n)| (*id, n)).collect();
 
         // Load all Contradicts edges
-        let contradicts_edges = self.load_cognitive_edges_by_kind(CognitiveEdgeKind::Contradicts)?;
+        let contradicts_edges =
+            self.load_cognitive_edges_by_kind(CognitiveEdgeKind::Contradicts)?;
 
-        let result = contradiction::scan_contradictions(
-            &ref_map,
-            &contradicts_edges,
-            config,
-            now_secs,
-        );
+        let result =
+            contradiction::scan_contradictions(&ref_map, &contradicts_edges, config, now_secs);
 
         Ok(result)
     }
@@ -217,10 +200,7 @@ impl YantrikDB {
     // ── Belief Queries ──
 
     /// Query beliefs from persistent storage using a pattern.
-    pub fn query_beliefs(
-        &self,
-        pattern: &BeliefPattern,
-    ) -> Result<Vec<CognitiveNode>> {
+    pub fn query_beliefs(&self, pattern: &BeliefPattern) -> Result<Vec<CognitiveNode>> {
         let beliefs = self.load_cognitive_nodes_by_kind(NodeKind::Belief)?;
         let results: Vec<CognitiveNode> = belief_query::query_beliefs(beliefs.iter(), pattern)
             .into_iter()
@@ -254,10 +234,8 @@ impl YantrikDB {
             }
         }
 
-        let neighbor_refs: HashMap<NodeId, &CognitiveNode> = neighbor_map
-            .iter()
-            .map(|(id, n)| (*id, n))
-            .collect();
+        let neighbor_refs: HashMap<NodeId, &CognitiveNode> =
+            neighbor_map.iter().map(|(id, n)| (*id, n)).collect();
 
         let explanation = belief_query::explain_belief(&node, &edges_to, &neighbor_refs, now_secs);
         Ok(explanation)
@@ -323,8 +301,8 @@ impl YantrikDB {
 mod tests {
     use super::*;
     use crate::state::{
-        BeliefPayload, CognitiveEdge, CognitiveNode, NodeIdAllocator,
-        NodePayload, Provenance, PreferencePayload,
+        BeliefPayload, CognitiveEdge, CognitiveNode, NodeIdAllocator, NodePayload,
+        PreferencePayload, Provenance,
     };
 
     fn test_db() -> YantrikDB {
@@ -366,7 +344,10 @@ mod tests {
         };
 
         let config = BeliefRevisionConfig::default();
-        let result = db.assert_belief_evidence(&evidence, &config).unwrap().unwrap();
+        let result = db
+            .assert_belief_evidence(&evidence, &config)
+            .unwrap()
+            .unwrap();
 
         assert!(result.posterior_probability > 0.5);
 
@@ -405,7 +386,10 @@ mod tests {
         };
 
         let config = BeliefRevisionConfig::default();
-        let result = db.assert_belief_evidence(&evidence, &config).unwrap().unwrap();
+        let result = db
+            .assert_belief_evidence(&evidence, &config)
+            .unwrap()
+            .unwrap();
 
         // Should have propagated to B
         assert!(!result.propagated_to.is_empty());
@@ -413,7 +397,10 @@ mod tests {
         // Verify B was updated
         let loaded_b = db.load_cognitive_node(b.id).unwrap().unwrap();
         if let NodePayload::Belief(bel) = &loaded_b.payload {
-            assert!(bel.log_odds > 0.0, "B should have received propagated evidence");
+            assert!(
+                bel.log_odds > 0.0,
+                "B should have received propagated evidence"
+            );
         }
     }
 
@@ -565,9 +552,14 @@ mod tests {
         let mut alloc = NodeIdAllocator::new();
 
         for i in 0..10 {
-            let mut node = make_belief_node(&mut alloc, &format!("Belief {i}"), (i as f64 - 5.0) * 0.5);
+            let mut node =
+                make_belief_node(&mut alloc, &format!("Belief {i}"), (i as f64 - 5.0) * 0.5);
             if let NodePayload::Belief(b) = &mut node.payload {
-                b.domain = if i < 4 { "health".to_string() } else { "work".to_string() };
+                b.domain = if i < 4 {
+                    "health".to_string()
+                } else {
+                    "work".to_string()
+                };
             }
             db.persist_cognitive_node(&node).unwrap();
         }

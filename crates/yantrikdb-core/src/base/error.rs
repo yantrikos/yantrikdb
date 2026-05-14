@@ -35,7 +35,6 @@ pub enum YantrikDbError {
     #[error("session conflict: {0}")]
     SessionConflict(String),
 
-
     /// **Decoupled write path RFC, Phase 1.**
     ///
     /// The bounded global ingest queue is full. Foreground writers receive
@@ -45,7 +44,9 @@ pub enum YantrikDbError {
     ///
     /// `retry_after_ms` is a coarse hint — actual drain rate depends on
     /// background worker throughput.
-    #[error("ingest queue full ({pending} pending ops, max={max}); retry after {retry_after_ms}ms")]
+    #[error(
+        "ingest queue full ({pending} pending ops, max={max}); retry after {retry_after_ms}ms"
+    )]
     Backpressure {
         pending: i64,
         max: i64,
@@ -79,10 +80,7 @@ pub enum YantrikDbError {
     /// follower are running with different embedder model versions, which
     /// would silently corrupt HNSW state if applied. Reject deterministically.
     #[error("embedding dimension mismatch: expected {expected}, got {got}")]
-    EmbeddingDimensionMismatch {
-        expected: usize,
-        got: usize,
-    },
+    EmbeddingDimensionMismatch { expected: usize, got: usize },
 
     #[error("invalid input: {0}")]
     InvalidInput(String),

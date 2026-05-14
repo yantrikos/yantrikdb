@@ -111,7 +111,11 @@ impl UtilityWeights {
 
     /// Compute the weighted score for a feature vector.
     pub fn score(&self, features: &[f64; 4]) -> f64 {
-        self.weights.iter().zip(features.iter()).map(|(w, f)| w * f).sum()
+        self.weights
+            .iter()
+            .zip(features.iter())
+            .map(|(w, f)| w * f)
+            .sum()
     }
 
     /// Current ranking accuracy [0.0, 1.0] (pairs correctly ordered / total pairs).
@@ -153,13 +157,14 @@ pub fn update_utility_weights(
 
     for i in 0..interactions.len() {
         for j in (i + 1)..interactions.len() {
-            let (better, worse) = if interactions[i].outcome.ordinal() > interactions[j].outcome.ordinal() {
-                (&interactions[i], &interactions[j])
-            } else if interactions[j].outcome.ordinal() > interactions[i].outcome.ordinal() {
-                (&interactions[j], &interactions[i])
-            } else {
-                continue; // Same outcome, no signal
-            };
+            let (better, worse) =
+                if interactions[i].outcome.ordinal() > interactions[j].outcome.ordinal() {
+                    (&interactions[i], &interactions[j])
+                } else if interactions[j].outcome.ordinal() > interactions[i].outcome.ordinal() {
+                    (&interactions[j], &interactions[i])
+                } else {
+                    continue; // Same outcome, no signal
+                };
 
             let score_better = weights.score(&better.features);
             let score_worse = weights.score(&worse.features);
@@ -727,7 +732,9 @@ pub fn record_interaction(state: &mut LearningState, record: InteractionRecord, 
     state.bandits.record(&record.action_kind, record.outcome);
 
     // 2. Update calibration map
-    state.calibration.record(record.raw_confidence, record.outcome.is_positive());
+    state
+        .calibration
+        .record(record.raw_confidence, record.outcome.is_positive());
 
     // 3. Buffer interaction for batch weight updates
     state.interaction_buffer.push(record);
@@ -764,7 +771,10 @@ pub fn record_belief_confirmed(state: &mut LearningState, source: &str) {
 
 /// Record that a belief from a specific source was contradicted.
 pub fn record_belief_contradicted(state: &mut LearningState, source: &str) {
-    state.reliability.get_or_create(source).record_contradicted();
+    state
+        .reliability
+        .get_or_create(source)
+        .record_contradicted();
 }
 
 /// Get calibrated confidence for a raw confidence value.
@@ -774,7 +784,9 @@ pub fn calibrated_confidence(state: &LearningState, raw_confidence: f64) -> f64 
 
 /// Get the recommended confidence threshold for an action kind.
 pub fn action_threshold(state: &LearningState, action_kind: &str) -> f64 {
-    state.bandits.threshold(action_kind, state.config.bandit_safety_margin)
+    state
+        .bandits
+        .threshold(action_kind, state.config.bandit_safety_margin)
 }
 
 /// Get the current utility weights as a snapshot.
@@ -871,7 +883,12 @@ mod tests {
         86400.0 * 100.0 + offset
     }
 
-    fn make_record(kind: &str, features: [f64; 4], confidence: f64, outcome: InteractionOutcome) -> InteractionRecord {
+    fn make_record(
+        kind: &str,
+        features: [f64; 4],
+        confidence: f64,
+        outcome: InteractionOutcome,
+    ) -> InteractionRecord {
         InteractionRecord {
             action_kind: kind.to_string(),
             raw_confidence: confidence,
@@ -905,10 +922,30 @@ mod tests {
 
         // Create interactions where feature[0] (effect) is the strongest predictor
         let interactions = vec![
-            make_record("test", [0.9, 0.2, 0.1, 0.3], 0.7, InteractionOutcome::Accepted),
-            make_record("test", [0.1, 0.8, 0.7, 0.2], 0.5, InteractionOutcome::Rejected),
-            make_record("test", [0.8, 0.3, 0.2, 0.1], 0.6, InteractionOutcome::Accepted),
-            make_record("test", [0.2, 0.7, 0.6, 0.1], 0.4, InteractionOutcome::Rejected),
+            make_record(
+                "test",
+                [0.9, 0.2, 0.1, 0.3],
+                0.7,
+                InteractionOutcome::Accepted,
+            ),
+            make_record(
+                "test",
+                [0.1, 0.8, 0.7, 0.2],
+                0.5,
+                InteractionOutcome::Rejected,
+            ),
+            make_record(
+                "test",
+                [0.8, 0.3, 0.2, 0.1],
+                0.6,
+                InteractionOutcome::Accepted,
+            ),
+            make_record(
+                "test",
+                [0.2, 0.7, 0.6, 0.1],
+                0.4,
+                InteractionOutcome::Rejected,
+            ),
         ];
 
         let initial_w0 = weights.weights[0];
@@ -918,12 +955,17 @@ mod tests {
         assert!(
             weights.weights[0] > initial_w0 - 0.01,
             "Effect weight should not decrease significantly: {} → {}",
-            initial_w0, weights.weights[0]
+            initial_w0,
+            weights.weights[0]
         );
 
         // Weights should still sum to ~1.0
         let sum: f64 = weights.weights.iter().sum();
-        assert!((sum - 1.0).abs() < 0.01, "Weights should sum to ~1.0 after update: {}", sum);
+        assert!(
+            (sum - 1.0).abs() < 0.01,
+            "Weights should sum to ~1.0 after update: {}",
+            sum
+        );
     }
 
     #[test]
@@ -934,7 +976,12 @@ mod tests {
         update_utility_weights(&mut weights, &[], 0.1, 0.05);
         assert_eq!(weights.weights, original, "No update on empty interactions");
 
-        let interactions = vec![make_record("test", [0.5; 4], 0.5, InteractionOutcome::Accepted)];
+        let interactions = vec![make_record(
+            "test",
+            [0.5; 4],
+            0.5,
+            InteractionOutcome::Accepted,
+        )];
         update_utility_weights(&mut weights, &interactions, 0.1, 0.05);
         assert_eq!(weights.weights, original, "No update on single interaction");
     }
@@ -953,7 +1000,11 @@ mod tests {
             bandit.record_negative();
         }
 
-        assert!(bandit.mean() > 0.7, "Should reflect high acceptance: {}", bandit.mean());
+        assert!(
+            bandit.mean() > 0.7,
+            "Should reflect high acceptance: {}",
+            bandit.mean()
+        );
     }
 
     #[test]
@@ -1024,7 +1075,12 @@ mod tests {
 
         let high_cal = cal.calibrate(0.9);
         let low_cal = cal.calibrate(0.1);
-        assert!(high_cal > low_cal, "High confidence should calibrate higher: {} vs {}", high_cal, low_cal);
+        assert!(
+            high_cal > low_cal,
+            "High confidence should calibrate higher: {} vs {}",
+            high_cal,
+            low_cal
+        );
     }
 
     #[test]
@@ -1038,7 +1094,9 @@ mod tests {
             assert!(
                 values[i] >= values[i - 1] - 1e-10,
                 "Not monotonic at {}: {} < {}",
-                i, values[i], values[i - 1]
+                i,
+                values[i],
+                values[i - 1]
             );
         }
     }
@@ -1078,7 +1136,11 @@ mod tests {
         }
         source.record_contradicted();
 
-        assert!(source.reliability() > 0.8, "Mostly confirmed → high reliability: {}", source.reliability());
+        assert!(
+            source.reliability() > 0.8,
+            "Mostly confirmed → high reliability: {}",
+            source.reliability()
+        );
     }
 
     #[test]
@@ -1147,7 +1209,11 @@ mod tests {
         state.bandits.record("remind", InteractionOutcome::Rejected);
 
         let thresh = action_threshold(&state, "remind");
-        assert!(thresh > 0.3 && thresh < 0.9, "Threshold should be reasonable: {}", thresh);
+        assert!(
+            thresh > 0.3 && thresh < 0.9,
+            "Threshold should be reasonable: {}",
+            thresh
+        );
     }
 
     #[test]
@@ -1155,7 +1221,10 @@ mod tests {
         let state = LearningState::new();
         let snap = weight_snapshot(&state);
 
-        let sum = snap.effect_weight + snap.intent_weight + snap.preference_weight + snap.simulation_weight;
+        let sum = snap.effect_weight
+            + snap.intent_weight
+            + snap.preference_weight
+            + snap.simulation_weight;
         assert!((sum - 1.0).abs() < 0.01);
         assert_eq!(snap.update_count, 0);
     }
@@ -1205,7 +1274,10 @@ mod tests {
             record_interaction(&mut state, record, ts(i as f64));
         }
 
-        assert!(state.interaction_buffer.len() <= 5, "Buffer should be limited to max");
+        assert!(
+            state.interaction_buffer.len() <= 5,
+            "Buffer should be limited to max"
+        );
     }
 
     #[test]
@@ -1230,7 +1302,10 @@ mod tests {
         }
 
         // Should have triggered weight refit at interaction 5 and 10
-        assert!(state.weights.update_count >= 1, "Weight refit should have triggered");
+        assert!(
+            state.weights.update_count >= 1,
+            "Weight refit should have triggered"
+        );
     }
 
     // ── § 6: Edge cases ──

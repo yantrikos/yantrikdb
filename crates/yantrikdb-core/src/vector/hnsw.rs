@@ -20,9 +20,21 @@ use crate::error::Result;
 /// For normalized vectors, this equals 1.0 - dot_product.
 #[inline]
 fn cosine_distance(a: &[f32], b: &[f32]) -> f64 {
-    let dot: f64 = a.iter().zip(b.iter()).map(|(&x, &y)| x as f64 * y as f64).sum();
-    let norm_a: f64 = a.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
-    let norm_b: f64 = b.iter().map(|&x| (x as f64) * (x as f64)).sum::<f64>().sqrt();
+    let dot: f64 = a
+        .iter()
+        .zip(b.iter())
+        .map(|(&x, &y)| x as f64 * y as f64)
+        .sum();
+    let norm_a: f64 = a
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        .sqrt();
+    let norm_b: f64 = b
+        .iter()
+        .map(|&x| (x as f64) * (x as f64))
+        .sum::<f64>()
+        .sqrt();
     if norm_a == 0.0 || norm_b == 0.0 {
         return 1.0;
     }
@@ -260,11 +272,7 @@ impl HnswIndex {
             let nearest = self.search_layer(&query, &ep_candidates, ef, lc, Some(idx));
 
             // Select top M neighbors
-            let selected: Vec<usize> = nearest
-                .iter()
-                .take(max_m)
-                .map(|c| c.idx)
-                .collect();
+            let selected: Vec<usize> = nearest.iter().take(max_m).map(|c| c.idx).collect();
 
             // Connect bidirectionally
             self.nodes[idx].neighbors[lc] = selected.clone();
@@ -482,7 +490,11 @@ impl HnswIndex {
                 distance: fc.distance,
             })
             .collect();
-        sorted.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(Ordering::Equal));
+        sorted.sort_by(|a, b| {
+            a.distance
+                .partial_cmp(&b.distance)
+                .unwrap_or(Ordering::Equal)
+        });
         sorted
     }
 }
@@ -512,7 +524,8 @@ impl BruteForceIndex {
             self.entries[idx].2 = false;
         } else {
             let idx = self.entries.len();
-            self.entries.push((rid.to_string(), embedding.to_vec(), false));
+            self.entries
+                .push((rid.to_string(), embedding.to_vec(), false));
             self.rid_to_idx.insert(rid.to_string(), idx);
         }
     }
@@ -577,7 +590,10 @@ mod tests {
         let a = vec![1.0f32, 0.0, 0.0, 0.0];
         let b = vec![0.0f32, 1.0, 0.0, 0.0];
         let d = cosine_distance(&a, &b);
-        assert!((d - 1.0).abs() < 1e-6, "orthogonal distance should be ~1, got {d}");
+        assert!(
+            (d - 1.0).abs() < 1e-6,
+            "orthogonal distance should be ~1, got {d}"
+        );
     }
 
     #[test]
@@ -608,7 +624,9 @@ mod tests {
 
         // Insert 100 vectors
         for i in 0..100 {
-            index.insert(&format!("v{i}"), &vec_seed(i as f32 * 0.37, dim)).unwrap();
+            index
+                .insert(&format!("v{i}"), &vec_seed(i as f32 * 0.37, dim))
+                .unwrap();
         }
         assert_eq!(index.len(), 100);
 
@@ -667,7 +685,9 @@ mod tests {
         let dim = 8;
         let mut index = HnswIndex::new(dim);
         for i in 0..50 {
-            index.insert(&format!("v{i}"), &vec_seed(i as f32, dim)).unwrap();
+            index
+                .insert(&format!("v{i}"), &vec_seed(i as f32, dim))
+                .unwrap();
         }
         assert_eq!(index.len(), 50);
 
@@ -799,7 +819,9 @@ mod tests {
         let dim = 64;
         let mut index = HnswIndex::new(dim);
         for i in 0..200 {
-            index.insert(&format!("v{i}"), &vec_seed(i as f32 * 0.37, dim)).unwrap();
+            index
+                .insert(&format!("v{i}"), &vec_seed(i as f32 * 0.37, dim))
+                .unwrap();
         }
 
         let query = vec_seed(999.0, dim);
@@ -822,7 +844,9 @@ mod tests {
         let mut index = HnswIndex::new(dim);
 
         for i in 0..n {
-            index.insert(&format!("v{i}"), &vec_seed(i as f32 * 0.37, dim)).unwrap();
+            index
+                .insert(&format!("v{i}"), &vec_seed(i as f32 * 0.37, dim))
+                .unwrap();
         }
         assert_eq!(index.len(), n);
 
@@ -837,7 +861,9 @@ mod tests {
 
         // Insert 100, tombstone 90
         for i in 0..100 {
-            index.insert(&format!("v{i}"), &vec_seed(i as f32, dim)).unwrap();
+            index
+                .insert(&format!("v{i}"), &vec_seed(i as f32, dim))
+                .unwrap();
         }
         for i in 0..90 {
             index.remove(&format!("v{i}"));

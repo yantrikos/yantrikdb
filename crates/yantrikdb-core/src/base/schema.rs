@@ -1828,7 +1828,6 @@ CREATE INDEX IF NOT EXISTS idx_contest_flags ON contest_state(heuristic_flags);
 CREATE INDEX IF NOT EXISTS idx_contest_status ON contest_state(state_status);
 ";
 
-
 /// v23 → v24: extend oplog with `embedding` BLOB column.
 ///
 /// Engine v0.7.0 (decoupled write path RFC) needs the full embedding bytes

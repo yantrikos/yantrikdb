@@ -247,7 +247,12 @@ pub fn what_have_you_learned(inputs: &IntrospectionInputs) -> IntrospectionRepor
         .experiment_registry
         .experiments
         .iter()
-        .filter(|e| matches!(e.status, ExperimentStatus::Running | ExperimentStatus::Designed))
+        .filter(|e| {
+            matches!(
+                e.status,
+                ExperimentStatus::Running | ExperimentStatus::Designed
+            )
+        })
         .count();
 
     // ── Discoveries ──
@@ -334,7 +339,8 @@ fn extract_discoveries(store: &BeliefStore) -> Vec<Discovery> {
         .iter()
         .filter(|b| {
             b.confidence >= DISCOVERY_MIN_CONFIDENCE
-                && (b.confirming_observations + b.contradicting_observations) >= DISCOVERY_MIN_EVIDENCE
+                && (b.confirming_observations + b.contradicting_observations)
+                    >= DISCOVERY_MIN_EVIDENCE
                 && !matches!(b.stage, BeliefStage::Dying)
         })
         .map(|b| belief_to_discovery(b))
@@ -383,14 +389,20 @@ fn build_milestones(inputs: &IntrospectionInputs) -> Vec<LearningMilestone> {
                 milestones.push(LearningMilestone {
                     timestamp: belief.last_updated,
                     kind: MilestoneKind::BeliefEstablished,
-                    description: format!("Belief established: {}", truncate(&belief.description, 80)),
+                    description: format!(
+                        "Belief established: {}",
+                        truncate(&belief.description, 80)
+                    ),
                 });
             }
             BeliefStage::Certain => {
                 milestones.push(LearningMilestone {
                     timestamp: belief.last_updated,
                     kind: MilestoneKind::BeliefCertain,
-                    description: format!("Belief confirmed with certainty: {}", truncate(&belief.description, 80)),
+                    description: format!(
+                        "Belief confirmed with certainty: {}",
+                        truncate(&belief.description, 80)
+                    ),
                 });
             }
             _ => {}
@@ -406,7 +418,10 @@ fn build_milestones(inputs: &IntrospectionInputs) -> Vec<LearningMilestone> {
         milestones.push(LearningMilestone {
             timestamp: earliest.formed_at,
             kind: MilestoneKind::FirstBelief,
-            description: format!("First belief formed: {}", truncate(&earliest.description, 80)),
+            description: format!(
+                "First belief formed: {}",
+                truncate(&earliest.description, 80)
+            ),
         });
     }
 
@@ -415,7 +430,11 @@ fn build_milestones(inputs: &IntrospectionInputs) -> Vec<LearningMilestone> {
         match skill.stage {
             SkillStage::Promoted => {
                 milestones.push(LearningMilestone {
-                    timestamp: if skill.last_seen_at > 0.0 { skill.last_seen_at } else { skill.discovered_at },
+                    timestamp: if skill.last_seen_at > 0.0 {
+                        skill.last_seen_at
+                    } else {
+                        skill.discovered_at
+                    },
                     kind: MilestoneKind::SkillPromoted,
                     description: format!("Skill promoted: {}", truncate(&skill.description, 80)),
                 });
@@ -478,10 +497,7 @@ fn count_belief_stages(store: &BeliefStore) -> BeliefStageBreakdown {
 fn count_recent_events(buffer: &EventBuffer, now: f64, window_secs: f64) -> u32 {
     let cutoff = now - window_secs;
     let events = buffer.recent(buffer.len());
-    events
-        .iter()
-        .filter(|e| e.timestamp >= cutoff)
-        .count() as u32
+    events.iter().filter(|e| e.timestamp >= cutoff).count() as u32
 }
 
 /// Truncate a string to a maximum character length, appending "..." if truncated.
@@ -858,7 +874,10 @@ mod tests {
         store.upsert(b1);
 
         let discoveries = extract_discoveries(&store);
-        assert!(discoveries.is_empty(), "Dying beliefs should not be discoveries");
+        assert!(
+            discoveries.is_empty(),
+            "Dying beliefs should not be discoveries"
+        );
     }
 
     #[test]
@@ -964,7 +983,10 @@ mod tests {
             assert!(
                 milestones[i].timestamp >= milestones[i - 1].timestamp,
                 "Milestones not sorted: {} at index {} < {} at index {}",
-                milestones[i].timestamp, i, milestones[i - 1].timestamp, i - 1
+                milestones[i].timestamp,
+                i,
+                milestones[i - 1].timestamp,
+                i - 1
             );
         }
     }

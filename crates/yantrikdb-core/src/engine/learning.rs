@@ -11,8 +11,8 @@
 //! absolute threshold loss because it doesn't require knowing the "right"
 //! score values — only that relevant results should rank above irrelevant ones.
 
-use std::collections::HashMap;
 use rusqlite::params;
+use std::collections::HashMap;
 
 use crate::error::Result;
 use crate::scoring;
@@ -36,7 +36,7 @@ const RANKING_MARGIN: f64 = 0.05;
 struct FeedbackRow {
     query_text: Option<String>,
     rid: String,
-    feedback: String,        // "relevant" or "irrelevant"
+    feedback: String, // "relevant" or "irrelevant"
     score_at_retrieval: Option<f64>,
 }
 
@@ -48,7 +48,7 @@ struct FeedbackFeatures {
     importance: f64,
     valence: f64,
     feedback: String,
-    query_group: usize,      // index into query groups for pairwise loss
+    query_group: usize, // index into query groups for pairwise loss
 }
 
 impl YantrikDB {
@@ -108,10 +108,18 @@ impl YantrikDB {
             let mut candidate = best.clone();
             match field {
                 "w_sim" => candidate.w_sim = (candidate.w_sim * (1.0 + delta)).clamp(0.05, 0.90),
-                "w_decay" => candidate.w_decay = (candidate.w_decay * (1.0 + delta)).clamp(0.05, 0.90),
-                "w_recency" => candidate.w_recency = (candidate.w_recency * (1.0 + delta)).clamp(0.05, 0.90),
-                "gate_tau" => candidate.gate_tau = (candidate.gate_tau + delta * 0.1).clamp(0.10, 0.50),
-                "alpha_imp" => candidate.alpha_imp = (candidate.alpha_imp * (1.0 + delta)).clamp(0.10, 1.50),
+                "w_decay" => {
+                    candidate.w_decay = (candidate.w_decay * (1.0 + delta)).clamp(0.05, 0.90)
+                }
+                "w_recency" => {
+                    candidate.w_recency = (candidate.w_recency * (1.0 + delta)).clamp(0.05, 0.90)
+                }
+                "gate_tau" => {
+                    candidate.gate_tau = (candidate.gate_tau + delta * 0.1).clamp(0.10, 0.50)
+                }
+                "alpha_imp" => {
+                    candidate.alpha_imp = (candidate.alpha_imp * (1.0 + delta)).clamp(0.10, 1.50)
+                }
                 _ => {}
             }
 
@@ -196,7 +204,9 @@ impl YantrikDB {
         let mut features = Vec::with_capacity(feedback.len());
 
         for fb in feedback {
-            let Some(row) = cache.get(&fb.rid) else { continue };
+            let Some(row) = cache.get(&fb.rid) else {
+                continue;
+            };
 
             let elapsed = ts - row.last_access;
             let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
@@ -206,7 +216,11 @@ impl YantrikDB {
             let estimated_sim = if let Some(score) = fb.score_at_retrieval {
                 // Back-calculate similarity from stored composite score
                 let imp_gate = 1.0 + initial_weights.alpha_imp * row.importance;
-                let base = if imp_gate > 0.0 { score / imp_gate } else { score };
+                let base = if imp_gate > 0.0 {
+                    score / imp_gate
+                } else {
+                    score
+                };
                 let sim = if initial_weights.w_sim > 0.0 {
                     (base - initial_weights.w_decay * decay - initial_weights.w_recency * recency)
                         / initial_weights.w_sim
@@ -270,7 +284,9 @@ fn compute_loss(weights: &LearnedWeights, features: &[FeedbackFeatures]) -> f64 
     // Group features by query
     let mut groups: HashMap<usize, (Vec<usize>, Vec<usize>)> = HashMap::new();
     for (i, f) in features.iter().enumerate() {
-        let entry = groups.entry(f.query_group).or_insert_with(|| (Vec::new(), Vec::new()));
+        let entry = groups
+            .entry(f.query_group)
+            .or_insert_with(|| (Vec::new(), Vec::new()));
         match f.feedback.as_str() {
             "relevant" => entry.0.push(i),
             "irrelevant" => entry.1.push(i),
@@ -279,11 +295,20 @@ fn compute_loss(weights: &LearnedWeights, features: &[FeedbackFeatures]) -> f64 
     }
 
     // Pre-compute all scores once
-    let scores: Vec<f64> = features.iter().map(|f| {
-        scoring::adaptive_composite_score(
-            f.estimated_sim, f.decay, f.recency, f.importance, f.valence, 0.0, weights,
-        )
-    }).collect();
+    let scores: Vec<f64> = features
+        .iter()
+        .map(|f| {
+            scoring::adaptive_composite_score(
+                f.estimated_sim,
+                f.decay,
+                f.recency,
+                f.importance,
+                f.valence,
+                0.0,
+                weights,
+            )
+        })
+        .collect();
 
     let mut total_loss = 0.0;
     let mut pair_count = 0;

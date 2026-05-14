@@ -4,7 +4,7 @@ use crate::error::Result;
 use crate::serde_helpers::serialize_f32;
 use crate::types::*;
 
-use super::{now, embedding_hash, YantrikDB};
+use super::{embedding_hash, now, YantrikDB};
 
 impl YantrikDB {
     /// Store a new memory and return its RID.
@@ -46,8 +46,24 @@ impl YantrikDB {
                   half_life, last_access, valence, metadata, namespace, \
                   certainty, domain, source, emotional_state) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
-                params![rid, memory_type, stored_text, stored_emb, ts, ts, importance, half_life, ts, valence, stored_meta, namespace,
-                        certainty, domain, source, emotional_state],
+                params![
+                    rid,
+                    memory_type,
+                    stored_text,
+                    stored_emb,
+                    ts,
+                    ts,
+                    importance,
+                    half_life,
+                    ts,
+                    valence,
+                    stored_meta,
+                    namespace,
+                    certainty,
+                    domain,
+                    source,
+                    emotional_state
+                ],
             )?;
 
             // Auto-link to active session for this namespace
@@ -65,26 +81,33 @@ impl YantrikDB {
         // conn dropped here
 
         // Insert into vector index (lock ordering: conn already dropped)
-        let seq = self.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-        self.vec_index.append(rid.clone(), embedding.to_vec(), seq)?;
+        let seq = self
+            .vec_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        self.vec_index
+            .append(rid.clone(), embedding.to_vec(), seq)?;
         self.bump_visible_seq(namespace, seq);
 
         // Insert into scoring cache (conn and vec_index dropped)
-        self.cache_insert(rid.clone(), ScoringRow {
-            created_at: ts,
-            importance,
-            half_life,
-            last_access: ts,
-            access_count: 0,
-            valence,
-            consolidation_status: "active".to_string(),
-            memory_type: memory_type.to_string(),
-            namespace: namespace.to_string(),
-            certainty,
-            domain: domain.to_string(),
-            source: source.to_string(),
-            emotional_state: emotional_state.map(|s| s.to_string()),
-        });
+        self.cache_insert(
+            rid.clone(),
+            ScoringRow {
+                created_at: ts,
+                importance,
+                half_life,
+                last_access: ts,
+                access_count: 0,
+                valence,
+                consolidation_status: "active".to_string(),
+                memory_type: memory_type.to_string(),
+                namespace: namespace.to_string(),
+                certainty,
+                domain: domain.to_string(),
+                source: source.to_string(),
+                emotional_state: emotional_state.map(|s| s.to_string()),
+            },
+        );
 
         // Log the user-facing "record" op FIRST so external consumers
         // (replication extract_ops_since, oplog inspectors) see records
@@ -267,8 +290,9 @@ impl YantrikDB {
         }
 
         // RFC 006 Phase 0: emit one audit event per memory in the batch.
-        for (rid, (input, (heuristic_entities, candidates))) in
-            rids.iter().zip(inputs.iter().zip(per_memory_linkage.iter()))
+        for (rid, (input, (heuristic_entities, candidates))) in rids
+            .iter()
+            .zip(inputs.iter().zip(per_memory_linkage.iter()))
         {
             let heuristic_vec: Vec<String> = heuristic_entities.iter().cloned().collect();
             let features = crate::graph::analyze_text_features(&input.text, &heuristic_vec);
@@ -295,8 +319,12 @@ impl YantrikDB {
 
         // Append to vec_index (DeltaIndex) after SQL commit
         for (rid, input) in rids.iter().zip(inputs.iter()) {
-            let seq = self.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            self.vec_index.append(rid.clone(), input.embedding.clone(), seq)?;
+            let seq = self
+                .vec_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            self.vec_index
+                .append(rid.clone(), input.embedding.clone(), seq)?;
             self.bump_visible_seq(&input.namespace, seq);
         }
         // vec_index dropped, now scoring_cache
@@ -304,21 +332,24 @@ impl YantrikDB {
             let mut cache = self.scoring_cache.write();
             for (rid, input) in rids.iter().zip(inputs.iter()) {
                 let ts = now();
-                cache.insert(rid.clone(), ScoringRow {
-                    created_at: ts,
-                    importance: input.importance,
-                    half_life: input.half_life,
-                    last_access: ts,
-                    access_count: 0,
-                    valence: input.valence,
-                    consolidation_status: "active".to_string(),
-                    memory_type: input.memory_type.clone(),
-                    namespace: input.namespace.clone(),
-                    certainty: input.certainty,
-                    domain: input.domain.clone(),
-                    source: input.source.clone(),
-                    emotional_state: input.emotional_state.clone(),
-                });
+                cache.insert(
+                    rid.clone(),
+                    ScoringRow {
+                        created_at: ts,
+                        importance: input.importance,
+                        half_life: input.half_life,
+                        last_access: ts,
+                        access_count: 0,
+                        valence: input.valence,
+                        consolidation_status: "active".to_string(),
+                        memory_type: input.memory_type.clone(),
+                        namespace: input.namespace.clone(),
+                        certainty: input.certainty,
+                        domain: input.domain.clone(),
+                        source: input.source.clone(),
+                        emotional_state: input.emotional_state.clone(),
+                    },
+                );
             }
         }
 
@@ -378,7 +409,10 @@ impl YantrikDB {
     /// `Ok(())` on success or idempotent re-apply. The rid is the input,
     /// not the output — caller already owns it.
     #[allow(clippy::too_many_arguments)]
-    #[tracing::instrument(skip(self, metadata, embedding, extracted_entities), fields(rid, memory_type, namespace, embedding_model))]
+    #[tracing::instrument(
+        skip(self, metadata, embedding, extracted_entities),
+        fields(rid, memory_type, namespace, embedding_model)
+    )]
     pub fn record_with_rid(
         &self,
         rid: &str,
@@ -475,7 +509,10 @@ impl YantrikDB {
             })();
 
             match result {
-                Ok(b) => { conn.execute_batch("RELEASE record_with_rid")?; b }
+                Ok(b) => {
+                    conn.execute_batch("RELEASE record_with_rid")?;
+                    b
+                }
                 Err(e) => {
                     let _ = conn.execute_batch("ROLLBACK TO record_with_rid");
                     let _ = conn.execute_batch("RELEASE record_with_rid");
@@ -492,27 +529,31 @@ impl YantrikDB {
         // (single-node retry); the compactor's highest-seq-wins rule
         // converges state identically on both paths.
         let seq = self.assign_seq(seq);
-        self.vec_index.append(rid.to_string(), embedding.to_vec(), seq)?;
+        self.vec_index
+            .append(rid.to_string(), embedding.to_vec(), seq)?;
         self.bump_visible_seq(namespace, seq);
 
         // Scoring cache (engine-internal; replay safe since insert is
         // overwrite-on-rid).
         if was_new_row {
-            self.cache_insert(rid.to_string(), ScoringRow {
-                created_at: ts_secs,
-                importance,
-                half_life,
-                last_access: ts_secs,
-                access_count: 0,
-                valence,
-                consolidation_status: "active".to_string(),
-                memory_type: memory_type.to_string(),
-                namespace: namespace.to_string(),
-                certainty,
-                domain: domain.to_string(),
-                source: source.to_string(),
-                emotional_state: emotional_state.map(|s| s.to_string()),
-            });
+            self.cache_insert(
+                rid.to_string(),
+                ScoringRow {
+                    created_at: ts_secs,
+                    importance,
+                    half_life,
+                    last_access: ts_secs,
+                    access_count: 0,
+                    valence,
+                    consolidation_status: "active".to_string(),
+                    memory_type: memory_type.to_string(),
+                    namespace: namespace.to_string(),
+                    certainty,
+                    domain: domain.to_string(),
+                    source: source.to_string(),
+                    emotional_state: emotional_state.map(|s| s.to_string()),
+                },
+            );
         }
 
         // Op log entry — applied=1 since leader has materialized inline.

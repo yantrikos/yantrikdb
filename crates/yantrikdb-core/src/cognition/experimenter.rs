@@ -351,10 +351,7 @@ impl ExperimentRegistry {
 
     /// Number of currently active experiments.
     pub fn active_count(&self) -> usize {
-        self.experiments
-            .iter()
-            .filter(|e| e.is_active())
-            .count()
+        self.experiments.iter().filter(|e| e.is_active()).count()
     }
 
     /// Whether we can start a new experiment.
@@ -364,10 +361,7 @@ impl ExperimentRegistry {
 
     /// Get all active experiments.
     pub fn active_experiments(&self) -> Vec<&Experiment> {
-        self.experiments
-            .iter()
-            .filter(|e| e.is_active())
-            .collect()
+        self.experiments.iter().filter(|e| e.is_active()).collect()
     }
 
     /// Get concluded experiments.
@@ -440,7 +434,13 @@ pub fn design_experiment(
 
     let id = registry.alloc_id();
     let mut experiment = Experiment::new(
-        id, hypothesis, variable, variants, sample_size_target, safety_bounds, now,
+        id,
+        hypothesis,
+        variable,
+        variants,
+        sample_size_target,
+        safety_bounds,
+        now,
     );
     experiment.start(now);
     registry.experiments.push(experiment);
@@ -452,7 +452,10 @@ pub fn design_experiment(
 /// Assign a variant for the next trial using Thompson sampling.
 ///
 /// Returns `(variant_index, variant_value)`.
-pub fn assign_variant(experiment: &mut Experiment, jitter_seed: f64) -> Option<(usize, &VariantValue)> {
+pub fn assign_variant(
+    experiment: &mut Experiment,
+    jitter_seed: f64,
+) -> Option<(usize, &VariantValue)> {
     if !experiment.is_active() {
         return None;
     }
@@ -536,11 +539,7 @@ fn check_safety_bounds(experiment: &Experiment, now: f64) -> bool {
     for bound in &experiment.safety_bounds {
         match bound {
             SafetyBound::MaxConsecutiveRejections(max) => {
-                if experiment
-                    .consecutive_negatives
-                    .iter()
-                    .any(|&c| c >= *max)
-                {
+                if experiment.consecutive_negatives.iter().any(|&c| c >= *max) {
                     return false;
                 }
             }
@@ -733,7 +732,10 @@ mod tests {
             &mut registry,
             "Test custom".to_string(),
             ExperimentVariable::Custom("dangerous".to_string()),
-            vec![VariantValue::Label("a".to_string()), VariantValue::Label("b".to_string())],
+            vec![
+                VariantValue::Label("a".to_string()),
+                VariantValue::Label("b".to_string()),
+            ],
             10,
             default_bounds(),
             ts(0.0),
@@ -750,7 +752,10 @@ mod tests {
             &mut registry,
             "First".to_string(),
             ExperimentVariable::SurfacingMode,
-            vec![VariantValue::Label("whisper".to_string()), VariantValue::Label("nudge".to_string())],
+            vec![
+                VariantValue::Label("whisper".to_string()),
+                VariantValue::Label("nudge".to_string()),
+            ],
             10,
             default_bounds(),
             ts(0.0),
@@ -760,7 +765,10 @@ mod tests {
             &mut registry,
             "Duplicate".to_string(),
             ExperimentVariable::SurfacingMode,
-            vec![VariantValue::Label("a".to_string()), VariantValue::Label("b".to_string())],
+            vec![
+                VariantValue::Label("a".to_string()),
+                VariantValue::Label("b".to_string()),
+            ],
             10,
             default_bounds(),
             ts(1.0),
@@ -794,7 +802,10 @@ mod tests {
             &mut registry,
             "Third".to_string(),
             ExperimentVariable::InformationDensity,
-            vec![VariantValue::Label("brief".to_string()), VariantValue::Label("detailed".to_string())],
+            vec![
+                VariantValue::Label("brief".to_string()),
+                VariantValue::Label("detailed".to_string()),
+            ],
             10,
             default_bounds(),
             ts(2.0),
@@ -846,7 +857,10 @@ mod tests {
             &mut registry,
             "Test".to_string(),
             ExperimentVariable::SurfacingMode,
-            vec![VariantValue::Label("whisper".to_string()), VariantValue::Label("nudge".to_string())],
+            vec![
+                VariantValue::Label("whisper".to_string()),
+                VariantValue::Label("nudge".to_string()),
+            ],
             5,
             default_bounds(),
             ts(0.0),
@@ -893,7 +907,10 @@ mod tests {
             &mut registry,
             "Test".to_string(),
             ExperimentVariable::InformationDensity,
-            vec![VariantValue::Label("brief".to_string()), VariantValue::Label("detailed".to_string())],
+            vec![
+                VariantValue::Label("brief".to_string()),
+                VariantValue::Label("detailed".to_string()),
+            ],
             100,
             vec![SafetyBound::MaxDuration(60.0)], // 60 seconds
             ts(0.0),
@@ -970,11 +987,7 @@ mod tests {
         }
 
         let prob = variant_superiority(&a, &b);
-        assert!(
-            prob > 0.95,
-            "P(A > B) = {:.3} should be > 0.95",
-            prob,
-        );
+        assert!(prob > 0.95, "P(A > B) = {:.3} should be > 0.95", prob,);
     }
 
     // ── Check Experiments ──

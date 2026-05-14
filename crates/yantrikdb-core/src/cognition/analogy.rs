@@ -243,7 +243,9 @@ impl AnalogyStore {
             .min_by(|(_, a), (_, b)| {
                 let score_a = a.structural_similarity * (1.0 + a.use_count as f64).ln();
                 let score_b = b.structural_similarity * (1.0 + b.use_count as f64).ln();
-                score_a.partial_cmp(&score_b).unwrap_or(std::cmp::Ordering::Equal)
+                score_a
+                    .partial_cmp(&score_b)
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
             .map(|(i, _)| i)
             .unwrap();
@@ -330,9 +332,7 @@ fn edge_kind_similarity(a: CognitiveEdgeKind, b: CognitiveEdgeKind) -> f64 {
 fn edge_category(kind: CognitiveEdgeKind) -> u8 {
     match kind {
         CognitiveEdgeKind::Supports | CognitiveEdgeKind::Contradicts => 0, // epistemic
-        CognitiveEdgeKind::Causes
-        | CognitiveEdgeKind::Predicts
-        | CognitiveEdgeKind::Prevents => 1, // causal
+        CognitiveEdgeKind::Causes | CognitiveEdgeKind::Predicts | CognitiveEdgeKind::Prevents => 1, // causal
         CognitiveEdgeKind::AdvancesGoal
         | CognitiveEdgeKind::BlocksGoal
         | CognitiveEdgeKind::SubtaskOf
@@ -342,9 +342,7 @@ fn edge_category(kind: CognitiveEdgeKind) -> u8 {
         | CognitiveEdgeKind::PartOf
         | CognitiveEdgeKind::SimilarTo => 3, // associative
         CognitiveEdgeKind::PrecedesTemporally | CognitiveEdgeKind::Triggers => 4, // temporal
-        CognitiveEdgeKind::Prefers
-        | CognitiveEdgeKind::Avoids
-        | CognitiveEdgeKind::Constrains => 5, // preference/constraint
+        CognitiveEdgeKind::Prefers | CognitiveEdgeKind::Avoids | CognitiveEdgeKind::Constrains => 5, // preference/constraint
     }
 }
 
@@ -480,7 +478,10 @@ pub fn compute_structural_similarity(
     let avg_node_quality = if node_correspondences.is_empty() {
         0.0
     } else {
-        node_correspondences.iter().map(|c| c.match_quality).sum::<f64>()
+        node_correspondences
+            .iter()
+            .map(|c| c.match_quality)
+            .sum::<f64>()
             / node_correspondences.len() as f64
     };
 
@@ -489,10 +490,7 @@ pub fn compute_structural_similarity(
     // Systematicity bonus: fraction of matched edges that are causal/epistemic.
     let high_order_count = edge_correspondences
         .iter()
-        .filter(|ec| {
-            ec.source_edge.2.is_causal()
-                || ec.source_edge.2.is_epistemic()
-        })
+        .filter(|ec| ec.source_edge.2.is_causal() || ec.source_edge.2.is_epistemic())
         .count();
     let systematicity = if edge_correspondences.is_empty() {
         0.0
@@ -504,7 +502,10 @@ pub fn compute_structural_similarity(
     let exact_match_ratio = if edge_correspondences.is_empty() {
         0.0
     } else {
-        edge_correspondences.iter().filter(|ec| ec.exact_kind_match).count() as f64
+        edge_correspondences
+            .iter()
+            .filter(|ec| ec.exact_kind_match)
+            .count() as f64
             / edge_correspondences.len() as f64
     };
 
@@ -526,7 +527,7 @@ pub fn compute_structural_similarity(
         edge_correspondences,
         structural_similarity,
         relational_depth,
-        pragmatic_relevance: 0.0, // set externally
+        pragmatic_relevance: 0.0,         // set externally
         candidate_inferences: Vec::new(), // populated by generate_candidate_inferences
         source_domain,
         target_domain,
@@ -693,10 +694,7 @@ pub fn evaluate_analogy_quality(mapping: &StructuralMapping) -> f64 {
     let high_order = mapping
         .edge_correspondences
         .iter()
-        .filter(|ec| {
-            ec.source_edge.2.is_causal()
-                || ec.source_edge.2.is_epistemic()
-        })
+        .filter(|ec| ec.source_edge.2.is_causal() || ec.source_edge.2.is_epistemic())
         .count();
     let systematicity = high_order as f64 / total_edges as f64;
 
@@ -779,11 +777,8 @@ pub fn find_analogies(
             && mapping.structural_similarity >= 0.15
         {
             // Generate inferences for this mapping.
-            let inferences = generate_candidate_inferences(
-                &mapping,
-                source_node_data,
-                &query.source_edges,
-            );
+            let inferences =
+                generate_candidate_inferences(&mapping, source_node_data, &query.source_edges);
             mapping.candidate_inferences = inferences;
 
             results.push(mapping);
@@ -880,9 +875,7 @@ pub fn transfer_strategy(
                     source_schema: schema.name.clone(),
                     adapted_description: format!(
                         "[Transferred from {}→{}] {}",
-                        mapping.source_domain,
-                        mapping.target_domain,
-                        schema.description,
+                        mapping.source_domain, mapping.target_domain, schema.description,
                     ),
                     transfer_confidence: confidence.clamp(0.0, 1.0),
                     mappings_used,
@@ -1123,11 +1116,12 @@ mod tests {
 
     #[test]
     fn test_edge_kind_similarity() {
-        assert_eq!(edge_kind_similarity(CognitiveEdgeKind::Causes, CognitiveEdgeKind::Causes), 1.0);
-        // Same category (causal).
-        assert!(
-            edge_kind_similarity(CognitiveEdgeKind::Causes, CognitiveEdgeKind::Predicts) > 0.5
+        assert_eq!(
+            edge_kind_similarity(CognitiveEdgeKind::Causes, CognitiveEdgeKind::Causes),
+            1.0
         );
+        // Same category (causal).
+        assert!(edge_kind_similarity(CognitiveEdgeKind::Causes, CognitiveEdgeKind::Predicts) > 0.5);
         // Different category.
         assert_eq!(
             edge_kind_similarity(CognitiveEdgeKind::Causes, CognitiveEdgeKind::Prefers),
@@ -1201,18 +1195,10 @@ mod tests {
         let assoc_source = vec![edge(a1.id, b1.id, CognitiveEdgeKind::AssociatedWith)];
         let assoc_target = vec![edge(a2.id, b2.id, CognitiveEdgeKind::AssociatedWith)];
 
-        let m_causal = compute_structural_similarity(
-            &[&a1, &b1],
-            &[&a2, &b2],
-            &causal_source,
-            &causal_target,
-        );
-        let m_assoc = compute_structural_similarity(
-            &[&a1, &b1],
-            &[&a2, &b2],
-            &assoc_source,
-            &assoc_target,
-        );
+        let m_causal =
+            compute_structural_similarity(&[&a1, &b1], &[&a2, &b2], &causal_source, &causal_target);
+        let m_assoc =
+            compute_structural_similarity(&[&a1, &b1], &[&a2, &b2], &assoc_source, &assoc_target);
 
         assert!(
             m_causal.structural_similarity > m_assoc.structural_similarity,
@@ -1233,8 +1219,8 @@ mod tests {
 
         // Source has 3 edges; target only has 1 matching.
         let source_edges = vec![
-            edge(a1.id, b1.id, CognitiveEdgeKind::Causes),     // mapped
-            edge(b1.id, c1.id, CognitiveEdgeKind::Requires),    // b1 mapped, c1 NOT mapped
+            edge(a1.id, b1.id, CognitiveEdgeKind::Causes), // mapped
+            edge(b1.id, c1.id, CognitiveEdgeKind::Requires), // b1 mapped, c1 NOT mapped
             edge(a1.id, c1.id, CognitiveEdgeKind::AdvancesGoal), // a1 mapped, c1 NOT mapped
         ];
         let target_edges = vec![edge(a2.id, b2.id, CognitiveEdgeKind::Causes)];
@@ -1256,7 +1242,10 @@ mod tests {
 
         // All inferences should have positive confidence.
         for inf in &inferences {
-            assert!(inf.confidence > 0.0, "Inference confidence should be positive");
+            assert!(
+                inf.confidence > 0.0,
+                "Inference confidence should be positive"
+            );
         }
     }
 
@@ -1270,12 +1259,8 @@ mod tests {
         let source_edges = vec![edge(a1.id, b1.id, CognitiveEdgeKind::Causes)];
         let target_edges = vec![edge(a2.id, b2.id, CognitiveEdgeKind::Causes)];
 
-        let mapping = compute_structural_similarity(
-            &[&a1, &b1],
-            &[&a2, &b2],
-            &source_edges,
-            &target_edges,
-        );
+        let mapping =
+            compute_structural_similarity(&[&a1, &b1], &[&a2, &b2], &source_edges, &target_edges);
 
         let quality = evaluate_analogy_quality(&mapping);
         assert!(quality > 0.0, "Quality should be positive: {quality}");
@@ -1296,12 +1281,8 @@ mod tests {
         let source_edges = vec![edge(a1.id, b1.id, CognitiveEdgeKind::Requires)];
         let target_edges = vec![edge(a2.id, b2.id, CognitiveEdgeKind::Requires)];
 
-        let mapping = compute_structural_similarity(
-            &[&a1, &b1],
-            &[&a2, &b2],
-            &source_edges,
-            &target_edges,
-        );
+        let mapping =
+            compute_structural_similarity(&[&a1, &b1], &[&a2, &b2], &source_edges, &target_edges);
 
         let transferred = transfer_strategy(&[&schema], &mapping);
         assert!(
@@ -1443,7 +1424,10 @@ mod tests {
 
         let report = analogy_strength_decay(&mut store, now, 86_400_000); // 24h max age
 
-        assert!(report.pruned_low_quality > 0, "Should prune below-threshold");
+        assert!(
+            report.pruned_low_quality > 0,
+            "Should prune below-threshold"
+        );
         assert!(report.pruned_stale > 0, "Should prune stale unused");
         assert_eq!(report.remaining, 1, "Only the fresh good one should remain");
         assert_eq!(store.len(), 1);
@@ -1608,8 +1592,14 @@ mod tests {
     #[test]
     fn test_transfer_type_as_str() {
         assert_eq!(TransferType::DirectMapping.as_str(), "direct_mapping");
-        assert_eq!(TransferType::RelationalTransfer.as_str(), "relational_transfer");
-        assert_eq!(TransferType::AbstractionTransfer.as_str(), "abstraction_transfer");
+        assert_eq!(
+            TransferType::RelationalTransfer.as_str(),
+            "relational_transfer"
+        );
+        assert_eq!(
+            TransferType::AbstractionTransfer.as_str(),
+            "abstraction_transfer"
+        );
     }
 
     #[test]

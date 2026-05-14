@@ -42,8 +42,8 @@
 //!    lowest relevance_score() (combines activation, salience, persistence,
 //!    urgency, recency).
 
-use std::collections::{BinaryHeap, HashMap};
 use std::cmp::Ordering;
+use std::collections::{BinaryHeap, HashMap};
 
 use super::state::*;
 
@@ -255,7 +255,8 @@ impl WorkingSet {
     pub fn by_activation(&self) -> Vec<&CognitiveNode> {
         let mut nodes: Vec<_> = self.nodes.values().collect();
         nodes.sort_by(|a, b| {
-            b.attrs.activation
+            b.attrs
+                .activation
                 .partial_cmp(&a.attrs.activation)
                 .unwrap_or(Ordering::Equal)
         });
@@ -266,7 +267,8 @@ impl WorkingSet {
     pub fn by_relevance(&self) -> Vec<&CognitiveNode> {
         let mut nodes: Vec<_> = self.nodes.values().collect();
         nodes.sort_by(|a, b| {
-            b.attrs.relevance_score()
+            b.attrs
+                .relevance_score()
                 .partial_cmp(&a.attrs.relevance_score())
                 .unwrap_or(Ordering::Equal)
         });
@@ -298,12 +300,11 @@ impl WorkingSet {
 
         // Collect IDs and look up nodes
         let ids: Vec<u32> = heap.into_iter().map(|e| e.raw_id).collect();
-        let mut result: Vec<&CognitiveNode> = ids
-            .iter()
-            .filter_map(|id| self.nodes.get(id))
-            .collect();
+        let mut result: Vec<&CognitiveNode> =
+            ids.iter().filter_map(|id| self.nodes.get(id)).collect();
         result.sort_by(|a, b| {
-            b.attrs.activation
+            b.attrs
+                .activation
                 .partial_cmp(&a.attrs.activation)
                 .unwrap_or(Ordering::Equal)
         });
@@ -449,7 +450,8 @@ impl WorkingSet {
             let old = node.attrs.activation;
             node.attrs.activation = (node.attrs.activation + seed_activation).min(1.0);
             node.attrs.last_updated_ms = now_ms();
-            self.last_spread_deltas.insert(seed_id.to_raw(), node.attrs.activation - old);
+            self.last_spread_deltas
+                .insert(seed_id.to_raw(), node.attrs.activation - old);
         } else {
             return 0;
         }
@@ -516,28 +518,31 @@ impl WorkingSet {
 
                 // Lateral inhibition: also reduce nodes that support the inhibited target
                 if self.config.lateral_inhibition > 0.0 {
-                    let supporters: Vec<u32> = self.reverse_adj
-                        .get(dst_raw)
-                        .cloned()
-                        .unwrap_or_default();
+                    let supporters: Vec<u32> =
+                        self.reverse_adj.get(dst_raw).cloned().unwrap_or_default();
 
                     for supporter_raw in supporters {
                         // Check if the edge from supporter to dst is a Supports edge
-                        let is_supporter = self.adjacency
+                        let is_supporter = self
+                            .adjacency
                             .get(&supporter_raw)
-                            .map(|edges| edges.iter().any(|(d, e)| {
-                                *d == *dst_raw && e.kind == CognitiveEdgeKind::Supports
-                            }))
+                            .map(|edges| {
+                                edges.iter().any(|(d, e)| {
+                                    *d == *dst_raw && e.kind == CognitiveEdgeKind::Supports
+                                })
+                            })
                             .unwrap_or(false);
 
                         if is_supporter {
                             if let Some(node) = self.nodes.get_mut(&supporter_raw) {
                                 let lateral = delta * self.config.lateral_inhibition;
                                 let old = node.attrs.activation;
-                                node.attrs.activation = (node.attrs.activation + lateral).clamp(0.0, 1.0);
+                                node.attrs.activation =
+                                    (node.attrs.activation + lateral).clamp(0.0, 1.0);
                                 let actual_delta = node.attrs.activation - old;
                                 if actual_delta.abs() > 1e-6 {
-                                    *self.last_spread_deltas.entry(supporter_raw).or_insert(0.0) += actual_delta;
+                                    *self.last_spread_deltas.entry(supporter_raw).or_insert(0.0) +=
+                                        actual_delta;
                                 }
                             }
                         }
@@ -547,9 +552,7 @@ impl WorkingSet {
 
             // Top-K truncation: only keep the most activated nodes in the frontier
             if next_frontier.len() > self.config.top_k_per_hop {
-                next_frontier.sort_by(|a, b| {
-                    b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal)
-                });
+                next_frontier.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
                 next_frontier.truncate(self.config.top_k_per_hop);
             }
 
@@ -583,7 +586,8 @@ impl WorkingSet {
 
         // Then spread from all seeds
         // We collect frontier from all seeds and do combined spreading
-        let mut frontier: Vec<(u32, f64)> = seeds.iter()
+        let mut frontier: Vec<(u32, f64)> = seeds
+            .iter()
             .filter_map(|&(id, act)| {
                 if self.nodes.contains_key(&id.to_raw()) {
                     Some((id.to_raw(), act))
@@ -650,7 +654,9 @@ impl WorkingSet {
     /// Evict nodes below an activation threshold.
     /// Returns evicted nodes (for persistence if they're persistent).
     pub fn evict_below_threshold(&mut self, threshold: f64) -> Vec<CognitiveNode> {
-        let to_evict: Vec<u32> = self.nodes.iter()
+        let to_evict: Vec<u32> = self
+            .nodes
+            .iter()
             .filter(|(_, n)| n.attrs.activation < threshold && n.attrs.persistence < 0.9)
             .map(|(raw, _)| *raw)
             .collect();
@@ -671,28 +677,36 @@ impl WorkingSet {
 
     /// Find the most activated node of a specific kind.
     pub fn most_active_of_kind(&self, kind: NodeKind) -> Option<&CognitiveNode> {
-        self.nodes.values()
+        self.nodes
+            .values()
             .filter(|n| n.kind() == kind)
             .max_by(|a, b| {
-                a.attrs.activation.partial_cmp(&b.attrs.activation)
+                a.attrs
+                    .activation
+                    .partial_cmp(&b.attrs.activation)
                     .unwrap_or(Ordering::Equal)
             })
     }
 
     /// Find all active beliefs (activation > threshold).
     pub fn active_beliefs(&self, threshold: f64) -> Vec<&CognitiveNode> {
-        self.nodes.values()
+        self.nodes
+            .values()
             .filter(|n| n.kind() == NodeKind::Belief && n.attrs.activation > threshold)
             .collect()
     }
 
     /// Find all urgent nodes (urgency > threshold).
     pub fn urgent_nodes(&self, threshold: f64) -> Vec<&CognitiveNode> {
-        let mut nodes: Vec<_> = self.nodes.values()
+        let mut nodes: Vec<_> = self
+            .nodes
+            .values()
             .filter(|n| n.attrs.urgency > threshold)
             .collect();
         nodes.sort_by(|a, b| {
-            b.attrs.urgency.partial_cmp(&a.attrs.urgency)
+            b.attrs
+                .urgency
+                .partial_cmp(&a.attrs.urgency)
                 .unwrap_or(Ordering::Equal)
         });
         nodes
@@ -751,20 +765,24 @@ impl WorkingSet {
 
         for goal in goals {
             let raw = goal.id.to_raw();
-            let blockers: Vec<&CognitiveNode> = self.reverse_adj
+            let blockers: Vec<&CognitiveNode> = self
+                .reverse_adj
                 .get(&raw)
                 .map(|sources| {
-                    sources.iter().filter_map(|src_raw| {
-                        let edges = self.adjacency.get(src_raw)?;
-                        let is_blocker = edges.iter().any(|(d, e)| {
-                            *d == raw && e.kind == CognitiveEdgeKind::BlocksGoal
-                        });
-                        if is_blocker {
-                            self.nodes.get(src_raw)
-                        } else {
-                            None
-                        }
-                    }).collect()
+                    sources
+                        .iter()
+                        .filter_map(|src_raw| {
+                            let edges = self.adjacency.get(src_raw)?;
+                            let is_blocker = edges
+                                .iter()
+                                .any(|(d, e)| *d == raw && e.kind == CognitiveEdgeKind::BlocksGoal);
+                            if is_blocker {
+                                self.nodes.get(src_raw)
+                            } else {
+                                None
+                            }
+                        })
+                        .collect()
                 })
                 .unwrap_or_default();
 
@@ -778,7 +796,9 @@ impl WorkingSet {
 
     /// Compute a snapshot of the working set state for debugging.
     pub fn snapshot(&self) -> WorkingSetSnapshot {
-        let mut node_summaries: Vec<NodeSummary> = self.nodes.values()
+        let mut node_summaries: Vec<NodeSummary> = self
+            .nodes
+            .values()
             .map(|n| NodeSummary {
                 id: n.id,
                 kind: n.kind(),
@@ -790,7 +810,8 @@ impl WorkingSet {
             .collect();
 
         node_summaries.sort_by(|a, b| {
-            b.activation.partial_cmp(&a.activation)
+            b.activation
+                .partial_cmp(&a.activation)
                 .unwrap_or(Ordering::Equal)
         });
 
@@ -810,12 +831,14 @@ impl WorkingSet {
     /// Find the best eviction candidate — the node with lowest relevance
     /// that isn't the node being inserted.
     fn find_eviction_candidate(&self, incoming: &CognitiveNode) -> Option<NodeId> {
-        self.nodes.values()
+        self.nodes
+            .values()
             .filter(|n| n.id != incoming.id)
             // Don't evict high-persistence nodes (core beliefs, constraints)
             .filter(|n| n.attrs.persistence < 0.95)
             .min_by(|a, b| {
-                a.attrs.relevance_score()
+                a.attrs
+                    .relevance_score()
                     .partial_cmp(&b.attrs.relevance_score())
                     .unwrap_or(Ordering::Equal)
             })
@@ -854,7 +877,10 @@ impl PartialOrd for ActivationEntry {
 impl Ord for ActivationEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // REVERSED: min-heap behavior — lowest activation at top
-        other.activation.partial_cmp(&self.activation).unwrap_or(Ordering::Equal)
+        other
+            .activation
+            .partial_cmp(&self.activation)
+            .unwrap_or(Ordering::Equal)
     }
 }
 
@@ -886,7 +912,12 @@ mod tests {
     use super::*;
 
     /// Helper: create a simple node with given activation.
-    fn make_node(alloc: &mut NodeIdAllocator, kind: NodeKind, label: &str, activation: f64) -> CognitiveNode {
+    fn make_node(
+        alloc: &mut NodeIdAllocator,
+        kind: NodeKind,
+        label: &str,
+        activation: f64,
+    ) -> CognitiveNode {
         let id = alloc.alloc(kind);
         let mut attrs = CognitiveAttrs::default_for(kind);
         attrs.activation = activation;
@@ -896,28 +927,46 @@ mod tests {
     fn make_payload(kind: NodeKind, label: &str) -> NodePayload {
         match kind {
             NodeKind::Entity => NodePayload::Entity(EntityPayload {
-                name: label.into(), entity_type: "test".into(), memory_rids: vec![],
+                name: label.into(),
+                entity_type: "test".into(),
+                memory_rids: vec![],
             }),
             NodeKind::Belief => NodePayload::Belief(BeliefPayload {
-                proposition: label.into(), log_odds: 0.0, domain: "test".into(),
-                evidence_trail: vec![], user_confirmed: false,
+                proposition: label.into(),
+                log_odds: 0.0,
+                domain: "test".into(),
+                evidence_trail: vec![],
+                user_confirmed: false,
             }),
             NodeKind::Goal => NodePayload::Goal(GoalPayload {
-                description: label.into(), status: GoalStatus::Active, progress: 0.0,
-                deadline: None, priority: Priority::Medium, parent_goal: None,
+                description: label.into(),
+                status: GoalStatus::Active,
+                progress: 0.0,
+                deadline: None,
+                priority: Priority::Medium,
+                parent_goal: None,
                 completion_criteria: "test".into(),
             }),
             NodeKind::Task => NodePayload::Task(TaskPayload {
-                description: label.into(), status: TaskStatus::Pending,
-                goal_id: None, deadline: None, priority: Priority::Medium,
-                estimated_minutes: None, prerequisites: vec![],
+                description: label.into(),
+                status: TaskStatus::Pending,
+                goal_id: None,
+                deadline: None,
+                priority: Priority::Medium,
+                estimated_minutes: None,
+                prerequisites: vec![],
             }),
             NodeKind::Risk => NodePayload::Risk(RiskPayload {
-                description: label.into(), severity: 0.5, likelihood: 0.5,
-                mitigation: "test".into(), threatened_goals: vec![],
+                description: label.into(),
+                severity: 0.5,
+                likelihood: 0.5,
+                mitigation: "test".into(),
+                threatened_goals: vec![],
             }),
             _ => NodePayload::Entity(EntityPayload {
-                name: label.into(), entity_type: "test".into(), memory_rids: vec![],
+                name: label.into(),
+                entity_type: "test".into(),
+                memory_rids: vec![],
             }),
         }
     }
@@ -943,7 +992,10 @@ mod tests {
 
     #[test]
     fn test_working_set_capacity_eviction() {
-        let config = AttentionConfig { capacity: 3, ..AttentionConfig::fast() };
+        let config = AttentionConfig {
+            capacity: 3,
+            ..AttentionConfig::fast()
+        };
         let mut ws = WorkingSet::with_config(config);
         let mut alloc = NodeIdAllocator::new();
 
@@ -978,7 +1030,12 @@ mod tests {
         ws.insert(belief);
 
         // Add a Supports edge: entity → belief
-        ws.add_edge(CognitiveEdge::new(entity_id, belief_id, CognitiveEdgeKind::Supports, 0.8));
+        ws.add_edge(CognitiveEdge::new(
+            entity_id,
+            belief_id,
+            CognitiveEdgeKind::Supports,
+            0.8,
+        ));
 
         // Activate entity and spread
         let changed = ws.activate_and_spread(entity_id, 1.0);
@@ -986,9 +1043,11 @@ mod tests {
 
         // Belief should have received activation
         let belief_node = ws.get(belief_id).unwrap();
-        assert!(belief_node.attrs.activation > 0.0,
+        assert!(
+            belief_node.attrs.activation > 0.0,
             "Belief should receive activation via Supports edge, got {}",
-            belief_node.attrs.activation);
+            belief_node.attrs.activation
+        );
     }
 
     #[test]
@@ -1005,19 +1064,29 @@ mod tests {
         ws.insert(belief);
 
         // Contradicts edge: evidence → belief (should inhibit)
-        ws.add_edge(CognitiveEdge::new(evidence_id, belief_id, CognitiveEdgeKind::Contradicts, 0.9));
+        ws.add_edge(CognitiveEdge::new(
+            evidence_id,
+            belief_id,
+            CognitiveEdgeKind::Contradicts,
+            0.9,
+        ));
 
         let before = ws.get(belief_id).unwrap().attrs.activation;
         ws.activate_and_spread(evidence_id, 1.0);
         let after = ws.get(belief_id).unwrap().attrs.activation;
 
-        assert!(after < before,
-            "Contradicts edge should inhibit belief: before={before}, after={after}");
+        assert!(
+            after < before,
+            "Contradicts edge should inhibit belief: before={before}, after={after}"
+        );
     }
 
     #[test]
     fn test_spreading_multi_hop() {
-        let config = AttentionConfig { max_hops: 2, ..AttentionConfig::balanced() };
+        let config = AttentionConfig {
+            max_hops: 2,
+            ..AttentionConfig::balanced()
+        };
         let mut ws = WorkingSet::with_config(config);
         let mut alloc = NodeIdAllocator::new();
 
@@ -1033,8 +1102,18 @@ mod tests {
         ws.insert(b);
         ws.insert(c);
 
-        ws.add_edge(CognitiveEdge::new(a_id, b_id, CognitiveEdgeKind::Causes, 0.9));
-        ws.add_edge(CognitiveEdge::new(b_id, c_id, CognitiveEdgeKind::Causes, 0.9));
+        ws.add_edge(CognitiveEdge::new(
+            a_id,
+            b_id,
+            CognitiveEdgeKind::Causes,
+            0.9,
+        ));
+        ws.add_edge(CognitiveEdge::new(
+            b_id,
+            c_id,
+            CognitiveEdgeKind::Causes,
+            0.9,
+        ));
 
         ws.activate_and_spread(a_id, 1.0);
 
@@ -1043,7 +1122,10 @@ mod tests {
 
         assert!(b_act > 0.0, "B should receive activation from A");
         assert!(c_act > 0.0, "C should receive activation from B (2nd hop)");
-        assert!(b_act > c_act, "B should have more activation than C (decay per hop)");
+        assert!(
+            b_act > c_act,
+            "B should have more activation than C (decay per hop)"
+        );
     }
 
     #[test]
@@ -1079,7 +1161,12 @@ mod tests {
 
         // Force activations
         ws.get_mut(high_id).unwrap().attrs.activation = 0.8;
-        let low_raw: u32 = ws.iter().find(|n| n.label == "Dormant").unwrap().id.to_raw();
+        let low_raw: u32 = ws
+            .iter()
+            .find(|n| n.label == "Dormant")
+            .unwrap()
+            .id
+            .to_raw();
         ws.nodes.get_mut(&low_raw).unwrap().attrs.activation = 0.01;
         ws.nodes.get_mut(&low_raw).unwrap().attrs.persistence = 0.1;
 
@@ -1144,8 +1231,18 @@ mod tests {
         ws.insert(support);
         ws.insert(contra);
 
-        ws.add_edge(CognitiveEdge::new(support_id, belief_id, CognitiveEdgeKind::Supports, 0.8));
-        ws.add_edge(CognitiveEdge::new(contra_id, belief_id, CognitiveEdgeKind::Contradicts, 0.7));
+        ws.add_edge(CognitiveEdge::new(
+            support_id,
+            belief_id,
+            CognitiveEdgeKind::Supports,
+            0.8,
+        ));
+        ws.add_edge(CognitiveEdge::new(
+            contra_id,
+            belief_id,
+            CognitiveEdgeKind::Contradicts,
+            0.7,
+        ));
 
         let supporters = ws.supporters_of(belief_id);
         assert_eq!(supporters.len(), 1);
@@ -1168,7 +1265,12 @@ mod tests {
 
         ws.insert(goal);
         ws.insert(risk);
-        ws.add_edge(CognitiveEdge::new(risk_id, goal_id, CognitiveEdgeKind::BlocksGoal, 0.8));
+        ws.add_edge(CognitiveEdge::new(
+            risk_id,
+            goal_id,
+            CognitiveEdgeKind::BlocksGoal,
+            0.8,
+        ));
 
         let blocked = ws.blocked_goals();
         assert_eq!(blocked.len(), 1);
@@ -1212,18 +1314,33 @@ mod tests {
         ws.insert(c);
 
         // Force zero activation after insertion boost
-        for n in ws.iter_mut() { n.attrs.activation = 0.0; }
+        for n in ws.iter_mut() {
+            n.attrs.activation = 0.0;
+        }
 
         // Strong Causes edges (0.8 transfer factor) for reliable spreading
-        ws.add_edge(CognitiveEdge::new(a_id, c_id, CognitiveEdgeKind::Causes, 0.9));
-        ws.add_edge(CognitiveEdge::new(b_id, c_id, CognitiveEdgeKind::Causes, 0.9));
+        ws.add_edge(CognitiveEdge::new(
+            a_id,
+            c_id,
+            CognitiveEdgeKind::Causes,
+            0.9,
+        ));
+        ws.add_edge(CognitiveEdge::new(
+            b_id,
+            c_id,
+            CognitiveEdgeKind::Causes,
+            0.9,
+        ));
 
         let changed = ws.activate_seeds(&[(a_id, 0.8), (b_id, 0.8)]);
         assert!(changed >= 2, "At least seeds should change, got {changed}");
 
         // C should receive activation from both A and B
         let c_act = ws.get(c_id).unwrap().attrs.activation;
-        assert!(c_act > 0.0, "C should receive combined activation from A and B, got {c_act}");
+        assert!(
+            c_act > 0.0,
+            "C should receive combined activation from A and B, got {c_act}"
+        );
     }
 
     #[test]
@@ -1242,13 +1359,26 @@ mod tests {
         ws.insert(b);
         ws.insert(c);
 
-        ws.add_edge(CognitiveEdge::new(a_id, b_id, CognitiveEdgeKind::Supports, 0.8));
-        ws.add_edge(CognitiveEdge::new(b_id, c_id, CognitiveEdgeKind::Causes, 0.7));
+        ws.add_edge(CognitiveEdge::new(
+            a_id,
+            b_id,
+            CognitiveEdgeKind::Supports,
+            0.8,
+        ));
+        ws.add_edge(CognitiveEdge::new(
+            b_id,
+            c_id,
+            CognitiveEdgeKind::Causes,
+            0.7,
+        ));
 
         // Remove B — should clean all edges involving B
         ws.remove(b_id);
         assert_eq!(ws.len(), 2);
-        assert!(ws.edges_from(a_id).is_empty() || ws.edges_from(a_id).iter().all(|(d, _)| *d != b_id.to_raw()));
+        assert!(
+            ws.edges_from(a_id).is_empty()
+                || ws.edges_from(a_id).iter().all(|(d, _)| *d != b_id.to_raw())
+        );
     }
 
     #[test]
@@ -1277,8 +1407,18 @@ mod tests {
         ws.get_mut(belief_id).unwrap().attrs.activation = 0.5;
         ws.get_mut(evidence_id).unwrap().attrs.activation = 0.0;
 
-        ws.add_edge(CognitiveEdge::new(supporter_id, belief_id, CognitiveEdgeKind::Supports, 0.8));
-        ws.add_edge(CognitiveEdge::new(evidence_id, belief_id, CognitiveEdgeKind::Contradicts, 0.9));
+        ws.add_edge(CognitiveEdge::new(
+            supporter_id,
+            belief_id,
+            CognitiveEdgeKind::Supports,
+            0.8,
+        ));
+        ws.add_edge(CognitiveEdge::new(
+            evidence_id,
+            belief_id,
+            CognitiveEdgeKind::Contradicts,
+            0.9,
+        ));
 
         let supporter_before = ws.get(supporter_id).unwrap().attrs.activation;
 
@@ -1322,9 +1462,15 @@ mod tests {
         let b = make_node(&mut alloc, NodeKind::Entity, "B", 0.5);
         let b_id = b.id;
 
-        ws.insert_with_edges(b, vec![
-            CognitiveEdge::new(a_id, b_id, CognitiveEdgeKind::AssociatedWith, 0.7),
-        ]);
+        ws.insert_with_edges(
+            b,
+            vec![CognitiveEdge::new(
+                a_id,
+                b_id,
+                CognitiveEdgeKind::AssociatedWith,
+                0.7,
+            )],
+        );
 
         assert_eq!(ws.len(), 2);
         assert_eq!(ws.edges_from(a_id).len(), 1);
@@ -1366,7 +1512,12 @@ mod tests {
 
         // B doesn't exist in the working set
         let b_id = alloc.alloc(NodeKind::Entity);
-        let added = ws.add_edge(CognitiveEdge::new(a_id, b_id, CognitiveEdgeKind::Supports, 0.5));
+        let added = ws.add_edge(CognitiveEdge::new(
+            a_id,
+            b_id,
+            CognitiveEdgeKind::Supports,
+            0.5,
+        ));
         assert!(!added, "Edge should not be added when endpoint is missing");
     }
 
@@ -1389,7 +1540,12 @@ mod tests {
         ws.insert(b);
 
         // Weak edge — transfer will be below threshold
-        ws.add_edge(CognitiveEdge::new(a_id, b_id, CognitiveEdgeKind::SimilarTo, 0.1));
+        ws.add_edge(CognitiveEdge::new(
+            a_id,
+            b_id,
+            CognitiveEdgeKind::SimilarTo,
+            0.1,
+        ));
 
         // Force zero
         ws.get_mut(b_id).unwrap().attrs.activation = 0.0;
@@ -1398,7 +1554,9 @@ mod tests {
 
         // B should NOT receive activation because transfer < threshold
         let b_act = ws.get(b_id).unwrap().attrs.activation;
-        assert!(b_act < 0.01,
-            "Weak edge below threshold shouldn't spread: got {b_act}");
+        assert!(
+            b_act < 0.01,
+            "Weak edge below threshold shouldn't spread: got {b_act}"
+        );
     }
 }

@@ -3,8 +3,8 @@
 //! Wires the policy engine into `YantrikDB` methods that chain
 //! the full pipeline: intent → action → evaluate → policy select.
 
-use crate::error::Result;
 use crate::action::ActionConfig;
+use crate::error::Result;
 use crate::evaluator::EvaluatorConfig;
 use crate::intent::IntentConfig;
 use crate::policy::{self, PolicyConfig, PolicyContext, PolicyResult};
@@ -117,7 +117,10 @@ mod tests {
 
         // Should produce a decision (Act or EscalateToLlm)
         assert!(
-            matches!(result.decision, PolicyDecision::Act(_) | PolicyDecision::EscalateToLlm { .. }),
+            matches!(
+                result.decision,
+                PolicyDecision::Act(_) | PolicyDecision::EscalateToLlm { .. }
+            ),
             "should produce an action decision or escalate"
         );
         assert!(result.trace.execution_time_us > 0);
@@ -153,7 +156,10 @@ mod tests {
 
         // Most proactive actions should be filtered by quiet hours
         assert!(result.trace.rejected_candidates.iter().any(|r| {
-            matches!(r.rejection_reason, crate::policy::RejectionReason::QuietHours)
+            matches!(
+                r.rejection_reason,
+                crate::policy::RejectionReason::QuietHours
+            )
         }));
     }
 
@@ -201,7 +207,10 @@ mod tests {
         // Execute-type actions should be filtered
         let execute_rejected = result.trace.rejected_candidates.iter().any(|r| {
             r.action_kind == "Execute"
-                && matches!(r.rejection_reason, crate::policy::RejectionReason::HardConstraint { .. })
+                && matches!(
+                    r.rejection_reason,
+                    crate::policy::RejectionReason::HardConstraint { .. }
+                )
         });
         // This may or may not find execute candidates depending on what the pipeline generates,
         // but the constraint node should be loaded and checked

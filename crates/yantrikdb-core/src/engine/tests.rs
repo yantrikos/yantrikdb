@@ -90,7 +90,11 @@ fn test_record_auto_extracts_entities() {
         .conn()
         .query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0))
         .unwrap();
-    assert!(entity_count >= 2, "expected >= 2 entities, got {}", entity_count);
+    assert!(
+        entity_count >= 2,
+        "expected >= 2 entities, got {}",
+        entity_count
+    );
 }
 
 #[test]
@@ -165,7 +169,22 @@ fn test_record_batch_auto_extracts_entities() {
 fn test_record_and_get() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let emb = vec_seed(1.0, 8);
-    let rid = db.record("hello world", "episodic", 0.8, 0.0, 604800.0, &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "hello world",
+            "episodic",
+            0.8,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
     assert_eq!(rid.len(), 36);
 
     let mem = db.get(&rid).unwrap().unwrap();
@@ -178,26 +197,124 @@ fn test_record_and_get() {
 #[test]
 fn test_record_updates_stats() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    db.record("one", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
-    db.record("two", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(2.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    db.record(
+        "one",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.record(
+        "two",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(2.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
     assert_eq!(db.stats(None).unwrap().active_memories, 2);
 }
 
 #[test]
 fn test_recall_basic() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    db.record("the cat sat on the mat", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
-    db.record("dogs are loyal friends", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(5.0, 8), "default", 0.8, "general", "user", None).unwrap();
-    db.record("cats love warm places", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.1, 8), "default", 0.8, "general", "user", None).unwrap();
+    db.record(
+        "the cat sat on the mat",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.record(
+        "dogs are loyal friends",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(5.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.record(
+        "cats love warm places",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.1, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
 
-    let results = db.recall(&vec_seed(1.0, 8), 2, None, None, false, false, None, false, None, None, None).unwrap();
+    let results = db
+        .recall(
+            &vec_seed(1.0, 8),
+            2,
+            None,
+            None,
+            false,
+            false,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
     assert_eq!(results.len(), 2);
 }
 
 #[test]
 fn test_recall_empty() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let results = db.recall(&vec_seed(1.0, 8), 5, None, None, false, false, None, false, None, None, None).unwrap();
+    let results = db
+        .recall(
+            &vec_seed(1.0, 8),
+            5,
+            None,
+            None,
+            false,
+            false,
+            None,
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
     assert!(results.is_empty());
 }
 
@@ -216,7 +333,22 @@ fn test_relate_and_get_edges() {
 #[test]
 fn test_forget() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let rid = db.record("forget me", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "forget me",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
     assert!(db.forget(&rid).unwrap());
     let mem = db.get(&rid).unwrap().unwrap();
     assert_eq!(mem.consolidation_status, "tombstoned");
@@ -231,7 +363,21 @@ fn test_forget_nonexistent() {
 #[test]
 fn test_decay_fresh() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    db.record("fresh", "episodic", 0.9, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    db.record(
+        "fresh",
+        "episodic",
+        0.9,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
     let decayed = db.decay(0.01).unwrap();
     assert!(decayed.is_empty());
 }
@@ -239,13 +385,30 @@ fn test_decay_fresh() {
 #[test]
 fn test_oplog_has_hlc() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    db.record("test", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    db.record(
+        "test",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
 
-    let hlc_bytes: Vec<u8> = db.conn().query_row(
-        "SELECT hlc FROM oplog ORDER BY rowid DESC LIMIT 1",
-        [],
-        |row| row.get(0),
-    ).unwrap();
+    let hlc_bytes: Vec<u8> = db
+        .conn()
+        .query_row(
+            "SELECT hlc FROM oplog ORDER BY rowid DESC LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(hlc_bytes.len(), 16);
 
     let ts = HLCTimestamp::from_bytes(&hlc_bytes).unwrap();
@@ -255,27 +418,61 @@ fn test_oplog_has_hlc() {
 #[test]
 fn test_oplog_has_embedding_hash() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    db.record("test", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    db.record(
+        "test",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
 
     // The record op should have an embedding_hash
-    let hash: Vec<u8> = db.conn().query_row(
-        "SELECT embedding_hash FROM oplog WHERE op_type = 'record' LIMIT 1",
-        [],
-        |row| row.get(0),
-    ).unwrap();
+    let hash: Vec<u8> = db
+        .conn()
+        .query_row(
+            "SELECT embedding_hash FROM oplog WHERE op_type = 'record' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(hash.len(), 32); // BLAKE3 output is 32 bytes
 }
 
 #[test]
 fn test_oplog_enriched_payload() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    db.record("test payload", "semantic", 0.7, 0.3, 1000.0, &serde_json::json!({"key": "val"}), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    db.record(
+        "test payload",
+        "semantic",
+        0.7,
+        0.3,
+        1000.0,
+        &serde_json::json!({"key": "val"}),
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
 
-    let payload_str: String = db.conn().query_row(
-        "SELECT payload FROM oplog WHERE op_type = 'record' LIMIT 1",
-        [],
-        |row| row.get(0),
-    ).unwrap();
+    let payload_str: String = db
+        .conn()
+        .query_row(
+            "SELECT payload FROM oplog WHERE op_type = 'record' LIMIT 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     let payload: serde_json::Value = serde_json::from_str(&payload_str).unwrap();
 
     assert_eq!(payload["type"], "semantic");
@@ -291,26 +488,73 @@ fn test_oplog_enriched_payload() {
 #[test]
 fn test_schema_v3_has_conflicts_table() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let count: i64 = db.conn().query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='conflicts'",
-        [],
-        |row| row.get(0),
-    ).unwrap();
+    let count: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='conflicts'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(count, 1);
 }
 
 #[test]
 fn test_resolve_keep_a() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let rid_a = db.record("birthday March 5", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
-    let rid_b = db.record("birthday March 15", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(2.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    let rid_a = db
+        .record(
+            "birthday March 5",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let rid_b = db
+        .record(
+            "birthday March 15",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     let conflict = crate::conflict::create_conflict(
-        &db, &crate::types::ConflictType::IdentityFact, &rid_a, &rid_b,
-        Some("User"), Some("birthday"), "conflicting birthdays",
-    ).unwrap();
+        &db,
+        &crate::types::ConflictType::IdentityFact,
+        &rid_a,
+        &rid_b,
+        Some("User"),
+        Some("birthday"),
+        "conflicting birthdays",
+    )
+    .unwrap();
 
-    let result = db.resolve_conflict(&conflict.conflict_id, "keep_a", Some(&rid_a), None, Some("User confirmed March 5")).unwrap();
+    let result = db
+        .resolve_conflict(
+            &conflict.conflict_id,
+            "keep_a",
+            Some(&rid_a),
+            None,
+            Some("User confirmed March 5"),
+        )
+        .unwrap();
     assert!(result.loser_tombstoned);
 
     let mem_b = db.get(&rid_b).unwrap().unwrap();
@@ -324,13 +568,52 @@ fn test_resolve_keep_a() {
 #[test]
 fn test_resolve_keep_both() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let rid_a = db.record("a", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
-    let rid_b = db.record("b", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(2.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    let rid_a = db
+        .record(
+            "a",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let rid_b = db
+        .record(
+            "b",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     let conflict = crate::conflict::create_conflict(
-        &db, &crate::types::ConflictType::Minor, &rid_a, &rid_b, None, None, "test",
-    ).unwrap();
-    let result = db.resolve_conflict(&conflict.conflict_id, "keep_both", None, None, None).unwrap();
+        &db,
+        &crate::types::ConflictType::Minor,
+        &rid_a,
+        &rid_b,
+        None,
+        None,
+        "test",
+    )
+    .unwrap();
+    let result = db
+        .resolve_conflict(&conflict.conflict_id, "keep_both", None, None, None)
+        .unwrap();
     assert!(!result.loser_tombstoned);
 
     let mem_a = db.get(&rid_a).unwrap().unwrap();
@@ -342,12 +625,33 @@ fn test_resolve_keep_both() {
 #[test]
 fn test_correct_memory() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let rid = db.record("favorite color is green", "episodic", 0.7, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "favorite color is green",
+            "episodic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
-    let result = db.correct(
-        &rid, "favorite color is blue", Some(0.9), None, &vec_seed(2.0, 8),
-        Some("User corrected their favorite color"),
-    ).unwrap();
+    let result = db
+        .correct(
+            &rid,
+            "favorite color is blue",
+            Some(0.9),
+            None,
+            &vec_seed(2.0, 8),
+            Some("User corrected their favorite color"),
+        )
+        .unwrap();
 
     assert!(result.original_tombstoned);
 
@@ -362,40 +666,139 @@ fn test_correct_memory() {
 #[test]
 fn test_get_conflicts_filtered() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let rid_a = db.record("a", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
-    let rid_b = db.record("b", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(2.0, 8), "default", 0.8, "general", "user", None).unwrap();
-    let rid_c = db.record("c", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(3.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    let rid_a = db
+        .record(
+            "a",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let rid_b = db
+        .record(
+            "b",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let rid_c = db
+        .record(
+            "c",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(3.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     crate::conflict::create_conflict(
-        &db, &crate::types::ConflictType::IdentityFact, &rid_a, &rid_b,
-        Some("User"), Some("birthday"), "test 1",
-    ).unwrap();
+        &db,
+        &crate::types::ConflictType::IdentityFact,
+        &rid_a,
+        &rid_b,
+        Some("User"),
+        Some("birthday"),
+        "test 1",
+    )
+    .unwrap();
     crate::conflict::create_conflict(
-        &db, &crate::types::ConflictType::Preference, &rid_b, &rid_c,
-        Some("User"), Some("prefers"), "test 2",
-    ).unwrap();
+        &db,
+        &crate::types::ConflictType::Preference,
+        &rid_b,
+        &rid_c,
+        Some("User"),
+        Some("prefers"),
+        "test 2",
+    )
+    .unwrap();
 
     let all = db.get_conflicts(None, None, None, None, None, 50).unwrap();
     assert_eq!(all.len(), 2);
 
-    let identity_only = db.get_conflicts(None, Some("identity_fact"), None, None, None, 50).unwrap();
+    let identity_only = db
+        .get_conflicts(None, Some("identity_fact"), None, None, None, 50)
+        .unwrap();
     assert_eq!(identity_only.len(), 1);
 
-    let critical = db.get_conflicts(None, None, None, Some("critical"), None, 50).unwrap();
+    let critical = db
+        .get_conflicts(None, None, None, Some("critical"), None, 50)
+        .unwrap();
     assert_eq!(critical.len(), 1);
 }
 
 #[test]
 fn test_dismiss_conflict() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let rid_a = db.record("a", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
-    let rid_b = db.record("b", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(2.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    let rid_a = db
+        .record(
+            "a",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let rid_b = db
+        .record(
+            "b",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     let conflict = crate::conflict::create_conflict(
-        &db, &crate::types::ConflictType::Minor, &rid_a, &rid_b, None, None, "test",
-    ).unwrap();
+        &db,
+        &crate::types::ConflictType::Minor,
+        &rid_a,
+        &rid_b,
+        None,
+        None,
+        "test",
+    )
+    .unwrap();
 
-    db.dismiss_conflict(&conflict.conflict_id, Some("Not really a conflict")).unwrap();
+    db.dismiss_conflict(&conflict.conflict_id, Some("Not really a conflict"))
+        .unwrap();
 
     let c = db.get_conflict(&conflict.conflict_id).unwrap().unwrap();
     assert_eq!(c.status, "dismissed");
@@ -408,11 +811,48 @@ fn test_stats_include_conflicts() {
     assert_eq!(s.open_conflicts, 0);
     assert_eq!(s.resolved_conflicts, 0);
 
-    let rid_a = db.record("a", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
-    let rid_b = db.record("b", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(2.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    let rid_a = db
+        .record(
+            "a",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let rid_b = db
+        .record(
+            "b",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
     crate::conflict::create_conflict(
-        &db, &crate::types::ConflictType::Minor, &rid_a, &rid_b, None, None, "test",
-    ).unwrap();
+        &db,
+        &crate::types::ConflictType::Minor,
+        &rid_a,
+        &rid_b,
+        None,
+        None,
+        "test",
+    )
+    .unwrap();
 
     let s = db.stats(None).unwrap();
     assert_eq!(s.open_conflicts, 1);
@@ -435,12 +875,19 @@ fn test_schema_v4_has_trigger_log_and_patterns() {
 #[test]
 fn test_schema_v19_has_rfc007_tables() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let count: i64 = db.conn().query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN \
+    let count: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN \
          ('propositions', 'variables', 'state_assertions', 'rule_edges', 'scenario_specs')",
-        [], |row| row.get(0),
-    ).unwrap();
-    assert_eq!(count, 5, "RFC 007 Phase 0 should create all five new tables");
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 5,
+        "RFC 007 Phase 0 should create all five new tables"
+    );
 }
 
 #[test]
@@ -465,16 +912,20 @@ fn test_schema_v19_claims_has_proposition_id() {
 fn test_schema_v19_rule_edge_whitelist_enforced() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     // Seed a variable so the FK is valid.
-    db.conn().execute(
-        "INSERT INTO variables (variable_id, name, namespace, value_space, scope, created_at) \
+    db.conn()
+        .execute(
+            "INSERT INTO variables (variable_id, name, namespace, value_space, scope, created_at) \
          VALUES ('v1', 'var_a', 'default', '{}', 'generic', 0.0)",
-        [],
-    ).unwrap();
-    db.conn().execute(
-        "INSERT INTO variables (variable_id, name, namespace, value_space, scope, created_at) \
+            [],
+        )
+        .unwrap();
+    db.conn()
+        .execute(
+            "INSERT INTO variables (variable_id, name, namespace, value_space, scope, created_at) \
          VALUES ('v2', 'var_b', 'default', '{}', 'generic', 0.0)",
-        [],
-    ).unwrap();
+            [],
+        )
+        .unwrap();
     // Disallowed edge_type — CHECK constraint should reject.
     let result = db.conn().execute(
         "INSERT INTO rule_edges (rule_id, parent_variable_id, child_variable_id, edge_type, \
@@ -500,12 +951,19 @@ fn test_schema_v19_rule_edge_whitelist_enforced() {
 #[test]
 fn test_schema_v20_has_rfc008_phase1_tables() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let count: i64 = db.conn().query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN \
+    let count: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN \
          ('mobility_state', 'actor_profile', 'compression_artifact')",
-        [], |row| row.get(0),
-    ).unwrap();
-    assert_eq!(count, 3, "RFC 008 Phase 1 should create mobility_state, actor_profile, compression_artifact");
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 3,
+        "RFC 008 Phase 1 should create mobility_state, actor_profile, compression_artifact"
+    );
 }
 
 #[test]
@@ -518,10 +976,17 @@ fn test_schema_v20_claims_has_mobility_signals() {
         .unwrap()
         .filter_map(|r| r.ok())
         .collect();
-    for expected in &["regime_tag", "self_generated", "source_lineage", "modality_signal"] {
+    for expected in &[
+        "regime_tag",
+        "self_generated",
+        "source_lineage",
+        "modality_signal",
+    ] {
         assert!(
             cols.contains(&expected.to_string()),
-            "claims table should have column {} after V20. Got: {:?}", expected, cols
+            "claims table should have column {} after V20. Got: {:?}",
+            expected,
+            cols
         );
     }
 }
@@ -530,11 +995,13 @@ fn test_schema_v20_claims_has_mobility_signals() {
 fn test_schema_v20_actor_profile_whitelist_enforced() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     // Allowed actor_type — should succeed.
-    db.conn().execute(
-        "INSERT INTO actor_profile (actor_id, actor_type, regime, last_updated) \
+    db.conn()
+        .execute(
+            "INSERT INTO actor_profile (actor_id, actor_type, regime, last_updated) \
          VALUES ('ext_medical', 'extractor', 'medical', 0.0)",
-        [],
-    ).unwrap();
+            [],
+        )
+        .unwrap();
     // Disallowed actor_type — should be rejected.
     let bad = db.conn().execute(
         "INSERT INTO actor_profile (actor_id, actor_type, regime, last_updated) \
@@ -564,43 +1031,61 @@ fn test_schema_v20_compression_artifact_status_whitelist() {
          VALUES ('a2', '[]', 'x', 'y', 'default', 0.0, 'freshly_minted')",
         [],
     );
-    assert!(bad.is_err(), "compression_artifact.status whitelist should reject unknown values");
+    assert!(
+        bad.is_err(),
+        "compression_artifact.status whitelist should reject unknown values"
+    );
 }
 
 #[test]
 fn test_schema_v20_mobility_state_roundtrip() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     // Seed a proposition so the FK holds.
-    db.conn().execute(
-        "INSERT INTO propositions (proposition_id, src, rel_type, dst, namespace, created_at) \
+    db.conn()
+        .execute(
+            "INSERT INTO propositions (proposition_id, src, rel_type, dst, namespace, created_at) \
          VALUES ('p1', 'Alice', 'works_at', 'Acme', 'default', 0.0)",
-        [],
-    ).unwrap();
+            [],
+        )
+        .unwrap();
     // Insert a partial mobility state — only write-tier components populated.
-    db.conn().execute(
-        "INSERT INTO mobility_state (proposition_id, regime, snapshot_ts, \
+    db.conn()
+        .execute(
+            "INSERT INTO mobility_state (proposition_id, regime, snapshot_ts, \
          support_mass, attack_mass, self_gen_local, modality_consilience, \
          tier_write_components) \
          VALUES ('p1', 'default', 100.0, 2.0, 0.5, 0.0, 1.0, \
          '[\"support_mass\",\"attack_mass\",\"self_gen_local\",\"modality_consilience\"]')",
-        [],
-    ).unwrap();
+            [],
+        )
+        .unwrap();
     // Read it back.
-    let (s, a, psi_l, chi): (f64, f64, f64, f64) = db.conn().query_row(
-        "SELECT support_mass, attack_mass, self_gen_local, modality_consilience \
+    let (s, a, psi_l, chi): (f64, f64, f64, f64) = db
+        .conn()
+        .query_row(
+            "SELECT support_mass, attack_mass, self_gen_local, modality_consilience \
          FROM mobility_state WHERE proposition_id='p1'",
-        [], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-    ).unwrap();
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .unwrap();
     assert_eq!(s, 2.0);
     assert_eq!(a, 0.5);
     assert_eq!(psi_l, 0.0);
     assert_eq!(chi, 1.0);
     // Background-tier components should be NULL since we didn't populate them.
-    let ancestral: Option<f64> = db.conn().query_row(
-        "SELECT self_gen_ancestral FROM mobility_state WHERE proposition_id='p1'",
-        [], |row| row.get(0),
-    ).unwrap();
-    assert!(ancestral.is_none(), "untouched background components should remain NULL");
+    let ancestral: Option<f64> = db
+        .conn()
+        .query_row(
+            "SELECT self_gen_ancestral FROM mobility_state WHERE proposition_id='p1'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        ancestral.is_none(),
+        "untouched background components should remain NULL"
+    );
 }
 
 // RFC 008 Phase 1 M2: integration tests for compute_write_tier_mobility ⊕
@@ -624,8 +1109,14 @@ fn seed_mobility_claim(
              self_generated, source_lineage, modality_signal, weight) \
              VALUES (?1, 'X', 'Y', 'rel', 0.0, ?2, ?3, 'default', ?4, ?5, ?6, ?7, ?8, 1.0)",
             rusqlite::params![
-                claim_id, extractor, polarity, proposition_id, regime,
-                self_gen, source_lineage_json, modality,
+                claim_id,
+                extractor,
+                polarity,
+                proposition_id,
+                regime,
+                self_gen,
+                source_lineage_json,
+                modality,
             ],
         )
         .unwrap();
@@ -659,9 +1150,20 @@ fn seed_proposition(db: &YantrikDB, pid: &str) {
 fn test_mobility_single_support_claim() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_single");
-    seed_mobility_claim(&db, "p_single", "ext_a", 1, "[\"src_1\"]", 0, "text", "default");
+    seed_mobility_claim(
+        &db,
+        "p_single",
+        "ext_a",
+        1,
+        "[\"src_1\"]",
+        0,
+        "text",
+        "default",
+    );
 
-    let state = db.compute_write_tier_mobility("p_single", "default").unwrap();
+    let state = db
+        .compute_write_tier_mobility("p_single", "default")
+        .unwrap();
     assert_eq!(state.support_mass, Some(1.0));
     assert_eq!(state.attack_mass, Some(0.0));
     assert_eq!(state.self_gen_local, Some(0.0));
@@ -673,9 +1175,36 @@ fn test_mobility_single_support_claim() {
 fn test_mobility_three_independent_sources() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_ind");
-    seed_mobility_claim(&db, "p_ind", "ext_a", 1, "[\"src_a\"]", 0, "text", "default");
-    seed_mobility_claim(&db, "p_ind", "ext_b", 1, "[\"src_b\"]", 0, "image", "default");
-    seed_mobility_claim(&db, "p_ind", "ext_c", 1, "[\"src_c\"]", 0, "numeric", "default");
+    seed_mobility_claim(
+        &db,
+        "p_ind",
+        "ext_a",
+        1,
+        "[\"src_a\"]",
+        0,
+        "text",
+        "default",
+    );
+    seed_mobility_claim(
+        &db,
+        "p_ind",
+        "ext_b",
+        1,
+        "[\"src_b\"]",
+        0,
+        "image",
+        "default",
+    );
+    seed_mobility_claim(
+        &db,
+        "p_ind",
+        "ext_c",
+        1,
+        "[\"src_c\"]",
+        0,
+        "numeric",
+        "default",
+    );
 
     let state = db.compute_write_tier_mobility("p_ind", "default").unwrap();
     // Three disjoint sources, disjoint extractors, no self-gen → raw sum.
@@ -697,15 +1226,46 @@ fn test_mobility_duplicate_sources_discounted() {
     // extractors both derive claims from the same upstream source. The
     // shared lineage is what should trigger the discount, NOT the extractor
     // identity.
-    seed_mobility_claim(&db, "p_dup", "ext_a", 1, "[\"src_shared\"]", 0, "text", "default");
-    seed_mobility_claim(&db, "p_dup", "ext_b", 1, "[\"src_shared\"]", 0, "text", "default");
-    seed_mobility_claim(&db, "p_dup", "ext_c", 1, "[\"src_shared\"]", 0, "text", "default");
+    seed_mobility_claim(
+        &db,
+        "p_dup",
+        "ext_a",
+        1,
+        "[\"src_shared\"]",
+        0,
+        "text",
+        "default",
+    );
+    seed_mobility_claim(
+        &db,
+        "p_dup",
+        "ext_b",
+        1,
+        "[\"src_shared\"]",
+        0,
+        "text",
+        "default",
+    );
+    seed_mobility_claim(
+        &db,
+        "p_dup",
+        "ext_c",
+        1,
+        "[\"src_shared\"]",
+        0,
+        "text",
+        "default",
+    );
 
     let state = db.compute_write_tier_mobility("p_dup", "default").unwrap();
     let s = state.support_mass.unwrap();
     // D_k = 1.0 (identical lineage), P_k = 0 (distinct extractors), S_k = 0.
     // discount = 1 + 0.5·1 + 0 + 0 = 1.5; ω = 2/3; total ≈ 3 · 2/3 = 2.0
-    assert!(s < 2.5, "shared-source claims should discount below 2.5, got {}", s);
+    assert!(
+        s < 2.5,
+        "shared-source claims should discount below 2.5, got {}",
+        s
+    );
     assert!(s > 1.8, "discount shouldn't be excessive, got {}", s);
 }
 
@@ -713,11 +1273,40 @@ fn test_mobility_duplicate_sources_discounted() {
 fn test_mobility_support_and_attack_separate() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_mixed");
-    seed_mobility_claim(&db, "p_mixed", "ext_a", 1, "[\"src_a\"]", 0, "text", "default");
-    seed_mobility_claim(&db, "p_mixed", "ext_b", 1, "[\"src_b\"]", 0, "image", "default");
-    seed_mobility_claim(&db, "p_mixed", "ext_c", -1, "[\"src_c\"]", 0, "text", "default");
+    seed_mobility_claim(
+        &db,
+        "p_mixed",
+        "ext_a",
+        1,
+        "[\"src_a\"]",
+        0,
+        "text",
+        "default",
+    );
+    seed_mobility_claim(
+        &db,
+        "p_mixed",
+        "ext_b",
+        1,
+        "[\"src_b\"]",
+        0,
+        "image",
+        "default",
+    );
+    seed_mobility_claim(
+        &db,
+        "p_mixed",
+        "ext_c",
+        -1,
+        "[\"src_c\"]",
+        0,
+        "text",
+        "default",
+    );
 
-    let state = db.compute_write_tier_mobility("p_mixed", "default").unwrap();
+    let state = db
+        .compute_write_tier_mobility("p_mixed", "default")
+        .unwrap();
     // Two supports accumulate, one attack accumulates separately.
     assert!((state.support_mass.unwrap() - 2.0).abs() < 1e-9);
     assert!((state.attack_mass.unwrap() - 1.0).abs() < 1e-9);
@@ -755,14 +1344,36 @@ fn test_mobility_self_generated_discount() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_self");
     // Two claims self-generated by different self-modes but sharing lineage.
-    seed_mobility_claim(&db, "p_self", "self_mode_a", 1, "[\"self_1\"]", 1, "text", "default");
-    seed_mobility_claim(&db, "p_self", "self_mode_b", 1, "[\"self_1\"]", 1, "text", "default");
+    seed_mobility_claim(
+        &db,
+        "p_self",
+        "self_mode_a",
+        1,
+        "[\"self_1\"]",
+        1,
+        "text",
+        "default",
+    );
+    seed_mobility_claim(
+        &db,
+        "p_self",
+        "self_mode_b",
+        1,
+        "[\"self_1\"]",
+        1,
+        "text",
+        "default",
+    );
 
     let state = db.compute_write_tier_mobility("p_self", "default").unwrap();
     // D_k = 1.0 (same lineage), P_k = 0 (distinct extractors), S_k = 1.0 (both self-gen).
     // discount = 1 + 0.5·1 + 0 + 0.7·1 = 2.2; ω ≈ 0.454; total ≈ 0.91
     let s = state.support_mass.unwrap();
-    assert!(s < 1.2, "self-gen shared-lineage claims should collapse, got {}", s);
+    assert!(
+        s < 1.2,
+        "self-gen shared-lineage claims should collapse, got {}",
+        s
+    );
     // ψ_l = 1.0 because all supporting claims are self-generated.
     assert_eq!(state.self_gen_local, Some(1.0));
 }
@@ -784,7 +1395,13 @@ fn test_m3_schema_v21_columns_present() {
         .unwrap()
         .collect::<std::result::Result<Vec<_>, _>>()
         .unwrap();
-    for expected in ["formula_version", "content_hash", "live_claim_count", "state_status", "computed_at"] {
+    for expected in [
+        "formula_version",
+        "content_hash",
+        "live_claim_count",
+        "state_status",
+        "computed_at",
+    ] {
         assert!(
             rows.iter().any(|c| c == expected),
             "V21 column {} missing from mobility_state",
@@ -797,11 +1414,26 @@ fn test_m3_schema_v21_columns_present() {
 fn test_m3_state_populated_with_hash_and_status() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_hash");
-    seed_mobility_claim(&db, "p_hash", "ext_a", 1, "[\"src_1\"]", 0, "text", "default");
+    seed_mobility_claim(
+        &db,
+        "p_hash",
+        "ext_a",
+        1,
+        "[\"src_1\"]",
+        0,
+        "text",
+        "default",
+    );
 
     let state = db.compute_write_tier_mobility("p_hash", "default").unwrap();
-    assert_eq!(state.formula_version, crate::engine::warrant::FORMULA_VERSION);
-    assert!(!state.content_hash.is_empty(), "content_hash should be populated");
+    assert_eq!(
+        state.formula_version,
+        crate::engine::warrant::FORMULA_VERSION
+    );
+    assert!(
+        !state.content_hash.is_empty(),
+        "content_hash should be populated"
+    );
     assert_eq!(state.state_status, "fresh");
     assert_eq!(state.live_claim_count, 1);
     assert!(state.computed_at > 0, "computed_at should be set");
@@ -820,12 +1452,27 @@ fn test_m3_idempotent_recompute_on_unchanged_live_set() {
     // no state change).
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_idem");
-    seed_mobility_claim(&db, "p_idem", "ext_a", 1, "[\"src_1\"]", 0, "text", "default");
+    seed_mobility_claim(
+        &db,
+        "p_idem",
+        "ext_a",
+        1,
+        "[\"src_1\"]",
+        0,
+        "text",
+        "default",
+    );
 
     let first = db.compute_write_tier_mobility("p_idem", "default").unwrap();
     let second = db.compute_write_tier_mobility("p_idem", "default").unwrap();
-    assert_eq!(first.content_hash, second.content_hash, "hash must be stable on unchanged set");
-    assert_eq!(first.snapshot_ts, second.snapshot_ts, "idempotent call should return the same row");
+    assert_eq!(
+        first.content_hash, second.content_hash,
+        "hash must be stable on unchanged set"
+    );
+    assert_eq!(
+        first.snapshot_ts, second.snapshot_ts,
+        "idempotent call should return the same row"
+    );
 }
 
 #[test]
@@ -833,11 +1480,35 @@ fn test_m3_hash_discriminates_on_claim_change() {
     // Adding a claim changes the live set → content_hash must change.
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_disc");
-    seed_mobility_claim(&db, "p_disc", "ext_a", 1, "[\"src_a\"]", 0, "text", "default");
-    let h1 = db.compute_write_tier_mobility("p_disc", "default").unwrap().content_hash;
+    seed_mobility_claim(
+        &db,
+        "p_disc",
+        "ext_a",
+        1,
+        "[\"src_a\"]",
+        0,
+        "text",
+        "default",
+    );
+    let h1 = db
+        .compute_write_tier_mobility("p_disc", "default")
+        .unwrap()
+        .content_hash;
 
-    seed_mobility_claim(&db, "p_disc", "ext_b", 1, "[\"src_b\"]", 0, "image", "default");
-    let h2 = db.compute_write_tier_mobility("p_disc", "default").unwrap().content_hash;
+    seed_mobility_claim(
+        &db,
+        "p_disc",
+        "ext_b",
+        1,
+        "[\"src_b\"]",
+        0,
+        "image",
+        "default",
+    );
+    let h2 = db
+        .compute_write_tier_mobility("p_disc", "default")
+        .unwrap()
+        .content_hash;
     assert_ne!(h1, h2, "content_hash must change when live set changes");
 }
 
@@ -867,7 +1538,12 @@ fn test_m3_order_invariant_through_db() {
         ("ext_b", "src_b", "image"),
         ("ext_a", "src_a", "text"),
     ]);
-    assert!((mass_abc - mass_cba).abs() < 1e-9, "order invariance broken: {} vs {}", mass_abc, mass_cba);
+    assert!(
+        (mass_abc - mass_cba).abs() < 1e-9,
+        "order invariance broken: {} vs {}",
+        mass_abc,
+        mass_cba
+    );
     assert_eq!(hash_abc, hash_cba, "content_hash must be order-invariant");
 }
 
@@ -876,32 +1552,35 @@ fn test_m3_ingest_claim_triggers_mobility() {
     // The ingestion hook is the hot-path entry: ingest_claim should create
     // both the proposition row and a fresh mobility_state row in one pass.
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let claim_id = db.ingest_claim(
-        "Alice", "works_at", "Acme", "default",
-        1, "asserted",
-        None, None,
-        "manual", None,
-        "medium",
-        None, None, None,
-        1.0,
-    ).unwrap();
+    let claim_id = db
+        .ingest_claim(
+            "Alice", "works_at", "Acme", "default", 1, "asserted", None, None, "manual", None,
+            "medium", None, None, None, 1.0,
+        )
+        .unwrap();
     assert!(!claim_id.is_empty());
 
     // Proposition row should exist.
-    let prop_id: String = db.conn().query_row(
-        "SELECT proposition_id FROM propositions \
+    let prop_id: String = db
+        .conn()
+        .query_row(
+            "SELECT proposition_id FROM propositions \
          WHERE src = 'Alice' AND rel_type = 'works_at' AND dst = 'Acme' AND namespace = 'default'",
-        [],
-        |row| row.get(0),
-    ).unwrap();
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert!(!prop_id.is_empty());
 
     // Claim row should have proposition_id populated.
-    let claim_prop_id: String = db.conn().query_row(
-        "SELECT proposition_id FROM claims WHERE claim_id = ?1",
-        rusqlite::params![claim_id],
-        |row| row.get(0),
-    ).unwrap();
+    let claim_prop_id: String = db
+        .conn()
+        .query_row(
+            "SELECT proposition_id FROM claims WHERE claim_id = ?1",
+            rusqlite::params![claim_id],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(claim_prop_id, prop_id);
 
     // Mobility state should exist with state_status='fresh'.
@@ -946,9 +1625,18 @@ fn seed_contest_claim(
              VALUES (?1, ?2, ?3, ?4, 0.0, ?5, ?6, ?7, ?8, 'default', 0, \
              ?9, 'text', 1.0, ?10, ?11, ?12)",
             rusqlite::params![
-                claim_id, src, dst, rel, extractor, polarity, namespace,
-                proposition_id, source_lineage_json, source_memory_rid,
-                valid_from, valid_to,
+                claim_id,
+                src,
+                dst,
+                rel,
+                extractor,
+                polarity,
+                namespace,
+                proposition_id,
+                source_lineage_json,
+                source_memory_rid,
+                valid_from,
+                valid_to,
             ],
         )
         .unwrap();
@@ -965,31 +1653,59 @@ fn test_m4_schema_v22_contest_state_table() {
         .collect::<std::result::Result<Vec<_>, _>>()
         .unwrap();
     for expected in [
-        "proposition_id", "regime", "support_mass", "attack_mass",
-        "support_effective_independence", "attack_effective_independence",
-        "support_distinct_source_count", "attack_distinct_source_count",
+        "proposition_id",
+        "regime",
+        "support_mass",
+        "attack_mass",
+        "support_effective_independence",
+        "attack_effective_independence",
+        "support_distinct_source_count",
+        "attack_distinct_source_count",
         "same_source_opposite_polarity_count",
         "same_artifact_extractor_polarity_conflict_count",
-        "temporal_overlap_conflict_count", "temporal_separable_opposition_count",
-        "referent_schema_heterogeneity_count", "heuristic_flags",
-        "derivation_version", "content_hash", "live_claim_count",
-        "state_status", "computed_at",
+        "temporal_overlap_conflict_count",
+        "temporal_separable_opposition_count",
+        "referent_schema_heterogeneity_count",
+        "heuristic_flags",
+        "derivation_version",
+        "content_hash",
+        "live_claim_count",
+        "state_status",
+        "computed_at",
     ] {
-        assert!(rows.iter().any(|c| c == expected), "contest_state column {} missing", expected);
+        assert!(
+            rows.iter().any(|c| c == expected),
+            "contest_state column {} missing",
+            expected
+        );
     }
 }
 
 #[test]
 fn test_m4_contest_state_missing_returns_none() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    assert!(db.get_contest_state("nonexistent", "default").unwrap().is_none());
+    assert!(db
+        .get_contest_state("nonexistent", "default")
+        .unwrap()
+        .is_none());
 }
 
 #[test]
 fn test_m4_contest_single_support_basic_fields() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_c1");
-    seed_contest_claim(&db, "p_c1", "c1", "ext_a", 1, "[\"src_1\"]", None, "default", None, None);
+    seed_contest_claim(
+        &db,
+        "p_c1",
+        "c1",
+        "ext_a",
+        1,
+        "[\"src_1\"]",
+        None,
+        "default",
+        None,
+        None,
+    );
 
     let c = db.compute_contest_state("p_c1", "default").unwrap();
     assert_eq!(c.live_claim_count, 1);
@@ -999,7 +1715,10 @@ fn test_m4_contest_single_support_basic_fields() {
     assert_eq!(c.attack_mass, 0.0);
     assert_eq!(c.support_distinct_source_count, 1);
     assert_eq!(c.attack_distinct_source_count, 0);
-    assert_eq!(c.heuristic_flags, 0, "no flags should fire for a lone claim");
+    assert_eq!(
+        c.heuristic_flags, 0,
+        "no flags should fire for a lone claim"
+    );
 }
 
 #[test]
@@ -1007,8 +1726,30 @@ fn test_m4_contest_same_source_opposite_polarity() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_same_src");
     // Two claims with IDENTICAL source_lineage but opposite polarity.
-    seed_contest_claim(&db, "p_same_src", "c_sup", "ext_a", 1, "[\"src_x\"]", None, "default", None, None);
-    seed_contest_claim(&db, "p_same_src", "c_att", "ext_b", -1, "[\"src_x\"]", None, "default", None, None);
+    seed_contest_claim(
+        &db,
+        "p_same_src",
+        "c_sup",
+        "ext_a",
+        1,
+        "[\"src_x\"]",
+        None,
+        "default",
+        None,
+        None,
+    );
+    seed_contest_claim(
+        &db,
+        "p_same_src",
+        "c_att",
+        "ext_b",
+        -1,
+        "[\"src_x\"]",
+        None,
+        "default",
+        None,
+        None,
+    );
 
     let c = db.compute_contest_state("p_same_src", "default").unwrap();
     assert_eq!(c.same_source_opposite_polarity_count, 1);
@@ -1020,12 +1761,37 @@ fn test_m4_contest_same_artifact_extractor_conflict() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_artifact");
     // Same source_memory_rid, different extractors, opposite polarities.
-    seed_contest_claim(&db, "p_artifact", "c1", "extractor_a", 1, "[]", Some("doc_42"), "default", None, None);
-    seed_contest_claim(&db, "p_artifact", "c2", "extractor_b", -1, "[]", Some("doc_42"), "default", None, None);
+    seed_contest_claim(
+        &db,
+        "p_artifact",
+        "c1",
+        "extractor_a",
+        1,
+        "[]",
+        Some("doc_42"),
+        "default",
+        None,
+        None,
+    );
+    seed_contest_claim(
+        &db,
+        "p_artifact",
+        "c2",
+        "extractor_b",
+        -1,
+        "[]",
+        Some("doc_42"),
+        "default",
+        None,
+        None,
+    );
 
     let c = db.compute_contest_state("p_artifact", "default").unwrap();
     assert_eq!(c.same_artifact_extractor_polarity_conflict_count, 1);
-    assert!(c.heuristic_flags & crate::engine::warrant::contest_flags::SAME_ARTIFACT_EXTRACTOR_CONFLICT != 0);
+    assert!(
+        c.heuristic_flags & crate::engine::warrant::contest_flags::SAME_ARTIFACT_EXTRACTOR_CONFLICT
+            != 0
+    );
 }
 
 #[test]
@@ -1035,8 +1801,30 @@ fn test_m4_contest_same_artifact_same_extractor_is_not_conflict() {
     // same pipeline. Gate should exclude.
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_same_ext");
-    seed_contest_claim(&db, "p_same_ext", "c1", "extractor_a", 1, "[]", Some("doc_42"), "default", None, None);
-    seed_contest_claim(&db, "p_same_ext", "c2", "extractor_a", -1, "[]", Some("doc_42"), "default", None, None);
+    seed_contest_claim(
+        &db,
+        "p_same_ext",
+        "c1",
+        "extractor_a",
+        1,
+        "[]",
+        Some("doc_42"),
+        "default",
+        None,
+        None,
+    );
+    seed_contest_claim(
+        &db,
+        "p_same_ext",
+        "c2",
+        "extractor_a",
+        -1,
+        "[]",
+        Some("doc_42"),
+        "default",
+        None,
+        None,
+    );
 
     let c = db.compute_contest_state("p_same_ext", "default").unwrap();
     assert_eq!(
@@ -1050,14 +1838,38 @@ fn test_m4_contest_temporal_separable_vs_overlap() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_temporal");
     // Support valid 0..10, attack valid 20..30 — disjoint → separable opposition.
-    seed_contest_claim(&db, "p_temporal", "c_sup", "ext_a", 1, "[\"s1\"]", None, "default", Some(0.0), Some(10.0));
-    seed_contest_claim(&db, "p_temporal", "c_att", "ext_b", -1, "[\"s2\"]", None, "default", Some(20.0), Some(30.0));
+    seed_contest_claim(
+        &db,
+        "p_temporal",
+        "c_sup",
+        "ext_a",
+        1,
+        "[\"s1\"]",
+        None,
+        "default",
+        Some(0.0),
+        Some(10.0),
+    );
+    seed_contest_claim(
+        &db,
+        "p_temporal",
+        "c_att",
+        "ext_b",
+        -1,
+        "[\"s2\"]",
+        None,
+        "default",
+        Some(20.0),
+        Some(30.0),
+    );
 
     let c = db.compute_contest_state("p_temporal", "default").unwrap();
     assert_eq!(c.temporal_separable_opposition_count, 1);
     assert_eq!(c.temporal_overlap_conflict_count, 0);
-    assert!(c.heuristic_flags & crate::engine::warrant::contest_flags::PRESENT_TENSE_CONFLICT == 0,
-        "disjoint intervals should NOT set PRESENT_TENSE_CONFLICT");
+    assert!(
+        c.heuristic_flags & crate::engine::warrant::contest_flags::PRESENT_TENSE_CONFLICT == 0,
+        "disjoint intervals should NOT set PRESENT_TENSE_CONFLICT"
+    );
 }
 
 #[test]
@@ -1065,8 +1877,30 @@ fn test_m4_contest_temporal_overlap_is_present_tense_conflict() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_overlap");
     // Support valid 0..20, attack valid 10..30 — overlapping → present-tense.
-    seed_contest_claim(&db, "p_overlap", "c_sup", "ext_a", 1, "[\"s1\"]", None, "default", Some(0.0), Some(20.0));
-    seed_contest_claim(&db, "p_overlap", "c_att", "ext_b", -1, "[\"s2\"]", None, "default", Some(10.0), Some(30.0));
+    seed_contest_claim(
+        &db,
+        "p_overlap",
+        "c_sup",
+        "ext_a",
+        1,
+        "[\"s1\"]",
+        None,
+        "default",
+        Some(0.0),
+        Some(20.0),
+    );
+    seed_contest_claim(
+        &db,
+        "p_overlap",
+        "c_att",
+        "ext_b",
+        -1,
+        "[\"s2\"]",
+        None,
+        "default",
+        Some(10.0),
+        Some(30.0),
+    );
 
     let c = db.compute_contest_state("p_overlap", "default").unwrap();
     assert_eq!(c.temporal_overlap_conflict_count, 1);
@@ -1081,17 +1915,29 @@ fn test_m4_contest_referent_heterogeneity() {
     // proposition_ids; instead test heterogeneity by seeding claims on one
     // proposition that carry mixed namespaces (possible because namespace
     // is per-claim in the schema, even if ingest_claim normalizes it).
-    db.conn().execute(
-        "INSERT INTO propositions (proposition_id, src, rel_type, dst, namespace, created_at) \
+    db.conn()
+        .execute(
+            "INSERT INTO propositions (proposition_id, src, rel_type, dst, namespace, created_at) \
          VALUES ('p_het', 'X', 'rel', 'Y', 'default', 0.0)",
-        [],
-    ).unwrap();
-    seed_contest_claim(&db, "p_het", "c1", "ext_a", 1, "[\"s1\"]", None, "ns_a", None, None);
-    seed_contest_claim(&db, "p_het", "c2", "ext_b", 1, "[\"s2\"]", None, "ns_b", None, None);
+            [],
+        )
+        .unwrap();
+    seed_contest_claim(
+        &db, "p_het", "c1", "ext_a", 1, "[\"s1\"]", None, "ns_a", None, None,
+    );
+    seed_contest_claim(
+        &db, "p_het", "c2", "ext_b", 1, "[\"s2\"]", None, "ns_b", None, None,
+    );
 
     let c = db.compute_contest_state("p_het", "default").unwrap();
-    assert!(c.referent_schema_heterogeneity_count > 0, "two namespaces should register heterogeneity");
-    assert!(c.heuristic_flags & crate::engine::warrant::contest_flags::REFERENT_HETEROGENEITY_PRESENT != 0);
+    assert!(
+        c.referent_schema_heterogeneity_count > 0,
+        "two namespaces should register heterogeneity"
+    );
+    assert!(
+        c.heuristic_flags & crate::engine::warrant::contest_flags::REFERENT_HETEROGENEITY_PRESENT
+            != 0
+    );
 }
 
 #[test]
@@ -1105,7 +1951,18 @@ fn test_m4_contest_duplication_risk_flag() {
     for i in 0..4 {
         let cid = format!("c_dup_{}", i);
         let ext = format!("ext_{}", i);
-        seed_contest_claim(&db, "p_dup_risk", &cid, &ext, 1, "[\"shared\"]", None, "default", None, None);
+        seed_contest_claim(
+            &db,
+            "p_dup_risk",
+            &cid,
+            &ext,
+            1,
+            "[\"shared\"]",
+            None,
+            "default",
+            None,
+            None,
+        );
     }
 
     let c = db.compute_contest_state("p_dup_risk", "default").unwrap();
@@ -1129,8 +1986,14 @@ fn test_m4_contest_duplication_risk_flag() {
     // Given the flag definition, DUPLICATION_RISK fires only when dependence
     // discount is severe. Verify the flag mechanics are correct even if this
     // specific scenario doesn't trigger it.
-    assert!(c.support_distinct_source_count == 1, "all share the same lineage element");
-    assert!(c.support_mass > 2.0, "four-way shared lineage should still give σ > 2");
+    assert!(
+        c.support_distinct_source_count == 1,
+        "all share the same lineage element"
+    );
+    assert!(
+        c.support_mass > 2.0,
+        "four-way shared lineage should still give σ > 2"
+    );
     // Not asserting the flag here — it depends on independence threshold tuning
     // that should be revisited with real data. The flag bit definition is
     // covered separately; see test_m4_flag_bit_definitions.
@@ -1144,10 +2007,16 @@ fn test_m4_contest_order_invariant_through_db() {
         seed_proposition(&db, "p_ord");
         for (ext, pol, lineage) in order {
             let cid = format!("c_{}_{}", ext, pol);
-            seed_contest_claim(&db, "p_ord", &cid, ext, *pol, lineage, None, "default", None, None);
+            seed_contest_claim(
+                &db, "p_ord", &cid, ext, *pol, lineage, None, "default", None, None,
+            );
         }
         let c = db.compute_contest_state("p_ord", "default").unwrap();
-        (c.support_mass, c.same_source_opposite_polarity_count, c.content_hash)
+        (
+            c.support_mass,
+            c.same_source_opposite_polarity_count,
+            c.content_hash,
+        )
     }
     let (m1, n1, h1) = setup(&[
         ("ext_a", 1, "[\"x\"]"),
@@ -1159,7 +2028,10 @@ fn test_m4_contest_order_invariant_through_db() {
         ("ext_b", -1, "[\"x\"]"),
         ("ext_a", 1, "[\"x\"]"),
     ]);
-    assert!((m1 - m2).abs() < 1e-9, "support_mass must be order-invariant");
+    assert!(
+        (m1 - m2).abs() < 1e-9,
+        "support_mass must be order-invariant"
+    );
     assert_eq!(n1, n2, "counters must be order-invariant");
     assert_eq!(h1, h2, "content_hash must be order-invariant");
 }
@@ -1168,36 +2040,45 @@ fn test_m4_contest_order_invariant_through_db() {
 fn test_m4_contest_idempotent_recompute() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_idem");
-    seed_contest_claim(&db, "p_idem", "c1", "ext_a", 1, "[\"s1\"]", None, "default", None, None);
+    seed_contest_claim(
+        &db, "p_idem", "c1", "ext_a", 1, "[\"s1\"]", None, "default", None, None,
+    );
     let first = db.compute_contest_state("p_idem", "default").unwrap();
     let second = db.compute_contest_state("p_idem", "default").unwrap();
     assert_eq!(first.content_hash, second.content_hash);
-    assert_eq!(first.computed_at, second.computed_at, "idempotent recompute should not re-stamp");
+    assert_eq!(
+        first.computed_at, second.computed_at,
+        "idempotent recompute should not re-stamp"
+    );
 }
 
 #[test]
 fn test_m4_ingest_claim_triggers_contest_state() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     db.ingest_claim(
-        "Alice", "works_at", "Acme", "default",
-        1, "asserted", None, None,
-        "manual", None, "medium",
-        None, None, None,
-        1.0,
-    ).unwrap();
+        "Alice", "works_at", "Acme", "default", 1, "asserted", None, None, "manual", None,
+        "medium", None, None, None, 1.0,
+    )
+    .unwrap();
 
-    let prop_id: String = db.conn().query_row(
-        "SELECT proposition_id FROM propositions \
+    let prop_id: String = db
+        .conn()
+        .query_row(
+            "SELECT proposition_id FROM propositions \
          WHERE src = 'Alice' AND rel_type = 'works_at' AND dst = 'Acme' AND namespace = 'default'",
-        [],
-        |row| row.get(0),
-    ).unwrap();
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
 
     let c = db.get_contest_state(&prop_id, "default").unwrap().unwrap();
     assert_eq!(c.state_status, "fresh");
     assert_eq!(c.live_claim_count, 1);
     assert!(!c.content_hash.is_empty());
-    assert_eq!(c.derivation_version, crate::engine::warrant::CONTEST_DERIVATION_VERSION);
+    assert_eq!(
+        c.derivation_version,
+        crate::engine::warrant::CONTEST_DERIVATION_VERSION
+    );
 }
 
 #[test]
@@ -1210,11 +2091,25 @@ fn test_m4_contest_independence_matches_omega_sum() {
     for i in 0..3 {
         let cid = format!("c_ind_{}", i);
         let ext = format!("ext_{}", i);
-        seed_contest_claim(&db, "p_ind", &cid, &ext, 1, "[\"shared\"]", None, "default", None, None);
+        seed_contest_claim(
+            &db,
+            "p_ind",
+            &cid,
+            &ext,
+            1,
+            "[\"shared\"]",
+            None,
+            "default",
+            None,
+            None,
+        );
     }
     let c = db.compute_contest_state("p_ind", "default").unwrap();
-    assert!((c.support_effective_independence - 2.0).abs() < 0.01,
-        "expected ≈ 2.0, got {}", c.support_effective_independence);
+    assert!(
+        (c.support_effective_independence - 2.0).abs() < 0.01,
+        "expected ≈ 2.0, got {}",
+        c.support_effective_independence
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -1227,13 +2122,30 @@ fn test_m4_contest_independence_matches_omega_sum() {
 fn test_m45_list_flagged_propositions_empty_when_nothing_flagged() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_clean");
-    seed_contest_claim(&db, "p_clean", "c1", "ext_a", 1, "[\"src_1\"]", None, "default", None, None);
+    seed_contest_claim(
+        &db,
+        "p_clean",
+        "c1",
+        "ext_a",
+        1,
+        "[\"src_1\"]",
+        None,
+        "default",
+        None,
+        None,
+    );
     db.compute_contest_state("p_clean", "default").unwrap();
 
     let flagged = db
-        .list_flagged_propositions(crate::engine::warrant::contest_flags::SAME_SOURCE_CONFLICT, 10)
+        .list_flagged_propositions(
+            crate::engine::warrant::contest_flags::SAME_SOURCE_CONFLICT,
+            10,
+        )
         .unwrap();
-    assert!(flagged.is_empty(), "clean proposition should not be flagged");
+    assert!(
+        flagged.is_empty(),
+        "clean proposition should not be flagged"
+    );
 }
 
 #[test]
@@ -1241,17 +2153,53 @@ fn test_m45_list_flagged_propositions_returns_matching() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     // Flagged proposition: same-source opposite polarity.
     seed_proposition(&db, "p_flag");
-    seed_contest_claim(&db, "p_flag", "c_s", "ext_a", 1, "[\"src_x\"]", None, "default", None, None);
-    seed_contest_claim(&db, "p_flag", "c_a", "ext_b", -1, "[\"src_x\"]", None, "default", None, None);
+    seed_contest_claim(
+        &db,
+        "p_flag",
+        "c_s",
+        "ext_a",
+        1,
+        "[\"src_x\"]",
+        None,
+        "default",
+        None,
+        None,
+    );
+    seed_contest_claim(
+        &db,
+        "p_flag",
+        "c_a",
+        "ext_b",
+        -1,
+        "[\"src_x\"]",
+        None,
+        "default",
+        None,
+        None,
+    );
     db.compute_contest_state("p_flag", "default").unwrap();
 
     // Clean proposition in the same DB.
     seed_proposition(&db, "p_clean");
-    seed_contest_claim(&db, "p_clean", "c1", "ext_a", 1, "[\"src_y\"]", None, "default", None, None);
+    seed_contest_claim(
+        &db,
+        "p_clean",
+        "c1",
+        "ext_a",
+        1,
+        "[\"src_y\"]",
+        None,
+        "default",
+        None,
+        None,
+    );
     db.compute_contest_state("p_clean", "default").unwrap();
 
     let flagged = db
-        .list_flagged_propositions(crate::engine::warrant::contest_flags::SAME_SOURCE_CONFLICT, 10)
+        .list_flagged_propositions(
+            crate::engine::warrant::contest_flags::SAME_SOURCE_CONFLICT,
+            10,
+        )
         .unwrap();
     assert_eq!(flagged.len(), 1);
     assert_eq!(flagged[0].proposition_id, "p_flag");
@@ -1262,20 +2210,68 @@ fn test_m45_list_flagged_propositions_combined_mask() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     // Same-source conflict proposition.
     seed_proposition(&db, "p_same_src");
-    seed_contest_claim(&db, "p_same_src", "c_src_s", "ext_a", 1, "[\"src_x\"]", None, "default", None, None);
-    seed_contest_claim(&db, "p_same_src", "c_src_a", "ext_b", -1, "[\"src_x\"]", None, "default", None, None);
+    seed_contest_claim(
+        &db,
+        "p_same_src",
+        "c_src_s",
+        "ext_a",
+        1,
+        "[\"src_x\"]",
+        None,
+        "default",
+        None,
+        None,
+    );
+    seed_contest_claim(
+        &db,
+        "p_same_src",
+        "c_src_a",
+        "ext_b",
+        -1,
+        "[\"src_x\"]",
+        None,
+        "default",
+        None,
+        None,
+    );
     db.compute_contest_state("p_same_src", "default").unwrap();
 
     // Same-artifact conflict proposition.
     seed_proposition(&db, "p_artifact");
-    seed_contest_claim(&db, "p_artifact", "c_art_s", "extractor_a", 1, "[]", Some("doc_1"), "default", None, None);
-    seed_contest_claim(&db, "p_artifact", "c_art_a", "extractor_b", -1, "[]", Some("doc_1"), "default", None, None);
+    seed_contest_claim(
+        &db,
+        "p_artifact",
+        "c_art_s",
+        "extractor_a",
+        1,
+        "[]",
+        Some("doc_1"),
+        "default",
+        None,
+        None,
+    );
+    seed_contest_claim(
+        &db,
+        "p_artifact",
+        "c_art_a",
+        "extractor_b",
+        -1,
+        "[]",
+        Some("doc_1"),
+        "default",
+        None,
+        None,
+    );
     db.compute_contest_state("p_artifact", "default").unwrap();
 
     let mask = crate::engine::warrant::contest_flags::SAME_SOURCE_CONFLICT
         | crate::engine::warrant::contest_flags::SAME_ARTIFACT_EXTRACTOR_CONFLICT;
     let flagged = db.list_flagged_propositions(mask, 10).unwrap();
-    assert_eq!(flagged.len(), 2, "combined mask should match both propositions");
+    assert_eq!(
+        flagged.len(),
+        2,
+        "combined mask should match both propositions"
+    );
 
     let prop_ids: Vec<&str> = flagged.iter().map(|c| c.proposition_id.as_str()).collect();
     assert!(prop_ids.contains(&"p_same_src"));
@@ -1286,8 +2282,30 @@ fn test_m45_list_flagged_propositions_combined_mask() {
 fn test_m45_list_flagged_propositions_zero_mask_returns_empty() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_any");
-    seed_contest_claim(&db, "p_any", "c_s", "ext_a", 1, "[\"src_x\"]", None, "default", None, None);
-    seed_contest_claim(&db, "p_any", "c_a", "ext_b", -1, "[\"src_x\"]", None, "default", None, None);
+    seed_contest_claim(
+        &db,
+        "p_any",
+        "c_s",
+        "ext_a",
+        1,
+        "[\"src_x\"]",
+        None,
+        "default",
+        None,
+        None,
+    );
+    seed_contest_claim(
+        &db,
+        "p_any",
+        "c_a",
+        "ext_b",
+        -1,
+        "[\"src_x\"]",
+        None,
+        "default",
+        None,
+        None,
+    );
     db.compute_contest_state("p_any", "default").unwrap();
 
     let flagged = db.list_flagged_propositions(0, 10).unwrap();
@@ -1297,7 +2315,9 @@ fn test_m45_list_flagged_propositions_zero_mask_returns_empty() {
 #[test]
 fn test_m45_inspect_contest_conflicts_missing_returns_none() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let report = db.inspect_contest_conflicts("nonexistent", "default").unwrap();
+    let report = db
+        .inspect_contest_conflicts("nonexistent", "default")
+        .unwrap();
     assert!(report.is_none());
 }
 
@@ -1305,19 +2325,47 @@ fn test_m45_inspect_contest_conflicts_missing_returns_none() {
 fn test_m45_inspect_contest_returns_exemplar_pairs() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_insp");
-    seed_contest_claim(&db, "p_insp", "c_support", "ext_a", 1, "[\"src_shared\"]", None, "default", None, None);
-    seed_contest_claim(&db, "p_insp", "c_attack", "ext_b", -1, "[\"src_shared\"]", None, "default", None, None);
+    seed_contest_claim(
+        &db,
+        "p_insp",
+        "c_support",
+        "ext_a",
+        1,
+        "[\"src_shared\"]",
+        None,
+        "default",
+        None,
+        None,
+    );
+    seed_contest_claim(
+        &db,
+        "p_insp",
+        "c_attack",
+        "ext_b",
+        -1,
+        "[\"src_shared\"]",
+        None,
+        "default",
+        None,
+        None,
+    );
     db.compute_contest_state("p_insp", "default").unwrap();
 
-    let report = db.inspect_contest_conflicts("p_insp", "default").unwrap().unwrap();
-    assert!(report.heuristic_flags & crate::engine::warrant::contest_flags::SAME_SOURCE_CONFLICT != 0);
+    let report = db
+        .inspect_contest_conflicts("p_insp", "default")
+        .unwrap()
+        .unwrap();
+    assert!(
+        report.heuristic_flags & crate::engine::warrant::contest_flags::SAME_SOURCE_CONFLICT != 0
+    );
     assert_eq!(report.same_source_opposite_polarity_pairs.len(), 1);
     let pair = &report.same_source_opposite_polarity_pairs[0];
     assert!(
         (pair.0 == "c_support" && pair.1 == "c_attack")
             || (pair.0 == "c_attack" && pair.1 == "c_support"),
         "exemplar pair should contain the actual conflicting claim_ids, got ({}, {})",
-        pair.0, pair.1
+        pair.0,
+        pair.1
     );
 }
 
@@ -1326,21 +2374,74 @@ fn test_m45_inspect_temporal_overlap_pairs() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_temp");
     // Overlapping intervals → should appear in temporal_overlap_conflict_pairs.
-    seed_contest_claim(&db, "p_temp", "c_s", "ext_a", 1, "[\"s1\"]", None, "default", Some(0.0), Some(20.0));
-    seed_contest_claim(&db, "p_temp", "c_a", "ext_b", -1, "[\"s2\"]", None, "default", Some(10.0), Some(30.0));
+    seed_contest_claim(
+        &db,
+        "p_temp",
+        "c_s",
+        "ext_a",
+        1,
+        "[\"s1\"]",
+        None,
+        "default",
+        Some(0.0),
+        Some(20.0),
+    );
+    seed_contest_claim(
+        &db,
+        "p_temp",
+        "c_a",
+        "ext_b",
+        -1,
+        "[\"s2\"]",
+        None,
+        "default",
+        Some(10.0),
+        Some(30.0),
+    );
     db.compute_contest_state("p_temp", "default").unwrap();
 
-    let report = db.inspect_contest_conflicts("p_temp", "default").unwrap().unwrap();
+    let report = db
+        .inspect_contest_conflicts("p_temp", "default")
+        .unwrap()
+        .unwrap();
     assert_eq!(report.temporal_overlap_conflict_pairs.len(), 1);
     // Disjoint cases should NOT appear here — reseed with disjoint intervals.
     let db2 = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db2, "p_sep");
-    seed_contest_claim(&db2, "p_sep", "c_s", "ext_a", 1, "[\"s1\"]", None, "default", Some(0.0), Some(10.0));
-    seed_contest_claim(&db2, "p_sep", "c_a", "ext_b", -1, "[\"s2\"]", None, "default", Some(20.0), Some(30.0));
+    seed_contest_claim(
+        &db2,
+        "p_sep",
+        "c_s",
+        "ext_a",
+        1,
+        "[\"s1\"]",
+        None,
+        "default",
+        Some(0.0),
+        Some(10.0),
+    );
+    seed_contest_claim(
+        &db2,
+        "p_sep",
+        "c_a",
+        "ext_b",
+        -1,
+        "[\"s2\"]",
+        None,
+        "default",
+        Some(20.0),
+        Some(30.0),
+    );
     db2.compute_contest_state("p_sep", "default").unwrap();
-    let report2 = db2.inspect_contest_conflicts("p_sep", "default").unwrap().unwrap();
-    assert_eq!(report2.temporal_overlap_conflict_pairs.len(), 0,
-        "disjoint intervals should not appear as overlap conflicts");
+    let report2 = db2
+        .inspect_contest_conflicts("p_sep", "default")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        report2.temporal_overlap_conflict_pairs.len(),
+        0,
+        "disjoint intervals should not appear as overlap conflicts"
+    );
 }
 
 #[test]
@@ -1354,26 +2455,38 @@ fn test_m45_end_to_end_ingest_then_flagged_query() {
     // contest_state was materialized and the reader API works end to end.
     let db = YantrikDB::new(":memory:", 8).unwrap();
     db.ingest_claim(
-        "Alice", "works_at", "Acme", "default",
-        1, "asserted", None, None,
-        "manual", None, "medium",
-        None, None, None,
-        1.0,
-    ).unwrap();
+        "Alice", "works_at", "Acme", "default", 1, "asserted", None, None, "manual", None,
+        "medium", None, None, None, 1.0,
+    )
+    .unwrap();
     db.ingest_claim(
-        "Alice", "works_at", "Acme", "default",
-        -1, "denied", None, None,
-        "alt_manual", None, "medium",
-        None, None, None,
+        "Alice",
+        "works_at",
+        "Acme",
+        "default",
+        -1,
+        "denied",
+        None,
+        None,
+        "alt_manual",
+        None,
+        "medium",
+        None,
+        None,
+        None,
         1.0,
-    ).unwrap();
+    )
+    .unwrap();
 
-    let prop_id: String = db.conn().query_row(
-        "SELECT proposition_id FROM propositions \
+    let prop_id: String = db
+        .conn()
+        .query_row(
+            "SELECT proposition_id FROM propositions \
          WHERE src = 'Alice' AND rel_type = 'works_at' AND dst = 'Acme' AND namespace = 'default'",
-        [],
-        |row| row.get(0),
-    ).unwrap();
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
 
     let state = db.get_contest_state(&prop_id, "default").unwrap().unwrap();
     assert_eq!(state.live_claim_count, 2);
@@ -1381,12 +2494,17 @@ fn test_m45_end_to_end_ingest_then_flagged_query() {
     // No source_memory_rid → no SAME_ARTIFACT_EXTRACTOR_CONFLICT.
     // Temporal intervals are all None → both treated as fully-open, which is
     // NOT disjoint → overlap count ≥ 1. So PRESENT_TENSE_CONFLICT should fire.
-    assert!(state.heuristic_flags & crate::engine::warrant::contest_flags::PRESENT_TENSE_CONFLICT != 0,
-        "opposite-polarity claims without temporal bounds should flag as present-tense conflict");
+    assert!(
+        state.heuristic_flags & crate::engine::warrant::contest_flags::PRESENT_TENSE_CONFLICT != 0,
+        "opposite-polarity claims without temporal bounds should flag as present-tense conflict"
+    );
 
     // Reader returns the flagged proposition.
     let flagged = db
-        .list_flagged_propositions(crate::engine::warrant::contest_flags::PRESENT_TENSE_CONFLICT, 10)
+        .list_flagged_propositions(
+            crate::engine::warrant::contest_flags::PRESENT_TENSE_CONFLICT,
+            10,
+        )
         .unwrap();
     assert_eq!(flagged.len(), 1);
     assert_eq!(flagged[0].proposition_id, prop_id);
@@ -1399,29 +2517,32 @@ fn test_m3_second_ingest_updates_mobility_deterministically() {
     // live_claim_count.
     let db = YantrikDB::new(":memory:", 8).unwrap();
     db.ingest_claim(
-        "Alice", "works_at", "Acme", "default",
-        1, "asserted", None, None,
-        "source_a", None, "medium",
-        None, None, None,
-        1.0,
-    ).unwrap();
+        "Alice", "works_at", "Acme", "default", 1, "asserted", None, None, "source_a", None,
+        "medium", None, None, None, 1.0,
+    )
+    .unwrap();
 
-    let prop_id: String = db.conn().query_row(
-        "SELECT proposition_id FROM propositions \
+    let prop_id: String = db
+        .conn()
+        .query_row(
+            "SELECT proposition_id FROM propositions \
          WHERE src = 'Alice' AND rel_type = 'works_at' AND dst = 'Acme' AND namespace = 'default'",
-        [],
-        |row| row.get(0),
-    ).unwrap();
-    let h1 = db.get_mobility_state(&prop_id, "default").unwrap().unwrap().content_hash;
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let h1 = db
+        .get_mobility_state(&prop_id, "default")
+        .unwrap()
+        .unwrap()
+        .content_hash;
 
     // Second claim, different extractor (so uniqueness doesn't collapse).
     db.ingest_claim(
-        "Alice", "works_at", "Acme", "default",
-        1, "asserted", None, None,
-        "source_b", None, "medium",
-        None, None, None,
-        1.0,
-    ).unwrap();
+        "Alice", "works_at", "Acme", "default", 1, "asserted", None, None, "source_b", None,
+        "medium", None, None, None, 1.0,
+    )
+    .unwrap();
 
     let state2 = db.get_mobility_state(&prop_id, "default").unwrap().unwrap();
     assert_eq!(state2.live_claim_count, 2);
@@ -1441,7 +2562,8 @@ fn test_schema_v20_migration_from_v19() {
     let conn = Connection::open_in_memory().unwrap();
 
     // Minimal V19-shaped schema.
-    conn.execute_batch("
+    conn.execute_batch(
+        "
         CREATE TABLE propositions (
             proposition_id TEXT PRIMARY KEY,
             src TEXT NOT NULL, rel_type TEXT NOT NULL, dst TEXT NOT NULL,
@@ -1465,29 +2587,42 @@ fn test_schema_v20_migration_from_v19() {
             namespace TEXT NOT NULL DEFAULT 'default',
             proposition_id TEXT
         );
-    ").unwrap();
-    conn.execute("INSERT INTO propositions (proposition_id, src, rel_type, dst, namespace, created_at) \
-                  VALUES ('p1', 'Alice', 'works_at', 'Acme', 'default', 0.0)", []).unwrap();
+    ",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO propositions (proposition_id, src, rel_type, dst, namespace, created_at) \
+                  VALUES ('p1', 'Alice', 'works_at', 'Acme', 'default', 0.0)",
+        [],
+    )
+    .unwrap();
     conn.execute("INSERT INTO claims (claim_id, src, dst, rel_type, created_at, extractor, namespace, proposition_id) \
                   VALUES ('c1', 'Alice', 'Acme', 'works_at', 0.0, 'manual', 'default', 'p1')", []).unwrap();
 
     // Run V20 migration.
-    conn.execute_batch(crate::schema::MIGRATE_V19_TO_V20).unwrap();
+    conn.execute_batch(crate::schema::MIGRATE_V19_TO_V20)
+        .unwrap();
 
     // New tables should exist.
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN \
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN \
          ('mobility_state', 'actor_profile', 'compression_artifact')",
-        [], |r| r.get(0),
-    ).unwrap();
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(count, 3);
 
     // Existing claim should have sensible defaults for new columns.
-    let (regime, self_gen, lineage, modality): (String, i64, String, String) = conn.query_row(
-        "SELECT regime_tag, self_generated, source_lineage, modality_signal \
+    let (regime, self_gen, lineage, modality): (String, i64, String, String) = conn
+        .query_row(
+            "SELECT regime_tag, self_generated, source_lineage, modality_signal \
          FROM claims WHERE claim_id='c1'",
-        [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-    ).unwrap();
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .unwrap();
     assert_eq!(regime, "default");
     assert_eq!(self_gen, 0);
     assert_eq!(lineage, "[]");
@@ -1503,7 +2638,8 @@ fn test_schema_v19_backfill_from_v18() {
     let conn = Connection::open_in_memory().unwrap();
 
     // Minimal V18-shaped schema (just what V19's backfill needs).
-    conn.execute_batch("
+    conn.execute_batch(
+        "
         CREATE TABLE claims (
             claim_id TEXT PRIMARY KEY,
             src TEXT NOT NULL,
@@ -1522,42 +2658,82 @@ fn test_schema_v19_backfill_from_v18() {
             span_start INTEGER, span_end INTEGER,
             namespace TEXT NOT NULL DEFAULT 'default'
         );
-    ").unwrap();
+    ",
+    )
+    .unwrap();
 
     // Three claims, two proposition-unique tuples, one tombstoned (should be skipped).
-    conn.execute("INSERT INTO claims (claim_id, src, dst, rel_type, created_at, extractor, namespace) \
-                  VALUES ('c1', 'Alice', 'Acme', 'works_at', 0.0, 'source_a', 'ns1')", []).unwrap();
-    conn.execute("INSERT INTO claims (claim_id, src, dst, rel_type, created_at, extractor, namespace) \
-                  VALUES ('c2', 'Alice', 'Acme', 'works_at', 0.0, 'source_b', 'ns1')", []).unwrap();
-    conn.execute("INSERT INTO claims (claim_id, src, dst, rel_type, created_at, extractor, namespace) \
-                  VALUES ('c3', 'Bob', 'Beta', 'works_at', 0.0, 'source_a', 'ns1')", []).unwrap();
+    conn.execute(
+        "INSERT INTO claims (claim_id, src, dst, rel_type, created_at, extractor, namespace) \
+                  VALUES ('c1', 'Alice', 'Acme', 'works_at', 0.0, 'source_a', 'ns1')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO claims (claim_id, src, dst, rel_type, created_at, extractor, namespace) \
+                  VALUES ('c2', 'Alice', 'Acme', 'works_at', 0.0, 'source_b', 'ns1')",
+        [],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO claims (claim_id, src, dst, rel_type, created_at, extractor, namespace) \
+                  VALUES ('c3', 'Bob', 'Beta', 'works_at', 0.0, 'source_a', 'ns1')",
+        [],
+    )
+    .unwrap();
     conn.execute("INSERT INTO claims (claim_id, src, dst, rel_type, created_at, extractor, namespace, tombstoned) \
                   VALUES ('c4', 'Carol', 'Gamma', 'works_at', 0.0, 'source_a', 'ns1', 1)", []).unwrap();
 
     // Run the V19 migration.
-    conn.execute_batch(crate::schema::MIGRATE_V18_TO_V19).unwrap();
+    conn.execute_batch(crate::schema::MIGRATE_V18_TO_V19)
+        .unwrap();
 
     // Two propositions expected (Alice/Acme/works_at, Bob/Beta/works_at).
     // The tombstoned claim's tuple should NOT create a proposition.
-    let prop_count: i64 = conn.query_row("SELECT COUNT(*) FROM propositions", [], |r| r.get(0)).unwrap();
-    assert_eq!(prop_count, 2, "backfill should create one proposition per unique non-tombstoned tuple");
+    let prop_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM propositions", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        prop_count, 2,
+        "backfill should create one proposition per unique non-tombstoned tuple"
+    );
 
     // Both Alice claims should share the same proposition_id.
-    let alice_props: Vec<String> = conn.prepare("SELECT proposition_id FROM claims WHERE src='Alice'").unwrap()
+    let alice_props: Vec<String> = conn
+        .prepare("SELECT proposition_id FROM claims WHERE src='Alice'")
+        .unwrap()
         .query_map([], |r| r.get::<_, String>(0))
         .unwrap()
         .filter_map(|r| r.ok())
         .collect();
     assert_eq!(alice_props.len(), 2);
-    assert_eq!(alice_props[0], alice_props[1], "claims on the same tuple should share a proposition_id");
+    assert_eq!(
+        alice_props[0], alice_props[1],
+        "claims on the same tuple should share a proposition_id"
+    );
 
     // Alice and Bob should have different proposition_ids.
-    let bob_prop: String = conn.query_row("SELECT proposition_id FROM claims WHERE src='Bob'", [], |r| r.get(0)).unwrap();
+    let bob_prop: String = conn
+        .query_row(
+            "SELECT proposition_id FROM claims WHERE src='Bob'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_ne!(alice_props[0], bob_prop);
 
     // The tombstoned claim's proposition_id should remain NULL.
-    let carol_prop: Option<String> = conn.query_row("SELECT proposition_id FROM claims WHERE src='Carol'", [], |r| r.get(0)).unwrap();
-    assert!(carol_prop.is_none(), "tombstoned claims should not be backfilled");
+    let carol_prop: Option<String> = conn
+        .query_row(
+            "SELECT proposition_id FROM claims WHERE src='Carol'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        carol_prop.is_none(),
+        "tombstoned claims should not be backfilled"
+    );
 }
 
 #[test]
@@ -1579,14 +2755,34 @@ fn test_think_empty_db() {
 #[test]
 fn test_think_with_decayed_memories() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let rid = db.record("important deadline", "episodic", 0.9, 0.0, 100.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "important deadline",
+            "episodic",
+            0.9,
+            0.0,
+            100.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     // Backdate last_access
-    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
-    db.conn().execute(
-        "UPDATE memories SET last_access = ?1 WHERE rid = ?2",
-        rusqlite::params![ts - 10000.0, rid],
-    ).unwrap();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    db.conn()
+        .execute(
+            "UPDATE memories SET last_access = ?1 WHERE rid = ?2",
+            rusqlite::params![ts - 10000.0, rid],
+        )
+        .unwrap();
 
     let config = ThinkConfig {
         run_consolidation: false,
@@ -1610,10 +2806,14 @@ fn test_think_records_last_think_at() {
     };
     db.think(&config).unwrap();
 
-    let val: String = db.conn().query_row(
-        "SELECT value FROM meta WHERE key = 'last_think_at'",
-        [], |row| row.get(0),
-    ).unwrap();
+    let val: String = db
+        .conn()
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'last_think_at'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     let ts: f64 = val.parse().unwrap();
     assert!(ts > 0.0);
 }
@@ -1631,8 +2831,13 @@ fn test_trigger_lifecycle() {
         suggested_action: "test".to_string(),
         context: std::collections::HashMap::new(),
     };
-    let ts = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs_f64();
-    let tid = crate::triggers::persist_trigger(&db, &trigger, ts).unwrap().unwrap();
+    let ts = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64();
+    let tid = crate::triggers::persist_trigger(&db, &trigger, ts)
+        .unwrap()
+        .unwrap();
 
     // Verify pending
     let pending = db.get_pending_triggers(10).unwrap();
@@ -1673,36 +2878,67 @@ fn test_entity_type_stored_on_relate() {
     // "lives_in" → src=person, dst=place
     db.relate("Sarah", "Bangalore", "lives_in", 1.0).unwrap();
     // Tech blocklist still works
-    db.relate("FAISS", "recommendation engine", "used_in", 1.0).unwrap();
+    db.relate("FAISS", "recommendation engine", "used_in", 1.0)
+        .unwrap();
 
-    let etype: String = db.conn().query_row(
-        "SELECT entity_type FROM entities WHERE name = 'Sarah'", [], |r| r.get(0),
-    ).unwrap();
+    let etype: String = db
+        .conn()
+        .query_row(
+            "SELECT entity_type FROM entities WHERE name = 'Sarah'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(etype, "person");
 
-    let etype: String = db.conn().query_row(
-        "SELECT entity_type FROM entities WHERE name = 'Mike'", [], |r| r.get(0),
-    ).unwrap();
+    let etype: String = db
+        .conn()
+        .query_row(
+            "SELECT entity_type FROM entities WHERE name = 'Mike'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(etype, "person");
 
-    let etype: String = db.conn().query_row(
-        "SELECT entity_type FROM entities WHERE name = 'Flipkart'", [], |r| r.get(0),
-    ).unwrap();
+    let etype: String = db
+        .conn()
+        .query_row(
+            "SELECT entity_type FROM entities WHERE name = 'Flipkart'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(etype, "organization");
 
-    let etype: String = db.conn().query_row(
-        "SELECT entity_type FROM entities WHERE name = 'Bangalore'", [], |r| r.get(0),
-    ).unwrap();
+    let etype: String = db
+        .conn()
+        .query_row(
+            "SELECT entity_type FROM entities WHERE name = 'Bangalore'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(etype, "place");
 
-    let etype: String = db.conn().query_row(
-        "SELECT entity_type FROM entities WHERE name = 'FAISS'", [], |r| r.get(0),
-    ).unwrap();
+    let etype: String = db
+        .conn()
+        .query_row(
+            "SELECT entity_type FROM entities WHERE name = 'FAISS'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(etype, "tech");
 
-    let etype: String = db.conn().query_row(
-        "SELECT entity_type FROM entities WHERE name = 'recommendation engine'", [], |r| r.get(0),
-    ).unwrap();
+    let etype: String = db
+        .conn()
+        .query_row(
+            "SELECT entity_type FROM entities WHERE name = 'recommendation engine'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(etype, "unknown");
 }
 
@@ -1710,14 +2946,39 @@ fn test_entity_type_stored_on_relate() {
 fn test_recall_deterministic_with_skip_reinforce() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     for i in 0..10 {
-        db.record(&format!("memory {i}"), "episodic", 0.5, 0.0, 604800.0,
-            &empty_meta(), &vec_seed(i as f32, 8), "default", 0.8, "general", "user", None).unwrap();
+        db.record(
+            &format!("memory {i}"),
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(i as f32, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
     }
     let query = vec_seed(3.0, 8);
 
-    let r1 = db.recall(&query, 5, None, None, false, false, None, true, None, None, None).unwrap();
-    let r2 = db.recall(&query, 5, None, None, false, false, None, true, None, None, None).unwrap();
-    let r3 = db.recall(&query, 5, None, None, false, false, None, true, None, None, None).unwrap();
+    let r1 = db
+        .recall(
+            &query, 5, None, None, false, false, None, true, None, None, None,
+        )
+        .unwrap();
+    let r2 = db
+        .recall(
+            &query, 5, None, None, false, false, None, true, None, None, None,
+        )
+        .unwrap();
+    let r3 = db
+        .recall(
+            &query, 5, None, None, false, false, None, true, None, None, None,
+        )
+        .unwrap();
 
     // Same RIDs in same order every time
     let rids1: Vec<&str> = r1.iter().map(|r| r.rid.as_str()).collect();
@@ -1728,25 +2989,69 @@ fn test_recall_deterministic_with_skip_reinforce() {
 
     // Scores very close (tiny drift from wall-clock recency between calls)
     for i in 0..5 {
-        assert!((r1[i].score - r2[i].score).abs() < 1e-4,
-            "score drift too large between calls: {} vs {}", r1[i].score, r2[i].score);
+        assert!(
+            (r1[i].score - r2[i].score).abs() < 1e-4,
+            "score drift too large between calls: {} vs {}",
+            r1[i].score,
+            r2[i].score
+        );
     }
 }
 
 #[test]
 fn test_reinforce_mutates_but_skip_does_not() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let rid = db.record("test", "episodic", 0.5, 0.0, 1000.0,
-        &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "test",
+            "episodic",
+            0.5,
+            0.0,
+            1000.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
     let original_hl = db.get(&rid).unwrap().unwrap().half_life;
 
     // skip_reinforce=true should NOT change half_life
-    db.recall(&vec_seed(1.0, 8), 1, None, None, false, false, None, true, None, None, None).unwrap();
+    db.recall(
+        &vec_seed(1.0, 8),
+        1,
+        None,
+        None,
+        false,
+        false,
+        None,
+        true,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     let after_skip = db.get(&rid).unwrap().unwrap().half_life;
     assert!((original_hl - after_skip).abs() < 1e-10);
 
     // skip_reinforce=false SHOULD change half_life
-    db.recall(&vec_seed(1.0, 8), 1, None, None, false, false, None, false, None, None, None).unwrap();
+    db.recall(
+        &vec_seed(1.0, 8),
+        1,
+        None,
+        None,
+        false,
+        false,
+        None,
+        false,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     let after_reinforce = db.get(&rid).unwrap().unwrap().half_life;
     assert!(after_reinforce > original_hl);
 }
@@ -1754,42 +3059,128 @@ fn test_reinforce_mutates_but_skip_does_not() {
 #[test]
 fn test_graph_expansion_off_no_graph_results() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let r1 = db.record("Alice discussed plan", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
-    let r2 = db.record("Bob reviewed code", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &vec_seed(5.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    let r1 = db
+        .record(
+            "Alice discussed plan",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let r2 = db
+        .record(
+            "Bob reviewed code",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(5.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
     db.relate("Alice", "Bob", "knows", 1.0).unwrap();
     db.link_memory_entity(&r1, "Alice").unwrap();
     db.link_memory_entity(&r2, "Bob").unwrap();
 
     // expand_entities=false: no graph_proximity should be set
-    let results = db.recall(&vec_seed(1.0, 8), 10, None, None, false, false,
-        Some("Alice"), false, None, None, None).unwrap();
+    let results = db
+        .recall(
+            &vec_seed(1.0, 8),
+            10,
+            None,
+            None,
+            false,
+            false,
+            Some("Alice"),
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
     for r in &results {
-        assert!((r.scores.graph_proximity - 0.0).abs() < 1e-10,
-            "graph_proximity should be 0.0 when expansion is disabled");
+        assert!(
+            (r.scores.graph_proximity - 0.0).abs() < 1e-10,
+            "graph_proximity should be 0.0 when expansion is disabled"
+        );
     }
 }
 
 #[test]
 fn test_graph_expansion_on_boosts_connected_memory() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let r1 = db.record("Alice discussed the project plan", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
-    let r2 = db.record("Bob reviewed the code", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &vec_seed(5.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    let r1 = db
+        .record(
+            "Alice discussed the project plan",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let r2 = db
+        .record(
+            "Bob reviewed the code",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(5.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
     db.relate("Alice", "Bob", "knows", 1.0).unwrap();
     db.link_memory_entity(&r1, "Alice").unwrap();
     db.link_memory_entity(&r2, "Bob").unwrap();
 
     // expand_entities=true with query mentioning "Alice"
-    let results = db.recall(&vec_seed(1.0, 8), 10, None, None, false, true,
-        Some("What is Alice working on?"), true, None, None, None).unwrap();
+    let results = db
+        .recall(
+            &vec_seed(1.0, 8),
+            10,
+            None,
+            None,
+            false,
+            true,
+            Some("What is Alice working on?"),
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
     // The Alice memory should have graph_proximity > 0
     let alice_result = results.iter().find(|r| r.rid == r1).unwrap();
-    assert!(alice_result.scores.graph_proximity > 0.0,
-        "Alice memory should have graph proximity when expansion is on");
+    assert!(
+        alice_result.scores.graph_proximity > 0.0,
+        "Alice memory should have graph proximity when expansion is on"
+    );
 }
 
 #[test]
@@ -1799,21 +3190,59 @@ fn test_backfill_uses_word_boundaries() {
     db.relate("data", "pipeline", "part_of", 1.0).unwrap();
 
     // Create memories: one with "data" as a word, one with "database" (contains "data")
-    let r1 = db.record("the data is clean", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
-    let r2 = db.record("the database is fast", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &vec_seed(2.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    let r1 = db
+        .record(
+            "the data is clean",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let r2 = db
+        .record(
+            "the database is fast",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     let _count = db.backfill_memory_entities().unwrap();
 
     // Check: r1 should be linked to "data", r2 should NOT
-    let linked_to_data: Vec<String> = db.conn().prepare(
-        "SELECT memory_rid FROM memory_entities WHERE entity_name = 'data'"
-    ).unwrap().query_map([], |row| row.get(0)).unwrap()
-        .collect::<std::result::Result<Vec<_>, _>>().unwrap();
+    let linked_to_data: Vec<String> = db
+        .conn()
+        .prepare("SELECT memory_rid FROM memory_entities WHERE entity_name = 'data'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
 
-    assert!(linked_to_data.contains(&r1), "memory with 'data' as word should be linked");
-    assert!(!linked_to_data.contains(&r2), "memory with 'database' should NOT be linked (word boundary)");
+    assert!(
+        linked_to_data.contains(&r1),
+        "memory with 'data' as word should be linked"
+    );
+    assert!(
+        !linked_to_data.contains(&r2),
+        "memory with 'database' should NOT be linked (word boundary)"
+    );
 }
 
 #[test]
@@ -1821,16 +3250,49 @@ fn test_recall_scores_bounded() {
     // All recall scores should be non-negative and reasonably bounded
     let db = YantrikDB::new(":memory:", 8).unwrap();
     for i in 0..10 {
-        db.record(&format!("memory {i}"), "episodic",
-            (i as f64) * 0.1, // importance 0..0.9
+        db.record(
+            &format!("memory {i}"),
+            "episodic",
+            (i as f64) * 0.1,         // importance 0..0.9
             ((i as f64) - 5.0) * 0.2, // valence -1.0..0.8
-            604800.0, &empty_meta(), &vec_seed(i as f32, 8), "default", 0.8, "general", "user", None).unwrap();
+            604800.0,
+            &empty_meta(),
+            &vec_seed(i as f32, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
     }
 
-    let results = db.recall(&vec_seed(5.0, 8), 10, None, None, false, false, None, true, None, None, None).unwrap();
+    let results = db
+        .recall(
+            &vec_seed(5.0, 8),
+            10,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
     for r in &results {
-        assert!(r.score >= 0.0, "score should be non-negative, got {}", r.score);
-        assert!(r.score < 5.0, "score should be reasonably bounded, got {}", r.score);
+        assert!(
+            r.score >= 0.0,
+            "score should be non-negative, got {}",
+            r.score
+        );
+        assert!(
+            r.score < 5.0,
+            "score should be reasonably bounded, got {}",
+            r.score
+        );
         assert!(r.scores.similarity >= -1.0 && r.scores.similarity <= 1.0);
         assert!(r.scores.decay >= 0.0 && r.scores.decay <= 1.0);
         assert!(r.scores.recency >= 0.0 && r.scores.recency <= 1.0);
@@ -1840,28 +3302,50 @@ fn test_recall_scores_bounded() {
 #[test]
 fn test_link_memory_entity_idempotent() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let rid = db.record("test", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "test",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
     db.relate("Alice", "Bob", "knows", 1.0).unwrap();
 
     // Link twice — should not error or create duplicates
     db.link_memory_entity(&rid, "Alice").unwrap();
     db.link_memory_entity(&rid, "Alice").unwrap();
 
-    let count: i64 = db.conn().query_row(
-        "SELECT COUNT(*) FROM memory_entities WHERE memory_rid = ?1 AND entity_name = 'Alice'",
-        params![rid], |r| r.get(0),
-    ).unwrap();
+    let count: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memory_entities WHERE memory_rid = ?1 AND entity_name = 'Alice'",
+            params![rid],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(count, 1);
 }
 
 #[test]
 fn test_schema_v5_has_memory_entities() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let count: i64 = db.conn().query_row(
-        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memory_entities'",
-        [], |r| r.get(0),
-    ).unwrap();
+    let count: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='memory_entities'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(count, 1);
 }
 
@@ -1870,18 +3354,55 @@ fn test_recall_top_k_respected_with_graph_expansion() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     // Create a web of interconnected memories
     for i in 0..20 {
-        let rid = db.record(&format!("memory about topic {i}"), "episodic",
-            0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(i as f32, 8), "default", 0.8, "general", "user", None).unwrap();
+        let rid = db
+            .record(
+                &format!("memory about topic {i}"),
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &vec_seed(i as f32, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
         let entity = format!("Entity{i}");
-        db.relate(&entity, &format!("Entity{}", (i + 1) % 20), "related_to", 1.0).unwrap();
+        db.relate(
+            &entity,
+            &format!("Entity{}", (i + 1) % 20),
+            "related_to",
+            1.0,
+        )
+        .unwrap();
         db.link_memory_entity(&rid, &entity).unwrap();
     }
 
-    let results = db.recall(&vec_seed(0.0, 8), 5, None, None, false, true,
-        Some("Entity0 topic"), true, None, None, None).unwrap();
+    let results = db
+        .recall(
+            &vec_seed(0.0, 8),
+            5,
+            None,
+            None,
+            false,
+            true,
+            Some("Entity0 topic"),
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
     // top_k=5 must be respected even with graph expansion
-    assert!(results.len() <= 5, "results should not exceed top_k=5, got {}", results.len());
+    assert!(
+        results.len() <= 5,
+        "results should not exceed top_k=5, got {}",
+        results.len()
+    );
 }
 
 // ── V4: Storage & Performance tests ──
@@ -1889,8 +3410,22 @@ fn test_recall_top_k_respected_with_graph_expansion() {
 #[test]
 fn test_schema_v6_has_storage_tier() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let rid = db.record("tier test", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "tier test",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
     let mem = db.get(&rid).unwrap().unwrap();
     assert_eq!(mem.storage_tier, "hot");
 }
@@ -1902,32 +3437,59 @@ fn test_schema_v7_has_fts5_and_join_tables() {
     // FTS5 virtual table exists — insert then search.
     // Must record BEFORE acquiring conn — db.record() internally takes
     // conn, so holding conn across record() would self-deadlock.
-    let _rid = db.record("The quick brown fox jumps over the lazy dog", "episodic",
-        0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    let _rid = db
+        .record(
+            "The quick brown fox jumps over the lazy dog",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     let conn = db.conn();
 
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH 'quick brown'",
-        [], |row| row.get(0),
-    ).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH 'quick brown'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(count, 1, "FTS5 should index inserted memory");
 
     // Join tables exist
-    let _: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM trigger_source_rids", [], |row| row.get(0),
-    ).unwrap();
-    let _: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM pattern_evidence", [], |row| row.get(0),
-    ).unwrap();
-    let _: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM pattern_entities", [], |row| row.get(0),
-    ).unwrap();
+    let _: i64 = conn
+        .query_row("SELECT COUNT(*) FROM trigger_source_rids", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let _: i64 = conn
+        .query_row("SELECT COUNT(*) FROM pattern_evidence", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
+    let _: i64 = conn
+        .query_row("SELECT COUNT(*) FROM pattern_entities", [], |row| {
+            row.get(0)
+        })
+        .unwrap();
 
     // Schema version is current
-    let ver: String = conn.query_row(
-        "SELECT value FROM meta WHERE key = 'schema_version'", [], |row| row.get(0),
-    ).unwrap();
+    let ver: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(ver, crate::schema::SCHEMA_VERSION.to_string());
 }
 
@@ -1935,12 +3497,51 @@ fn test_schema_v7_has_fts5_and_join_tables() {
 fn test_fts5_search_multiple_memories() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
 
-    db.record("Alice loves Rust programming", "semantic",
-        0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
-    db.record("Bob prefers Python scripting", "semantic",
-        0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(0.5, 8), "default", 0.8, "general", "user", None).unwrap();
-    db.record("Alice and Bob work on Rust projects", "episodic",
-        0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(0.3, 8), "default", 0.8, "general", "user", None).unwrap();
+    db.record(
+        "Alice loves Rust programming",
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.record(
+        "Bob prefers Python scripting",
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(0.5, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.record(
+        "Alice and Bob work on Rust projects",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(0.3, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
 
     // Acquire conn AFTER records are written — db.record() internally takes
     // conn, and holding it across db.record() would self-deadlock (the
@@ -1948,32 +3549,55 @@ fn test_fts5_search_multiple_memories() {
     let conn = db.conn();
 
     // Search for "Rust" should match 2 memories
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH 'rust'",
-        [], |row| row.get(0),
-    ).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH 'rust'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(count, 2, "FTS5 should find 2 memories containing 'rust'");
 
     // Search for "Alice" should match 2 memories
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH 'alice'",
-        [], |row| row.get(0),
-    ).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH 'alice'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(count, 2, "FTS5 should find 2 memories containing 'alice'");
 
     // Search for "Python" should match 1
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH 'python'",
-        [], |row| row.get(0),
-    ).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH 'python'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(count, 1);
 }
 
 #[test]
 fn test_archive_memory() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let rid = db.record("to archive", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "to archive",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     // Archive
     assert!(db.archive(&rid).unwrap());
@@ -1981,8 +3605,25 @@ fn test_archive_memory() {
     assert_eq!(mem.storage_tier, "cold");
 
     // Verify removed from vec_memories (recall should not find it)
-    let results = db.recall(&vec_seed(1.0, 8), 10, None, None, false, false, None, true, None, None, None).unwrap();
-    assert!(results.iter().all(|r| r.rid != rid), "archived memory should not appear in recall");
+    let results = db
+        .recall(
+            &vec_seed(1.0, 8),
+            10,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    assert!(
+        results.iter().all(|r| r.rid != rid),
+        "archived memory should not appear in recall"
+    );
 
     // Stats should show archived
     assert_eq!(db.stats(None).unwrap().archived_memories, 1);
@@ -1992,8 +3633,22 @@ fn test_archive_memory() {
 fn test_hydrate_memory() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let emb = vec_seed(2.0, 8);
-    let rid = db.record("to hydrate", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "to hydrate",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     // Archive then hydrate
     db.archive(&rid).unwrap();
@@ -2002,8 +3657,15 @@ fn test_hydrate_memory() {
     assert_eq!(mem.storage_tier, "hot");
 
     // Should be back in recall
-    let results = db.recall(&emb, 10, None, None, false, false, None, true, None, None, None).unwrap();
-    assert!(results.iter().any(|r| r.rid == rid), "hydrated memory should appear in recall");
+    let results = db
+        .recall(
+            &emb, 10, None, None, false, false, None, true, None, None, None,
+        )
+        .unwrap();
+    assert!(
+        results.iter().any(|r| r.rid == rid),
+        "hydrated memory should appear in recall"
+    );
 
     // Stats
     assert_eq!(db.stats(None).unwrap().archived_memories, 0);
@@ -2012,8 +3674,22 @@ fn test_hydrate_memory() {
 #[test]
 fn test_archive_idempotent() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let rid = db.record("idempotent", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "idempotent",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     assert!(db.archive(&rid).unwrap());
     assert!(!db.archive(&rid).unwrap()); // Already cold
@@ -2022,20 +3698,22 @@ fn test_archive_idempotent() {
 #[test]
 fn test_record_batch() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let inputs: Vec<RecordInput> = (0..10).map(|i| RecordInput {
-        text: format!("batch memory {i}"),
-        memory_type: "episodic".to_string(),
-        importance: 0.5,
-        valence: 0.0,
-        half_life: 604800.0,
-        metadata: serde_json::json!({}),
-        embedding: vec_seed(i as f32, 8),
-        namespace: "default".to_string(),
-        certainty: 0.8,
-        domain: "general".to_string(),
-        source: "user".to_string(),
-        emotional_state: None,
-    }).collect();
+    let inputs: Vec<RecordInput> = (0..10)
+        .map(|i| RecordInput {
+            text: format!("batch memory {i}"),
+            memory_type: "episodic".to_string(),
+            importance: 0.5,
+            valence: 0.0,
+            half_life: 604800.0,
+            metadata: serde_json::json!({}),
+            embedding: vec_seed(i as f32, 8),
+            namespace: "default".to_string(),
+            certainty: 0.8,
+            domain: "general".to_string(),
+            source: "user".to_string(),
+            emotional_state: None,
+        })
+        .collect();
 
     let rids = db.record_batch(&inputs).unwrap();
     assert_eq!(rids.len(), 10);
@@ -2059,8 +3737,21 @@ fn test_evict() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     // Seed 20 memories
     for i in 0..20 {
-        db.record(&format!("evict mem {i}"), "episodic", 0.5, 0.0, 604800.0,
-            &empty_meta(), &vec_seed(i as f32, 8), "default", 0.8, "general", "user", None).unwrap();
+        db.record(
+            &format!("evict mem {i}"),
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(i as f32, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
     }
     assert_eq!(db.stats(None).unwrap().active_memories, 20);
 
@@ -2072,9 +3763,26 @@ fn test_evict() {
     assert_eq!(stats.archived_memories, 10);
 
     // Recall should only find hot memories
-    let results = db.recall(&vec_seed(0.0, 8), 20, None, None, false, false, None, true, None, None, None).unwrap();
+    let results = db
+        .recall(
+            &vec_seed(0.0, 8),
+            20,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
     for r in &results {
-        assert!(!archived.contains(&r.rid), "evicted memory should not be in recall");
+        assert!(
+            !archived.contains(&r.rid),
+            "evicted memory should not be in recall"
+        );
     }
 }
 
@@ -2082,8 +3790,21 @@ fn test_evict() {
 fn test_evict_no_action_when_under_limit() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     for i in 0..5 {
-        db.record(&format!("small db {i}"), "episodic", 0.5, 0.0, 604800.0,
-            &empty_meta(), &vec_seed(i as f32, 8), "default", 0.8, "general", "user", None).unwrap();
+        db.record(
+            &format!("small db {i}"),
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(i as f32, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
     }
     let archived = db.evict(10).unwrap();
     assert!(archived.is_empty());
@@ -2093,36 +3814,88 @@ fn test_evict_no_action_when_under_limit() {
 fn test_query_builder_basic() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     for i in 0..10 {
-        db.record(&format!("memory {i}"), "episodic", 0.5, 0.0, 604800.0,
-            &empty_meta(), &vec_seed(i as f32, 8), "default", 0.8, "general", "user", None).unwrap();
+        db.record(
+            &format!("memory {i}"),
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(i as f32, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
     }
 
-    let results = db.query(
-        RecallQuery::new(vec_seed(0.0, 8))
-            .top_k(3)
-            .skip_reinforce()
-    ).unwrap();
+    let results = db
+        .query(RecallQuery::new(vec_seed(0.0, 8)).top_k(3).skip_reinforce())
+        .unwrap();
     assert_eq!(results.len(), 3);
 }
 
 #[test]
 fn test_query_builder_with_filters() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    db.record("episodic one", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &vec_seed(1.0, 8), "work", 0.8, "general", "user", None).unwrap();
-    db.record("semantic one", "semantic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &vec_seed(2.0, 8), "work", 0.8, "general", "user", None).unwrap();
-    db.record("episodic two", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &vec_seed(3.0, 8), "personal", 0.8, "general", "user", None).unwrap();
+    db.record(
+        "episodic one",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "work",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.record(
+        "semantic one",
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(2.0, 8),
+        "work",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.record(
+        "episodic two",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(3.0, 8),
+        "personal",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
 
     // Filter by type + namespace
-    let results = db.query(
-        RecallQuery::new(vec_seed(1.0, 8))
-            .top_k(10)
-            .memory_type("episodic")
-            .namespace("work")
-            .skip_reinforce()
-    ).unwrap();
+    let results = db
+        .query(
+            RecallQuery::new(vec_seed(1.0, 8))
+                .top_k(10)
+                .memory_type("episodic")
+                .namespace("work")
+                .skip_reinforce(),
+        )
+        .unwrap();
     assert_eq!(results.len(), 1);
     assert_eq!(results[0].memory_type, "episodic");
     assert_eq!(results[0].namespace, "work");
@@ -2131,14 +3904,25 @@ fn test_query_builder_with_filters() {
 #[test]
 fn test_query_builder_contributions_present() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    db.record("test mem", "episodic", 0.8, 0.5, 604800.0,
-        &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    db.record(
+        "test mem",
+        "episodic",
+        0.8,
+        0.5,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
 
-    let results = db.query(
-        RecallQuery::new(vec_seed(1.0, 8))
-            .top_k(1)
-            .skip_reinforce()
-    ).unwrap();
+    let results = db
+        .query(RecallQuery::new(vec_seed(1.0, 8)).top_k(1).skip_reinforce())
+        .unwrap();
     assert_eq!(results.len(), 1);
 
     let r = &results[0];
@@ -2168,7 +3952,22 @@ fn test_encrypted_record_and_get() {
 
     let meta = serde_json::json!({"source": "test", "topic": "encryption"});
     let emb = vec_seed(1.0, 8);
-    let rid = db.record("secret memory", "episodic", 0.8, 0.3, 604800.0, &meta, &emb, "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "secret memory",
+            "episodic",
+            0.8,
+            0.3,
+            604800.0,
+            &meta,
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     let mem = db.get(&rid).unwrap().unwrap();
     assert_eq!(mem.text, "secret memory");
@@ -2183,20 +3982,46 @@ fn test_encrypted_data_not_plaintext_in_db() {
     let key = test_key();
     let db = YantrikDB::new_encrypted(":memory:", 8, &key).unwrap();
 
-    let rid = db.record("secret memory", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "secret memory",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     // Read raw stored text — should NOT be plaintext
-    let stored_text: String = db.conn().query_row(
-        "SELECT text FROM memories WHERE rid = ?1",
-        params![rid], |r| r.get(0),
-    ).unwrap();
-    assert_ne!(stored_text, "secret memory", "text should be encrypted in DB");
+    let stored_text: String = db
+        .conn()
+        .query_row(
+            "SELECT text FROM memories WHERE rid = ?1",
+            params![rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_ne!(
+        stored_text, "secret memory",
+        "text should be encrypted in DB"
+    );
 
     // Read raw stored metadata — should NOT be plaintext
-    let stored_meta: String = db.conn().query_row(
-        "SELECT metadata FROM memories WHERE rid = ?1",
-        params![rid], |r| r.get(0),
-    ).unwrap();
+    let stored_meta: String = db
+        .conn()
+        .query_row(
+            "SELECT metadata FROM memories WHERE rid = ?1",
+            params![rid],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_ne!(stored_meta, "{}", "metadata should be encrypted in DB");
 }
 
@@ -2205,11 +4030,67 @@ fn test_encrypted_recall_roundtrip() {
     let key = test_key();
     let db = YantrikDB::new_encrypted(":memory:", 8, &key).unwrap();
 
-    db.record("cat sat on mat", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
-    db.record("dog ran in park", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(5.0, 8), "default", 0.8, "general", "user", None).unwrap();
-    db.record("cats love warmth", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.1, 8), "default", 0.8, "general", "user", None).unwrap();
+    db.record(
+        "cat sat on mat",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.record(
+        "dog ran in park",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(5.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.record(
+        "cats love warmth",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.1, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
 
-    let results = db.recall(&vec_seed(1.0, 8), 2, None, None, false, false, None, true, None, None, None).unwrap();
+    let results = db
+        .recall(
+            &vec_seed(1.0, 8),
+            2,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
     assert_eq!(results.len(), 2);
     // Text should be decrypted in results
     assert!(results.iter().any(|r| r.text.contains("cat")));
@@ -2220,20 +4101,22 @@ fn test_encrypted_record_batch() {
     let key = test_key();
     let db = YantrikDB::new_encrypted(":memory:", 8, &key).unwrap();
 
-    let inputs: Vec<RecordInput> = (0..5).map(|i| RecordInput {
-        text: format!("encrypted batch {i}"),
-        memory_type: "episodic".to_string(),
-        importance: 0.5,
-        valence: 0.0,
-        half_life: 604800.0,
-        metadata: serde_json::json!({"idx": i}),
-        embedding: vec_seed(i as f32, 8),
-        namespace: "default".to_string(),
-        certainty: 0.8,
-        domain: "general".to_string(),
-        source: "user".to_string(),
-        emotional_state: None,
-    }).collect();
+    let inputs: Vec<RecordInput> = (0..5)
+        .map(|i| RecordInput {
+            text: format!("encrypted batch {i}"),
+            memory_type: "episodic".to_string(),
+            importance: 0.5,
+            valence: 0.0,
+            half_life: 604800.0,
+            metadata: serde_json::json!({"idx": i}),
+            embedding: vec_seed(i as f32, 8),
+            namespace: "default".to_string(),
+            certainty: 0.8,
+            domain: "general".to_string(),
+            source: "user".to_string(),
+            emotional_state: None,
+        })
+        .collect();
 
     let rids = db.record_batch(&inputs).unwrap();
     assert_eq!(rids.len(), 5);
@@ -2251,7 +4134,22 @@ fn test_encrypted_archive_hydrate() {
     let db = YantrikDB::new_encrypted(":memory:", 8, &key).unwrap();
 
     let emb = vec_seed(2.0, 8);
-    let rid = db.record("to archive encrypted", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "to archive encrypted",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     // Archive (encrypt compressed)
     assert!(db.archive(&rid).unwrap());
@@ -2265,7 +4163,11 @@ fn test_encrypted_archive_hydrate() {
     assert_eq!(mem.storage_tier, "hot");
 
     // Should be findable in recall after hydration
-    let results = db.recall(&emb, 10, None, None, false, false, None, true, None, None, None).unwrap();
+    let results = db
+        .recall(
+            &emb, 10, None, None, false, false, None, true, None, None, None,
+        )
+        .unwrap();
     assert!(results.iter().any(|r| r.rid == rid));
 }
 
@@ -2274,8 +4176,32 @@ fn test_encrypted_correct_memory() {
     let key = test_key();
     let db = YantrikDB::new_encrypted(":memory:", 8, &key).unwrap();
 
-    let rid = db.record("color is green", "semantic", 0.7, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
-    let result = db.correct(&rid, "color is blue", Some(0.9), None, &vec_seed(2.0, 8), Some("fixed")).unwrap();
+    let rid = db
+        .record(
+            "color is green",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let result = db
+        .correct(
+            &rid,
+            "color is blue",
+            Some(0.9),
+            None,
+            &vec_seed(2.0, 8),
+            Some("fixed"),
+        )
+        .unwrap();
 
     assert!(result.original_tombstoned);
     let corrected = db.get(&result.corrected_rid).unwrap().unwrap();
@@ -2289,15 +4215,34 @@ fn test_unencrypted_db_unaffected() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     assert!(!db.is_encrypted());
 
-    let rid = db.record("plaintext memory", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "plaintext memory",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
     let mem = db.get(&rid).unwrap().unwrap();
     assert_eq!(mem.text, "plaintext memory");
 
     // Text should be stored as plaintext
-    let stored_text: String = db.conn().query_row(
-        "SELECT text FROM memories WHERE rid = ?1",
-        params![rid], |r| r.get(0),
-    ).unwrap();
+    let stored_text: String = db
+        .conn()
+        .query_row(
+            "SELECT text FROM memories WHERE rid = ?1",
+            params![rid],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(stored_text, "plaintext memory");
 }
 
@@ -2311,7 +4256,21 @@ fn test_encrypted_db_wrong_key_fails() {
     let key_a = test_key();
     {
         let db = YantrikDB::new_encrypted(path, 8, &key_a).unwrap();
-        db.record("secret", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+        db.record(
+            "secret",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
         db.close().unwrap();
     }
 
@@ -2319,7 +4278,10 @@ fn test_encrypted_db_wrong_key_fails() {
     let mut key_b = [0u8; 32];
     key_b[0] = 99;
     let result = YantrikDB::new_encrypted(path, 8, &key_b);
-    assert!(result.is_err(), "Opening encrypted DB with wrong key should fail");
+    assert!(
+        result.is_err(),
+        "Opening encrypted DB with wrong key should fail"
+    );
 }
 
 #[test]
@@ -2332,7 +4294,22 @@ fn test_encrypted_db_reopen_same_key() {
     let rid;
     {
         let db = YantrikDB::new_encrypted(path, 8, &key).unwrap();
-        rid = db.record("persistent secret", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+        rid = db
+            .record(
+                "persistent secret",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &vec_seed(1.0, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
         db.close().unwrap();
     }
 
@@ -2353,13 +4330,30 @@ fn test_open_encrypted_db_without_key_fails() {
     let key = test_key();
     {
         let db = YantrikDB::new_encrypted(path, 8, &key).unwrap();
-        db.record("data", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+        db.record(
+            "data",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
         db.close().unwrap();
     }
 
     // Open without key — should detect encryption_enabled and refuse
     let result = YantrikDB::new(path, 8);
-    assert!(result.is_err(), "Opening encrypted DB without key should fail");
+    assert!(
+        result.is_err(),
+        "Opening encrypted DB without key should fail"
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -2370,15 +4364,30 @@ fn test_open_encrypted_db_without_key_fails() {
 fn test_record_with_dimensions() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let emb = vec_seed(1.0, 8);
-    let rid = db.record(
-        "meeting notes for Q1 planning", "episodic", 0.7, 0.2, 604800.0,
-        &empty_meta(), &emb, "default",
-        0.9, "work", "document", Some("joy"),
-    ).unwrap();
+    let rid = db
+        .record(
+            "meeting notes for Q1 planning",
+            "episodic",
+            0.7,
+            0.2,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.9,
+            "work",
+            "document",
+            Some("joy"),
+        )
+        .unwrap();
 
     let mem = db.get(&rid).unwrap().unwrap();
     assert_eq!(mem.text, "meeting notes for Q1 planning");
-    assert!((mem.certainty - 0.9).abs() < 1e-6, "certainty should be 0.9, got {}", mem.certainty);
+    assert!(
+        (mem.certainty - 0.9).abs() < 1e-6,
+        "certainty should be 0.9, got {}",
+        mem.certainty
+    );
     assert_eq!(mem.domain, "work");
     assert_eq!(mem.source, "document");
     assert_eq!(mem.emotional_state, Some("joy".to_string()));
@@ -2389,16 +4398,74 @@ fn test_domain_filter() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
 
     // Record 3 memories: 2 in "work" domain, 1 in "health"
-    db.record("work task A", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "work", "user", None).unwrap();
-    db.record("health checkup", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(2.0, 8), "default", 0.8, "health", "user", None).unwrap();
-    db.record("work task B", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(3.0, 8), "default", 0.8, "work", "user", None).unwrap();
+    db.record(
+        "work task A",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "work",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.record(
+        "health checkup",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(2.0, 8),
+        "default",
+        0.8,
+        "health",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.record(
+        "work task B",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(3.0, 8),
+        "default",
+        0.8,
+        "work",
+        "user",
+        None,
+    )
+    .unwrap();
 
     // Recall with domain="work" should return only the 2 work memories
-    let results = db.recall(
-        &vec_seed(1.0, 8), 10, None, None, false, false, None, true, None,
-        Some("work"), None,
-    ).unwrap();
-    assert_eq!(results.len(), 2, "Expected 2 work-domain memories, got {}", results.len());
+    let results = db
+        .recall(
+            &vec_seed(1.0, 8),
+            10,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            Some("work"),
+            None,
+        )
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        2,
+        "Expected 2 work-domain memories, got {}",
+        results.len()
+    );
     for r in &results {
         assert_eq!(r.domain, "work");
     }
@@ -2409,16 +4476,74 @@ fn test_source_filter() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
 
     // Record 3 memories: 2 from "user" source, 1 from "system"
-    db.record("user input A", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
-    db.record("system log", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(2.0, 8), "default", 0.8, "general", "system", None).unwrap();
-    db.record("user input B", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(3.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    db.record(
+        "user input A",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.record(
+        "system log",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(2.0, 8),
+        "default",
+        0.8,
+        "general",
+        "system",
+        None,
+    )
+    .unwrap();
+    db.record(
+        "user input B",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(3.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
 
     // Recall with source="user" should return only the 2 user-sourced memories
-    let results = db.recall(
-        &vec_seed(1.0, 8), 10, None, None, false, false, None, true, None,
-        None, Some("user"),
-    ).unwrap();
-    assert_eq!(results.len(), 2, "Expected 2 user-source memories, got {}", results.len());
+    let results = db
+        .recall(
+            &vec_seed(1.0, 8),
+            10,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            Some("user"),
+        )
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        2,
+        "Expected 2 user-source memories, got {}",
+        results.len()
+    );
     for r in &results {
         assert_eq!(r.source, "user");
     }
@@ -2429,26 +4554,114 @@ fn test_domain_and_source_combined_filter() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
 
     // Record 4 memories with different domain/source combinations
-    db.record("work from user", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "work", "user", None).unwrap();
-    db.record("work from system", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(2.0, 8), "default", 0.8, "work", "system", None).unwrap();
-    db.record("health from user", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(3.0, 8), "default", 0.8, "health", "user", None).unwrap();
-    db.record("health from system", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(4.0, 8), "default", 0.8, "health", "system", None).unwrap();
+    db.record(
+        "work from user",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "work",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.record(
+        "work from system",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(2.0, 8),
+        "default",
+        0.8,
+        "work",
+        "system",
+        None,
+    )
+    .unwrap();
+    db.record(
+        "health from user",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(3.0, 8),
+        "default",
+        0.8,
+        "health",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.record(
+        "health from system",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(4.0, 8),
+        "default",
+        0.8,
+        "health",
+        "system",
+        None,
+    )
+    .unwrap();
 
     // Filter by domain="work" AND source="user" — should return only 1
-    let results = db.recall(
-        &vec_seed(1.0, 8), 10, None, None, false, false, None, true, None,
-        Some("work"), Some("user"),
-    ).unwrap();
-    assert_eq!(results.len(), 1, "Expected 1 work+user memory, got {}", results.len());
+    let results = db
+        .recall(
+            &vec_seed(1.0, 8),
+            10,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            Some("work"),
+            Some("user"),
+        )
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        1,
+        "Expected 1 work+user memory, got {}",
+        results.len()
+    );
     assert_eq!(results[0].domain, "work");
     assert_eq!(results[0].source, "user");
 
     // Filter by domain="health" AND source="system" — should return only 1
-    let results = db.recall(
-        &vec_seed(4.0, 8), 10, None, None, false, false, None, true, None,
-        Some("health"), Some("system"),
-    ).unwrap();
-    assert_eq!(results.len(), 1, "Expected 1 health+system memory, got {}", results.len());
+    let results = db
+        .recall(
+            &vec_seed(4.0, 8),
+            10,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            Some("health"),
+            Some("system"),
+        )
+        .unwrap();
+    assert_eq!(
+        results.len(),
+        1,
+        "Expected 1 health+system memory, got {}",
+        results.len()
+    );
     assert_eq!(results[0].domain, "health");
     assert_eq!(results[0].source, "system");
 }
@@ -2456,21 +4669,47 @@ fn test_domain_and_source_combined_filter() {
 #[test]
 fn test_dimensions_preserved_on_correct() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let rid = db.record(
-        "the sky is green", "semantic", 0.7, 0.0, 604800.0,
-        &empty_meta(), &vec_seed(1.0, 8), "default",
-        0.6, "work", "document", Some("surprise"),
-    ).unwrap();
+    let rid = db
+        .record(
+            "the sky is green",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.6,
+            "work",
+            "document",
+            Some("surprise"),
+        )
+        .unwrap();
 
     // Correct the memory text
-    let result = db.correct(&rid, "the sky is blue", Some(0.9), None, &vec_seed(2.0, 8), Some("color fix")).unwrap();
+    let result = db
+        .correct(
+            &rid,
+            "the sky is blue",
+            Some(0.9),
+            None,
+            &vec_seed(2.0, 8),
+            Some("color fix"),
+        )
+        .unwrap();
     assert!(result.original_tombstoned);
 
     // Verify the corrected memory preserves domain, source, and emotional_state
     let corrected = db.get(&result.corrected_rid).unwrap().unwrap();
     assert_eq!(corrected.text, "the sky is blue");
-    assert_eq!(corrected.domain, "work", "domain should be preserved after correction");
-    assert_eq!(corrected.source, "document", "source should be preserved after correction");
+    assert_eq!(
+        corrected.domain, "work",
+        "domain should be preserved after correction"
+    );
+    assert_eq!(
+        corrected.source, "document",
+        "source should be preserved after correction"
+    );
 }
 
 #[test]
@@ -2553,18 +4792,54 @@ fn test_batch_record_with_dimensions() {
 #[test]
 fn test_recall_with_response_structure() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    db.record("memory for recall response", "episodic", 0.7, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    db.record(
+        "memory for recall response",
+        "episodic",
+        0.7,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
 
-    let response = db.recall_with_response(
-        &vec_seed(1.0, 8), 5, None, None, false, false, None, true, None, None, None,
-    ).unwrap();
+    let response = db
+        .recall_with_response(
+            &vec_seed(1.0, 8),
+            5,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
     // RecallResponse must have all four fields
     assert!(!response.results.is_empty(), "results should not be empty");
-    assert!(response.confidence >= 0.0 && response.confidence <= 1.0, "confidence should be in [0, 1], got {}", response.confidence);
+    assert!(
+        response.confidence >= 0.0 && response.confidence <= 1.0,
+        "confidence should be in [0, 1], got {}",
+        response.confidence
+    );
     // retrieval_summary should have sources_used and candidate_count
-    assert!(!response.retrieval_summary.sources_used.is_empty(), "sources_used should not be empty");
-    assert!(response.retrieval_summary.candidate_count > 0, "candidate_count should be > 0");
+    assert!(
+        !response.retrieval_summary.sources_used.is_empty(),
+        "sources_used should not be empty"
+    );
+    assert!(
+        response.retrieval_summary.candidate_count > 0,
+        "candidate_count should be > 0"
+    );
     // hints is a Vec, may be empty or not
     let _ = response.hints; // just ensure the field exists and is accessible
 }
@@ -2577,16 +4852,29 @@ fn test_high_confidence_no_hints() {
     // Record several memories with similar embeddings so density is high
     for i in 0..5 {
         db.record(
-            &format!("exact match memory {}", i), "episodic", 0.9, 0.0, 604800.0,
-            &empty_meta(), &emb, "default", 0.8, "general", "user", None,
-        ).unwrap();
+            &format!("exact match memory {}", i),
+            "episodic",
+            0.9,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
     }
 
     // Recall with exact same embedding and top_k matching the number of stored memories.
     // This maximises the density signal (results.len / top_k = 1.0).
-    let response = db.recall_with_response(
-        &emb, 5, None, None, false, false, None, true, None, None, None,
-    ).unwrap();
+    let response = db
+        .recall_with_response(
+            &emb, 5, None, None, false, false, None, true, None, None, None,
+        )
+        .unwrap();
 
     assert!(!response.results.is_empty());
     // With 5 exact matches and top_k=5: signal_density=1.0, signal_sim~1.0
@@ -2609,17 +4897,41 @@ fn test_low_confidence_has_hints() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
 
     // Record a memory with one embedding
-    db.record("something about cats", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+    db.record(
+        "something about cats",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
 
     // Recall with a very different embedding and a short query_text.
     // The short query_text (<=3 words) triggers the "specificity" hint, and
     // low density (1 result / 10 top_k) keeps confidence below 0.60.
     let far_emb = vec_seed(100.0, 8);
-    let response = db.recall_with_response(
-        &far_emb, 10, None, None, false, false,
-        Some("cats"),  // short query_text triggers specificity hint
-        true, None, None, None,
-    ).unwrap();
+    let response = db
+        .recall_with_response(
+            &far_emb,
+            10,
+            None,
+            None,
+            false,
+            false,
+            Some("cats"), // short query_text triggers specificity hint
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
     // With only 1 memory, top_k=10, no entities, no gap — confidence should be low
     assert!(
@@ -2640,29 +4952,62 @@ fn test_recall_refine_excludes_originals() {
     // Record 5 memories with distinct embeddings
     let mut rids = Vec::new();
     for i in 1..=5 {
-        let rid = db.record(
-            &format!("memory number {}", i), "episodic", 0.5, 0.0, 604800.0,
-            &empty_meta(), &vec_seed(i as f32, 8), "default", 0.8, "general", "user", None,
-        ).unwrap();
+        let rid = db
+            .record(
+                &format!("memory number {}", i),
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &vec_seed(i as f32, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
         rids.push(rid);
     }
 
     // First recall: get top 2
-    let first_results = db.recall(
-        &vec_seed(1.0, 8), 2, None, None, false, false, None, true, None, None, None,
-    ).unwrap();
+    let first_results = db
+        .recall(
+            &vec_seed(1.0, 8),
+            2,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
     assert_eq!(first_results.len(), 2);
     let original_rids: Vec<String> = first_results.iter().map(|r| r.rid.clone()).collect();
 
     // Refine: exclude the first 2 RIDs
-    let refined = db.recall_refine(
-        &vec_seed(1.0, 8),      // original query
-        &vec_seed(2.0, 8),      // refinement embedding
-        &original_rids.iter().map(|s| s.as_str()).collect::<Vec<&str>>()
-            .iter().map(|s| s.to_string()).collect::<Vec<String>>(),
-        3,                       // top_k
-        None, None, None,
-    ).unwrap();
+    let refined = db
+        .recall_refine(
+            &vec_seed(1.0, 8), // original query
+            &vec_seed(2.0, 8), // refinement embedding
+            &original_rids
+                .iter()
+                .map(|s| s.as_str())
+                .collect::<Vec<&str>>()
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>(),
+            3, // top_k
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
     // Refined results should not contain any of the original RIDs
     for result in &refined.results {
@@ -2681,19 +5026,34 @@ fn test_recall_refine_returns_response() {
     // Record a few memories
     for i in 1..=4 {
         db.record(
-            &format!("refine test {}", i), "episodic", 0.5, 0.0, 604800.0,
-            &empty_meta(), &vec_seed(i as f32, 8), "default", 0.8, "general", "user", None,
-        ).unwrap();
+            &format!("refine test {}", i),
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(i as f32, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
     }
 
     let exclude: Vec<String> = vec![];
-    let response = db.recall_refine(
-        &vec_seed(1.0, 8),
-        &vec_seed(2.0, 8),
-        &exclude,
-        3,
-        None, None, None,
-    ).unwrap();
+    let response = db
+        .recall_refine(
+            &vec_seed(1.0, 8),
+            &vec_seed(2.0, 8),
+            &exclude,
+            3,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
     // Verify RecallResponse structure
     assert!(response.confidence >= 0.0 && response.confidence <= 1.0);
@@ -2710,23 +5070,54 @@ fn test_retrieval_summary_fields() {
     // Record some memories so recall has candidates
     for i in 1..=3 {
         db.record(
-            &format!("summary test {}", i), "episodic", 0.5, 0.0, 604800.0,
-            &empty_meta(), &vec_seed(i as f32, 8), "default", 0.8, "general", "user", None,
-        ).unwrap();
+            &format!("summary test {}", i),
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(i as f32, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
     }
 
-    let response = db.recall_with_response(
-        &vec_seed(1.0, 8), 5, None, None, false, false, None, true, None, None, None,
-    ).unwrap();
+    let response = db
+        .recall_with_response(
+            &vec_seed(1.0, 8),
+            5,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
     let summary = &response.retrieval_summary;
-    assert!(summary.top_similarity > 0.0, "top_similarity should be > 0, got {}", summary.top_similarity);
+    assert!(
+        summary.top_similarity > 0.0,
+        "top_similarity should be > 0, got {}",
+        summary.top_similarity
+    );
     assert!(
         summary.sources_used.contains(&"hnsw".to_string()),
         "sources_used should contain 'hnsw', got {:?}",
         summary.sources_used,
     );
-    assert!(summary.candidate_count > 0, "candidate_count should be > 0, got {}", summary.candidate_count);
+    assert!(
+        summary.candidate_count > 0,
+        "candidate_count should be > 0, got {}",
+        summary.candidate_count
+    );
 }
 
 // ════════════════════════════════════════════════════════════════════════════════
@@ -2737,17 +5128,43 @@ fn test_retrieval_summary_fields() {
 fn test_recall_feedback_stores() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let emb = vec_seed(1.0, 8);
-    let rid = db.record("feedback target", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "feedback target",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     // Submit feedback
-    db.recall_feedback(Some("test query"), Some(&emb), &rid, "relevant", Some(0.85), Some(1)).unwrap();
+    db.recall_feedback(
+        Some("test query"),
+        Some(&emb),
+        &rid,
+        "relevant",
+        Some(0.85),
+        Some(1),
+    )
+    .unwrap();
 
     // Verify the row exists in recall_feedback table
-    let count: i64 = db.conn().query_row(
-        "SELECT COUNT(*) FROM recall_feedback WHERE rid = ?1 AND feedback = 'relevant'",
-        params![rid],
-        |row| row.get(0),
-    ).unwrap();
+    let count: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM recall_feedback WHERE rid = ?1 AND feedback = 'relevant'",
+            params![rid],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(count, 1, "Expected 1 feedback row, got {}", count);
 }
 
@@ -2756,11 +5173,31 @@ fn test_learned_weights_default() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let weights = db.load_learned_weights().unwrap();
 
-    assert!((weights.w_sim - 0.50).abs() < 1e-6, "w_sim default should be 0.50, got {}", weights.w_sim);
-    assert!((weights.w_decay - 0.20).abs() < 1e-6, "w_decay default should be 0.20, got {}", weights.w_decay);
-    assert!((weights.w_recency - 0.30).abs() < 1e-6, "w_recency default should be 0.30, got {}", weights.w_recency);
-    assert!((weights.gate_tau - 0.25).abs() < 1e-6, "gate_tau default should be 0.25, got {}", weights.gate_tau);
-    assert!((weights.alpha_imp - 0.80).abs() < 1e-6, "alpha_imp default should be 0.80, got {}", weights.alpha_imp);
+    assert!(
+        (weights.w_sim - 0.50).abs() < 1e-6,
+        "w_sim default should be 0.50, got {}",
+        weights.w_sim
+    );
+    assert!(
+        (weights.w_decay - 0.20).abs() < 1e-6,
+        "w_decay default should be 0.20, got {}",
+        weights.w_decay
+    );
+    assert!(
+        (weights.w_recency - 0.30).abs() < 1e-6,
+        "w_recency default should be 0.30, got {}",
+        weights.w_recency
+    );
+    assert!(
+        (weights.gate_tau - 0.25).abs() < 1e-6,
+        "gate_tau default should be 0.25, got {}",
+        weights.gate_tau
+    );
+    assert!(
+        (weights.alpha_imp - 0.80).abs() < 1e-6,
+        "alpha_imp default should be 0.80, got {}",
+        weights.alpha_imp
+    );
     assert_eq!(weights.generation, 0, "generation should start at 0");
 }
 
@@ -2768,12 +5205,35 @@ fn test_learned_weights_default() {
 fn test_feedback_count_increments() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let emb = vec_seed(1.0, 8);
-    let rid = db.record("counting feedback", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "counting feedback",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     // Submit 5 feedback items
     for i in 0..5 {
         let feedback_type = if i % 2 == 0 { "relevant" } else { "irrelevant" };
-        db.recall_feedback(Some("query"), Some(&emb), &rid, feedback_type, Some(0.5), Some(i + 1)).unwrap();
+        db.recall_feedback(
+            Some("query"),
+            Some(&emb),
+            &rid,
+            feedback_type,
+            Some(0.5),
+            Some(i + 1),
+        )
+        .unwrap();
     }
 
     let count = db.feedback_count().unwrap();
@@ -2784,53 +5244,126 @@ fn test_feedback_count_increments() {
 fn test_learning_skipped_under_threshold() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let emb = vec_seed(1.0, 8);
-    let rid = db.record("learning test", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "learning test",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     // Submit fewer than 20 feedback items (the MIN_FEEDBACK threshold)
     for i in 0..10 {
-        db.recall_feedback(Some("q"), Some(&emb), &rid, "relevant", Some(0.5), Some(i)).unwrap();
+        db.recall_feedback(Some("q"), Some(&emb), &rid, "relevant", Some(0.5), Some(i))
+            .unwrap();
     }
 
     // run_learning should return false (skipped due to insufficient feedback)
     let result = db.run_learning().unwrap();
-    assert!(!result, "run_learning should return false with < 20 feedback items");
+    assert!(
+        !result,
+        "run_learning should return false with < 20 feedback items"
+    );
 }
 
 #[test]
 fn test_learning_runs_with_enough_feedback() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let emb = vec_seed(1.0, 8);
-    let rid = db.record("learning convergence", "episodic", 0.7, 0.0, 604800.0, &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "learning convergence",
+            "episodic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     // Submit 25 feedback items (above the MIN_FEEDBACK=20 threshold)
     for i in 0..25 {
         let feedback_type = if i % 3 == 0 { "irrelevant" } else { "relevant" };
         let score = 0.3 + (i as f64 * 0.02);
-        db.recall_feedback(Some("learning query"), Some(&emb), &rid, feedback_type, Some(score), Some(i + 1)).unwrap();
+        db.recall_feedback(
+            Some("learning query"),
+            Some(&emb),
+            &rid,
+            feedback_type,
+            Some(score),
+            Some(i + 1),
+        )
+        .unwrap();
     }
 
     // run_learning should complete without error (may return true or false
     // depending on whether the optimizer found an improvement)
     let result = db.run_learning();
-    assert!(result.is_ok(), "run_learning should not error with 25 feedback items: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "run_learning should not error with 25 feedback items: {:?}",
+        result.err()
+    );
 }
 
 #[test]
 fn test_think_includes_learning() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let emb = vec_seed(1.0, 8);
-    let rid = db.record("think learning integration", "episodic", 0.7, 0.0, 604800.0, &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "think learning integration",
+            "episodic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     // Submit 25+ feedback items so learning has enough data
     for i in 0..26 {
         let feedback_type = if i % 4 == 0 { "irrelevant" } else { "relevant" };
-        db.recall_feedback(Some("think query"), Some(&emb), &rid, feedback_type, Some(0.5), Some(i + 1)).unwrap();
+        db.recall_feedback(
+            Some("think query"),
+            Some(&emb),
+            &rid,
+            feedback_type,
+            Some(0.5),
+            Some(i + 1),
+        )
+        .unwrap();
     }
 
     // think() internally calls run_learning() — it should not panic or error
     let config = ThinkConfig::default();
     let result = db.think(&config);
-    assert!(result.is_ok(), "think() should not error when learning has enough feedback: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "think() should not error when learning has enough feedback: {:?}",
+        result.err()
+    );
 }
 
 // ── Contradiction Classifier Tests ──
@@ -2846,10 +5379,36 @@ fn test_conflict_entity_substitution_org() {
     db.relate("User", "Meta", "works_at", 1.0).unwrap();
 
     // Record memories mentioning these entities
-    db.record("User works at Google as a senior engineer", "episodic", 0.7, 0.0, 604800.0,
-              &empty_meta(), &emb1, "default", 0.8, "work", "user", None).unwrap();
-    db.record("User works at Meta as a senior engineer", "episodic", 0.7, 0.0, 604800.0,
-              &empty_meta(), &emb2, "default", 0.8, "work", "user", None).unwrap();
+    db.record(
+        "User works at Google as a senior engineer",
+        "episodic",
+        0.7,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &emb1,
+        "default",
+        0.8,
+        "work",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.record(
+        "User works at Meta as a senior engineer",
+        "episodic",
+        0.7,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &emb2,
+        "default",
+        0.8,
+        "work",
+        "user",
+        None,
+    )
+    .unwrap();
 
     // Scan for conflicts — the entity substitution classifier should detect
     // that Google and Meta are both organizations, making this an identity_fact conflict
@@ -2870,16 +5429,43 @@ fn test_conflict_entity_substitution_tech() {
     // Record memories with similar embeddings but different tech choices
     let emb1 = vec_seed(2.0, 384);
     let emb2 = vec_seed(2.05, 384);
-    db.record("The API service uses PostgreSQL for the database layer", "semantic", 0.8, 0.0, 604800.0,
-              &empty_meta(), &emb1, "default", 0.8, "architecture", "user", None).unwrap();
-    db.record("The API service uses MySQL for the database layer", "semantic", 0.8, 0.0, 604800.0,
-              &empty_meta(), &emb2, "default", 0.8, "architecture", "user", None).unwrap();
+    db.record(
+        "The API service uses PostgreSQL for the database layer",
+        "semantic",
+        0.8,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &emb1,
+        "default",
+        0.8,
+        "architecture",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.record(
+        "The API service uses MySQL for the database layer",
+        "semantic",
+        0.8,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &emb2,
+        "default",
+        0.8,
+        "architecture",
+        "user",
+        None,
+    )
+    .unwrap();
 
     let conflicts = crate::conflict::scan_conflicts(&db).unwrap();
     // Should detect entity-based semantic conflict with tech substitution
-    let entity_based = conflicts.iter().filter(|c| {
-        c.detection_reason.contains("contradict")
-    }).collect::<Vec<_>>();
+    let entity_based = conflicts
+        .iter()
+        .filter(|c| c.detection_reason.contains("contradict"))
+        .collect::<Vec<_>>();
     // May or may not detect depending on similarity threshold — just ensure no panics
     assert!(conflicts.len() >= 0);
 }
@@ -2915,14 +5501,42 @@ fn test_relate_infers_infrastructure() {
 fn test_recall_with_response_has_certainty_reasons() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let emb = vec_seed(1.0, 8);
-    db.record("Important architecture decision about microservices", "semantic", 0.8, 0.0, 604800.0,
-              &empty_meta(), &emb, "default", 0.8, "work", "user", None).unwrap();
+    db.record(
+        "Important architecture decision about microservices",
+        "semantic",
+        0.8,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &emb,
+        "default",
+        0.8,
+        "work",
+        "user",
+        None,
+    )
+    .unwrap();
 
-    let response = db.recall_with_response(
-        &emb, 5, None, None, false, false, Some("architecture decision"), false, None, None, None,
-    ).unwrap();
+    let response = db
+        .recall_with_response(
+            &emb,
+            5,
+            None,
+            None,
+            false,
+            false,
+            Some("architecture decision"),
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
-    assert!(!response.certainty_reasons.is_empty(), "should have certainty reasons");
+    assert!(
+        !response.certainty_reasons.is_empty(),
+        "should have certainty reasons"
+    );
     assert!(response.confidence >= 0.0 && response.confidence <= 1.0);
 }
 
@@ -2931,13 +5545,33 @@ fn test_recall_empty_db_low_confidence() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let emb = vec_seed(1.0, 8);
 
-    let response = db.recall_with_response(
-        &emb, 5, None, None, false, false, Some("anything"), false, None, None, None,
-    ).unwrap();
+    let response = db
+        .recall_with_response(
+            &emb,
+            5,
+            None,
+            None,
+            false,
+            false,
+            Some("anything"),
+            false,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
-    assert!(response.confidence < 0.5, "empty DB should have low confidence");
-    assert!(response.certainty_reasons.iter().any(|r| r.contains("No") || r.contains("Sparse") || r.contains("Weak")),
-            "should explain low confidence");
+    assert!(
+        response.confidence < 0.5,
+        "empty DB should have low confidence"
+    );
+    assert!(
+        response
+            .certainty_reasons
+            .iter()
+            .any(|r| r.contains("No") || r.contains("Sparse") || r.contains("Weak")),
+        "should explain low confidence"
+    );
 }
 
 // ── Relationship Depth Tests ──
@@ -2951,10 +5585,36 @@ fn test_relationship_depth_basic() {
     db.relate("Alice", "Bob", "knows", 1.0).unwrap();
     db.relate("Alice", "ProjectX", "works_on", 1.0).unwrap();
 
-    db.record("Alice presented the quarterly report", "episodic", 0.5, 0.3, 604800.0,
-              &empty_meta(), &emb, "default", 0.8, "work", "user", None).unwrap();
-    db.record("Alice prefers async communication", "semantic", 0.6, 0.0, 604800.0,
-              &empty_meta(), &vec_seed(2.0, 8), "default", 0.8, "preference", "user", None).unwrap();
+    db.record(
+        "Alice presented the quarterly report",
+        "episodic",
+        0.5,
+        0.3,
+        604800.0,
+        &empty_meta(),
+        &emb,
+        "default",
+        0.8,
+        "work",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.record(
+        "Alice prefers async communication",
+        "semantic",
+        0.6,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(2.0, 8),
+        "default",
+        0.8,
+        "preference",
+        "user",
+        None,
+    )
+    .unwrap();
     // Phase 4.3: drain the post-record materialization queue so the
     // memory_entities link is visible to relationship_depth.
     db.apply_pending_ops_once(100).unwrap();
@@ -2962,8 +5622,14 @@ fn test_relationship_depth_basic() {
     let depth = db.relationship_depth("Alice", None).unwrap();
     assert_eq!(depth.entity, "Alice");
     assert_eq!(depth.entity_type, "person");
-    assert!(depth.connection_count >= 2, "Alice connected to Bob and ProjectX");
-    assert!(depth.memories_mentioning >= 2, "at least 2 memories mention Alice");
+    assert!(
+        depth.connection_count >= 2,
+        "Alice connected to Bob and ProjectX"
+    );
+    assert!(
+        depth.memories_mentioning >= 2,
+        "at least 2 memories mention Alice"
+    );
     assert!(depth.depth_score > 0.0, "should have positive depth score");
     assert!(depth.depth_score <= 1.0);
 }
@@ -2982,10 +5648,16 @@ fn test_record_and_surface_procedural() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let emb = vec_seed(3.0, 8);
 
-    let rid = db.record_procedural(
-        "Use Agent tool with Explore subtype for architectural questions in this codebase",
-        &emb, "work", "code search", 0.8, "default",
-    ).unwrap();
+    let rid = db
+        .record_procedural(
+            "Use Agent tool with Explore subtype for architectural questions in this codebase",
+            &emb,
+            "work",
+            "code search",
+            0.8,
+            "default",
+        )
+        .unwrap();
 
     // Verify it was stored as procedural type
     let mem = db.get(&rid).unwrap().unwrap();
@@ -2993,7 +5665,9 @@ fn test_record_and_surface_procedural() {
     assert!((mem.importance - 0.8).abs() < 0.01);
 
     // Surface it with a similar query
-    let results = db.surface_procedural(&emb, Some("how to search code"), Some("work"), 5, None).unwrap();
+    let results = db
+        .surface_procedural(&emb, Some("how to search code"), Some("work"), 5, None)
+        .unwrap();
     assert!(!results.is_empty(), "should surface the procedural memory");
     assert_eq!(results[0].memory_type, "procedural");
 }
@@ -3003,10 +5677,16 @@ fn test_reinforce_procedural() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let emb = vec_seed(4.0, 8);
 
-    let rid = db.record_procedural(
-        "Always run tests before pushing",
-        &emb, "work", "git workflow", 0.5, "default",
-    ).unwrap();
+    let rid = db
+        .record_procedural(
+            "Always run tests before pushing",
+            &emb,
+            "work",
+            "git workflow",
+            0.5,
+            "default",
+        )
+        .unwrap();
 
     // Reinforce with high outcome
     let reinforced = db.reinforce_procedural(&rid, 1.0).unwrap();
@@ -3014,18 +5694,48 @@ fn test_reinforce_procedural() {
 
     // Check importance increased
     let mem = db.get(&rid).unwrap().unwrap();
-    assert!(mem.importance > 0.5, "importance should increase after positive reinforcement");
+    assert!(
+        mem.importance > 0.5,
+        "importance should increase after positive reinforcement"
+    );
 }
 
 #[test]
 fn test_procedural_stats() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    db.record_procedural("proc 1", &vec_seed(1.0, 8), "work", "task A", 0.7, "default").unwrap();
-    db.record_procedural("proc 2", &vec_seed(2.0, 8), "work", "task B", 0.9, "default").unwrap();
-    db.record_procedural("proc 3", &vec_seed(3.0, 8), "health", "exercise", 0.5, "default").unwrap();
+    db.record_procedural(
+        "proc 1",
+        &vec_seed(1.0, 8),
+        "work",
+        "task A",
+        0.7,
+        "default",
+    )
+    .unwrap();
+    db.record_procedural(
+        "proc 2",
+        &vec_seed(2.0, 8),
+        "work",
+        "task B",
+        0.9,
+        "default",
+    )
+    .unwrap();
+    db.record_procedural(
+        "proc 3",
+        &vec_seed(3.0, 8),
+        "health",
+        "exercise",
+        0.5,
+        "default",
+    )
+    .unwrap();
 
     let stats = db.procedural_stats(None).unwrap();
-    assert!(stats.len() >= 2, "should have stats for work and health domains");
+    assert!(
+        stats.len() >= 2,
+        "should have stats for work and health domains"
+    );
     let work_stats = stats.iter().find(|(d, _, _)| d == "work");
     assert!(work_stats.is_some());
     let (_, count, _) = work_stats.unwrap();
@@ -3040,10 +5750,27 @@ fn test_session_awareness_trigger() {
     let emb = vec_seed(1.0, 8);
 
     // Start and end a session
-    let sid = db.session_start("default", "claude", &serde_json::json!({})).unwrap();
-    db.record("Worked on battle testing the MCP server", "episodic", 0.7, 0.5, 604800.0,
-              &empty_meta(), &emb, "default", 0.8, "work", "user", None).unwrap();
-    let _summary = db.session_end(&sid, Some("Battle tested MCP server v0.2.8")).unwrap();
+    let sid = db
+        .session_start("default", "claude", &serde_json::json!({}))
+        .unwrap();
+    db.record(
+        "Worked on battle testing the MCP server",
+        "episodic",
+        0.7,
+        0.5,
+        604800.0,
+        &empty_meta(),
+        &emb,
+        "default",
+        0.8,
+        "work",
+        "user",
+        None,
+    )
+    .unwrap();
+    let _summary = db
+        .session_end(&sid, Some("Battle tested MCP server v0.2.8"))
+        .unwrap();
 
     // Simulate time passing by backdating the session
     db.conn().execute(
@@ -3061,11 +5788,19 @@ fn test_session_awareness_trigger() {
     };
     let result = db.think(&config).unwrap();
 
-    let session_triggers: Vec<_> = result.triggers.iter()
+    let session_triggers: Vec<_> = result
+        .triggers
+        .iter()
         .filter(|t| t.trigger_type == "session_awareness")
         .collect();
-    assert!(!session_triggers.is_empty(), "should generate session awareness trigger after 3-day gap");
-    assert!(session_triggers[0].reason.contains("hours"), "reason should mention time gap");
+    assert!(
+        !session_triggers.is_empty(),
+        "should generate session awareness trigger after 3-day gap"
+    );
+    assert!(
+        session_triggers[0].reason.contains("hours"),
+        "reason should mention time gap"
+    );
 }
 
 // ──────────────────────────────────────────────────────────────────
@@ -3075,30 +5810,34 @@ fn test_session_awareness_trigger() {
 // ──────────────────────────────────────────────────────────────────
 
 use crate::engine::moves::{
-    ClaimRef, RecordMoveEventInput, SideEffectRef,
-    adversarial_status, observability, posthoc_outcome,
+    adversarial_status, observability, posthoc_outcome, ClaimRef, RecordMoveEventInput,
+    SideEffectRef,
 };
 
-fn mk_move_input(
-    move_type: &str,
-    inputs: &[&str],
-    outputs: &[&str],
-) -> RecordMoveEventInput {
+fn mk_move_input(move_type: &str, inputs: &[&str], outputs: &[&str]) -> RecordMoveEventInput {
     RecordMoveEventInput {
         move_type: move_type.to_string(),
         operator_version: "v1".to_string(),
         context_regime: None,
         observability: observability::OBSERVED.to_string(),
-        inputs: inputs.iter().enumerate().map(|(i, c)| ClaimRef {
-            claim_id: c.to_string(),
-            role: "input".to_string(),
-            ordinal: i as i64,
-        }).collect(),
-        outputs: outputs.iter().enumerate().map(|(i, c)| ClaimRef {
-            claim_id: c.to_string(),
-            role: "output".to_string(),
-            ordinal: i as i64,
-        }).collect(),
+        inputs: inputs
+            .iter()
+            .enumerate()
+            .map(|(i, c)| ClaimRef {
+                claim_id: c.to_string(),
+                role: "input".to_string(),
+                ordinal: i as i64,
+            })
+            .collect(),
+        outputs: outputs
+            .iter()
+            .enumerate()
+            .map(|(i, c)| ClaimRef {
+                claim_id: c.to_string(),
+                role: "output".to_string(),
+                ordinal: i as i64,
+            })
+            .collect(),
         ..Default::default()
     }
 }
@@ -3108,16 +5847,24 @@ fn test_m5b_schema_v23_tables_present() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let conn = db.conn();
     for table in [
-        "move_events", "move_input_edge", "move_output_edge", "move_side_effect_edge",
-        "move_correction_event", "move_adversarial_instance",
-        "move_type_registry", "inference_basis_registry",
-        "move_composition_rule", "move_type_profile",
+        "move_events",
+        "move_input_edge",
+        "move_output_edge",
+        "move_side_effect_edge",
+        "move_correction_event",
+        "move_adversarial_instance",
+        "move_type_registry",
+        "inference_basis_registry",
+        "move_composition_rule",
+        "move_type_profile",
     ] {
-        let exists: bool = conn.query_row(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
-            rusqlite::params![table],
-            |_| Ok(true),
-        ).unwrap_or(false);
+        let exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1",
+                rusqlite::params![table],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
         assert!(exists, "V23 table {} must exist", table);
     }
 }
@@ -3128,25 +5875,42 @@ fn test_m5b_registries_seeded_at_bootstrap() {
     let conn = db.conn();
     // move_type_registry should have all 13 seed entries (12 from M5a +
     // aggregate_back added in M8 to complete the decomposition axiom pair).
-    let mt_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM move_type_registry WHERE status = 'active'",
-        [], |r| r.get(0),
-    ).unwrap();
+    let mt_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM move_type_registry WHERE status = 'active'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(mt_count, 13, "move_type_registry seed vocabulary count");
 
     // inference_basis_registry should have all 5 seed entries.
-    let ib_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM inference_basis_registry WHERE status = 'active'",
-        [], |r| r.get(0),
-    ).unwrap();
-    assert_eq!(ib_count, 5, "inference_basis_registry seed vocabulary count");
+    let ib_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM inference_basis_registry WHERE status = 'active'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        ib_count, 5,
+        "inference_basis_registry seed vocabulary count"
+    );
 
     // Spot-check that core vocabulary is present.
-    for mt in ["analogy", "decomposition", "source_audit", "hypothesis_generation"] {
-        let found: bool = conn.query_row(
-            "SELECT 1 FROM move_type_registry WHERE move_type = ?1",
-            rusqlite::params![mt], |_| Ok(true),
-        ).unwrap_or(false);
+    for mt in [
+        "analogy",
+        "decomposition",
+        "source_audit",
+        "hypothesis_generation",
+    ] {
+        let found: bool = conn
+            .query_row(
+                "SELECT 1 FROM move_type_registry WHERE move_type = ?1",
+                rusqlite::params![mt],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
         assert!(found, "seed vocabulary missing: {}", mt);
     }
 }
@@ -3154,9 +5918,13 @@ fn test_m5b_registries_seeded_at_bootstrap() {
 #[test]
 fn test_m5b_record_move_event_basic() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let move_id = db.record_move_event(
-        mk_move_input("analogy", &["claim_a", "claim_b"], &["claim_c"])
-    ).unwrap();
+    let move_id = db
+        .record_move_event(mk_move_input(
+            "analogy",
+            &["claim_a", "claim_b"],
+            &["claim_c"],
+        ))
+        .unwrap();
     assert!(!move_id.is_empty());
 
     // Read it back.
@@ -3186,8 +5954,14 @@ fn test_m5b_record_move_event_with_side_effects() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let mut inp = mk_move_input("quarantine", &["claim_suspect"], &[]);
     inp.side_effects = vec![
-        SideEffectRef { claim_id: "downstream_a".into(), effect_kind: "quarantine".into() },
-        SideEffectRef { claim_id: "downstream_b".into(), effect_kind: "quarantine".into() },
+        SideEffectRef {
+            claim_id: "downstream_a".into(),
+            effect_kind: "quarantine".into(),
+        },
+        SideEffectRef {
+            claim_id: "downstream_b".into(),
+            effect_kind: "quarantine".into(),
+        },
     ];
     let move_id = db.record_move_event(inp).unwrap();
     let side_effects = db.get_move_side_effects(&move_id).unwrap();
@@ -3198,8 +5972,12 @@ fn test_m5b_record_move_event_with_side_effects() {
 fn test_m5b_list_moves_consuming_and_producing() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     // Two moves, both consume claim_x; one produces claim_y.
-    let m1 = db.record_move_event(mk_move_input("analogy", &["claim_x"], &["claim_y"])).unwrap();
-    let m2 = db.record_move_event(mk_move_input("decomposition", &["claim_x"], &["claim_z"])).unwrap();
+    let m1 = db
+        .record_move_event(mk_move_input("analogy", &["claim_x"], &["claim_y"]))
+        .unwrap();
+    let m2 = db
+        .record_move_event(mk_move_input("decomposition", &["claim_x"], &["claim_z"]))
+        .unwrap();
 
     let consumers = db.list_moves_consuming_claim("claim_x", 10).unwrap();
     assert_eq!(consumers.len(), 2);
@@ -3220,7 +5998,10 @@ fn test_m5b_record_move_rejects_invalid_observability_fields() {
     let mut inp = mk_move_input("analogy", &["a"], &["b"]);
     inp.inference_confidence = Some(0.7);
     let r = db.record_move_event(inp);
-    assert!(r.is_err(), "should reject inference_confidence on non-inferred");
+    assert!(
+        r.is_err(),
+        "should reject inference_confidence on non-inferred"
+    );
 
     // observed + inference_basis non-empty → reject
     let mut inp2 = mk_move_input("analogy", &["a"], &["b"]);
@@ -3240,21 +6021,26 @@ fn test_m5b_inferred_move_carries_confidence() {
     let ev = db.get_move_event(&move_id).unwrap().unwrap();
     assert_eq!(ev.observability, "inferred");
     assert_eq!(ev.inference_confidence, Some(0.8));
-    assert!(ev.inference_basis_json.as_deref().unwrap_or("").contains("structural_pattern_match"));
+    assert!(ev
+        .inference_basis_json
+        .as_deref()
+        .unwrap_or("")
+        .contains("structural_pattern_match"));
 }
 
 #[test]
 fn test_m5b_record_move_outcome_narrow_mutation() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let move_id = db.record_move_event(
-        mk_move_input("analogy", &["a"], &["b"])
-    ).unwrap();
+    let move_id = db
+        .record_move_event(mk_move_input("analogy", &["a"], &["b"]))
+        .unwrap();
 
     db.record_move_outcome(
         &move_id,
         posthoc_outcome::CORROBORATED,
         Some(serde_json::json!({"predictive_gain": 0.3}).to_string()),
-    ).unwrap();
+    )
+    .unwrap();
 
     let ev = db.get_move_event(&move_id).unwrap().unwrap();
     assert_eq!(ev.posthoc_outcome.as_deref(), Some("corroborated"));
@@ -3263,13 +6049,18 @@ fn test_m5b_record_move_outcome_narrow_mutation() {
 
     // Second call on the same move should reject (already set).
     let second = db.record_move_outcome(&move_id, posthoc_outcome::RETRACTED, None);
-    assert!(second.is_err(), "should reject overwriting an existing posthoc_outcome");
+    assert!(
+        second.is_err(),
+        "should reject overwriting an existing posthoc_outcome"
+    );
 }
 
 #[test]
 fn test_m5b_record_move_outcome_rejects_invalid_label() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    let move_id = db
+        .record_move_event(mk_move_input("analogy", &["a"], &["b"]))
+        .unwrap();
     let r = db.record_move_outcome(&move_id, "totally_made_up", None);
     assert!(r.is_err());
 }
@@ -3277,25 +6068,35 @@ fn test_m5b_record_move_outcome_rejects_invalid_label() {
 #[test]
 fn test_m5b_correction_never_mutates_original() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    let move_id = db
+        .record_move_event(mk_move_input("analogy", &["a"], &["b"]))
+        .unwrap();
 
-    let correction_id = db.submit_move_correction(
-        &move_id,
-        Some("decomposition".to_string()),
-        None,
-        None,
-        "initial categorization was wrong".to_string(),
-        "curator_alice".to_string(),
-    ).unwrap();
+    let correction_id = db
+        .submit_move_correction(
+            &move_id,
+            Some("decomposition".to_string()),
+            None,
+            None,
+            "initial categorization was wrong".to_string(),
+            "curator_alice".to_string(),
+        )
+        .unwrap();
     assert!(!correction_id.is_empty());
 
     // The original row still has move_type='analogy'.
     let original = db.get_move_event(&move_id).unwrap().unwrap();
-    assert_eq!(original.move_type, "analogy", "original row must not be mutated");
+    assert_eq!(
+        original.move_type, "analogy",
+        "original row must not be mutated"
+    );
 
     // Canonical view reflects the correction.
     let canonical = db.get_move_event_canonical(&move_id).unwrap().unwrap();
-    assert_eq!(canonical.move_type, "decomposition", "canonical reflects latest correction");
+    assert_eq!(
+        canonical.move_type, "decomposition",
+        "canonical reflects latest correction"
+    );
 
     // Correction is readable via list_move_corrections.
     let corrections = db.list_move_corrections(&move_id).unwrap();
@@ -3306,37 +6107,64 @@ fn test_m5b_correction_never_mutates_original() {
 #[test]
 fn test_m5b_correction_latest_wins() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    let move_id = db
+        .record_move_event(mk_move_input("analogy", &["a"], &["b"]))
+        .unwrap();
 
     db.submit_move_correction(
-        &move_id, Some("decomposition".into()), None, None,
-        "first correction".into(), "curator_a".into(),
-    ).unwrap();
+        &move_id,
+        Some("decomposition".into()),
+        None,
+        None,
+        "first correction".into(),
+        "curator_a".into(),
+    )
+    .unwrap();
     // Need non-zero time delta between corrections for deterministic ordering.
     std::thread::sleep(std::time::Duration::from_millis(10));
     db.submit_move_correction(
-        &move_id, Some("ladder_up".into()), None, None,
-        "second correction, first was also wrong".into(), "curator_b".into(),
-    ).unwrap();
+        &move_id,
+        Some("ladder_up".into()),
+        None,
+        None,
+        "second correction, first was also wrong".into(),
+        "curator_b".into(),
+    )
+    .unwrap();
 
     let canonical = db.get_move_event_canonical(&move_id).unwrap().unwrap();
-    assert_eq!(canonical.move_type, "ladder_up", "latest correction should win");
+    assert_eq!(
+        canonical.move_type, "ladder_up",
+        "latest correction should win"
+    );
 }
 
 #[test]
 fn test_m5b_correction_rejects_empty_reason_and_no_fields() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    let move_id = db
+        .record_move_event(mk_move_input("analogy", &["a"], &["b"]))
+        .unwrap();
 
     // No fields changed → reject.
     let r = db.submit_move_correction(
-        &move_id, None, None, None, "reason".into(), "curator".into(),
+        &move_id,
+        None,
+        None,
+        None,
+        "reason".into(),
+        "curator".into(),
     );
     assert!(r.is_err());
 
     // Empty reason → reject.
     let r2 = db.submit_move_correction(
-        &move_id, Some("decomposition".into()), None, None, "".into(), "curator".into(),
+        &move_id,
+        Some("decomposition".into()),
+        None,
+        None,
+        "".into(),
+        "curator".into(),
     );
     assert!(r2.is_err());
 }
@@ -3344,14 +6172,18 @@ fn test_m5b_correction_rejects_empty_reason_and_no_fields() {
 #[test]
 fn test_m5b_adversarial_candidate_lifecycle() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    let move_id = db
+        .record_move_event(mk_move_input("analogy", &["a"], &["b"]))
+        .unwrap();
 
     // Create candidate from an automatic signal.
-    let instance_id = db.create_adversarial_candidate(
-        &move_id,
-        "contradiction",
-        Some("output claim was retracted within 24h".to_string()),
-    ).unwrap();
+    let instance_id = db
+        .create_adversarial_candidate(
+            &move_id,
+            "contradiction",
+            Some("output claim was retracted within 24h".to_string()),
+        )
+        .unwrap();
     let candidate = db.get_adversarial_instance(&instance_id).unwrap().unwrap();
     assert_eq!(candidate.status, "candidate");
     assert_eq!(candidate.discovered_via, "contradiction");
@@ -3372,56 +6204,60 @@ fn test_m5b_adversarial_candidate_lifecycle() {
     assert_eq!(confirmed.status, "confirmed");
     assert!(confirmed.generalized_lesson.is_some());
     assert!(confirmed.lesson_scope_json.is_some());
-    assert_eq!(confirmed.curation_actor_id.as_deref(), Some("curator_alice"));
+    assert_eq!(
+        confirmed.curation_actor_id.as_deref(),
+        Some("curator_alice")
+    );
 }
 
 #[test]
 fn test_m5b_adversarial_promote_rejects_non_candidate() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
-    let instance_id = db.create_adversarial_candidate(
-        &move_id, "contradiction", None,
-    ).unwrap();
-    db.promote_adversarial_candidate(
-        &instance_id, "lesson".into(), "{}".into(), "c".into(),
-    ).unwrap();
+    let move_id = db
+        .record_move_event(mk_move_input("analogy", &["a"], &["b"]))
+        .unwrap();
+    let instance_id = db
+        .create_adversarial_candidate(&move_id, "contradiction", None)
+        .unwrap();
+    db.promote_adversarial_candidate(&instance_id, "lesson".into(), "{}".into(), "c".into())
+        .unwrap();
     // Second promotion attempt → reject.
-    let r = db.promote_adversarial_candidate(
-        &instance_id, "lesson2".into(), "{}".into(), "c".into(),
-    );
+    let r =
+        db.promote_adversarial_candidate(&instance_id, "lesson2".into(), "{}".into(), "c".into());
     assert!(r.is_err(), "cannot promote non-candidate");
 }
 
 #[test]
 fn test_m5b_adversarial_promote_requires_non_empty_lesson() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
-    let instance_id = db.create_adversarial_candidate(
-        &move_id, "retraction", None,
-    ).unwrap();
+    let move_id = db
+        .record_move_event(mk_move_input("analogy", &["a"], &["b"]))
+        .unwrap();
+    let instance_id = db
+        .create_adversarial_candidate(&move_id, "retraction", None)
+        .unwrap();
 
     // Empty lesson → reject.
-    let r = db.promote_adversarial_candidate(
-        &instance_id, "".into(), "{}".into(), "c".into(),
-    );
+    let r = db.promote_adversarial_candidate(&instance_id, "".into(), "{}".into(), "c".into());
     assert!(r.is_err());
 
     // Empty scope → reject.
-    let r2 = db.promote_adversarial_candidate(
-        &instance_id, "lesson".into(), "".into(), "c".into(),
-    );
+    let r2 = db.promote_adversarial_candidate(&instance_id, "lesson".into(), "".into(), "c".into());
     assert!(r2.is_err());
 }
 
 #[test]
 fn test_m5b_adversarial_reject_candidate() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
-    let instance_id = db.create_adversarial_candidate(
-        &move_id, "calibration_signal", None,
-    ).unwrap();
+    let move_id = db
+        .record_move_event(mk_move_input("analogy", &["a"], &["b"]))
+        .unwrap();
+    let instance_id = db
+        .create_adversarial_candidate(&move_id, "calibration_signal", None)
+        .unwrap();
 
-    db.reject_adversarial_candidate(&instance_id, "curator_bob".into()).unwrap();
+    db.reject_adversarial_candidate(&instance_id, "curator_bob".into())
+        .unwrap();
     let rejected = db.get_adversarial_instance(&instance_id).unwrap().unwrap();
     assert_eq!(rejected.status, "rejected");
 
@@ -3445,20 +6281,26 @@ fn test_m5b_unknown_move_type_warns_but_does_not_reject() {
     assert!(r.is_ok(), "unknown move_type must not reject");
     let ev = db.get_move_event(&r.unwrap()).unwrap().unwrap();
     assert_eq!(ev.move_type, "entirely_novel_move_type_not_in_registry");
-    assert!(ev.expected_evaluation_horizon_ms.is_none(),
-        "unregistered move_type has no default horizon");
+    assert!(
+        ev.expected_evaluation_horizon_ms.is_none(),
+        "unregistered move_type has no default horizon"
+    );
 }
 
 #[test]
 fn test_m5b_dependencies_stored_as_json() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let m1 = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    let m1 = db
+        .record_move_event(mk_move_input("analogy", &["a"], &["b"]))
+        .unwrap();
     let mut inp = mk_move_input("decomposition", &["b"], &["c"]);
     inp.dependencies = vec![m1.clone()];
     let m2 = db.record_move_event(inp).unwrap();
     let ev = db.get_move_event(&m2).unwrap().unwrap();
-    assert!(ev.dependencies_json.contains(&m1),
-        "dependencies_json should reference the upstream move_id");
+    assert!(
+        ev.dependencies_json.contains(&m1),
+        "dependencies_json should reference the upstream move_id"
+    );
 }
 
 #[test]
@@ -3467,18 +6309,35 @@ fn test_m5b_append_only_preserves_original_after_correction() {
     // separate table. The structural fields on move_events are never
     // touched by submit_move_correction.
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    let move_id = db
+        .record_move_event(mk_move_input("analogy", &["a"], &["b"]))
+        .unwrap();
     db.submit_move_correction(
-        &move_id, Some("decomposition".into()), Some("v2".into()), None,
-        "reason".into(), "curator".into(),
-    ).unwrap();
+        &move_id,
+        Some("decomposition".into()),
+        Some("v2".into()),
+        None,
+        "reason".into(),
+        "curator".into(),
+    )
+    .unwrap();
 
-    let raw: (String, String) = db.conn().query_row(
-        "SELECT move_type, operator_version FROM move_events WHERE move_id = ?1",
-        rusqlite::params![move_id], |r| Ok((r.get(0)?, r.get(1)?)),
-    ).unwrap();
-    assert_eq!(raw.0, "analogy", "move_events row must keep original move_type");
-    assert_eq!(raw.1, "v1", "move_events row must keep original operator_version");
+    let raw: (String, String) = db
+        .conn()
+        .query_row(
+            "SELECT move_type, operator_version FROM move_events WHERE move_id = ?1",
+            rusqlite::params![move_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        raw.0, "analogy",
+        "move_events row must keep original move_type"
+    );
+    assert_eq!(
+        raw.1, "v1",
+        "move_events row must keep original operator_version"
+    );
 }
 
 #[test]
@@ -3500,7 +6359,9 @@ fn test_m5b_edge_tables_have_fk_integrity() {
 #[test]
 fn test_m5b_adversarial_discovered_via_whitelist() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    let move_id = db
+        .record_move_event(mk_move_input("analogy", &["a"], &["b"]))
+        .unwrap();
     let r = db.create_adversarial_candidate(&move_id, "invalid_source", None);
     assert!(r.is_err(), "discovered_via CHECK enforces the whitelist");
 }
@@ -3509,13 +6370,15 @@ fn test_m5b_adversarial_discovered_via_whitelist() {
 fn test_m5b_seed_registries_idempotent() {
     // Calling seed_move_registries a second time should not duplicate or error.
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let before: i64 = db.conn().query_row(
-        "SELECT COUNT(*) FROM move_type_registry", [], |r| r.get(0),
-    ).unwrap();
+    let before: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM move_type_registry", [], |r| r.get(0))
+        .unwrap();
     db.seed_move_registries().unwrap();
-    let after: i64 = db.conn().query_row(
-        "SELECT COUNT(*) FROM move_type_registry", [], |r| r.get(0),
-    ).unwrap();
+    let after: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM move_type_registry", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(before, after, "INSERT OR IGNORE should not add duplicates");
 }
 
@@ -3531,7 +6394,10 @@ fn test_m5b_seed_registries_idempotent() {
 fn test_m8_axiom_registry_has_core_entries() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let axioms = db.composition_axioms();
-    assert!(axioms.len() >= 3, "axiom registry should have at least 3 entries");
+    assert!(
+        axioms.len() >= 3,
+        "axiom registry should have at least 3 entries"
+    );
     let names: Vec<&str> = axioms.iter().map(|a| a.name).collect();
     assert!(names.contains(&"decompose_aggregate_identity"));
     assert!(names.contains(&"negate_analogize_non_commutative"));
@@ -3541,8 +6407,12 @@ fn test_m8_axiom_registry_has_core_entries() {
 #[test]
 fn test_m8_check_composition_non_commutative_match() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let left = db.record_move_event(mk_move_input("negate_and_test", &["a"], &["b"])).unwrap();
-    let right = db.record_move_event(mk_move_input("analogy", &["b"], &["c"])).unwrap();
+    let left = db
+        .record_move_event(mk_move_input("negate_and_test", &["a"], &["b"]))
+        .unwrap();
+    let right = db
+        .record_move_event(mk_move_input("analogy", &["b"], &["c"]))
+        .unwrap();
     let matches = db.check_composition_axioms(&left, &right).unwrap();
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].name, "negate_analogize_non_commutative");
@@ -3551,8 +6421,12 @@ fn test_m8_check_composition_non_commutative_match() {
 #[test]
 fn test_m8_check_composition_approx_identity_match() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let d = db.record_move_event(mk_move_input("decomposition", &["a"], &["b"])).unwrap();
-    let ag = db.record_move_event(mk_move_input("aggregate_back", &["b"], &["c"])).unwrap();
+    let d = db
+        .record_move_event(mk_move_input("decomposition", &["a"], &["b"]))
+        .unwrap();
+    let ag = db
+        .record_move_event(mk_move_input("aggregate_back", &["b"], &["c"]))
+        .unwrap();
     let matches = db.check_composition_axioms(&d, &ag).unwrap();
     assert_eq!(matches.len(), 1);
     assert_eq!(matches[0].name, "decompose_aggregate_identity");
@@ -3561,10 +6435,17 @@ fn test_m8_check_composition_approx_identity_match() {
 #[test]
 fn test_m8_check_composition_no_match() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let m1 = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
-    let m2 = db.record_move_event(mk_move_input("ladder_up", &["b"], &["c"])).unwrap();
+    let m1 = db
+        .record_move_event(mk_move_input("analogy", &["a"], &["b"]))
+        .unwrap();
+    let m2 = db
+        .record_move_event(mk_move_input("ladder_up", &["b"], &["c"]))
+        .unwrap();
     let matches = db.check_composition_axioms(&m1, &m2).unwrap();
-    assert!(matches.is_empty(), "unrelated move pair should match no axiom");
+    assert!(
+        matches.is_empty(),
+        "unrelated move pair should match no axiom"
+    );
 }
 
 #[test]
@@ -3576,26 +6457,51 @@ fn test_m8_source_audit_precondition_violation() {
     seed_proposition(&db, "p_self_audit");
     // Seed final claim of the proposition (self-generated).
     let conn = db.conn();
-    for (cid, self_gen, prop) in [("self_input", 1, None), ("final_out", 1, Some("p_self_audit"))] {
+    for (cid, self_gen, prop) in [
+        ("self_input", 1, None),
+        ("final_out", 1, Some("p_self_audit")),
+    ] {
         conn.execute(
             "INSERT INTO claims (claim_id, src, dst, rel_type, created_at, \
              extractor, polarity, namespace, proposition_id, regime_tag, \
              self_generated, source_lineage, modality_signal, weight) \
              VALUES (?1, ?2, ?3, 'rel', 0.0, 'ext', 1, 'default', ?4, 'default', \
              ?5, '[]', 'text', 1.0)",
-            rusqlite::params![cid, format!("src_{}", cid), format!("dst_{}", cid), prop, self_gen],
-        ).unwrap();
+            rusqlite::params![
+                cid,
+                format!("src_{}", cid),
+                format!("dst_{}", cid),
+                prop,
+                self_gen
+            ],
+        )
+        .unwrap();
     }
     drop(conn);
     // A move producing final_out with self_input as its upstream.
-    db.record_move_event(mk_move_input("hypothesis_generation", &["self_input"], &["final_out"])).unwrap();
+    db.record_move_event(mk_move_input(
+        "hypothesis_generation",
+        &["self_input"],
+        &["final_out"],
+    ))
+    .unwrap();
     // Run write + background tiers so ψ_a is populated.
-    db.compute_write_tier_mobility("p_self_audit", "default").unwrap();
-    db.compute_background_mobility("p_self_audit", "default").unwrap();
+    db.compute_write_tier_mobility("p_self_audit", "default")
+        .unwrap();
+    db.compute_background_mobility("p_self_audit", "default")
+        .unwrap();
 
-    let violations = db.check_move_preconditions("source_audit", "p_self_audit", "default").unwrap();
-    assert!(!violations.is_empty(), "source_audit on ψ_a=1.0 should violate");
-    assert_eq!(violations[0].axiom_name, "source_audit_requires_external_ancestry");
+    let violations = db
+        .check_move_preconditions("source_audit", "p_self_audit", "default")
+        .unwrap();
+    assert!(
+        !violations.is_empty(),
+        "source_audit on ψ_a=1.0 should violate"
+    );
+    assert_eq!(
+        violations[0].axiom_name,
+        "source_audit_requires_external_ancestry"
+    );
     assert!(violations[0].observation.contains("self_gen_ancestral"));
 }
 
@@ -3616,20 +6522,42 @@ fn test_m8_source_audit_passes_with_external_ancestry() {
              self_generated, source_lineage, modality_signal, weight) \
              VALUES (?1, ?2, ?3, 'rel', 0.0, 'ext', 1, 'default', ?4, 'default', \
              ?5, '[]', 'text', 1.0)",
-            rusqlite::params![cid, format!("src_{}", cid), format!("dst_{}", cid), prop, self_gen],
-        ).unwrap();
+            rusqlite::params![
+                cid,
+                format!("src_{}", cid),
+                format!("dst_{}", cid),
+                prop,
+                self_gen
+            ],
+        )
+        .unwrap();
     }
     drop(conn);
-    db.record_move_event(mk_move_input("decomposition", &["ext_src", "self_src"], &["final_out"])).unwrap();
-    db.compute_write_tier_mobility("p_ext_audit", "default").unwrap();
-    db.compute_background_mobility("p_ext_audit", "default").unwrap();
+    db.record_move_event(mk_move_input(
+        "decomposition",
+        &["ext_src", "self_src"],
+        &["final_out"],
+    ))
+    .unwrap();
+    db.compute_write_tier_mobility("p_ext_audit", "default")
+        .unwrap();
+    db.compute_background_mobility("p_ext_audit", "default")
+        .unwrap();
 
-    let state = db.get_mobility_state("p_ext_audit", "default").unwrap().unwrap();
+    let state = db
+        .get_mobility_state("p_ext_audit", "default")
+        .unwrap()
+        .unwrap();
     // ψ_a should be 0.5 (1 self-gen out of 2 ancestral claims).
     assert!((state.self_gen_ancestral.unwrap() - 0.5).abs() < 1e-9);
 
-    let violations = db.check_move_preconditions("source_audit", "p_ext_audit", "default").unwrap();
-    assert!(violations.is_empty(), "source_audit should be fine when external ancestry exists");
+    let violations = db
+        .check_move_preconditions("source_audit", "p_ext_audit", "default")
+        .unwrap();
+    assert!(
+        violations.is_empty(),
+        "source_audit should be fine when external ancestry exists"
+    );
 }
 
 #[test]
@@ -3637,11 +6565,28 @@ fn test_m8_compression_requires_support() {
     // Seed a proposition with only negative polarity claims → σ = 0.
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_no_support");
-    seed_contest_claim(&db, "p_no_support", "c1", "ext_a", -1, "[\"s\"]", None, "default", None, None);
-    db.compute_write_tier_mobility("p_no_support", "default").unwrap();
+    seed_contest_claim(
+        &db,
+        "p_no_support",
+        "c1",
+        "ext_a",
+        -1,
+        "[\"s\"]",
+        None,
+        "default",
+        None,
+        None,
+    );
+    db.compute_write_tier_mobility("p_no_support", "default")
+        .unwrap();
 
-    let violations = db.check_move_preconditions("compression", "p_no_support", "default").unwrap();
-    assert!(!violations.is_empty(), "compression should violate on zero support_mass");
+    let violations = db
+        .check_move_preconditions("compression", "p_no_support", "default")
+        .unwrap();
+    assert!(
+        !violations.is_empty(),
+        "compression should violate on zero support_mass"
+    );
     assert_eq!(violations[0].axiom_name, "compression_requires_support");
 }
 
@@ -3650,25 +6595,60 @@ fn test_m8_hypothesis_generation_blocked_on_present_tense_conflict() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_contested");
     // Opposite-polarity claims with overlapping validity intervals → PRESENT_TENSE_CONFLICT.
-    seed_contest_claim(&db, "p_contested", "c_sup", "ext_a", 1, "[\"s\"]", None, "default", Some(0.0), Some(20.0));
-    seed_contest_claim(&db, "p_contested", "c_att", "ext_b", -1, "[\"s\"]", None, "default", Some(10.0), Some(30.0));
-    db.compute_write_tier_mobility("p_contested", "default").unwrap();
+    seed_contest_claim(
+        &db,
+        "p_contested",
+        "c_sup",
+        "ext_a",
+        1,
+        "[\"s\"]",
+        None,
+        "default",
+        Some(0.0),
+        Some(20.0),
+    );
+    seed_contest_claim(
+        &db,
+        "p_contested",
+        "c_att",
+        "ext_b",
+        -1,
+        "[\"s\"]",
+        None,
+        "default",
+        Some(10.0),
+        Some(30.0),
+    );
+    db.compute_write_tier_mobility("p_contested", "default")
+        .unwrap();
     db.compute_contest_state("p_contested", "default").unwrap();
 
-    let violations = db.check_move_preconditions("hypothesis_generation", "p_contested", "default").unwrap();
-    assert!(!violations.is_empty(), "hypothesis_generation should be blocked by PRESENT_TENSE_CONFLICT");
-    assert_eq!(violations[0].axiom_name, "hypothesis_generation_skips_present_tense_conflict");
+    let violations = db
+        .check_move_preconditions("hypothesis_generation", "p_contested", "default")
+        .unwrap();
+    assert!(
+        !violations.is_empty(),
+        "hypothesis_generation should be blocked by PRESENT_TENSE_CONFLICT"
+    );
+    assert_eq!(
+        violations[0].axiom_name,
+        "hypothesis_generation_skips_present_tense_conflict"
+    );
 }
 
 #[test]
 fn test_m8_preconditions_ignore_unrelated_move_types() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_any");
-    seed_contest_claim(&db, "p_any", "c1", "ext_a", 1, "[\"s\"]", None, "default", None, None);
+    seed_contest_claim(
+        &db, "p_any", "c1", "ext_a", 1, "[\"s\"]", None, "default", None, None,
+    );
     db.compute_write_tier_mobility("p_any", "default").unwrap();
 
     // analogy has no precondition axiom → no violations.
-    let violations = db.check_move_preconditions("analogy", "p_any", "default").unwrap();
+    let violations = db
+        .check_move_preconditions("analogy", "p_any", "default")
+        .unwrap();
     assert!(violations.is_empty());
 }
 
@@ -3680,13 +6660,20 @@ fn test_m8_preconditions_ignore_unrelated_move_types() {
 fn test_m9_profile_counts_uses_and_resolutions() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     // Record three moves of the same type; resolve two (corroborated, retracted).
-    let m1 = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
-    let m2 = db.record_move_event(mk_move_input("analogy", &["c"], &["d"])).unwrap();
-    db.record_move_event(mk_move_input("analogy", &["e"], &["f"])).unwrap();
+    let m1 = db
+        .record_move_event(mk_move_input("analogy", &["a"], &["b"]))
+        .unwrap();
+    let m2 = db
+        .record_move_event(mk_move_input("analogy", &["c"], &["d"]))
+        .unwrap();
+    db.record_move_event(mk_move_input("analogy", &["e"], &["f"]))
+        .unwrap();
     db.record_move_outcome(&m1, "corroborated", None).unwrap();
     db.record_move_outcome(&m2, "retracted", None).unwrap();
 
-    let profile = db.recompute_move_type_profile("analogy", "v1", "default").unwrap();
+    let profile = db
+        .recompute_move_type_profile("analogy", "v1", "default")
+        .unwrap();
     assert_eq!(profile.uses_count, 3);
     assert_eq!(profile.corroborated_count, 1);
     assert_eq!(profile.retracted_count, 1);
@@ -3701,9 +6688,15 @@ fn test_m9_profile_counts_uses_and_resolutions() {
 #[test]
 fn test_m9_profile_round_trip_via_get() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
-    let computed = db.recompute_move_type_profile("analogy", "v1", "default").unwrap();
-    let read = db.get_move_type_profile("analogy", "v1", "default").unwrap().unwrap();
+    db.record_move_event(mk_move_input("analogy", &["a"], &["b"]))
+        .unwrap();
+    let computed = db
+        .recompute_move_type_profile("analogy", "v1", "default")
+        .unwrap();
+    let read = db
+        .get_move_type_profile("analogy", "v1", "default")
+        .unwrap()
+        .unwrap();
     assert_eq!(read.uses_count, computed.uses_count);
     assert_eq!(read.resolved_count, computed.resolved_count);
 }
@@ -3711,18 +6704,28 @@ fn test_m9_profile_round_trip_via_get() {
 #[test]
 fn test_m9_recompute_all_keys_present() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
-    db.record_move_event(mk_move_input("decomposition", &["c"], &["d"])).unwrap();
+    db.record_move_event(mk_move_input("analogy", &["a"], &["b"]))
+        .unwrap();
+    db.record_move_event(mk_move_input("decomposition", &["c"], &["d"]))
+        .unwrap();
     let count = db.recompute_all_move_type_profiles().unwrap();
     assert_eq!(count, 2, "two distinct (type, version, regime) triples");
-    assert!(db.get_move_type_profile("analogy", "v1", "default").unwrap().is_some());
-    assert!(db.get_move_type_profile("decomposition", "v1", "default").unwrap().is_some());
+    assert!(db
+        .get_move_type_profile("analogy", "v1", "default")
+        .unwrap()
+        .is_some());
+    assert!(db
+        .get_move_type_profile("decomposition", "v1", "default")
+        .unwrap()
+        .is_some());
 }
 
 #[test]
 fn test_m9_profile_missing_returns_none() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let p = db.get_move_type_profile("analogy", "v1", "default").unwrap();
+    let p = db
+        .get_move_type_profile("analogy", "v1", "default")
+        .unwrap();
     assert!(p.is_none());
 }
 
@@ -3730,8 +6733,11 @@ fn test_m9_profile_missing_returns_none() {
 fn test_m9_contradiction_rate_none_when_no_resolutions() {
     // All moves still pending within horizon → resolved = 0 → rate is None.
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
-    let profile = db.recompute_move_type_profile("analogy", "v1", "default").unwrap();
+    db.record_move_event(mk_move_input("analogy", &["a"], &["b"]))
+        .unwrap();
+    let profile = db
+        .recompute_move_type_profile("analogy", "v1", "default")
+        .unwrap();
     assert_eq!(profile.resolved_count, 0);
     assert!(profile.contradiction_introduction_rate.is_none());
 }
@@ -3743,7 +6749,9 @@ fn test_m9_contradiction_rate_none_when_no_resolutions() {
 #[test]
 fn test_m10_retraction_auto_files_candidate() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
+    let move_id = db
+        .record_move_event(mk_move_input("analogy", &["a"], &["b"]))
+        .unwrap();
 
     // Before outcome — no candidate.
     let before = db.list_adversarial_for_move(&move_id).unwrap();
@@ -3764,8 +6772,11 @@ fn test_m10_retraction_auto_files_candidate() {
 #[test]
 fn test_m10_harmful_side_effect_auto_files_candidate() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
-    db.record_move_outcome(&move_id, "harmful_side_effect", None).unwrap();
+    let move_id = db
+        .record_move_event(mk_move_input("analogy", &["a"], &["b"]))
+        .unwrap();
+    db.record_move_outcome(&move_id, "harmful_side_effect", None)
+        .unwrap();
     let after = db.list_adversarial_for_move(&move_id).unwrap();
     assert_eq!(after.len(), 1);
     assert_eq!(after[0].discovered_via, "calibration_signal");
@@ -3774,10 +6785,16 @@ fn test_m10_harmful_side_effect_auto_files_candidate() {
 #[test]
 fn test_m10_corroborated_outcome_does_not_file_candidate() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let move_id = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
-    db.record_move_outcome(&move_id, "corroborated", None).unwrap();
+    let move_id = db
+        .record_move_event(mk_move_input("analogy", &["a"], &["b"]))
+        .unwrap();
+    db.record_move_outcome(&move_id, "corroborated", None)
+        .unwrap();
     let after = db.list_adversarial_for_move(&move_id).unwrap();
-    assert!(after.is_empty(), "corroborated outcome must not file an adversarial candidate");
+    assert!(
+        after.is_empty(),
+        "corroborated outcome must not file an adversarial candidate"
+    );
 }
 
 #[test]
@@ -3788,22 +6805,54 @@ fn test_m10_contest_flag_transition_auto_files_for_producing_move() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_flag_auto");
     // First claim of the proposition.
-    seed_contest_claim(&db, "p_flag_auto", "claim_out", "ext_a", 1, "[\"s\"]", None, "default", None, None);
+    seed_contest_claim(
+        &db,
+        "p_flag_auto",
+        "claim_out",
+        "ext_a",
+        1,
+        "[\"s\"]",
+        None,
+        "default",
+        None,
+        None,
+    );
     // Move that produced claim_out.
-    let move_id = db.record_move_event(mk_move_input("hypothesis_generation", &["evidence"], &["claim_out"])).unwrap();
+    let move_id = db
+        .record_move_event(mk_move_input(
+            "hypothesis_generation",
+            &["evidence"],
+            &["claim_out"],
+        ))
+        .unwrap();
     // Initial write-tier + contest recompute: no conflict yet.
-    db.compute_write_tier_mobility("p_flag_auto", "default").unwrap();
+    db.compute_write_tier_mobility("p_flag_auto", "default")
+        .unwrap();
     db.compute_contest_state("p_flag_auto", "default").unwrap();
     assert!(db.list_adversarial_for_move(&move_id).unwrap().is_empty());
 
     // Add an opposite-polarity claim with identical source_lineage → SAME_SOURCE_CONFLICT.
-    seed_contest_claim(&db, "p_flag_auto", "conflicting", "ext_b", -1, "[\"s\"]", None, "default", None, None);
-    db.compute_write_tier_mobility("p_flag_auto", "default").unwrap();
+    seed_contest_claim(
+        &db,
+        "p_flag_auto",
+        "conflicting",
+        "ext_b",
+        -1,
+        "[\"s\"]",
+        None,
+        "default",
+        None,
+        None,
+    );
+    db.compute_write_tier_mobility("p_flag_auto", "default")
+        .unwrap();
     db.compute_contest_state("p_flag_auto", "default").unwrap();
 
     let after = db.list_adversarial_for_move(&move_id).unwrap();
-    assert!(!after.is_empty(),
-        "SAME_SOURCE_CONFLICT should auto-file adversarial candidate for producing move");
+    assert!(
+        !after.is_empty(),
+        "SAME_SOURCE_CONFLICT should auto-file adversarial candidate for producing move"
+    );
     assert_eq!(after[0].discovered_via, "contradiction");
     assert_eq!(after[0].status, "candidate");
 }
@@ -3814,13 +6863,30 @@ fn test_m10_contest_flag_transition_dedups_on_repeat_recompute() {
     // (move_id, discovered_via) dedup guard should prevent duplicate rows.
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_dedup");
-    seed_contest_claim(&db, "p_dedup", "claim_out", "ext_a", 1, "[\"s\"]", None, "default", None, None);
-    let move_id = db.record_move_event(mk_move_input("analogy", &["e"], &["claim_out"])).unwrap();
-    db.compute_write_tier_mobility("p_dedup", "default").unwrap();
+    seed_contest_claim(
+        &db,
+        "p_dedup",
+        "claim_out",
+        "ext_a",
+        1,
+        "[\"s\"]",
+        None,
+        "default",
+        None,
+        None,
+    );
+    let move_id = db
+        .record_move_event(mk_move_input("analogy", &["e"], &["claim_out"]))
+        .unwrap();
+    db.compute_write_tier_mobility("p_dedup", "default")
+        .unwrap();
     db.compute_contest_state("p_dedup", "default").unwrap();
     // Set up the conflict.
-    seed_contest_claim(&db, "p_dedup", "conflict", "ext_b", -1, "[\"s\"]", None, "default", None, None);
-    db.compute_write_tier_mobility("p_dedup", "default").unwrap();
+    seed_contest_claim(
+        &db, "p_dedup", "conflict", "ext_b", -1, "[\"s\"]", None, "default", None, None,
+    );
+    db.compute_write_tier_mobility("p_dedup", "default")
+        .unwrap();
     db.compute_contest_state("p_dedup", "default").unwrap();
 
     // Multiple recomputes must not create duplicates.
@@ -3829,10 +6895,15 @@ fn test_m10_contest_flag_transition_dedups_on_repeat_recompute() {
     db.compute_contest_state("p_dedup", "default").unwrap();
 
     let candidates = db.list_adversarial_for_move(&move_id).unwrap();
-    let contradiction_candidates: Vec<_> = candidates.iter()
-        .filter(|c| c.discovered_via == "contradiction").collect();
-    assert_eq!(contradiction_candidates.len(), 1,
-        "repeat contest recompute must not duplicate contradiction candidates");
+    let contradiction_candidates: Vec<_> = candidates
+        .iter()
+        .filter(|c| c.discovered_via == "contradiction")
+        .collect();
+    assert_eq!(
+        contradiction_candidates.len(),
+        1,
+        "repeat contest recompute must not duplicate contradiction candidates"
+    );
 }
 
 #[test]
@@ -3841,8 +6912,11 @@ fn test_m10_m9_feedback_loop_retraction_updates_profile() {
     // the profile, verify the retraction count increments. This is the
     // full M5b → M10 → M9 feedback loop.
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let m1 = db.record_move_event(mk_move_input("analogy", &["a"], &["b"])).unwrap();
-    db.record_move_event(mk_move_input("analogy", &["c"], &["d"])).unwrap();
+    let m1 = db
+        .record_move_event(mk_move_input("analogy", &["a"], &["b"]))
+        .unwrap();
+    db.record_move_event(mk_move_input("analogy", &["c"], &["d"]))
+        .unwrap();
     db.record_move_outcome(&m1, "retracted", None).unwrap();
 
     // M10 should have filed an adversarial candidate.
@@ -3850,7 +6924,9 @@ fn test_m10_m9_feedback_loop_retraction_updates_profile() {
     assert_eq!(candidates.len(), 1);
 
     // M9 profile recompute should pick up the retraction.
-    let profile = db.recompute_move_type_profile("analogy", "v1", "default").unwrap();
+    let profile = db
+        .recompute_move_type_profile("analogy", "v1", "default")
+        .unwrap();
     assert_eq!(profile.retracted_count, 1);
     assert_eq!(profile.uses_count, 2);
 }
@@ -3860,11 +6936,20 @@ fn test_m6_temporal_coherence_stable_polarity_is_one() {
     // All supports on the same proposition → no flips → τ = 1.
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_coh");
-    seed_contest_claim(&db, "p_coh", "c1", "ext_a", 1, "[\"s\"]", None, "default", None, None);
-    seed_contest_claim(&db, "p_coh", "c2", "ext_b", 1, "[\"s\"]", None, "default", None, None);
-    seed_contest_claim(&db, "p_coh", "c3", "ext_c", 1, "[\"s\"]", None, "default", None, None);
+    seed_contest_claim(
+        &db, "p_coh", "c1", "ext_a", 1, "[\"s\"]", None, "default", None, None,
+    );
+    seed_contest_claim(
+        &db, "p_coh", "c2", "ext_b", 1, "[\"s\"]", None, "default", None, None,
+    );
+    seed_contest_claim(
+        &db, "p_coh", "c3", "ext_c", 1, "[\"s\"]", None, "default", None, None,
+    );
     db.compute_write_tier_mobility("p_coh", "default").unwrap();
-    let state = db.compute_background_mobility("p_coh", "default").unwrap().unwrap();
+    let state = db
+        .compute_background_mobility("p_coh", "default")
+        .unwrap()
+        .unwrap();
     assert_eq!(state.temporal_coherence, Some(1.0));
 }
 
@@ -3878,9 +6963,9 @@ fn test_m6_temporal_coherence_flips_reduce_score() {
     // ensure the sort order is what we expect.
     let conn = db.conn();
     let triples = [
-        ("c_p1", "ext_a",  1, 1.0),
+        ("c_p1", "ext_a", 1, 1.0),
         ("c_a1", "ext_b", -1, 2.0),
-        ("c_p2", "ext_c",  1, 3.0),
+        ("c_p2", "ext_c", 1, 3.0),
     ];
     for (cid, ext, pol, ts) in triples {
         conn.execute(
@@ -3890,22 +6975,35 @@ fn test_m6_temporal_coherence_flips_reduce_score() {
              VALUES (?1, 'src_p_flip', 'dst_p_flip', 'rel_p_flip', ?2, ?3, ?4, \
              'default', 'p_flip', 'default', 0, '[\"s\"]', 'text', 1.0)",
             rusqlite::params![cid, ts, ext, pol],
-        ).unwrap();
+        )
+        .unwrap();
     }
     drop(conn);
     db.compute_write_tier_mobility("p_flip", "default").unwrap();
-    let state = db.compute_background_mobility("p_flip", "default").unwrap().unwrap();
+    let state = db
+        .compute_background_mobility("p_flip", "default")
+        .unwrap()
+        .unwrap();
     let tau = state.temporal_coherence.unwrap();
-    assert!((tau - 0.0).abs() < 1e-9, "expected τ=0 for maximally flipping polarity, got {}", tau);
+    assert!(
+        (tau - 0.0).abs() < 1e-9,
+        "expected τ=0 for maximally flipping polarity, got {}",
+        tau
+    );
 }
 
 #[test]
 fn test_m6_temporal_coherence_single_claim_is_one_by_convention() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_solo");
-    seed_contest_claim(&db, "p_solo", "c1", "ext_a", 1, "[\"s\"]", None, "default", None, None);
+    seed_contest_claim(
+        &db, "p_solo", "c1", "ext_a", 1, "[\"s\"]", None, "default", None, None,
+    );
     db.compute_write_tier_mobility("p_solo", "default").unwrap();
-    let state = db.compute_background_mobility("p_solo", "default").unwrap().unwrap();
+    let state = db
+        .compute_background_mobility("p_solo", "default")
+        .unwrap()
+        .unwrap();
     // Convention: too few claims to judge → default to 1.0 coherence.
     assert_eq!(state.temporal_coherence, Some(1.0));
 }
@@ -3914,23 +7012,65 @@ fn test_m6_temporal_coherence_single_claim_is_one_by_convention() {
 fn test_m6_load_bearingness_counts_downstream_moves() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_load");
-    seed_contest_claim(&db, "p_load", "upstream_a", "ext_a", 1, "[\"s\"]", None, "default", None, None);
-    seed_contest_claim(&db, "p_load", "upstream_b", "ext_b", 1, "[\"s\"]", None, "default", None, None);
+    seed_contest_claim(
+        &db,
+        "p_load",
+        "upstream_a",
+        "ext_a",
+        1,
+        "[\"s\"]",
+        None,
+        "default",
+        None,
+        None,
+    );
+    seed_contest_claim(
+        &db,
+        "p_load",
+        "upstream_b",
+        "ext_b",
+        1,
+        "[\"s\"]",
+        None,
+        "default",
+        None,
+        None,
+    );
     db.compute_write_tier_mobility("p_load", "default").unwrap();
 
     // No moves yet → λ = 0.
-    let before = db.compute_background_mobility("p_load", "default").unwrap().unwrap();
+    let before = db
+        .compute_background_mobility("p_load", "default")
+        .unwrap()
+        .unwrap();
     assert_eq!(before.load_bearingness, Some(0.0));
 
     // Record two moves that consume the upstream claims.
-    db.record_move_event(mk_move_input("analogy", &["upstream_a"], &["derived_1"])).unwrap();
-    db.record_move_event(mk_move_input("decomposition", &["upstream_a", "upstream_b"], &["derived_2"])).unwrap();
+    db.record_move_event(mk_move_input("analogy", &["upstream_a"], &["derived_1"]))
+        .unwrap();
+    db.record_move_event(mk_move_input(
+        "decomposition",
+        &["upstream_a", "upstream_b"],
+        &["derived_2"],
+    ))
+    .unwrap();
     // A third move that consumes an unrelated claim — should NOT count.
-    db.record_move_event(mk_move_input("analogy", &["unrelated_claim"], &["derived_3"])).unwrap();
+    db.record_move_event(mk_move_input(
+        "analogy",
+        &["unrelated_claim"],
+        &["derived_3"],
+    ))
+    .unwrap();
 
-    let after = db.compute_background_mobility("p_load", "default").unwrap().unwrap();
-    assert_eq!(after.load_bearingness, Some(2.0),
-        "expected 2 downstream moves consuming this proposition's claims");
+    let after = db
+        .compute_background_mobility("p_load", "default")
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after.load_bearingness,
+        Some(2.0),
+        "expected 2 downstream moves consuming this proposition's claims"
+    );
 }
 
 #[test]
@@ -3946,20 +7086,40 @@ fn test_m6_self_gen_ancestral_traces_backward() {
     // Add all the claims we'll reference. final_d belongs to p_anc;
     // the others are referenced by move edges only.
     let conn = db.conn();
-    for (cid, self_gen) in [("evidence_a", 1), ("evidence_b", 0), ("intermediate_c", 0), ("final_d", 0)] {
-        let prop = if cid == "final_d" { Some("p_anc") } else { None };
+    for (cid, self_gen) in [
+        ("evidence_a", 1),
+        ("evidence_b", 0),
+        ("intermediate_c", 0),
+        ("final_d", 0),
+    ] {
+        let prop = if cid == "final_d" {
+            Some("p_anc")
+        } else {
+            None
+        };
         conn.execute(
             "INSERT INTO claims (claim_id, src, dst, rel_type, created_at, \
              extractor, polarity, namespace, proposition_id, regime_tag, \
              self_generated, source_lineage, modality_signal, weight) \
              VALUES (?1, ?2, ?3, 'rel_anc', 0.0, 'ext', 1, 'default', ?4, \
              'default', ?5, '[]', 'text', 1.0)",
-            rusqlite::params![cid, format!("src_{}", cid), format!("dst_{}", cid), prop, self_gen],
-        ).unwrap();
+            rusqlite::params![
+                cid,
+                format!("src_{}", cid),
+                format!("dst_{}", cid),
+                prop,
+                self_gen
+            ],
+        )
+        .unwrap();
     }
     drop(conn);
     // m1: evidence_a + evidence_b → intermediate_c
-    let mut inp1 = mk_move_input("decomposition", &["evidence_a", "evidence_b"], &["intermediate_c"]);
+    let mut inp1 = mk_move_input(
+        "decomposition",
+        &["evidence_a", "evidence_b"],
+        &["intermediate_c"],
+    );
     inp1.operator_version = "v1".to_string();
     db.record_move_event(inp1).unwrap();
     // m2: intermediate_c → final_d
@@ -3968,13 +7128,19 @@ fn test_m6_self_gen_ancestral_traces_backward() {
     db.record_move_event(inp2).unwrap();
 
     db.compute_write_tier_mobility("p_anc", "default").unwrap();
-    let state = db.compute_background_mobility("p_anc", "default").unwrap().unwrap();
+    let state = db
+        .compute_background_mobility("p_anc", "default")
+        .unwrap()
+        .unwrap();
     // BFS from final_d (depth=2): layer 1 finds intermediate_c, layer 2
     // finds evidence_a and evidence_b. Ancestry = {intermediate_c, evidence_a, evidence_b}.
     // self_generated: evidence_a = true. → ψ_a = 1/3.
     let psi_a = state.self_gen_ancestral.unwrap();
-    assert!((psi_a - 1.0 / 3.0).abs() < 1e-9,
-        "expected ψ_a = 1/3, got {}", psi_a);
+    assert!(
+        (psi_a - 1.0 / 3.0).abs() < 1e-9,
+        "expected ψ_a = 1/3, got {}",
+        psi_a
+    );
 }
 
 #[test]
@@ -3982,9 +7148,14 @@ fn test_m6_self_gen_ancestral_no_moves_is_zero() {
     // Proposition with claims but no upstream moves → no ancestry → ψ_a = 0.
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_leaf");
-    seed_contest_claim(&db, "p_leaf", "c1", "ext_a", 1, "[\"s\"]", None, "default", None, None);
+    seed_contest_claim(
+        &db, "p_leaf", "c1", "ext_a", 1, "[\"s\"]", None, "default", None, None,
+    );
     db.compute_write_tier_mobility("p_leaf", "default").unwrap();
-    let state = db.compute_background_mobility("p_leaf", "default").unwrap().unwrap();
+    let state = db
+        .compute_background_mobility("p_leaf", "default")
+        .unwrap()
+        .unwrap();
     assert_eq!(state.self_gen_ancestral, Some(0.0));
 }
 
@@ -4001,10 +7172,28 @@ fn test_m6_background_idempotent() {
     // Calling twice with unchanged data produces the same values.
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_idem_bg");
-    seed_contest_claim(&db, "p_idem_bg", "c1", "ext_a", 1, "[\"s\"]", None, "default", None, None);
-    db.compute_write_tier_mobility("p_idem_bg", "default").unwrap();
-    let first = db.compute_background_mobility("p_idem_bg", "default").unwrap().unwrap();
-    let second = db.compute_background_mobility("p_idem_bg", "default").unwrap().unwrap();
+    seed_contest_claim(
+        &db,
+        "p_idem_bg",
+        "c1",
+        "ext_a",
+        1,
+        "[\"s\"]",
+        None,
+        "default",
+        None,
+        None,
+    );
+    db.compute_write_tier_mobility("p_idem_bg", "default")
+        .unwrap();
+    let first = db
+        .compute_background_mobility("p_idem_bg", "default")
+        .unwrap()
+        .unwrap();
+    let second = db
+        .compute_background_mobility("p_idem_bg", "default")
+        .unwrap()
+        .unwrap();
     assert_eq!(first.temporal_coherence, second.temporal_coherence);
     assert_eq!(first.load_bearingness, second.load_bearingness);
     assert_eq!(first.self_gen_ancestral, second.self_gen_ancestral);
@@ -4018,23 +7207,42 @@ fn test_m6_background_batch_scan() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     for pid in ["p_batch_1", "p_batch_2", "p_batch_3"] {
         seed_proposition(&db, pid);
-        seed_contest_claim(&db, pid, &format!("c_{}", pid), "ext_a", 1, "[\"s\"]", None, "default", None, None);
+        seed_contest_claim(
+            &db,
+            pid,
+            &format!("c_{}", pid),
+            "ext_a",
+            1,
+            "[\"s\"]",
+            None,
+            "default",
+            None,
+            None,
+        );
         db.compute_write_tier_mobility(pid, "default").unwrap();
     }
     // All three should have NULL background fields pre-scan.
-    let pending_before: i64 = db.conn().query_row(
-        "SELECT COUNT(*) FROM mobility_state WHERE temporal_coherence IS NULL",
-        [], |r| r.get(0),
-    ).unwrap();
+    let pending_before: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM mobility_state WHERE temporal_coherence IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(pending_before, 3);
 
     let processed = db.recompute_background_mobility_batch(10).unwrap();
     assert_eq!(processed, 3);
 
-    let pending_after: i64 = db.conn().query_row(
-        "SELECT COUNT(*) FROM mobility_state WHERE temporal_coherence IS NULL",
-        [], |r| r.get(0),
-    ).unwrap();
+    let pending_after: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM mobility_state WHERE temporal_coherence IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
     assert_eq!(pending_after, 0);
 }
 
@@ -4042,20 +7250,40 @@ fn test_m6_background_batch_scan() {
 fn test_m6_background_marks_tier_components() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     seed_proposition(&db, "p_tier");
-    seed_contest_claim(&db, "p_tier", "c1", "ext_a", 1, "[\"s\"]", None, "default", None, None);
+    seed_contest_claim(
+        &db, "p_tier", "c1", "ext_a", 1, "[\"s\"]", None, "default", None, None,
+    );
     db.compute_write_tier_mobility("p_tier", "default").unwrap();
-    let state = db.compute_background_mobility("p_tier", "default").unwrap().unwrap();
-    for expected in ["temporal_coherence", "load_bearingness", "self_gen_ancestral"] {
+    let state = db
+        .compute_background_mobility("p_tier", "default")
+        .unwrap()
+        .unwrap();
+    for expected in [
+        "temporal_coherence",
+        "load_bearingness",
+        "self_gen_ancestral",
+    ] {
         assert!(
             state.tier_bg_components.iter().any(|c| c == expected),
             "tier_bg_components should include {}, got {:?}",
-            expected, state.tier_bg_components
+            expected,
+            state.tier_bg_components
         );
     }
     // Repeat call shouldn't duplicate entries.
-    let state2 = db.compute_background_mobility("p_tier", "default").unwrap().unwrap();
-    let tc_count = state2.tier_bg_components.iter().filter(|c| *c == "temporal_coherence").count();
-    assert_eq!(tc_count, 1, "repeated calls must not duplicate tier_bg_components entries");
+    let state2 = db
+        .compute_background_mobility("p_tier", "default")
+        .unwrap()
+        .unwrap();
+    let tc_count = state2
+        .tier_bg_components
+        .iter()
+        .filter(|c| *c == "temporal_coherence")
+        .count();
+    assert_eq!(
+        tc_count, 1,
+        "repeated calls must not duplicate tier_bg_components entries"
+    );
 }
 
 #[test]
@@ -4064,19 +7292,25 @@ fn test_m5b_full_lifecycle_observed_to_retracted_with_adversarial() {
     // file an adversarial candidate, curator promotes to confirmed, verify
     // the canonical view and all pieces are readable.
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let move_id = db.record_move_event(mk_move_input(
-        "hypothesis_generation",
-        &["evidence_a", "evidence_b"],
-        &["hypothesis_h"],
-    )).unwrap();
+    let move_id = db
+        .record_move_event(mk_move_input(
+            "hypothesis_generation",
+            &["evidence_a", "evidence_b"],
+            &["hypothesis_h"],
+        ))
+        .unwrap();
 
     // Something goes wrong downstream — retract. Per M10, this auto-files
     // an adversarial candidate with discovered_via='retraction'.
     db.record_move_outcome(
         &move_id,
         posthoc_outcome::RETRACTED,
-        Some(serde_json::json!({"retraction_cause": "contradiction with high-weight claim"}).to_string()),
-    ).unwrap();
+        Some(
+            serde_json::json!({"retraction_cause": "contradiction with high-weight claim"})
+                .to_string(),
+        ),
+    )
+    .unwrap();
 
     // The M10 auto-candidate should exist.
     let auto_candidates = db.list_adversarial_for_move(&move_id).unwrap();
@@ -4092,14 +7326,19 @@ fn test_m5b_full_lifecycle_observed_to_retracted_with_adversarial() {
             "regimes": ["default"],
             "move_types": ["hypothesis_generation"],
             "input_signatures": {"min_inputs": 2}
-        }).to_string(),
+        })
+        .to_string(),
         "curator_dana".into(),
-    ).unwrap();
+    )
+    .unwrap();
 
     // Verify everything.
     let ev = db.get_move_event(&move_id).unwrap().unwrap();
     assert_eq!(ev.posthoc_outcome.as_deref(), Some("retracted"));
-    let instance = db.get_adversarial_instance(&auto_candidates[0].instance_id).unwrap().unwrap();
+    let instance = db
+        .get_adversarial_instance(&auto_candidates[0].instance_id)
+        .unwrap()
+        .unwrap();
     assert_eq!(instance.status, adversarial_status::CONFIRMED);
     let instances = db.list_adversarial_for_move(&move_id).unwrap();
     assert_eq!(instances.len(), 1);
@@ -4235,7 +7474,6 @@ fn test_encrypt_embedding_pub_with_encryption_returns_ciphertext() {
     );
 }
 
-
 // ── Issue #9 cluster replication API: record_with_rid ──
 
 #[test]
@@ -4246,16 +7484,22 @@ fn record_with_rid_basic_succeeds() {
         "rid_test_1",
         "the quick brown fox",
         "episodic",
-        0.5, 0.0, 604800.0,
+        0.5,
+        0.0,
+        604800.0,
         &empty_meta(),
         &emb,
         "default",
-        0.8, "general", "user", None,
+        0.8,
+        "general",
+        "user",
+        None,
         1_700_000_000_000_000,
         &[],
         "test-model.v1",
         None,
-    ).expect("record_with_rid succeeds");
+    )
+    .expect("record_with_rid succeeds");
 
     let row = db.get("rid_test_1").unwrap().unwrap();
     assert_eq!(row.rid, "rid_test_1");
@@ -4271,23 +7515,31 @@ fn record_with_rid_persists_v25_columns() {
         "rid_v25",
         "test v25 columns",
         "semantic",
-        0.5, 0.0, 604800.0,
+        0.5,
+        0.0,
+        604800.0,
         &empty_meta(),
         &emb,
         "default",
-        0.8, "general", "user", None,
+        0.8,
+        "general",
+        "user",
+        None,
         1_700_000_000_000_000,
         &[],
         "bge-base-en-v1.5",
         None,
-    ).unwrap();
+    )
+    .unwrap();
 
     let conn = db.read_conn();
-    let (cum, model): (i64, Option<String>) = conn.query_row(
-        "SELECT created_at_unix_micros, embedding_model FROM memories WHERE rid = ?1",
-        rusqlite::params!["rid_v25"],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).unwrap();
+    let (cum, model): (i64, Option<String>) = conn
+        .query_row(
+            "SELECT created_at_unix_micros, embedding_model FROM memories WHERE rid = ?1",
+            rusqlite::params!["rid_v25"],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
     assert_eq!(cum, 1_700_000_000_000_000);
     assert_eq!(model.as_deref(), Some("bge-base-en-v1.5"));
 }
@@ -4306,16 +7558,22 @@ fn record_with_rid_is_idempotent_on_replay() {
             "rid_idem",
             "Alice works at Acme",
             "episodic",
-            0.5, 0.0, 604800.0,
+            0.5,
+            0.0,
+            604800.0,
             &empty_meta(),
             &emb,
             "default",
-            0.8, "general", "user", None,
+            0.8,
+            "general",
+            "user",
+            None,
             1_700_000_001_000_000,
             &entity_refs,
             "test-model.v1",
             None,
-        ).expect("idempotent re-apply");
+        )
+        .expect("idempotent re-apply");
     }
     // Phase 4.3 Commit C: entity persistence is enqueued by record_with_rid
     // and applied by the materializer thread. Drain the queue inline before
@@ -4323,35 +7581,46 @@ fn record_with_rid_is_idempotent_on_replay() {
     db.apply_pending_ops_once(100).unwrap();
 
     let conn = db.read_conn();
-    let memory_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM memories WHERE rid = ?1",
-        rusqlite::params!["rid_idem"],
-        |row| row.get(0),
-    ).unwrap();
+    let memory_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE rid = ?1",
+            rusqlite::params!["rid_idem"],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(memory_count, 1, "memories has exactly one row");
 
     // memory_entities should have one row per (memory, entity) pair.
-    let me_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM memory_entities WHERE memory_rid = ?1",
-        rusqlite::params!["rid_idem"],
-        |row| row.get(0),
-    ).unwrap();
-    assert_eq!(me_count, 2, "memory_entities has 2 rows (Alice, Acme), no doubles");
+    let me_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memory_entities WHERE memory_rid = ?1",
+            rusqlite::params!["rid_idem"],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        me_count, 2,
+        "memory_entities has 2 rows (Alice, Acme), no doubles"
+    );
 
     // entities row mention_count should equal 1 (only first call counts as a new mention).
-    let mc: i64 = conn.query_row(
-        "SELECT mention_count FROM entities WHERE name = 'Alice'",
-        [],
-        |row| row.get(0),
-    ).unwrap();
+    let mc: i64 = conn
+        .query_row(
+            "SELECT mention_count FROM entities WHERE name = 'Alice'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(mc, 1, "mention_count not bumped on replay");
 
     // Oplog should have exactly one record_with_rid entry for this rid.
-    let op_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM oplog WHERE op_type = 'record_with_rid' AND target_rid = ?1",
-        rusqlite::params!["rid_idem"],
-        |row| row.get(0),
-    ).unwrap();
+    let op_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM oplog WHERE op_type = 'record_with_rid' AND target_rid = ?1",
+            rusqlite::params!["rid_idem"],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(op_count, 1, "oplog has exactly one record_with_rid entry");
 }
 
@@ -4359,20 +7628,27 @@ fn record_with_rid_is_idempotent_on_replay() {
 fn record_with_rid_rejects_dimension_mismatch() {
     let db = YantrikDB::new(":memory:", 64).unwrap();
     let bad = vec![0.0f32; 32]; // wrong dim
-    let err = db.record_with_rid(
-        "rid_bad_dim",
-        "x",
-        "episodic",
-        0.5, 0.0, 604800.0,
-        &empty_meta(),
-        &bad,
-        "default",
-        0.8, "general", "user", None,
-        1_700_000_002_000_000,
-        &[],
-        "test-model.v1",
-        None,
-    ).expect_err("must reject");
+    let err = db
+        .record_with_rid(
+            "rid_bad_dim",
+            "x",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &bad,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+            1_700_000_002_000_000,
+            &[],
+            "test-model.v1",
+            None,
+        )
+        .expect_err("must reject");
     match err {
         crate::error::YantrikDbError::EmbeddingDimensionMismatch { expected, got } => {
             assert_eq!(expected, 64);
@@ -4393,28 +7669,40 @@ fn record_with_rid_uses_caller_supplied_timestamp() {
         "rid_ts",
         "test ts",
         "episodic",
-        0.5, 0.0, 604800.0,
+        0.5,
+        0.0,
+        604800.0,
         &empty_meta(),
         &emb,
         "default",
-        0.8, "general", "user", None,
+        0.8,
+        "general",
+        "user",
+        None,
         caller_ts,
         &[],
         "test-model.v1",
         None,
-    ).unwrap();
+    )
+    .unwrap();
     // Verify created_at REAL and created_at_unix_micros INTEGER both
     // reflect the caller-supplied timestamp (no engine-side now() call).
     let conn = db.read_conn();
-    let (cat_real, cat_micros): (f64, i64) = conn.query_row(
-        "SELECT created_at, created_at_unix_micros FROM memories WHERE rid = ?1",
-        rusqlite::params!["rid_ts"],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).unwrap();
+    let (cat_real, cat_micros): (f64, i64) = conn
+        .query_row(
+            "SELECT created_at, created_at_unix_micros FROM memories WHERE rid = ?1",
+            rusqlite::params!["rid_ts"],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
     assert_eq!(cat_micros, caller_ts);
     let expected_real = (caller_ts as f64) / 1_000_000.0;
-    assert!((cat_real - expected_real).abs() < 1e-6,
-        "created_at REAL should reflect caller timestamp: got {} expected {}", cat_real, expected_real);
+    assert!(
+        (cat_real - expected_real).abs() < 1e-6,
+        "created_at REAL should reflect caller timestamp: got {} expected {}",
+        cat_real,
+        expected_real
+    );
 }
 
 #[test]
@@ -4425,18 +7713,28 @@ fn record_with_rid_makes_recall_find_it() {
         "rid_recall",
         "memory inserted via record_with_rid",
         "episodic",
-        0.7, 0.0, 604800.0,
+        0.7,
+        0.0,
+        604800.0,
         &empty_meta(),
         &emb,
         "default",
-        0.8, "general", "user", None,
+        0.8,
+        "general",
+        "user",
+        None,
         1_700_000_006_000_000,
         &[],
         "test-model.v1",
         None,
-    ).unwrap();
+    )
+    .unwrap();
 
-    let results = db.recall(&emb, 5, None, None, false, false, None, true, None, None, None).unwrap();
+    let results = db
+        .recall(
+            &emb, 5, None, None, false, false, None, true, None, None, None,
+        )
+        .unwrap();
     assert!(
         results.iter().any(|r| r.rid == "rid_recall"),
         "rid_recall should appear in recall results"
@@ -4449,11 +7747,31 @@ fn record_with_rid_makes_recall_find_it() {
 fn tombstone_with_rid_basic_succeeds() {
     let db = YantrikDB::new(":memory:", 64).unwrap();
     let emb = vec_seed(1.0, 64);
-    let rid = db.record("to tombstone", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "to tombstone",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
-    db.tombstone_with_rid(&rid, "default", Some("test reason"), 1_700_000_010_000_000, None)
-        .expect("tombstone_with_rid succeeds");
+    db.tombstone_with_rid(
+        &rid,
+        "default",
+        Some("test reason"),
+        1_700_000_010_000_000,
+        None,
+    )
+    .expect("tombstone_with_rid succeeds");
 
     let mem = db.get(&rid).unwrap().unwrap();
     assert_eq!(mem.consolidation_status, "tombstoned");
@@ -4463,16 +7781,39 @@ fn tombstone_with_rid_basic_succeeds() {
 fn tombstone_with_rid_persists_reason() {
     let db = YantrikDB::new(":memory:", 64).unwrap();
     let emb = vec_seed(2.0, 64);
-    let rid = db.record("memory with reason", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
-    db.tombstone_with_rid(&rid, "default", Some("user requested deletion"), 1_700_000_011_000_000, None).unwrap();
+    let rid = db
+        .record(
+            "memory with reason",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    db.tombstone_with_rid(
+        &rid,
+        "default",
+        Some("user requested deletion"),
+        1_700_000_011_000_000,
+        None,
+    )
+    .unwrap();
 
     let conn = db.read_conn();
-    let reason: Option<String> = conn.query_row(
-        "SELECT tombstone_reason FROM memories WHERE rid = ?1",
-        rusqlite::params![&rid],
-        |row| row.get(0),
-    ).unwrap();
+    let reason: Option<String> = conn
+        .query_row(
+            "SELECT tombstone_reason FROM memories WHERE rid = ?1",
+            rusqlite::params![&rid],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(reason.as_deref(), Some("user requested deletion"));
 }
 
@@ -4482,8 +7823,22 @@ fn tombstone_with_rid_idempotent_on_replay() {
     // returns Ok(()) without emitting a second oplog entry.
     let db = YantrikDB::new(":memory:", 64).unwrap();
     let emb = vec_seed(3.0, 64);
-    let rid = db.record("idempotent tombstone", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "idempotent tombstone",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     for _ in 0..3 {
         db.tombstone_with_rid(&rid, "default", Some("replay"), 1_700_000_012_000_000, None)
@@ -4491,12 +7846,17 @@ fn tombstone_with_rid_idempotent_on_replay() {
     }
 
     let conn = db.read_conn();
-    let op_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM oplog WHERE op_type = 'forget' AND target_rid = ?1",
-        rusqlite::params![&rid],
-        |row| row.get(0),
-    ).unwrap();
-    assert_eq!(op_count, 1, "oplog has exactly one forget entry despite 3 calls");
+    let op_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM oplog WHERE op_type = 'forget' AND target_rid = ?1",
+            rusqlite::params![&rid],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        op_count, 1,
+        "oplog has exactly one forget entry despite 3 calls"
+    );
 }
 
 #[test]
@@ -4504,15 +7864,23 @@ fn tombstone_with_rid_idempotent_on_missing() {
     // Snapshot-install + log replay overlap means tombstoning a rid that
     // doesn't exist is normal cluster behavior. Must return Ok(()), not error.
     let db = YantrikDB::new(":memory:", 64).unwrap();
-    db.tombstone_with_rid("rid_never_existed", "default", None, 1_700_000_013_000_000, None)
-        .expect("must be Ok(()) on missing rid");
+    db.tombstone_with_rid(
+        "rid_never_existed",
+        "default",
+        None,
+        1_700_000_013_000_000,
+        None,
+    )
+    .expect("must be Ok(()) on missing rid");
     // Verify no oplog entry created for the missing rid.
     let conn = db.read_conn();
-    let op_count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM oplog WHERE target_rid = ?1",
-        rusqlite::params!["rid_never_existed"],
-        |row| row.get(0),
-    ).unwrap();
+    let op_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM oplog WHERE target_rid = ?1",
+            rusqlite::params!["rid_never_existed"],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(op_count, 0);
 }
 
@@ -4520,20 +7888,41 @@ fn tombstone_with_rid_idempotent_on_missing() {
 fn tombstone_with_rid_uses_caller_supplied_timestamp() {
     let db = YantrikDB::new(":memory:", 64).unwrap();
     let emb = vec_seed(4.0, 64);
-    let rid = db.record("ts test", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "ts test",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
     let caller_ts: i64 = 1_700_000_999_000_000;
-    db.tombstone_with_rid(&rid, "default", None, caller_ts, None).unwrap();
+    db.tombstone_with_rid(&rid, "default", None, caller_ts, None)
+        .unwrap();
 
     let conn = db.read_conn();
-    let updated_at: f64 = conn.query_row(
-        "SELECT updated_at FROM memories WHERE rid = ?1",
-        rusqlite::params![&rid],
-        |row| row.get(0),
-    ).unwrap();
+    let updated_at: f64 = conn
+        .query_row(
+            "SELECT updated_at FROM memories WHERE rid = ?1",
+            rusqlite::params![&rid],
+            |row| row.get(0),
+        )
+        .unwrap();
     let expected = (caller_ts as f64) / 1_000_000.0;
-    assert!((updated_at - expected).abs() < 1e-6,
-        "updated_at should reflect caller ts: got {} expected {}", updated_at, expected);
+    assert!(
+        (updated_at - expected).abs() < 1e-6,
+        "updated_at should reflect caller ts: got {} expected {}",
+        updated_at,
+        expected
+    );
 }
 
 #[test]
@@ -4542,14 +7931,31 @@ fn forget_still_works_after_refactor() {
     // tombstone of a live row.
     let db = YantrikDB::new(":memory:", 64).unwrap();
     let emb = vec_seed(5.0, 64);
-    let rid = db.record("forget test", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "forget test",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     let first = db.forget(&rid).unwrap();
     assert!(first, "first forget on live row returns true");
 
     let second = db.forget(&rid).unwrap();
-    assert!(!second, "second forget on already-tombstoned row returns false");
+    assert!(
+        !second,
+        "second forget on already-tombstoned row returns false"
+    );
 
     let missing = db.forget("rid_never_existed").unwrap();
     assert!(!missing, "forget on missing rid returns false");
@@ -4560,17 +7966,40 @@ fn tombstone_with_rid_hides_from_recall() {
     // After tombstone_with_rid, the rid must not appear in recall results.
     let db = YantrikDB::new(":memory:", 64).unwrap();
     let emb = vec_seed(6.0, 64);
-    let rid = db.record("hide me", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
+    let rid = db
+        .record(
+            "hide me",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     // Sanity: visible before tombstone.
-    let r = db.recall(&emb, 5, None, None, false, false, None, true, None, None, None).unwrap();
+    let r = db
+        .recall(
+            &emb, 5, None, None, false, false, None, true, None, None, None,
+        )
+        .unwrap();
     assert!(r.iter().any(|x| x.rid == rid), "visible before tombstone");
 
-    db.tombstone_with_rid(&rid, "default", None, 1_700_000_014_000_000, None).unwrap();
+    db.tombstone_with_rid(&rid, "default", None, 1_700_000_014_000_000, None)
+        .unwrap();
 
     // Hidden after.
-    let r2 = db.recall(&emb, 5, None, None, false, false, None, true, None, None, None).unwrap();
+    let r2 = db
+        .recall(
+            &emb, 5, None, None, false, false, None, true, None, None, None,
+        )
+        .unwrap();
     assert!(!r2.iter().any(|x| x.rid == rid), "hidden after tombstone");
 }
 
@@ -4580,18 +8009,34 @@ fn tombstone_with_rid_hides_from_recall() {
 fn upsert_entity_edge_with_id_basic_succeeds() {
     let db = YantrikDB::new(":memory:", 64).unwrap();
     db.upsert_entity_edge_with_id(
-        "edge_1", "Alice", "Acme", "works_at", 0.9, "default",
+        "edge_1",
+        "Alice",
+        "Acme",
+        "works_at",
+        0.9,
+        "default",
         1_700_000_020_000_000,
         None,
-    ).expect("upsert succeeds");
+    )
+    .expect("upsert succeeds");
 
     // Verify the claim row exists with caller-supplied edge_id.
     let conn = db.read_conn();
-    let (cid, src, dst, rel, weight): (String, String, String, String, f64) = conn.query_row(
-        "SELECT claim_id, src, dst, rel_type, weight FROM claims WHERE claim_id = ?1",
-        rusqlite::params!["edge_1"],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
-    ).unwrap();
+    let (cid, src, dst, rel, weight): (String, String, String, String, f64) = conn
+        .query_row(
+            "SELECT claim_id, src, dst, rel_type, weight FROM claims WHERE claim_id = ?1",
+            rusqlite::params!["edge_1"],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .unwrap();
     assert_eq!(cid, "edge_1");
     assert_eq!(src, "Alice");
     assert_eq!(dst, "Acme");
@@ -4604,17 +8049,25 @@ fn upsert_entity_edge_with_id_is_idempotent_on_replay() {
     let db = YantrikDB::new(":memory:", 64).unwrap();
     for _ in 0..3 {
         db.upsert_entity_edge_with_id(
-            "edge_idem", "Bob", "Beta Corp", "founded", 0.8, "default",
+            "edge_idem",
+            "Bob",
+            "Beta Corp",
+            "founded",
+            0.8,
+            "default",
             1_700_000_021_000_000,
             None,
-        ).expect("idempotent");
+        )
+        .expect("idempotent");
     }
     let conn = db.read_conn();
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM claims WHERE claim_id = ?1",
-        rusqlite::params!["edge_idem"],
-        |row| row.get(0),
-    ).unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM claims WHERE claim_id = ?1",
+            rusqlite::params!["edge_idem"],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(count, 1, "exactly one claim row regardless of replay");
 
     let op_count: i64 = conn.query_row(
@@ -4630,37 +8083,55 @@ fn upsert_entity_edge_uses_caller_supplied_timestamp() {
     let db = YantrikDB::new(":memory:", 64).unwrap();
     let caller_ts: i64 = 1_700_000_555_000_000;
     db.upsert_entity_edge_with_id(
-        "edge_ts", "X", "Y", "knows", 0.5, "default", caller_ts,
-        None,
-    ).unwrap();
+        "edge_ts", "X", "Y", "knows", 0.5, "default", caller_ts, None,
+    )
+    .unwrap();
     let conn = db.read_conn();
-    let created_at: f64 = conn.query_row(
-        "SELECT created_at FROM claims WHERE claim_id = ?1",
-        rusqlite::params!["edge_ts"],
-        |row| row.get(0),
-    ).unwrap();
+    let created_at: f64 = conn
+        .query_row(
+            "SELECT created_at FROM claims WHERE claim_id = ?1",
+            rusqlite::params!["edge_ts"],
+            |row| row.get(0),
+        )
+        .unwrap();
     let expected = (caller_ts as f64) / 1_000_000.0;
-    assert!((created_at - expected).abs() < 1e-6,
-        "created_at REAL reflects caller ts: got {} expected {}", created_at, expected);
+    assert!(
+        (created_at - expected).abs() < 1e-6,
+        "created_at REAL reflects caller ts: got {} expected {}",
+        created_at,
+        expected
+    );
 }
 
 #[test]
 fn upsert_entity_edge_creates_entities() {
     let db = YantrikDB::new(":memory:", 64).unwrap();
     db.upsert_entity_edge_with_id(
-        "edge_ent", "Charlie", "Delta Inc", "ceo_of", 1.0, "default",
+        "edge_ent",
+        "Charlie",
+        "Delta Inc",
+        "ceo_of",
+        1.0,
+        "default",
         1_700_000_022_000_000,
         None,
-    ).unwrap();
+    )
+    .unwrap();
     let conn = db.read_conn();
-    let charlie: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM entities WHERE name = 'Charlie'",
-        [], |row| row.get(0),
-    ).unwrap();
-    let delta: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM entities WHERE name = 'Delta Inc'",
-        [], |row| row.get(0),
-    ).unwrap();
+    let charlie: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM entities WHERE name = 'Charlie'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let delta: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM entities WHERE name = 'Delta Inc'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(charlie, 1);
     assert_eq!(delta, 1);
 }
@@ -4669,18 +8140,26 @@ fn upsert_entity_edge_creates_entities() {
 fn delete_entity_edge_with_id_basic_succeeds() {
     let db = YantrikDB::new(":memory:", 64).unwrap();
     db.upsert_entity_edge_with_id(
-        "edge_del", "A", "B", "knows", 0.5, "default",
+        "edge_del",
+        "A",
+        "B",
+        "knows",
+        0.5,
+        "default",
         1_700_000_023_000_000,
         None,
-    ).unwrap();
+    )
+    .unwrap();
     db.delete_entity_edge_with_id("edge_del", "default", 1_700_000_024_000_000, None)
         .expect("delete succeeds");
     let conn = db.read_conn();
-    let tombstoned: i64 = conn.query_row(
-        "SELECT tombstoned FROM claims WHERE claim_id = ?1",
-        rusqlite::params!["edge_del"],
-        |row| row.get(0),
-    ).unwrap();
+    let tombstoned: i64 = conn
+        .query_row(
+            "SELECT tombstoned FROM claims WHERE claim_id = ?1",
+            rusqlite::params!["edge_del"],
+            |row| row.get(0),
+        )
+        .unwrap();
     assert_eq!(tombstoned, 1);
 }
 
@@ -4704,10 +8183,16 @@ fn delete_entity_edge_with_id_idempotent_on_missing() {
 fn delete_entity_edge_with_id_idempotent_on_replay() {
     let db = YantrikDB::new(":memory:", 64).unwrap();
     db.upsert_entity_edge_with_id(
-        "edge_del2", "P", "Q", "knows", 0.5, "default",
+        "edge_del2",
+        "P",
+        "Q",
+        "knows",
+        0.5,
+        "default",
         1_700_000_026_000_000,
         None,
-    ).unwrap();
+    )
+    .unwrap();
     for _ in 0..3 {
         db.delete_entity_edge_with_id("edge_del2", "default", 1_700_000_027_000_000, None)
             .expect("idempotent");
@@ -4718,7 +8203,10 @@ fn delete_entity_edge_with_id_idempotent_on_replay() {
         rusqlite::params!["edge_del2"],
         |row| row.get(0),
     ).unwrap();
-    assert_eq!(op_count, 1, "exactly one delete oplog entry across 3 replays");
+    assert_eq!(
+        op_count, 1,
+        "exactly one delete oplog entry across 3 replays"
+    );
 }
 
 // ── Phase 6 RYW — caller-supplied seq + visible_seq bump from all 4 primitives ──
@@ -4731,28 +8219,57 @@ fn record_with_rid_uses_caller_supplied_seq_and_bumps_visible() {
     let db = YantrikDB::new(":memory:", 64).unwrap();
     let emb = vec_seed(11.0, 64);
     db.record_with_rid(
-        "rid_seq_supplied", "x", "episodic",
-        0.5, 0.0, 604800.0,
-        &empty_meta(), &emb, "alpha",
-        0.8, "general", "user", None,
-        1_700_000_100_000_000, &[], "test-model.v1",
+        "rid_seq_supplied",
+        "x",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &emb,
+        "alpha",
+        0.8,
+        "general",
+        "user",
+        None,
+        1_700_000_100_000_000,
+        &[],
+        "test-model.v1",
         Some(1_000_000),
-    ).unwrap();
-    assert_eq!(db.visible_seq_for("alpha"), 1_000_000,
-        "visible_seq[alpha] equals caller-supplied seq");
+    )
+    .unwrap();
+    assert_eq!(
+        db.visible_seq_for("alpha"),
+        1_000_000,
+        "visible_seq[alpha] equals caller-supplied seq"
+    );
 
     // Subsequent engine-allocated seq for a fresh write must be > 1_000_000
     // because vec_seq was ratcheted.
     db.record_with_rid(
-        "rid_after_ratchet", "y", "episodic",
-        0.5, 0.0, 604800.0,
-        &empty_meta(), &vec_seed(12.0, 64), "alpha",
-        0.8, "general", "user", None,
-        1_700_000_101_000_000, &[], "test-model.v1",
+        "rid_after_ratchet",
+        "y",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(12.0, 64),
+        "alpha",
+        0.8,
+        "general",
+        "user",
         None,
-    ).unwrap();
-    assert!(db.visible_seq_for("alpha") > 1_000_000,
-        "engine-allocated seq is > ratcheted high-water");
+        1_700_000_101_000_000,
+        &[],
+        "test-model.v1",
+        None,
+    )
+    .unwrap();
+    assert!(
+        db.visible_seq_for("alpha") > 1_000_000,
+        "engine-allocated seq is > ratcheted high-water"
+    );
 }
 
 #[test]
@@ -4765,39 +8282,67 @@ fn tombstone_with_rid_bumps_visible_seq_even_when_rid_missing() {
     let db = YantrikDB::new(":memory:", 64).unwrap();
     assert_eq!(db.visible_seq_for("beta"), 0);
     db.tombstone_with_rid(
-        "rid_unknown_locally", "beta", None, 1_700_000_200_000_000,
+        "rid_unknown_locally",
+        "beta",
+        None,
+        1_700_000_200_000_000,
         Some(2_000_000),
-    ).unwrap();
-    assert_eq!(db.visible_seq_for("beta"), 2_000_000,
-        "tombstone_with_rid bumps visible_seq[beta] even on missing rid");
+    )
+    .unwrap();
+    assert_eq!(
+        db.visible_seq_for("beta"),
+        2_000_000,
+        "tombstone_with_rid bumps visible_seq[beta] even on missing rid"
+    );
 }
 
 #[test]
 fn upsert_entity_edge_with_id_bumps_visible_seq() {
     let db = YantrikDB::new(":memory:", 64).unwrap();
     db.upsert_entity_edge_with_id(
-        "edge_seq", "X", "Y", "knows", 0.5, "gamma",
+        "edge_seq",
+        "X",
+        "Y",
+        "knows",
+        0.5,
+        "gamma",
         1_700_000_300_000_000,
         Some(3_000_000),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(db.visible_seq_for("gamma"), 3_000_000);
 
     // Idempotent re-apply with the SAME seq is a no-op (fetch_max keeps it).
     db.upsert_entity_edge_with_id(
-        "edge_seq", "X", "Y", "knows", 0.5, "gamma",
+        "edge_seq",
+        "X",
+        "Y",
+        "knows",
+        0.5,
+        "gamma",
         1_700_000_300_000_000,
         Some(3_000_000),
-    ).unwrap();
-    assert_eq!(db.visible_seq_for("gamma"), 3_000_000,
-        "same-seq replay does not regress watermark");
+    )
+    .unwrap();
+    assert_eq!(
+        db.visible_seq_for("gamma"),
+        3_000_000,
+        "same-seq replay does not regress watermark"
+    );
 
     // A larger supplied seq advances. (Edge-replay should never happen with
     // a smaller seq in cluster mode, but fetch_max protects us regardless.)
     db.upsert_entity_edge_with_id(
-        "edge_seq2", "P", "Q", "knows", 0.5, "gamma",
+        "edge_seq2",
+        "P",
+        "Q",
+        "knows",
+        0.5,
+        "gamma",
         1_700_000_301_000_000,
         Some(3_500_000),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(db.visible_seq_for("gamma"), 3_500_000);
 }
 
@@ -4807,9 +8352,12 @@ fn delete_entity_edge_with_id_bumps_visible_seq_even_when_edge_missing() {
     // commit-log entry must still advance visible_seq for the namespace.
     let db = YantrikDB::new(":memory:", 64).unwrap();
     db.delete_entity_edge_with_id(
-        "edge_never", "delta", 1_700_000_400_000_000,
+        "edge_never",
+        "delta",
+        1_700_000_400_000_000,
         Some(4_000_000),
-    ).unwrap();
+    )
+    .unwrap();
     assert_eq!(db.visible_seq_for("delta"), 4_000_000);
 }
 
@@ -4823,29 +8371,47 @@ fn issue_8_tombstoned_memories_excluded_from_recall() {
     // 3. recall with semantically-related query → MUST NOT return the rid
     let db = YantrikDB::new(":memory:", 64).unwrap();
     let emb = vec_seed(42.0, 64);
-    let rid = db.record(
-        "memory to forget for issue 8 repro",
-        "episodic",
-        0.5, 0.0, 604800.0,
-        &empty_meta(),
-        &emb,
-        "default",
-        0.8, "general", "user", None,
-    ).unwrap();
+    let rid = db
+        .record(
+            "memory to forget for issue 8 repro",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
     // Sanity: visible before forget.
-    let before = db.recall(&emb, 5, None, None, false, false, None, true, None, None, None).unwrap();
-    assert!(before.iter().any(|r| r.rid == rid),
-        "memory must be findable before forget");
+    let before = db
+        .recall(
+            &emb, 5, None, None, false, false, None, true, None, None, None,
+        )
+        .unwrap();
+    assert!(
+        before.iter().any(|r| r.rid == rid),
+        "memory must be findable before forget"
+    );
 
     db.forget(&rid).unwrap();
 
     // After forget, should NOT appear in recall.
-    let after = db.recall(&emb, 5, None, None, false, false, None, true, None, None, None).unwrap();
-    assert!(!after.iter().any(|r| r.rid == rid),
-        "issue #8: tombstoned memory must NOT appear in recall results");
+    let after = db
+        .recall(
+            &emb, 5, None, None, false, false, None, true, None, None, None,
+        )
+        .unwrap();
+    assert!(
+        !after.iter().any(|r| r.rid == rid),
+        "issue #8: tombstoned memory must NOT appear in recall results"
+    );
 }
-
 
 #[test]
 fn issue_8_tombstoned_persists_across_engine_reopen() {
@@ -4859,23 +8425,36 @@ fn issue_8_tombstoned_persists_across_engine_reopen() {
     let rid;
     {
         let db = YantrikDB::new(path_str, 64).unwrap();
-        rid = db.record(
-            "memory survives reopen test",
-            "episodic",
-            0.5, 0.0, 604800.0,
-            &empty_meta(),
-            &emb,
-            "default",
-            0.8, "general", "user", None,
-        ).unwrap();
+        rid = db
+            .record(
+                "memory survives reopen test",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &emb,
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
         db.forget(&rid).unwrap();
     }
     // Reopen — engine rebuilds vec_index from disk.
     {
         let db2 = YantrikDB::new(path_str, 64).unwrap();
-        let after = db2.recall(&emb, 5, None, None, false, false, None, true, None, None, None).unwrap();
-        assert!(!after.iter().any(|r| r.rid == rid),
-            "tombstoned memory must stay hidden across engine reopen");
+        let after = db2
+            .recall(
+                &emb, 5, None, None, false, false, None, true, None, None, None,
+            )
+            .unwrap();
+        assert!(
+            !after.iter().any(|r| r.rid == rid),
+            "tombstoned memory must stay hidden across engine reopen"
+        );
     }
 }
 
@@ -4891,8 +8470,22 @@ fn visible_seq_starts_at_zero_for_new_namespace() {
 fn record_bumps_visible_seq_for_namespace() {
     let db = YantrikDB::new(":memory:", 64).unwrap();
     let before = db.visible_seq_for("default");
-    let _ = db.record("test", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &vec_seed(1.0, 64), "default", 0.8, "general", "user", None).unwrap();
+    let _ = db
+        .record(
+            "test",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 64),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
     let after = db.visible_seq_for("default");
     assert!(after > before, "record() must bump visible_seq[default]");
 }
@@ -4900,8 +8493,21 @@ fn record_bumps_visible_seq_for_namespace() {
 #[test]
 fn visible_seq_isolated_per_namespace() {
     let db = YantrikDB::new(":memory:", 64).unwrap();
-    db.record("ns_a memory", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &vec_seed(1.0, 64), "ns_a", 0.8, "general", "user", None).unwrap();
+    db.record(
+        "ns_a memory",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 64),
+        "ns_a",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
     let seq_a = db.visible_seq_for("ns_a");
     let seq_b = db.visible_seq_for("ns_b");
     assert!(seq_a > 0);
@@ -4911,8 +8517,21 @@ fn visible_seq_isolated_per_namespace() {
 #[test]
 fn wait_for_visible_seq_succeeds_when_already_reached() {
     let db = YantrikDB::new(":memory:", 64).unwrap();
-    db.record("set watermark", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &vec_seed(1.0, 64), "default", 0.8, "general", "user", None).unwrap();
+    db.record(
+        "set watermark",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 64),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
     let current = db.visible_seq_for("default");
     // Wait for a seq we've already passed — should return immediately.
     db.wait_for_visible_seq("default", current, std::time::Duration::from_millis(100))
@@ -4922,10 +8541,16 @@ fn wait_for_visible_seq_succeeds_when_already_reached() {
 #[test]
 fn wait_for_visible_seq_times_out_on_unreachable() {
     let db = YantrikDB::new(":memory:", 64).unwrap();
-    let err = db.wait_for_visible_seq("never", 9999, std::time::Duration::from_millis(50))
+    let err = db
+        .wait_for_visible_seq("never", 9999, std::time::Duration::from_millis(50))
         .expect_err("must timeout");
     match err {
-        crate::error::YantrikDbError::RyWaitTimeout { namespace, requested_seq, observed_seq, waited_ms } => {
+        crate::error::YantrikDbError::RyWaitTimeout {
+            namespace,
+            requested_seq,
+            observed_seq,
+            waited_ms,
+        } => {
             assert_eq!(namespace, "never");
             assert_eq!(requested_seq, 9999);
             assert_eq!(observed_seq, 0);
@@ -4944,16 +8569,29 @@ fn wait_for_visible_seq_wakes_on_concurrent_write() {
     let db = Arc::new(YantrikDB::new(":memory:", 64).unwrap());
     // Start a waiter that wants seq=1.
     let db_w = Arc::clone(&db);
-    let waiter = thread::spawn(move || {
-        db_w.wait_for_visible_seq("default", 1, Duration::from_secs(2))
-    });
+    let waiter =
+        thread::spawn(move || db_w.wait_for_visible_seq("default", 1, Duration::from_secs(2)));
 
     // Spawn a writer after a brief delay.
     let db_writer = Arc::clone(&db);
     let writer = thread::spawn(move || {
         thread::sleep(Duration::from_millis(50));
-        db_writer.record("wake the waiter", "episodic", 0.5, 0.0, 604800.0,
-            &empty_meta(), &vec_seed(1.0, 64), "default", 0.8, "general", "user", None).unwrap();
+        db_writer
+            .record(
+                "wake the waiter",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &vec_seed(1.0, 64),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
     });
 
     writer.join().unwrap();
@@ -4965,25 +8603,70 @@ fn wait_for_visible_seq_wakes_on_concurrent_write() {
 fn recall_with_seq_returns_results_when_seq_reached() {
     let db = YantrikDB::new(":memory:", 64).unwrap();
     let emb = vec_seed(1.0, 64);
-    let _ = db.record("ryw test", "episodic", 0.5, 0.0, 604800.0,
-        &empty_meta(), &emb, "default", 0.8, "general", "user", None).unwrap();
+    let _ = db
+        .record(
+            "ryw test",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
     let current = db.visible_seq_for("default");
-    let r = db.recall_with_seq(
-        &emb, 5, None, None, false, false, None, true, Some("default"), None, None,
-        current, std::time::Duration::from_millis(100),
-    ).unwrap();
-    assert!(!r.is_empty(), "recall_with_seq returns results once seq reached");
+    let r = db
+        .recall_with_seq(
+            &emb,
+            5,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            Some("default"),
+            None,
+            None,
+            current,
+            std::time::Duration::from_millis(100),
+        )
+        .unwrap();
+    assert!(
+        !r.is_empty(),
+        "recall_with_seq returns results once seq reached"
+    );
 }
 
 #[test]
 fn recall_with_seq_times_out_on_unreachable() {
     let db = YantrikDB::new(":memory:", 64).unwrap();
-    let err = db.recall_with_seq(
-        &vec_seed(1.0, 64), 5, None, None, false, false, None, true,
-        Some("default"), None, None,
-        9999, std::time::Duration::from_millis(50),
-    ).expect_err("must timeout");
-    assert!(matches!(err, crate::error::YantrikDbError::RyWaitTimeout { .. }));
+    let err = db
+        .recall_with_seq(
+            &vec_seed(1.0, 64),
+            5,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            Some("default"),
+            None,
+            None,
+            9999,
+            std::time::Duration::from_millis(50),
+        )
+        .expect_err("must timeout");
+    assert!(matches!(
+        err,
+        crate::error::YantrikDbError::RyWaitTimeout { .. }
+    ));
 }
 
 // ── Saga task 20: bundled-embedder auto-attach ──
@@ -5003,8 +8686,10 @@ fn bundled_embedder_auto_attaches_on_default_dim() {
     // bundled embedder switched from hash-trick dim=384 to potion-2M dim=64.
     use crate::embedder::BUNDLED_EMBEDDER_DIM;
     let db = YantrikDB::new(":memory:", BUNDLED_EMBEDDER_DIM).unwrap();
-    assert!(db.has_embedder(),
-        "default-build YantrikDB::new with bundled dim must auto-attach BundledEmbedder");
+    assert!(
+        db.has_embedder(),
+        "default-build YantrikDB::new with bundled dim must auto-attach BundledEmbedder"
+    );
 }
 
 #[cfg(feature = "bundled-embedder")]
@@ -5014,8 +8699,10 @@ fn with_default_constructor_attaches_bundled_embedder() {
     // stay agnostic to the bundled model's dimension. Stays in sync if
     // a future Slice C swaps the bundle to a different-dim variant.
     let db = YantrikDB::with_default(":memory:").unwrap();
-    assert!(db.has_embedder(),
-        "with_default must auto-attach BundledEmbedder");
+    assert!(
+        db.has_embedder(),
+        "with_default must auto-attach BundledEmbedder"
+    );
 }
 
 #[cfg(feature = "bundled-embedder")]
@@ -5026,8 +8713,10 @@ fn bundled_embedder_does_not_attach_on_mismatched_dim() {
     // silent dim-mismatch corruption when a caller is intentionally
     // running with a non-default dim (e.g. for an external MiniLM).
     let db = YantrikDB::new(":memory:", 384).unwrap();
-    assert!(!db.has_embedder(),
-        "dim mismatch should NOT auto-attach (avoids silent corruption)");
+    assert!(
+        !db.has_embedder(),
+        "dim mismatch should NOT auto-attach (avoids silent corruption)"
+    );
 }
 
 #[cfg(feature = "bundled-embedder")]
@@ -5037,16 +8726,29 @@ fn bundled_embedder_record_text_round_trip() {
     // YantrikDB::with_default(...); record_text(...); recall_text(...).
     // All works without configuration on default builds.
     let db = YantrikDB::with_default(":memory:").unwrap();
-    let _rid = db.record_text(
-        "Alice met Acme yesterday",
-        "episodic", 0.5, 0.0, 604800.0, &empty_meta(),
-        "default", 0.8, "general", "user", None,
-    ).expect("record_text should work without explicit set_embedder");
+    let _rid = db
+        .record_text(
+            "Alice met Acme yesterday",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .expect("record_text should work without explicit set_embedder");
 
     let results = db.recall_text("Alice", 5).expect("recall_text should work");
     assert!(!results.is_empty(), "recall finds the recorded memory");
-    assert!(results[0].text.contains("Alice"),
-        "potion-2M finds the recorded memory; got: {:?}", results[0].text);
+    assert!(
+        results[0].text.contains("Alice"),
+        "potion-2M finds the recorded memory; got: {:?}",
+        results[0].text
+    );
 }
 
 #[cfg(feature = "bundled-embedder")]
@@ -5057,21 +8759,28 @@ fn explicit_set_embedder_overrides_bundled() {
     // takes over.
     struct DummyEmbedder;
     impl crate::types::Embedder for DummyEmbedder {
-        fn embed(&self, _t: &str) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
+        fn embed(
+            &self,
+            _t: &str,
+        ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
             // Distinct sentinel value so we can detect this implementation was used.
             let mut v = vec![0.0; 64];
             v[0] = 0.7777;
             Ok(v)
         }
-        fn dim(&self) -> usize { 64 }
+        fn dim(&self) -> usize {
+            64
+        }
     }
 
     let mut db = YantrikDB::with_default(":memory:").unwrap();
     assert!(db.has_embedder(), "starts with bundled");
     db.set_embedder(Box::new(DummyEmbedder));
     let v = db.embed("anything").unwrap();
-    assert!((v[0] - 0.7777).abs() < 1e-6,
-        "DummyEmbedder's sentinel must be visible — set_embedder overrode bundled");
+    assert!(
+        (v[0] - 0.7777).abs() < 1e-6,
+        "DummyEmbedder's sentinel must be visible — set_embedder overrode bundled"
+    );
 }
 
 // ============================================================================
@@ -5118,7 +8827,8 @@ fn migration_replay_does_not_trip_on_already_present_column() {
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '23')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     // Second open: migration loop sees existing_version=23 and tries to
@@ -5133,10 +8843,20 @@ fn migration_replay_does_not_trip_on_already_present_column() {
     // (the column is reachable, the migration didn't leave the schema in a
     // partial state).
     db.record(
-        "post-heal smoke", "episodic",
-        0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8),
-        "default", 0.8, "general", "user", None,
-    ).unwrap();
+        "post-heal smoke",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -5168,13 +8888,17 @@ fn migration_replay_does_not_trip_on_alter_table_against_view() {
     // Sanity check: edges is indeed a view in the current-schema state.
     {
         let conn = rusqlite::Connection::open(path).unwrap();
-        let kind: String = conn.query_row(
-            "SELECT type FROM sqlite_master WHERE name = 'edges'",
-            [],
-            |row| row.get(0),
-        ).unwrap();
-        assert_eq!(kind, "view",
-            "fixture precondition: at current schema, edges should be a backward-compat view");
+        let kind: String = conn
+            .query_row(
+                "SELECT type FROM sqlite_master WHERE name = 'edges'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            kind, "view",
+            "fixture precondition: at current schema, edges should be a backward-compat view"
+        );
     }
 
     // Rewind meta to 14 — simulates the issue #10 production state where
@@ -5185,7 +8909,8 @@ fn migration_replay_does_not_trip_on_alter_table_against_view() {
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '14')",
             [],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     // Re-open: existing_version=14, migration loop runs V14_V15 which does
@@ -5198,10 +8923,20 @@ fn migration_replay_does_not_trip_on_alter_table_against_view() {
 
     // Sanity: post-heal write still works end-to-end.
     db.record(
-        "post-heal smoke (issue 10)", "episodic",
-        0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8),
-        "default", 0.8, "general", "user", None,
-    ).unwrap();
+        "post-heal smoke (issue 10)",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
 }
 
 #[test]
@@ -5220,8 +8955,9 @@ fn migration_meta_stamp_does_not_downgrade() {
         let conn = rusqlite::Connection::open(path).unwrap();
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
-             INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '999');"
-        ).unwrap();
+             INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '999');",
+        )
+        .unwrap();
     }
 
     // Open with the current binary — should NOT rewind 999 down to
@@ -5231,10 +8967,14 @@ fn migration_meta_stamp_does_not_downgrade() {
     let stamped: String = {
         let conn = rusqlite::Connection::open(path).unwrap();
         conn.query_row(
-            "SELECT value FROM meta WHERE key = 'schema_version'", [],
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
             |row| row.get(0),
-        ).unwrap()
+        )
+        .unwrap()
     };
-    assert_eq!(stamped, "999",
-        "MAX-stamp invariant: open() must never rewind meta.schema_version below the on-disk value");
+    assert_eq!(
+        stamped, "999",
+        "MAX-stamp invariant: open() must never rewind meta.schema_version below the on-disk value"
+    );
 }

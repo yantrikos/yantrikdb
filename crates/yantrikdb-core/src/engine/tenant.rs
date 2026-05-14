@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use crate::error::{YantrikDbError, Result};
+use crate::error::{Result, YantrikDbError};
 
 use super::YantrikDB;
 
@@ -95,13 +95,11 @@ impl TenantManager {
     /// List all tenant DB files discovered in the base directory.
     pub fn discovered_tenants(&self) -> Result<Vec<String>> {
         let mut tenants = Vec::new();
-        let entries = std::fs::read_dir(&self.base_dir).map_err(|e| {
-            YantrikDbError::SyncError(format!("failed to read tenant dir: {e}"))
-        })?;
+        let entries = std::fs::read_dir(&self.base_dir)
+            .map_err(|e| YantrikDbError::SyncError(format!("failed to read tenant dir: {e}")))?;
         for entry in entries {
-            let entry = entry.map_err(|e| {
-                YantrikDbError::SyncError(format!("failed to read dir entry: {e}"))
-            })?;
+            let entry = entry
+                .map_err(|e| YantrikDbError::SyncError(format!("failed to read dir entry: {e}")))?;
             let name = entry.file_name();
             let name_str = name.to_string_lossy();
             if name_str.ends_with(".db") {
@@ -162,8 +160,21 @@ mod tests {
         // Record in tenant-a
         let emb: Vec<f32> = (0..8).map(|i| (i as f32) * 0.1).collect();
         let db_a = mgr.get("tenant-a").unwrap();
-        db_a.record("a-memory", "episodic", 0.5, 0.0, 604800.0,
-            &serde_json::json!({}), &emb, "default", 0.8, "general", "user", None).unwrap();
+        db_a.record(
+            "a-memory",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
         // Tenant-b should still be empty
         let db_b = mgr.get("tenant-b").unwrap();
@@ -181,10 +192,13 @@ mod tests {
 
         let mut key = [0u8; 32];
         key[0] = 42;
-        mgr.register_tenant("secure", TenantConfig {
-            encryption_key: Some(key),
-            ..Default::default()
-        });
+        mgr.register_tenant(
+            "secure",
+            TenantConfig {
+                encryption_key: Some(key),
+                ..Default::default()
+            },
+        );
 
         let db = mgr.get("secure").unwrap();
         assert!(db.is_encrypted());

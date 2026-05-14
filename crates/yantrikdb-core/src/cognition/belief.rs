@@ -22,8 +22,8 @@
 use std::collections::HashMap;
 
 use crate::state::{
-    BeliefPayload, CognitiveAttrs, CognitiveEdge, CognitiveEdgeKind, CognitiveNode,
-    EvidenceEntry, NodeId, NodeKind, NodePayload, Provenance,
+    BeliefPayload, CognitiveAttrs, CognitiveEdge, CognitiveEdgeKind, CognitiveNode, EvidenceEntry,
+    NodeId, NodeKind, NodePayload, Provenance,
 };
 
 // ── Evidence Types ──
@@ -205,17 +205,16 @@ pub fn assert_evidence(
     enforce_confidence_ceiling(belief, &node.attrs, config);
 
     // Enforce absolute log-odds cap
-    belief.log_odds = belief.log_odds.clamp(-config.max_abs_log_odds, config.max_abs_log_odds);
+    belief.log_odds = belief
+        .log_odds
+        .clamp(-config.max_abs_log_odds, config.max_abs_log_odds);
 
     let posterior_log_odds = belief.log_odds;
     let posterior_probability = crate::state::sigmoid(posterior_log_odds);
 
     // Detect threshold crossings
-    let threshold_direction = detect_threshold_crossing(
-        prior_probability,
-        posterior_probability,
-        config,
-    );
+    let threshold_direction =
+        detect_threshold_crossing(prior_probability, posterior_probability, config);
 
     // Update cognitive attributes
     node.attrs.confidence = posterior_probability;
@@ -294,10 +293,9 @@ pub fn propagate_evidence(
             if let NodePayload::Belief(belief) = &mut downstream.payload {
                 let old_lo = belief.log_odds;
                 belief.log_odds += propagated_weight;
-                belief.log_odds = belief.log_odds.clamp(
-                    -config.max_abs_log_odds,
-                    config.max_abs_log_odds,
-                );
+                belief.log_odds = belief
+                    .log_odds
+                    .clamp(-config.max_abs_log_odds, config.max_abs_log_odds);
 
                 downstream.attrs.confidence = crate::state::sigmoid(belief.log_odds);
 
@@ -519,7 +517,10 @@ mod tests {
         let result = assert_evidence(&mut node, &evidence, &config).unwrap();
 
         assert!(result.crossed_threshold);
-        assert_eq!(result.threshold_direction, Some(ThresholdDirection::BecameConfident));
+        assert_eq!(
+            result.threshold_direction,
+            Some(ThresholdDirection::BecameConfident)
+        );
     }
 
     #[test]
@@ -534,7 +535,10 @@ mod tests {
         let result = assert_evidence(&mut node, &evidence, &config).unwrap();
 
         assert!(result.crossed_threshold);
-        assert_eq!(result.threshold_direction, Some(ThresholdDirection::Flipped));
+        assert_eq!(
+            result.threshold_direction,
+            Some(ThresholdDirection::Flipped)
+        );
         assert!(result.posterior_probability < 0.25);
     }
 
@@ -601,7 +605,10 @@ mod tests {
         assert!(decayed > 0.1, "should decay after grace period");
         if let NodePayload::Belief(b) = &node.payload {
             assert!(b.log_odds < 3.0, "log-odds should have decreased");
-            assert!(b.log_odds > 0.0, "should still be positive (not overcorrected)");
+            assert!(
+                b.log_odds > 0.0,
+                "should still be positive (not overcorrected)"
+            );
         }
     }
 

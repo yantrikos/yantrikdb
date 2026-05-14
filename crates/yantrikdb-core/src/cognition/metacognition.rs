@@ -365,16 +365,40 @@ pub fn metacognitive_assessment(inputs: &MetaCognitiveInputs) -> MetaCognitiveRe
 
     // Compute signal details.
     let signals = vec![
-        make_signal("evidence", 1.0 - evidence_sparsity, config.w_evidence, config),
-        make_signal("agreement", 1.0 - model_disagreement, config.w_agreement, config),
-        make_signal("consistency", 1.0 - contradiction_density, config.w_contradiction, config),
+        make_signal(
+            "evidence",
+            1.0 - evidence_sparsity,
+            config.w_evidence,
+            config,
+        ),
+        make_signal(
+            "agreement",
+            1.0 - model_disagreement,
+            config.w_agreement,
+            config,
+        ),
+        make_signal(
+            "consistency",
+            1.0 - contradiction_density,
+            config.w_contradiction,
+            config,
+        ),
         make_signal("accuracy", prediction_accuracy, config.w_accuracy, config),
-        make_signal("calibration", 1.0 - calibration_error, config.w_calibration, config),
+        make_signal(
+            "calibration",
+            1.0 - calibration_error,
+            config.w_calibration,
+            config,
+        ),
         make_signal("coverage", coverage, config.w_coverage, config),
     ];
 
     // Weighted composite confidence.
-    let overall_confidence: f64 = signals.iter().map(|s| s.contribution).sum::<f64>().clamp(0.0, 1.0);
+    let overall_confidence: f64 = signals
+        .iter()
+        .map(|s| s.contribution)
+        .sum::<f64>()
+        .clamp(0.0, 1.0);
 
     MetaCognitiveReport {
         evidence_sparsity,
@@ -450,7 +474,9 @@ pub fn should_abstain(
 
     // Check candidate confidence.
     let all_low = !candidates.is_empty()
-        && candidates.iter().all(|c| c.confidence < config.min_candidate_confidence);
+        && candidates
+            .iter()
+            .all(|c| c.confidence < config.min_candidate_confidence);
     if all_low {
         let max_conf = candidates
             .iter()
@@ -536,9 +562,9 @@ pub fn reasoning_health(inputs: &MetaCognitiveInputs) -> ReasoningHealthReport {
         name: "Calibration".to_string(),
         score: cal_score,
         status: classify_signal(cal_score, inputs.config),
-        detail: format!("ECE: {:.3}, {} total predictions",
-            report.calibration_error,
-            inputs.learning_state.calibration.total
+        detail: format!(
+            "ECE: {:.3}, {} total predictions",
+            report.calibration_error, inputs.learning_state.calibration.total
         ),
     });
 
@@ -548,7 +574,8 @@ pub fn reasoning_health(inputs: &MetaCognitiveInputs) -> ReasoningHealthReport {
         name: "World Model".to_string(),
         score: wm_score,
         status: classify_signal(wm_score, inputs.config),
-        detail: format!("{} transitions, {:.1}% accuracy",
+        detail: format!(
+            "{} transitions, {:.1}% accuracy",
             inputs.transition_model.total_transitions,
             wm_score * 100.0
         ),
@@ -560,7 +587,8 @@ pub fn reasoning_health(inputs: &MetaCognitiveInputs) -> ReasoningHealthReport {
         name: "Belief System".to_string(),
         score: belief_score,
         status: classify_signal(belief_score, inputs.config),
-        detail: format!("{} formed, {:.0}% established",
+        detail: format!(
+            "{} formed, {:.0}% established",
             inputs.belief_store.total_formed,
             belief_score * 100.0
         ),
@@ -572,7 +600,8 @@ pub fn reasoning_health(inputs: &MetaCognitiveInputs) -> ReasoningHealthReport {
         name: "Skill System".to_string(),
         score: skill_score,
         status: classify_signal(skill_score, inputs.config),
-        detail: format!("{} skills, {:.0}% mature",
+        detail: format!(
+            "{} skills, {:.0}% mature",
             inputs.skill_registry.skills.len(),
             skill_score * 100.0
         ),
@@ -584,9 +613,7 @@ pub fn reasoning_health(inputs: &MetaCognitiveInputs) -> ReasoningHealthReport {
         name: "Evidence Collection".to_string(),
         score: evidence_score,
         status: classify_signal(evidence_score, inputs.config),
-        detail: format!("{} events ingested",
-            inputs.event_buffer.total_ingested
-        ),
+        detail: format!("{} events ingested", inputs.event_buffer.total_ingested),
     });
 
     // Experimentation.
@@ -595,9 +622,9 @@ pub fn reasoning_health(inputs: &MetaCognitiveInputs) -> ReasoningHealthReport {
         name: "Experimentation".to_string(),
         score: exp_score,
         status: classify_signal(exp_score, inputs.config),
-        detail: format!("{} concluded, {} aborted",
-            inputs.experiment_registry.total_concluded,
-            inputs.experiment_registry.total_aborted
+        detail: format!(
+            "{} concluded, {} aborted",
+            inputs.experiment_registry.total_concluded, inputs.experiment_registry.total_aborted
         ),
     });
 
@@ -685,17 +712,31 @@ impl MetaCognitiveHistory {
 
     /// Average meta-cognitive confidence over last N snapshots.
     pub fn recent_confidence(&self, n: usize) -> f64 {
-        let recent: Vec<f64> = self.snapshots.iter().rev().take(n)
-            .map(|s| s.overall_confidence).collect();
-        if recent.is_empty() { return 0.5; }
+        let recent: Vec<f64> = self
+            .snapshots
+            .iter()
+            .rev()
+            .take(n)
+            .map(|s| s.overall_confidence)
+            .collect();
+        if recent.is_empty() {
+            return 0.5;
+        }
         recent.iter().sum::<f64>() / recent.len() as f64
     }
 
     /// Confidence trend over last N snapshots (positive = improving).
     pub fn confidence_trend(&self, n: usize) -> f64 {
-        let scores: Vec<f64> = self.snapshots.iter().rev().take(n)
-            .map(|s| s.overall_confidence).collect();
-        if scores.len() < 2 { return 0.0; }
+        let scores: Vec<f64> = self
+            .snapshots
+            .iter()
+            .rev()
+            .take(n)
+            .map(|s| s.overall_confidence)
+            .collect();
+        if scores.len() < 2 {
+            return 0.0;
+        }
         let first = scores.last().unwrap();
         let last = scores.first().unwrap();
         (last - first) / (scores.len() as f64 - 1.0)
@@ -704,8 +745,11 @@ impl MetaCognitiveHistory {
     /// Escalation rate over last N assessments.
     pub fn escalation_rate(&self, n: usize) -> f64 {
         let recent: Vec<&MetaCognitiveSnapshot> = self.snapshots.iter().rev().take(n).collect();
-        if recent.is_empty() { return 0.0; }
-        let escalations = recent.iter()
+        if recent.is_empty() {
+            return 0.0;
+        }
+        let escalations = recent
+            .iter()
             .filter(|s| s.abstain_action == "EscalateToLlm")
             .count();
         escalations as f64 / recent.len() as f64
@@ -735,22 +779,34 @@ fn compute_evidence_sparsity(inputs: &MetaCognitiveInputs) -> f64 {
 
     // Diversity component: how many event kinds have been observed?
     let all_kinds = [
-        EventKind::AppOpened, EventKind::AppClosed, EventKind::AppSequence,
-        EventKind::NotificationReceived, EventKind::NotificationDismissed,
+        EventKind::AppOpened,
+        EventKind::AppClosed,
+        EventKind::AppSequence,
+        EventKind::NotificationReceived,
+        EventKind::NotificationDismissed,
         EventKind::NotificationActedOn,
-        EventKind::SuggestionAccepted, EventKind::SuggestionRejected,
-        EventKind::SuggestionIgnored, EventKind::SuggestionModified,
-        EventKind::QueryRepeated, EventKind::UserTyping, EventKind::UserIdle,
-        EventKind::ToolCallCompleted, EventKind::LlmCalled, EventKind::ErrorOccurred,
+        EventKind::SuggestionAccepted,
+        EventKind::SuggestionRejected,
+        EventKind::SuggestionIgnored,
+        EventKind::SuggestionModified,
+        EventKind::QueryRepeated,
+        EventKind::UserTyping,
+        EventKind::UserIdle,
+        EventKind::ToolCallCompleted,
+        EventKind::LlmCalled,
+        EventKind::ErrorOccurred,
     ];
-    let observed_kinds = all_kinds.iter()
+    let observed_kinds = all_kinds
+        .iter()
         .filter(|k| inputs.event_buffer.by_kind(**k, 1).len() > 0)
         .count();
     let diversity = observed_kinds as f64 / all_kinds.len() as f64;
     let diversity_sparsity = 1.0 - diversity;
 
     // Belief grounding: how many beliefs have ≥3 observations?
-    let grounded_beliefs = inputs.belief_store.iter()
+    let grounded_beliefs = inputs
+        .belief_store
+        .iter()
         .filter(|b| b.confirming_observations + b.contradicting_observations >= 3)
         .count();
     let total_beliefs = inputs.belief_store.len().max(1);
@@ -773,10 +829,13 @@ fn compute_model_disagreement(inputs: &MetaCognitiveInputs) -> f64 {
     // 1. Experiment ambiguity: active experiments without clear winners.
     let active = inputs.experiment_registry.active_experiments();
     if !active.is_empty() {
-        let ambiguous = active.iter().filter(|e| {
-            // An experiment is ambiguous if no variant has >70% posterior.
-            e.variant_results.iter().all(|v| v.mean() < 0.7)
-        }).count();
+        let ambiguous = active
+            .iter()
+            .filter(|e| {
+                // An experiment is ambiguous if no variant has >70% posterior.
+                e.variant_results.iter().all(|v| v.mean() < 0.7)
+            })
+            .count();
         disagreement_signals.push(ambiguous as f64 / active.len() as f64);
     }
 
@@ -812,7 +871,9 @@ fn compute_contradiction_density(inputs: &MetaCognitiveInputs) -> f64 {
         return 0.0; // No beliefs → no contradictions.
     }
 
-    let contradicted = inputs.belief_store.iter()
+    let contradicted = inputs
+        .belief_store
+        .iter()
         .filter(|b| {
             b.contradicting_observations > 0
                 && b.contradicting_observations as f64
@@ -830,9 +891,9 @@ fn compute_contradiction_density(inputs: &MetaCognitiveInputs) -> f64 {
 ///
 /// Blends world model prediction accuracy with learning state accuracy.
 fn compute_prediction_accuracy(inputs: &MetaCognitiveInputs) -> f64 {
-    let wm_accuracy = inputs.transition_model.prediction_accuracy(
-        inputs.config.min_coverage_observations as u32,
-    );
+    let wm_accuracy = inputs
+        .transition_model
+        .prediction_accuracy(inputs.config.min_coverage_observations as u32);
     let learning_accuracy = inputs.learning_state.weights.accuracy();
 
     // If world model has few data points, rely more on learning accuracy.
@@ -864,7 +925,10 @@ fn compute_coverage(inputs: &MetaCognitiveInputs) -> f64 {
 
     // Also consider skill coverage.
     let total_skills = inputs.skill_registry.skills.len();
-    let reliable_skills = inputs.skill_registry.skills.values()
+    let reliable_skills = inputs
+        .skill_registry
+        .skills
+        .values()
         .filter(|s| s.confidence >= 0.6 && !s.deprecated)
         .count();
     let skill_coverage = if total_skills == 0 {
@@ -891,7 +955,8 @@ fn compute_source_reliability(inputs: &MetaCognitiveInputs) -> f64 {
     }
 
     // Weighted average by observation count.
-    let weighted_sum: f64 = sources.values()
+    let weighted_sum: f64 = sources
+        .values()
         .map(|s| s.reliability() * s.total as f64)
         .sum();
 
@@ -905,7 +970,10 @@ fn compute_source_reliability(inputs: &MetaCognitiveInputs) -> f64 {
 /// Proportion of non-deprecated skills that are Validated or better
 /// (confidence ≥ 0.5).
 fn compute_skill_maturity(inputs: &MetaCognitiveInputs) -> f64 {
-    let active_skills: Vec<_> = inputs.skill_registry.skills.values()
+    let active_skills: Vec<_> = inputs
+        .skill_registry
+        .skills
+        .values()
         .filter(|s| !s.deprecated)
         .collect();
 
@@ -913,9 +981,7 @@ fn compute_skill_maturity(inputs: &MetaCognitiveInputs) -> f64 {
         return 0.0;
     }
 
-    let mature = active_skills.iter()
-        .filter(|s| s.confidence >= 0.5)
-        .count();
+    let mature = active_skills.iter().filter(|s| s.confidence >= 0.5).count();
 
     mature as f64 / active_skills.len() as f64
 }
@@ -931,7 +997,9 @@ fn compute_belief_maturity(inputs: &MetaCognitiveInputs) -> f64 {
         return 0.0;
     }
 
-    let established = inputs.belief_store.iter()
+    let established = inputs
+        .belief_store
+        .iter()
         .filter(|b| matches!(b.stage, BeliefStage::Established | BeliefStage::Certain))
         .count();
 
@@ -946,13 +1014,22 @@ fn detect_coverage_gaps(inputs: &MetaCognitiveInputs) -> Vec<CoverageGap> {
 
     // 1. Unobserved event kinds.
     let all_kinds = [
-        EventKind::AppOpened, EventKind::AppClosed, EventKind::AppSequence,
-        EventKind::NotificationReceived, EventKind::NotificationDismissed,
+        EventKind::AppOpened,
+        EventKind::AppClosed,
+        EventKind::AppSequence,
+        EventKind::NotificationReceived,
+        EventKind::NotificationDismissed,
         EventKind::NotificationActedOn,
-        EventKind::SuggestionAccepted, EventKind::SuggestionRejected,
-        EventKind::SuggestionIgnored, EventKind::SuggestionModified,
-        EventKind::QueryRepeated, EventKind::UserTyping, EventKind::UserIdle,
-        EventKind::ToolCallCompleted, EventKind::LlmCalled, EventKind::ErrorOccurred,
+        EventKind::SuggestionAccepted,
+        EventKind::SuggestionRejected,
+        EventKind::SuggestionIgnored,
+        EventKind::SuggestionModified,
+        EventKind::QueryRepeated,
+        EventKind::UserTyping,
+        EventKind::UserIdle,
+        EventKind::ToolCallCompleted,
+        EventKind::LlmCalled,
+        EventKind::ErrorOccurred,
     ];
     for kind in &all_kinds {
         if inputs.event_buffer.by_kind(*kind, 1).is_empty() {
@@ -967,19 +1044,29 @@ fn detect_coverage_gaps(inputs: &MetaCognitiveInputs) -> Vec<CoverageGap> {
     // 2. Weak belief domains.
     use crate::flywheel::BeliefCategory;
     let categories = [
-        BeliefCategory::Temporal, BeliefCategory::Preference,
-        BeliefCategory::Behavioral, BeliefCategory::Productivity,
-        BeliefCategory::Need, BeliefCategory::System,
+        BeliefCategory::Temporal,
+        BeliefCategory::Preference,
+        BeliefCategory::Behavioral,
+        BeliefCategory::Productivity,
+        BeliefCategory::Need,
+        BeliefCategory::System,
     ];
     for cat in &categories {
-        let count = inputs.belief_store.iter()
-            .filter(|b| b.category == *cat && matches!(b.stage, BeliefStage::Established | BeliefStage::Certain))
+        let count = inputs
+            .belief_store
+            .iter()
+            .filter(|b| {
+                b.category == *cat
+                    && matches!(b.stage, BeliefStage::Established | BeliefStage::Certain)
+            })
             .count();
         if count < inputs.config.min_beliefs_per_category {
             gaps.push(CoverageGap {
                 kind: CoverageGapKind::WeakBeliefDomain,
-                description: format!("{:?} has only {} established beliefs (need {})",
-                    cat, count, inputs.config.min_beliefs_per_category),
+                description: format!(
+                    "{:?} has only {} established beliefs (need {})",
+                    cat, count, inputs.config.min_beliefs_per_category
+                ),
                 severity: 0.5,
             });
         }
@@ -996,13 +1083,19 @@ fn detect_coverage_gaps(inputs: &MetaCognitiveInputs) -> Vec<CoverageGap> {
     }
 
     // 4. Unreliable skill domains.
-    let unreliable: Vec<_> = inputs.skill_registry.skills.values()
+    let unreliable: Vec<_> = inputs
+        .skill_registry
+        .skills
+        .values()
         .filter(|s| !s.deprecated && s.confidence < 0.3 && s.offer_count > 3)
         .collect();
     if !unreliable.is_empty() {
         gaps.push(CoverageGap {
             kind: CoverageGapKind::UnreliableSkillDomain,
-            description: format!("{} skills with low confidence despite multiple offers", unreliable.len()),
+            description: format!(
+                "{} skills with low confidence despite multiple offers",
+                unreliable.len()
+            ),
             severity: 0.4,
         });
     }
@@ -1034,11 +1127,17 @@ fn classify_signal(value: f64, config: &MetaCognitiveConfig) -> SignalStatus {
 }
 
 fn score_to_grade(score: f64) -> char {
-    if score > 0.8 { 'A' }
-    else if score > 0.6 { 'B' }
-    else if score > 0.4 { 'C' }
-    else if score > 0.2 { 'D' }
-    else { 'F' }
+    if score > 0.8 {
+        'A'
+    } else if score > 0.6 {
+        'B'
+    } else if score > 0.4 {
+        'C'
+    } else if score > 0.2 {
+        'D'
+    } else {
+        'F'
+    }
 }
 
 fn compute_experiment_health(inputs: &MetaCognitiveInputs) -> f64 {
@@ -1062,33 +1161,38 @@ fn compute_experiment_health(inputs: &MetaCognitiveInputs) -> f64 {
 }
 
 fn extract_calibration_bins(cal: &CalibrationMap) -> Vec<CalibrationBinDetail> {
-    cal.bins.iter().enumerate().map(|(i, bin)| {
-        let lo = i as f64 * 0.1;
-        let hi = lo + 0.1;
-        let predicted = if bin.count > 0 {
-            bin.sum_predicted / bin.count as f64
-        } else {
-            (lo + hi) / 2.0
-        };
-        let actual = bin.actual_rate();
-        CalibrationBinDetail {
-            range: format!("{:.1}-{:.1}", lo, hi),
-            predicted,
-            actual,
-            count: bin.count,
-            gap: (predicted - actual).abs(),
-        }
-    }).collect()
+    cal.bins
+        .iter()
+        .enumerate()
+        .map(|(i, bin)| {
+            let lo = i as f64 * 0.1;
+            let hi = lo + 0.1;
+            let predicted = if bin.count > 0 {
+                bin.sum_predicted / bin.count as f64
+            } else {
+                (lo + hi) / 2.0
+            };
+            let actual = bin.actual_rate();
+            CalibrationBinDetail {
+                range: format!("{:.1}-{:.1}", lo, hi),
+                predicted,
+                actual,
+                count: bin.count,
+                gap: (predicted - actual).abs(),
+            }
+        })
+        .collect()
 }
 
 fn extract_source_reliabilities(reg: &ReliabilityRegistry) -> Vec<SourceReliabilityDetail> {
-    reg.sources.iter().map(|(name, src)| {
-        SourceReliabilityDetail {
+    reg.sources
+        .iter()
+        .map(|(name, src)| SourceReliabilityDetail {
             source: name.clone(),
             reliability: src.reliability(),
             observation_count: src.total,
-        }
-    }).collect()
+        })
+        .collect()
 }
 
 fn generate_recommendations(
@@ -1104,8 +1208,12 @@ fn generate_recommendations(
             recs.push(Recommendation {
                 priority: RecommendationPriority::Critical,
                 category: sub.name.clone(),
-                description: format!("{} is critically degraded ({:.0}%): {}",
-                    sub.name, sub.score * 100.0, sub.detail),
+                description: format!(
+                    "{} is critically degraded ({:.0}%): {}",
+                    sub.name,
+                    sub.score * 100.0,
+                    sub.detail
+                ),
             });
         }
     }
@@ -1151,11 +1259,14 @@ fn generate_recommendations(
     }
 
     // Experiment overload.
-    if inputs.experiment_registry.active_experiments().len() > inputs.experiment_registry.max_concurrent {
+    if inputs.experiment_registry.active_experiments().len()
+        > inputs.experiment_registry.max_concurrent
+    {
         recs.push(Recommendation {
             priority: RecommendationPriority::Medium,
             category: "Experimentation".to_string(),
-            description: "Too many concurrent experiments. Consider concluding or aborting some.".to_string(),
+            description: "Too many concurrent experiments. Consider concluding or aborting some."
+                .to_string(),
         });
     }
 
@@ -1182,14 +1293,16 @@ fn generate_recommendations(
 mod tests {
     use super::*;
     use crate::calibration::{
-        CalibrationBin, CalibrationMap, LearningState, ReliabilityRegistry,
-        SourceReliability, UtilityWeights, BanditRegistry,
+        BanditRegistry, CalibrationBin, CalibrationMap, LearningState, ReliabilityRegistry,
+        SourceReliability, UtilityWeights,
     };
-    use crate::experimenter::{ExperimentRegistry, Experiment, ExperimentStatus, BetaPosterior};
-    use crate::flywheel::{AutonomousBelief, BeliefCategory, BeliefEvidence, BeliefStage, BeliefStore};
+    use crate::experimenter::{BetaPosterior, Experiment, ExperimentRegistry, ExperimentStatus};
+    use crate::flywheel::{
+        AutonomousBelief, BeliefCategory, BeliefEvidence, BeliefStage, BeliefStore,
+    };
     use crate::observer::{EventBuffer, EventKind};
-    use crate::skills::{SkillRegistry, LearnedSkill, SkillOrigin, SkillStage};
-    use crate::world_model::{TransitionModel, OutcomeDistribution};
+    use crate::skills::{LearnedSkill, SkillOrigin, SkillRegistry, SkillStage};
+    use crate::world_model::{OutcomeDistribution, TransitionModel};
 
     fn empty_learning_state() -> LearningState {
         LearningState {
@@ -1266,9 +1379,10 @@ mod tests {
             assessed_at: 1000.0,
         };
 
-        let candidates = vec![
-            MetaActionCandidate { description: "Send notification".to_string(), confidence: 0.8 },
-        ];
+        let candidates = vec![MetaActionCandidate {
+            description: "Send notification".to_string(),
+            confidence: 0.8,
+        }];
         let config = MetaCognitiveConfig::default();
 
         let decision = should_abstain(&report, &candidates, &config);
@@ -1294,9 +1408,10 @@ mod tests {
             assessed_at: 1000.0,
         };
 
-        let candidates = vec![
-            MetaActionCandidate { description: "Act".to_string(), confidence: 0.7 },
-        ];
+        let candidates = vec![MetaActionCandidate {
+            description: "Act".to_string(),
+            confidence: 0.7,
+        }];
         let config = MetaCognitiveConfig::default();
 
         let decision = should_abstain(&report, &candidates, &config);
@@ -1322,9 +1437,10 @@ mod tests {
             assessed_at: 1000.0,
         };
 
-        let candidates = vec![
-            MetaActionCandidate { description: "Act".to_string(), confidence: 0.6 },
-        ];
+        let candidates = vec![MetaActionCandidate {
+            description: "Act".to_string(),
+            confidence: 0.6,
+        }];
         let config = MetaCognitiveConfig::default();
 
         let decision = should_abstain(&report, &candidates, &config);
@@ -1350,8 +1466,14 @@ mod tests {
         };
 
         let candidates = vec![
-            MetaActionCandidate { description: "A".to_string(), confidence: 0.2 },
-            MetaActionCandidate { description: "B".to_string(), confidence: 0.1 },
+            MetaActionCandidate {
+                description: "A".to_string(),
+                confidence: 0.2,
+            },
+            MetaActionCandidate {
+                description: "B".to_string(),
+                confidence: 0.1,
+            },
         ];
         let config = MetaCognitiveConfig::default();
 
@@ -1377,9 +1499,10 @@ mod tests {
             assessed_at: 1000.0,
         };
 
-        let candidates = vec![
-            MetaActionCandidate { description: "Act".to_string(), confidence: 0.3 },
-        ];
+        let candidates = vec![MetaActionCandidate {
+            description: "Act".to_string(),
+            confidence: 0.3,
+        }];
         let config = MetaCognitiveConfig::default();
 
         let decision = should_abstain(&report, &candidates, &config);
@@ -1549,8 +1672,12 @@ mod tests {
 
         // Should detect unobserved event kinds and weak belief domains.
         assert!(!gaps.is_empty());
-        assert!(gaps.iter().any(|g| g.kind == CoverageGapKind::UnobservedEventKind));
-        assert!(gaps.iter().any(|g| g.kind == CoverageGapKind::WeakBeliefDomain));
+        assert!(gaps
+            .iter()
+            .any(|g| g.kind == CoverageGapKind::UnobservedEventKind));
+        assert!(gaps
+            .iter()
+            .any(|g| g.kind == CoverageGapKind::WeakBeliefDomain));
     }
 
     #[test]

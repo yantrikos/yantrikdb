@@ -39,13 +39,11 @@ pub fn entity_matches_text(entity: &str, text_tokens: &[String]) -> bool {
 /// start or end of a capitalized chunk. A sentence-initial "The" or "Our" is
 /// capitalized by position, not because it names an entity.
 const ENTITY_STOPWORDS: &[&str] = &[
-    "The", "A", "An", "I", "We", "You", "He", "She", "It", "They",
-    "This", "That", "These", "Those", "My", "Your", "His", "Her",
-    "Its", "Our", "Their", "But", "And", "Or", "So", "If", "When",
-    "Where", "What", "Who", "Why", "How", "Is", "Are", "Was", "Were",
-    "Be", "Been", "Being", "Have", "Has", "Had", "Do", "Does", "Did",
-    "Of", "In", "On", "At", "To", "For", "With", "From", "By",
-    "As", "Than", "Then", "Also", "Just", "Only", "Very", "Much",
+    "The", "A", "An", "I", "We", "You", "He", "She", "It", "They", "This", "That", "These",
+    "Those", "My", "Your", "His", "Her", "Its", "Our", "Their", "But", "And", "Or", "So", "If",
+    "When", "Where", "What", "Who", "Why", "How", "Is", "Are", "Was", "Were", "Be", "Been",
+    "Being", "Have", "Has", "Had", "Do", "Does", "Did", "Of", "In", "On", "At", "To", "For",
+    "With", "From", "By", "As", "Than", "Then", "Also", "Just", "Only", "Very", "Much",
 ];
 
 /// Extract candidate proper-noun entities from free-form text using a
@@ -92,7 +90,8 @@ pub fn extract_heuristic_entities(text: &str) -> Vec<String> {
     {
         let first = word.chars().next().unwrap();
         let starts_upper = first.is_uppercase();
-        let is_all_caps = word.len() > 1 && word.chars().all(|c| !c.is_alphabetic() || c.is_uppercase());
+        let is_all_caps =
+            word.len() > 1 && word.chars().all(|c| !c.is_alphabetic() || c.is_uppercase());
 
         let joins_chunk = if chunk.is_empty() {
             // Open a new chunk only on capitalized or all-caps tokens.
@@ -100,9 +99,7 @@ pub fn extract_heuristic_entities(text: &str) -> Vec<String> {
         } else {
             // Continue an existing chunk on capitalized words or short letter-suffixes
             // (e.g., "Series A", "Version B").
-            starts_upper
-                || is_all_caps
-                || (word.len() == 1 && first.is_ascii_uppercase())
+            starts_upper || is_all_caps || (word.len() == 1 && first.is_ascii_uppercase())
         };
 
         if joins_chunk {
@@ -127,8 +124,8 @@ pub struct RelationCandidate {
     pub src: String,
     pub rel_type: String,
     pub dst: String,
-    pub polarity: i32,       // 1=positive, -1=negative
-    pub modality: String,    // asserted, reported, hypothetical, denied
+    pub polarity: i32,           // 1=positive, -1=negative
+    pub modality: String,        // asserted, reported, hypothetical, denied
     pub confidence_band: String, // low, medium, high
 }
 
@@ -136,25 +133,69 @@ pub struct RelationCandidate {
 /// and indicate a specific relationship. Each pattern maps to a rel_type.
 const RELATION_PATTERNS: &[(&[&str], &str)] = &[
     // Role-based (entity A <pattern> entity B → rel_type)
-    (&["is the ceo of", "is ceo of", "serves as ceo of"], "ceo_of"),
-    (&["is the cto of", "is cto of", "serves as cto of"], "cto_of"),
-    (&["is the cfo of", "is cfo of", "serves as cfo of"], "cfo_of"),
-    (&["is the founder of", "is founder of", "co-founded"], "founded"),
+    (
+        &["is the ceo of", "is ceo of", "serves as ceo of"],
+        "ceo_of",
+    ),
+    (
+        &["is the cto of", "is cto of", "serves as cto of"],
+        "cto_of",
+    ),
+    (
+        &["is the cfo of", "is cfo of", "serves as cfo of"],
+        "cfo_of",
+    ),
+    (
+        &["is the founder of", "is founder of", "co-founded"],
+        "founded",
+    ),
     (&["founded"], "founded"),
     (&["leads", "heads", "runs", "manages", "directs"], "leads"),
-    (&["works at", "works for", "employed at", "employed by", "joined"], "works_at"),
+    (
+        &[
+            "works at",
+            "works for",
+            "employed at",
+            "employed by",
+            "joined",
+        ],
+        "works_at",
+    ),
     // Location/origin
     (&["was born in", "born in"], "born_in"),
-    (&["is headquartered in", "headquartered in", "is based in", "based in", "located in"], "headquartered_in"),
+    (
+        &[
+            "is headquartered in",
+            "headquartered in",
+            "is based in",
+            "based in",
+            "located in",
+        ],
+        "headquartered_in",
+    ),
     // Personal
     (&["is married to", "married to", "wed to"], "married_to"),
     // Corporate
-    (&["acquired", "bought", "purchased", "took over"], "acquired"),
-    (&["is a subsidiary of", "subsidiary of", "is owned by", "owned by"], "subsidiary_of"),
+    (
+        &["acquired", "bought", "purchased", "took over"],
+        "acquired",
+    ),
+    (
+        &[
+            "is a subsidiary of",
+            "subsidiary of",
+            "is owned by",
+            "owned by",
+        ],
+        "subsidiary_of",
+    ),
     // Language/skill
     (&["speaks", "is fluent in"], "speaks"),
     // Generic membership/part-of
-    (&["is a member of", "member of", "belongs to", "part of"], "member_of"),
+    (
+        &["is a member of", "member of", "belongs to", "part of"],
+        "member_of",
+    ),
     (&["reports to"], "reports_to"),
 ];
 
@@ -221,9 +262,9 @@ pub fn extract_heuristic_relations(text: &str, entities: &[String]) -> Vec<Relat
 
             // Check negation in the between-window, then strip negation
             // words so pattern matching still works on "is NOT the CEO of"
-            let has_negation = NEGATION_CUES.iter().any(|cue| {
-                between.split_whitespace().any(|w| w == *cue)
-            });
+            let has_negation = NEGATION_CUES
+                .iter()
+                .any(|cue| between.split_whitespace().any(|w| w == *cue));
             let polarity = if has_negation { -1 } else { 1 };
             let between_stripped: String = between
                 .split_whitespace()
@@ -260,7 +301,8 @@ pub fn extract_heuristic_relations(text: &str, entities: &[String]) -> Vec<Relat
             for (role_keyword, rel_type) in REVERSE_ROLE_PATTERNS {
                 let possessive = format!("'s {}", role_keyword);
                 let possessive2 = format!("s {}", role_keyword);
-                if between_stripped.contains(&possessive) || between_stripped.contains(&possessive2) {
+                if between_stripped.contains(&possessive) || between_stripped.contains(&possessive2)
+                {
                     // Reversed: entity_a is the org, entity_b is the person
                     candidates.push(RelationCandidate {
                         src: entity_b.to_string(), // person
@@ -289,29 +331,59 @@ pub fn extract_heuristic_relations(text: &str, entities: &[String]) -> Vec<Relat
 /// matches to flag `polarity=negative` in v0.6.0. In v0.5.13 we only count
 /// occurrences for audit telemetry.
 const NEGATION_CUES: &[&str] = &[
-    "not", "no", "never", "denied", "refuted", "isn't", "wasn't",
-    "aren't", "weren't", "doesn't", "didn't", "disputes", "denies",
+    "not", "no", "never", "denied", "refuted", "isn't", "wasn't", "aren't", "weren't", "doesn't",
+    "didn't", "disputes", "denies",
 ];
 
 /// Cues that indicate a statement has temporal scope. Used to flag that a
 /// memory would benefit from `valid_from` / `valid_to` qualifiers.
 const TEMPORAL_CUES: &[&str] = &[
-    "was", "were", "until", "before", "after", "since", "during",
-    "former", "current", "currently", "previously", "recently",
-    "now", "then", "later", "earlier", "ago", "yesterday", "tomorrow",
+    "was",
+    "were",
+    "until",
+    "before",
+    "after",
+    "since",
+    "during",
+    "former",
+    "current",
+    "currently",
+    "previously",
+    "recently",
+    "now",
+    "then",
+    "later",
+    "earlier",
+    "ago",
+    "yesterday",
+    "tomorrow",
 ];
 
 /// Cues that indicate modality (hypothetical, reported, quoted).
 const MODALITY_CUES: &[&str] = &[
-    "may", "might", "allegedly", "reportedly", "rumor", "rumored",
-    "said", "claims", "according", "stated", "announced",
+    "may",
+    "might",
+    "allegedly",
+    "reportedly",
+    "rumor",
+    "rumored",
+    "said",
+    "claims",
+    "according",
+    "stated",
+    "announced",
 ];
 
 /// Compound-sentence separators that a v0.6.0 extractor should split on
 /// before running patterns. Counting these at audit time tells us how many
 /// real-world memories contain multiple claims per write.
 const COMPOUND_MARKERS: &[&str] = &[
-    "; ", ", then ", ", subsequently ", " but ", " however ", " although ",
+    "; ",
+    ", then ",
+    ", subsequently ",
+    " but ",
+    " however ",
+    " although ",
 ];
 
 /// Text features collected for extraction-audit telemetry (RFC 006 Phase 0).
@@ -364,9 +436,8 @@ pub fn analyze_text_features(text: &str, extracted_entities: &[String]) -> TextF
     // Rough "assertion?" signal: not a question, has at least 2 tokens, not
     // pure modality/rumor. Used to estimate what fraction of agent writes
     // the v0.6.0 extractor should try to process at all.
-    let likely_assertion = !text.trim_end().ends_with('?')
-        && tokens.len() >= 2
-        && modality_cue_count == 0;
+    let likely_assertion =
+        !text.trim_end().ends_with('?') && tokens.len() >= 2 && modality_cue_count == 0;
 
     TextFeatures {
         char_length: text.chars().count(),
@@ -384,20 +455,82 @@ pub fn analyze_text_features(text: &str, extracted_entities: &[String]) -> TextF
 
 /// Tech terms that should NOT be classified as person names even if title-cased/all-caps.
 const TECH_BLOCKLIST: &[&str] = &[
-    "faiss", "onnx", "scann", "redis", "kafka", "docker", "kubernetes", "react",
-    "python", "rust", "java", "swift", "flutter", "pytorch", "tensorflow",
-    "numpy", "pandas", "spark", "hadoop", "nginx", "postgres", "mysql",
-    "sqlite", "graphql", "grpc", "oauth", "jwt", "html", "css",
-    "api", "sdk", "ml", "ai", "gpu", "cpu", "ram", "ssd", "aws", "gcp",
-    "claude", "openai", "anthropic", "gemini", "llama", "ollama",
+    "faiss",
+    "onnx",
+    "scann",
+    "redis",
+    "kafka",
+    "docker",
+    "kubernetes",
+    "react",
+    "python",
+    "rust",
+    "java",
+    "swift",
+    "flutter",
+    "pytorch",
+    "tensorflow",
+    "numpy",
+    "pandas",
+    "spark",
+    "hadoop",
+    "nginx",
+    "postgres",
+    "mysql",
+    "sqlite",
+    "graphql",
+    "grpc",
+    "oauth",
+    "jwt",
+    "html",
+    "css",
+    "api",
+    "sdk",
+    "ml",
+    "ai",
+    "gpu",
+    "cpu",
+    "ram",
+    "ssd",
+    "aws",
+    "gcp",
+    "claude",
+    "openai",
+    "anthropic",
+    "gemini",
+    "llama",
+    "ollama",
 ];
 
 /// Words that indicate the entity is NOT a person when used as first word.
 const NON_PERSON_PREFIXES: &[&str] = &[
-    "project", "team", "company", "group", "department", "org", "the",
-    "operation", "task", "plan", "system", "service", "app", "tool",
-    "code", "server", "client", "api", "db", "database", "agent",
-    "model", "version", "release", "build", "deploy", "config",
+    "project",
+    "team",
+    "company",
+    "group",
+    "department",
+    "org",
+    "the",
+    "operation",
+    "task",
+    "plan",
+    "system",
+    "service",
+    "app",
+    "tool",
+    "code",
+    "server",
+    "client",
+    "api",
+    "db",
+    "database",
+    "agent",
+    "model",
+    "version",
+    "release",
+    "build",
+    "deploy",
+    "config",
 ];
 
 /// Classify an entity name into a type: "person", "tech", or "unknown".
@@ -416,7 +549,11 @@ pub fn classify_entity_type(name: &str) -> &'static str {
     }
 
     // All-caps multi-char → tech (e.g., "FAISS", "ONNX")
-    if trimmed.len() > 1 && trimmed.chars().all(|c| c.is_uppercase() || !c.is_alphabetic()) {
+    if trimmed.len() > 1
+        && trimmed
+            .chars()
+            .all(|c| c.is_uppercase() || !c.is_alphabetic())
+    {
         return "tech";
     }
 
@@ -434,7 +571,10 @@ pub fn classify_entity_type(name: &str) -> &'static str {
                 return "unknown";
             }
             // Also reject if any word is in tech blocklist
-            if words.iter().any(|w| TECH_BLOCKLIST.contains(&w.to_lowercase().as_str())) {
+            if words
+                .iter()
+                .any(|w| TECH_BLOCKLIST.contains(&w.to_lowercase().as_str()))
+            {
                 return "tech";
             }
             return "person";
@@ -448,62 +588,128 @@ pub fn classify_entity_type(name: &str) -> &'static str {
 
 /// Relationship types that imply both src and dst are persons.
 const PERSON_PERSON_RELS: &[&str] = &[
-    "married_to", "mother_of", "father_of", "daughter_of", "son_of",
-    "sister_of", "brother_of", "sibling_of", "parent_of", "child_of",
-    "knows", "friends_with", "met", "dating", "engaged_to",
-    "mentors", "mentored_by", "reports_to", "manages",
-    "colleagues", "roommate", "neighbor",
-    "called", "texted", "messaged", "date_night",
+    "married_to",
+    "mother_of",
+    "father_of",
+    "daughter_of",
+    "son_of",
+    "sister_of",
+    "brother_of",
+    "sibling_of",
+    "parent_of",
+    "child_of",
+    "knows",
+    "friends_with",
+    "met",
+    "dating",
+    "engaged_to",
+    "mentors",
+    "mentored_by",
+    "reports_to",
+    "manages",
+    "colleagues",
+    "roommate",
+    "neighbor",
+    "called",
+    "texted",
+    "messaged",
+    "date_night",
 ];
 
 /// Relationship types where dst is a place.
 const PLACE_DST_RELS: &[&str] = &[
-    "lives_in", "born_in", "grew_up_in", "located_in", "based_in",
-    "visited", "moved_to", "traveled_to", "from",
+    "lives_in",
+    "born_in",
+    "grew_up_in",
+    "located_in",
+    "based_in",
+    "visited",
+    "moved_to",
+    "traveled_to",
+    "from",
 ];
 
 /// Relationship types where dst is an organization / institution.
 const ORG_DST_RELS: &[&str] = &[
-    "works_at", "works_for", "employed_at", "employed_by",
-    "studied_at", "attended", "enrolled_in", "graduated_from",
-    "member_of", "belongs_to", "founded",
+    "works_at",
+    "works_for",
+    "employed_at",
+    "employed_by",
+    "studied_at",
+    "attended",
+    "enrolled_in",
+    "graduated_from",
+    "member_of",
+    "belongs_to",
+    "founded",
 ];
 
 /// Relationship types where dst is tech/tool (src is project or person).
 const TECH_DST_RELS: &[&str] = &[
-    "built_with", "uses", "depends_on", "integrates", "requires",
-    "written_in", "coded_in", "implemented_with", "powered_by",
-    "runs_on", "compiled_with",
+    "built_with",
+    "uses",
+    "depends_on",
+    "integrates",
+    "requires",
+    "written_in",
+    "coded_in",
+    "implemented_with",
+    "powered_by",
+    "runs_on",
+    "compiled_with",
 ];
 
 /// Relationship types where dst is infrastructure.
 const INFRA_DST_RELS: &[&str] = &[
-    "deployed_on", "hosted_on", "deployed_to", "hosted_at",
-    "runs_on_infra", "served_by",
+    "deployed_on",
+    "hosted_on",
+    "deployed_to",
+    "hosted_at",
+    "runs_on_infra",
+    "served_by",
 ];
 
 /// Relationship types where src is a person and dst is a project/thing.
 const PERSON_PROJECT_RELS: &[&str] = &[
-    "works_on", "contributes_to", "maintains", "leads", "created",
-    "built", "designed", "architected", "owns",
+    "works_on",
+    "contributes_to",
+    "maintains",
+    "leads",
+    "created",
+    "built",
+    "designed",
+    "architected",
+    "owns",
 ];
 
 /// Relationship types where src is a project and dst is a project (dependency).
 const PROJECT_PROJECT_RELS: &[&str] = &[
-    "depends_on_project", "extends", "forks", "replaces",
-    "supersedes", "derived_from",
+    "depends_on_project",
+    "extends",
+    "forks",
+    "replaces",
+    "supersedes",
+    "derived_from",
 ];
 
 /// Relationship types where dst is an event or activity.
 const EVENT_DST_RELS: &[&str] = &[
-    "attended_event", "participated_in", "scheduled_for",
-    "presented_at", "spoke_at",
+    "attended_event",
+    "participated_in",
+    "scheduled_for",
+    "presented_at",
+    "spoke_at",
 ];
 
 /// Relationship types where dst is a concept/topic.
 const CONCEPT_DST_RELS: &[&str] = &[
-    "interested_in", "studies", "researches", "specializes_in",
-    "expert_in", "learning", "teaches",
+    "interested_in",
+    "studies",
+    "researches",
+    "specializes_in",
+    "expert_in",
+    "learning",
+    "teaches",
 ];
 
 /// Classify entity types using relationship semantics.
@@ -534,13 +740,27 @@ pub fn classify_with_relationship(
     // * → Tech/Tool relationships (src type from name heuristic)
     if TECH_DST_RELS.contains(&rel) {
         let src_type = classify_entity_type(src);
-        return (if src_type == "unknown" { "project" } else { src_type }, "tech");
+        return (
+            if src_type == "unknown" {
+                "project"
+            } else {
+                src_type
+            },
+            "tech",
+        );
     }
 
     // * → Infrastructure relationships
     if INFRA_DST_RELS.contains(&rel) {
         let src_type = classify_entity_type(src);
-        return (if src_type == "unknown" { "project" } else { src_type }, "infrastructure");
+        return (
+            if src_type == "unknown" {
+                "project"
+            } else {
+                src_type
+            },
+            "infrastructure",
+        );
     }
 
     // Person → Project relationships
@@ -572,14 +792,20 @@ pub fn entities_for_memories(conn: &Connection, rids: &[&str]) -> Result<Vec<Str
     if rids.is_empty() {
         return Ok(vec![]);
     }
-    let placeholders: String = (0..rids.len()).map(|i| format!("?{}", i + 1)).collect::<Vec<_>>().join(",");
+    let placeholders: String = (0..rids.len())
+        .map(|i| format!("?{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(",");
     let sql = format!(
         "SELECT DISTINCT entity_name FROM memory_entities WHERE memory_rid IN ({placeholders})"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
-        rids.iter().map(|r| Box::new(r.to_string()) as Box<dyn rusqlite::types::ToSql>).collect();
-    let params_ref: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let param_values: Vec<Box<dyn rusqlite::types::ToSql>> = rids
+        .iter()
+        .map(|r| Box::new(r.to_string()) as Box<dyn rusqlite::types::ToSql>)
+        .collect();
+    let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
     let entities = stmt
         .query_map(params_ref.as_slice(), |row| row.get(0))?
         .collect::<std::result::Result<Vec<String>, _>>()?;
@@ -591,14 +817,20 @@ pub fn memories_for_entities(conn: &Connection, entity_names: &[&str]) -> Result
     if entity_names.is_empty() {
         return Ok(HashSet::new());
     }
-    let placeholders: String = (0..entity_names.len()).map(|i| format!("?{}", i + 1)).collect::<Vec<_>>().join(",");
+    let placeholders: String = (0..entity_names.len())
+        .map(|i| format!("?{}", i + 1))
+        .collect::<Vec<_>>()
+        .join(",");
     let sql = format!(
         "SELECT DISTINCT memory_rid FROM memory_entities WHERE entity_name IN ({placeholders})"
     );
     let mut stmt = conn.prepare(&sql)?;
-    let param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
-        entity_names.iter().map(|e| Box::new(e.to_string()) as Box<dyn rusqlite::types::ToSql>).collect();
-    let params_ref: Vec<&dyn rusqlite::types::ToSql> = param_values.iter().map(|p| p.as_ref()).collect();
+    let param_values: Vec<Box<dyn rusqlite::types::ToSql>> = entity_names
+        .iter()
+        .map(|e| Box::new(e.to_string()) as Box<dyn rusqlite::types::ToSql>)
+        .collect();
+    let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+        param_values.iter().map(|p| p.as_ref()).collect();
     let rids = stmt
         .query_map(params_ref.as_slice(), |row| row.get(0))?
         .collect::<std::result::Result<HashSet<String>, _>>()?;
@@ -623,10 +855,8 @@ pub fn expand_entities_nhop(
         result.push((s.to_string(), 0, 1.0));
     }
 
-    let mut frontier: VecDeque<(String, u8, f64)> = seeds
-        .iter()
-        .map(|s| (s.to_string(), 0u8, 1.0f64))
-        .collect();
+    let mut frontier: VecDeque<(String, u8, f64)> =
+        seeds.iter().map(|s| (s.to_string(), 0u8, 1.0f64)).collect();
 
     while let Some((entity, hops, weight)) = frontier.pop_front() {
         if hops >= max_hops || result.len() >= max_entities {
@@ -756,14 +986,22 @@ mod tests {
     fn test_extract_relations_works_at() {
         let entities = vec!["Bob".to_string(), "Google".to_string()];
         let rels = extract_heuristic_relations("Bob works at Google as an engineer", &entities);
-        assert!(rels.iter().any(|r| r.rel_type == "works_at"), "got: {:?}", rels);
+        assert!(
+            rels.iter().any(|r| r.rel_type == "works_at"),
+            "got: {:?}",
+            rels
+        );
     }
 
     #[test]
     fn test_extract_relations_headquartered() {
         let entities = vec!["Acme".to_string(), "San Francisco".to_string()];
         let rels = extract_heuristic_relations("Acme is headquartered in San Francisco", &entities);
-        assert!(rels.iter().any(|r| r.rel_type == "headquartered_in"), "got: {:?}", rels);
+        assert!(
+            rels.iter().any(|r| r.rel_type == "headquartered_in"),
+            "got: {:?}",
+            rels
+        );
     }
 
     #[test]
@@ -778,24 +1016,39 @@ mod tests {
     fn test_extract_relations_no_match_unrelated() {
         let entities = vec!["Alice".to_string(), "Bob".to_string()];
         let rels = extract_heuristic_relations("Alice and Bob went for coffee", &entities);
-        assert!(rels.is_empty(), "should not extract relation from unrelated text, got: {:?}", rels);
+        assert!(
+            rels.is_empty(),
+            "should not extract relation from unrelated text, got: {:?}",
+            rels
+        );
     }
 
     #[test]
     fn test_extract_relations_multiple_pairs() {
-        let entities = vec!["Alice".to_string(), "Acme".to_string(), "San Francisco".to_string()];
+        let entities = vec![
+            "Alice".to_string(),
+            "Acme".to_string(),
+            "San Francisco".to_string(),
+        ];
         let rels = extract_heuristic_relations(
             "Alice is the CEO of Acme which is headquartered in San Francisco",
             &entities,
         );
-        assert!(rels.len() >= 2, "should find CEO + headquartered, got: {:?}", rels);
+        assert!(
+            rels.len() >= 2,
+            "should find CEO + headquartered, got: {:?}",
+            rels
+        );
     }
 
     #[test]
     fn test_extract_relations_needs_two_entities() {
         let entities = vec!["Alice".to_string()];
         let rels = extract_heuristic_relations("Alice is the CEO", &entities);
-        assert!(rels.is_empty(), "cannot extract relation with only one entity");
+        assert!(
+            rels.is_empty(),
+            "cannot extract relation with only one entity"
+        );
     }
 
     // ── Text feature analysis tests ──
@@ -867,9 +1120,54 @@ mod tests {
 
         // Record memories and link to entities
         let emb = vec![1.0f32, 0.0, 0.0, 0.0];
-        let r1 = db.record("Alice discussed the plan", "episodic", 0.5, 0.0, 604800.0, &serde_json::json!({}), &emb, "default", 0.8, "general", "user", None).unwrap();
-        let r2 = db.record("Bob reviewed the code", "episodic", 0.5, 0.0, 604800.0, &serde_json::json!({}), &emb, "default", 0.8, "general", "user", None).unwrap();
-        let r3 = db.record("Charlie deployed to production", "episodic", 0.5, 0.0, 604800.0, &serde_json::json!({}), &emb, "default", 0.8, "general", "user", None).unwrap();
+        let r1 = db
+            .record(
+                "Alice discussed the plan",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &emb,
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+        let r2 = db
+            .record(
+                "Bob reviewed the code",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &emb,
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+        let r3 = db
+            .record(
+                "Charlie deployed to production",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &emb,
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
 
         db.link_memory_entity(&r1, "Alice").unwrap();
         db.link_memory_entity(&r1, "ProjectX").unwrap();
@@ -883,9 +1181,14 @@ mod tests {
     fn test_entities_for_memories() {
         let db = setup_db();
         // Get the first memory's rid
-        let rid: String = db.conn().query_row(
-            "SELECT rid FROM memories ORDER BY created_at LIMIT 1", [], |row| row.get(0),
-        ).unwrap();
+        let rid: String = db
+            .conn()
+            .query_row(
+                "SELECT rid FROM memories ORDER BY created_at LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         let entities = entities_for_memories(&*db.conn(), &[&rid]).unwrap();
         assert!(entities.contains(&"Alice".to_string()));
@@ -931,10 +1234,12 @@ mod tests {
     fn test_no_tombstoned_edges() {
         let db = setup_db();
         // Tombstone the Alice->Bob edge
-        db.conn().execute(
-            "UPDATE claims SET tombstoned = 1 WHERE src = 'Alice' AND dst = 'Bob'",
-            [],
-        ).unwrap();
+        db.conn()
+            .execute(
+                "UPDATE claims SET tombstoned = 1 WHERE src = 'Alice' AND dst = 'Bob'",
+                [],
+            )
+            .unwrap();
         let expanded = expand_entities_nhop(&*db.conn(), &["Alice"], 1, 30).unwrap();
         let names: HashSet<String> = expanded.iter().map(|(n, _, _)| n.clone()).collect();
         // Bob should NOT be reachable via tombstoned edge
@@ -946,9 +1251,14 @@ mod tests {
     #[test]
     fn test_graph_proximity_score() {
         let db = setup_db();
-        let rid: String = db.conn().query_row(
-            "SELECT rid FROM memories ORDER BY created_at LIMIT 1", [], |row| row.get(0),
-        ).unwrap();
+        let rid: String = db
+            .conn()
+            .query_row(
+                "SELECT rid FROM memories ORDER BY created_at LIMIT 1",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         let mut expanded = HashMap::new();
         expanded.insert("Alice".to_string(), (0u8, 1.0f64));

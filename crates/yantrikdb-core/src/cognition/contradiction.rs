@@ -21,8 +21,8 @@
 use std::collections::HashMap;
 
 use crate::state::{
-    BeliefPayload, CognitiveEdge, CognitiveEdgeKind, CognitiveNode,
-    NodeId, NodeKind, NodePayload, PreferencePayload,
+    BeliefPayload, CognitiveEdge, CognitiveEdgeKind, CognitiveNode, NodeId, NodeKind, NodePayload,
+    PreferencePayload,
 };
 
 // ── Conflict Types ──
@@ -246,10 +246,7 @@ pub fn detect_domain_conflicts(
                     belief_b: b.id,
                     detection_method: ConflictDetectionMethod::DomainOpposition,
                     severity,
-                    description: format!(
-                        "Domain conflict: \"{}\" vs \"{}\"",
-                        a.label, b.label,
-                    ),
+                    description: format!("Domain conflict: \"{}\" vs \"{}\"", a.label, b.label,),
                     detected_at: now_secs,
                     suggested_resolution: resolution,
                 });
@@ -272,7 +269,10 @@ pub fn detect_preference_conflicts(
     let mut by_domain: HashMap<&str, Vec<(&CognitiveNode, &PreferencePayload)>> = HashMap::new();
     for &node in nodes {
         if let NodePayload::Preference(pref) = &node.payload {
-            by_domain.entry(&pref.domain).or_default().push((node, pref));
+            by_domain
+                .entry(&pref.domain)
+                .or_default()
+                .push((node, pref));
         }
     }
 
@@ -364,11 +364,7 @@ pub fn scan_contradictions(
 // ── Internal Helpers ──
 
 /// Compute conflict severity from both beliefs' attributes.
-fn compute_conflict_severity(
-    a: &CognitiveNode,
-    b: &CognitiveNode,
-    edge_weight: f64,
-) -> f64 {
+fn compute_conflict_severity(a: &CognitiveNode, b: &CognitiveNode, edge_weight: f64) -> f64 {
     // Severity = geometric mean of confidences * max salience * edge weight factor
     let confidence_factor = (a.attrs.confidence * b.attrs.confidence).sqrt();
     let salience_factor = a.attrs.salience.max(b.attrs.salience);
@@ -400,14 +396,8 @@ fn suggest_resolution(a: &CognitiveNode, b: &CognitiveNode) -> ResolutionStrateg
     }
 
     // If one is much more recent, prefer it
-    let recency_a = belief_a
-        .evidence_trail
-        .last()
-        .map_or(0.0, |e| e.timestamp);
-    let recency_b = belief_b
-        .evidence_trail
-        .last()
-        .map_or(0.0, |e| e.timestamp);
+    let recency_a = belief_a.evidence_trail.last().map_or(0.0, |e| e.timestamp);
+    let recency_b = belief_b.evidence_trail.last().map_or(0.0, |e| e.timestamp);
     let recency_gap = (recency_a - recency_b).abs();
     if recency_gap > 7.0 * 86400.0 {
         // More than a week apart
@@ -423,9 +413,14 @@ fn suggest_resolution(a: &CognitiveNode, b: &CognitiveNode) -> ResolutionStrateg
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{NodeIdAllocator, NodePayload, BeliefPayload};
+    use crate::state::{BeliefPayload, NodeIdAllocator, NodePayload};
 
-    fn make_belief(alloc: &mut NodeIdAllocator, prop: &str, log_odds: f64, domain: &str) -> CognitiveNode {
+    fn make_belief(
+        alloc: &mut NodeIdAllocator,
+        prop: &str,
+        log_odds: f64,
+        domain: &str,
+    ) -> CognitiveNode {
         let id = alloc.alloc(NodeKind::Belief);
         let mut node = CognitiveNode::new(
             id,
@@ -459,7 +454,10 @@ mod tests {
         let conflicts = detect_epistemic_conflicts(&nodes, &[edge], &config, 1000.0);
 
         assert_eq!(conflicts.len(), 1);
-        assert_eq!(conflicts[0].detection_method, ConflictDetectionMethod::EpistemicEdge);
+        assert_eq!(
+            conflicts[0].detection_method,
+            ConflictDetectionMethod::EpistemicEdge
+        );
         assert!(conflicts[0].severity > 0.3);
     }
 
@@ -478,7 +476,11 @@ mod tests {
         let config = ContradictionConfig::default();
         let conflicts = detect_epistemic_conflicts(&nodes, &[edge], &config, 1000.0);
 
-        assert_eq!(conflicts.len(), 0, "low-confidence beliefs should not trigger conflict");
+        assert_eq!(
+            conflicts.len(),
+            0,
+            "low-confidence beliefs should not trigger conflict"
+        );
     }
 
     #[test]
@@ -500,7 +502,10 @@ mod tests {
         let conflicts = detect_domain_conflicts(&beliefs, &config, 1000.0);
 
         assert_eq!(conflicts.len(), 1);
-        assert_eq!(conflicts[0].detection_method, ConflictDetectionMethod::DomainOpposition);
+        assert_eq!(
+            conflicts[0].detection_method,
+            ConflictDetectionMethod::DomainOpposition
+        );
     }
 
     #[test]
@@ -540,7 +545,10 @@ mod tests {
         let conflicts = detect_preference_conflicts(&nodes, &config, 1000.0);
 
         assert_eq!(conflicts.len(), 1);
-        assert_eq!(conflicts[0].detection_method, ConflictDetectionMethod::PreferenceConflict);
+        assert_eq!(
+            conflicts[0].detection_method,
+            ConflictDetectionMethod::PreferenceConflict
+        );
     }
 
     #[test]

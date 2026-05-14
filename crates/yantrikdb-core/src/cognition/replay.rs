@@ -386,10 +386,7 @@ pub fn reprioritize_buffer(engine: &mut ReplayEngine, now_ms: u64) {
 }
 
 /// Sample episodes from the buffer for replay.
-fn sample_episodes(
-    engine: &ReplayEngine,
-    count: usize,
-) -> Vec<usize> {
+fn sample_episodes(engine: &ReplayEngine, count: usize) -> Vec<usize> {
     let n = engine.buffer.entries.len().min(count);
     let budget = &engine.budget;
 
@@ -404,8 +401,7 @@ fn sample_episodes(
                 .take(n)
                 .collect()
         }
-        SamplingStrategy::PrioritizedByTDError
-        | SamplingStrategy::PrioritizedBySurprise => {
+        SamplingStrategy::PrioritizedByTDError | SamplingStrategy::PrioritizedBySurprise => {
             // Already sorted by priority — take top N eligible.
             let mut indices = Vec::new();
             for (i, entry) in engine.buffer.entries.iter().enumerate() {
@@ -421,9 +417,7 @@ fn sample_episodes(
         SamplingStrategy::PrioritizedByRecency => {
             // Sort by created_at descending, take top N.
             let mut sorted_indices: Vec<usize> = (0..engine.buffer.entries.len())
-                .filter(|&i| {
-                    engine.buffer.entries[i].replay_count < budget.max_replays_per_episode
-                })
+                .filter(|&i| engine.buffer.entries[i].replay_count < budget.max_replays_per_episode)
                 .collect();
             sorted_indices.sort_by(|&a, &b| {
                 engine.buffer.entries[b]
@@ -451,10 +445,7 @@ pub fn re_evaluate_episode(
     let mut insights = Vec::new();
 
     // Check how beliefs about involved nodes have changed.
-    let belief_map: HashMap<NodeId, f64> = current_belief_confidences
-        .iter()
-        .cloned()
-        .collect();
+    let belief_map: HashMap<NodeId, f64> = current_belief_confidences.iter().cloned().collect();
 
     for &affected in &entry.outcome.affected_nodes {
         if let Some(&current_conf) = belief_map.get(&affected) {
@@ -573,10 +564,7 @@ pub fn discover_cross_associations(
     }
 
     // Deduplicate.
-    associations.sort_by(|a, b| {
-        b.2.partial_cmp(&a.2)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    associations.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
     associations.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
 
     associations
@@ -639,10 +627,7 @@ pub fn run_replay_cycle(
     // Aggregate results.
     let total_belief_updates: usize = outcomes.iter().map(|o| o.belief_updates.len()).sum();
     let total_causal_updates: usize = outcomes.iter().map(|o| o.causal_updates.len()).sum();
-    let all_insights: Vec<String> = outcomes
-        .iter()
-        .flat_map(|o| o.insights.clone())
-        .collect();
+    let all_insights: Vec<String> = outcomes.iter().flat_map(|o| o.insights.clone()).collect();
 
     // Update entries in buffer (new TD error, replay count).
     for (idx_pos, &buf_idx) in sample_indices.iter().enumerate() {
@@ -715,7 +700,12 @@ pub fn replay_summary(engine: &ReplayEngine) -> ReplaySummary {
     let avg_td = if engine.buffer.entries.is_empty() {
         0.0
     } else {
-        engine.buffer.entries.iter().map(|e| e.td_error).sum::<f64>()
+        engine
+            .buffer
+            .entries
+            .iter()
+            .map(|e| e.td_error)
+            .sum::<f64>()
             / engine.buffer.entries.len() as f64
     };
 
@@ -729,7 +719,9 @@ pub fn replay_summary(engine: &ReplayEngine) -> ReplaySummary {
     // Domain distribution.
     let mut domain_counts: HashMap<String, usize> = HashMap::new();
     for entry in &engine.buffer.entries {
-        *domain_counts.entry(entry.action.domain.clone()).or_insert(0) += 1;
+        *domain_counts
+            .entry(entry.action.domain.clone())
+            .or_insert(0) += 1;
     }
 
     ReplaySummary {
@@ -784,7 +776,12 @@ mod tests {
         }
     }
 
-    fn make_outcome(utility: f64, expected: bool, domains: &[&str], nodes: &[NodeId]) -> OutcomeData {
+    fn make_outcome(
+        utility: f64,
+        expected: bool,
+        domains: &[&str],
+        nodes: &[NodeId],
+    ) -> OutcomeData {
         OutcomeData {
             utility,
             expected,

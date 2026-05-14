@@ -2,7 +2,6 @@
 ///
 /// Cold-tier memories store compressed embeddings to save space.
 /// The zstd magic bytes (0x28 0xB5 0x2F 0xFD) identify compressed blobs.
-
 use crate::serde_helpers::{deserialize_f32, serialize_f32};
 
 /// Compress a float32 embedding into a zstd-compressed blob.
@@ -60,6 +59,11 @@ mod tests {
         assert_eq!(embedding, decompressed);
         // Compressed should be smaller than raw for large vectors
         let raw_size = embedding.len() * 4;
-        assert!(compressed.len() < raw_size, "compressed {} should be < raw {}", compressed.len(), raw_size);
+        assert!(
+            compressed.len() < raw_size,
+            "compressed {} should be < raw {}",
+            compressed.len(),
+            raw_size
+        );
     }
 }

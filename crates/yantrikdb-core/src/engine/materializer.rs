@@ -403,8 +403,13 @@ mod tests {
             let emb: Vec<f32> = (0..64).map(|j| (i + j) as f32 * 0.001).collect();
             let norm: f32 = emb.iter().map(|x| x * x).sum::<f32>().sqrt();
             let normalized: Vec<f32> = emb.iter().map(|x| x / norm).collect();
-            let seq = db.vec_seq.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            db.vec_index.append(format!("rid_{i}"), normalized, seq).unwrap();
+            let seq = db
+                .vec_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            db.vec_index
+                .append(format!("rid_{i}"), normalized, seq)
+                .unwrap();
         }
 
         let mut tries = 0;

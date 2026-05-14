@@ -4,9 +4,8 @@
 
 use crate::error::Result;
 use crate::schema_induction::{
-    SchemaId, SchemaMaintenanceReport, SchemaStore,
-    match_schemas, observe_episode, schema_maintenance,
-    EpisodeData, ContextSnapshot,
+    match_schemas, observe_episode, schema_maintenance, ContextSnapshot, EpisodeData, SchemaId,
+    SchemaMaintenanceReport, SchemaStore,
 };
 
 use super::YantrikDB;
@@ -24,9 +23,9 @@ impl YantrikDB {
         let meta = Self::get_meta(&self.conn(), SCHEMA_STORE_META_KEY)?;
         match meta {
             Some(json) => serde_json::from_str(&json).map_err(|e| {
-                crate::error::YantrikDbError::Database(
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-                )
+                crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                    Box::new(e),
+                ))
             }),
             None => Ok(SchemaStore::default()),
         }
@@ -35,9 +34,9 @@ impl YantrikDB {
     /// Persist the induced schema store.
     pub fn save_induced_schema_store(&self, store: &SchemaStore) -> Result<()> {
         let json = serde_json::to_string(store).map_err(|e| {
-            crate::error::YantrikDbError::Database(
-                rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-            )
+            crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                Box::new(e),
+            ))
         })?;
         self.conn().execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -49,10 +48,7 @@ impl YantrikDB {
     // ── API ──
 
     /// Observe an episode and update schemas.
-    pub fn observe_episode_for_schema(
-        &self,
-        episode: &EpisodeData,
-    ) -> Result<()> {
+    pub fn observe_episode_for_schema(&self, episode: &EpisodeData) -> Result<()> {
         let mut store = self.load_induced_schema_store()?;
         observe_episode(episode, &mut store);
         self.save_induced_schema_store(&store)?;
@@ -60,10 +56,7 @@ impl YantrikDB {
     }
 
     /// Find schemas matching a given context snapshot.
-    pub fn find_matching_schemas(
-        &self,
-        context: &ContextSnapshot,
-    ) -> Result<Vec<(SchemaId, f64)>> {
+    pub fn find_matching_schemas(&self, context: &ContextSnapshot) -> Result<Vec<(SchemaId, f64)>> {
         let store = self.load_induced_schema_store()?;
         Ok(match_schemas(context, &store))
     }

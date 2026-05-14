@@ -109,12 +109,54 @@ mod tests {
         let b = YantrikDB::new_with_actor(":memory:", 8, "device-B").unwrap();
 
         // A writes independently
-        a.record("from A - memory 1", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
-        a.record("from A - memory 2", "episodic", 0.7, 0.1, 604800.0, &empty_meta(), &vec_seed(2.0, 8), "default", 0.8, "general", "user", None).unwrap();
+        a.record(
+            "from A - memory 1",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+        a.record(
+            "from A - memory 2",
+            "episodic",
+            0.7,
+            0.1,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
         a.relate("Alice", "Bob", "knows", 1.0).unwrap();
 
         // B writes independently
-        b.record("from B - memory 3", "semantic", 0.6, 0.0, 604800.0, &empty_meta(), &vec_seed(3.0, 8), "default", 0.8, "general", "user", None).unwrap();
+        b.record(
+            "from B - memory 3",
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(3.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
         b.relate("Charlie", "Dave", "works_with", 0.8).unwrap();
 
         // Sync
@@ -137,7 +179,22 @@ mod tests {
         let b = YantrikDB::new_with_actor(":memory:", 8, "B").unwrap();
 
         // A records and B gets it via sync
-        let rid = a.record("will be forgotten", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+        let rid = a
+            .record(
+                "will be forgotten",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &vec_seed(1.0, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
         sync_bidirectional(&a, &b).unwrap();
 
         // Verify B has it
@@ -182,7 +239,21 @@ mod tests {
         let a = YantrikDB::new_with_actor(":memory:", 8, "A").unwrap();
         let b = YantrikDB::new_with_actor(":memory:", 8, "B").unwrap();
 
-        a.record("test", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+        a.record(
+            "test",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
         // First sync
         let r1 = sync_bidirectional(&a, &b).unwrap();
@@ -200,21 +271,51 @@ mod tests {
         let b = YantrikDB::new_with_actor(":memory:", 8, "B").unwrap();
 
         // A creates memories and consolidates
-        a.record("mem1", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
-        a.record("mem2", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.1, 8), "default", 0.8, "general", "user", None).unwrap();
+        a.record(
+            "mem1",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+        a.record(
+            "mem2",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.1, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
-        let consolidated = crate::consolidate::consolidate(&a, 0.0, 365.0, 2, 10000, false, false).unwrap();
+        let consolidated =
+            crate::consolidate::consolidate(&a, 0.0, 365.0, 2, 10000, false, false).unwrap();
         assert!(!consolidated.is_empty());
 
         // Sync to B
         sync_bidirectional(&a, &b).unwrap();
 
         // B should have consolidation_members entries
-        let cm_count: i64 = b.conn().query_row(
-            "SELECT COUNT(*) FROM consolidation_members",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let cm_count: i64 = b
+            .conn()
+            .query_row("SELECT COUNT(*) FROM consolidation_members", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
         assert!(cm_count >= 2);
 
         // B should have the consolidated memory
@@ -228,14 +329,74 @@ mod tests {
         let b = YantrikDB::new_with_actor(":memory:", 8, "B").unwrap();
 
         // Create shared memories on both via sync
-        let r1 = a.record("shared1", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
-        let r2 = a.record("shared2", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.1, 8), "default", 0.8, "general", "user", None).unwrap();
-        let r3 = a.record("shared3", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.2, 8), "default", 0.8, "general", "user", None).unwrap();
+        let r1 = a
+            .record(
+                "shared1",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &vec_seed(1.0, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+        let r2 = a
+            .record(
+                "shared2",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &vec_seed(1.1, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+        let r3 = a
+            .record(
+                "shared3",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &vec_seed(1.2, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
         sync_bidirectional(&a, &b).unwrap();
 
         // A consolidates {shared1, shared2} — manually create the consolidated
         // memory + consolidation_members + oplog entry so it replicates
-        let a_consolidated = a.record("A consolidated", "semantic", 0.6, 0.0, 604800.0, &serde_json::json!({"consolidated_from": [&r1, &r2]}), &vec_seed(1.05, 8), "default", 0.8, "general", "user", None).unwrap();
+        let a_consolidated = a
+            .record(
+                "A consolidated",
+                "semantic",
+                0.6,
+                0.0,
+                604800.0,
+                &serde_json::json!({"consolidated_from": [&r1, &r2]}),
+                &vec_seed(1.05, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
         let hlc_a = a.tick_hlc();
         let hlc_a_bytes = hlc_a.to_bytes().to_vec();
         a.conn().execute(
@@ -247,17 +408,38 @@ mod tests {
             rusqlite::params![a_consolidated, r2, hlc_a_bytes, "A"],
         ).unwrap();
         // Log a consolidate op so it replicates
-        a.log_op("consolidate", Some(&a_consolidated), &serde_json::json!({
-            "consolidated_rid": a_consolidated,
-            "source_rids": [&r1, &r2],
-            "text": "A consolidated",
-            "importance": 0.6,
-            "valence": 0.0,
-            "half_life": 604800.0,
-        }), None).unwrap();
+        a.log_op(
+            "consolidate",
+            Some(&a_consolidated),
+            &serde_json::json!({
+                "consolidated_rid": a_consolidated,
+                "source_rids": [&r1, &r2],
+                "text": "A consolidated",
+                "importance": 0.6,
+                "valence": 0.0,
+                "half_life": 604800.0,
+            }),
+            None,
+        )
+        .unwrap();
 
         // B consolidates {shared2, shared3}
-        let b_consolidated = b.record("B consolidated", "semantic", 0.6, 0.0, 604800.0, &serde_json::json!({"consolidated_from": [&r2, &r3]}), &vec_seed(1.15, 8), "default", 0.8, "general", "user", None).unwrap();
+        let b_consolidated = b
+            .record(
+                "B consolidated",
+                "semantic",
+                0.6,
+                0.0,
+                604800.0,
+                &serde_json::json!({"consolidated_from": [&r2, &r3]}),
+                &vec_seed(1.15, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
         let hlc_b = b.tick_hlc();
         let hlc_b_bytes = hlc_b.to_bytes().to_vec();
         b.conn().execute(
@@ -268,33 +450,51 @@ mod tests {
             "INSERT OR IGNORE INTO consolidation_members (consolidation_rid, source_rid, hlc, actor_id) VALUES (?1, ?2, ?3, ?4)",
             rusqlite::params![b_consolidated, r3, hlc_b_bytes, "B"],
         ).unwrap();
-        b.log_op("consolidate", Some(&b_consolidated), &serde_json::json!({
-            "consolidated_rid": b_consolidated,
-            "source_rids": [&r2, &r3],
-            "text": "B consolidated",
-            "importance": 0.6,
-            "valence": 0.0,
-            "half_life": 604800.0,
-        }), None).unwrap();
+        b.log_op(
+            "consolidate",
+            Some(&b_consolidated),
+            &serde_json::json!({
+                "consolidated_rid": b_consolidated,
+                "source_rids": [&r2, &r3],
+                "text": "B consolidated",
+                "importance": 0.6,
+                "valence": 0.0,
+                "half_life": 604800.0,
+            }),
+            None,
+        )
+        .unwrap();
 
         // Sync
         sync_bidirectional(&a, &b).unwrap();
 
         // Both should have both consolidation records
-        let a_cm: i64 = a.conn().query_row(
-            "SELECT COUNT(DISTINCT consolidation_rid) FROM consolidation_members",
-            [],
-            |row| row.get(0),
-        ).unwrap();
-        let b_cm: i64 = b.conn().query_row(
-            "SELECT COUNT(DISTINCT consolidation_rid) FROM consolidation_members",
-            [],
-            |row| row.get(0),
-        ).unwrap();
+        let a_cm: i64 = a
+            .conn()
+            .query_row(
+                "SELECT COUNT(DISTINCT consolidation_rid) FROM consolidation_members",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let b_cm: i64 = b
+            .conn()
+            .query_row(
+                "SELECT COUNT(DISTINCT consolidation_rid) FROM consolidation_members",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
 
         // Both A and B should have at least 2 distinct consolidation records
-        assert!(a_cm >= 2, "A should have both consolidation records, got {a_cm}");
-        assert!(b_cm >= 2, "B should have both consolidation records, got {b_cm}");
+        assert!(
+            a_cm >= 2,
+            "A should have both consolidation records, got {a_cm}"
+        );
+        assert!(
+            b_cm >= 2,
+            "B should have both consolidation records, got {b_cm}"
+        );
     }
 
     #[test]
@@ -305,14 +505,46 @@ mod tests {
         // A records memories
         let emb1 = vec_seed(1.0, 8);
         let emb2 = vec_seed(5.0, 8);
-        a.record("close to query", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &emb1, "default", 0.8, "general", "user", None).unwrap();
-        a.record("far from query", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &emb2, "default", 0.8, "general", "user", None).unwrap();
+        a.record(
+            "close to query",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb1,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+        a.record(
+            "far from query",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb2,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
 
         // Sync to B
         sync_bidirectional(&a, &b).unwrap();
 
         // A can recall (has vec_memories entries)
-        let a_results = a.recall(&emb1, 2, None, None, false, false, None, false, None, None, None).unwrap();
+        let a_results = a
+            .recall(
+                &emb1, 2, None, None, false, false, None, false, None, None, None,
+            )
+            .unwrap();
         assert!(!a_results.is_empty());
 
         // B won't have vec_memories (embeddings aren't in oplog)
@@ -338,8 +570,38 @@ mod tests {
         let a = YantrikDB::new_with_actor(":memory:", 8, "A").unwrap();
         let b = YantrikDB::new_with_actor(":memory:", 8, "B").unwrap();
 
-        let rid_a = a.record("birthday March 5", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
-        let rid_b = a.record("birthday March 15", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(2.0, 8), "default", 0.8, "general", "user", None).unwrap();
+        let rid_a = a
+            .record(
+                "birthday March 5",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &vec_seed(1.0, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+        let rid_b = a
+            .record(
+                "birthday March 15",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &vec_seed(2.0, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
 
         // Create and resolve a conflict on A
         let conflict = crate::conflict::create_conflict(
@@ -380,11 +642,35 @@ mod tests {
         let a = YantrikDB::new_with_actor(":memory:", 8, "A").unwrap();
         let b = YantrikDB::new_with_actor(":memory:", 8, "B").unwrap();
 
-        let rid = a.record("color is green", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
+        let rid = a
+            .record(
+                "color is green",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &vec_seed(1.0, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
         sync_bidirectional(&a, &b).unwrap();
 
         // Correct on A
-        let result = a.correct(&rid, "color is blue", Some(0.9), None, &vec_seed(2.0, 8), Some("User said blue")).unwrap();
+        let result = a
+            .correct(
+                &rid,
+                "color is blue",
+                Some(0.9),
+                None,
+                &vec_seed(2.0, 8),
+                Some("User said blue"),
+            )
+            .unwrap();
         sync_bidirectional(&a, &b).unwrap();
 
         // B should have original tombstoned
@@ -402,8 +688,38 @@ mod tests {
         let a = YantrikDB::new_with_actor(":memory:", 8, "A").unwrap();
         let b = YantrikDB::new_with_actor(":memory:", 8, "B").unwrap();
 
-        let rid_a = a.record("mem a", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(1.0, 8), "default", 0.8, "general", "user", None).unwrap();
-        let rid_b = a.record("mem b", "episodic", 0.5, 0.0, 604800.0, &empty_meta(), &vec_seed(2.0, 8), "default", 0.8, "general", "user", None).unwrap();
+        let rid_a = a
+            .record(
+                "mem a",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &vec_seed(1.0, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+        let rid_b = a
+            .record(
+                "mem b",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &vec_seed(2.0, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
 
         // Create conflict on A
         crate::conflict::create_conflict(
@@ -421,7 +737,9 @@ mod tests {
         sync_bidirectional(&a, &b).unwrap();
 
         // B should have the open conflict
-        let b_conflicts = b.get_conflicts(Some("open"), None, None, None, None, 50).unwrap();
+        let b_conflicts = b
+            .get_conflicts(Some("open"), None, None, None, None, 50)
+            .unwrap();
         assert!(!b_conflicts.is_empty());
         assert_eq!(b_conflicts[0].conflict_type, "preference");
     }

@@ -82,19 +82,19 @@ pub struct MobilityState {
     pub proposition_id: String,
     pub regime: String,
     pub snapshot_ts: f64,
-    pub support_mass: Option<f64>,            // σ
-    pub attack_mass: Option<f64>,             // α
-    pub source_diversity: Option<f64>,        // δ
-    pub effective_independence: Option<f64>,  // ι
-    pub temporal_coherence: Option<f64>,      // τ
-    pub transportability: Option<f64>,        // γ
-    pub mutability: Option<f64>,              // μ
-    pub load_bearingness: Option<f64>,        // λ
-    pub modality_consilience: Option<f64>,    // χ
-    pub self_gen_local: Option<f64>,          // ψ_l
-    pub self_gen_ancestral: Option<f64>,      // ψ_a
-    pub contamination_risk: Option<f64>,      // κ
-    pub novelty_isolation: Option<f64>,       // ν
+    pub support_mass: Option<f64>,           // σ
+    pub attack_mass: Option<f64>,            // α
+    pub source_diversity: Option<f64>,       // δ
+    pub effective_independence: Option<f64>, // ι
+    pub temporal_coherence: Option<f64>,     // τ
+    pub transportability: Option<f64>,       // γ
+    pub mutability: Option<f64>,             // μ
+    pub load_bearingness: Option<f64>,       // λ
+    pub modality_consilience: Option<f64>,   // χ
+    pub self_gen_local: Option<f64>,         // ψ_l
+    pub self_gen_ancestral: Option<f64>,     // ψ_a
+    pub contamination_risk: Option<f64>,     // κ
+    pub novelty_isolation: Option<f64>,      // ν
     /// JSON array of component names populated at each tier.
     pub tier_write_components: Vec<String>,
     pub tier_read_components: Vec<String>,
@@ -203,7 +203,11 @@ impl crate::engine::YantrikDB {
         state.self_gen_ancestral = Some(psi_a);
         // Mark background tier components as present. Extend the tier_bg
         // component list idempotently so reads know what's been populated.
-        for name in ["temporal_coherence", "load_bearingness", "self_gen_ancestral"] {
+        for name in [
+            "temporal_coherence",
+            "load_bearingness",
+            "self_gen_ancestral",
+        ] {
             if !state.tier_bg_components.iter().any(|c| c == name) {
                 state.tier_bg_components.push(name.to_string());
             }
@@ -225,7 +229,10 @@ impl crate::engine::YantrikDB {
         let pending = self.list_background_pending(limit)?;
         let mut count = 0;
         for (prop_id, regime) in pending {
-            if self.compute_background_mobility(&prop_id, &regime)?.is_some() {
+            if self
+                .compute_background_mobility(&prop_id, &regime)?
+                .is_some()
+            {
                 count += 1;
             }
         }
@@ -316,16 +323,30 @@ fn upsert_mobility_state_inner(conn: &Connection, state: &MobilityState) -> Resu
          state_status = excluded.state_status, \
          computed_at = excluded.computed_at",
         params![
-            state.proposition_id, state.regime, state.snapshot_ts,
-            state.support_mass, state.attack_mass, state.source_diversity,
-            state.effective_independence, state.temporal_coherence,
-            state.transportability, state.mutability, state.load_bearingness,
-            state.modality_consilience, state.self_gen_local,
-            state.self_gen_ancestral, state.contamination_risk,
+            state.proposition_id,
+            state.regime,
+            state.snapshot_ts,
+            state.support_mass,
+            state.attack_mass,
+            state.source_diversity,
+            state.effective_independence,
+            state.temporal_coherence,
+            state.transportability,
+            state.mutability,
+            state.load_bearingness,
+            state.modality_consilience,
+            state.self_gen_local,
+            state.self_gen_ancestral,
+            state.contamination_risk,
             state.novelty_isolation,
-            tier_write, tier_read, tier_bg,
-            state.formula_version, state.content_hash, state.live_claim_count,
-            state.state_status, state.computed_at,
+            tier_write,
+            tier_read,
+            tier_bg,
+            state.formula_version,
+            state.content_hash,
+            state.live_claim_count,
+            state.state_status,
+            state.computed_at,
         ],
     )?;
     Ok(())
@@ -437,7 +458,11 @@ fn fetch_claims_for_mobility(
 /// also what makes content_hash reproducible across equivalent inputs.
 fn normalize_lineage(lineage_json: &str) -> Vec<String> {
     let parsed: Vec<String> = serde_json::from_str(lineage_json).unwrap_or_default();
-    let mut set: Vec<String> = parsed.into_iter().collect::<HashSet<_>>().into_iter().collect();
+    let mut set: Vec<String> = parsed
+        .into_iter()
+        .collect::<HashSet<_>>()
+        .into_iter()
+        .collect();
     set.sort();
     set
 }
@@ -516,7 +541,11 @@ fn unix_seconds() -> i64 {
 /// column exists on claims; S_k could become Jaccard over a self-gen
 /// ancestry lineage. Both preserve the set-symmetry property regardless.
 pub(super) fn accumulate_mass(claims: &[&ClaimRow]) -> f64 {
-    compute_omegas(claims).iter().enumerate().map(|(k, w)| w * claims[k].weight).sum()
+    compute_omegas(claims)
+        .iter()
+        .enumerate()
+        .map(|(k, w)| w * claims[k].weight)
+        .sum()
 }
 
 /// Compute the per-claim discount ω_k vector for a polarity-homogeneous
@@ -577,7 +606,8 @@ fn leave_one_out_jaccard(
         // "rest" is empty iff every element in freq has count == 1 AND is
         // in claim_set — i.e., claim_set is the only contributor.
         let claim_set_lookup: HashSet<&str> = claim_set.iter().map(|s| s.as_str()).collect();
-        freq.iter().all(|(e, c)| *c == 1 && claim_set_lookup.contains(e))
+        freq.iter()
+            .all(|(e, c)| *c == 1 && claim_set_lookup.contains(e))
     };
     if rest_union_is_empty {
         return 0.0;
@@ -772,7 +802,10 @@ fn compute_self_gen_ancestral(
     Ok(self_gen as f64 / ancestry.len() as f64)
 }
 
-fn fetch_proposition_live_claim_ids(conn: &Connection, proposition_id: &str) -> Result<Vec<String>> {
+fn fetch_proposition_live_claim_ids(
+    conn: &Connection,
+    proposition_id: &str,
+) -> Result<Vec<String>> {
     let mut stmt = conn.prepare(
         "SELECT claim_id FROM claims \
          WHERE proposition_id = ?1 AND tombstoned = 0",
@@ -1023,7 +1056,9 @@ fn same_source_pairs(supports: &[&ClaimRow], attacks: &[&ClaimRow]) -> Vec<(Stri
 fn same_artifact_pairs(supports: &[&ClaimRow], attacks: &[&ClaimRow]) -> Vec<(String, String)> {
     let mut out = Vec::new();
     for s in supports {
-        let Some(s_rid) = &s.source_memory_rid else { continue };
+        let Some(s_rid) = &s.source_memory_rid else {
+            continue;
+        };
         for a in attacks {
             if let Some(a_rid) = &a.source_memory_rid {
                 if a_rid == s_rid && a.extractor != s.extractor {
@@ -1248,7 +1283,9 @@ fn count_same_source_opposite_polarity(supports: &[&ClaimRow], attacks: &[&Claim
         if s.source_lineage.is_empty() {
             continue; // empty lineage provides no identity for this gate
         }
-        *support_groups.entry(lineage_key(&s.source_lineage)).or_insert(0) += 1;
+        *support_groups
+            .entry(lineage_key(&s.source_lineage))
+            .or_insert(0) += 1;
     }
     let mut count: i64 = 0;
     for a in attacks {
@@ -1266,10 +1303,7 @@ fn count_same_source_opposite_polarity(supports: &[&ClaimRow], attacks: &[&Claim
 /// source_memory_rid (same underlying document/event) via DIFFERENT
 /// extractors. The same-artifact gate distinguishes extraction pathology
 /// from ordinary cross-source disagreement.
-fn count_same_artifact_extractor_conflict(
-    supports: &[&ClaimRow],
-    attacks: &[&ClaimRow],
-) -> i64 {
+fn count_same_artifact_extractor_conflict(supports: &[&ClaimRow], attacks: &[&ClaimRow]) -> i64 {
     if supports.is_empty() || attacks.is_empty() {
         return 0;
     }
@@ -1277,7 +1311,10 @@ fn count_same_artifact_extractor_conflict(
     let mut by_artifact: HashMap<&str, Vec<&str>> = HashMap::new();
     for s in supports {
         if let Some(rid) = &s.source_memory_rid {
-            by_artifact.entry(rid.as_str()).or_default().push(s.extractor.as_str());
+            by_artifact
+                .entry(rid.as_str())
+                .or_default()
+                .push(s.extractor.as_str());
         }
     }
     let mut count: i64 = 0;
@@ -1388,8 +1425,14 @@ fn contest_content_hash(claims: &[ClaimRow]) -> String {
         }
         hasher.update(b"|");
         // valid_from/to rounded to milliseconds for stable hashing.
-        let vf = c.valid_from.map(|t| (t * 1000.0).round() as i64).unwrap_or(i64::MIN);
-        let vt = c.valid_to.map(|t| (t * 1000.0).round() as i64).unwrap_or(i64::MAX);
+        let vf = c
+            .valid_from
+            .map(|t| (t * 1000.0).round() as i64)
+            .unwrap_or(i64::MIN);
+        let vt = c
+            .valid_to
+            .map(|t| (t * 1000.0).round() as i64)
+            .unwrap_or(i64::MAX);
         hasher.update(&vf.to_le_bytes());
         hasher.update(&vt.to_le_bytes());
         hasher.update(b"\x00");
@@ -1588,8 +1631,16 @@ mod tests {
         let c3 = mk_claim("c3", "ext_a", &["src_shared"], false, "text", 1.0);
         let total = accumulate_mass(&[&c1, &c2, &c3]);
         // D_k = 1, P_k = 1, S_k = 0 → discount = 1.8; ω = 1/1.8; total ≈ 1.67
-        assert!(total < 2.0, "duplicate lineage should discount, got {}", total);
-        assert!(total > 1.5, "discount shouldn't be excessive, got {}", total);
+        assert!(
+            total < 2.0,
+            "duplicate lineage should discount, got {}",
+            total
+        );
+        assert!(
+            total > 1.5,
+            "discount shouldn't be excessive, got {}",
+            total
+        );
     }
 
     #[test]
@@ -1598,7 +1649,11 @@ mod tests {
         let c2 = mk_claim("c2", "self_reasoning", &["self_1"], true, "text", 1.0);
         let total = accumulate_mass(&[&c1, &c2]);
         // discount = 1 + 0.5·1 + 0.3·1 + 0.7·1 = 2.5; ω = 0.4; total ≈ 0.8
-        assert!(total < 1.0, "self-generated duplicates should collapse; got {}", total);
+        assert!(
+            total < 1.0,
+            "self-generated duplicates should collapse; got {}",
+            total
+        );
     }
 
     #[test]

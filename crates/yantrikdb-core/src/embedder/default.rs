@@ -62,14 +62,10 @@ pub const BUNDLED_EMBEDDER_DIM: usize = 64;
 // `cargo build` and downstream `cargo install yantrikdb` both bake
 // the bytes into the final binary — no network at install or
 // runtime.
-const POTION_2M_MODEL: &[u8] =
-    include_bytes!("../../assets/potion-base-2M/model.safetensors");
-const POTION_2M_TOKENIZER: &[u8] =
-    include_bytes!("../../assets/potion-base-2M/tokenizer.json");
-const POTION_2M_CONFIG: &[u8] =
-    include_bytes!("../../assets/potion-base-2M/config.json");
-const POTION_2M_MODULES: &[u8] =
-    include_bytes!("../../assets/potion-base-2M/modules.json");
+const POTION_2M_MODEL: &[u8] = include_bytes!("../../assets/potion-base-2M/model.safetensors");
+const POTION_2M_TOKENIZER: &[u8] = include_bytes!("../../assets/potion-base-2M/tokenizer.json");
+const POTION_2M_CONFIG: &[u8] = include_bytes!("../../assets/potion-base-2M/config.json");
+const POTION_2M_MODULES: &[u8] = include_bytes!("../../assets/potion-base-2M/modules.json");
 
 /// **Bundled default embedder.** See [module docs][super] for the
 /// design rationale and the Slice A → B → C arc.
@@ -99,7 +95,9 @@ mod once_cell_lite {
 
     impl Lazy {
         pub fn new() -> Self {
-            Self { cell: OnceLock::new() }
+            Self {
+                cell: OnceLock::new(),
+            }
         }
 
         /// Get-or-init the model. Extracts the bundled bytes to a
@@ -184,9 +182,10 @@ impl Embedder for BundledEmbedder {
         &self,
         text: &str,
     ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
-        let model = self.inner.get().map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-            e.to_string().into()
-        })?;
+        let model = self
+            .inner
+            .get()
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
         Ok(model.encode_single(text))
     }
 
@@ -194,9 +193,10 @@ impl Embedder for BundledEmbedder {
         &self,
         texts: &[&str],
     ) -> std::result::Result<Vec<Vec<f32>>, Box<dyn std::error::Error + Send + Sync>> {
-        let model = self.inner.get().map_err(|e| -> Box<dyn std::error::Error + Send + Sync> {
-            e.to_string().into()
-        })?;
+        let model = self
+            .inner
+            .get()
+            .map_err(|e| -> Box<dyn std::error::Error + Send + Sync> { e.to_string().into() })?;
         let owned: Vec<String> = texts.iter().map(|s| (*s).to_string()).collect();
         Ok(model.encode(&owned))
     }
@@ -231,8 +231,7 @@ mod tests {
         let e = BundledEmbedder::new();
         let v = e.embed("Project Atlas launches in March").unwrap();
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-        assert!((norm - 1.0).abs() < 1e-3,
-            "expected unit-norm; got {norm}");
+        assert!((norm - 1.0).abs() < 1e-3, "expected unit-norm; got {norm}");
     }
 
     #[test]
@@ -249,16 +248,16 @@ mod tests {
     fn embed_batch_matches_single() {
         let e = BundledEmbedder::new();
         let inputs = ["one fish", "two fish", "red fish"];
-        let single: Vec<Vec<f32>> = inputs.iter()
-            .map(|t| e.embed(t).unwrap())
-            .collect();
+        let single: Vec<Vec<f32>> = inputs.iter().map(|t| e.embed(t).unwrap()).collect();
         let batch = e.embed_batch(&inputs).unwrap();
         assert_eq!(single.len(), batch.len());
         for (s, b) in single.iter().zip(batch.iter()) {
             assert_eq!(s.len(), b.len(), "dim mismatch single vs batch");
             for (x, y) in s.iter().zip(b.iter()) {
-                assert!((x - y).abs() < 1e-5,
-                    "single vs batch divergence: {x} vs {y}");
+                assert!(
+                    (x - y).abs() < 1e-5,
+                    "single vs batch divergence: {x} vs {y}"
+                );
             }
         }
     }
@@ -273,9 +272,8 @@ mod tests {
         let b = e.embed("Alice runs the technical team").unwrap();
         let c = e.embed("the lunch menu has pasta today").unwrap();
 
-        let cos = |x: &[f32], y: &[f32]| -> f32 {
-            x.iter().zip(y.iter()).map(|(a, b)| a * b).sum()
-        };
+        let cos =
+            |x: &[f32], y: &[f32]| -> f32 { x.iter().zip(y.iter()).map(|(a, b)| a * b).sum() };
         let sim_ab = cos(&a, &b);
         let sim_ac = cos(&a, &c);
         assert!(

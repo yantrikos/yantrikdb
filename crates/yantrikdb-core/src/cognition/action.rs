@@ -148,7 +148,11 @@ const BUILTIN_SCHEMAS: &[SchemaTemplate] = &[
         description: "Remind the user about a pending task or goal",
         kind: ActionKind::Communicate,
         preconditions: &[
-            ("User has an active goal or task", true, Some(NodeKind::Goal)),
+            (
+                "User has an active goal or task",
+                true,
+                Some(NodeKind::Goal),
+            ),
             ("Goal or task has urgency above threshold", true, None),
         ],
         effects: &[
@@ -161,12 +165,12 @@ const BUILTIN_SCHEMAS: &[SchemaTemplate] = &[
         name: "proactive_greeting",
         description: "Greet the user based on detected routine start",
         kind: ActionKind::Communicate,
-        preconditions: &[
-            ("A routine is near its trigger time", true, Some(NodeKind::Routine)),
-        ],
-        effects: &[
-            ("User feels acknowledged", 0.90, 0.3),
-        ],
+        preconditions: &[(
+            "A routine is near its trigger time",
+            true,
+            Some(NodeKind::Routine),
+        )],
+        effects: &[("User feels acknowledged", 0.90, 0.3)],
         confidence_threshold: 0.3,
     },
     SchemaTemplate {
@@ -187,47 +191,44 @@ const BUILTIN_SCHEMAS: &[SchemaTemplate] = &[
         name: "share_encouragement",
         description: "Encourage the user about progress on a goal",
         kind: ActionKind::Communicate,
-        preconditions: &[
-            ("User has a goal with positive progress", true, Some(NodeKind::Goal)),
-        ],
-        effects: &[
-            ("User feels motivated", 0.80, 0.5),
-        ],
+        preconditions: &[(
+            "User has a goal with positive progress",
+            true,
+            Some(NodeKind::Goal),
+        )],
+        effects: &[("User feels motivated", 0.80, 0.5)],
         confidence_threshold: 0.3,
     },
-
     // ── Inform (5) ──
     SchemaTemplate {
         name: "surface_relevant_memory",
         description: "Recall a related past experience or decision",
         kind: ActionKind::Inform,
-        preconditions: &[
-            ("Related episode exists in memory", true, Some(NodeKind::Episode)),
-        ],
-        effects: &[
-            ("User gains useful context", 0.75, 0.5),
-        ],
+        preconditions: &[(
+            "Related episode exists in memory",
+            true,
+            Some(NodeKind::Episode),
+        )],
+        effects: &[("User gains useful context", 0.75, 0.5)],
         confidence_threshold: 0.4,
     },
     SchemaTemplate {
         name: "present_belief_summary",
         description: "Summarize what the system believes about a topic",
         kind: ActionKind::Inform,
-        preconditions: &[
-            ("Relevant belief exists", true, Some(NodeKind::Belief)),
-        ],
-        effects: &[
-            ("User validates or corrects beliefs", 0.80, 0.4),
-        ],
+        preconditions: &[("Relevant belief exists", true, Some(NodeKind::Belief))],
+        effects: &[("User validates or corrects beliefs", 0.80, 0.4)],
         confidence_threshold: 0.5,
     },
     SchemaTemplate {
         name: "explain_pattern",
         description: "Explain a detected behavioral pattern to the user",
         kind: ActionKind::Inform,
-        preconditions: &[
-            ("A routine or pattern is detected", true, Some(NodeKind::Routine)),
-        ],
+        preconditions: &[(
+            "A routine or pattern is detected",
+            true,
+            Some(NodeKind::Routine),
+        )],
         effects: &[
             ("User gains self-awareness", 0.85, 0.5),
             ("User may dispute the pattern", 0.20, -0.1),
@@ -238,9 +239,11 @@ const BUILTIN_SCHEMAS: &[SchemaTemplate] = &[
         name: "present_opportunity",
         description: "Inform the user about a time-bounded opportunity",
         kind: ActionKind::Inform,
-        preconditions: &[
-            ("An unexpired opportunity exists", true, Some(NodeKind::Opportunity)),
-        ],
+        preconditions: &[(
+            "An unexpired opportunity exists",
+            true,
+            Some(NodeKind::Opportunity),
+        )],
         effects: &[
             ("User seizes the opportunity", 0.50, 0.7),
             ("User ignores it", 0.40, 0.0),
@@ -251,15 +254,14 @@ const BUILTIN_SCHEMAS: &[SchemaTemplate] = &[
         name: "share_entity_insight",
         description: "Share an insight about a person or concept the user cares about",
         kind: ActionKind::Inform,
-        preconditions: &[
-            ("An entity with connections exists", true, Some(NodeKind::Entity)),
-        ],
-        effects: &[
-            ("User learns something useful", 0.65, 0.4),
-        ],
+        preconditions: &[(
+            "An entity with connections exists",
+            true,
+            Some(NodeKind::Entity),
+        )],
+        effects: &[("User learns something useful", 0.65, 0.4)],
         confidence_threshold: 0.4,
     },
-
     // ── Organize (4) ──
     SchemaTemplate {
         name: "prioritize_tasks",
@@ -269,122 +271,112 @@ const BUILTIN_SCHEMAS: &[SchemaTemplate] = &[
             ("Multiple active tasks exist", true, Some(NodeKind::Task)),
             ("At least one task has urgency", false, None),
         ],
-        effects: &[
-            ("User focuses on highest-value work", 0.70, 0.6),
-        ],
+        effects: &[("User focuses on highest-value work", 0.70, 0.6)],
         confidence_threshold: 0.5,
     },
     SchemaTemplate {
         name: "suggest_goal_decomposition",
         description: "Suggest breaking a large goal into sub-goals",
         kind: ActionKind::Organize,
-        preconditions: &[
-            ("A goal with low progress exists", true, Some(NodeKind::Goal)),
-        ],
-        effects: &[
-            ("Goal becomes more actionable", 0.75, 0.5),
-        ],
+        preconditions: &[(
+            "A goal with low progress exists",
+            true,
+            Some(NodeKind::Goal),
+        )],
+        effects: &[("Goal becomes more actionable", 0.75, 0.5)],
         confidence_threshold: 0.5,
     },
     SchemaTemplate {
         name: "consolidate_related_notes",
         description: "Suggest merging related memory entries",
         kind: ActionKind::Organize,
-        preconditions: &[
-            ("Multiple related episodes exist", true, Some(NodeKind::Episode)),
-        ],
-        effects: &[
-            ("Memory is cleaner and more useful", 0.80, 0.3),
-        ],
+        preconditions: &[(
+            "Multiple related episodes exist",
+            true,
+            Some(NodeKind::Episode),
+        )],
+        effects: &[("Memory is cleaner and more useful", 0.80, 0.3)],
         confidence_threshold: 0.6,
     },
     SchemaTemplate {
         name: "archive_completed_goal",
         description: "Suggest archiving a completed or abandoned goal",
         kind: ActionKind::Organize,
-        preconditions: &[
-            ("A completed or abandoned goal exists", true, Some(NodeKind::Goal)),
-        ],
-        effects: &[
-            ("Cognitive graph is tidier", 0.90, 0.2),
-        ],
+        preconditions: &[(
+            "A completed or abandoned goal exists",
+            true,
+            Some(NodeKind::Goal),
+        )],
+        effects: &[("Cognitive graph is tidier", 0.90, 0.2)],
         confidence_threshold: 0.3,
     },
-
     // ── Schedule (3) ──
     SchemaTemplate {
         name: "suggest_time_block",
         description: "Suggest blocking time for a high-urgency task",
         kind: ActionKind::Schedule,
-        preconditions: &[
-            ("A task with deadline exists", true, Some(NodeKind::Task)),
-        ],
-        effects: &[
-            ("User allocates time and makes progress", 0.60, 0.6),
-        ],
+        preconditions: &[("A task with deadline exists", true, Some(NodeKind::Task))],
+        effects: &[("User allocates time and makes progress", 0.60, 0.6)],
         confidence_threshold: 0.5,
     },
     SchemaTemplate {
         name: "routine_adjustment",
         description: "Suggest adjusting a routine's timing based on drift",
         kind: ActionKind::Schedule,
-        preconditions: &[
-            ("A routine with low reliability exists", true, Some(NodeKind::Routine)),
-        ],
-        effects: &[
-            ("Routine becomes more reliable", 0.55, 0.3),
-        ],
+        preconditions: &[(
+            "A routine with low reliability exists",
+            true,
+            Some(NodeKind::Routine),
+        )],
+        effects: &[("Routine becomes more reliable", 0.55, 0.3)],
         confidence_threshold: 0.5,
     },
     SchemaTemplate {
         name: "deadline_warning",
         description: "Warn about an approaching deadline",
         kind: ActionKind::Schedule,
-        preconditions: &[
-            ("A task or goal has an imminent deadline", true, Some(NodeKind::Task)),
-        ],
-        effects: &[
-            ("User takes timely action", 0.75, 0.5),
-        ],
+        preconditions: &[(
+            "A task or goal has an imminent deadline",
+            true,
+            Some(NodeKind::Task),
+        )],
+        effects: &[("User takes timely action", 0.75, 0.5)],
         confidence_threshold: 0.3,
     },
-
     // ── Suggest (5) ──
     SchemaTemplate {
         name: "suggest_break",
         description: "Suggest the user take a break based on activity patterns",
         kind: ActionKind::Suggest,
         preconditions: &[
-            ("User has been active for extended period", false, Some(NodeKind::Episode)),
-            ("Health or wellbeing need detected", false, Some(NodeKind::Need)),
+            (
+                "User has been active for extended period",
+                false,
+                Some(NodeKind::Episode),
+            ),
+            (
+                "Health or wellbeing need detected",
+                false,
+                Some(NodeKind::Need),
+            ),
         ],
-        effects: &[
-            ("User takes a break and feels refreshed", 0.50, 0.5),
-        ],
+        effects: &[("User takes a break and feels refreshed", 0.50, 0.5)],
         confidence_threshold: 0.4,
     },
     SchemaTemplate {
         name: "suggest_delegation",
         description: "Suggest delegating a task that's blocking progress",
         kind: ActionKind::Suggest,
-        preconditions: &[
-            ("A blocked task exists", true, Some(NodeKind::Task)),
-        ],
-        effects: &[
-            ("Task gets unblocked", 0.40, 0.6),
-        ],
+        preconditions: &[("A blocked task exists", true, Some(NodeKind::Task))],
+        effects: &[("Task gets unblocked", 0.40, 0.6)],
         confidence_threshold: 0.6,
     },
     SchemaTemplate {
         name: "suggest_learning",
         description: "Suggest learning material based on detected knowledge gaps",
         kind: ActionKind::Suggest,
-        preconditions: &[
-            ("An informational need exists", true, Some(NodeKind::Need)),
-        ],
-        effects: &[
-            ("User fills knowledge gap", 0.55, 0.5),
-        ],
+        preconditions: &[("An informational need exists", true, Some(NodeKind::Need))],
+        effects: &[("User fills knowledge gap", 0.55, 0.5)],
         confidence_threshold: 0.4,
     },
     SchemaTemplate {
@@ -393,34 +385,37 @@ const BUILTIN_SCHEMAS: &[SchemaTemplate] = &[
         kind: ActionKind::Suggest,
         preconditions: &[
             ("A social need exists", true, Some(NodeKind::Need)),
-            ("A relevant entity (person) exists", false, Some(NodeKind::Entity)),
+            (
+                "A relevant entity (person) exists",
+                false,
+                Some(NodeKind::Entity),
+            ),
         ],
-        effects: &[
-            ("Social need is addressed", 0.45, 0.5),
-        ],
+        effects: &[("Social need is addressed", 0.45, 0.5)],
         confidence_threshold: 0.5,
     },
     SchemaTemplate {
         name: "suggest_alternative_approach",
         description: "Suggest a different approach to a stuck goal",
         kind: ActionKind::Suggest,
-        preconditions: &[
-            ("A goal with low progress exists", true, Some(NodeKind::Goal)),
-        ],
-        effects: &[
-            ("User tries new approach and makes progress", 0.40, 0.6),
-        ],
+        preconditions: &[(
+            "A goal with low progress exists",
+            true,
+            Some(NodeKind::Goal),
+        )],
+        effects: &[("User tries new approach and makes progress", 0.40, 0.6)],
         confidence_threshold: 0.5,
     },
-
     // ── Warn (3) ──
     SchemaTemplate {
         name: "risk_alert",
         description: "Alert the user about a detected risk",
         kind: ActionKind::Warn,
-        preconditions: &[
-            ("A risk with significant expected impact", true, Some(NodeKind::Risk)),
-        ],
+        preconditions: &[(
+            "A risk with significant expected impact",
+            true,
+            Some(NodeKind::Risk),
+        )],
         effects: &[
             ("User takes preventive action", 0.60, 0.7),
             ("User feels anxious", 0.25, -0.2),
@@ -431,50 +426,41 @@ const BUILTIN_SCHEMAS: &[SchemaTemplate] = &[
         name: "contradiction_alert",
         description: "Alert about conflicting beliefs that need resolution",
         kind: ActionKind::Warn,
-        preconditions: &[
-            ("Contradicting beliefs exist", true, Some(NodeKind::Belief)),
-        ],
-        effects: &[
-            ("User resolves the contradiction", 0.55, 0.5),
-        ],
+        preconditions: &[("Contradicting beliefs exist", true, Some(NodeKind::Belief))],
+        effects: &[("User resolves the contradiction", 0.55, 0.5)],
         confidence_threshold: 0.5,
     },
     SchemaTemplate {
         name: "constraint_violation_warning",
         description: "Warn that a planned action may violate a constraint",
         kind: ActionKind::Warn,
-        preconditions: &[
-            ("A constraint exists", true, Some(NodeKind::Constraint)),
-        ],
-        effects: &[
-            ("User avoids the violation", 0.80, 0.4),
-        ],
+        preconditions: &[("A constraint exists", true, Some(NodeKind::Constraint))],
+        effects: &[("User avoids the violation", 0.80, 0.4)],
         confidence_threshold: 0.3,
     },
-
     // ── Execute (3) ──
     SchemaTemplate {
         name: "auto_consolidate",
         description: "Automatically consolidate redundant memories",
         kind: ActionKind::Execute,
-        preconditions: &[
-            ("Multiple similar episodes exist", true, Some(NodeKind::Episode)),
-        ],
-        effects: &[
-            ("Memory is cleaner", 0.90, 0.3),
-        ],
+        preconditions: &[(
+            "Multiple similar episodes exist",
+            true,
+            Some(NodeKind::Episode),
+        )],
+        effects: &[("Memory is cleaner", 0.90, 0.3)],
         confidence_threshold: 0.7,
     },
     SchemaTemplate {
         name: "update_belief_confidence",
         description: "Update a belief's confidence based on new evidence",
         kind: ActionKind::Execute,
-        preconditions: &[
-            ("A belief with new evidence exists", true, Some(NodeKind::Belief)),
-        ],
-        effects: &[
-            ("Belief accuracy improves", 0.85, 0.3),
-        ],
+        preconditions: &[(
+            "A belief with new evidence exists",
+            true,
+            Some(NodeKind::Belief),
+        )],
+        effects: &[("Belief accuracy improves", 0.85, 0.3)],
         confidence_threshold: 0.5,
     },
     SchemaTemplate {
@@ -482,21 +468,16 @@ const BUILTIN_SCHEMAS: &[SchemaTemplate] = &[
         description: "Decay activation of nodes that haven't been accessed",
         kind: ActionKind::Execute,
         preconditions: &[], // always valid — system maintenance
-        effects: &[
-            ("Working set stays focused", 0.95, 0.2),
-        ],
+        effects: &[("Working set stays focused", 0.95, 0.2)],
         confidence_threshold: 0.2,
     },
-
     // ── Abstain (1) ──
     SchemaTemplate {
         name: "abstain",
         description: "Explicitly decide to take no action right now",
         kind: ActionKind::Abstain,
         preconditions: &[], // always satisfiable
-        effects: &[
-            ("User is not disturbed", 0.95, 0.1),
-        ],
+        effects: &[("User is not disturbed", 0.95, 0.1)],
         confidence_threshold: 0.0,
     },
 ];
@@ -512,20 +493,26 @@ fn template_to_payload(t: &SchemaTemplate) -> ActionSchemaPayload {
         name: t.name.to_string(),
         description: t.description.to_string(),
         action_kind: t.kind,
-        preconditions: t.preconditions.iter().map(|(desc, req, _kind)| {
-            Precondition {
-                description: desc.to_string(),
-                node_ref: None, // bound at generation time
-                required: *req,
-            }
-        }).collect(),
-        effects: t.effects.iter().map(|(desc, prob, util)| {
-            Effect {
+        preconditions: t
+            .preconditions
+            .iter()
+            .map(|(desc, req, _kind)| {
+                Precondition {
+                    description: desc.to_string(),
+                    node_ref: None, // bound at generation time
+                    required: *req,
+                }
+            })
+            .collect(),
+        effects: t
+            .effects
+            .iter()
+            .map(|(desc, prob, util)| Effect {
                 description: desc.to_string(),
                 probability: *prob,
                 utility: *util,
-            }
-        }).collect(),
+            })
+            .collect(),
         confidence_threshold: t.confidence_threshold,
         success_rate: 0.5, // neutral prior for untried schemas
         execution_count: 0,
@@ -540,7 +527,8 @@ pub fn builtin_schemas() -> Vec<ActionSchemaPayload> {
 
 /// Look up a built-in schema by name.
 pub fn lookup_builtin(name: &str) -> Option<ActionSchemaPayload> {
-    BUILTIN_SCHEMAS.iter()
+    BUILTIN_SCHEMAS
+        .iter()
         .find(|t| t.name == name)
         .map(template_to_payload)
 }
@@ -554,33 +542,42 @@ fn match_preconditions(
     template: &SchemaTemplate,
     nodes: &[&CognitiveNode],
 ) -> Vec<PreconditionBinding> {
-    template.preconditions.iter().map(|(desc, required, kind_opt)| {
-        let bound = kind_opt.and_then(|kind| {
-            nodes.iter().find(|n| n.id.kind() == kind).map(|n| n.id)
-        });
+    template
+        .preconditions
+        .iter()
+        .map(|(desc, required, kind_opt)| {
+            let bound =
+                kind_opt.and_then(|kind| nodes.iter().find(|n| n.id.kind() == kind).map(|n| n.id));
 
-        // Preconditions without a required node kind are context-based
-        // (e.g., "goal hasn't been updated recently") — check via heuristics
-        let satisfied = if let Some(kind) = kind_opt {
-            nodes.iter().any(|n| n.id.kind() == *kind)
-        } else {
-            true // context preconditions are optimistically satisfied
-        };
+            // Preconditions without a required node kind are context-based
+            // (e.g., "goal hasn't been updated recently") — check via heuristics
+            let satisfied = if let Some(kind) = kind_opt {
+                nodes.iter().any(|n| n.id.kind() == *kind)
+            } else {
+                true // context preconditions are optimistically satisfied
+            };
 
-        PreconditionBinding {
-            description: desc.to_string(),
-            required: *required,
-            satisfied,
-            bound_node: bound,
-        }
-    }).collect()
+            PreconditionBinding {
+                description: desc.to_string(),
+                required: *required,
+                satisfied,
+                bound_node: bound,
+            }
+        })
+        .collect()
 }
 
 /// Calculate precondition satisfaction ratio.
 fn precondition_satisfaction(bindings: &[PreconditionBinding]) -> (usize, usize, usize) {
     let required_total = bindings.iter().filter(|b| b.required).count();
-    let required_sat = bindings.iter().filter(|b| b.required && b.satisfied).count();
-    let soft_sat = bindings.iter().filter(|b| !b.required && b.satisfied).count();
+    let required_sat = bindings
+        .iter()
+        .filter(|b| b.required && b.satisfied)
+        .count();
+    let soft_sat = bindings
+        .iter()
+        .filter(|b| !b.required && b.satisfied)
+        .count();
     (required_sat, required_total, soft_sat)
 }
 
@@ -617,10 +614,7 @@ fn compute_relevance(
     let success = 0.5_f64;
     let _ = schema; // success_rate would come from persisted schema
 
-    0.40 * req_ratio
-        + 0.25 * success
-        + 0.25 * intent_posterior
-        + 0.10 * soft_ratio
+    0.40 * req_ratio + 0.25 * success + 0.25 * intent_posterior + 0.10 * soft_ratio
 }
 
 // ── Candidate Generation ──
@@ -656,8 +650,12 @@ pub fn generate_candidates_for_intent(
 
         let total_soft = bindings.iter().filter(|b| !b.required).count();
         let relevance = compute_relevance(
-            req_sat, req_total, soft_sat, total_soft,
-            template, intent.posterior,
+            req_sat,
+            req_total,
+            soft_sat,
+            total_soft,
+            template,
+            intent.posterior,
         );
 
         candidates.push(ActionCandidate {
@@ -681,19 +679,23 @@ pub fn generate_candidates_for_intent(
                 continue;
             }
 
-            let bindings: Vec<PreconditionBinding> = schema.preconditions.iter().map(|p| {
-                let satisfied = if let Some(node_ref) = p.node_ref {
-                    nodes.iter().any(|n| n.id == node_ref)
-                } else {
-                    true // no specific node required
-                };
-                PreconditionBinding {
-                    description: p.description.clone(),
-                    required: p.required,
-                    satisfied,
-                    bound_node: p.node_ref,
-                }
-            }).collect();
+            let bindings: Vec<PreconditionBinding> = schema
+                .preconditions
+                .iter()
+                .map(|p| {
+                    let satisfied = if let Some(node_ref) = p.node_ref {
+                        nodes.iter().any(|n| n.id == node_ref)
+                    } else {
+                        true // no specific node required
+                    };
+                    PreconditionBinding {
+                        description: p.description.clone(),
+                        required: p.required,
+                        satisfied,
+                        bound_node: p.node_ref,
+                    }
+                })
+                .collect();
 
             let (req_sat, req_total, soft_sat) = precondition_satisfaction(&bindings);
             let ratio = if req_total > 0 {
@@ -707,7 +709,11 @@ pub fn generate_candidates_for_intent(
             }
 
             let total_soft = bindings.iter().filter(|b| !b.required).count();
-            let soft_ratio = if total_soft > 0 { soft_sat as f64 / total_soft as f64 } else { 0.0 };
+            let soft_ratio = if total_soft > 0 {
+                soft_sat as f64 / total_soft as f64
+            } else {
+                0.0
+            };
             let relevance = 0.40 * ratio
                 + 0.25 * schema.success_rate
                 + 0.25 * intent.posterior
@@ -790,7 +796,8 @@ mod tests {
     fn make_goal(alloc: &mut NodeIdAllocator, desc: &str, urgency: f64) -> CognitiveNode {
         let id = alloc.alloc(NodeKind::Goal);
         let mut node = CognitiveNode::new(
-            id, desc.to_string(),
+            id,
+            desc.to_string(),
             NodePayload::Goal(GoalPayload {
                 description: desc.to_string(),
                 status: GoalStatus::Active,
@@ -808,7 +815,8 @@ mod tests {
     fn make_episode_node(alloc: &mut NodeIdAllocator, summary: &str) -> CognitiveNode {
         let id = alloc.alloc(NodeKind::Episode);
         CognitiveNode::new(
-            id, summary.to_string(),
+            id,
+            summary.to_string(),
             NodePayload::Episode(EpisodePayload {
                 memory_rid: format!("rid_{}", id.to_raw()),
                 summary: summary.to_string(),
@@ -821,7 +829,8 @@ mod tests {
     fn make_need_node(alloc: &mut NodeIdAllocator, desc: &str, intensity: f64) -> CognitiveNode {
         let id = alloc.alloc(NodeKind::Need);
         let mut node = CognitiveNode::new(
-            id, desc.to_string(),
+            id,
+            desc.to_string(),
             NodePayload::Need(NeedPayload {
                 description: desc.to_string(),
                 category: NeedCategory::Informational,
@@ -864,7 +873,11 @@ mod tests {
 
         // Check all 8 action kinds are represented
         let kinds: std::collections::HashSet<_> = schemas.iter().map(|s| s.action_kind).collect();
-        assert_eq!(kinds.len(), 8, "all 8 ActionKind variants should be represented");
+        assert_eq!(
+            kinds.len(),
+            8,
+            "all 8 ActionKind variants should be represented"
+        );
     }
 
     #[test]
@@ -888,11 +901,17 @@ mod tests {
 
         let result = generate_candidates(&[intent], &nodes, &[], &config);
 
-        assert!(!result.candidates.is_empty(), "should find matching schemas");
+        assert!(
+            !result.candidates.is_empty(),
+            "should find matching schemas"
+        );
         assert!(result.schemas_evaluated >= 28);
 
         // Should include at least send_reminder (needs Goal)
-        let has_reminder = result.candidates.iter().any(|c| c.schema_name == "send_reminder");
+        let has_reminder = result
+            .candidates
+            .iter()
+            .any(|c| c.schema_name == "send_reminder");
         assert!(has_reminder, "send_reminder should match (Goal exists)");
     }
 
@@ -906,8 +925,10 @@ mod tests {
         // Only schemas with no required preconditions should match
         // (abstain, decay_stale_activations, suggest_break)
         for c in &result.candidates {
-            assert_eq!(c.total_required, 0,
-                "without nodes, only no-precondition schemas should match");
+            assert_eq!(
+                c.total_required, 0,
+                "without nodes, only no-precondition schemas should match"
+            );
         }
     }
 
@@ -946,8 +967,10 @@ mod tests {
         let result = generate_candidates(&[intent], &nodes, &[], &config);
 
         for w in result.candidates.windows(2) {
-            assert!(w[0].relevance_score >= w[1].relevance_score,
-                "candidates should be sorted by relevance descending");
+            assert!(
+                w[0].relevance_score >= w[1].relevance_score,
+                "candidates should be sorted by relevance descending"
+            );
         }
     }
 
@@ -964,9 +987,17 @@ mod tests {
         let result = generate_candidates(&[intent1, intent2], &nodes, &[], &config);
 
         // No duplicate schema names
-        let names: Vec<&str> = result.candidates.iter().map(|c| c.schema_name.as_str()).collect();
+        let names: Vec<&str> = result
+            .candidates
+            .iter()
+            .map(|c| c.schema_name.as_str())
+            .collect();
         let unique: std::collections::HashSet<&str> = names.iter().copied().collect();
-        assert_eq!(names.len(), unique.len(), "no duplicate schema names after dedup");
+        assert_eq!(
+            names.len(),
+            unique.len(),
+            "no duplicate schema names after dedup"
+        );
     }
 
     #[test]
@@ -1003,7 +1034,10 @@ mod tests {
 
         let result = generate_candidates(&[intent], &nodes, &schemas, &config);
 
-        let has_custom = result.candidates.iter().any(|c| c.schema_name == "custom_action");
+        let has_custom = result
+            .candidates
+            .iter()
+            .any(|c| c.schema_name == "custom_action");
         assert!(has_custom, "persisted schema should be included");
     }
 
@@ -1016,17 +1050,22 @@ mod tests {
         let need = make_need_node(&mut alloc, "Need", 0.6);
 
         let belief_id = alloc.alloc(NodeKind::Belief);
-        let belief = CognitiveNode::new(belief_id, "Belief".to_string(),
+        let belief = CognitiveNode::new(
+            belief_id,
+            "Belief".to_string(),
             NodePayload::Belief(BeliefPayload {
                 proposition: "Something is true".to_string(),
                 log_odds: 2.0,
                 domain: "test".to_string(),
                 evidence_trail: vec![],
                 user_confirmed: false,
-            }));
+            }),
+        );
 
         let task_id = alloc.alloc(NodeKind::Task);
-        let task = CognitiveNode::new(task_id, "Task".to_string(),
+        let task = CognitiveNode::new(
+            task_id,
+            "Task".to_string(),
             NodePayload::Task(TaskPayload {
                 description: "Do something".to_string(),
                 status: TaskStatus::Pending,
@@ -1035,29 +1074,38 @@ mod tests {
                 priority: Priority::Medium,
                 estimated_minutes: Some(60),
                 prerequisites: vec![],
-            }));
+            }),
+        );
 
         let risk_id = alloc.alloc(NodeKind::Risk);
-        let risk = CognitiveNode::new(risk_id, "Risk".to_string(),
+        let risk = CognitiveNode::new(
+            risk_id,
+            "Risk".to_string(),
             NodePayload::Risk(RiskPayload {
                 description: "Something bad".to_string(),
                 severity: 0.7,
                 likelihood: 0.5,
                 mitigation: "Be careful".to_string(),
                 threatened_goals: vec![],
-            }));
+            }),
+        );
 
         let constraint_id = alloc.alloc(NodeKind::Constraint);
-        let constraint = CognitiveNode::new(constraint_id, "Constraint".to_string(),
+        let constraint = CognitiveNode::new(
+            constraint_id,
+            "Constraint".to_string(),
             NodePayload::Constraint(ConstraintPayload {
                 description: "No late notifications".to_string(),
                 constraint_type: ConstraintType::Hard,
                 condition: "always".to_string(),
                 imposed_by: "user".to_string(),
-            }));
+            }),
+        );
 
         let routine_id = alloc.alloc(NodeKind::Routine);
-        let routine = CognitiveNode::new(routine_id, "Routine".to_string(),
+        let routine = CognitiveNode::new(
+            routine_id,
+            "Routine".to_string(),
             NodePayload::Routine(RoutinePayload {
                 description: "Daily check".to_string(),
                 period_secs: 86400.0,
@@ -1067,29 +1115,44 @@ mod tests {
                 last_triggered: 0.0,
                 action_description: "check".to_string(),
                 weekday_mask: 0x7F,
-            }));
+            }),
+        );
 
         let opp_id = alloc.alloc(NodeKind::Opportunity);
-        let opportunity = CognitiveNode::new(opp_id, "Opportunity".to_string(),
+        let opportunity = CognitiveNode::new(
+            opp_id,
+            "Opportunity".to_string(),
             NodePayload::Opportunity(OpportunityPayload {
                 description: "Sale".to_string(),
                 expires_at: now_secs() + 3600.0,
                 expected_benefit: 0.8,
                 required_action: "Buy".to_string(),
                 relevant_goals: vec![],
-            }));
+            }),
+        );
 
         let entity_id = alloc.alloc(NodeKind::Entity);
-        let entity = CognitiveNode::new(entity_id, "Entity".to_string(),
+        let entity = CognitiveNode::new(
+            entity_id,
+            "Entity".to_string(),
             NodePayload::Entity(EntityPayload {
                 name: "Alice".to_string(),
                 entity_type: "person".to_string(),
                 memory_rids: vec![],
-            }));
+            }),
+        );
 
         let nodes: Vec<&CognitiveNode> = vec![
-            &goal, &ep, &need, &belief, &task, &risk,
-            &constraint, &routine, &opportunity, &entity,
+            &goal,
+            &ep,
+            &need,
+            &belief,
+            &task,
+            &risk,
+            &constraint,
+            &routine,
+            &opportunity,
+            &entity,
         ];
 
         let intent = make_intent("Big intent", 0.8);
@@ -1097,6 +1160,9 @@ mod tests {
         config.max_total_candidates = 10;
 
         let result = generate_candidates(&[intent], &nodes, &[], &config);
-        assert!(result.candidates.len() <= 10, "should respect max_total_candidates");
+        assert!(
+            result.candidates.len() <= 10,
+            "should respect max_total_candidates"
+        );
     }
 }

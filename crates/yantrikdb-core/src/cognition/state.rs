@@ -319,12 +319,12 @@ impl Provenance {
     /// Used as a multiplicative factor in belief revision.
     pub fn reliability_prior(self) -> f64 {
         match self {
-            Self::Told => 0.95,       // User explicitly stated — highest trust
-            Self::Observed => 0.90,    // Directly observed behavior
-            Self::Experimented => 0.85, // Confirmed via controlled experiment
-            Self::Extracted => 0.75,   // From external documents — may be outdated
-            Self::Inferred => 0.60,    // Pattern-based inference — moderate trust
-            Self::Consolidated => 0.80, // Merged from multiple sources
+            Self::Told => 0.95,          // User explicitly stated — highest trust
+            Self::Observed => 0.90,      // Directly observed behavior
+            Self::Experimented => 0.85,  // Confirmed via controlled experiment
+            Self::Extracted => 0.75,     // From external documents — may be outdated
+            Self::Inferred => 0.60,      // Pattern-based inference — moderate trust
+            Self::Consolidated => 0.80,  // Merged from multiple sources
             Self::SystemDefault => 0.50, // Defaults — weakest, easily overridden
         }
     }
@@ -1159,7 +1159,12 @@ impl CognitiveNode {
     }
 
     /// Create with custom attributes.
-    pub fn with_attrs(id: NodeId, label: String, payload: NodePayload, attrs: CognitiveAttrs) -> Self {
+    pub fn with_attrs(
+        id: NodeId,
+        label: String,
+        payload: NodePayload,
+        attrs: CognitiveAttrs,
+    ) -> Self {
         Self {
             id,
             attrs,
@@ -1442,7 +1447,11 @@ impl NodeIdAllocator {
     pub fn alloc(&mut self, kind: NodeKind) -> NodeId {
         let idx = kind.discriminant() as usize;
         let seq = self.next_seq[idx];
-        assert!(seq <= NodeId::MAX_SEQ, "NodeId sequence exhausted for {:?}", kind);
+        assert!(
+            seq <= NodeId::MAX_SEQ,
+            "NodeId sequence exhausted for {:?}",
+            kind
+        );
         self.next_seq[idx] = seq + 1;
         NodeId::new(kind, seq)
     }
@@ -1519,20 +1528,48 @@ pub fn serialize_payload(payload: &NodePayload) -> serde_json::Value {
 /// to select the correct inner type.
 pub fn deserialize_payload(kind: NodeKind, json: &serde_json::Value) -> Option<NodePayload> {
     match kind {
-        NodeKind::Entity => serde_json::from_value(json.clone()).ok().map(NodePayload::Entity),
-        NodeKind::Episode => serde_json::from_value(json.clone()).ok().map(NodePayload::Episode),
-        NodeKind::Belief => serde_json::from_value(json.clone()).ok().map(NodePayload::Belief),
-        NodeKind::Goal => serde_json::from_value(json.clone()).ok().map(NodePayload::Goal),
-        NodeKind::Task => serde_json::from_value(json.clone()).ok().map(NodePayload::Task),
-        NodeKind::IntentHypothesis => serde_json::from_value(json.clone()).ok().map(NodePayload::IntentHypothesis),
-        NodeKind::Routine => serde_json::from_value(json.clone()).ok().map(NodePayload::Routine),
-        NodeKind::Need => serde_json::from_value(json.clone()).ok().map(NodePayload::Need),
-        NodeKind::Opportunity => serde_json::from_value(json.clone()).ok().map(NodePayload::Opportunity),
-        NodeKind::Risk => serde_json::from_value(json.clone()).ok().map(NodePayload::Risk),
-        NodeKind::Constraint => serde_json::from_value(json.clone()).ok().map(NodePayload::Constraint),
-        NodeKind::Preference => serde_json::from_value(json.clone()).ok().map(NodePayload::Preference),
-        NodeKind::ConversationThread => serde_json::from_value(json.clone()).ok().map(NodePayload::ConversationThread),
-        NodeKind::ActionSchema => serde_json::from_value(json.clone()).ok().map(NodePayload::ActionSchema),
+        NodeKind::Entity => serde_json::from_value(json.clone())
+            .ok()
+            .map(NodePayload::Entity),
+        NodeKind::Episode => serde_json::from_value(json.clone())
+            .ok()
+            .map(NodePayload::Episode),
+        NodeKind::Belief => serde_json::from_value(json.clone())
+            .ok()
+            .map(NodePayload::Belief),
+        NodeKind::Goal => serde_json::from_value(json.clone())
+            .ok()
+            .map(NodePayload::Goal),
+        NodeKind::Task => serde_json::from_value(json.clone())
+            .ok()
+            .map(NodePayload::Task),
+        NodeKind::IntentHypothesis => serde_json::from_value(json.clone())
+            .ok()
+            .map(NodePayload::IntentHypothesis),
+        NodeKind::Routine => serde_json::from_value(json.clone())
+            .ok()
+            .map(NodePayload::Routine),
+        NodeKind::Need => serde_json::from_value(json.clone())
+            .ok()
+            .map(NodePayload::Need),
+        NodeKind::Opportunity => serde_json::from_value(json.clone())
+            .ok()
+            .map(NodePayload::Opportunity),
+        NodeKind::Risk => serde_json::from_value(json.clone())
+            .ok()
+            .map(NodePayload::Risk),
+        NodeKind::Constraint => serde_json::from_value(json.clone())
+            .ok()
+            .map(NodePayload::Constraint),
+        NodeKind::Preference => serde_json::from_value(json.clone())
+            .ok()
+            .map(NodePayload::Preference),
+        NodeKind::ConversationThread => serde_json::from_value(json.clone())
+            .ok()
+            .map(NodePayload::ConversationThread),
+        NodeKind::ActionSchema => serde_json::from_value(json.clone())
+            .ok()
+            .map(NodePayload::ActionSchema),
     }
 }
 
@@ -1600,8 +1637,13 @@ mod tests {
     fn test_provenance_reliability() {
         // Told > Observed > Experimented > Extracted > Consolidated > Inferred > SystemDefault
         assert!(Provenance::Told.reliability_prior() > Provenance::Observed.reliability_prior());
-        assert!(Provenance::Observed.reliability_prior() > Provenance::Inferred.reliability_prior());
-        assert!(Provenance::Inferred.reliability_prior() > Provenance::SystemDefault.reliability_prior());
+        assert!(
+            Provenance::Observed.reliability_prior() > Provenance::Inferred.reliability_prior()
+        );
+        assert!(
+            Provenance::Inferred.reliability_prior()
+                > Provenance::SystemDefault.reliability_prior()
+        );
     }
 
     #[test]
@@ -1785,10 +1827,7 @@ mod tests {
 
     #[test]
     fn test_node_id_allocator_restore() {
-        let marks = vec![
-            (NodeKind::Belief, 100),
-            (NodeKind::Goal, 50),
-        ];
+        let marks = vec![(NodeKind::Belief, 100), (NodeKind::Goal, 50)];
         let mut alloc = NodeIdAllocator::from_high_water_marks(&marks);
 
         let id = alloc.alloc(NodeKind::Belief);
@@ -1828,7 +1867,7 @@ mod tests {
     fn test_routine_next_occurrence() {
         let routine = RoutinePayload {
             description: "Morning email check".to_string(),
-            period_secs: 86400.0,    // daily
+            period_secs: 86400.0,       // daily
             phase_offset_secs: 32400.0, // 9am UTC
             reliability: 0.8,
             observation_count: 30,
@@ -1981,13 +2020,11 @@ mod tests {
             proposition: "The sky is blue".to_string(),
             log_odds: 3.5,
             domain: "science".to_string(),
-            evidence_trail: vec![
-                EvidenceEntry {
-                    source: "observation".to_string(),
-                    weight: 2.0,
-                    timestamp: 1000.0,
-                },
-            ],
+            evidence_trail: vec![EvidenceEntry {
+                source: "observation".to_string(),
+                weight: 2.0,
+                timestamp: 1000.0,
+            }],
             user_confirmed: true,
         });
 
@@ -2029,20 +2066,16 @@ mod tests {
             name: "send_reminder".to_string(),
             description: "Send a reminder to the user".to_string(),
             action_kind: ActionKind::Communicate,
-            preconditions: vec![
-                Precondition {
-                    description: "User has a pending task".to_string(),
-                    node_ref: None,
-                    required: true,
-                },
-            ],
-            effects: vec![
-                Effect {
-                    description: "User is reminded of the task".to_string(),
-                    probability: 0.95,
-                    utility: 0.3,
-                },
-            ],
+            preconditions: vec![Precondition {
+                description: "User has a pending task".to_string(),
+                node_ref: None,
+                required: true,
+            }],
+            effects: vec![Effect {
+                description: "User is reminded of the task".to_string(),
+                probability: 0.95,
+                utility: 0.3,
+            }],
             confidence_threshold: 0.6,
             success_rate: 0.85,
             execution_count: 100,

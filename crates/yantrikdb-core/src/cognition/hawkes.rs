@@ -135,7 +135,7 @@ impl HawkesParams {
 impl Default for HawkesParams {
     fn default() -> Self {
         Self {
-            mu: 1.0 / 3600.0, // 1 event per hour
+            mu: 1.0 / 3600.0,  // 1 event per hour
             alpha: 0.001,      // Mild excitation
             beta: 1.0 / 300.0, // 5-minute decay
         }
@@ -408,9 +408,7 @@ impl EventTypeModel {
         self.circadian.observe(timestamp, 0.05);
 
         // Periodically re-estimate parameters
-        if timestamp - self.last_refit_at >= self.refit_interval
-            && self.inter_event_count >= 10
-        {
+        if timestamp - self.last_refit_at >= self.refit_interval && self.inter_event_count >= 10 {
             self.refit_parameters();
             self.last_refit_at = timestamp;
         }
@@ -479,12 +477,7 @@ impl EventTypeModel {
     /// Compute intensity curve over a time range.
     ///
     /// Returns `(timestamp, intensity)` pairs sampled at `step_secs` intervals.
-    pub fn intensity_curve(
-        &self,
-        start: f64,
-        end: f64,
-        step_secs: f64,
-    ) -> Vec<(f64, f64)> {
+    pub fn intensity_curve(&self, start: f64, end: f64, step_secs: f64) -> Vec<(f64, f64)> {
         let mut curve = Vec::new();
         let mut t = start;
         while t <= end {
@@ -669,7 +662,7 @@ impl Default for HawkesRegistryConfig {
             max_event_types: 100,
             min_observations_for_prediction: 5,
             prediction_horizon_secs: 3600.0 * 4.0, // 4 hours
-            prediction_step_secs: 60.0,             // 1-minute steps
+            prediction_step_secs: 60.0,            // 1-minute steps
             anticipation_threshold: 1.5,
         }
     }
@@ -771,12 +764,8 @@ impl HawkesRegistry {
 
     /// Get summaries for all tracked event types.
     pub fn summaries(&self) -> Vec<ModelSummary> {
-        let mut summaries: Vec<ModelSummary> =
-            self.models.values().map(|m| m.summary()).collect();
-        summaries.sort_by(|a, b| {
-            b.total_observations
-                .cmp(&a.total_observations)
-        });
+        let mut summaries: Vec<ModelSummary> = self.models.values().map(|m| m.summary()).collect();
+        summaries.sort_by(|a, b| b.total_observations.cmp(&a.total_observations));
         summaries
     }
 
@@ -890,9 +879,15 @@ mod tests {
     #[test]
     fn test_circadian_mean_normalized() {
         let mut hist = super::super::temporal::SeasonalHistogram::hour_of_day();
-        for _ in 0..50 { hist.add(9); }
-        for _ in 0..30 { hist.add(14); }
-        for _ in 0..20 { hist.add(21); }
+        for _ in 0..50 {
+            hist.add(9);
+        }
+        for _ in 0..30 {
+            hist.add(14);
+        }
+        for _ in 0..20 {
+            hist.add(21);
+        }
         let profile = CircadianProfile::from_histogram(&hist);
         let mean: f64 = profile.hourly_multipliers.iter().sum::<f64>() / 24.0;
         assert!(
@@ -1043,7 +1038,11 @@ mod tests {
 
         assert_eq!(registry.model_count(), 2);
         assert_eq!(
-            registry.models.get("email_check").unwrap().total_observations,
+            registry
+                .models
+                .get("email_check")
+                .unwrap()
+                .total_observations,
             2
         );
     }
@@ -1051,9 +1050,7 @@ mod tests {
     #[test]
     fn test_registry_batch_observe() {
         let mut registry = HawkesRegistry::new();
-        let timestamps: Vec<f64> = (0..30)
-            .map(|i| 1_000_000.0 + i as f64 * 3600.0)
-            .collect();
+        let timestamps: Vec<f64> = (0..30).map(|i| 1_000_000.0 + i as f64 * 3600.0).collect();
         registry.observe_batch("hourly_task", &timestamps);
 
         assert_eq!(registry.model_count(), 1);
@@ -1083,9 +1080,7 @@ mod tests {
     fn test_registry_predict() {
         let mut registry = HawkesRegistry::new();
         // Need enough observations for prediction
-        let timestamps: Vec<f64> = (0..20)
-            .map(|i| 1_000_000.0 + i as f64 * 600.0)
-            .collect();
+        let timestamps: Vec<f64> = (0..20).map(|i| 1_000_000.0 + i as f64 * 600.0).collect();
         registry.observe_batch("check", &timestamps);
 
         let now = *timestamps.last().unwrap() + 60.0;
@@ -1167,9 +1162,7 @@ mod tests {
         let clustered = EventTypeModel::from_observations("clustered", &timestamps);
 
         // Regular events: evenly spaced
-        let regular_ts: Vec<f64> = (0..50)
-            .map(|i| 1_000_000.0 + i as f64 * 720.0)
-            .collect();
+        let regular_ts: Vec<f64> = (0..50).map(|i| 1_000_000.0 + i as f64 * 720.0).collect();
         let regular = EventTypeModel::from_observations("regular", &regular_ts);
 
         // Clustered should have higher branching ratio

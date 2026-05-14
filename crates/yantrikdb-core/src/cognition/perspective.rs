@@ -360,9 +360,7 @@ pub fn resolve_salience(
                 let matches = match &ovr.target {
                     SalienceTarget::Node(n) => *n == node_id,
                     SalienceTarget::Kind(k) => *k == node_kind,
-                    SalienceTarget::Domain(d) => {
-                        node_domain.map(|nd| nd == d).unwrap_or(false)
-                    }
+                    SalienceTarget::Domain(d) => node_domain.map(|nd| nd == d).unwrap_or(false),
                     SalienceTarget::Tag(t) => node_tags.contains(t),
                 };
                 if matches {
@@ -469,8 +467,8 @@ pub fn detect_perspective_shift(
             .collect();
 
         if !met_conditions.is_empty() && !already_active {
-            let confidence = met_conditions.len() as f64
-                / perspective.activation_conditions.len().max(1) as f64;
+            let confidence =
+                met_conditions.len() as f64 / perspective.activation_conditions.len().max(1) as f64;
 
             transitions.push(PerspectiveTransition {
                 activate: perspective.id,
@@ -546,11 +544,7 @@ pub fn perspective_conflict_check(
 ) -> Vec<PerspectiveConflict> {
     let mut conflicts = Vec::new();
 
-    let active: Vec<&Perspective> = stack
-        .stack
-        .iter()
-        .filter_map(|&id| store.get(id))
-        .collect();
+    let active: Vec<&Perspective> = stack.stack.iter().filter_map(|&id| store.get(id)).collect();
 
     for i in 0..active.len() {
         for j in (i + 1)..active.len() {
@@ -710,12 +704,10 @@ pub fn create_preset(name: &str, id: PerspectiveId, now_ms: u64) -> Option<Persp
             id,
             name: "deadline-crunch".to_string(),
             perspective_type: PerspectiveType::Temporal,
-            salience_overrides: vec![
-                SalienceOverride {
-                    target: SalienceTarget::Kind(NodeKind::Task),
-                    multiplier: 2.5,
-                },
-            ],
+            salience_overrides: vec![SalienceOverride {
+                target: SalienceTarget::Kind(NodeKind::Task),
+                multiplier: 2.5,
+            }],
             edge_modifiers: vec![
                 EdgeWeightModifier {
                     edge_kind: CognitiveEdgeKind::Requires,
@@ -753,12 +745,10 @@ pub fn create_preset(name: &str, id: PerspectiveId, now_ms: u64) -> Option<Persp
                     multiplier: 1.5,
                 },
             ],
-            edge_modifiers: vec![
-                EdgeWeightModifier {
-                    edge_kind: CognitiveEdgeKind::Causes,
-                    multiplier: 1.5,
-                },
-            ],
+            edge_modifiers: vec![EdgeWeightModifier {
+                edge_kind: CognitiveEdgeKind::Causes,
+                multiplier: 1.5,
+            }],
             active_goals: vec![],
             suppressed_goals: vec![],
             cognitive_style: CognitiveStyle {
@@ -881,15 +871,7 @@ mod tests {
         // Deadline mode boosts Task nodes.
         activate_perspective(&mut stack, PerspectiveId(2), &store);
 
-        let salience = resolve_salience(
-            &stack,
-            task(1),
-            NodeKind::Task,
-            None,
-            &[],
-            0.5,
-            &store,
-        );
+        let salience = resolve_salience(&stack, task(1), NodeKind::Task, None, &[], 0.5, &store);
 
         // Should be boosted above base.
         assert!(salience > 0.5);
@@ -934,24 +916,8 @@ mod tests {
         let mut stack = PerspectiveStack::new();
         activate_perspective(&mut stack, id, &store);
 
-        let boosted = resolve_salience(
-            &stack,
-            goal(1),
-            NodeKind::Goal,
-            None,
-            &[],
-            0.5,
-            &store,
-        );
-        let suppressed = resolve_salience(
-            &stack,
-            goal(2),
-            NodeKind::Goal,
-            None,
-            &[],
-            0.5,
-            &store,
-        );
+        let boosted = resolve_salience(&stack, goal(1), NodeKind::Goal, None, &[], 0.5, &store);
+        let suppressed = resolve_salience(&stack, goal(2), NodeKind::Goal, None, &[], 0.5, &store);
 
         assert!(boosted > 0.5);
         assert!(suppressed < 0.5);
@@ -966,21 +932,11 @@ mod tests {
         activate_perspective(&mut stack, PerspectiveId(1), &store); // creative
 
         // AssociatedWith should be boosted in creative mode.
-        let weight = resolve_edge_weight(
-            &stack,
-            CognitiveEdgeKind::AssociatedWith,
-            1.0,
-            &store,
-        );
+        let weight = resolve_edge_weight(&stack, CognitiveEdgeKind::AssociatedWith, 1.0, &store);
         assert!(weight > 1.0);
 
         // Contradicts should be dampened.
-        let weight = resolve_edge_weight(
-            &stack,
-            CognitiveEdgeKind::Contradicts,
-            1.0,
-            &store,
-        );
+        let weight = resolve_edge_weight(&stack, CognitiveEdgeKind::Contradicts, 1.0, &store);
         assert!(weight < 1.0);
     }
 
@@ -1072,10 +1028,11 @@ mod tests {
         let mut store = PerspectiveStore::new();
         let id = store.alloc_id();
         let mut p = make_custom_perspective(id, "morning-routine", 0.5, 0.5);
-        p.activation_conditions.push(ActivationCondition::TimeWindow {
-            start_hour: 6,
-            end_hour: 10,
-        });
+        p.activation_conditions
+            .push(ActivationCondition::TimeWindow {
+                start_hour: 6,
+                end_hour: 10,
+            });
         store.insert(p);
 
         let mut ctx = ActivationContext::default();

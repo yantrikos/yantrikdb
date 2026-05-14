@@ -7,10 +7,16 @@ use std::collections::HashMap;
 /// Implementations can use any embedding model (sentence-transformers, candle, etc.).
 pub trait Embedder: Send + Sync {
     /// Embed a single text string into a vector.
-    fn embed(&self, text: &str) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>>;
+    fn embed(
+        &self,
+        text: &str,
+    ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>>;
 
     /// Embed multiple texts. Default implementation calls embed() in a loop.
-    fn embed_batch(&self, texts: &[&str]) -> std::result::Result<Vec<Vec<f32>>, Box<dyn std::error::Error + Send + Sync>> {
+    fn embed_batch(
+        &self,
+        texts: &[&str],
+    ) -> std::result::Result<Vec<Vec<f32>>, Box<dyn std::error::Error + Send + Sync>> {
         texts.iter().map(|t| self.embed(t)).collect()
     }
 

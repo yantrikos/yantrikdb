@@ -13,7 +13,7 @@
 //! Run with: `cargo run --example showcase_wirecard -- --nocapture`
 //! Or the standard: `cargo run --example showcase_wirecard`
 
-use yantrikdb::engine::moves::{ClaimRef, RecordMoveEventInput, observability};
+use yantrikdb::engine::moves::{observability, ClaimRef, RecordMoveEventInput};
 use yantrikdb::YantrikDB;
 
 fn main() {
@@ -30,12 +30,21 @@ fn main() {
 
     sub("Phase 1 — seeding the public record");
 
-    let prop_key = ("Philippine_trustee_accounts", "balance_equals", "EUR_1.9_billion");
+    let prop_key = (
+        "Philippine_trustee_accounts",
+        "balance_equals",
+        "EUR_1.9_billion",
+    );
 
     // (1) Wirecard's own filings — self-reported. source_lineage = ["wirecard"].
     ingest_claim_with_lineage(
-        &db, prop_key, 1, "asserted", "wirecard.filing",
-        Some(d(2018, 12, 31)), Some(d(2020, 6, 18)),
+        &db,
+        prop_key,
+        1,
+        "asserted",
+        "wirecard.filing",
+        Some(d(2018, 12, 31)),
+        Some(d(2020, 6, 18)),
         &["wirecard"],
     );
 
@@ -46,30 +55,50 @@ fn main() {
     //     from an independent channel — it came from Wirecard-provided
     //     documents that EY failed to verify directly with the banks.
     ingest_claim_with_lineage(
-        &db, prop_key, 1, "asserted", "ey.audit",
-        Some(d(2014, 1, 1)), Some(d(2020, 6, 18)),
+        &db,
+        prop_key,
+        1,
+        "asserted",
+        "ey.audit",
+        Some(d(2014, 1, 1)),
+        Some(d(2020, 6, 18)),
         &["wirecard", "ey"],
     );
 
     // (3) FT — independent investigative reporting. source_lineage = ["ft"].
     //     Polarity -1 (denies the balance exists in the form claimed).
     ingest_claim_with_lineage(
-        &db, prop_key, -1, "reported", "ft.investigation",
-        Some(d(2019, 1, 30)), None,
+        &db,
+        prop_key,
+        -1,
+        "reported",
+        "ft.investigation",
+        Some(d(2019, 1, 30)),
+        None,
         &["ft"],
     );
 
     // (4) BPI — Philippine bank's own formal denial. Independent source.
     ingest_claim_with_lineage(
-        &db, prop_key, -1, "asserted", "bpi.statement",
-        Some(d(2020, 6, 18)), None,
+        &db,
+        prop_key,
+        -1,
+        "asserted",
+        "bpi.statement",
+        Some(d(2020, 6, 18)),
+        None,
         &["bpi"],
     );
 
     // (5) BDO — the other Philippine bank. Independent.
     ingest_claim_with_lineage(
-        &db, prop_key, -1, "asserted", "bdo.statement",
-        Some(d(2020, 6, 19)), None,
+        &db,
+        prop_key,
+        -1,
+        "asserted",
+        "bdo.statement",
+        Some(d(2020, 6, 19)),
+        None,
         &["bdo"],
     );
 
@@ -78,8 +107,13 @@ fn main() {
     //     ⊕ should discount this substantially because it shares lineage
     //     with BPI + BDO.
     ingest_claim_with_lineage(
-        &db, prop_key, -1, "asserted", "bsp.circular",
-        Some(d(2020, 6, 21)), None,
+        &db,
+        prop_key,
+        -1,
+        "asserted",
+        "bsp.circular",
+        Some(d(2020, 6, 21)),
+        None,
         &["bsp", "bpi", "bdo"],
     );
 
@@ -104,22 +138,40 @@ fn main() {
     let mobility = db.get_mobility_state(&prop_id, "default").unwrap().unwrap();
     let contest = db.get_contest_state(&prop_id, "default").unwrap().unwrap();
 
-    let naive_pro = 2.0_f64;   // raw count of positive-polarity claims
-    let naive_con = 4.0_f64;   // raw count of negative-polarity claims
+    let naive_pro = 2.0_f64; // raw count of positive-polarity claims
+    let naive_con = 4.0_f64; // raw count of negative-polarity claims
     println!("  naive σ (support count) = {:.3}", naive_pro);
     println!("  naive α (attack count)  = {:.3}", naive_con);
-    println!("  naive net = {:.3}  (attack-dominant, straightforward tally)",
-             naive_pro - naive_con);
+    println!(
+        "  naive net = {:.3}  (attack-dominant, straightforward tally)",
+        naive_pro - naive_con
+    );
 
     sub("Phase 3 — substrate leave-one-out aggregation (RFC 008 ⊕)");
-    println!("  σ (dependence-discounted support) = {:.3}",
-             mobility.support_mass.unwrap_or(0.0));
-    println!("  α (dependence-discounted attack)  = {:.3}",
-             mobility.attack_mass.unwrap_or(0.0));
-    println!("  support_distinct_source_count = {}", contest.support_distinct_source_count);
-    println!("  attack_distinct_source_count  = {}", contest.attack_distinct_source_count);
-    println!("  support_effective_independence = {:.3}", contest.support_effective_independence);
-    println!("  attack_effective_independence  = {:.3}", contest.attack_effective_independence);
+    println!(
+        "  σ (dependence-discounted support) = {:.3}",
+        mobility.support_mass.unwrap_or(0.0)
+    );
+    println!(
+        "  α (dependence-discounted attack)  = {:.3}",
+        mobility.attack_mass.unwrap_or(0.0)
+    );
+    println!(
+        "  support_distinct_source_count = {}",
+        contest.support_distinct_source_count
+    );
+    println!(
+        "  attack_distinct_source_count  = {}",
+        contest.attack_distinct_source_count
+    );
+    println!(
+        "  support_effective_independence = {:.3}",
+        contest.support_effective_independence
+    );
+    println!(
+        "  attack_effective_independence  = {:.3}",
+        contest.attack_effective_independence
+    );
 
     sub("Phase 4 — what the substrate discounts");
     println!("  ey.audit shares source_lineage ['wirecard','ey'] with wirecard.filing.");
@@ -136,16 +188,26 @@ fn main() {
     // ──────────────────────────────────────────────────────────────
 
     sub("Phase 5 — contest Γ(c) diagnostics");
-    println!("  same_source_opposite_polarity_count            = {}",
-             contest.same_source_opposite_polarity_count);
-    println!("  same_artifact_extractor_polarity_conflict_count = {}",
-             contest.same_artifact_extractor_polarity_conflict_count);
-    println!("  temporal_overlap_conflict_count                 = {}",
-             contest.temporal_overlap_conflict_count);
-    println!("  temporal_separable_opposition_count             = {}",
-             contest.temporal_separable_opposition_count);
-    println!("  referent_schema_heterogeneity_count             = {}",
-             contest.referent_schema_heterogeneity_count);
+    println!(
+        "  same_source_opposite_polarity_count            = {}",
+        contest.same_source_opposite_polarity_count
+    );
+    println!(
+        "  same_artifact_extractor_polarity_conflict_count = {}",
+        contest.same_artifact_extractor_polarity_conflict_count
+    );
+    println!(
+        "  temporal_overlap_conflict_count                 = {}",
+        contest.temporal_overlap_conflict_count
+    );
+    println!(
+        "  temporal_separable_opposition_count             = {}",
+        contest.temporal_separable_opposition_count
+    );
+    println!(
+        "  referent_schema_heterogeneity_count             = {}",
+        contest.referent_schema_heterogeneity_count
+    );
 
     let flags = contest.heuristic_flags;
     println!("\n  heuristic_flags bitmap = 0x{:X}", flags);
@@ -165,11 +227,20 @@ fn main() {
     // ──────────────────────────────────────────────────────────────
 
     sub("Phase 6 — background tier (τ, λ, ψ_a)");
-    println!("  τ (temporal_coherence)    = {:?}", mobility.temporal_coherence);
+    println!(
+        "  τ (temporal_coherence)    = {:?}",
+        mobility.temporal_coherence
+    );
     println!("     polarity flipped from +1 (2014-2019) to -1 (2020); coherence < 1");
-    println!("  λ (load_bearingness)      = {:?}", mobility.load_bearingness);
+    println!(
+        "  λ (load_bearingness)      = {:?}",
+        mobility.load_bearingness
+    );
     println!("     no downstream moves yet consume these claims");
-    println!("  ψ_a (self_gen_ancestral)  = {:?}", mobility.self_gen_ancestral);
+    println!(
+        "  ψ_a (self_gen_ancestral)  = {:?}",
+        mobility.self_gen_ancestral
+    );
     println!("     no cognitive moves yet in the chain");
 
     // ──────────────────────────────────────────────────────────────
@@ -180,39 +251,62 @@ fn main() {
 
     let claim_ids = fetch_claim_ids_for_prop(&db, &prop_id);
     // 0 wirecard, 1 ey, 2 ft, 3 bpi, 4 bdo, 5 bsp — insertion order preserved
-    let (c_wirecard, c_ey, c_ft, c_bpi, c_bdo, c_bsp) =
-        (claim_ids[0].clone(), claim_ids[1].clone(), claim_ids[2].clone(),
-         claim_ids[3].clone(), claim_ids[4].clone(), claim_ids[5].clone());
+    let (c_wirecard, c_ey, c_ft, c_bpi, c_bdo, c_bsp) = (
+        claim_ids[0].clone(),
+        claim_ids[1].clone(),
+        claim_ids[2].clone(),
+        claim_ids[3].clone(),
+        claim_ids[4].clone(),
+        claim_ids[5].clone(),
+    );
 
     // Move 1: FT performs contradiction_triage against wirecard+ey claims.
-    let m_ft = db.record_move_event(RecordMoveEventInput {
-        move_type: "contradiction_triage".into(),
-        operator_version: "v1".into(),
-        observability: observability::OBSERVED.into(),
-        inputs: vec![
-            ClaimRef { claim_id: c_wirecard.clone(), role: "subject".into(), ordinal: 0 },
-            ClaimRef { claim_id: c_ey.clone(),      role: "subject".into(), ordinal: 1 },
-        ],
-        outputs: vec![
-            ClaimRef { claim_id: c_ft.clone(), role: "attack_claim".into(), ordinal: 0 },
-        ],
-        ..Default::default()
-    }).unwrap();
+    let m_ft = db
+        .record_move_event(RecordMoveEventInput {
+            move_type: "contradiction_triage".into(),
+            operator_version: "v1".into(),
+            observability: observability::OBSERVED.into(),
+            inputs: vec![
+                ClaimRef {
+                    claim_id: c_wirecard.clone(),
+                    role: "subject".into(),
+                    ordinal: 0,
+                },
+                ClaimRef {
+                    claim_id: c_ey.clone(),
+                    role: "subject".into(),
+                    ordinal: 1,
+                },
+            ],
+            outputs: vec![ClaimRef {
+                claim_id: c_ft.clone(),
+                role: "attack_claim".into(),
+                ordinal: 0,
+            }],
+            ..Default::default()
+        })
+        .unwrap();
     println!("  [{}] FT contradiction_triage", m_ft);
 
     // Move 2: BPI source_audit (banks audit their own records, find nothing).
-    let m_bpi = db.record_move_event(RecordMoveEventInput {
-        move_type: "source_audit".into(),
-        operator_version: "v1".into(),
-        observability: observability::OBSERVED.into(),
-        inputs: vec![
-            ClaimRef { claim_id: c_wirecard.clone(), role: "subject".into(), ordinal: 0 },
-        ],
-        outputs: vec![
-            ClaimRef { claim_id: c_bpi.clone(), role: "audit_finding".into(), ordinal: 0 },
-        ],
-        ..Default::default()
-    }).unwrap();
+    let m_bpi = db
+        .record_move_event(RecordMoveEventInput {
+            move_type: "source_audit".into(),
+            operator_version: "v1".into(),
+            observability: observability::OBSERVED.into(),
+            inputs: vec![ClaimRef {
+                claim_id: c_wirecard.clone(),
+                role: "subject".into(),
+                ordinal: 0,
+            }],
+            outputs: vec![ClaimRef {
+                claim_id: c_bpi.clone(),
+                role: "audit_finding".into(),
+                ordinal: 0,
+            }],
+            ..Default::default()
+        })
+        .unwrap();
     println!("  [{}] BPI source_audit → no such accounts", m_bpi);
 
     // Move 3: BDO source_audit (same deal).
@@ -220,14 +314,19 @@ fn main() {
         move_type: "source_audit".into(),
         operator_version: "v1".into(),
         observability: observability::OBSERVED.into(),
-        inputs: vec![
-            ClaimRef { claim_id: c_wirecard.clone(), role: "subject".into(), ordinal: 0 },
-        ],
-        outputs: vec![
-            ClaimRef { claim_id: c_bdo.clone(), role: "audit_finding".into(), ordinal: 0 },
-        ],
+        inputs: vec![ClaimRef {
+            claim_id: c_wirecard.clone(),
+            role: "subject".into(),
+            ordinal: 0,
+        }],
+        outputs: vec![ClaimRef {
+            claim_id: c_bdo.clone(),
+            role: "audit_finding".into(),
+            ordinal: 0,
+        }],
         ..Default::default()
-    }).unwrap();
+    })
+    .unwrap();
 
     // Move 4: BSP contradiction_triage — central bank's determination
     // consumes both bank findings.
@@ -236,23 +335,38 @@ fn main() {
         operator_version: "v1".into(),
         observability: observability::OBSERVED.into(),
         inputs: vec![
-            ClaimRef { claim_id: c_bpi.clone(), role: "evidence".into(), ordinal: 0 },
-            ClaimRef { claim_id: c_bdo.clone(), role: "evidence".into(), ordinal: 1 },
+            ClaimRef {
+                claim_id: c_bpi.clone(),
+                role: "evidence".into(),
+                ordinal: 0,
+            },
+            ClaimRef {
+                claim_id: c_bdo.clone(),
+                role: "evidence".into(),
+                ordinal: 1,
+            },
         ],
-        outputs: vec![
-            ClaimRef { claim_id: c_bsp.clone(), role: "official_determination".into(), ordinal: 0 },
-        ],
+        outputs: vec![ClaimRef {
+            claim_id: c_bsp.clone(),
+            role: "official_determination".into(),
+            ordinal: 0,
+        }],
         ..Default::default()
-    }).unwrap();
+    })
+    .unwrap();
 
     // Recompute background so λ and ψ_a reflect the new moves.
     db.compute_background_mobility(&prop_id, "default").unwrap();
     let mobility_post = db.get_mobility_state(&prop_id, "default").unwrap().unwrap();
     println!("\n  After recording moves, background mobility updates:");
-    println!("    λ (load_bearingness) = {:?} — moves now cite these claims",
-             mobility_post.load_bearingness);
-    println!("    ψ_a (self_gen_ancestral) = {:?} — ancestry traced through the DAG",
-             mobility_post.self_gen_ancestral);
+    println!(
+        "    λ (load_bearingness) = {:?} — moves now cite these claims",
+        mobility_post.load_bearingness
+    );
+    println!(
+        "    ψ_a (self_gen_ancestral) = {:?} — ancestry traced through the DAG",
+        mobility_post.self_gen_ancestral
+    );
 
     // ──────────────────────────────────────────────────────────────
     // Phase 7: Verdict.
@@ -268,10 +382,22 @@ fn main() {
     println!();
     println!("  SUBSTRATE:");
     let mobility = db.get_mobility_state(&prop_id, "default").unwrap().unwrap();
-    println!("    σ = {:.3}  (dependence-discounted support)", mobility.support_mass.unwrap());
-    println!("    α = {:.3}  (dependence-discounted attack)",  mobility.attack_mass.unwrap());
-    println!("    support_effective_independence = {:.3}", contest.support_effective_independence);
-    println!("    attack_effective_independence  = {:.3}", contest.attack_effective_independence);
+    println!(
+        "    σ = {:.3}  (dependence-discounted support)",
+        mobility.support_mass.unwrap()
+    );
+    println!(
+        "    α = {:.3}  (dependence-discounted attack)",
+        mobility.attack_mass.unwrap()
+    );
+    println!(
+        "    support_effective_independence = {:.3}",
+        contest.support_effective_independence
+    );
+    println!(
+        "    attack_effective_independence  = {:.3}",
+        contest.attack_effective_independence
+    );
     println!();
     println!("    ey.audit shares lineage with wirecard.filing → support is");
     println!("    closer to 1 independent source, not 2. Correctly reflects");
@@ -302,27 +428,24 @@ fn ingest_claim_with_lineage(
     lineage: &[&str],
 ) -> String {
     let (src, rel, dst) = prop;
-    let claim_id = db.ingest_claim(
-        src, rel, dst, "default",
-        polarity, modality,
-        valid_from, valid_to,
-        extractor, None, "medium",
-        None, None, None,
-        1.0,
-    ).expect("ingest_claim");
+    let claim_id = db
+        .ingest_claim(
+            src, rel, dst, "default", polarity, modality, valid_from, valid_to, extractor, None,
+            "medium", None, None, None, 1.0,
+        )
+        .expect("ingest_claim");
     // Post-insert: patch source_lineage. The default-schema-constrained
     // ingest_claim doesn't take lineage directly, but the substrate math
     // keys on the claims.source_lineage column. Re-ingestion would hit
     // the UNIQUE constraint, so we UPDATE in place before the hook
     // would have captured the final row (the hook already ran; re-
     // triggering recompute picks up the updated lineage).
-    db.conn().execute(
-        "UPDATE claims SET source_lineage = ?1 WHERE claim_id = ?2",
-        rusqlite::params![
-            serde_json::to_string(lineage).unwrap(),
-            claim_id
-        ],
-    ).unwrap();
+    db.conn()
+        .execute(
+            "UPDATE claims SET source_lineage = ?1 WHERE claim_id = ?2",
+            rusqlite::params![serde_json::to_string(lineage).unwrap(), claim_id],
+        )
+        .unwrap();
     // Re-trigger mobility + contest recompute so the new lineage is reflected.
     let prop_id = find_proposition(db, prop);
     db.compute_write_tier_mobility(&prop_id, "default").unwrap();
@@ -332,21 +455,25 @@ fn ingest_claim_with_lineage(
 
 fn find_proposition(db: &YantrikDB, prop: (&str, &str, &str)) -> String {
     let (src, rel, dst) = prop;
-    db.conn().query_row(
-        "SELECT proposition_id FROM propositions \
+    db.conn()
+        .query_row(
+            "SELECT proposition_id FROM propositions \
          WHERE src = ?1 AND rel_type = ?2 AND dst = ?3 AND namespace = 'default'",
-        rusqlite::params![src, rel, dst],
-        |r| r.get(0),
-    ).expect("proposition exists")
+            rusqlite::params![src, rel, dst],
+            |r| r.get(0),
+        )
+        .expect("proposition exists")
 }
 
 fn fetch_claim_ids_for_prop(db: &YantrikDB, prop_id: &str) -> Vec<String> {
     let conn = db.conn();
-    let mut stmt = conn.prepare(
-        "SELECT claim_id FROM claims \
+    let mut stmt = conn
+        .prepare(
+            "SELECT claim_id FROM claims \
          WHERE proposition_id = ?1 AND tombstoned = 0 \
          ORDER BY created_at ASC",
-    ).unwrap();
+        )
+        .unwrap();
     stmt.query_map(rusqlite::params![prop_id], |row| row.get::<_, String>(0))
         .unwrap()
         .collect::<std::result::Result<Vec<_>, _>>()
@@ -384,5 +511,9 @@ fn banner(title: &str) {
 }
 
 fn sub(title: &str) {
-    println!("\n-- {} {}", title, "-".repeat(70usize.saturating_sub(title.len())));
+    println!(
+        "\n-- {} {}",
+        title,
+        "-".repeat(70usize.saturating_sub(title.len()))
+    );
 }

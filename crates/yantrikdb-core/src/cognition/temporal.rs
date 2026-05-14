@@ -88,14 +88,10 @@ impl TimeInterval {
         // Tolerance for "meets" — intervals within ε of touching are considered meeting
         const EPSILON: f64 = 0.5;
 
-        if (self.end - other.start).abs() < EPSILON
-            && self.start < other.start
-        {
+        if (self.end - other.start).abs() < EPSILON && self.start < other.start {
             return IntervalRelation::Meets;
         }
-        if (other.end - self.start).abs() < EPSILON
-            && other.start < self.start
-        {
+        if (other.end - self.start).abs() < EPSILON && other.start < self.start {
             return IntervalRelation::MetBy;
         }
 
@@ -312,11 +308,7 @@ pub fn recency_relevance_domain(
 /// Score a batch of events by recency and return them sorted (most relevant first).
 ///
 /// Each event is `(event_id, event_time)`. Returns `(event_id, relevance_score)`.
-pub fn rank_by_recency(
-    events: &[(u64, f64)],
-    now: f64,
-    config: &RecencyConfig,
-) -> Vec<(u64, f64)> {
+pub fn rank_by_recency(events: &[(u64, f64)], now: f64, config: &RecencyConfig) -> Vec<(u64, f64)> {
     let mut scored: Vec<(u64, f64)> = events
         .iter()
         .map(|&(id, time)| (id, recency_relevance(time, now, config)))
@@ -351,13 +343,13 @@ impl Default for PeriodicityConfig {
     fn default() -> Self {
         Self {
             candidate_periods: vec![
-                3600.0,           // hourly
-                3600.0 * 4.0,     // 4-hourly
-                86400.0,          // daily
-                86400.0 * 7.0,    // weekly
-                86400.0 * 14.0,   // biweekly
-                86400.0 * 30.0,   // monthly
-                86400.0 * 90.0,   // quarterly
+                3600.0,         // hourly
+                3600.0 * 4.0,   // 4-hourly
+                86400.0,        // daily
+                86400.0 * 7.0,  // weekly
+                86400.0 * 14.0, // biweekly
+                86400.0 * 30.0, // monthly
+                86400.0 * 90.0, // quarterly
             ],
             min_events: 5,
             correlation_threshold: 0.3,
@@ -405,10 +397,7 @@ pub struct PeriodicityResult {
 ///
 /// # Returns
 /// `PeriodicityResult` with detected periods sorted by correlation.
-pub fn detect_periodicity(
-    timestamps: &[f64],
-    config: &PeriodicityConfig,
-) -> PeriodicityResult {
+pub fn detect_periodicity(timestamps: &[f64], config: &PeriodicityConfig) -> PeriodicityResult {
     if timestamps.len() < config.min_events {
         return PeriodicityResult {
             detected: vec![],
@@ -457,11 +446,18 @@ pub fn detect_periodicity(
 
         // Hit rate: fraction of events falling within tolerance of predicted times
         let tolerance = period * config.tolerance_fraction;
-        let hits = sorted.iter().filter(|&&t| {
-            let offset = (t - phase_offset) % period;
-            let offset = if offset < 0.0 { offset + period } else { offset };
-            offset < tolerance || (period - offset) < tolerance
-        }).count();
+        let hits = sorted
+            .iter()
+            .filter(|&&t| {
+                let offset = (t - phase_offset) % period;
+                let offset = if offset < 0.0 {
+                    offset + period
+                } else {
+                    offset
+                };
+                offset < tolerance || (period - offset) < tolerance
+            })
+            .count();
         let hit_rate = hits as f64 / n;
 
         if r >= config.correlation_threshold {
@@ -476,7 +472,11 @@ pub fn detect_periodicity(
     }
 
     // Sort by correlation descending
-    detected.sort_by(|a, b| b.correlation.partial_cmp(&a.correlation).unwrap_or(std::cmp::Ordering::Equal));
+    detected.sort_by(|a, b| {
+        b.correlation
+            .partial_cmp(&a.correlation)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     PeriodicityResult {
         detected,
@@ -807,17 +807,18 @@ impl Default for MotifConfig {
 /// # Arguments
 /// * `events` — Labeled events (need not be sorted).
 /// * `config` — Mining parameters.
-pub fn mine_temporal_motifs(
-    events: &[LabeledEvent],
-    config: &MotifConfig,
-) -> Vec<TemporalMotif> {
+pub fn mine_temporal_motifs(events: &[LabeledEvent], config: &MotifConfig) -> Vec<TemporalMotif> {
     if events.len() < config.min_length {
         return vec![];
     }
 
     // Sort by timestamp
     let mut sorted: Vec<&LabeledEvent> = events.iter().collect();
-    sorted.sort_by(|a, b| a.timestamp.partial_cmp(&b.timestamp).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| {
+        a.timestamp
+            .partial_cmp(&b.timestamp)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
 
     // Extract all subsequences of valid length within max_gap constraint
     // Key: sequence of labels → list of (span_secs, gap_secs_list)
@@ -927,7 +928,9 @@ pub fn mine_temporal_motifs(
     motifs.sort_by(|a, b| {
         let score_a = a.occurrences as f64 * a.confidence;
         let score_b = b.occurrences as f64 * b.confidence;
-        score_b.partial_cmp(&score_a).unwrap_or(std::cmp::Ordering::Equal)
+        score_b
+            .partial_cmp(&score_a)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     motifs
@@ -1006,7 +1009,7 @@ pub fn deadline_urgency(deadline: f64, now: f64, config: &DeadlineUrgencyConfig)
     // Normalized sigmoid: maps [0, 1] → [0, 1]
     let k = config.steepness;
     let raw = 1.0 / (1.0 + (-k * (fraction - 0.5)).exp());
-    let sig_low = 1.0 / (1.0 + (k * 0.5).exp());  // sig at fraction=0
+    let sig_low = 1.0 / (1.0 + (k * 0.5).exp()); // sig at fraction=0
     let sig_high = 1.0 / (1.0 + (-k * 0.5).exp()); // sig at fraction=1
     let normalized = (raw - sig_low) / (sig_high - sig_low);
 
@@ -1152,8 +1155,7 @@ pub fn topological_order(events: &[TemporalEvent]) -> TemporalOrder {
     }
 
     // Any nodes not in ordered are part of cycles
-    let ordered_set: std::collections::HashSet<u32> =
-        ordered.iter().map(|n| n.to_raw()).collect();
+    let ordered_set: std::collections::HashSet<u32> = ordered.iter().map(|n| n.to_raw()).collect();
     let cycles: Vec<super::state::NodeId> = all_nodes
         .iter()
         .filter(|n| !ordered_set.contains(n))
@@ -1472,12 +1474,18 @@ mod tests {
     #[test]
     fn test_interval_inverse_symmetry() {
         for rel in [
-            IntervalRelation::Before, IntervalRelation::After,
-            IntervalRelation::Meets, IntervalRelation::MetBy,
-            IntervalRelation::Overlaps, IntervalRelation::OverlappedBy,
-            IntervalRelation::Starts, IntervalRelation::StartedBy,
-            IntervalRelation::Finishes, IntervalRelation::FinishedBy,
-            IntervalRelation::During, IntervalRelation::Contains,
+            IntervalRelation::Before,
+            IntervalRelation::After,
+            IntervalRelation::Meets,
+            IntervalRelation::MetBy,
+            IntervalRelation::Overlaps,
+            IntervalRelation::OverlappedBy,
+            IntervalRelation::Starts,
+            IntervalRelation::StartedBy,
+            IntervalRelation::Finishes,
+            IntervalRelation::FinishedBy,
+            IntervalRelation::During,
+            IntervalRelation::Contains,
             IntervalRelation::Equals,
         ] {
             assert_eq!(rel.inverse().inverse(), rel);
@@ -1599,10 +1607,15 @@ mod tests {
         let result = detect_periodicity(&timestamps, &config);
         assert!(!result.detected.is_empty());
         // Should detect daily period
-        let has_daily = result.detected.iter().any(|p| {
-            (p.period_secs - 86400.0).abs() < 1.0
-        });
-        assert!(has_daily, "Should detect daily period: {:?}", result.detected);
+        let has_daily = result
+            .detected
+            .iter()
+            .any(|p| (p.period_secs - 86400.0).abs() < 1.0);
+        assert!(
+            has_daily,
+            "Should detect daily period: {:?}",
+            result.detected
+        );
     }
 
     #[test]
@@ -1624,12 +1637,18 @@ mod tests {
             ..Default::default()
         };
         // Random-ish timestamps (no real periodicity)
-        let timestamps = vec![100.0, 357.0, 981.0, 1234.0, 2001.0, 3500.0, 5600.0, 8900.0, 14000.0, 22000.0];
+        let timestamps = vec![
+            100.0, 357.0, 981.0, 1234.0, 2001.0, 3500.0, 5600.0, 8900.0, 14000.0, 22000.0,
+        ];
         let result = detect_periodicity(&timestamps, &config);
         // Should find few or no strong periodicities
         // (may find weak ones by chance, but correlation should be lower)
         for p in &result.detected {
-            assert!(p.correlation < 0.9, "Unexpected strong periodicity in noise: {:?}", p);
+            assert!(
+                p.correlation < 0.9,
+                "Unexpected strong periodicity in noise: {:?}",
+                p
+            );
         }
     }
 
@@ -1669,7 +1688,10 @@ mod tests {
         // Uniform rate
         let timestamps: Vec<f64> = (0..100).map(|i| i as f64 * 100.0).collect();
         let result = detect_bursts(&timestamps, &config);
-        assert!(result.bursts.is_empty(), "Uniform rate should not trigger burst");
+        assert!(
+            result.bursts.is_empty(),
+            "Uniform rate should not trigger burst"
+        );
     }
 
     // ── Deadline Urgency ──
@@ -1685,7 +1707,10 @@ mod tests {
     fn test_urgency_far_away() {
         let config = DeadlineUrgencyConfig::default();
         let urgency = deadline_urgency(1_000_000.0, 0.0, &config);
-        assert!((urgency - 0.02).abs() < 1e-10, "Far-away deadline should equal floor: {urgency}");
+        assert!(
+            (urgency - 0.02).abs() < 1e-10,
+            "Far-away deadline should equal floor: {urgency}"
+        );
     }
 
     #[test]
@@ -1695,7 +1720,10 @@ mod tests {
         let mut prev = 0.0;
         for t in (0..100_000).step_by(10_000) {
             let u = deadline_urgency(deadline, t as f64, &config);
-            assert!(u >= prev - 1e-10, "Urgency should increase: {prev} -> {u} at t={t}");
+            assert!(
+                u >= prev - 1e-10,
+                "Urgency should increase: {prev} -> {u} at t={t}"
+            );
             prev = u;
         }
     }
@@ -1709,7 +1737,10 @@ mod tests {
         let low = compound_urgency(deadline, now, 0.25, &config);
         let high = compound_urgency(deadline, now, 1.0, &config);
         // Higher priority should cause higher urgency at the same time
-        assert!(high >= low, "Higher priority should mean higher urgency: low={low}, high={high}");
+        assert!(
+            high >= low,
+            "Higher priority should mean higher urgency: low={low}, high={high}"
+        );
     }
 
     // ── Temporal Motifs ──
@@ -1727,20 +1758,31 @@ mod tests {
         let mut events = Vec::new();
         for day in 0..3 {
             let base = day as f64 * 86400.0;
-            events.push(LabeledEvent { label: "email".to_string(), timestamp: base + 100.0 });
-            events.push(LabeledEvent { label: "calendar".to_string(), timestamp: base + 600.0 });
-            events.push(LabeledEvent { label: "standup".to_string(), timestamp: base + 1200.0 });
+            events.push(LabeledEvent {
+                label: "email".to_string(),
+                timestamp: base + 100.0,
+            });
+            events.push(LabeledEvent {
+                label: "calendar".to_string(),
+                timestamp: base + 600.0,
+            });
+            events.push(LabeledEvent {
+                label: "standup".to_string(),
+                timestamp: base + 1200.0,
+            });
         }
 
         let motifs = mine_temporal_motifs(&events, &config);
         assert!(!motifs.is_empty());
         // Should find the email→calendar pattern
         let has_email_cal = motifs.iter().any(|m| {
-            m.sequence.len() >= 2
-                && m.sequence[0] == "email"
-                && m.sequence[1] == "calendar"
+            m.sequence.len() >= 2 && m.sequence[0] == "email" && m.sequence[1] == "calendar"
         });
-        assert!(has_email_cal, "Should find email→calendar motif: {:?}", motifs);
+        assert!(
+            has_email_cal,
+            "Should find email→calendar motif: {:?}",
+            motifs
+        );
     }
 
     #[test]
@@ -1753,15 +1795,24 @@ mod tests {
         };
 
         // Events too far apart to form motifs
-        let events: Vec<LabeledEvent> = (0..6).map(|i| {
-            LabeledEvent {
-                label: if i % 2 == 0 { "a".to_string() } else { "b".to_string() },
-                timestamp: i as f64 * 1000.0, // 1000s gaps > 100s max
-            }
-        }).collect();
+        let events: Vec<LabeledEvent> = (0..6)
+            .map(|i| {
+                LabeledEvent {
+                    label: if i % 2 == 0 {
+                        "a".to_string()
+                    } else {
+                        "b".to_string()
+                    },
+                    timestamp: i as f64 * 1000.0, // 1000s gaps > 100s max
+                }
+            })
+            .collect();
 
         let motifs = mine_temporal_motifs(&events, &config);
-        assert!(motifs.is_empty(), "Large gaps should prevent motif detection");
+        assert!(
+            motifs.is_empty(),
+            "Large gaps should prevent motif detection"
+        );
     }
 
     // ── Topological Order ──
@@ -1775,9 +1826,21 @@ mod tests {
         let c = NodeId::new(NodeKind::Episode, 3);
 
         let events = vec![
-            TemporalEvent { node_id: a, timestamp: 100.0, predecessors: vec![] },
-            TemporalEvent { node_id: b, timestamp: 200.0, predecessors: vec![a] },
-            TemporalEvent { node_id: c, timestamp: 300.0, predecessors: vec![b] },
+            TemporalEvent {
+                node_id: a,
+                timestamp: 100.0,
+                predecessors: vec![],
+            },
+            TemporalEvent {
+                node_id: b,
+                timestamp: 200.0,
+                predecessors: vec![a],
+            },
+            TemporalEvent {
+                node_id: c,
+                timestamp: 300.0,
+                predecessors: vec![b],
+            },
         ];
 
         let order = topological_order(&events);
@@ -1796,8 +1859,16 @@ mod tests {
         let b = NodeId::new(NodeKind::Episode, 2);
 
         let events = vec![
-            TemporalEvent { node_id: a, timestamp: 100.0, predecessors: vec![b] },
-            TemporalEvent { node_id: b, timestamp: 200.0, predecessors: vec![a] },
+            TemporalEvent {
+                node_id: a,
+                timestamp: 100.0,
+                predecessors: vec![b],
+            },
+            TemporalEvent {
+                node_id: b,
+                timestamp: 200.0,
+                predecessors: vec![a],
+            },
         ];
 
         let order = topological_order(&events);
@@ -1814,9 +1885,21 @@ mod tests {
         let c = NodeId::new(NodeKind::Episode, 3);
 
         let events = vec![
-            TemporalEvent { node_id: a, timestamp: 100.0, predecessors: vec![] },
-            TemporalEvent { node_id: b, timestamp: 200.0, predecessors: vec![a] },
-            TemporalEvent { node_id: c, timestamp: 300.0, predecessors: vec![a, b] },
+            TemporalEvent {
+                node_id: a,
+                timestamp: 100.0,
+                predecessors: vec![],
+            },
+            TemporalEvent {
+                node_id: b,
+                timestamp: 200.0,
+                predecessors: vec![a],
+            },
+            TemporalEvent {
+                node_id: c,
+                timestamp: 300.0,
+                predecessors: vec![a, b],
+            },
         ];
 
         let order = topological_order(&events);
@@ -1830,9 +1913,15 @@ mod tests {
     fn test_seasonal_histogram_peak() {
         let mut hist = SeasonalHistogram::hour_of_day();
         // Most events at 9am
-        for _ in 0..20 { hist.add(9); }
-        for _ in 0..5 { hist.add(14); }
-        for _ in 0..3 { hist.add(22); }
+        for _ in 0..20 {
+            hist.add(9);
+        }
+        for _ in 0..5 {
+            hist.add(14);
+        }
+        for _ in 0..3 {
+            hist.add(22);
+        }
 
         let (peak_bin, peak_count) = hist.peak();
         assert_eq!(peak_bin, 9);
@@ -1843,14 +1932,24 @@ mod tests {
     fn test_seasonal_entropy() {
         // Uniform distribution → maximum entropy
         let mut uniform = SeasonalHistogram::new(4, "test");
-        for _ in 0..25 { uniform.add(0); }
-        for _ in 0..25 { uniform.add(1); }
-        for _ in 0..25 { uniform.add(2); }
-        for _ in 0..25 { uniform.add(3); }
+        for _ in 0..25 {
+            uniform.add(0);
+        }
+        for _ in 0..25 {
+            uniform.add(1);
+        }
+        for _ in 0..25 {
+            uniform.add(2);
+        }
+        for _ in 0..25 {
+            uniform.add(3);
+        }
 
         // Concentrated → low entropy
         let mut concentrated = SeasonalHistogram::new(4, "test");
-        for _ in 0..100 { concentrated.add(0); }
+        for _ in 0..100 {
+            concentrated.add(0);
+        }
 
         assert!(uniform.entropy() > concentrated.entropy());
     }
@@ -1858,9 +1957,15 @@ mod tests {
     #[test]
     fn test_concentration_ratio() {
         let mut hist = SeasonalHistogram::new(10, "test");
-        for _ in 0..50 { hist.add(0); }
-        for _ in 0..30 { hist.add(1); }
-        for _ in 0..20 { hist.add(2); }
+        for _ in 0..50 {
+            hist.add(0);
+        }
+        for _ in 0..30 {
+            hist.add(1);
+        }
+        for _ in 0..20 {
+            hist.add(2);
+        }
 
         let c2 = hist.concentration(2);
         assert!((c2 - 0.80).abs() < 1e-10); // Top 2 bins = 80%
@@ -1872,9 +1977,7 @@ mod tests {
     fn test_composite_all_recent() {
         let config = TemporalRelevanceConfig::default();
         let now = 1000.0;
-        let score = temporal_relevance_composite(
-            now, now, None, None, &config,
-        );
+        let score = temporal_relevance_composite(now, now, None, None, &config);
         // Only recency contributes (1.0), periodicity and deadline are 0
         // score = (0.4 * 1.0 + 0.3 * 0.0 + 0.3 * 0.0) / 1.0 = 0.4
         assert!((score - 0.4).abs() < 0.05);
@@ -1885,9 +1988,7 @@ mod tests {
         let config = TemporalRelevanceConfig::default();
         let now = 1000.0;
         let deadline = 1001.0; // 1 second away
-        let score = temporal_relevance_composite(
-            now, now, None, Some(deadline), &config,
-        );
+        let score = temporal_relevance_composite(now, now, None, Some(deadline), &config);
         // Recency = 1.0 (just now), deadline urgency should be high
         assert!(score > 0.5);
     }

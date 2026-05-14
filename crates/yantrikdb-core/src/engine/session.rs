@@ -61,11 +61,7 @@ impl YantrikDB {
     }
 
     /// End an active session. Computes summary stats.
-    pub fn session_end(
-        &self,
-        session_id: &str,
-        summary: Option<&str>,
-    ) -> Result<SessionSummary> {
+    pub fn session_end(&self, session_id: &str, summary: Option<&str>) -> Result<SessionSummary> {
         let ts = now();
 
         let (memory_count, avg_valence, topics, duration_secs) = {
@@ -107,14 +103,23 @@ impl YantrikDB {
                 "UPDATE sessions SET status = 'ended', ended_at = ?1, avg_valence = ?2, \
                  memory_count = ?3, topics = ?4, summary = ?5 \
                  WHERE session_id = ?6 AND status = 'active'",
-                params![ts, avg_valence, memory_count, topics_json, summary, session_id],
+                params![
+                    ts,
+                    avg_valence,
+                    memory_count,
+                    topics_json,
+                    summary,
+                    session_id
+                ],
             )?;
 
             (memory_count, avg_valence, topics, duration_secs)
         }; // drop conn before acquiring active_sessions write lock
 
         // Clear from active_sessions cache
-        self.active_sessions.write().retain(|_, sid| sid != session_id);
+        self.active_sessions
+            .write()
+            .retain(|_, sid| sid != session_id);
 
         self.log_op(
             "session_end",
@@ -139,11 +144,7 @@ impl YantrikDB {
     }
 
     /// Get the currently active session for a (namespace, client_id).
-    pub fn active_session(
-        &self,
-        namespace: &str,
-        client_id: &str,
-    ) -> Result<Option<Session>> {
+    pub fn active_session(&self, namespace: &str, client_id: &str) -> Result<Option<Session>> {
         let conn = self.conn();
         let result = conn.query_row(
             "SELECT session_id, namespace, client_id, status, started_at, ended_at, \

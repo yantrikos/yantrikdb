@@ -134,7 +134,9 @@ fn compute_effect_utility(candidate: &ActionCandidate) -> f64 {
     // We don't have the full schema effects in ActionCandidate,
     // so we use the schema's built-in info via lookup.
     if let Some(schema) = super::action::lookup_builtin(&candidate.schema_name) {
-        schema.effects.iter()
+        schema
+            .effects
+            .iter()
             .map(|e| e.probability * e.utility)
             .sum()
     } else {
@@ -157,29 +159,29 @@ fn compute_confidence(candidate: &ActionCandidate) -> f64 {
     };
 
     // Look up schema for execution count
-    let experience_confidence = if let Some(schema) = super::action::lookup_builtin(&candidate.schema_name) {
-        // Confidence grows with execution count, plateaus at 20
-        (schema.execution_count as f64 / 20.0).min(1.0)
-    } else {
-        0.5 // neutral for unknown schemas
-    };
+    let experience_confidence =
+        if let Some(schema) = super::action::lookup_builtin(&candidate.schema_name) {
+            // Confidence grows with execution count, plateaus at 20
+            (schema.execution_count as f64 / 20.0).min(1.0)
+        } else {
+            0.5 // neutral for unknown schemas
+        };
 
     // Average effect probability as confidence factor
-    let effect_confidence = if let Some(schema) = super::action::lookup_builtin(&candidate.schema_name) {
+    let effect_confidence = if let Some(schema) =
+        super::action::lookup_builtin(&candidate.schema_name)
+    {
         if schema.effects.is_empty() {
             0.5
         } else {
-            schema.effects.iter().map(|e| e.probability).sum::<f64>()
-                / schema.effects.len() as f64
+            schema.effects.iter().map(|e| e.probability).sum::<f64>() / schema.effects.len() as f64
         }
     } else {
         0.5
     };
 
     // Weighted average
-    0.50 * precondition_confidence
-        + 0.25 * effect_confidence
-        + 0.25 * experience_confidence
+    0.50 * precondition_confidence + 0.25 * effect_confidence + 0.25 * experience_confidence
 }
 
 // ── Timing Analysis ──
@@ -190,10 +192,7 @@ fn compute_confidence(candidate: &ActionCandidate) -> f64 {
 /// - User has high-urgency tasks they're working on (don't interrupt)
 /// - Recent high-valence episodes suggest the user is focused
 /// - Time of day suggests the user is sleeping/busy
-fn compute_timing_penalty(
-    candidate: &ActionCandidate,
-    nodes: &[&CognitiveNode],
-) -> f64 {
+fn compute_timing_penalty(candidate: &ActionCandidate, nodes: &[&CognitiveNode]) -> f64 {
     // If action is Abstain, no timing penalty
     if candidate.action_kind == ActionKind::Abstain {
         return 0.0;
@@ -202,7 +201,8 @@ fn compute_timing_penalty(
     let mut penalty = 0.0;
 
     // Check for active high-urgency tasks (suggests user is focused)
-    let max_task_urgency = nodes.iter()
+    let max_task_urgency = nodes
+        .iter()
         .filter(|n| n.id.kind() == NodeKind::Task)
         .map(|n| n.attrs.urgency)
         .fold(0.0_f64, f64::max);
@@ -214,9 +214,9 @@ fn compute_timing_penalty(
     }
 
     // Check conversation thread activity (don't interrupt active conversations)
-    let has_active_thread = nodes.iter().any(|n| {
-        n.id.kind() == NodeKind::ConversationThread && n.attrs.activation > 0.5
-    });
+    let has_active_thread = nodes
+        .iter()
+        .any(|n| n.id.kind() == NodeKind::ConversationThread && n.attrs.activation > 0.5);
     if has_active_thread && candidate.action_kind != ActionKind::Communicate {
         penalty += 0.1;
     }
@@ -234,7 +234,8 @@ fn compute_preference_alignment(
     nodes: &[&CognitiveNode],
     edges: &[CognitiveEdge],
 ) -> f64 {
-    let preferences: Vec<&CognitiveNode> = nodes.iter()
+    let preferences: Vec<&CognitiveNode> = nodes
+        .iter()
         .filter(|n| n.id.kind() == NodeKind::Preference)
         .copied()
         .collect();
@@ -244,7 +245,9 @@ fn compute_preference_alignment(
     }
 
     // Check for Prefers/Avoids edges involving the candidate's bound nodes
-    let bound_nodes: std::collections::HashSet<u32> = candidate.precondition_bindings.iter()
+    let bound_nodes: std::collections::HashSet<u32> = candidate
+        .precondition_bindings
+        .iter()
         .filter_map(|b| b.bound_node.map(|n| n.to_raw()))
         .collect();
 
@@ -294,10 +297,7 @@ fn compute_preference_alignment(
 /// - Needs that would be satisfied → positive delta
 /// - Constraints that would be violated → negative delta
 /// - Risks that would be mitigated → positive delta
-fn simulate_forward(
-    candidate: &ActionCandidate,
-    nodes: &[&CognitiveNode],
-) -> f64 {
+fn simulate_forward(candidate: &ActionCandidate, nodes: &[&CognitiveNode]) -> f64 {
     let mut delta = 0.0;
 
     // Look up schema effects for simulation
@@ -334,7 +334,8 @@ fn simulate_forward(
 
     // Constraint violation check: if action is Execute or high-cost,
     // and constraints exist, apply a dampening factor
-    let constraint_count = nodes.iter()
+    let constraint_count = nodes
+        .iter()
         .filter(|n| n.id.kind() == NodeKind::Constraint)
         .count();
 
@@ -343,7 +344,8 @@ fn simulate_forward(
     }
 
     // Need satisfaction: if action addresses a need, bonus
-    let unmet_needs = nodes.iter()
+    let unmet_needs = nodes
+        .iter()
         .filter(|n| n.id.kind() == NodeKind::Need)
         .filter(|n| n.attrs.urgency > 0.3)
         .count();
@@ -369,43 +371,49 @@ pub fn evaluate_candidates(
     let start = std::time::Instant::now();
     let total_evaluated = candidates.len();
 
-    let mut evaluated: Vec<EvaluatedAction> = candidates.iter().map(|candidate| {
-        let effect_utility = compute_effect_utility(candidate);
-        let base_cost = candidate.action_kind.base_cost();
-        let timing_penalty = compute_timing_penalty(candidate, nodes);
-        let intent_alignment = candidate.relevance_score; // from CK-1.7
-        let preference_alignment = compute_preference_alignment(candidate, nodes, edges);
-        let simulation_delta = simulate_forward(candidate, nodes);
-        let confidence = compute_confidence(candidate);
+    let mut evaluated: Vec<EvaluatedAction> = candidates
+        .iter()
+        .map(|candidate| {
+            let effect_utility = compute_effect_utility(candidate);
+            let base_cost = candidate.action_kind.base_cost();
+            let timing_penalty = compute_timing_penalty(candidate, nodes);
+            let intent_alignment = candidate.relevance_score; // from CK-1.7
+            let preference_alignment = compute_preference_alignment(candidate, nodes, edges);
+            let simulation_delta = simulate_forward(candidate, nodes);
+            let confidence = compute_confidence(candidate);
 
-        // Composite utility
-        let utility = config.effect_weight * effect_utility
-            - config.cost_penalty_scale * base_cost
-            - config.timing_penalty_scale * timing_penalty
-            + config.intent_weight * intent_alignment
-            + config.preference_weight * preference_alignment
-            + config.simulation_weight * simulation_delta;
+            // Composite utility
+            let utility = config.effect_weight * effect_utility
+                - config.cost_penalty_scale * base_cost
+                - config.timing_penalty_scale * timing_penalty
+                + config.intent_weight * intent_alignment
+                + config.preference_weight * preference_alignment
+                + config.simulation_weight * simulation_delta;
 
-        EvaluatedAction {
-            candidate: candidate.clone(),
-            effect_utility,
-            base_cost,
-            timing_penalty,
-            intent_alignment,
-            preference_alignment,
-            simulation_delta,
-            utility,
-            confidence,
-        }
-    }).collect();
+            EvaluatedAction {
+                candidate: candidate.clone(),
+                effect_utility,
+                base_cost,
+                timing_penalty,
+                intent_alignment,
+                preference_alignment,
+                simulation_delta,
+                utility,
+                confidence,
+            }
+        })
+        .collect();
 
     // Sort by utility descending
     evaluated.sort_by(|a, b| {
-        b.utility.partial_cmp(&a.utility).unwrap_or(std::cmp::Ordering::Equal)
+        b.utility
+            .partial_cmp(&a.utility)
+            .unwrap_or(std::cmp::Ordering::Equal)
     });
 
     // Filter by min_utility
-    let filtered: Vec<EvaluatedAction> = evaluated.into_iter()
+    let filtered: Vec<EvaluatedAction> = evaluated
+        .into_iter()
         .filter(|e| e.utility >= config.min_utility)
         .take(config.max_results)
         .collect();
@@ -424,9 +432,9 @@ pub fn evaluate_candidates(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use super::super::action::{ActionConfig, PreconditionBinding, generate_candidates};
+    use super::super::action::{generate_candidates, ActionConfig, PreconditionBinding};
     use super::super::intent::{IntentSource, ScoredIntent};
+    use super::*;
 
     fn make_candidate(name: &str, kind: ActionKind, relevance: f64) -> ActionCandidate {
         ActionCandidate {
@@ -446,7 +454,8 @@ mod tests {
     fn make_goal(alloc: &mut NodeIdAllocator, desc: &str, urgency: f64) -> CognitiveNode {
         let id = alloc.alloc(NodeKind::Goal);
         let mut node = CognitiveNode::new(
-            id, desc.to_string(),
+            id,
+            desc.to_string(),
             NodePayload::Goal(GoalPayload {
                 description: desc.to_string(),
                 status: GoalStatus::Active,
@@ -482,7 +491,9 @@ mod tests {
     fn test_timing_penalty_during_focus() {
         let mut alloc = NodeIdAllocator::new();
         let task_id = alloc.alloc(NodeKind::Task);
-        let mut task = CognitiveNode::new(task_id, "Urgent task".to_string(),
+        let mut task = CognitiveNode::new(
+            task_id,
+            "Urgent task".to_string(),
             NodePayload::Task(TaskPayload {
                 description: "Urgent work".to_string(),
                 status: TaskStatus::InProgress,
@@ -491,18 +502,25 @@ mod tests {
                 priority: Priority::Critical,
                 estimated_minutes: None,
                 prerequisites: vec![],
-            }));
+            }),
+        );
         task.attrs.urgency = 0.9;
 
         let nodes: Vec<&CognitiveNode> = vec![&task];
         let disruptive = make_candidate("send_reminder", ActionKind::Communicate, 0.5);
         let penalty = compute_timing_penalty(&disruptive, &nodes);
 
-        assert!(penalty > 0.0, "should have timing penalty during focus work");
+        assert!(
+            penalty > 0.0,
+            "should have timing penalty during focus work"
+        );
 
         let abstain = make_candidate("abstain", ActionKind::Abstain, 0.3);
         let abstain_penalty = compute_timing_penalty(&abstain, &nodes);
-        assert_eq!(abstain_penalty, 0.0, "abstain should have no timing penalty");
+        assert_eq!(
+            abstain_penalty, 0.0,
+            "abstain should have no timing penalty"
+        );
     }
 
     #[test]
@@ -530,9 +548,11 @@ mod tests {
         let mut alloc = NodeIdAllocator::new();
         let goal = make_goal(&mut alloc, "Ship feature", 0.8);
 
-        let candidates = vec![
-            make_candidate("send_reminder", ActionKind::Communicate, 0.7),
-        ];
+        let candidates = vec![make_candidate(
+            "send_reminder",
+            ActionKind::Communicate,
+            0.7,
+        )];
 
         let config = EvaluatorConfig::default();
 
@@ -545,7 +565,8 @@ mod tests {
 
         // Forward simulation should give a boost when goals exist
         assert!(
-            result_with_goals.actions[0].simulation_delta >= result_no_goals.actions[0].simulation_delta,
+            result_with_goals.actions[0].simulation_delta
+                >= result_no_goals.actions[0].simulation_delta,
             "goals should boost forward simulation delta"
         );
     }
@@ -557,14 +578,12 @@ mod tests {
             action_kind: ActionKind::Communicate,
             description: "test".to_string(),
             source_intent: "test".to_string(),
-            precondition_bindings: vec![
-                PreconditionBinding {
-                    description: "test".to_string(),
-                    required: true,
-                    satisfied: true,
-                    bound_node: None,
-                },
-            ],
+            precondition_bindings: vec![PreconditionBinding {
+                description: "test".to_string(),
+                required: true,
+                satisfied: true,
+                bound_node: None,
+            }],
             satisfied_required: 1,
             total_required: 1,
             satisfied_soft: 0,
@@ -581,8 +600,10 @@ mod tests {
         let full_conf = compute_confidence(&full_satisfaction);
         let partial_conf = compute_confidence(&partial_satisfaction);
 
-        assert!(full_conf > partial_conf,
-            "full precondition satisfaction should yield higher confidence");
+        assert!(
+            full_conf > partial_conf,
+            "full precondition satisfaction should yield higher confidence"
+        );
     }
 
     #[test]
@@ -600,8 +621,10 @@ mod tests {
         // Some candidates may be filtered out by high threshold
         assert!(result.actions.len() <= candidates.len());
         for action in &result.actions {
-            assert!(action.utility >= config.min_utility,
-                "all returned actions should be above min_utility");
+            assert!(
+                action.utility >= config.min_utility,
+                "all returned actions should be above min_utility"
+            );
         }
     }
 
@@ -614,12 +637,20 @@ mod tests {
         let result = evaluate_candidates(&[low_cost, high_cost], &[], &[], &config);
 
         if result.actions.len() >= 2 {
-            let abstain = result.actions.iter().find(|a| a.candidate.schema_name == "abstain");
-            let execute = result.actions.iter().find(|a| a.candidate.schema_name == "decay_stale_activations");
+            let abstain = result
+                .actions
+                .iter()
+                .find(|a| a.candidate.schema_name == "abstain");
+            let execute = result
+                .actions
+                .iter()
+                .find(|a| a.candidate.schema_name == "decay_stale_activations");
 
             if let (Some(a), Some(e)) = (abstain, execute) {
-                assert!(a.base_cost < e.base_cost,
-                    "Execute should have higher base cost than Abstain");
+                assert!(
+                    a.base_cost < e.base_cost,
+                    "Execute should have higher base cost than Abstain"
+                );
             }
         }
     }

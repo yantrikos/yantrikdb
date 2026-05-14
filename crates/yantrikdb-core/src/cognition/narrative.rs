@@ -348,10 +348,7 @@ pub struct NarrativeEpisode {
 /// - Domain overlap (0.30)
 /// - Recency (0.15)
 /// - Sentiment continuity (0.15)
-pub fn assign_to_arc(
-    episode: &NarrativeEpisode,
-    timeline: &mut AutobiographicalTimeline,
-) -> ArcId {
+pub fn assign_to_arc(episode: &NarrativeEpisode, timeline: &mut AutobiographicalTimeline) -> ArcId {
     let mut best_arc: Option<(ArcId, f64)> = None;
 
     for arc in &timeline.arcs {
@@ -525,7 +522,9 @@ pub fn detect_chapter_boundary(arc: &NarrativeArc, episode: &NarrativeEpisode) -
 
 fn detect_chapter_boundary_internal(last_chapter: &Chapter, episode: &NarrativeEpisode) -> bool {
     // Time gap > 48 hours.
-    let time_gap = episode.timestamp_ms.saturating_sub(last_chapter.time_span.1);
+    let time_gap = episode
+        .timestamp_ms
+        .saturating_sub(last_chapter.time_span.1);
     if time_gap > 48 * 3600 * 1000 {
         return true;
     }
@@ -612,9 +611,7 @@ pub fn detect_arc_resolution(arc: &NarrativeArc, now_ms: u64) -> bool {
         .take(3)
         .collect();
 
-    if recent_sentiments.len() >= 3
-        && recent_sentiments.iter().all(|&s| s > 0.5)
-    {
+    if recent_sentiments.len() >= 3 && recent_sentiments.iter().all(|&s| s > 0.5) {
         return true;
     }
 
@@ -812,11 +809,9 @@ pub fn query_timeline(
             .iter()
             .filter(|a| a.domains.contains(domain))
             .collect(),
-        NarrativeQuery::ArcsByTheme(theme) => timeline
-            .arcs
-            .iter()
-            .filter(|a| a.theme == *theme)
-            .collect(),
+        NarrativeQuery::ArcsByTheme(theme) => {
+            timeline.arcs.iter().filter(|a| a.theme == *theme).collect()
+        }
         NarrativeQuery::ActiveArcs => timeline.arcs.iter().filter(|a| a.is_active()).collect(),
         NarrativeQuery::UnresolvedThreads => timeline
             .arcs
@@ -970,7 +965,14 @@ mod tests {
     #[test]
     fn test_arc_assignment_creates_new_arc() {
         let mut timeline = AutobiographicalTimeline::default();
-        let ep = make_episode(1, "Started learning Rust", vec![alice()], vec!["learning"], 0.5, 1000);
+        let ep = make_episode(
+            1,
+            "Started learning Rust",
+            vec![alice()],
+            vec!["learning"],
+            0.5,
+            1000,
+        );
 
         let arc_id = assign_to_arc(&ep, &mut timeline);
         assert_eq!(timeline.arcs.len(), 1);
@@ -986,8 +988,22 @@ mod tests {
         let mut timeline = AutobiographicalTimeline::default();
         let now = 1_000_000;
 
-        let ep1 = make_episode(1, "Started learning Rust", vec![alice()], vec!["learning"], 0.5, now);
-        let ep2 = make_episode(2, "Read Rust book ch1", vec![alice()], vec!["learning"], 0.6, now + 3600_000);
+        let ep1 = make_episode(
+            1,
+            "Started learning Rust",
+            vec![alice()],
+            vec!["learning"],
+            0.5,
+            now,
+        );
+        let ep2 = make_episode(
+            2,
+            "Read Rust book ch1",
+            vec![alice()],
+            vec!["learning"],
+            0.6,
+            now + 3600_000,
+        );
 
         assign_to_arc(&ep1, &mut timeline);
         assign_to_arc(&ep2, &mut timeline);
@@ -1025,10 +1041,21 @@ mod tests {
         assign_to_arc(&ep1, &mut timeline);
 
         // 3 days later → new chapter.
-        let ep2 = make_episode(2, "Day 4", vec![alice()], vec!["project"], 0.5, now + 3 * 86_400_000);
+        let ep2 = make_episode(
+            2,
+            "Day 4",
+            vec![alice()],
+            vec!["project"],
+            0.5,
+            now + 3 * 86_400_000,
+        );
         assign_to_arc(&ep2, &mut timeline);
 
-        assert_eq!(timeline.arcs[0].chapters.len(), 2, "Should create new chapter");
+        assert_eq!(
+            timeline.arcs[0].chapters.len(),
+            2,
+            "Should create new chapter"
+        );
     }
 
     #[test]
@@ -1040,10 +1067,20 @@ mod tests {
         assign_to_arc(&ep1, &mut timeline);
 
         // Big sentiment drop → new chapter.
-        let ep2 = make_episode(2, "Terrible day", vec![alice()], vec!["work"], -0.5, now + 3600_000);
+        let ep2 = make_episode(
+            2,
+            "Terrible day",
+            vec![alice()],
+            vec!["work"],
+            -0.5,
+            now + 3600_000,
+        );
         assign_to_arc(&ep2, &mut timeline);
 
-        assert!(timeline.arcs[0].chapters.len() >= 2, "Sentiment reversal should create chapter");
+        assert!(
+            timeline.arcs[0].chapters.len() >= 2,
+            "Sentiment reversal should create chapter"
+        );
     }
 
     #[test]
@@ -1053,12 +1090,26 @@ mod tests {
 
         // Build up a baseline.
         for i in 0..3 {
-            let ep = make_episode(i + 1, "Normal day", vec![alice()], vec!["work"], 0.3, now + i as u64 * 3600_000);
+            let ep = make_episode(
+                i + 1,
+                "Normal day",
+                vec![alice()],
+                vec!["work"],
+                0.3,
+                now + i as u64 * 3600_000,
+            );
             assign_to_arc(&ep, &mut timeline);
         }
 
         // Big positive shift.
-        let ep4 = make_episode(4, "Got promoted!", vec![alice()], vec!["work"], 0.9, now + 4 * 3600_000);
+        let ep4 = make_episode(
+            4,
+            "Got promoted!",
+            vec![alice()],
+            vec!["work"],
+            0.9,
+            now + 4 * 3600_000,
+        );
         assign_to_arc(&ep4, &mut timeline);
 
         assert!(
@@ -1138,7 +1189,10 @@ mod tests {
         assert_eq!(r1.arcs.len(), 1);
 
         // Query by domain.
-        let r2 = query_timeline(&timeline, &NarrativeQuery::ArcsByDomain("project".to_string()));
+        let r2 = query_timeline(
+            &timeline,
+            &NarrativeQuery::ArcsByDomain("project".to_string()),
+        );
         assert_eq!(r2.arcs.len(), 1);
 
         // Query active arcs.
@@ -1255,7 +1309,9 @@ mod tests {
         };
 
         let alerts = arc_health_check(&timeline, now);
-        let negative = alerts.iter().find(|a| a.alert_type == ArcAlertType::TrendingNegative);
+        let negative = alerts
+            .iter()
+            .find(|a| a.alert_type == ArcAlertType::TrendingNegative);
         assert!(negative.is_some(), "Should detect negative trend");
     }
 
@@ -1267,7 +1323,10 @@ mod tests {
             theme: ArcTheme::Growth,
             chapters: vec![Chapter {
                 title: "ch1".to_string(),
-                episodes: vec![NodeId::new(NodeKind::Episode, 1), NodeId::new(NodeKind::Episode, 2)],
+                episodes: vec![
+                    NodeId::new(NodeKind::Episode, 1),
+                    NodeId::new(NodeKind::Episode, 2),
+                ],
                 summary: String::new(),
                 chapter_type: ChapterType::Setup,
                 time_span: (0, 86_400_000),
@@ -1303,8 +1362,22 @@ mod tests {
         let mut timeline = AutobiographicalTimeline::default();
         let now = 1_000_000;
 
-        let ep1 = make_episode(1, "Meeting with Alice", vec![alice()], vec!["work"], 0.5, now);
-        let ep2 = make_episode(2, "Meeting with Bob", vec![bob()], vec!["social"], 0.5, now + 1000);
+        let ep1 = make_episode(
+            1,
+            "Meeting with Alice",
+            vec![alice()],
+            vec!["work"],
+            0.5,
+            now,
+        );
+        let ep2 = make_episode(
+            2,
+            "Meeting with Bob",
+            vec![bob()],
+            vec!["social"],
+            0.5,
+            now + 1000,
+        );
 
         assign_to_arc(&ep1, &mut timeline);
         assign_to_arc(&ep2, &mut timeline);

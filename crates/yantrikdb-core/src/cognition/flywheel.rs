@@ -148,10 +148,7 @@ pub enum BeliefEvidence {
         sample_size: u32,
     },
     /// Need: repeated query.
-    Need {
-        query_hash: u64,
-        repeat_count: u32,
-    },
+    Need { query_hash: u64, repeat_count: u32 },
     /// System: tool/LLM reliability.
     System {
         component: String,
@@ -621,12 +618,20 @@ fn detect_preference_beliefs(
 
         let (description, preferred) = if accept_rate > 0.5 {
             (
-                format!("User accepts '{}' suggestions {:.0}% of time", kind, accept_rate * 100.0),
+                format!(
+                    "User accepts '{}' suggestions {:.0}% of time",
+                    kind,
+                    accept_rate * 100.0
+                ),
                 kind.clone(),
             )
         } else {
             (
-                format!("User rejects '{}' suggestions {:.0}% of time", kind, reject_rate * 100.0),
+                format!(
+                    "User rejects '{}' suggestions {:.0}% of time",
+                    kind,
+                    reject_rate * 100.0
+                ),
                 kind.clone(),
             )
         };
@@ -743,7 +748,10 @@ fn detect_need_beliefs(
         }
 
         let dedup_key = format!("need:query:{:x}", hash);
-        let description = format!("Repeated query (hash {:x}) {} times — unresolved need", hash, count);
+        let description = format!(
+            "Repeated query (hash {:x}) {} times — unresolved need",
+            hash, count
+        );
 
         upsert_or_confirm(
             store,
@@ -907,7 +915,9 @@ fn format_ratio(value: f64, baseline: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::observer::{EventBuffer, ObserverConfig, ObserverState, SystemEvent, SystemEventData};
+    use crate::observer::{
+        EventBuffer, ObserverConfig, ObserverState, SystemEvent, SystemEventData,
+    };
 
     fn ts(offset: f64) -> f64 {
         86400.0 * 100.0 + offset

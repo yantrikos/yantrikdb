@@ -127,7 +127,10 @@ const SEED_CATEGORIES: &[SeedCategory] = &[
             ("frontend", r#"["engineer","developer","role","team"]"#),
             ("data", r#"["engineer","scientist","analyst","role"]"#),
             ("platform", r#"["engineer","team","infrastructure","role"]"#),
-            ("mobile", r#"["engineer","developer","ios","android","role"]"#),
+            (
+                "mobile",
+                r#"["engineer","developer","ios","android","role"]"#,
+            ),
         ],
     },
     SeedCategory {
@@ -143,9 +146,7 @@ const SEED_CATEGORIES: &[SeedCategory] = &[
             ("caddy", "Caddy"),
             ("traefik", "Traefik"),
         ],
-        context_hints: &[
-            ("apache", r#"["webserver","httpd","proxy","server"]"#),
-        ],
+        context_hints: &[("apache", r#"["webserver","httpd","proxy","server"]"#)],
     },
     SeedCategory {
         name: "editors_tools",
@@ -158,9 +159,7 @@ const SEED_CATEGORIES: &[SeedCategory] = &[
             ("cursor", "Cursor"),
             ("windsurf", "Windsurf"),
         ],
-        context_hints: &[
-            ("cursor", r#"["editor","ide","ai","coding"]"#),
-        ],
+        context_hints: &[("cursor", r#"["editor","ide","ai","coding"]"#)],
     },
     SeedCategory {
         name: "llm_providers",
@@ -241,13 +240,17 @@ mod tests {
 
         // Check categories were created
         let cat_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM substitution_categories", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM substitution_categories", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(cat_count, 8);
 
         // Check members were created
         let member_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM substitution_members", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM substitution_members", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(member_count, 80);
 
@@ -266,7 +269,9 @@ mod tests {
         // Idempotent: running again should not error or duplicate
         populate_seed_categories(&conn).unwrap();
         let cat_count2: i64 = conn
-            .query_row("SELECT COUNT(*) FROM substitution_categories", [], |r| r.get(0))
+            .query_row("SELECT COUNT(*) FROM substitution_categories", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(cat_count2, 8);
     }

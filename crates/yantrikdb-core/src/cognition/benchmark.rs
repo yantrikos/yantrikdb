@@ -172,12 +172,15 @@ impl BenchTracker {
     /// Detect regressions by comparing with the most recent previous run.
     pub fn detect_regressions(&self, run_id: &str, threshold_pct: f64) -> Result<Vec<Regression>> {
         // Find previous run
-        let prev_run_id: Option<String> = self.conn.query_row(
-            "SELECT run_id FROM bench_runs WHERE run_id != ?1 \
+        let prev_run_id: Option<String> = self
+            .conn
+            .query_row(
+                "SELECT run_id FROM bench_runs WHERE run_id != ?1 \
              ORDER BY timestamp DESC LIMIT 1",
-            rusqlite::params![run_id],
-            |row| row.get(0),
-        ).ok();
+                rusqlite::params![run_id],
+                |row| row.get(0),
+            )
+            .ok();
 
         let prev_run_id = match prev_run_id {
             Some(id) => id,
@@ -196,14 +199,13 @@ impl BenchTracker {
         )?;
 
         let mut regressions = Vec::new();
-        let rows = stmt.query_map(
-            rusqlite::params![run_id, prev_run_id],
-            |row| Ok((
+        let rows = stmt.query_map(rusqlite::params![run_id, prev_run_id], |row| {
+            Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, f64>(1)?,
                 row.get::<_, f64>(2)?,
-            )),
-        )?;
+            ))
+        })?;
 
         for row in rows {
             let (test_name, prev_value, curr_value) = row?;
@@ -233,8 +235,7 @@ impl BenchTracker {
                       current_value, delta_pct, severity) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                     rusqlite::params![
-                        reg_id, run_id, test_name,
-                        prev_value, curr_value, delta_pct, severity
+                        reg_id, run_id, test_name, prev_value, curr_value, delta_pct, severity
                     ],
                 )?;
 
@@ -253,18 +254,19 @@ impl BenchTracker {
              FROM bench_runs ORDER BY timestamp DESC LIMIT ?1",
         )?;
 
-        let rows = stmt.query_map(rusqlite::params![limit as i64], |row| {
-            Ok(RunSummary {
-                run_id: row.get("run_id")?,
-                timestamp: row.get("timestamp")?,
-                description: row.get("description")?,
-                total_duration_ms: row.get("total_duration_ms")?,
-                pass_count: row.get("pass_count")?,
-                fail_count: row.get("fail_count")?,
-                skip_count: row.get("skip_count")?,
-            })
-        })?
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+        let rows = stmt
+            .query_map(rusqlite::params![limit as i64], |row| {
+                Ok(RunSummary {
+                    run_id: row.get("run_id")?,
+                    timestamp: row.get("timestamp")?,
+                    description: row.get("description")?,
+                    total_duration_ms: row.get("total_duration_ms")?,
+                    pass_count: row.get("pass_count")?,
+                    fail_count: row.get("fail_count")?,
+                    skip_count: row.get("skip_count")?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(rows)
     }
@@ -340,134 +342,238 @@ pub fn build_aisha() -> Result<PersonaScenario> {
 
     // ── Entities ──
     let aisha_id = alloc.alloc(NodeKind::Entity);
-    nodes.push(CognitiveNode::new(aisha_id, "Aisha Okafor".into(), NodePayload::Entity(EntityPayload {
-        name: "Aisha Okafor".into(),
-        entity_type: "person".into(),
-        memory_rids: vec![],
-    })));
+    nodes.push(CognitiveNode::new(
+        aisha_id,
+        "Aisha Okafor".into(),
+        NodePayload::Entity(EntityPayload {
+            name: "Aisha Okafor".into(),
+            entity_type: "person".into(),
+            memory_rids: vec![],
+        }),
+    ));
 
     let chidi_id = alloc.alloc(NodeKind::Entity);
-    nodes.push(CognitiveNode::new(chidi_id, "Chidi".into(), NodePayload::Entity(EntityPayload {
-        name: "Chidi".into(),
-        entity_type: "person".into(),
-        memory_rids: vec![],
-    })));
+    nodes.push(CognitiveNode::new(
+        chidi_id,
+        "Chidi".into(),
+        NodePayload::Entity(EntityPayload {
+            name: "Chidi".into(),
+            entity_type: "person".into(),
+            memory_rids: vec![],
+        }),
+    ));
 
     let hospital_id = alloc.alloc(NodeKind::Entity);
-    nodes.push(CognitiveNode::new(hospital_id, "Lagos Teaching Hospital".into(), NodePayload::Entity(EntityPayload {
-        name: "Lagos Teaching Hospital".into(),
-        entity_type: "organization".into(),
-        memory_rids: vec![],
-    })));
+    nodes.push(CognitiveNode::new(
+        hospital_id,
+        "Lagos Teaching Hospital".into(),
+        NodePayload::Entity(EntityPayload {
+            name: "Lagos Teaching Hospital".into(),
+            entity_type: "organization".into(),
+            memory_rids: vec![],
+        }),
+    ));
 
     let fellowship_id = alloc.alloc(NodeKind::Entity);
-    nodes.push(CognitiveNode::new(fellowship_id, "Cardiothoracic Fellowship".into(), NodePayload::Entity(EntityPayload {
-        name: "Cardiothoracic Fellowship".into(),
-        entity_type: "concept".into(),
-        memory_rids: vec![],
-    })));
+    nodes.push(CognitiveNode::new(
+        fellowship_id,
+        "Cardiothoracic Fellowship".into(),
+        NodePayload::Entity(EntityPayload {
+            name: "Cardiothoracic Fellowship".into(),
+            entity_type: "concept".into(),
+            memory_rids: vec![],
+        }),
+    ));
 
     // ── Beliefs ──
     let belief_surgery = alloc.alloc(NodeKind::Belief);
-    nodes.push(CognitiveNode::new(belief_surgery, "Surgery is my calling".into(), NodePayload::Belief(BeliefPayload {
-        proposition: "Surgery is my calling and I'm good at it".into(),
-        log_odds: 2.5, // ~92% confidence
-        domain: "career".into(),
-        evidence_trail: vec![
-            EvidenceEntry { source: "successful operations".into(), weight: 1.5, timestamp: 1000.0 },
-            EvidenceEntry { source: "attending feedback".into(), weight: 1.0, timestamp: 2000.0 },
-        ],
-        user_confirmed: true,
-    })));
+    nodes.push(CognitiveNode::new(
+        belief_surgery,
+        "Surgery is my calling".into(),
+        NodePayload::Belief(BeliefPayload {
+            proposition: "Surgery is my calling and I'm good at it".into(),
+            log_odds: 2.5, // ~92% confidence
+            domain: "career".into(),
+            evidence_trail: vec![
+                EvidenceEntry {
+                    source: "successful operations".into(),
+                    weight: 1.5,
+                    timestamp: 1000.0,
+                },
+                EvidenceEntry {
+                    source: "attending feedback".into(),
+                    weight: 1.0,
+                    timestamp: 2000.0,
+                },
+            ],
+            user_confirmed: true,
+        }),
+    ));
 
     let belief_chidi = alloc.alloc(NodeKind::Belief);
-    nodes.push(CognitiveNode::new(belief_chidi, "Chidi is supportive".into(), NodePayload::Belief(BeliefPayload {
-        proposition: "Chidi supports my career despite the long hours".into(),
-        log_odds: 1.0, // ~73% — some tension
-        domain: "relationship".into(),
-        evidence_trail: vec![
-            EvidenceEntry { source: "encouraging messages".into(), weight: 1.5, timestamp: 1000.0 },
-            EvidenceEntry { source: "complained about missed dinner".into(), weight: -0.5, timestamp: 3000.0 },
-        ],
-        user_confirmed: false,
-    })));
+    nodes.push(CognitiveNode::new(
+        belief_chidi,
+        "Chidi is supportive".into(),
+        NodePayload::Belief(BeliefPayload {
+            proposition: "Chidi supports my career despite the long hours".into(),
+            log_odds: 1.0, // ~73% — some tension
+            domain: "relationship".into(),
+            evidence_trail: vec![
+                EvidenceEntry {
+                    source: "encouraging messages".into(),
+                    weight: 1.5,
+                    timestamp: 1000.0,
+                },
+                EvidenceEntry {
+                    source: "complained about missed dinner".into(),
+                    weight: -0.5,
+                    timestamp: 3000.0,
+                },
+            ],
+            user_confirmed: false,
+        }),
+    ));
 
     // ── Goals ──
     let goal_fellowship = alloc.alloc(NodeKind::Goal);
-    nodes.push(CognitiveNode::new(goal_fellowship, "Get fellowship".into(), NodePayload::Goal(GoalPayload {
-        description: "Get accepted to cardiothoracic fellowship".into(),
-        status: GoalStatus::Active,
-        progress: 0.35,
-        deadline: Some(now_secs() + 86400.0 * 180.0),
-        priority: Priority::Critical,
-        parent_goal: None,
-        completion_criteria: "Receive acceptance letter from fellowship program".into(),
-    })));
+    nodes.push(CognitiveNode::new(
+        goal_fellowship,
+        "Get fellowship".into(),
+        NodePayload::Goal(GoalPayload {
+            description: "Get accepted to cardiothoracic fellowship".into(),
+            status: GoalStatus::Active,
+            progress: 0.35,
+            deadline: Some(now_secs() + 86400.0 * 180.0),
+            priority: Priority::Critical,
+            parent_goal: None,
+            completion_criteria: "Receive acceptance letter from fellowship program".into(),
+        }),
+    ));
 
     // ── Tasks ──
     let task_essay = alloc.alloc(NodeKind::Task);
-    nodes.push(CognitiveNode::new(task_essay, "Write fellowship essay".into(), NodePayload::Task(TaskPayload {
-        description: "Complete personal statement for fellowship application".into(),
-        status: TaskStatus::InProgress,
-        goal_id: Some(goal_fellowship),
-        deadline: Some(now_secs() + 86400.0 * 14.0),
-        priority: Priority::High,
-        estimated_minutes: Some(480),
-        prerequisites: vec![],
-    })));
+    nodes.push(CognitiveNode::new(
+        task_essay,
+        "Write fellowship essay".into(),
+        NodePayload::Task(TaskPayload {
+            description: "Complete personal statement for fellowship application".into(),
+            status: TaskStatus::InProgress,
+            goal_id: Some(goal_fellowship),
+            deadline: Some(now_secs() + 86400.0 * 14.0),
+            priority: Priority::High,
+            estimated_minutes: Some(480),
+            prerequisites: vec![],
+        }),
+    ));
 
     let task_rec_letters = alloc.alloc(NodeKind::Task);
-    nodes.push(CognitiveNode::new(task_rec_letters, "Get recommendation letters".into(), NodePayload::Task(TaskPayload {
-        description: "Obtain 3 recommendation letters from attendings".into(),
-        status: TaskStatus::Pending,
-        goal_id: Some(goal_fellowship),
-        deadline: Some(now_secs() + 86400.0 * 30.0),
-        priority: Priority::High,
-        estimated_minutes: Some(120),
-        prerequisites: vec![],
-    })));
+    nodes.push(CognitiveNode::new(
+        task_rec_letters,
+        "Get recommendation letters".into(),
+        NodePayload::Task(TaskPayload {
+            description: "Obtain 3 recommendation letters from attendings".into(),
+            status: TaskStatus::Pending,
+            goal_id: Some(goal_fellowship),
+            deadline: Some(now_secs() + 86400.0 * 30.0),
+            priority: Priority::High,
+            estimated_minutes: Some(120),
+            prerequisites: vec![],
+        }),
+    ));
 
     // ── Routines ──
     let routine_rounds = alloc.alloc(NodeKind::Routine);
-    nodes.push(CognitiveNode::new(routine_rounds, "Morning rounds".into(), NodePayload::Routine(RoutinePayload {
-        description: "Morning ward rounds at 6:30am".into(),
-        period_secs: 86400.0,
-        phase_offset_secs: 23400.0, // 6:30am
-        reliability: 0.92,
-        observation_count: 180,
-        last_triggered: now_secs() - 3600.0,
-        action_description: "Review patients, check vitals, update care plans".into(),
-        weekday_mask: 0x7F, // every day — surgical resident life
-    })));
+    nodes.push(CognitiveNode::new(
+        routine_rounds,
+        "Morning rounds".into(),
+        NodePayload::Routine(RoutinePayload {
+            description: "Morning ward rounds at 6:30am".into(),
+            period_secs: 86400.0,
+            phase_offset_secs: 23400.0, // 6:30am
+            reliability: 0.92,
+            observation_count: 180,
+            last_triggered: now_secs() - 3600.0,
+            action_description: "Review patients, check vitals, update care plans".into(),
+            weekday_mask: 0x7F, // every day — surgical resident life
+        }),
+    ));
 
     // ── Risks ──
     let risk_burnout = alloc.alloc(NodeKind::Risk);
-    nodes.push(CognitiveNode::new(risk_burnout, "Burnout risk".into(), NodePayload::Risk(RiskPayload {
-        description: "Risk of burnout from 80+ hour work weeks".into(),
-        severity: 0.8,
-        likelihood: 0.6,
-        mitigation: "Schedule rest days, communicate boundaries with Chidi".into(),
-        threatened_goals: vec![goal_fellowship],
-    })));
+    nodes.push(CognitiveNode::new(
+        risk_burnout,
+        "Burnout risk".into(),
+        NodePayload::Risk(RiskPayload {
+            description: "Risk of burnout from 80+ hour work weeks".into(),
+            severity: 0.8,
+            likelihood: 0.6,
+            mitigation: "Schedule rest days, communicate boundaries with Chidi".into(),
+            threatened_goals: vec![goal_fellowship],
+        }),
+    ));
 
     // ── Constraints ──
     let constraint_quiet = alloc.alloc(NodeKind::Constraint);
-    nodes.push(CognitiveNode::new(constraint_quiet, "No notifications during surgery".into(), NodePayload::Constraint(ConstraintPayload {
-        description: "Never send notifications during scheduled surgeries".into(),
-        constraint_type: ConstraintType::Hard,
-        condition: "During scheduled surgery blocks (7am-2pm weekdays)".into(),
-        imposed_by: "user".into(),
-    })));
+    nodes.push(CognitiveNode::new(
+        constraint_quiet,
+        "No notifications during surgery".into(),
+        NodePayload::Constraint(ConstraintPayload {
+            description: "Never send notifications during scheduled surgeries".into(),
+            constraint_type: ConstraintType::Hard,
+            condition: "During scheduled surgery blocks (7am-2pm weekdays)".into(),
+            imposed_by: "user".into(),
+        }),
+    ));
 
     // ── Edges ──
-    edges.push(CognitiveEdge::new(belief_surgery, goal_fellowship, CognitiveEdgeKind::Supports, 0.9));
-    edges.push(CognitiveEdge::new(task_essay, goal_fellowship, CognitiveEdgeKind::AdvancesGoal, 0.7));
-    edges.push(CognitiveEdge::new(task_rec_letters, goal_fellowship, CognitiveEdgeKind::AdvancesGoal, 0.8));
-    edges.push(CognitiveEdge::new(task_rec_letters, task_essay, CognitiveEdgeKind::Requires, 0.3));
-    edges.push(CognitiveEdge::new(risk_burnout, goal_fellowship, CognitiveEdgeKind::BlocksGoal, 0.6));
-    edges.push(CognitiveEdge::new(constraint_quiet, routine_rounds, CognitiveEdgeKind::Constrains, 0.9));
-    edges.push(CognitiveEdge::new(aisha_id, hospital_id, CognitiveEdgeKind::AssociatedWith, 0.95));
-    edges.push(CognitiveEdge::new(aisha_id, chidi_id, CognitiveEdgeKind::AssociatedWith, 0.85));
+    edges.push(CognitiveEdge::new(
+        belief_surgery,
+        goal_fellowship,
+        CognitiveEdgeKind::Supports,
+        0.9,
+    ));
+    edges.push(CognitiveEdge::new(
+        task_essay,
+        goal_fellowship,
+        CognitiveEdgeKind::AdvancesGoal,
+        0.7,
+    ));
+    edges.push(CognitiveEdge::new(
+        task_rec_letters,
+        goal_fellowship,
+        CognitiveEdgeKind::AdvancesGoal,
+        0.8,
+    ));
+    edges.push(CognitiveEdge::new(
+        task_rec_letters,
+        task_essay,
+        CognitiveEdgeKind::Requires,
+        0.3,
+    ));
+    edges.push(CognitiveEdge::new(
+        risk_burnout,
+        goal_fellowship,
+        CognitiveEdgeKind::BlocksGoal,
+        0.6,
+    ));
+    edges.push(CognitiveEdge::new(
+        constraint_quiet,
+        routine_rounds,
+        CognitiveEdgeKind::Constrains,
+        0.9,
+    ));
+    edges.push(CognitiveEdge::new(
+        aisha_id,
+        hospital_id,
+        CognitiveEdgeKind::AssociatedWith,
+        0.95,
+    ));
+    edges.push(CognitiveEdge::new(
+        aisha_id,
+        chidi_id,
+        CognitiveEdgeKind::AssociatedWith,
+        0.85,
+    ));
 
     // Seed some memories into the DB for integration
     let dim = 8;
@@ -475,16 +581,27 @@ pub fn build_aisha() -> Result<PersonaScenario> {
         let emb = crate::bench_utils::vec_seed_dim(i as f32, dim);
         db.record(
             &format!("Aisha memory {i}: patient case discussion at hospital"),
-            "episodic", 0.5 + (i % 5) as f64 * 0.1, 0.2, 604800.0,
-            &serde_json::json!({"persona": "aisha"}), &emb, "default",
-            0.8, "medical", "user", None,
+            "episodic",
+            0.5 + (i % 5) as f64 * 0.1,
+            0.2,
+            604800.0,
+            &serde_json::json!({"persona": "aisha"}),
+            &emb,
+            "default",
+            0.8,
+            "medical",
+            "user",
+            None,
         )?;
     }
 
     Ok(PersonaScenario {
         name: "Aisha".into(),
         description: "Surgical resident in Lagos — high-urgency, medical domain".into(),
-        db, allocator: alloc, nodes, edges,
+        db,
+        allocator: alloc,
+        nodes,
+        edges,
     })
 }
 
@@ -497,105 +614,193 @@ pub fn build_marcus() -> Result<PersonaScenario> {
 
     // Entities
     let marcus_id = alloc.alloc(NodeKind::Entity);
-    nodes.push(CognitiveNode::new(marcus_id, "Marcus Chen".into(), NodePayload::Entity(EntityPayload {
-        name: "Marcus Chen".into(), entity_type: "person".into(), memory_rids: vec![],
-    })));
+    nodes.push(CognitiveNode::new(
+        marcus_id,
+        "Marcus Chen".into(),
+        NodePayload::Entity(EntityPayload {
+            name: "Marcus Chen".into(),
+            entity_type: "person".into(),
+            memory_rids: vec![],
+        }),
+    ));
 
     let pearl_id = alloc.alloc(NodeKind::Entity);
-    nodes.push(CognitiveNode::new(pearl_id, "The Pearl Kitchen".into(), NodePayload::Entity(EntityPayload {
-        name: "The Pearl Kitchen".into(), entity_type: "organization".into(), memory_rids: vec![],
-    })));
+    nodes.push(CognitiveNode::new(
+        pearl_id,
+        "The Pearl Kitchen".into(),
+        NodePayload::Entity(EntityPayload {
+            name: "The Pearl Kitchen".into(),
+            entity_type: "organization".into(),
+            memory_rids: vec![],
+        }),
+    ));
 
     let sarah_id = alloc.alloc(NodeKind::Entity);
-    nodes.push(CognitiveNode::new(sarah_id, "Sarah Chen".into(), NodePayload::Entity(EntityPayload {
-        name: "Sarah Chen".into(), entity_type: "person".into(), memory_rids: vec![],
-    })));
+    nodes.push(CognitiveNode::new(
+        sarah_id,
+        "Sarah Chen".into(),
+        NodePayload::Entity(EntityPayload {
+            name: "Sarah Chen".into(),
+            entity_type: "person".into(),
+            memory_rids: vec![],
+        }),
+    ));
 
     // Goal hierarchy: expand restaurant
     let goal_expand = alloc.alloc(NodeKind::Goal);
-    nodes.push(CognitiveNode::new(goal_expand, "Open second location".into(), NodePayload::Goal(GoalPayload {
-        description: "Open a second Pearl Kitchen location in NW Portland".into(),
-        status: GoalStatus::Active, progress: 0.15,
-        deadline: Some(now_secs() + 86400.0 * 365.0),
-        priority: Priority::High, parent_goal: None,
-        completion_criteria: "Second location open and profitable for 3 months".into(),
-    })));
+    nodes.push(CognitiveNode::new(
+        goal_expand,
+        "Open second location".into(),
+        NodePayload::Goal(GoalPayload {
+            description: "Open a second Pearl Kitchen location in NW Portland".into(),
+            status: GoalStatus::Active,
+            progress: 0.15,
+            deadline: Some(now_secs() + 86400.0 * 365.0),
+            priority: Priority::High,
+            parent_goal: None,
+            completion_criteria: "Second location open and profitable for 3 months".into(),
+        }),
+    ));
 
     let goal_menu = alloc.alloc(NodeKind::Goal);
-    nodes.push(CognitiveNode::new(goal_menu, "Spring menu launch".into(), NodePayload::Goal(GoalPayload {
-        description: "Design and launch spring seasonal menu".into(),
-        status: GoalStatus::Active, progress: 0.60,
-        deadline: Some(now_secs() + 86400.0 * 30.0),
-        priority: Priority::Medium, parent_goal: Some(goal_expand),
-        completion_criteria: "Menu finalized, staff trained, marketing sent".into(),
-    })));
+    nodes.push(CognitiveNode::new(
+        goal_menu,
+        "Spring menu launch".into(),
+        NodePayload::Goal(GoalPayload {
+            description: "Design and launch spring seasonal menu".into(),
+            status: GoalStatus::Active,
+            progress: 0.60,
+            deadline: Some(now_secs() + 86400.0 * 30.0),
+            priority: Priority::Medium,
+            parent_goal: Some(goal_expand),
+            completion_criteria: "Menu finalized, staff trained, marketing sent".into(),
+        }),
+    ));
 
     // Routines
     let routine_inventory = alloc.alloc(NodeKind::Routine);
-    nodes.push(CognitiveNode::new(routine_inventory, "Inventory check".into(), NodePayload::Routine(RoutinePayload {
-        description: "Weekly inventory count and supplier orders".into(),
-        period_secs: 604800.0, // weekly
-        phase_offset_secs: 36000.0, // Monday 10am
-        reliability: 0.88,
-        observation_count: 48,
-        last_triggered: now_secs() - 86400.0 * 3.0,
-        action_description: "Count inventory, compare to POS, order from suppliers".into(),
-        weekday_mask: 0x01, // Monday only
-    })));
+    nodes.push(CognitiveNode::new(
+        routine_inventory,
+        "Inventory check".into(),
+        NodePayload::Routine(RoutinePayload {
+            description: "Weekly inventory count and supplier orders".into(),
+            period_secs: 604800.0,      // weekly
+            phase_offset_secs: 36000.0, // Monday 10am
+            reliability: 0.88,
+            observation_count: 48,
+            last_triggered: now_secs() - 86400.0 * 3.0,
+            action_description: "Count inventory, compare to POS, order from suppliers".into(),
+            weekday_mask: 0x01, // Monday only
+        }),
+    ));
 
     // Preferences
     let pref_local = alloc.alloc(NodeKind::Preference);
-    nodes.push(CognitiveNode::new(pref_local, "Prefers local suppliers".into(), NodePayload::Preference(PreferencePayload {
-        domain: "business".into(),
-        preferred: "Local Oregon farms and producers".into(),
-        dispreferred: Some("Large national distributors".into()),
-        strength: 0.85,
-        log_odds: 2.0,
-        observation_count: 25,
-    })));
+    nodes.push(CognitiveNode::new(
+        pref_local,
+        "Prefers local suppliers".into(),
+        NodePayload::Preference(PreferencePayload {
+            domain: "business".into(),
+            preferred: "Local Oregon farms and producers".into(),
+            dispreferred: Some("Large national distributors".into()),
+            strength: 0.85,
+            log_odds: 2.0,
+            observation_count: 25,
+        }),
+    ));
 
     // Risk
     let risk_cost = alloc.alloc(NodeKind::Risk);
-    nodes.push(CognitiveNode::new(risk_cost, "Rising food costs".into(), NodePayload::Risk(RiskPayload {
-        description: "Food costs rising 15% YoY threatening margins".into(),
-        severity: 0.7, likelihood: 0.8,
-        mitigation: "Negotiate long-term contracts, adjust menu prices".into(),
-        threatened_goals: vec![goal_expand],
-    })));
+    nodes.push(CognitiveNode::new(
+        risk_cost,
+        "Rising food costs".into(),
+        NodePayload::Risk(RiskPayload {
+            description: "Food costs rising 15% YoY threatening margins".into(),
+            severity: 0.7,
+            likelihood: 0.8,
+            mitigation: "Negotiate long-term contracts, adjust menu prices".into(),
+            threatened_goals: vec![goal_expand],
+        }),
+    ));
 
     // Need
     let need_staff = alloc.alloc(NodeKind::Need);
-    nodes.push(CognitiveNode::new(need_staff, "Hire sous chef".into(), NodePayload::Need(NeedPayload {
-        description: "Need experienced sous chef for second location".into(),
-        category: NeedCategory::Professional,
-        intensity: 0.7,
-        last_satisfied: None,
-        satisfaction_pattern: "Post job listing, network at culinary events".into(),
-    })));
+    nodes.push(CognitiveNode::new(
+        need_staff,
+        "Hire sous chef".into(),
+        NodePayload::Need(NeedPayload {
+            description: "Need experienced sous chef for second location".into(),
+            category: NeedCategory::Professional,
+            intensity: 0.7,
+            last_satisfied: None,
+            satisfaction_pattern: "Post job listing, network at culinary events".into(),
+        }),
+    ));
 
     // Edges
-    edges.push(CognitiveEdge::new(goal_menu, goal_expand, CognitiveEdgeKind::SubtaskOf, 0.5));
-    edges.push(CognitiveEdge::new(risk_cost, goal_expand, CognitiveEdgeKind::BlocksGoal, 0.7));
-    edges.push(CognitiveEdge::new(pref_local, risk_cost, CognitiveEdgeKind::Contradicts, 0.3));
-    edges.push(CognitiveEdge::new(marcus_id, pearl_id, CognitiveEdgeKind::AssociatedWith, 0.95));
-    edges.push(CognitiveEdge::new(marcus_id, sarah_id, CognitiveEdgeKind::AssociatedWith, 0.90));
-    edges.push(CognitiveEdge::new(need_staff, goal_expand, CognitiveEdgeKind::AdvancesGoal, 0.6));
+    edges.push(CognitiveEdge::new(
+        goal_menu,
+        goal_expand,
+        CognitiveEdgeKind::SubtaskOf,
+        0.5,
+    ));
+    edges.push(CognitiveEdge::new(
+        risk_cost,
+        goal_expand,
+        CognitiveEdgeKind::BlocksGoal,
+        0.7,
+    ));
+    edges.push(CognitiveEdge::new(
+        pref_local,
+        risk_cost,
+        CognitiveEdgeKind::Contradicts,
+        0.3,
+    ));
+    edges.push(CognitiveEdge::new(
+        marcus_id,
+        pearl_id,
+        CognitiveEdgeKind::AssociatedWith,
+        0.95,
+    ));
+    edges.push(CognitiveEdge::new(
+        marcus_id,
+        sarah_id,
+        CognitiveEdgeKind::AssociatedWith,
+        0.90,
+    ));
+    edges.push(CognitiveEdge::new(
+        need_staff,
+        goal_expand,
+        CognitiveEdgeKind::AdvancesGoal,
+        0.6,
+    ));
 
     // Seed memories
     for i in 0..15 {
         let emb = crate::bench_utils::vec_seed_dim(100.0 + i as f32, 8);
         db.record(
             &format!("Marcus memory {i}: restaurant operations and menu planning"),
-            "episodic", 0.4 + (i % 6) as f64 * 0.1, 0.3, 604800.0,
-            &serde_json::json!({"persona": "marcus"}), &emb, "default",
-            0.8, "business", "user", None,
+            "episodic",
+            0.4 + (i % 6) as f64 * 0.1,
+            0.3,
+            604800.0,
+            &serde_json::json!({"persona": "marcus"}),
+            &emb,
+            "default",
+            0.8,
+            "business",
+            "user",
+            None,
         )?;
     }
 
     Ok(PersonaScenario {
         name: "Marcus".into(),
         description: "Restaurant owner in Portland — business goals, seasonal routines".into(),
-        db, allocator: alloc, nodes, edges,
+        db,
+        allocator: alloc,
+        nodes,
+        edges,
     })
 }
 
@@ -608,103 +813,197 @@ pub fn build_priya() -> Result<PersonaScenario> {
 
     // Entities
     let priya_id = alloc.alloc(NodeKind::Entity);
-    nodes.push(CognitiveNode::new(priya_id, "Priya Sharma".into(), NodePayload::Entity(EntityPayload {
-        name: "Priya Sharma".into(), entity_type: "person".into(), memory_rids: vec![],
-    })));
+    nodes.push(CognitiveNode::new(
+        priya_id,
+        "Priya Sharma".into(),
+        NodePayload::Entity(EntityPayload {
+            name: "Priya Sharma".into(),
+            entity_type: "person".into(),
+            memory_rids: vec![],
+        }),
+    ));
 
     // Technical beliefs — some will be revised during testing
     let belief_microservices = alloc.alloc(NodeKind::Belief);
-    nodes.push(CognitiveNode::new(belief_microservices, "Microservices > monolith".into(), NodePayload::Belief(BeliefPayload {
-        proposition: "Microservices architecture is better than monolith for our team".into(),
-        log_odds: 0.5, // mild confidence — will be tested with conflicting evidence
-        domain: "engineering".into(),
-        evidence_trail: vec![
-            EvidenceEntry { source: "conference talk".into(), weight: 0.5, timestamp: 1000.0 },
-        ],
-        user_confirmed: false,
-    })));
+    nodes.push(CognitiveNode::new(
+        belief_microservices,
+        "Microservices > monolith".into(),
+        NodePayload::Belief(BeliefPayload {
+            proposition: "Microservices architecture is better than monolith for our team".into(),
+            log_odds: 0.5, // mild confidence — will be tested with conflicting evidence
+            domain: "engineering".into(),
+            evidence_trail: vec![EvidenceEntry {
+                source: "conference talk".into(),
+                weight: 0.5,
+                timestamp: 1000.0,
+            }],
+            user_confirmed: false,
+        }),
+    ));
 
     let belief_rust = alloc.alloc(NodeKind::Belief);
-    nodes.push(CognitiveNode::new(belief_rust, "Rust for ML infra".into(), NodePayload::Belief(BeliefPayload {
-        proposition: "Rust is the right choice for our ML inference pipeline".into(),
-        log_odds: 2.0, // strong confidence
-        domain: "engineering".into(),
-        evidence_trail: vec![
-            EvidenceEntry { source: "benchmark results".into(), weight: 1.5, timestamp: 1000.0 },
-            EvidenceEntry { source: "team productivity".into(), weight: 0.5, timestamp: 2000.0 },
-        ],
-        user_confirmed: true,
-    })));
+    nodes.push(CognitiveNode::new(
+        belief_rust,
+        "Rust for ML infra".into(),
+        NodePayload::Belief(BeliefPayload {
+            proposition: "Rust is the right choice for our ML inference pipeline".into(),
+            log_odds: 2.0, // strong confidence
+            domain: "engineering".into(),
+            evidence_trail: vec![
+                EvidenceEntry {
+                    source: "benchmark results".into(),
+                    weight: 1.5,
+                    timestamp: 1000.0,
+                },
+                EvidenceEntry {
+                    source: "team productivity".into(),
+                    weight: 0.5,
+                    timestamp: 2000.0,
+                },
+            ],
+            user_confirmed: true,
+        }),
+    ));
 
     // Goals
     let goal_promo = alloc.alloc(NodeKind::Goal);
-    nodes.push(CognitiveNode::new(goal_promo, "Get promoted to staff".into(), NodePayload::Goal(GoalPayload {
-        description: "Get promoted to Staff Engineer at Flipkart".into(),
-        status: GoalStatus::Active, progress: 0.40,
-        deadline: Some(now_secs() + 86400.0 * 270.0),
-        priority: Priority::High, parent_goal: None,
-        completion_criteria: "Staff Engineer title and compensation".into(),
-    })));
+    nodes.push(CognitiveNode::new(
+        goal_promo,
+        "Get promoted to staff".into(),
+        NodePayload::Goal(GoalPayload {
+            description: "Get promoted to Staff Engineer at Flipkart".into(),
+            status: GoalStatus::Active,
+            progress: 0.40,
+            deadline: Some(now_secs() + 86400.0 * 270.0),
+            priority: Priority::High,
+            parent_goal: None,
+            completion_criteria: "Staff Engineer title and compensation".into(),
+        }),
+    ));
 
     // Task chain with dependencies
     let task_design = alloc.alloc(NodeKind::Task);
-    nodes.push(CognitiveNode::new(task_design, "Write design doc".into(), NodePayload::Task(TaskPayload {
-        description: "Write technical design doc for search ranking v2".into(),
-        status: TaskStatus::InProgress,
-        goal_id: Some(goal_promo), deadline: Some(now_secs() + 86400.0 * 7.0),
-        priority: Priority::High, estimated_minutes: Some(960),
-        prerequisites: vec![],
-    })));
+    nodes.push(CognitiveNode::new(
+        task_design,
+        "Write design doc".into(),
+        NodePayload::Task(TaskPayload {
+            description: "Write technical design doc for search ranking v2".into(),
+            status: TaskStatus::InProgress,
+            goal_id: Some(goal_promo),
+            deadline: Some(now_secs() + 86400.0 * 7.0),
+            priority: Priority::High,
+            estimated_minutes: Some(960),
+            prerequisites: vec![],
+        }),
+    ));
 
     let task_review = alloc.alloc(NodeKind::Task);
-    nodes.push(CognitiveNode::new(task_review, "Get design review".into(), NodePayload::Task(TaskPayload {
-        description: "Schedule and complete design review with tech leads".into(),
-        status: TaskStatus::Blocked,
-        goal_id: Some(goal_promo), deadline: Some(now_secs() + 86400.0 * 14.0),
-        priority: Priority::High, estimated_minutes: Some(120),
-        prerequisites: vec![task_design],
-    })));
+    nodes.push(CognitiveNode::new(
+        task_review,
+        "Get design review".into(),
+        NodePayload::Task(TaskPayload {
+            description: "Schedule and complete design review with tech leads".into(),
+            status: TaskStatus::Blocked,
+            goal_id: Some(goal_promo),
+            deadline: Some(now_secs() + 86400.0 * 14.0),
+            priority: Priority::High,
+            estimated_minutes: Some(120),
+            prerequisites: vec![task_design],
+        }),
+    ));
 
     let task_impl = alloc.alloc(NodeKind::Task);
-    nodes.push(CognitiveNode::new(task_impl, "Implement ranking v2".into(), NodePayload::Task(TaskPayload {
-        description: "Implement search ranking v2 based on approved design".into(),
-        status: TaskStatus::Pending,
-        goal_id: Some(goal_promo), deadline: Some(now_secs() + 86400.0 * 60.0),
-        priority: Priority::High, estimated_minutes: Some(4800),
-        prerequisites: vec![task_review],
-    })));
+    nodes.push(CognitiveNode::new(
+        task_impl,
+        "Implement ranking v2".into(),
+        NodePayload::Task(TaskPayload {
+            description: "Implement search ranking v2 based on approved design".into(),
+            status: TaskStatus::Pending,
+            goal_id: Some(goal_promo),
+            deadline: Some(now_secs() + 86400.0 * 60.0),
+            priority: Priority::High,
+            estimated_minutes: Some(4800),
+            prerequisites: vec![task_review],
+        }),
+    ));
 
     // Constraint
     let constraint_wlb = alloc.alloc(NodeKind::Constraint);
-    nodes.push(CognitiveNode::new(constraint_wlb, "Work-life balance".into(), NodePayload::Constraint(ConstraintPayload {
-        description: "No work after 7pm — family time with Arjun and Meera".into(),
-        constraint_type: ConstraintType::Soft,
-        condition: "After 7pm IST on weekdays, all day weekends".into(),
-        imposed_by: "user".into(),
-    })));
+    nodes.push(CognitiveNode::new(
+        constraint_wlb,
+        "Work-life balance".into(),
+        NodePayload::Constraint(ConstraintPayload {
+            description: "No work after 7pm — family time with Arjun and Meera".into(),
+            constraint_type: ConstraintType::Soft,
+            condition: "After 7pm IST on weekdays, all day weekends".into(),
+            imposed_by: "user".into(),
+        }),
+    ));
 
     // Edges
-    edges.push(CognitiveEdge::new(task_design, goal_promo, CognitiveEdgeKind::AdvancesGoal, 0.7));
-    edges.push(CognitiveEdge::new(task_review, task_design, CognitiveEdgeKind::Requires, 0.9));
-    edges.push(CognitiveEdge::new(task_impl, task_review, CognitiveEdgeKind::Requires, 0.9));
-    edges.push(CognitiveEdge::new(task_impl, goal_promo, CognitiveEdgeKind::AdvancesGoal, 0.9));
-    edges.push(CognitiveEdge::new(belief_rust, task_impl, CognitiveEdgeKind::Supports, 0.6));
-    edges.push(CognitiveEdge::new(constraint_wlb, task_design, CognitiveEdgeKind::Constrains, 0.4));
+    edges.push(CognitiveEdge::new(
+        task_design,
+        goal_promo,
+        CognitiveEdgeKind::AdvancesGoal,
+        0.7,
+    ));
+    edges.push(CognitiveEdge::new(
+        task_review,
+        task_design,
+        CognitiveEdgeKind::Requires,
+        0.9,
+    ));
+    edges.push(CognitiveEdge::new(
+        task_impl,
+        task_review,
+        CognitiveEdgeKind::Requires,
+        0.9,
+    ));
+    edges.push(CognitiveEdge::new(
+        task_impl,
+        goal_promo,
+        CognitiveEdgeKind::AdvancesGoal,
+        0.9,
+    ));
+    edges.push(CognitiveEdge::new(
+        belief_rust,
+        task_impl,
+        CognitiveEdgeKind::Supports,
+        0.6,
+    ));
+    edges.push(CognitiveEdge::new(
+        constraint_wlb,
+        task_design,
+        CognitiveEdgeKind::Constrains,
+        0.4,
+    ));
 
     for i in 0..25 {
         let emb = crate::bench_utils::vec_seed_dim(200.0 + i as f32, 8);
         db.record(
             &format!("Priya memory {i}: ML pipeline and search ranking work"),
-            "episodic", 0.4 + (i % 7) as f64 * 0.1, 0.1, 604800.0,
-            &serde_json::json!({"persona": "priya"}), &emb, "default",
-            0.8, "engineering", "user", None,
+            "episodic",
+            0.4 + (i % 7) as f64 * 0.1,
+            0.1,
+            604800.0,
+            &serde_json::json!({"persona": "priya"}),
+            &emb,
+            "default",
+            0.8,
+            "engineering",
+            "user",
+            None,
         )?;
     }
 
     Ok(PersonaScenario {
         name: "Priya".into(),
-        description: "Senior engineer in Bangalore — technical beliefs, task dependency chains".into(),
-        db, allocator: alloc, nodes, edges,
+        description: "Senior engineer in Bangalore — technical beliefs, task dependency chains"
+            .into(),
+        db,
+        allocator: alloc,
+        nodes,
+        edges,
     })
 }
 
@@ -716,74 +1015,118 @@ pub fn build_emre() -> Result<PersonaScenario> {
     let mut edges = Vec::new();
 
     let emre_id = alloc.alloc(NodeKind::Entity);
-    nodes.push(CognitiveNode::new(emre_id, "Emre Yilmaz".into(), NodePayload::Entity(EntityPayload {
-        name: "Emre Yilmaz".into(), entity_type: "person".into(), memory_rids: vec![],
-    })));
+    nodes.push(CognitiveNode::new(
+        emre_id,
+        "Emre Yilmaz".into(),
+        NodePayload::Entity(EntityPayload {
+            name: "Emre Yilmaz".into(),
+            entity_type: "person".into(),
+            memory_rids: vec![],
+        }),
+    ));
 
     // Opportunity — time-bounded
     let opp_exhibit = alloc.alloc(NodeKind::Opportunity);
-    nodes.push(CognitiveNode::new(opp_exhibit, "Gallery exhibition slot".into(), NodePayload::Opportunity(OpportunityPayload {
-        description: "Open slot at Pera Museum for emerging photographers".into(),
-        expires_at: now_secs() + 86400.0 * 10.0,
-        expected_benefit: 0.85,
-        required_action: "Submit portfolio of 15 prints by deadline".into(),
-        relevant_goals: vec![],
-    })));
+    nodes.push(CognitiveNode::new(
+        opp_exhibit,
+        "Gallery exhibition slot".into(),
+        NodePayload::Opportunity(OpportunityPayload {
+            description: "Open slot at Pera Museum for emerging photographers".into(),
+            expires_at: now_secs() + 86400.0 * 10.0,
+            expected_benefit: 0.85,
+            required_action: "Submit portfolio of 15 prints by deadline".into(),
+            relevant_goals: vec![],
+        }),
+    ));
 
     // Creative need
     let need_inspiration = alloc.alloc(NodeKind::Need);
-    nodes.push(CognitiveNode::new(need_inspiration, "Creative inspiration".into(), NodePayload::Need(NeedPayload {
-        description: "Need fresh creative inspiration — feeling stuck on project".into(),
-        category: NeedCategory::Creative,
-        intensity: 0.7,
-        last_satisfied: Some(now_secs() - 86400.0 * 12.0),
-        satisfaction_pattern: "Walk through old bazaar, visit other exhibitions, travel".into(),
-    })));
+    nodes.push(CognitiveNode::new(
+        need_inspiration,
+        "Creative inspiration".into(),
+        NodePayload::Need(NeedPayload {
+            description: "Need fresh creative inspiration — feeling stuck on project".into(),
+            category: NeedCategory::Creative,
+            intensity: 0.7,
+            last_satisfied: Some(now_secs() - 86400.0 * 12.0),
+            satisfaction_pattern: "Walk through old bazaar, visit other exhibitions, travel".into(),
+        }),
+    ));
 
     // Irregular routine (not daily — seasonal)
     let routine_golden = alloc.alloc(NodeKind::Routine);
-    nodes.push(CognitiveNode::new(routine_golden, "Golden hour shoots".into(), NodePayload::Routine(RoutinePayload {
-        description: "Sunset golden hour photography sessions at Bosphorus".into(),
-        period_secs: 259200.0, // every 3 days (irregular)
-        phase_offset_secs: 61200.0, // 5pm
-        reliability: 0.55, // weather-dependent
-        observation_count: 40,
-        last_triggered: now_secs() - 86400.0 * 2.0,
-        action_description: "Go to waterfront for golden hour photography".into(),
-        weekday_mask: 0x7F,
-    })));
+    nodes.push(CognitiveNode::new(
+        routine_golden,
+        "Golden hour shoots".into(),
+        NodePayload::Routine(RoutinePayload {
+            description: "Sunset golden hour photography sessions at Bosphorus".into(),
+            period_secs: 259200.0,      // every 3 days (irregular)
+            phase_offset_secs: 61200.0, // 5pm
+            reliability: 0.55,          // weather-dependent
+            observation_count: 40,
+            last_triggered: now_secs() - 86400.0 * 2.0,
+            action_description: "Go to waterfront for golden hour photography".into(),
+            weekday_mask: 0x7F,
+        }),
+    ));
 
     // Intent hypothesis — transient
     let intent_travel = alloc.alloc(NodeKind::IntentHypothesis);
     let mut intent_attrs = CognitiveAttrs::default_for(NodeKind::IntentHypothesis);
     intent_attrs.activation = 0.8;
-    nodes.push(CognitiveNode::with_attrs(intent_travel, "Planning Cappadocia trip".into(),
+    nodes.push(CognitiveNode::with_attrs(
+        intent_travel,
+        "Planning Cappadocia trip".into(),
         NodePayload::IntentHypothesis(IntentPayload {
             description: "User might be planning a photography trip to Cappadocia".into(),
             features: vec![0.8, 0.3, 0.6, 0.2, 0.9],
             posterior: 0.65,
             candidate_actions: vec![],
             source_context: "Searched for 'hot air balloon Cappadocia sunrise'".into(),
-        }), intent_attrs));
+        }),
+        intent_attrs,
+    ));
 
     // Edges
-    edges.push(CognitiveEdge::new(need_inspiration, opp_exhibit, CognitiveEdgeKind::Supports, 0.5));
-    edges.push(CognitiveEdge::new(intent_travel, need_inspiration, CognitiveEdgeKind::AdvancesGoal, 0.7));
+    edges.push(CognitiveEdge::new(
+        need_inspiration,
+        opp_exhibit,
+        CognitiveEdgeKind::Supports,
+        0.5,
+    ));
+    edges.push(CognitiveEdge::new(
+        intent_travel,
+        need_inspiration,
+        CognitiveEdgeKind::AdvancesGoal,
+        0.7,
+    ));
 
     for i in 0..12 {
         let emb = crate::bench_utils::vec_seed_dim(300.0 + i as f32, 8);
         db.record(
             &format!("Emre memory {i}: photography project and creative work"),
-            "episodic", 0.3 + (i % 4) as f64 * 0.15, 0.5, 604800.0,
-            &serde_json::json!({"persona": "emre"}), &emb, "default",
-            0.8, "creative", "user", None,
+            "episodic",
+            0.3 + (i % 4) as f64 * 0.15,
+            0.5,
+            604800.0,
+            &serde_json::json!({"persona": "emre"}),
+            &emb,
+            "default",
+            0.8,
+            "creative",
+            "user",
+            None,
         )?;
     }
 
     Ok(PersonaScenario {
         name: "Emre".into(),
-        description: "Freelance photographer in Istanbul — creative needs, time-bounded opportunities".into(),
-        db, allocator: alloc, nodes, edges,
+        description:
+            "Freelance photographer in Istanbul — creative needs, time-bounded opportunities".into(),
+        db,
+        allocator: alloc,
+        nodes,
+        edges,
     })
 }
 
@@ -795,99 +1138,151 @@ pub fn build_keiko() -> Result<PersonaScenario> {
     let mut edges = Vec::new();
 
     let keiko_id = alloc.alloc(NodeKind::Entity);
-    nodes.push(CognitiveNode::new(keiko_id, "Keiko Tanaka".into(), NodePayload::Entity(EntityPayload {
-        name: "Keiko Tanaka".into(), entity_type: "person".into(), memory_rids: vec![],
-    })));
+    nodes.push(CognitiveNode::new(
+        keiko_id,
+        "Keiko Tanaka".into(),
+        NodePayload::Entity(EntityPayload {
+            name: "Keiko Tanaka".into(),
+            entity_type: "person".into(),
+            memory_rids: vec![],
+        }),
+    ));
 
     // Health goal
     let goal_health = alloc.alloc(NodeKind::Goal);
-    nodes.push(CognitiveNode::new(goal_health, "Manage blood pressure".into(), NodePayload::Goal(GoalPayload {
-        description: "Keep blood pressure below 130/80 consistently".into(),
-        status: GoalStatus::Active, progress: 0.70,
-        deadline: None, // ongoing
-        priority: Priority::High, parent_goal: None,
-        completion_criteria: "3 consecutive monthly readings below 130/80".into(),
-    })));
+    nodes.push(CognitiveNode::new(
+        goal_health,
+        "Manage blood pressure".into(),
+        NodePayload::Goal(GoalPayload {
+            description: "Keep blood pressure below 130/80 consistently".into(),
+            status: GoalStatus::Active,
+            progress: 0.70,
+            deadline: None, // ongoing
+            priority: Priority::High,
+            parent_goal: None,
+            completion_criteria: "3 consecutive monthly readings below 130/80".into(),
+        }),
+    ));
 
     // Medication routine — high reliability
     let routine_meds = alloc.alloc(NodeKind::Routine);
-    nodes.push(CognitiveNode::new(routine_meds, "Morning medication".into(), NodePayload::Routine(RoutinePayload {
-        description: "Take blood pressure medication with breakfast".into(),
-        period_secs: 86400.0,
-        phase_offset_secs: 25200.0, // 7am
-        reliability: 0.97,
-        observation_count: 365,
-        last_triggered: now_secs() - 3600.0,
-        action_description: "Take amlodipine 5mg with breakfast".into(),
-        weekday_mask: 0x7F,
-    })));
+    nodes.push(CognitiveNode::new(
+        routine_meds,
+        "Morning medication".into(),
+        NodePayload::Routine(RoutinePayload {
+            description: "Take blood pressure medication with breakfast".into(),
+            period_secs: 86400.0,
+            phase_offset_secs: 25200.0, // 7am
+            reliability: 0.97,
+            observation_count: 365,
+            last_triggered: now_secs() - 3600.0,
+            action_description: "Take amlodipine 5mg with breakfast".into(),
+            weekday_mask: 0x7F,
+        }),
+    ));
 
     // Strong preference
     let pref_comm = alloc.alloc(NodeKind::Preference);
-    nodes.push(CognitiveNode::new(pref_comm, "Prefers gentle communication".into(), NodePayload::Preference(PreferencePayload {
-        domain: "communication".into(),
-        preferred: "Gentle, warm, respectful tone".into(),
-        dispreferred: Some("Urgent, alarming, or technical language".into()),
-        strength: 0.95,
-        log_odds: 3.0,
-        observation_count: 50,
-    })));
+    nodes.push(CognitiveNode::new(
+        pref_comm,
+        "Prefers gentle communication".into(),
+        NodePayload::Preference(PreferencePayload {
+            domain: "communication".into(),
+            preferred: "Gentle, warm, respectful tone".into(),
+            dispreferred: Some("Urgent, alarming, or technical language".into()),
+            strength: 0.95,
+            log_odds: 3.0,
+            observation_count: 50,
+        }),
+    ));
 
     // Conversation thread
     let conv_garden = alloc.alloc(NodeKind::ConversationThread);
-    nodes.push(CognitiveNode::new(conv_garden, "Garden planning".into(), NodePayload::ConversationThread(ConversationPayload {
-        topic: "Planning spring garden — which vegetables to plant".into(),
-        valence_history: vec![0.6, 0.7, 0.8, 0.7],
-        open_items: vec!["Research tomato varieties for Kyoto climate".into()],
-        turn_count: 8,
-        started_at: now_secs() - 3600.0 * 2.0,
-    })));
+    nodes.push(CognitiveNode::new(
+        conv_garden,
+        "Garden planning".into(),
+        NodePayload::ConversationThread(ConversationPayload {
+            topic: "Planning spring garden — which vegetables to plant".into(),
+            valence_history: vec![0.6, 0.7, 0.8, 0.7],
+            open_items: vec!["Research tomato varieties for Kyoto climate".into()],
+            turn_count: 8,
+            started_at: now_secs() - 3600.0 * 2.0,
+        }),
+    ));
 
     // Action schema
     let action_remind = alloc.alloc(NodeKind::ActionSchema);
-    nodes.push(CognitiveNode::new(action_remind, "Gentle medication reminder".into(), NodePayload::ActionSchema(ActionSchemaPayload {
-        name: "medication_reminder".into(),
-        description: "Send a gentle reminder to take medication".into(),
-        action_kind: ActionKind::Communicate,
-        preconditions: vec![
-            Precondition {
+    nodes.push(CognitiveNode::new(
+        action_remind,
+        "Gentle medication reminder".into(),
+        NodePayload::ActionSchema(ActionSchemaPayload {
+            name: "medication_reminder".into(),
+            description: "Send a gentle reminder to take medication".into(),
+            action_kind: ActionKind::Communicate,
+            preconditions: vec![Precondition {
                 description: "Medication time has passed without confirmation".into(),
                 node_ref: Some(routine_meds),
                 required: true,
-            },
-        ],
-        effects: vec![
-            Effect {
+            }],
+            effects: vec![Effect {
                 description: "User takes medication on time".into(),
                 probability: 0.90,
                 utility: 0.8,
-            },
-        ],
-        confidence_threshold: 0.5,
-        success_rate: 0.92,
-        execution_count: 300,
-        acceptance_count: 276,
-    })));
+            }],
+            confidence_threshold: 0.5,
+            success_rate: 0.92,
+            execution_count: 300,
+            acceptance_count: 276,
+        }),
+    ));
 
     // Edges
-    edges.push(CognitiveEdge::new(routine_meds, goal_health, CognitiveEdgeKind::AdvancesGoal, 0.9));
-    edges.push(CognitiveEdge::new(action_remind, routine_meds, CognitiveEdgeKind::Triggers, 0.8));
-    edges.push(CognitiveEdge::new(pref_comm, action_remind, CognitiveEdgeKind::Constrains, 0.7));
+    edges.push(CognitiveEdge::new(
+        routine_meds,
+        goal_health,
+        CognitiveEdgeKind::AdvancesGoal,
+        0.9,
+    ));
+    edges.push(CognitiveEdge::new(
+        action_remind,
+        routine_meds,
+        CognitiveEdgeKind::Triggers,
+        0.8,
+    ));
+    edges.push(CognitiveEdge::new(
+        pref_comm,
+        action_remind,
+        CognitiveEdgeKind::Constrains,
+        0.7,
+    ));
 
     for i in 0..10 {
         let emb = crate::bench_utils::vec_seed_dim(400.0 + i as f32, 8);
         db.record(
             &format!("Keiko memory {i}: daily health routine and garden hobbies"),
-            "episodic", 0.5 + (i % 3) as f64 * 0.15, 0.6, 604800.0,
-            &serde_json::json!({"persona": "keiko"}), &emb, "default",
-            0.8, "health", "user", None,
+            "episodic",
+            0.5 + (i % 3) as f64 * 0.15,
+            0.6,
+            604800.0,
+            &serde_json::json!({"persona": "keiko"}),
+            &emb,
+            "default",
+            0.8,
+            "health",
+            "user",
+            None,
         )?;
     }
 
     Ok(PersonaScenario {
         name: "Keiko".into(),
-        description: "Retired teacher in Kyoto — health routines, strong preferences, gentle constraints".into(),
-        db, allocator: alloc, nodes, edges,
+        description:
+            "Retired teacher in Kyoto — health routines, strong preferences, gentle constraints"
+                .into(),
+        db,
+        allocator: alloc,
+        nodes,
+        edges,
     })
 }
 
@@ -911,9 +1306,7 @@ pub fn run_cognitive_benchmark(
         build_keiko(),
     ];
 
-    let scenarios: Vec<PersonaScenario> = personas
-        .into_iter()
-        .collect::<Result<Vec<_>>>()?;
+    let scenarios: Vec<PersonaScenario> = personas.into_iter().collect::<Result<Vec<_>>>()?;
 
     // ── Category 1: Node Operations ──
     for scenario in &scenarios {
@@ -1078,7 +1471,8 @@ pub fn run_cognitive_benchmark(
     if !regressions.is_empty() {
         tracing::warn!(
             "Detected {} regressions (>15% change) in benchmark run {}",
-            regressions.len(), run.run_id
+            regressions.len(),
+            run.run_id
         );
     }
 
@@ -1108,14 +1502,18 @@ fn run_node_operation_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
 
     // Test: all nodes have valid NodeId (kind matches payload)
     let start = Instant::now();
-    let all_consistent = scenario.nodes.iter().all(|n| n.id.kind() == n.payload.kind());
+    let all_consistent = scenario
+        .nodes
+        .iter()
+        .all(|n| n.id.kind() == n.payload.kind());
     run.add(BenchResult {
         category: "node_operations".into(),
         test_name: "node_id_payload_consistency".into(),
         persona: persona.clone(),
         passed: all_consistent,
         duration_us: start.elapsed().as_micros() as f64,
-        metric_name: None, metric_value: None,
+        metric_name: None,
+        metric_value: None,
         details: None,
     });
 
@@ -1132,7 +1530,13 @@ fn run_node_operation_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         passed: all_bounded,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("max_relevance".into()),
-        metric_value: Some(scenario.nodes.iter().map(|n| n.attrs.relevance_score()).fold(0.0f64, f64::max)),
+        metric_value: Some(
+            scenario
+                .nodes
+                .iter()
+                .map(|n| n.attrs.relevance_score())
+                .fold(0.0f64, f64::max),
+        ),
         details: None,
     });
 
@@ -1148,7 +1552,9 @@ fn run_node_operation_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("persistent_ratio".into()),
         metric_value: Some(persistent_count as f64 / scenario.nodes.len() as f64),
-        details: Some(format!("persistent={persistent_count}, transient={transient_count}")),
+        details: Some(format!(
+            "persistent={persistent_count}, transient={transient_count}"
+        )),
     });
 }
 
@@ -1170,19 +1576,26 @@ fn run_belief_revision_tests(run: &mut BenchRun) {
     run.add(BenchResult {
         category: "belief_revision".into(),
         test_name: "positive_evidence_convergence".into(),
-        persona: None, passed: converged,
+        persona: None,
+        passed: converged,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("final_probability".into()),
         metric_value: Some(belief.probability()),
-        details: Some(format!("log_odds={:.3}, evidence_count={}", belief.log_odds, belief.evidence_trail.len())),
+        details: Some(format!(
+            "log_odds={:.3}, evidence_count={}",
+            belief.log_odds,
+            belief.evidence_trail.len()
+        )),
     });
 
     // Test: conflicting evidence prevents convergence
     let start = Instant::now();
     let mut belief2 = BeliefPayload {
         proposition: "Contested claim".into(),
-        log_odds: 0.0, domain: "test".into(),
-        evidence_trail: vec![], user_confirmed: false,
+        log_odds: 0.0,
+        domain: "test".into(),
+        evidence_trail: vec![],
+        user_confirmed: false,
     };
     for i in 0..10 {
         let weight = if i % 2 == 0 { 0.5 } else { -0.5 };
@@ -1192,7 +1605,8 @@ fn run_belief_revision_tests(run: &mut BenchRun) {
     run.add(BenchResult {
         category: "belief_revision".into(),
         test_name: "conflicting_evidence_uncertainty".into(),
-        persona: None, passed: stays_uncertain,
+        persona: None,
+        passed: stays_uncertain,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("final_probability".into()),
         metric_value: Some(belief2.probability()),
@@ -1202,12 +1616,18 @@ fn run_belief_revision_tests(run: &mut BenchRun) {
     // Test: reliability scaling
     let start = Instant::now();
     let mut high_rel = BeliefPayload {
-        proposition: "A".into(), log_odds: 0.0, domain: "test".into(),
-        evidence_trail: vec![], user_confirmed: false,
+        proposition: "A".into(),
+        log_odds: 0.0,
+        domain: "test".into(),
+        evidence_trail: vec![],
+        user_confirmed: false,
     };
     let mut low_rel = BeliefPayload {
-        proposition: "B".into(), log_odds: 0.0, domain: "test".into(),
-        evidence_trail: vec![], user_confirmed: false,
+        proposition: "B".into(),
+        log_odds: 0.0,
+        domain: "test".into(),
+        evidence_trail: vec![],
+        user_confirmed: false,
     };
     high_rel.update(1.0, 0.95, "reliable", 100.0);
     low_rel.update(1.0, 0.3, "unreliable", 100.0);
@@ -1215,7 +1635,8 @@ fn run_belief_revision_tests(run: &mut BenchRun) {
     run.add(BenchResult {
         category: "belief_revision".into(),
         test_name: "reliability_scaling".into(),
-        persona: None, passed: rel_correct,
+        persona: None,
+        passed: rel_correct,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("reliability_gap".into()),
         metric_value: Some(high_rel.probability() - low_rel.probability()),
@@ -1224,16 +1645,19 @@ fn run_belief_revision_tests(run: &mut BenchRun) {
 
     // Test: provenance reliability ordering
     let start = Instant::now();
-    let ordering_correct =
-        Provenance::Told.reliability_prior() > Provenance::Observed.reliability_prior()
+    let ordering_correct = Provenance::Told.reliability_prior()
+        > Provenance::Observed.reliability_prior()
         && Provenance::Observed.reliability_prior() > Provenance::Inferred.reliability_prior()
         && Provenance::Inferred.reliability_prior() > Provenance::SystemDefault.reliability_prior();
     run.add(BenchResult {
         category: "belief_revision".into(),
         test_name: "provenance_ordering".into(),
-        persona: None, passed: ordering_correct,
+        persona: None,
+        passed: ordering_correct,
         duration_us: start.elapsed().as_micros() as f64,
-        metric_name: None, metric_value: None, details: None,
+        metric_name: None,
+        metric_value: None,
+        details: None,
     });
 }
 
@@ -1241,16 +1665,21 @@ fn run_activation_dynamics_tests(run: &mut BenchRun) {
     // Test: activation decay over time
     let start = Instant::now();
     let mut attrs = CognitiveAttrs {
-        activation: 1.0, novelty: 1.0, persistence: 0.5,
+        activation: 1.0,
+        novelty: 1.0,
+        persistence: 0.5,
         ..CognitiveAttrs::default_for(NodeKind::Belief)
     };
     attrs.decay(600.0); // 10 minutes
-    let decayed_correctly = attrs.activation < 1.0 && attrs.activation > 0.0
-        && attrs.novelty < 1.0 && attrs.novelty > 0.0;
+    let decayed_correctly = attrs.activation < 1.0
+        && attrs.activation > 0.0
+        && attrs.novelty < 1.0
+        && attrs.novelty > 0.0;
     run.add(BenchResult {
         category: "activation_dynamics".into(),
         test_name: "decay_10min".into(),
-        persona: None, passed: decayed_correctly,
+        persona: None,
+        passed: decayed_correctly,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("activation_after_10min".into()),
         metric_value: Some(attrs.activation),
@@ -1259,30 +1688,46 @@ fn run_activation_dynamics_tests(run: &mut BenchRun) {
 
     // Test: high persistence resists decay
     let start = Instant::now();
-    let mut high_p = CognitiveAttrs { activation: 1.0, persistence: 0.95, ..Default::default() };
-    let mut low_p = CognitiveAttrs { activation: 1.0, persistence: 0.05, ..Default::default() };
+    let mut high_p = CognitiveAttrs {
+        activation: 1.0,
+        persistence: 0.95,
+        ..Default::default()
+    };
+    let mut low_p = CognitiveAttrs {
+        activation: 1.0,
+        persistence: 0.05,
+        ..Default::default()
+    };
     high_p.decay(600.0);
     low_p.decay(600.0);
     let persistence_works = high_p.activation > low_p.activation;
     run.add(BenchResult {
         category: "activation_dynamics".into(),
         test_name: "persistence_resistance".into(),
-        persona: None, passed: persistence_works,
+        persona: None,
+        passed: persistence_works,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("high_low_ratio".into()),
         metric_value: Some(high_p.activation / low_p.activation.max(1e-10)),
-        details: Some(format!("high={:.4}, low={:.4}", high_p.activation, low_p.activation)),
+        details: Some(format!(
+            "high={:.4}, low={:.4}",
+            high_p.activation, low_p.activation
+        )),
     });
 
     // Test: touch boosts activation
     let start = Instant::now();
-    let mut attrs2 = CognitiveAttrs { activation: 0.3, ..Default::default() };
+    let mut attrs2 = CognitiveAttrs {
+        activation: 0.3,
+        ..Default::default()
+    };
     attrs2.touch(0.5);
     let boosted = attrs2.activation > 0.7;
     run.add(BenchResult {
         category: "activation_dynamics".into(),
         test_name: "touch_boost".into(),
-        persona: None, passed: boosted,
+        persona: None,
+        passed: boosted,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("activation_after_touch".into()),
         metric_value: Some(attrs2.activation),
@@ -1291,13 +1736,17 @@ fn run_activation_dynamics_tests(run: &mut BenchRun) {
 
     // Test: activation clamped at 1.0
     let start = Instant::now();
-    let mut attrs3 = CognitiveAttrs { activation: 0.9, ..Default::default() };
+    let mut attrs3 = CognitiveAttrs {
+        activation: 0.9,
+        ..Default::default()
+    };
     attrs3.touch(0.5);
     let clamped = attrs3.activation <= 1.0;
     run.add(BenchResult {
         category: "activation_dynamics".into(),
         test_name: "activation_clamp".into(),
-        persona: None, passed: clamped,
+        persona: None,
+        passed: clamped,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("clamped_activation".into()),
         metric_value: Some(attrs3.activation),
@@ -1307,7 +1756,9 @@ fn run_activation_dynamics_tests(run: &mut BenchRun) {
     // Test: novelty decays faster than activation
     let start = Instant::now();
     let mut attrs4 = CognitiveAttrs {
-        activation: 1.0, novelty: 1.0, persistence: 0.5,
+        activation: 1.0,
+        novelty: 1.0,
+        persistence: 0.5,
         ..Default::default()
     };
     attrs4.decay(3600.0); // 1 hour
@@ -1315,11 +1766,15 @@ fn run_activation_dynamics_tests(run: &mut BenchRun) {
     run.add(BenchResult {
         category: "activation_dynamics".into(),
         test_name: "novelty_decays_faster".into(),
-        persona: None, passed: novelty_faster,
+        persona: None,
+        passed: novelty_faster,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("novelty_activation_ratio".into()),
         metric_value: Some(attrs4.novelty / attrs4.activation.max(1e-10)),
-        details: Some(format!("activation={:.4}, novelty={:.4}", attrs4.activation, attrs4.novelty)),
+        details: Some(format!(
+            "activation={:.4}, novelty={:.4}",
+            attrs4.activation, attrs4.novelty
+        )),
     });
 }
 
@@ -1328,11 +1783,15 @@ fn run_edge_semantics_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
 
     // Test: all edges have valid weight range
     let start = Instant::now();
-    let all_valid = scenario.edges.iter().all(|e| e.weight >= -1.0 && e.weight <= 1.0);
+    let all_valid = scenario
+        .edges
+        .iter()
+        .all(|e| e.weight >= -1.0 && e.weight <= 1.0);
     run.add(BenchResult {
         category: "edge_semantics".into(),
         test_name: "edge_weight_range".into(),
-        persona: persona.clone(), passed: all_valid,
+        persona: persona.clone(),
+        passed: all_valid,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("edge_count".into()),
         metric_value: Some(scenario.edges.len() as f64),
@@ -1341,15 +1800,20 @@ fn run_edge_semantics_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
 
     // Test: inhibitory edges have negative transfer
     let start = Instant::now();
-    let inhibitory_correct = scenario.edges.iter()
+    let inhibitory_correct = scenario
+        .edges
+        .iter()
         .filter(|e| e.kind.is_inhibitory())
         .all(|e| e.effective_activation_transfer() <= 0.0);
     run.add(BenchResult {
         category: "edge_semantics".into(),
         test_name: "inhibitory_transfer_sign".into(),
-        persona: persona.clone(), passed: inhibitory_correct,
+        persona: persona.clone(),
+        passed: inhibitory_correct,
         duration_us: start.elapsed().as_micros() as f64,
-        metric_name: None, metric_value: None, details: None,
+        metric_name: None,
+        metric_value: None,
+        details: None,
     });
 
     // Test: edge confirmation increases confidence
@@ -1364,7 +1828,8 @@ fn run_edge_semantics_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         run.add(BenchResult {
             category: "edge_semantics".into(),
             test_name: "edge_confirm_boosts_confidence".into(),
-            persona: persona.clone(), passed: increased,
+            persona: persona.clone(),
+            passed: increased,
             duration_us: start.elapsed().as_micros() as f64,
             metric_name: Some("confidence_delta".into()),
             metric_value: Some(e.confidence - before),
@@ -1400,7 +1865,8 @@ fn run_allocator_tests(run: &mut BenchRun) {
     run.add(BenchResult {
         category: "allocator".into(),
         test_name: "alloc_throughput_100k".into(),
-        persona: None, passed: throughput > 1_000_000.0, // >1M allocs/sec
+        persona: None,
+        passed: throughput > 1_000_000.0, // >1M allocs/sec
         duration_us: elapsed_us,
         metric_name: Some("allocs_per_sec".into()),
         metric_value: Some(throughput),
@@ -1410,10 +1876,15 @@ fn run_allocator_tests(run: &mut BenchRun) {
     // Test: high-water-mark persistence roundtrip
     let start = Instant::now();
     let mut alloc1 = NodeIdAllocator::new();
-    for _ in 0..50 { alloc1.alloc(NodeKind::Goal); }
-    for _ in 0..30 { alloc1.alloc(NodeKind::Task); }
+    for _ in 0..50 {
+        alloc1.alloc(NodeKind::Goal);
+    }
+    for _ in 0..30 {
+        alloc1.alloc(NodeKind::Task);
+    }
 
-    let marks: Vec<(NodeKind, u32)> = NodeKind::ALL.iter()
+    let marks: Vec<(NodeKind, u32)> = NodeKind::ALL
+        .iter()
         .map(|&k| (k, alloc1.high_water_mark(k)))
         .collect();
 
@@ -1424,10 +1895,16 @@ fn run_allocator_tests(run: &mut BenchRun) {
     run.add(BenchResult {
         category: "allocator".into(),
         test_name: "hwm_roundtrip".into(),
-        persona: None, passed: restored_correctly,
+        persona: None,
+        passed: restored_correctly,
         duration_us: start.elapsed().as_micros() as f64,
-        metric_name: None, metric_value: None,
-        details: Some(format!("goal_seq={}, task_seq={}", next_goal.seq(), next_task.seq())),
+        metric_name: None,
+        metric_value: None,
+        details: Some(format!(
+            "goal_seq={}, task_seq={}",
+            next_goal.seq(),
+            next_task.seq()
+        )),
     });
 }
 
@@ -1451,11 +1928,16 @@ fn run_serialization_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     run.add(BenchResult {
         category: "serialization".into(),
         test_name: "payload_json_roundtrip".into(),
-        persona: persona.clone(), passed: all_roundtrip,
+        persona: persona.clone(),
+        passed: all_roundtrip,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("nodes_tested".into()),
         metric_value: Some(scenario.nodes.len() as f64),
-        details: if fail_details.is_empty() { None } else { Some(fail_details.join(", ")) },
+        details: if fail_details.is_empty() {
+            None
+        } else {
+            Some(fail_details.join(", "))
+        },
     });
 
     // Test: NodeId raw roundtrip
@@ -1471,7 +1953,9 @@ fn run_serialization_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         persona,
         passed: id_roundtrip,
         duration_us: start.elapsed().as_micros() as f64,
-        metric_name: None, metric_value: None, details: None,
+        metric_name: None,
+        metric_value: None,
+        details: None,
     });
 }
 
@@ -1483,7 +1967,8 @@ fn run_composite_tests(run: &mut BenchRun, scenarios: &[PersonaScenario]) {
     run.add(BenchResult {
         category: "composite".into(),
         test_name: "total_cognitive_elements".into(),
-        persona: None, passed: total_nodes >= 30 && total_edges >= 15,
+        persona: None,
+        passed: total_nodes >= 30 && total_edges >= 15,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("total_nodes".into()),
         metric_value: Some(total_nodes as f64),
@@ -1494,13 +1979,16 @@ fn run_composite_tests(run: &mut BenchRun, scenarios: &[PersonaScenario]) {
     let start = Instant::now();
     let all_have_goals = scenarios.iter().all(|s| {
         s.nodes.iter().any(|n| n.kind() == NodeKind::Goal)
-            || s.nodes.iter().any(|n| matches!(n.kind(), NodeKind::Opportunity | NodeKind::Need))
+            || s.nodes
+                .iter()
+                .any(|n| matches!(n.kind(), NodeKind::Opportunity | NodeKind::Need))
     });
     let all_have_edges = scenarios.iter().all(|s| !s.edges.is_empty());
     run.add(BenchResult {
         category: "composite".into(),
         test_name: "persona_completeness".into(),
-        persona: None, passed: all_have_goals && all_have_edges,
+        persona: None,
+        passed: all_have_goals && all_have_edges,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("personas_tested".into()),
         metric_value: Some(scenarios.len() as f64),
@@ -1520,24 +2008,30 @@ fn run_composite_tests(run: &mut BenchRun, scenarios: &[PersonaScenario]) {
     run.add(BenchResult {
         category: "composite".into(),
         test_name: "no_node_id_collisions".into(),
-        persona: None, passed: no_collisions,
+        persona: None,
+        passed: no_collisions,
         duration_us: start.elapsed().as_micros() as f64,
-        metric_name: None, metric_value: None, details: None,
+        metric_name: None,
+        metric_value: None,
+        details: None,
     });
 
     // Test: memories seeded in underlying DBs
     let start = Instant::now();
     let mut total_memories = 0i64;
     for scenario in scenarios {
-        let count: i64 = scenario.db.conn().query_row(
-            "SELECT COUNT(*) FROM memories", [], |row| row.get(0)
-        ).unwrap_or(0);
+        let count: i64 = scenario
+            .db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
+            .unwrap_or(0);
         total_memories += count;
     }
     run.add(BenchResult {
         category: "composite".into(),
         test_name: "underlying_memory_count".into(),
-        persona: None, passed: total_memories >= 50,
+        persona: None,
+        passed: total_memories >= 50,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("total_memories".into()),
         metric_value: Some(total_memories as f64),
@@ -1568,7 +2062,8 @@ fn run_working_set_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     run.add(BenchResult {
         category: "working_set".into(),
         test_name: "populate_from_persona".into(),
-        persona: persona.clone(), passed: populated,
+        persona: persona.clone(),
+        passed: populated,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("node_count".into()),
         metric_value: Some(ws_node_count as f64),
@@ -1587,7 +2082,8 @@ fn run_working_set_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     run.add(BenchResult {
         category: "working_set".into(),
         test_name: "spreading_activation".into(),
-        persona: persona.clone(), passed: spread_ok,
+        persona: persona.clone(),
+        passed: spread_ok,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("nodes_activated".into()),
         metric_value: Some(ws.last_spread_deltas().len() as f64),
@@ -1597,11 +2093,14 @@ fn run_working_set_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     // Test: top_k returns nodes in descending activation order
     let start = Instant::now();
     let top5 = ws.top_k(5);
-    let sorted = top5.windows(2).all(|w| w[0].attrs.activation >= w[1].attrs.activation);
+    let sorted = top5
+        .windows(2)
+        .all(|w| w[0].attrs.activation >= w[1].attrs.activation);
     run.add(BenchResult {
         category: "working_set".into(),
         test_name: "top_k_ordering".into(),
-        persona: persona.clone(), passed: sorted && !top5.is_empty(),
+        persona: persona.clone(),
+        passed: sorted && !top5.is_empty(),
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("top_k_count".into()),
         metric_value: Some(top5.len() as f64),
@@ -1618,7 +2117,8 @@ fn run_working_set_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     run.add(BenchResult {
         category: "working_set".into(),
         test_name: "persist_to_db".into(),
-        persona: persona.clone(), passed: persist_ok,
+        persona: persona.clone(),
+        passed: persist_ok,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("nodes_persisted".into()),
         metric_value: save_result.as_ref().map(|r| r.nodes_inserted as f64).ok(),
@@ -1635,7 +2135,8 @@ fn run_working_set_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     run.add(BenchResult {
         category: "working_set".into(),
         test_name: "hydrate_from_db".into(),
-        persona: persona.clone(), passed: hydrate_ok,
+        persona: persona.clone(),
+        passed: hydrate_ok,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("hydrated_nodes".into()),
         metric_value: hydrate_result.as_ref().map(|h| h.len() as f64).ok(),
@@ -1652,7 +2153,8 @@ fn run_working_set_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     run.add(BenchResult {
         category: "working_set".into(),
         test_name: "graph_stats_consistency".into(),
-        persona: persona.clone(), passed: stats_ok,
+        persona: persona.clone(),
+        passed: stats_ok,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("persisted_nodes".into()),
         metric_value: stats_result.as_ref().map(|s| s.total_nodes as f64).ok(),
@@ -1680,22 +2182,29 @@ fn run_working_set_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     run.add(BenchResult {
         category: "working_set".into(),
         test_name: "allocator_hwm_roundtrip".into(),
-        persona: persona.clone(), passed: hwm_ok,
+        persona: persona.clone(),
+        passed: hwm_ok,
         duration_us: start.elapsed().as_micros() as f64,
-        metric_name: None, metric_value: None, details: None,
+        metric_name: None,
+        metric_value: None,
+        details: None,
     });
 
     // Test: Query cognitive nodes by kind matches WorkingSet
     let start = Instant::now();
     let entity_count_ws = ws.nodes_of_kind(NodeKind::Entity).len();
-    let entity_count_db = scenario.db.count_cognitive_nodes(Some(NodeKind::Entity)).unwrap_or(0);
+    let entity_count_db = scenario
+        .db
+        .count_cognitive_nodes(Some(NodeKind::Entity))
+        .unwrap_or(0);
     // DB count may be <= WS count because transient nodes aren't persisted
     // but entity nodes ARE persistent, so counts should match (or DB ≥ WS for re-persisted)
     let query_ok = entity_count_db > 0 || entity_count_ws == 0;
     run.add(BenchResult {
         category: "working_set".into(),
         test_name: "query_kind_consistency".into(),
-        persona: persona.clone(), passed: query_ok,
+        persona: persona.clone(),
+        passed: query_ok,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("entity_ws".into()),
         metric_value: Some(entity_count_ws as f64),
@@ -1722,10 +2231,8 @@ fn run_belief_engine_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     // Test 1: Evidence assertion on persona beliefs
     let start = Instant::now();
     let config = BeliefRevisionConfig::default();
-    let mut updated_beliefs: Vec<CognitiveNode> = belief_nodes
-        .iter()
-        .map(|n| (*n).clone())
-        .collect();
+    let mut updated_beliefs: Vec<CognitiveNode> =
+        belief_nodes.iter().map(|n| (*n).clone()).collect();
 
     let mut assertion_count = 0;
     for node in updated_beliefs.iter_mut() {
@@ -1745,7 +2252,8 @@ fn run_belief_engine_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     run.add(BenchResult {
         category: "belief_engine".into(),
         test_name: "evidence_assertion".into(),
-        persona: persona.clone(), passed,
+        persona: persona.clone(),
+        passed,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("assertions_applied".into()),
         metric_value: Some(assertion_count as f64),
@@ -1763,7 +2271,8 @@ fn run_belief_engine_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     run.add(BenchResult {
         category: "belief_engine".into(),
         test_name: "query_all_beliefs".into(),
-        persona: persona.clone(), passed: query_passed,
+        persona: persona.clone(),
+        passed: query_passed,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("beliefs_found".into()),
         metric_value: Some(query_result.len() as f64),
@@ -1778,7 +2287,8 @@ fn run_belief_engine_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     run.add(BenchResult {
         category: "belief_engine".into(),
         test_name: "belief_inventory".into(),
-        persona: persona.clone(), passed: inv_passed,
+        persona: persona.clone(),
+        passed: inv_passed,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("domains".into()),
         metric_value: Some(inv.by_domain.len() as f64),
@@ -1803,7 +2313,8 @@ fn run_belief_engine_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     run.add(BenchResult {
         category: "belief_engine".into(),
         test_name: "explain_belief".into(),
-        persona: persona.clone(), passed: explain_passed,
+        persona: persona.clone(),
+        passed: explain_passed,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("has_beliefs".into()),
         metric_value: Some(belief_count as f64),
@@ -1812,18 +2323,16 @@ fn run_belief_engine_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
 
     // Test 5: Contradiction scanning
     let start = Instant::now();
-    let node_map: HashMap<NodeId, &CognitiveNode> = scenario
-        .nodes
-        .iter()
-        .map(|n| (n.id, n))
-        .collect();
+    let node_map: HashMap<NodeId, &CognitiveNode> =
+        scenario.nodes.iter().map(|n| (n.id, n)).collect();
     let contra_config = ContradictionConfig::default();
     let scan_result = scan_contradictions(&node_map, &scenario.edges, &contra_config, now_secs());
     // Contradiction detection should run without panic — success means passed
     run.add(BenchResult {
         category: "belief_engine".into(),
         test_name: "contradiction_scan".into(),
-        persona: persona.clone(), passed: true,
+        persona: persona.clone(),
+        passed: true,
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("contradictions_found".into()),
         metric_value: Some(scan_result.conflicts.len() as f64),
@@ -1910,8 +2419,10 @@ mod tests {
             // Every node's NodeId kind should match its payload kind
             for node in &scenario.nodes {
                 assert_eq!(
-                    node.id.kind(), node.payload.kind(),
-                    "{name}: NodeId kind mismatch for {}", node.label
+                    node.id.kind(),
+                    node.payload.kind(),
+                    "{name}: NodeId kind mismatch for {}",
+                    node.label
                 );
             }
         }
@@ -1925,7 +2436,8 @@ mod tests {
         run.add(BenchResult {
             category: "test".into(),
             test_name: "dummy".into(),
-            persona: None, passed: true,
+            persona: None,
+            passed: true,
             duration_us: 42.0,
             metric_name: Some("speed".into()),
             metric_value: Some(100.0),
@@ -1934,9 +2446,11 @@ mod tests {
         run.add(BenchResult {
             category: "test".into(),
             test_name: "failing".into(),
-            persona: None, passed: false,
+            persona: None,
+            passed: false,
             duration_us: 10.0,
-            metric_name: None, metric_value: None,
+            metric_name: None,
+            metric_value: None,
             details: Some("intentional failure".into()),
         });
 
@@ -1955,9 +2469,13 @@ mod tests {
         // Run 1: baseline
         let mut run1 = tracker.start_run("baseline", None).unwrap();
         run1.add(BenchResult {
-            category: "perf".into(), test_name: "latency".into(),
-            persona: None, passed: true, duration_us: 100.0,
-            metric_name: Some("ms".into()), metric_value: Some(10.0),
+            category: "perf".into(),
+            test_name: "latency".into(),
+            persona: None,
+            passed: true,
+            duration_us: 100.0,
+            metric_name: Some("ms".into()),
+            metric_value: Some(10.0),
             details: None,
         });
         tracker.finalize_run(&run1).unwrap();
@@ -1965,9 +2483,13 @@ mod tests {
         // Run 2: 50% regression
         let mut run2 = tracker.start_run("after change", None).unwrap();
         run2.add(BenchResult {
-            category: "perf".into(), test_name: "latency".into(),
-            persona: None, passed: true, duration_us: 150.0,
-            metric_name: Some("ms".into()), metric_value: Some(15.0),
+            category: "perf".into(),
+            test_name: "latency".into(),
+            persona: None,
+            passed: true,
+            duration_us: 150.0,
+            metric_name: Some("ms".into()),
+            metric_value: Some(15.0),
             details: None,
         });
         tracker.finalize_run(&run2).unwrap();
@@ -1985,9 +2507,20 @@ mod tests {
         let pass_count = run.results.iter().filter(|r| r.passed).count();
         let fail_count = run.results.iter().filter(|r| !r.passed).count();
 
-        assert!(pass_count > 20, "Expected >20 passing tests, got {pass_count}");
-        assert_eq!(fail_count, 0, "Expected 0 failures, got {fail_count}: {:?}",
-            run.results.iter().filter(|r| !r.passed).map(|r| &r.test_name).collect::<Vec<_>>());
+        assert!(
+            pass_count > 20,
+            "Expected >20 passing tests, got {pass_count}"
+        );
+        assert_eq!(
+            fail_count,
+            0,
+            "Expected 0 failures, got {fail_count}: {:?}",
+            run.results
+                .iter()
+                .filter(|r| !r.passed)
+                .map(|r| &r.test_name)
+                .collect::<Vec<_>>()
+        );
 
         // Verify history was persisted
         let history = tracker.run_history(10).unwrap();
@@ -2007,19 +2540,28 @@ mod tests {
         let has_risk = aisha.nodes.iter().any(|n| n.kind() == NodeKind::Risk);
         let has_constraint = aisha.nodes.iter().any(|n| n.kind() == NodeKind::Constraint);
 
-        assert!(has_belief && has_goal && has_task && has_routine && has_risk && has_constraint,
-            "Aisha should have all core node types");
+        assert!(
+            has_belief && has_goal && has_task && has_routine && has_risk && has_constraint,
+            "Aisha should have all core node types"
+        );
 
         // Fellowship goal should have AdvancesGoal edges
-        let advances_count = aisha.edges.iter()
+        let advances_count = aisha
+            .edges
+            .iter()
             .filter(|e| e.kind == CognitiveEdgeKind::AdvancesGoal)
             .count();
-        assert!(advances_count >= 2, "Aisha should have >=2 AdvancesGoal edges");
+        assert!(
+            advances_count >= 2,
+            "Aisha should have >=2 AdvancesGoal edges"
+        );
 
         // Memories should be in the DB
-        let mem_count: i64 = aisha.db.conn().query_row(
-            "SELECT COUNT(*) FROM memories", [], |row| row.get(0)
-        ).unwrap();
+        let mem_count: i64 = aisha
+            .db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(mem_count, 20);
     }
 
@@ -2028,10 +2570,15 @@ mod tests {
         let priya = build_priya().unwrap();
 
         // Should have a task dependency chain: design → review → impl
-        let requires_edges: Vec<_> = priya.edges.iter()
+        let requires_edges: Vec<_> = priya
+            .edges
+            .iter()
             .filter(|e| e.kind == CognitiveEdgeKind::Requires)
             .collect();
-        assert!(requires_edges.len() >= 2, "Priya should have task dependency chain");
+        assert!(
+            requires_edges.len() >= 2,
+            "Priya should have task dependency chain"
+        );
     }
 
     #[test]
@@ -2040,10 +2587,15 @@ mod tests {
 
         // Should have at least one transient node (IntentHypothesis)
         let transient = emre.nodes.iter().filter(|n| !n.is_persistent()).count();
-        assert!(transient >= 1, "Emre should have transient intent hypothesis");
+        assert!(
+            transient >= 1,
+            "Emre should have transient intent hypothesis"
+        );
 
         // The intent should have high activation
-        let intent = emre.nodes.iter()
+        let intent = emre
+            .nodes
+            .iter()
             .find(|n| n.kind() == NodeKind::IntentHypothesis)
             .unwrap();
         assert!(intent.attrs.activation >= 0.5);
@@ -2054,7 +2606,9 @@ mod tests {
         let keiko = build_keiko().unwrap();
 
         // Should have an action schema for medication reminder
-        let action = keiko.nodes.iter()
+        let action = keiko
+            .nodes
+            .iter()
             .find(|n| n.kind() == NodeKind::ActionSchema)
             .unwrap();
 
@@ -2071,9 +2625,7 @@ mod tests {
 // ── Category 10: Intent Inference Engine ──
 
 fn run_intent_inference_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
-    use super::intent::{
-        infer_intents, IntentConfig, IntentSource,
-    };
+    use super::intent::{infer_intents, IntentConfig, IntentSource};
 
     let persona = Some(scenario.name.clone());
     let now = now_secs();
@@ -2081,11 +2633,16 @@ fn run_intent_inference_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     let all_refs: Vec<&CognitiveNode> = scenario.nodes.iter().collect();
 
     // Check if persona has any signal-source nodes
-    let has_signal_sources = scenario.nodes.iter().any(|n| matches!(
-        n.kind(),
-        NodeKind::Goal | NodeKind::Routine | NodeKind::Need
-            | NodeKind::Episode | NodeKind::Opportunity
-    ));
+    let has_signal_sources = scenario.nodes.iter().any(|n| {
+        matches!(
+            n.kind(),
+            NodeKind::Goal
+                | NodeKind::Routine
+                | NodeKind::Need
+                | NodeKind::Episode
+                | NodeKind::Opportunity
+        )
+    });
 
     // Test 1: Full inference pipeline
     let start = Instant::now();
@@ -2209,9 +2766,7 @@ fn run_intent_inference_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
 // ── Category 11: Action Schema Library + Candidate Generator ──
 
 fn run_action_schema_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
-    use super::action::{
-        builtin_schema_count, builtin_schemas, generate_candidates, ActionConfig,
-    };
+    use super::action::{builtin_schema_count, builtin_schemas, generate_candidates, ActionConfig};
     use super::intent::{infer_intents, IntentConfig};
 
     let persona = Some(scenario.name.clone());
@@ -2221,7 +2776,9 @@ fn run_action_schema_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     let start = Instant::now();
     let schemas = builtin_schemas();
     let lib_valid = schemas.len() == builtin_schema_count()
-        && schemas.iter().all(|s| !s.name.is_empty() && !s.description.is_empty());
+        && schemas
+            .iter()
+            .all(|s| !s.name.is_empty() && !s.description.is_empty());
     run.add(BenchResult {
         category: "action_schema".into(),
         test_name: "library_validity".into(),
@@ -2240,12 +2797,17 @@ fn run_action_schema_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     let intent_result = infer_intents(&all_refs, &scenario.edges, now, &intent_config);
 
     let action_config = ActionConfig::default();
-    let schema_nodes: Vec<&CognitiveNode> = scenario.nodes.iter()
+    let schema_nodes: Vec<&CognitiveNode> = scenario
+        .nodes
+        .iter()
         .filter(|n| n.kind() == NodeKind::ActionSchema)
         .collect();
 
     let result = generate_candidates(
-        &intent_result.hypotheses, &all_refs, &schema_nodes, &action_config,
+        &intent_result.hypotheses,
+        &all_refs,
+        &schema_nodes,
+        &action_config,
     );
     // Pipeline ran without error — success
     run.add(BenchResult {
@@ -2264,9 +2826,10 @@ fn run_action_schema_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
 
     // Test 3: Candidate ranking order
     let start = Instant::now();
-    let ranking_ok = result.candidates.windows(2).all(|w| {
-        w[0].relevance_score >= w[1].relevance_score
-    });
+    let ranking_ok = result
+        .candidates
+        .windows(2)
+        .all(|w| w[0].relevance_score >= w[1].relevance_score);
     run.add(BenchResult {
         category: "action_schema".into(),
         test_name: "ranking_order".into(),
@@ -2280,7 +2843,11 @@ fn run_action_schema_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
 
     // Test 4: No duplicate schema names in results
     let start = Instant::now();
-    let names: Vec<&str> = result.candidates.iter().map(|c| c.schema_name.as_str()).collect();
+    let names: Vec<&str> = result
+        .candidates
+        .iter()
+        .map(|c| c.schema_name.as_str())
+        .collect();
     let unique: std::collections::HashSet<&str> = names.iter().copied().collect();
     let no_dupes = names.len() == unique.len();
     run.add(BenchResult {
@@ -2311,11 +2878,16 @@ fn run_evaluator_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     let intent_result = infer_intents(&all_refs, &scenario.edges, now, &intent_config);
 
     let action_config = ActionConfig::default();
-    let schema_nodes: Vec<&CognitiveNode> = scenario.nodes.iter()
+    let schema_nodes: Vec<&CognitiveNode> = scenario
+        .nodes
+        .iter()
         .filter(|n| n.kind() == NodeKind::ActionSchema)
         .collect();
     let candidate_result = generate_candidates(
-        &intent_result.hypotheses, &all_refs, &schema_nodes, &action_config,
+        &intent_result.hypotheses,
+        &all_refs,
+        &schema_nodes,
+        &action_config,
     );
 
     let eval_config = EvaluatorConfig::default();
@@ -2323,7 +2895,10 @@ fn run_evaluator_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     // Test 1: Full evaluation pipeline runs without error
     let start = Instant::now();
     let result = evaluate_candidates(
-        &candidate_result.candidates, &all_refs, &scenario.edges, &eval_config,
+        &candidate_result.candidates,
+        &all_refs,
+        &scenario.edges,
+        &eval_config,
     );
     run.add(BenchResult {
         category: "evaluator".into(),
@@ -2335,13 +2910,17 @@ fn run_evaluator_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         metric_value: Some(result.total_evaluated as f64),
         details: Some(format!(
             "returned={} filtered={}",
-            result.actions.len(), result.filtered_count,
+            result.actions.len(),
+            result.filtered_count,
         )),
     });
 
     // Test 2: Utility ranking order (descending)
     let start = Instant::now();
-    let ranking_ok = result.actions.windows(2).all(|w| w[0].utility >= w[1].utility);
+    let ranking_ok = result
+        .actions
+        .windows(2)
+        .all(|w| w[0].utility >= w[1].utility);
     run.add(BenchResult {
         category: "evaluator".into(),
         test_name: "utility_ranking".into(),
@@ -2355,9 +2934,10 @@ fn run_evaluator_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
 
     // Test 3: Confidence bounds [0.0, 1.0]
     let start = Instant::now();
-    let confidence_ok = result.actions.iter().all(|a| {
-        a.confidence >= 0.0 && a.confidence <= 1.0
-    });
+    let confidence_ok = result
+        .actions
+        .iter()
+        .all(|a| a.confidence >= 0.0 && a.confidence <= 1.0);
     run.add(BenchResult {
         category: "evaluator".into(),
         test_name: "confidence_bounds".into(),
@@ -2369,7 +2949,9 @@ fn run_evaluator_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         details: if !confidence_ok {
             Some(format!(
                 "out_of_bounds: {:?}",
-                result.actions.iter()
+                result
+                    .actions
+                    .iter()
                     .filter(|a| a.confidence < 0.0 || a.confidence > 1.0)
                     .map(|a| (a.candidate.schema_name.as_str(), a.confidence))
                     .collect::<Vec<_>>()
@@ -2381,7 +2963,10 @@ fn run_evaluator_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
 
     // Test 4: Min-utility filter respected
     let start = Instant::now();
-    let filter_ok = result.actions.iter().all(|a| a.utility >= eval_config.min_utility);
+    let filter_ok = result
+        .actions
+        .iter()
+        .all(|a| a.utility >= eval_config.min_utility);
     run.add(BenchResult {
         category: "evaluator".into(),
         test_name: "min_utility_filter".into(),
@@ -2422,7 +3007,9 @@ fn run_evaluator_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
 
     // Test 6: Abstain baseline — if present, should have zero timing penalty
     let start = Instant::now();
-    let abstain_actions: Vec<_> = result.actions.iter()
+    let abstain_actions: Vec<_> = result
+        .actions
+        .iter()
         .filter(|a| a.candidate.action_kind == ActionKind::Abstain)
         .collect();
     let abstain_ok = abstain_actions.iter().all(|a| a.timing_penalty == 0.0);
@@ -2459,16 +3046,24 @@ fn run_policy_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     let intent_result = infer_intents(&all_refs, &scenario.edges, now, &intent_config);
 
     let action_config = ActionConfig::default();
-    let schema_nodes: Vec<&CognitiveNode> = scenario.nodes.iter()
+    let schema_nodes: Vec<&CognitiveNode> = scenario
+        .nodes
+        .iter()
         .filter(|n| n.kind() == NodeKind::ActionSchema)
         .collect();
     let candidate_result = generate_candidates(
-        &intent_result.hypotheses, &all_refs, &schema_nodes, &action_config,
+        &intent_result.hypotheses,
+        &all_refs,
+        &schema_nodes,
+        &action_config,
     );
 
     let eval_config = EvaluatorConfig::default();
     let eval_result = evaluate_candidates(
-        &candidate_result.candidates, &all_refs, &scenario.edges, &eval_config,
+        &candidate_result.candidates,
+        &all_refs,
+        &scenario.edges,
+        &eval_config,
     );
 
     let policy_config = PolicyConfig::default();
@@ -2477,7 +3072,11 @@ fn run_policy_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     // Test 1: Full policy pipeline runs without error
     let start = Instant::now();
     let result = select_action(
-        &eval_result.actions, &all_refs, &policy_config, &policy_ctx, now,
+        &eval_result.actions,
+        &all_refs,
+        &policy_config,
+        &policy_ctx,
+        now,
     );
     run.add(BenchResult {
         category: "policy".into(),
@@ -2501,8 +3100,7 @@ fn run_policy_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
 
     // Test 2: All candidates accounted for in trace
     let start = Instant::now();
-    let accounted = result.trace.passed_hard_filter
-        + result.trace.rejected_candidates.len();
+    let accounted = result.trace.passed_hard_filter + result.trace.rejected_candidates.len();
     let accounting_ok = accounted == result.total_input;
     run.add(BenchResult {
         category: "policy".into(),
@@ -2515,7 +3113,8 @@ fn run_policy_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         details: if !accounting_ok {
             Some(format!(
                 "expected {} but got {} (hard={} rejected={})",
-                result.total_input, accounted,
+                result.total_input,
+                accounted,
                 result.trace.passed_hard_filter,
                 result.trace.rejected_candidates.len(),
             ))
@@ -2529,9 +3128,16 @@ fn run_policy_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     let mut quiet_ctx = PolicyContext::default();
     quiet_ctx.current_hour = 3; // 3 AM
     let quiet_result = select_action(
-        &eval_result.actions, &all_refs, &policy_config, &quiet_ctx, now,
+        &eval_result.actions,
+        &all_refs,
+        &policy_config,
+        &quiet_ctx,
+        now,
     );
-    let quiet_rejected = quiet_result.trace.rejected_candidates.iter()
+    let quiet_rejected = quiet_result
+        .trace
+        .rejected_candidates
+        .iter()
         .filter(|r| matches!(r.rejection_reason, RejectionReason::QuietHours))
         .count();
     // Informational: during quiet hours, proactive actions should be filtered
@@ -2548,7 +3154,10 @@ fn run_policy_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
 
     // Test 4: Confidence floor enforcement
     let start = Instant::now();
-    let confidence_violations = result.trace.rejected_candidates.iter()
+    let confidence_violations = result
+        .trace
+        .rejected_candidates
+        .iter()
         .filter(|r| matches!(r.rejection_reason, RejectionReason::ConfidenceFloor { .. }))
         .count();
     run.add(BenchResult {
@@ -2679,7 +3288,10 @@ fn run_suggest_pipeline_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         metric_name: Some("stage_sum_us".into()),
         metric_value: Some(stage_sum as f64),
         details: if !metrics_ok {
-            Some(format!("stage_sum={} > total={}", stage_sum, resp.metrics.total_us))
+            Some(format!(
+                "stage_sum={} > total={}",
+                stage_sum, resp.metrics.total_us
+            ))
         } else {
             None
         },
@@ -2687,9 +3299,10 @@ fn run_suggest_pipeline_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
 
     // Test 5: Alternatives ordering
     let start = Instant::now();
-    let alts_ordered = resp.alternatives.windows(2).all(|w| {
-        w[0].utility >= w[1].utility
-    });
+    let alts_ordered = resp
+        .alternatives
+        .windows(2)
+        .all(|w| w[0].utility >= w[1].utility);
     run.add(BenchResult {
         category: "suggest_pipeline".into(),
         test_name: "alternatives_ordering".into(),
@@ -2705,9 +3318,7 @@ fn run_suggest_pipeline_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
 // ── Category 15: Agenda / Open Loops Engine ──
 
 fn run_agenda_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
-    use super::agenda::{
-        Agenda, AgendaConfig, AgendaKind, UrgencyFn, detect_open_loops,
-    };
+    use super::agenda::{detect_open_loops, Agenda, AgendaConfig, AgendaKind, UrgencyFn};
 
     let persona = Some(scenario.name.clone());
     let now = now_secs();
@@ -2734,9 +3345,13 @@ fn run_agenda_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     let mut agenda = Agenda::new();
     for detected in &scan.new_loops {
         agenda.add_item_at(
-            detected.node_id, detected.kind,
+            detected.node_id,
+            detected.kind,
             detected.suggested_urgency.clone(),
-            None, detected.description.clone(), now, &config,
+            None,
+            detected.description.clone(),
+            now,
+            &config,
         );
     }
     let tick_result = agenda.tick(now, &config);
@@ -2759,9 +3374,9 @@ fn run_agenda_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     // Test 3: Urgency ordering
     let start = Instant::now();
     let active = agenda.get_active(now, 50);
-    let ordered = active.windows(2).all(|w| {
-        w[0].current_urgency(now) >= w[1].current_urgency(now)
-    });
+    let ordered = active
+        .windows(2)
+        .all(|w| w[0].current_urgency(now) >= w[1].current_urgency(now));
     run.add(BenchResult {
         category: "agenda".into(),
         test_name: "urgency_ordering".into(),
@@ -2794,30 +3409,37 @@ fn run_agenda_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
 
 fn run_temporal_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     use super::temporal::{
-        self, RecencyConfig, PeriodicityConfig, BurstConfig, EwmaTracker,
-        DeadlineUrgencyConfig, SeasonalHistogram, TemporalRelevanceConfig,
-        LabeledEvent, MotifConfig,
+        self, BurstConfig, DeadlineUrgencyConfig, EwmaTracker, LabeledEvent, MotifConfig,
+        PeriodicityConfig, RecencyConfig, SeasonalHistogram, TemporalRelevanceConfig,
     };
 
     let persona = Some(scenario.name.clone());
     let now = now_secs();
 
     // Extract episode timestamps for temporal analysis
-    let episode_timestamps: Vec<f64> = scenario.nodes.iter().filter_map(|n| {
-        if let NodePayload::Episode(ep) = &n.payload {
-            Some(ep.occurred_at)
-        } else {
-            None
-        }
-    }).collect();
+    let episode_timestamps: Vec<f64> = scenario
+        .nodes
+        .iter()
+        .filter_map(|n| {
+            if let NodePayload::Episode(ep) = &n.payload {
+                Some(ep.occurred_at)
+            } else {
+                None
+            }
+        })
+        .collect();
 
     // Test 1: Recency-weighted relevance scoring
     let start = Instant::now();
     let config = RecencyConfig::default();
-    let mut recency_scores: Vec<f64> = scenario.nodes.iter().map(|n| {
-        let last = n.attrs.last_updated_ms as f64 / 1000.0;
-        temporal::recency_relevance(last, now, &config)
-    }).collect();
+    let mut recency_scores: Vec<f64> = scenario
+        .nodes
+        .iter()
+        .map(|n| {
+            let last = n.attrs.last_updated_ms as f64 / 1000.0;
+            temporal::recency_relevance(last, now, &config)
+        })
+        .collect();
     recency_scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
     let all_bounded = recency_scores.iter().all(|&s| s >= 0.0 && s <= 1.0);
     run.add(BenchResult {
@@ -2874,7 +3496,8 @@ fn run_temporal_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         metric_value: Some(anomaly_count as f64),
         details: Some(format!(
             "observations={} std_dev={:.2}",
-            tracker.count, tracker.std_dev()
+            tracker.count,
+            tracker.std_dev()
         )),
     });
 
@@ -2882,13 +3505,15 @@ fn run_temporal_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     let start = Instant::now();
     let dl_config = DeadlineUrgencyConfig::default();
     // Collect deadlines from tasks and goals
-    let deadlines: Vec<f64> = scenario.nodes.iter().filter_map(|n| {
-        match &n.payload {
+    let deadlines: Vec<f64> = scenario
+        .nodes
+        .iter()
+        .filter_map(|n| match &n.payload {
             NodePayload::Task(t) => t.deadline,
             NodePayload::Goal(g) => g.deadline,
             _ => None,
-        }
-    }).collect();
+        })
+        .collect();
     let mut monotonic = true;
     for &dl in &deadlines {
         let mut prev = 0.0_f64;
@@ -2931,23 +3556,33 @@ fn run_temporal_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         metric_value: Some(entropy),
         details: Some(format!(
             "total={} peak={:?} top3_concentration={:.2}",
-            hist.total, hist.peak(), concentration
+            hist.total,
+            hist.peak(),
+            concentration
         )),
     });
 
     // Test 6: Temporal motif mining
     let start = Instant::now();
-    let labeled_events: Vec<LabeledEvent> = scenario.nodes.iter().filter_map(|n| {
-        if let NodePayload::Episode(ep) = &n.payload {
-            Some(LabeledEvent {
-                label: ep.summary.split_whitespace().next()
-                    .unwrap_or("unknown").to_lowercase(),
-                timestamp: ep.occurred_at,
-            })
-        } else {
-            None
-        }
-    }).collect();
+    let labeled_events: Vec<LabeledEvent> = scenario
+        .nodes
+        .iter()
+        .filter_map(|n| {
+            if let NodePayload::Episode(ep) = &n.payload {
+                Some(LabeledEvent {
+                    label: ep
+                        .summary
+                        .split_whitespace()
+                        .next()
+                        .unwrap_or("unknown")
+                        .to_lowercase(),
+                    timestamp: ep.occurred_at,
+                })
+            } else {
+                None
+            }
+        })
+        .collect();
     let motif_config = MotifConfig {
         max_gap_secs: 7200.0,
         min_length: 2,
@@ -2966,7 +3601,9 @@ fn run_temporal_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         details: Some(format!(
             "events={} top_motif={}",
             labeled_events.len(),
-            motifs.first().map(|m| format!("{:?}(x{})", m.sequence, m.occurrences))
+            motifs
+                .first()
+                .map(|m| format!("{:?}(x{})", m.sequence, m.occurrences))
                 .unwrap_or_else(|| "none".to_string()),
         )),
     });
@@ -2984,9 +3621,16 @@ fn run_hawkes_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     let mut episode_groups: HashMap<String, Vec<f64>> = HashMap::new();
     for n in &scenario.nodes {
         if let NodePayload::Episode(ep) = &n.payload {
-            let label = ep.summary.split_whitespace().next()
-                .unwrap_or("unknown").to_lowercase();
-            episode_groups.entry(label).or_default().push(ep.occurred_at);
+            let label = ep
+                .summary
+                .split_whitespace()
+                .next()
+                .unwrap_or("unknown")
+                .to_lowercase();
+            episode_groups
+                .entry(label)
+                .or_default()
+                .push(ep.occurred_at);
         }
     }
 
@@ -3000,7 +3644,10 @@ fn run_hawkes_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
             total_models += 1;
         }
     }
-    let all_stable = registry.models.values().all(|m| m.params.branching_ratio() < 1.0);
+    let all_stable = registry
+        .models
+        .values()
+        .all(|m| m.params.branching_ratio() < 1.0);
     run.add(BenchResult {
         category: "hawkes".into(),
         test_name: "model_training".into(),
@@ -3084,9 +3731,9 @@ fn run_hawkes_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     // Test 5: Anticipation check
     let start = Instant::now();
     let anticipated = registry.anticipate_all(now);
-    let anticipation_valid = anticipated.iter().all(|ae| {
-        ae.prediction.confidence >= 0.0 && ae.prediction.confidence <= 1.0
-    });
+    let anticipation_valid = anticipated
+        .iter()
+        .all(|ae| ae.prediction.confidence >= 0.0 && ae.prediction.confidence <= 1.0);
     run.add(BenchResult {
         category: "hawkes".into(),
         test_name: "anticipation".into(),
@@ -3097,7 +3744,9 @@ fn run_hawkes_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         metric_value: Some(anticipated.len() as f64),
         details: Some(format!(
             "top={}",
-            anticipated.first().map(|a| format!("{}(c={:.2})", a.label, a.prediction.confidence))
+            anticipated
+                .first()
+                .map(|a| format!("{}(c={:.2})", a.label, a.prediction.confidence))
                 .unwrap_or_else(|| "none".to_string()),
         )),
     });
@@ -3107,9 +3756,8 @@ fn run_hawkes_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
 
 fn run_receptivity_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     use super::receptivity::{
-        self, ActivityState, ContextSnapshot, NotificationMode,
-        ReceptivityModel, SuggestionOutcome, QuietHoursConfig,
-        estimate_interruption_cost,
+        self, estimate_interruption_cost, ActivityState, ContextSnapshot, NotificationMode,
+        QuietHoursConfig, ReceptivityModel, SuggestionOutcome,
     };
 
     let persona = Some(scenario.name.clone());
@@ -3121,9 +3769,12 @@ fn run_receptivity_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     let mut model = ReceptivityModel::new();
     model.quiet_hours.enabled = false; // Disable for benchmark determinism
     let activities = [
-        ActivityState::Idle, ActivityState::JustReturned,
-        ActivityState::Browsing, ActivityState::Communicating,
-        ActivityState::TaskSwitching, ActivityState::FocusedWork,
+        ActivityState::Idle,
+        ActivityState::JustReturned,
+        ActivityState::Browsing,
+        ActivityState::Communicating,
+        ActivityState::TaskSwitching,
+        ActivityState::FocusedWork,
         ActivityState::DeepFocus,
     ];
     let mut all_bounded = true;
@@ -3276,8 +3927,7 @@ fn run_tick_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     use super::agenda::{Agenda, AgendaConfig, AgendaKind, UrgencyFn};
     use super::hawkes::HawkesRegistry;
     use super::tick::{
-        cognitive_tick, next_tick_interval_ms, CachedSuggestion,
-        TickConfig, TickPhase, TickState,
+        cognitive_tick, next_tick_interval_ms, CachedSuggestion, TickConfig, TickPhase, TickState,
     };
 
     let persona = Some(scenario.name.clone());
@@ -3339,7 +3989,10 @@ fn run_tick_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("decay_delta".into()),
         metric_value: Some(initial - nodes[0].attrs.activation),
-        details: Some(format!("{:.4} -> {:.4}", initial, nodes[0].attrs.activation)),
+        details: Some(format!(
+            "{:.4} -> {:.4}",
+            initial, nodes[0].attrs.activation
+        )),
     });
 
     // Test 3: Anomaly detection finds stale items
@@ -3369,10 +4022,18 @@ fn run_tick_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         ..Default::default()
     };
 
-    let report = cognitive_tick(now, &mut state, &mut agenda, &mut nodes, &registry, &config_anomaly);
-    let found_stale = report.anomalies_detected.iter().any(|a| {
-        a.kind == super::tick::AnomalyKind::StaleItem
-    });
+    let report = cognitive_tick(
+        now,
+        &mut state,
+        &mut agenda,
+        &mut nodes,
+        &registry,
+        &config_anomaly,
+    );
+    let found_stale = report
+        .anomalies_detected
+        .iter()
+        .any(|a| a.kind == super::tick::AnomalyKind::StaleItem);
     run.add(BenchResult {
         category: "tick".into(),
         test_name: "anomaly_stale_detection".into(),
@@ -3409,9 +4070,16 @@ fn run_tick_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         suggestion_cache_interval: 1,
         ..Default::default()
     };
-    cognitive_tick(now, &mut state, &mut agenda, &mut nodes, &registry, &config_cache);
-    let expired_correctly = state.cached_suggestions.len() == 1
-        && state.cached_suggestions[0].description == "Fresh";
+    cognitive_tick(
+        now,
+        &mut state,
+        &mut agenda,
+        &mut nodes,
+        &registry,
+        &config_cache,
+    );
+    let expired_correctly =
+        state.cached_suggestions.len() == 1 && state.cached_suggestions[0].description == "Fresh";
     run.add(BenchResult {
         category: "tick".into(),
         test_name: "suggestion_cache_expiry".into(),
@@ -3481,9 +4149,8 @@ fn run_surfacing_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         ActivityState, ContextSnapshot, NotificationMode, ReceptivityEstimate,
     };
     use super::surfacing::{
-        compute_net_utility, run_surfacing_pipeline, select_surface_mode,
-        SurfaceMode, SurfaceOutcome, SurfaceRateLimiter, SurfaceReason,
-        SurfacingConfig, SurfacingPreferences,
+        compute_net_utility, run_surfacing_pipeline, select_surface_mode, SurfaceMode,
+        SurfaceOutcome, SurfaceRateLimiter, SurfaceReason, SurfacingConfig, SurfacingPreferences,
     };
 
     let persona = Some(scenario.name.clone());
@@ -3520,14 +4187,20 @@ fn run_surfacing_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         (0.3, SurfaceReason::FollowUpDue, ActivityState::FocusedWork),
         (0.55, SurfaceReason::FollowUpDue, ActivityState::FocusedWork),
         (0.85, SurfaceReason::FollowUpDue, ActivityState::FocusedWork),
-        (0.96, SurfaceReason::DeadlineImminent, ActivityState::FocusedWork),
+        (
+            0.96,
+            SurfaceReason::DeadlineImminent,
+            ActivityState::FocusedWork,
+        ),
     ];
     let mut escalates = true;
     let mut prev_mode = None;
     for &(urgency, reason, activity) in &modes {
         let mode = select_surface_mode(urgency, reason, activity, &config);
         if let Some(prev) = prev_mode {
-            if mode < prev { escalates = false; }
+            if mode < prev {
+                escalates = false;
+            }
         }
         prev_mode = Some(mode);
     }
@@ -3547,9 +4220,13 @@ fn run_surfacing_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     let mut agenda = Agenda::new();
     let aconfig = AgendaConfig::default();
     agenda.add_item_at(
-        NodeId::NIL, AgendaKind::FollowUpNeeded,
-        UrgencyFn::Constant { value: 0.7 }, None,
-        "Follow up".to_string(), now - 3600.0, &aconfig,
+        NodeId::NIL,
+        AgendaKind::FollowUpNeeded,
+        UrgencyFn::Constant { value: 0.7 },
+        None,
+        "Follow up".to_string(),
+        now - 3600.0,
+        &aconfig,
     );
     let items = agenda.items.clone();
 
@@ -3557,17 +4234,13 @@ fn run_surfacing_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     let low_est = make_estimate(0.05, false);
     let rate_limiter = SurfaceRateLimiter::new();
     let ctx = make_ctx(now, ActivityState::DeepFocus, NotificationMode::All);
-    let result = run_surfacing_pipeline(
-        &items, now, &low_est, &rate_limiter, &ctx, &config,
-    );
+    let result = run_surfacing_pipeline(&items, now, &low_est, &rate_limiter, &ctx, &config);
     let suppressed = result.suggestions.is_empty() && !result.suppressed.is_empty();
 
     // Run with normal receptivity → should surface
     let normal_est = make_estimate(0.7, false);
     let ctx2 = make_ctx(now, ActivityState::TaskSwitching, NotificationMode::All);
-    let result2 = run_surfacing_pipeline(
-        &items, now, &normal_est, &rate_limiter, &ctx2, &config,
-    );
+    let result2 = run_surfacing_pipeline(&items, now, &normal_est, &rate_limiter, &ctx2, &config);
     let surfaced = !result2.suggestions.is_empty();
 
     run.add(BenchResult {
@@ -3580,7 +4253,8 @@ fn run_surfacing_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         metric_value: None,
         details: Some(format!(
             "suppressed={} surfaced={}",
-            result.suppressed.len(), result2.suggestions.len(),
+            result.suppressed.len(),
+            result2.suggestions.len(),
         )),
     });
 
@@ -3610,7 +4284,12 @@ fn run_surfacing_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     let base_threshold = config.urgency_threshold;
     let before = prefs.effective_threshold(base_threshold);
     for _ in 0..20 {
-        prefs.observe(AgendaKind::FollowUpNeeded, SurfaceMode::Nudge, 12, SurfaceOutcome::Dismissed);
+        prefs.observe(
+            AgendaKind::FollowUpNeeded,
+            SurfaceMode::Nudge,
+            12,
+            SurfaceOutcome::Dismissed,
+        );
     }
     let after = prefs.effective_threshold(base_threshold);
     let threshold_raised = after > before;
@@ -3629,9 +4308,13 @@ fn run_surfacing_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     let start = Instant::now();
     let mut agenda = Agenda::new();
     agenda.add_item_at(
-        NodeId::NIL, AgendaKind::DeadlineApproaching,
-        UrgencyFn::Constant { value: 0.85 }, None,
-        "Deadline".to_string(), now - 3600.0, &aconfig,
+        NodeId::NIL,
+        AgendaKind::DeadlineApproaching,
+        UrgencyFn::Constant { value: 0.85 },
+        None,
+        "Deadline".to_string(),
+        now - 3600.0,
+        &aconfig,
     );
     let items = agenda.items.clone();
     let est = make_estimate(0.7, false);
@@ -3642,7 +4325,8 @@ fn run_surfacing_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     let dnd_blocked = dnd_result.suggestions.is_empty();
 
     let important_ctx = make_ctx(now, ActivityState::Idle, NotificationMode::ImportantOnly);
-    let imp_result = run_surfacing_pipeline(&items, now, &est, &rate_limiter, &important_ctx, &config);
+    let imp_result =
+        run_surfacing_pipeline(&items, now, &est, &rate_limiter, &important_ctx, &config);
     // 0.85 urgency → Alert mode → should pass ImportantOnly filter
     let important_passes = !imp_result.suggestions.is_empty();
 

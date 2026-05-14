@@ -117,8 +117,11 @@ pub fn run_causal_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         details: Some(format!(
             "avg_confidence={:.3} stages=H{}/C{}/E{}/W{}/R{}",
             avg_confidence,
-            summary.hypothesized, summary.candidates,
-            summary.established, summary.weakening, summary.refuted,
+            summary.hypothesized,
+            summary.candidates,
+            summary.established,
+            summary.weakening,
+            summary.refuted,
         )),
     });
 
@@ -156,12 +159,8 @@ pub fn run_causal_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         }
     }
     let mut discovery_store = CausalStore::new();
-    let disc_report = discover_local_causality(
-        &mut discovery_store,
-        &event_buffer,
-        &scenario.edges,
-        now,
-    );
+    let disc_report =
+        discover_local_causality(&mut discovery_store, &event_buffer, &scenario.edges, now);
     run.add(BenchResult {
         category: "causal".into(),
         test_name: "discovery".into(),
@@ -294,9 +293,7 @@ pub fn run_planner_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     for goal in &goals {
         let proposal = instantiate_plan(goal.node_id, &ctx);
         // Plans should be sorted by composite score descending.
-        let composites: Vec<f64> = proposal.plans.iter()
-            .map(|p| p.score.composite)
-            .collect();
+        let composites: Vec<f64> = proposal.plans.iter().map(|p| p.score.composite).collect();
         for w in composites.windows(2) {
             if w[0] < w[1] - 1e-9 {
                 scores_monotonic = false;
@@ -344,7 +341,8 @@ pub fn run_planner_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
             stored += 1;
         }
     }
-    let retrieved = goals.iter()
+    let retrieved = goals
+        .iter()
         .filter(|g| store.get_plan(g.node_id).is_some())
         .count();
     run.add(BenchResult {
@@ -529,7 +527,9 @@ pub fn run_coherence_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         metric_value: Some(trend),
         details: Some(format!(
             "avg={:.3} checks={} snapshots={}",
-            avg, history.total_checks, history.snapshot_count()
+            avg,
+            history.total_checks,
+            history.snapshot_count()
         )),
     });
 
@@ -582,7 +582,8 @@ fn build_working_set(
 fn build_belief_conflicts(nodes: &[CognitiveNode]) -> Vec<super::contradiction::BeliefConflict> {
     use super::contradiction::{BeliefConflict, ConflictDetectionMethod, ResolutionStrategy};
 
-    let beliefs: Vec<&CognitiveNode> = nodes.iter()
+    let beliefs: Vec<&CognitiveNode> = nodes
+        .iter()
         .filter(|n| matches!(n.payload, NodePayload::Belief(_)))
         .collect();
 
@@ -657,8 +658,10 @@ pub fn run_metacognition_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         metric_value: Some(report.overall_confidence),
         details: Some(format!(
             "evidence={:.3} disagreement={:.3} accuracy={:.3} coverage={:.3}",
-            report.evidence_sparsity, report.model_disagreement,
-            report.prediction_accuracy, report.coverage,
+            report.evidence_sparsity,
+            report.model_disagreement,
+            report.prediction_accuracy,
+            report.coverage,
         )),
     });
 
@@ -686,7 +689,8 @@ pub fn run_metacognition_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         metric_value: Some(decision.meta_confidence),
         details: Some(format!(
             "action={:?} reasons={}",
-            decision.action, decision.reasons.len(),
+            decision.action,
+            decision.reasons.len(),
         )),
     });
 
@@ -726,15 +730,18 @@ pub fn run_metacognition_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         metric_value: Some(health.health_score),
         details: Some(format!(
             "grade={} subsystems={} recommendations={}",
-            health.grade, health.subsystem_health.len(), health.recommendations.len(),
+            health.grade,
+            health.subsystem_health.len(),
+            health.recommendations.len(),
         )),
     });
 
     // Test 5: Signal detail analysis.
     let start = Instant::now();
-    let all_signals_valid = report.signal_details.iter().all(|s| {
-        s.value >= 0.0 && s.value <= 1.0
-    });
+    let all_signals_valid = report
+        .signal_details
+        .iter()
+        .all(|s| s.value >= 0.0 && s.value <= 1.0);
     let signal_count = report.signal_details.len();
     run.add(BenchResult {
         category: "metacognition".into(),
@@ -765,10 +772,7 @@ pub fn run_metacognition_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         duration_us: start.elapsed().as_micros() as f64,
         metric_name: Some("assessments".into()),
         metric_value: Some(history.total_assessments as f64),
-        details: Some(format!(
-            "escalation_rate={:.3}",
-            history.escalation_rate(5),
-        )),
+        details: Some(format!("escalation_rate={:.3}", history.escalation_rate(5),)),
     });
 }
 
@@ -837,7 +841,8 @@ pub fn run_personality_bias_tests(run: &mut BenchRun, scenario: &PersonaScenario
         metric_value: Some(companion_bias.total_bias),
         details: Some(format!(
             "companion={:.3} guardian={:.3} contributions={}",
-            companion_bias.total_bias, guardian_bias.total_bias,
+            companion_bias.total_bias,
+            guardian_bias.total_bias,
             companion_bias.contributions.len(),
         )),
     });
@@ -922,9 +927,12 @@ pub fn run_personality_bias_tests(run: &mut BenchRun, scenario: &PersonaScenario
     let avg_bias = if report.action_biases.is_empty() {
         0.0
     } else {
-        report.action_biases.iter()
+        report
+            .action_biases
+            .iter()
             .map(|a| a.bias_result.total_bias)
-            .sum::<f64>() / report.action_biases.len() as f64
+            .sum::<f64>()
+            / report.action_biases.len() as f64
     };
     run.add(BenchResult {
         category: "personality_bias".into(),
@@ -947,8 +955,8 @@ pub fn run_personality_bias_tests(run: &mut BenchRun, scenario: &PersonaScenario
 
     let store_result = store.apply_bias(&risky_action);
     let store_result2 = store.apply_bias(&safe_action);
-    let store_consistent = store_result.total_bias.is_finite()
-        && store_result2.total_bias.is_finite();
+    let store_consistent =
+        store_result.total_bias.is_finite() && store_result2.total_bias.is_finite();
     run.add(BenchResult {
         category: "personality_bias".into(),
         test_name: "store_integration".into(),
@@ -959,7 +967,8 @@ pub fn run_personality_bias_tests(run: &mut BenchRun, scenario: &PersonaScenario
         metric_value: Some(store_result.total_bias),
         details: Some(format!(
             "risky={:.3} safe={:.3} threshold_delta={:.3}",
-            store_result.total_bias, store_result2.total_bias,
+            store_result.total_bias,
+            store_result2.total_bias,
             store_result.confidence_threshold_delta,
         )),
     });
@@ -968,8 +977,14 @@ pub fn run_personality_bias_tests(run: &mut BenchRun, scenario: &PersonaScenario
 /// Check that all personality dimensions are in [0.0, 1.0].
 fn is_valid_vector(v: &super::personality_bias::PersonalityBiasVector) -> bool {
     let dims = [
-        v.curiosity, v.proactivity, v.caution, v.warmth,
-        v.efficiency, v.playfulness, v.formality, v.persistence,
+        v.curiosity,
+        v.proactivity,
+        v.caution,
+        v.warmth,
+        v.efficiency,
+        v.playfulness,
+        v.formality,
+        v.persistence,
     ];
     dims.iter().all(|&d| d >= 0.0 && d <= 1.0)
 }
@@ -1001,10 +1016,7 @@ pub fn run_query_dsl_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     let now = now_secs();
 
     // Build seed node IDs from scenario.
-    let seeds: Vec<NodeId> = scenario.nodes.iter()
-        .take(3)
-        .map(|n| n.id)
-        .collect();
+    let seeds: Vec<NodeId> = scenario.nodes.iter().take(3).map(|n| n.id).collect();
 
     let candidates: Vec<CandidateAction> = vec![
         CandidateAction {
@@ -1067,15 +1079,23 @@ pub fn run_query_dsl_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     // Test 3: Pipeline patterns.
     let start = Instant::now();
     let patterns = vec![
-        ("user_turn", PipelinePatterns::user_turn(seeds.clone(), candidates.clone())),
-        ("proactive", PipelinePatterns::proactive(candidates.clone(), 3600.0)),
-        ("deep_reasoning", PipelinePatterns::deep_reasoning(
-            seeds.clone(),
-            seeds[0],
-            candidates.clone(),
-        )),
+        (
+            "user_turn",
+            PipelinePatterns::user_turn(seeds.clone(), candidates.clone()),
+        ),
+        (
+            "proactive",
+            PipelinePatterns::proactive(candidates.clone(), 3600.0),
+        ),
+        (
+            "deep_reasoning",
+            PipelinePatterns::deep_reasoning(seeds.clone(), seeds[0], candidates.clone()),
+        ),
         ("health_check", PipelinePatterns::health_check()),
-        ("budgeted", PipelinePatterns::budgeted(seeds.clone(), candidates.clone(), 50)),
+        (
+            "budgeted",
+            PipelinePatterns::budgeted(seeds.clone(), candidates.clone(), 50),
+        ),
     ];
     let all_non_empty = patterns.iter().all(|(_, p)| !p.is_empty());
     let pattern_count = patterns.len();
@@ -1088,7 +1108,8 @@ pub fn run_query_dsl_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
         metric_name: Some("patterns_tested".into()),
         metric_value: Some(pattern_count as f64),
         details: Some(
-            patterns.iter()
+            patterns
+                .iter()
                 .map(|(name, p)| format!("{}={}", name, p.len()))
                 .collect::<Vec<_>>()
                 .join(" "),
@@ -1185,7 +1206,10 @@ mod tests {
         let mut run = tracker.start_run("causal-test", None).unwrap();
         let scenario = super::super::benchmark::build_aisha().unwrap();
         super::run_causal_tests(&mut run, &scenario);
-        assert!(!run.results.is_empty(), "causal tests should produce results");
+        assert!(
+            !run.results.is_empty(),
+            "causal tests should produce results"
+        );
         assert!(
             run.results.iter().all(|r| r.category == "causal"),
             "all results should be causal category"
@@ -1198,7 +1222,10 @@ mod tests {
         let mut run = tracker.start_run("planner-test", None).unwrap();
         let scenario = super::super::benchmark::build_marcus().unwrap();
         super::run_planner_tests(&mut run, &scenario);
-        assert!(!run.results.is_empty(), "planner tests should produce results");
+        assert!(
+            !run.results.is_empty(),
+            "planner tests should produce results"
+        );
     }
 
     #[test]
@@ -1207,7 +1234,10 @@ mod tests {
         let mut run = tracker.start_run("coherence-test", None).unwrap();
         let scenario = super::super::benchmark::build_priya().unwrap();
         super::run_coherence_tests(&mut run, &scenario);
-        assert!(!run.results.is_empty(), "coherence tests should produce results");
+        assert!(
+            !run.results.is_empty(),
+            "coherence tests should produce results"
+        );
     }
 
     #[test]
@@ -1216,7 +1246,10 @@ mod tests {
         let mut run = tracker.start_run("meta-test", None).unwrap();
         let scenario = super::super::benchmark::build_emre().unwrap();
         super::run_metacognition_tests(&mut run, &scenario);
-        assert!(!run.results.is_empty(), "metacognition tests should produce results");
+        assert!(
+            !run.results.is_empty(),
+            "metacognition tests should produce results"
+        );
     }
 
     #[test]
@@ -1225,7 +1258,10 @@ mod tests {
         let mut run = tracker.start_run("personality-test", None).unwrap();
         let scenario = super::super::benchmark::build_keiko().unwrap();
         super::run_personality_bias_tests(&mut run, &scenario);
-        assert!(!run.results.is_empty(), "personality bias tests should produce results");
+        assert!(
+            !run.results.is_empty(),
+            "personality bias tests should produce results"
+        );
     }
 
     #[test]
@@ -1234,6 +1270,9 @@ mod tests {
         let mut run = tracker.start_run("dsl-test", None).unwrap();
         let scenario = super::super::benchmark::build_aisha().unwrap();
         super::run_query_dsl_tests(&mut run, &scenario);
-        assert!(!run.results.is_empty(), "query DSL tests should produce results");
+        assert!(
+            !run.results.is_empty(),
+            "query DSL tests should produce results"
+        );
     }
 }

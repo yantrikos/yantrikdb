@@ -5,10 +5,9 @@
 
 use crate::error::Result;
 use crate::observer::{
-    compute_derived_signals, detect_app_sequences, mark_flushed, needs_flush,
-    observe_event, query_events, summarize, CircadianHistogram, DerivedSignals,
-    EventBuffer, EventFilter, EventKind, ObserverConfig, ObserverState,
-    ObserverSummary, SystemEvent,
+    compute_derived_signals, detect_app_sequences, mark_flushed, needs_flush, observe_event,
+    query_events, summarize, CircadianHistogram, DerivedSignals, EventBuffer, EventFilter,
+    EventKind, ObserverConfig, ObserverState, ObserverSummary, SystemEvent,
 };
 
 use super::{now, YantrikDB};
@@ -31,9 +30,9 @@ impl YantrikDB {
         let meta = Self::get_meta(&self.conn(), OBSERVER_STATE_META_KEY)?;
         match meta {
             Some(json) => serde_json::from_str(&json).map_err(|e| {
-                crate::error::YantrikDbError::Database(
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-                )
+                crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                    Box::new(e),
+                ))
             }),
             None => Ok(ObserverState::new()),
         }
@@ -42,9 +41,9 @@ impl YantrikDB {
     /// Persist the observer state.
     pub fn save_observer_state(&self, state: &ObserverState) -> Result<()> {
         let json = serde_json::to_string(state).map_err(|e| {
-            crate::error::YantrikDbError::Database(
-                rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-            )
+            crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                Box::new(e),
+            ))
         })?;
         self.conn().execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -61,9 +60,9 @@ impl YantrikDB {
         let meta = Self::get_meta(&self.conn(), OBSERVER_BUFFER_META_KEY)?;
         match meta {
             Some(json) => serde_json::from_str(&json).map_err(|e| {
-                crate::error::YantrikDbError::Database(
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-                )
+                crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                    Box::new(e),
+                ))
             }),
             None => Ok(EventBuffer::new(10_000)),
         }
@@ -72,9 +71,9 @@ impl YantrikDB {
     /// Persist the event buffer.
     pub fn save_event_buffer(&self, buffer: &EventBuffer) -> Result<()> {
         let json = serde_json::to_string(buffer).map_err(|e| {
-            crate::error::YantrikDbError::Database(
-                rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-            )
+            crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                Box::new(e),
+            ))
         })?;
         self.conn().execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
@@ -91,9 +90,9 @@ impl YantrikDB {
         let meta = Self::get_meta(&self.conn(), OBSERVER_CONFIG_META_KEY)?;
         match meta {
             Some(json) => serde_json::from_str(&json).map_err(|e| {
-                crate::error::YantrikDbError::Database(
-                    rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-                )
+                crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                    Box::new(e),
+                ))
             }),
             None => Ok(ObserverConfig::default()),
         }
@@ -102,9 +101,9 @@ impl YantrikDB {
     /// Persist the observer configuration.
     pub fn save_observer_config(&self, config: &ObserverConfig) -> Result<()> {
         let json = serde_json::to_string(config).map_err(|e| {
-            crate::error::YantrikDbError::Database(
-                rusqlite::Error::ToSqlConversionFailure(Box::new(e)),
-            )
+            crate::error::YantrikDbError::Database(rusqlite::Error::ToSqlConversionFailure(
+                Box::new(e),
+            ))
         })?;
         self.conn().execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",

@@ -1,46 +1,267 @@
 use rusqlite::params;
 
-use crate::error::{YantrikDbError, Result};
+use crate::error::{Result, YantrikDbError};
 use crate::types::*;
 
 use super::{now, YantrikDB};
 
 /// Common English stopwords that should never be added to substitution categories.
 const RECLASSIFY_STOPWORDS: &[&str] = &[
-    "a", "an", "the", "is", "are", "was", "were", "be", "been", "being",
-    "have", "has", "had", "do", "does", "did", "will", "would", "could",
-    "should", "may", "might", "shall", "can", "must", "need",
-    "i", "me", "my", "we", "our", "you", "your", "he", "she", "it",
-    "they", "them", "their", "his", "her", "its", "this", "that", "these",
-    "those", "who", "what", "which", "where", "when", "how", "why",
-    "and", "or", "but", "if", "then", "else", "so", "yet", "nor",
-    "not", "no", "yes", "all", "any", "some", "every", "each",
-    "in", "on", "at", "to", "for", "of", "with", "by", "from", "up",
-    "about", "into", "over", "after", "before", "between", "under",
-    "again", "further", "more", "most", "other", "such", "than",
-    "too", "very", "just", "also", "now", "here", "there", "out",
-    "only", "own", "same", "both", "few", "many", "much", "well",
-    "back", "even", "still", "way", "new", "old", "one", "two",
-    "first", "last", "long", "great", "little", "right", "big",
-    "high", "low", "small", "large", "next", "early", "late",
-    "use", "uses", "used", "using", "like", "make", "made", "get",
-    "got", "take", "took", "come", "came", "go", "went", "see", "saw",
-    "know", "knew", "think", "thought", "want", "give", "gave",
-    "tell", "told", "work", "works", "call", "try", "ask", "put",
-    "keep", "let", "begin", "seem", "help", "show", "hear", "play",
-    "run", "move", "live", "believe", "bring", "happen", "write",
-    "provide", "sit", "stand", "lose", "pay", "meet", "include",
-    "continue", "set", "learn", "change", "lead", "understand",
-    "watch", "follow", "stop", "create", "speak", "read", "add",
-    "spend", "grow", "open", "walk", "win", "offer", "remember",
-    "love", "consider", "appear", "buy", "wait", "serve", "die",
-    "send", "expect", "build", "stay", "fall", "cut", "reach",
-    "remain", "suggest", "raise", "pass", "sell", "require",
-    "report", "decide", "pull", "develop", "always", "never",
-    "sometimes", "often", "usually", "really", "actually",
-    "probably", "already", "quite", "rather", "pretty",
-    "solves", "solved", "solving", "started", "starting", "finished",
-    "finishing", "before", "after", "during", "while", "until", "since",
+    "a",
+    "an",
+    "the",
+    "is",
+    "are",
+    "was",
+    "were",
+    "be",
+    "been",
+    "being",
+    "have",
+    "has",
+    "had",
+    "do",
+    "does",
+    "did",
+    "will",
+    "would",
+    "could",
+    "should",
+    "may",
+    "might",
+    "shall",
+    "can",
+    "must",
+    "need",
+    "i",
+    "me",
+    "my",
+    "we",
+    "our",
+    "you",
+    "your",
+    "he",
+    "she",
+    "it",
+    "they",
+    "them",
+    "their",
+    "his",
+    "her",
+    "its",
+    "this",
+    "that",
+    "these",
+    "those",
+    "who",
+    "what",
+    "which",
+    "where",
+    "when",
+    "how",
+    "why",
+    "and",
+    "or",
+    "but",
+    "if",
+    "then",
+    "else",
+    "so",
+    "yet",
+    "nor",
+    "not",
+    "no",
+    "yes",
+    "all",
+    "any",
+    "some",
+    "every",
+    "each",
+    "in",
+    "on",
+    "at",
+    "to",
+    "for",
+    "of",
+    "with",
+    "by",
+    "from",
+    "up",
+    "about",
+    "into",
+    "over",
+    "after",
+    "before",
+    "between",
+    "under",
+    "again",
+    "further",
+    "more",
+    "most",
+    "other",
+    "such",
+    "than",
+    "too",
+    "very",
+    "just",
+    "also",
+    "now",
+    "here",
+    "there",
+    "out",
+    "only",
+    "own",
+    "same",
+    "both",
+    "few",
+    "many",
+    "much",
+    "well",
+    "back",
+    "even",
+    "still",
+    "way",
+    "new",
+    "old",
+    "one",
+    "two",
+    "first",
+    "last",
+    "long",
+    "great",
+    "little",
+    "right",
+    "big",
+    "high",
+    "low",
+    "small",
+    "large",
+    "next",
+    "early",
+    "late",
+    "use",
+    "uses",
+    "used",
+    "using",
+    "like",
+    "make",
+    "made",
+    "get",
+    "got",
+    "take",
+    "took",
+    "come",
+    "came",
+    "go",
+    "went",
+    "see",
+    "saw",
+    "know",
+    "knew",
+    "think",
+    "thought",
+    "want",
+    "give",
+    "gave",
+    "tell",
+    "told",
+    "work",
+    "works",
+    "call",
+    "try",
+    "ask",
+    "put",
+    "keep",
+    "let",
+    "begin",
+    "seem",
+    "help",
+    "show",
+    "hear",
+    "play",
+    "run",
+    "move",
+    "live",
+    "believe",
+    "bring",
+    "happen",
+    "write",
+    "provide",
+    "sit",
+    "stand",
+    "lose",
+    "pay",
+    "meet",
+    "include",
+    "continue",
+    "set",
+    "learn",
+    "change",
+    "lead",
+    "understand",
+    "watch",
+    "follow",
+    "stop",
+    "create",
+    "speak",
+    "read",
+    "add",
+    "spend",
+    "grow",
+    "open",
+    "walk",
+    "win",
+    "offer",
+    "remember",
+    "love",
+    "consider",
+    "appear",
+    "buy",
+    "wait",
+    "serve",
+    "die",
+    "send",
+    "expect",
+    "build",
+    "stay",
+    "fall",
+    "cut",
+    "reach",
+    "remain",
+    "suggest",
+    "raise",
+    "pass",
+    "sell",
+    "require",
+    "report",
+    "decide",
+    "pull",
+    "develop",
+    "always",
+    "never",
+    "sometimes",
+    "often",
+    "usually",
+    "really",
+    "actually",
+    "probably",
+    "already",
+    "quite",
+    "rather",
+    "pretty",
+    "solves",
+    "solved",
+    "solving",
+    "started",
+    "starting",
+    "finished",
+    "finishing",
+    "before",
+    "after",
+    "during",
+    "while",
+    "until",
+    "since",
 ];
 
 impl YantrikDB {
@@ -242,7 +463,10 @@ impl YantrikDB {
                     "merged_from": [conflict.memory_a, conflict.memory_b],
                     "conflict_id": conflict_id,
                 });
-                let merge_ns = mem_a.as_ref().map(|m| m.namespace.as_str()).unwrap_or("default");
+                let merge_ns = mem_a
+                    .as_ref()
+                    .map(|m| m.namespace.as_str())
+                    .unwrap_or("default");
                 let rid = self.record(
                     text,
                     "semantic",
@@ -283,7 +507,14 @@ impl YantrikDB {
              winner_rid = ?4,
              resolution_note = ?5
              WHERE conflict_id = ?6",
-            params![ts, actor_id, strategy, effective_winner, resolution_note, conflict_id],
+            params![
+                ts,
+                actor_id,
+                strategy,
+                effective_winner,
+                resolution_note,
+                conflict_id
+            ],
         )?;
 
         // Log to oplog for replication
@@ -344,12 +575,18 @@ impl YantrikDB {
         // Extract differing tokens (symmetric difference)
         let words_a: std::collections::HashSet<String> = text_a
             .split_whitespace()
-            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+            .map(|w| {
+                w.trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase()
+            })
             .filter(|w| !w.is_empty())
             .collect();
         let words_b: std::collections::HashSet<String> = text_b
             .split_whitespace()
-            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+            .map(|w| {
+                w.trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase()
+            })
             .filter(|w| !w.is_empty())
             .collect();
 
@@ -374,11 +611,19 @@ impl YantrikDB {
             .collect();
 
         // Separate known-category tokens from unknown tokens
-        let known_a: Vec<(&str, &str, &str)> = cats_a.iter()
-            .filter_map(|(t, c)| c.as_ref().map(|(id, name)| (t.as_str(), id.as_str(), name.as_str())))
+        let known_a: Vec<(&str, &str, &str)> = cats_a
+            .iter()
+            .filter_map(|(t, c)| {
+                c.as_ref()
+                    .map(|(id, name)| (t.as_str(), id.as_str(), name.as_str()))
+            })
             .collect();
-        let known_b: Vec<(&str, &str, &str)> = cats_b.iter()
-            .filter_map(|(t, c)| c.as_ref().map(|(id, name)| (t.as_str(), id.as_str(), name.as_str())))
+        let known_b: Vec<(&str, &str, &str)> = cats_b
+            .iter()
+            .filter_map(|(t, c)| {
+                c.as_ref()
+                    .map(|(id, name)| (t.as_str(), id.as_str(), name.as_str()))
+            })
             .collect();
 
         // Track which tokens have been processed to avoid double-adding
@@ -416,23 +661,35 @@ impl YantrikDB {
         // Strategy 2: One side has a known member, other side doesn't
         // Only add the BEST matching unknown token per category (not all unknowns)
         // Filter out stopwords and very short tokens
-        let is_meaningful = |t: &str| -> bool {
-            t.len() >= 3 && !RECLASSIFY_STOPWORDS.contains(&t)
-        };
+        let is_meaningful =
+            |t: &str| -> bool { t.len() >= 3 && !RECLASSIFY_STOPWORDS.contains(&t) };
 
         // known_a tokens → find best unknown match in diff_b
         for &(token_a, cat_id_a, cat_name_a) in &known_a {
-            if processed.contains(token_a) { continue; }
-            let unknown_b: Vec<&str> = diff_b.iter()
+            if processed.contains(token_a) {
+                continue;
+            }
+            let unknown_b: Vec<&str> = diff_b
+                .iter()
                 .map(|s| s.as_str())
-                .filter(|t| is_meaningful(t) && !processed.contains(*t) && self.find_member_category(t).is_none())
+                .filter(|t| {
+                    is_meaningful(t)
+                        && !processed.contains(*t)
+                        && self.find_member_category(t).is_none()
+                })
                 .collect();
             // Only learn if there's exactly one meaningful unknown — ambiguity = skip
             if unknown_b.len() == 1 {
                 let token_b = unknown_b[0];
                 self.add_member_to_category(
-                    cat_id_a, token_b, token_b,
-                    1.0, "user_confirmed", ts, &hlc_bytes, &actor,
+                    cat_id_a,
+                    token_b,
+                    token_b,
+                    1.0,
+                    "user_confirmed",
+                    ts,
+                    &hlc_bytes,
+                    &actor,
                 )?;
                 processed.insert(token_b.to_string());
                 learned_members.push(LearnedMember {
@@ -445,16 +702,29 @@ impl YantrikDB {
 
         // known_b tokens → find best unknown match in diff_a
         for &(token_b, cat_id_b, cat_name_b) in &known_b {
-            if processed.contains(token_b) { continue; }
-            let unknown_a: Vec<&str> = diff_a.iter()
+            if processed.contains(token_b) {
+                continue;
+            }
+            let unknown_a: Vec<&str> = diff_a
+                .iter()
                 .map(|s| s.as_str())
-                .filter(|t| is_meaningful(t) && !processed.contains(*t) && self.find_member_category(t).is_none())
+                .filter(|t| {
+                    is_meaningful(t)
+                        && !processed.contains(*t)
+                        && self.find_member_category(t).is_none()
+                })
                 .collect();
             if unknown_a.len() == 1 {
                 let token_a = unknown_a[0];
                 self.add_member_to_category(
-                    cat_id_b, token_a, token_a,
-                    1.0, "user_confirmed", ts, &hlc_bytes, &actor,
+                    cat_id_b,
+                    token_a,
+                    token_a,
+                    1.0,
+                    "user_confirmed",
+                    ts,
+                    &hlc_bytes,
+                    &actor,
                 )?;
                 processed.insert(token_a.to_string());
                 learned_members.push(LearnedMember {
@@ -468,11 +738,13 @@ impl YantrikDB {
         // Strategy 3: Neither side known — only create provisional category
         // for recurring meaningful-token pairs (requires 2+ prior occurrences)
         if known_a.is_empty() && known_b.is_empty() {
-            let meaningful_a: Vec<&str> = diff_a.iter()
+            let meaningful_a: Vec<&str> = diff_a
+                .iter()
                 .map(|s| s.as_str())
                 .filter(|t| is_meaningful(t))
                 .collect();
-            let meaningful_b: Vec<&str> = diff_b.iter()
+            let meaningful_b: Vec<&str> = diff_b
+                .iter()
                 .map(|s| s.as_str())
                 .filter(|t| is_meaningful(t))
                 .collect();
@@ -491,17 +763,35 @@ impl YantrikDB {
                         params![cat_id, prov_name, ts, hlc_bytes, actor],
                     )?;
                     self.add_member_to_category(
-                        &cat_id, ta, ta, 1.0, "user_confirmed", ts, &hlc_bytes, &actor,
+                        &cat_id,
+                        ta,
+                        ta,
+                        1.0,
+                        "user_confirmed",
+                        ts,
+                        &hlc_bytes,
+                        &actor,
                     )?;
                     self.add_member_to_category(
-                        &cat_id, tb, tb, 1.0, "user_confirmed", ts, &hlc_bytes, &actor,
+                        &cat_id,
+                        tb,
+                        tb,
+                        1.0,
+                        "user_confirmed",
+                        ts,
+                        &hlc_bytes,
+                        &actor,
                     )?;
                     category_created = Some(prov_name.clone());
                     learned_members.push(LearnedMember {
-                        token: ta.to_string(), category_name: prov_name.clone(), is_new: true,
+                        token: ta.to_string(),
+                        category_name: prov_name.clone(),
+                        is_new: true,
                     });
                     learned_members.push(LearnedMember {
-                        token: tb.to_string(), category_name: prov_name, is_new: true,
+                        token: tb.to_string(),
+                        category_name: prov_name,
+                        is_new: true,
                     });
                 }
             }
@@ -550,7 +840,7 @@ impl YantrikDB {
                     (SELECT COUNT(*) FROM substitution_members m
                      WHERE m.category_id = c.id AND m.status = 'active') as member_count
              FROM substitution_categories c
-             ORDER BY c.name"
+             ORDER BY c.name",
         )?;
 
         let cats = stmt
@@ -577,7 +867,7 @@ impl YantrikDB {
              FROM substitution_members m
              JOIN substitution_categories c ON c.id = m.category_id
              WHERE c.name = ?1
-             ORDER BY m.confidence DESC, m.token_normalized"
+             ORDER BY m.confidence DESC, m.token_normalized",
         )?;
 
         let members = stmt
@@ -641,15 +931,25 @@ impl YantrikDB {
             Err(e) => return Err(e.into()),
         };
 
-        let status = if source == "llm_suggested" { "pending" } else { "active" };
+        let status = if source == "llm_suggested" {
+            "pending"
+        } else {
+            "active"
+        };
         let mut added = 0;
 
         for (token, confidence) in members {
             let normalized = token.to_lowercase();
             let display = token.clone();
             let was_added = self.add_member_to_category(
-                &cat_id, &normalized, &display,
-                *confidence, source, ts, &hlc_bytes, &actor,
+                &cat_id,
+                &normalized,
+                &display,
+                *confidence,
+                source,
+                ts,
+                &hlc_bytes,
+                &actor,
             )?;
             if was_added {
                 added += 1;
@@ -677,11 +977,13 @@ impl YantrikDB {
     /// Returns the number of members removed.
     pub fn reset_category_to_seed(&self, category_name: &str) -> Result<usize> {
         let conn = self.conn();
-        let cat_id: String = conn.query_row(
-            "SELECT id FROM substitution_categories WHERE name = ?1",
-            params![category_name],
-            |row| row.get(0),
-        ).map_err(|_| YantrikDbError::NotFound(format!("category: {}", category_name)))?;
+        let cat_id: String = conn
+            .query_row(
+                "SELECT id FROM substitution_categories WHERE name = ?1",
+                params![category_name],
+                |row| row.get(0),
+            )
+            .map_err(|_| YantrikDbError::NotFound(format!("category: {}", category_name)))?;
 
         let removed = conn.execute(
             "DELETE FROM substitution_members
@@ -707,14 +1009,16 @@ impl YantrikDB {
     // ── Internal helpers for substitution categories ──
 
     fn find_member_category(&self, token: &str) -> Option<(String, String)> {
-        self.conn().query_row(
-            "SELECT c.id, c.name FROM substitution_members m
+        self.conn()
+            .query_row(
+                "SELECT c.id, c.name FROM substitution_members m
              JOIN substitution_categories c ON c.id = m.category_id
              WHERE m.token_normalized = ?1 AND m.status = 'active'
              LIMIT 1",
-            params![token],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
-        ).ok()
+                params![token],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .ok()
     }
 
     fn add_member_to_category(
@@ -729,32 +1033,39 @@ impl YantrikDB {
         actor: &str,
     ) -> Result<bool> {
         let member_id = crate::id::new_id();
-        let status = if source == "llm_suggested" { "pending" } else { "active" };
+        let status = if source == "llm_suggested" {
+            "pending"
+        } else {
+            "active"
+        };
         let rows = self.conn().execute(
             "INSERT OR IGNORE INTO substitution_members
              (id, category_id, token_normalized, token_display, confidence,
               source, status, context_hint, created_at, updated_at, hlc, origin_actor)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?8, ?9, ?10)",
-            params![member_id, cat_id, normalized, display, confidence, source, status, ts, hlc_bytes, actor],
+            params![
+                member_id, cat_id, normalized, display, confidence, source, status, ts, hlc_bytes,
+                actor
+            ],
         )?;
         Ok(rows > 0)
     }
 
     fn count_reclassify_pair_occurrences(&self, token_a: &str, token_b: &str) -> usize {
         // Count how many times this pair appeared in conflict_reclassify oplog events
-        let count: i64 = self.conn().query_row(
-            "SELECT COUNT(*) FROM oplog
+        let count: i64 = self
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM oplog
              WHERE op_type = 'conflict_reclassify'
                AND (json_extract(payload, '$.diff_a') LIKE ?1
                     OR json_extract(payload, '$.diff_b') LIKE ?1)
                AND (json_extract(payload, '$.diff_a') LIKE ?2
                     OR json_extract(payload, '$.diff_b') LIKE ?2)",
-            params![
-                format!("%{}%", token_a),
-                format!("%{}%", token_b),
-            ],
-            |row| row.get(0),
-        ).unwrap_or(0);
+                params![format!("%{}%", token_a), format!("%{}%", token_b),],
+                |row| row.get(0),
+            )
+            .unwrap_or(0);
         count as usize
     }
 

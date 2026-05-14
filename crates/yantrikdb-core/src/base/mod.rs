@@ -1,10 +1,10 @@
-pub mod error;
-pub mod types;
-pub mod schema;
-pub mod scoring;
-pub mod hlc;
-pub mod serde_helpers;
+pub mod bench_utils;
 pub mod compression;
 pub mod encryption;
+pub mod error;
+pub mod hlc;
+pub mod schema;
+pub mod scoring;
+pub mod serde_helpers;
+pub mod types;
 pub mod vault;
-pub mod bench_utils;

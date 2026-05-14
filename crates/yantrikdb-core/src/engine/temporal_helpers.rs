@@ -7,12 +7,7 @@ use super::{now, YantrikDB};
 
 impl YantrikDB {
     /// Memories not accessed in `days`, still active, ordered by importance.
-    pub fn stale(
-        &self,
-        days: f64,
-        limit: usize,
-        namespace: Option<&str>,
-    ) -> Result<Vec<Memory>> {
+    pub fn stale(&self, days: f64, limit: usize, namespace: Option<&str>) -> Result<Vec<Memory>> {
         let ts = now();
         let cutoff = ts - days * 86400.0;
 
@@ -158,8 +153,8 @@ impl YantrikDB {
 
         // Get entity metadata
         let conn = self.conn();
-        let (entity_type, first_seen, last_seen, total_mentions): (String, f64, f64, i64) =
-            conn.query_row(
+        let (entity_type, first_seen, last_seen, total_mentions): (String, f64, f64, i64) = conn
+            .query_row(
                 "SELECT entity_type, first_seen, last_seen, mention_count \
                  FROM entities WHERE name = ?1",
                 params![entity],
@@ -234,8 +229,7 @@ impl YantrikDB {
         // Valence trend: recent half vs older half
         let valence_trend = if rows.len() >= 4 {
             let mid = rows.len() / 2;
-            let older_avg =
-                rows[..mid].iter().map(|r| r.valence).sum::<f64>() / mid as f64;
+            let older_avg = rows[..mid].iter().map(|r| r.valence).sum::<f64>() / mid as f64;
             let recent_avg =
                 rows[mid..].iter().map(|r| r.valence).sum::<f64>() / (rows.len() - mid) as f64;
             recent_avg - older_avg
@@ -244,8 +238,7 @@ impl YantrikDB {
         };
 
         // Session count
-        let mut session_set: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut session_set: std::collections::HashSet<String> = std::collections::HashSet::new();
         for r in &rows {
             if let Some(ref sid) = r.session_id {
                 session_set.insert(sid.clone());
@@ -302,15 +295,18 @@ impl YantrikDB {
         let conn = self.conn();
 
         // Get entity metadata
-        let (entity_type, first_seen, last_seen): (String, f64, f64) = conn.query_row(
-            "SELECT entity_type, first_seen, last_seen FROM entities WHERE name = ?1",
-            params![entity],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        ).map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows =>
-                crate::error::YantrikDbError::NotFound(format!("entity: {}", entity)),
-            _ => e.into(),
-        })?;
+        let (entity_type, first_seen, last_seen): (String, f64, f64) = conn
+            .query_row(
+                "SELECT entity_type, first_seen, last_seen FROM entities WHERE name = ?1",
+                params![entity],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => {
+                    crate::error::YantrikDbError::NotFound(format!("entity: {}", entity))
+                }
+                _ => e.into(),
+            })?;
 
         // Count memories mentioning this entity
         let memories_mentioning: i64 = if let Some(ns) = namespace {
