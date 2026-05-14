@@ -126,6 +126,64 @@ fn cache_is_populated(dir: &std::path::Path) -> bool {
     true
 }
 
+/// Extract a `.tar.gz` byte slice into `dest_dir`, handling both
+/// tarball layouts our model artifacts ship in:
+///   - **v0.1.0 layout** (potion-base-8M, potion-base-32M): files
+///     nested under a top-level directory matching the model name,
+///     e.g. `potion-base-8M/model.safetensors`. The leading directory
+///     component must be stripped so files land directly in `dest_dir`.
+///   - **v0.2.0 layout** (potion-multilingual-128M): files at the
+///     archive root, e.g. `model.safetensors`. No stripping needed.
+///
+/// Per-entry: strip the leading component only when the path has 2+
+/// components. Single-component paths are written as-is. Directory
+/// entries are skipped (parent dirs are created as needed when files
+/// are unpacked).
+///
+/// Closes yantrikos/yantrikdb#15 — pre-fix this code unconditionally
+/// stripped the leading component, which silently produced an empty
+/// cache dir for v0.2.0-layout artifacts because every entry had 1
+/// component, `skip(1)` produced an empty path, and the `continue`
+/// skipped every file.
+fn extract_tarball_to(bytes: &[u8], dest_dir: &std::path::Path) -> Result<()> {
+    let gz = flate2::read::GzDecoder::new(bytes);
+    let mut archive = tar::Archive::new(gz);
+    for entry in archive
+        .entries()
+        .map_err(|e| YantrikDbError::InvalidInput(format!("tar open: {e}")))?
+    {
+        let mut entry =
+            entry.map_err(|e| YantrikDbError::InvalidInput(format!("tar entry: {e}")))?;
+        // Skip pure directory entries — we create dirs as needed when
+        // unpacking files.
+        if entry.header().entry_type().is_dir() {
+            continue;
+        }
+        let path = entry
+            .path()
+            .map_err(|e| YantrikDbError::InvalidInput(format!("tar path: {e}")))?;
+
+        let n_components = path.components().count();
+        let stripped: PathBuf = if n_components >= 2 {
+            path.components().skip(1).collect()
+        } else {
+            path.into_owned()
+        };
+
+        if stripped.as_os_str().is_empty() {
+            continue;
+        }
+        let dest = dest_dir.join(&stripped);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).ok();
+        }
+        entry.unpack(&dest).map_err(|e| {
+            YantrikDbError::InvalidInput(format!("tar unpack {}: {e}", dest.display()))
+        })?;
+    }
+    Ok(())
+}
+
 /// Download the asset, verify SHA-256, extract into the cache dir.
 /// Atomic via tmp dir + rename: a partially-extracted cache dir is
 /// never left visible.
@@ -194,34 +252,6 @@ fn fetch_and_extract(model: &DownloadableModel, name: &str) -> Result<PathBuf> {
         YantrikDbError::InvalidInput(format!("mkdir tmp {}: {e}", tmp_dir.display()))
     })?;
 
-    let gz = flate2::read::GzDecoder::new(&bytes[..]);
-    let mut archive = tar::Archive::new(gz);
-    // The tarball entries are scoped under e.g. `potion-base-8M/...`.
-    // We want the inner files at the cache dir root, so we strip the
-    // leading directory component.
-    for entry in archive
-        .entries()
-        .map_err(|e| YantrikDbError::InvalidInput(format!("tar open: {e}")))?
-    {
-        let mut entry =
-            entry.map_err(|e| YantrikDbError::InvalidInput(format!("tar entry: {e}")))?;
-        let path = entry
-            .path()
-            .map_err(|e| YantrikDbError::InvalidInput(format!("tar path: {e}")))?;
-        // Strip the leading dir component if present.
-        let stripped: PathBuf = path.components().skip(1).collect();
-        if stripped.as_os_str().is_empty() {
-            continue;
-        }
-        let dest = tmp_dir.join(&stripped);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent).ok();
-        }
-        entry.unpack(&dest).map_err(|e| {
-            YantrikDbError::InvalidInput(format!("tar unpack {}: {e}", dest.display()))
-        })?;
-    }
-
     // Final move: rename tmp_dir → final_dir. If a concurrent process
     // beat us to it, both renames may run; the second one fails and we
     // accept whatever's already there.
@@ -270,7 +300,8 @@ impl DownloadedEmbedder {
     pub fn fetch(name: &str) -> Result<Self> {
         let model = registry(name).ok_or_else(|| {
             YantrikDbError::InvalidInput(format!(
-                "unknown embedder name {name:?}; known: potion-base-8M, potion-base-32M"
+                "unknown embedder name {name:?}; known: \
+                 potion-base-8M, potion-base-32M, potion-multilingual-128M"
             ))
         })?;
         let dir = fetch_and_extract(&model, name)?;
@@ -332,6 +363,102 @@ mod tests {
         assert_eq!(
             url,
             "https://github.com/yantrikos/yantrikdb-models/releases/download/v0.1.0/potion-base-8M.tar.gz"
+        );
+    }
+
+    #[test]
+    fn registry_includes_potion_multilingual_128m() {
+        let m = registry("potion-multilingual-128M").expect("registered");
+        assert_eq!(m.dim, 256);
+        assert_eq!(m.release_tag, "v0.2.0");
+        assert_eq!(m.sha256.len(), 64);
+    }
+
+    /// Helper: build an in-memory .tar.gz with the given (path, bytes)
+    /// entries. Used by the layout-agnostic extractor tests below.
+    fn build_tar_gz(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        {
+            let mut builder = tar::Builder::new(&mut gz);
+            for (path, content) in entries {
+                let mut header = tar::Header::new_gnu();
+                header.set_size(content.len() as u64);
+                header.set_mode(0o644);
+                header.set_cksum();
+                builder
+                    .append_data(&mut header, path, *content)
+                    .expect("tar append");
+            }
+            builder.finish().expect("tar finish");
+        }
+        gz.finish().expect("gz finish")
+    }
+
+    /// Closes yantrikos/yantrikdb#15. The v0.2.0 multilingual tarball
+    /// ships files at the archive root (`model.safetensors`, not
+    /// `potion-multilingual-128M/model.safetensors`). Pre-fix the
+    /// extractor unconditionally stripped the leading component, so
+    /// every entry's path became empty and was skipped, leaving the
+    /// cache dir empty. This test exercises the files-at-root layout
+    /// to ensure the fix actually works for the multilingual case.
+    #[test]
+    fn extract_tarball_files_at_root_layout() {
+        let bytes = build_tar_gz(&[
+            ("model.safetensors", b"safetensors-bytes" as &[u8]),
+            ("tokenizer.json", b"{\"tokenizer\": true}"),
+            ("config.json", b"{\"hidden_dim\": 256}"),
+            ("modules.json", b"[]"),
+        ]);
+        let dir = tempfile::tempdir().expect("tmpdir");
+        extract_tarball_to(&bytes, dir.path()).expect("extract succeeds");
+
+        for filename in [
+            "model.safetensors",
+            "tokenizer.json",
+            "config.json",
+            "modules.json",
+        ] {
+            let p = dir.path().join(filename);
+            assert!(p.exists(), "missing expected file: {}", p.display());
+        }
+    }
+
+    /// Symmetric: the v0.1.0 base tarballs (potion-base-8M /
+    /// potion-base-32M) nest files under a top-level directory. The
+    /// extractor must strip that directory so files land at the cache
+    /// root for model2vec to find them. This test guards against the
+    /// regression-of-the-regression — fixing files-at-root must not
+    /// break files-under-prefix.
+    #[test]
+    fn extract_tarball_files_under_prefix_layout() {
+        let bytes = build_tar_gz(&[
+            (
+                "potion-base-8M/model.safetensors",
+                b"safetensors-bytes" as &[u8],
+            ),
+            ("potion-base-8M/tokenizer.json", b"{\"tokenizer\": true}"),
+            ("potion-base-8M/config.json", b"{\"hidden_dim\": 256}"),
+            ("potion-base-8M/modules.json", b"[]"),
+        ]);
+        let dir = tempfile::tempdir().expect("tmpdir");
+        extract_tarball_to(&bytes, dir.path()).expect("extract succeeds");
+
+        // After stripping the prefix, files are at the dir root.
+        for filename in [
+            "model.safetensors",
+            "tokenizer.json",
+            "config.json",
+            "modules.json",
+        ] {
+            let p = dir.path().join(filename);
+            assert!(p.exists(), "missing expected file: {}", p.display());
+        }
+        // The prefix directory should NOT exist as a literal child of
+        // dest_dir — the strip should have eliminated it.
+        assert!(
+            !dir.path().join("potion-base-8M").exists(),
+            "prefix directory should have been stripped"
         );
     }
 
