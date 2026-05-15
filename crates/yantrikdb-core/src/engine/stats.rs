@@ -1090,7 +1090,12 @@ mod pending_ops_tests {
     }
 
     #[test]
-    fn schema_version_meta_at_25() {
+    fn schema_version_meta_at_current() {
+        // Locks the meta-stamp to the SCHEMA_VERSION constant so a future
+        // bump (e.g. v26 → v27 from RFC 026's next phase) automatically
+        // moves this test forward without a manual literal edit.
+        // Previously hard-coded "25"; v26 (issue #29) made the brittleness
+        // obvious so the renaming + constant reference go together.
         let db = open_test_db();
         let conn = db.read_conn();
         let v: String = conn
@@ -1100,7 +1105,7 @@ mod pending_ops_tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(v, "25");
+        assert_eq!(v, crate::schema::SCHEMA_VERSION.to_string());
     }
 
     // ── Perf regression tests (added v0.7.1 after the SELECT COUNT incident) ──

@@ -8978,3 +8978,249 @@ fn migration_meta_stamp_does_not_downgrade() {
         "MAX-stamp invariant: open() must never rewind meta.schema_version below the on-disk value"
     );
 }
+
+// ============================================================================
+// v0.8.x — schema v26 conflict-aware-write provenance columns
+// (issue yantrikos/yantrikdb#29, RFC 026 umbrella issue #28).
+//
+// v26 introduces four additive columns on `memories` that the WriteResolution
+// API (issue #30) will populate at write time:
+//   - prior_rid, resolution_kind, dismissal_reason, confidence_at_write
+//
+// Plus normalizes the existing `source` field to the enum {user, inference,
+// document, source}; non-conforming rows are coerced to 'user' and the
+// count is logged via meta.source_normalization_log_v26.
+//
+// Tests cover three paths:
+//   1. Fresh-install DB has all four columns and both partial indexes.
+//   2. Pre-v26 DB upgrades cleanly: columns appear, indexes appear, source
+//      normalization runs and the meta log is written.
+//   3. Replay-resilience: migration is safe to re-run on an already-v26 DB
+//      (per v0.7.3 idempotent runner contract — the same property #16, #22
+//      and the cluster-replication incident locked).
+// ============================================================================
+
+/// Helper: list columns of a SQLite table via PRAGMA.
+fn table_columns(conn: &rusqlite::Connection, table: &str) -> Vec<String> {
+    let mut stmt = conn
+        .prepare(&format!("PRAGMA table_info({table})"))
+        .unwrap();
+    stmt.query_map([], |row| row.get::<_, String>(1))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap()
+}
+
+/// Helper: assert an index exists in sqlite_master.
+fn index_exists(conn: &rusqlite::Connection, index: &str) -> bool {
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=?1",
+            params![index],
+            |row| row.get(0),
+        )
+        .unwrap();
+    count == 1
+}
+
+#[test]
+fn schema_v26_fresh_install_has_provenance_columns_and_indexes() {
+    // Fresh DB takes the SCHEMA_SQL path (not the migration chain), so this
+    // locks the invariant that SCHEMA_SQL stays in sync with the
+    // MIGRATE_V25_TO_V26 column set. If someone adds a column to one but
+    // not the other (the classic migration drift bug), this test catches it.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let conn = db.conn();
+
+    let cols = table_columns(&conn, "memories");
+    for required in [
+        "prior_rid",
+        "resolution_kind",
+        "dismissal_reason",
+        "confidence_at_write",
+    ] {
+        assert!(
+            cols.iter().any(|c| c == required),
+            "v26: fresh-install memories table missing column {required}, got: {cols:?}"
+        );
+    }
+
+    assert!(
+        index_exists(&conn, "idx_memories_prior_rid"),
+        "v26: fresh-install missing partial index idx_memories_prior_rid"
+    );
+    assert!(
+        index_exists(&conn, "idx_memories_resolution_kind"),
+        "v26: fresh-install missing partial index idx_memories_resolution_kind"
+    );
+}
+
+#[test]
+fn schema_v26_migration_from_v25_adds_columns_and_normalizes_source() {
+    // Simulate a pre-v26 DB: open at current schema, write some rows with
+    // both enum-valid and enum-invalid source values, rewind meta to 25,
+    // re-open to trigger MIGRATE_V25_TO_V26. After re-open:
+    //   - new columns must exist
+    //   - new indexes must exist
+    //   - rows with non-enum source must have been coerced to 'user'
+    //   - meta.source_normalization_log_v26 must report the affected count
+    use tempfile::NamedTempFile;
+    let tmp = NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap();
+
+    // First open: creates DB at current SCHEMA_VERSION with all columns.
+    {
+        let db = YantrikDB::new(path, 8).unwrap();
+        // Plant 3 rows: 2 with enum-valid source, 1 with non-enum source.
+        // We bypass record() because record()'s contract doesn't yet enforce
+        // the enum (that's issue #30's job); using direct SQL is the honest
+        // way to simulate a pre-v26 DB that contains legacy free-text source
+        // values. The migration's job is to clean those up.
+        let conn = db.conn();
+        for (rid, src) in [
+            ("01900000-0000-7000-8000-000000000001", "user"),
+            ("01900000-0000-7000-8000-000000000002", "inference"),
+            ("01900000-0000-7000-8000-000000000003", "legacy-freetext"),
+        ] {
+            conn.execute(
+                "INSERT INTO memories (rid, type, text, created_at, updated_at, last_access, source) \
+                 VALUES (?1, 'episodic', 'test', 0.0, 0.0, 0.0, ?2)",
+                params![rid, src],
+            )
+            .unwrap();
+        }
+    }
+
+    // Rewind meta to 25 to force re-run of MIGRATE_V25_TO_V26. The
+    // idempotent runner swallows the "duplicate column" errors that
+    // the ALTER TABLE statements would raise on the second pass — that
+    // property is what makes this rewind-then-reopen test legitimate.
+    {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '25')",
+            [],
+        )
+        .unwrap();
+        // Also drop the v26 indexes so we can verify the migration
+        // recreates them (without this, IF NOT EXISTS would skip).
+        conn.execute("DROP INDEX IF EXISTS idx_memories_prior_rid", [])
+            .unwrap();
+        conn.execute("DROP INDEX IF EXISTS idx_memories_resolution_kind", [])
+            .unwrap();
+    }
+
+    // Re-open: existing_version=25 triggers MIGRATE_V25_TO_V26.
+    let db = YantrikDB::new(path, 8)
+        .expect("v26 migration must run cleanly against a rewound-meta v25 DB");
+    let conn = db.conn();
+
+    // Columns present.
+    let cols = table_columns(&conn, "memories");
+    for required in [
+        "prior_rid",
+        "resolution_kind",
+        "dismissal_reason",
+        "confidence_at_write",
+    ] {
+        assert!(
+            cols.iter().any(|c| c == required),
+            "v26 migration: missing column {required} after re-open"
+        );
+    }
+
+    // Indexes recreated.
+    assert!(
+        index_exists(&conn, "idx_memories_prior_rid"),
+        "v26 migration: missing partial index idx_memories_prior_rid"
+    );
+    assert!(
+        index_exists(&conn, "idx_memories_resolution_kind"),
+        "v26 migration: missing partial index idx_memories_resolution_kind"
+    );
+
+    // Source normalization: legacy-freetext row should be 'user' now.
+    let normalized: String = conn
+        .query_row(
+            "SELECT source FROM memories WHERE rid = '01900000-0000-7000-8000-000000000003'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        normalized, "user",
+        "v26 migration must coerce non-enum source to 'user'"
+    );
+
+    // Enum-valid rows preserved.
+    let preserved: String = conn
+        .query_row(
+            "SELECT source FROM memories WHERE rid = '01900000-0000-7000-8000-000000000002'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        preserved, "inference",
+        "v26 migration must preserve enum-valid source values"
+    );
+
+    // Normalization log written to meta — count includes 1 affected row.
+    let log: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'source_normalization_log_v26'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        log.contains("normalized 1 rows"),
+        "v26 migration must log normalization count, got: {log}"
+    );
+}
+
+#[test]
+fn schema_v26_migration_replay_is_idempotent() {
+    // Replay-resilience: rewinding meta to 25 on a DB that's already at v26
+    // schema must not break the second open. This is the same shape as the
+    // v0.7.3 / v0.7.8 replay tests above, repeated for the v26 migration so
+    // the property is locked at this specific migration boundary too.
+    use tempfile::NamedTempFile;
+    let tmp = NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap();
+
+    // First open: fresh v26.
+    {
+        let _db = YantrikDB::new(path, 8).unwrap();
+    }
+    // Rewind meta.
+    {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '25')",
+            [],
+        )
+        .unwrap();
+    }
+    // Second open: MIGRATE_V25_TO_V26 re-runs against already-v26 schema.
+    // run_migration_idempotent swallows the duplicate-column errors.
+    let db = YantrikDB::new(path, 8)
+        .expect("v26 migration runner must heal rewound-meta deployments on a v26-schema DB");
+
+    // Sanity: a write still works end-to-end after the heal.
+    db.record(
+        "post-v26-heal smoke",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+}
