@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 25;
+pub const SCHEMA_VERSION: i32 = 26;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -46,8 +46,23 @@ CREATE TABLE IF NOT EXISTS memories (
     -- v25 (RFC issue #9): cluster-replication determinism columns
     tombstone_reason TEXT,                     -- caller-supplied reason for tombstone_with_rid (NULL for live rows)
     created_at_unix_micros INTEGER NOT NULL DEFAULT 0, -- caller-supplied i64 micros, materialized at leader for byte-deterministic follower replay
-    embedding_model TEXT                       -- engine-deterministic-surface version pin (e.g. 'bge-base-en-v1.5'); RFC 013 may swap for richer type
+    embedding_model TEXT,                      -- engine-deterministic-surface version pin (e.g. 'bge-base-en-v1.5'); RFC 013 may swap for richer type
+
+    -- v26 (RFC 026 / issue #29): conflict-aware-write provenance metadata.
+    -- Foundation for issue #30 WriteResolution API. Columns capture the
+    -- epistemic operation chosen at write time so conflict resolution +
+    -- paper adoption analysis are first-class queries, not JSON-blob crawls.
+    -- All NULL on pre-v26 rows.
+    prior_rid TEXT,                            -- supersedes/updates/merges target rid; NULL for append_as_new
+    resolution_kind TEXT,                      -- 'append' | 'update' | 'merge' | 'supersede' | 'dismiss'
+    dismissal_reason TEXT,                     -- non-empty when resolution_kind='dismiss'; audit trail
+    confidence_at_write REAL                   -- substrate's conflict-confidence at write time, [0.0, 1.0]
 );
+-- v26 partial indexes for the resolution/supersession query patterns the
+-- WriteResolution API will exercise. Partial so they cost nothing on the
+-- (initially) overwhelming majority of rows that are append-with-no-conflict.
+CREATE INDEX IF NOT EXISTS idx_memories_prior_rid ON memories(prior_rid) WHERE prior_rid IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_memories_resolution_kind ON memories(resolution_kind) WHERE resolution_kind IS NOT NULL;
 
 -- Session tracking (V13)
 CREATE TABLE IF NOT EXISTS sessions (
@@ -1872,4 +1887,57 @@ ALTER TABLE memories ADD COLUMN embedding_model TEXT;
 UPDATE memories SET created_at_unix_micros = CAST(created_at * 1000000 AS INTEGER) WHERE created_at_unix_micros = 0;
 CREATE INDEX IF NOT EXISTS idx_memories_created_at_micros ON memories(created_at_unix_micros);
 CREATE INDEX IF NOT EXISTS idx_memories_embedding_model ON memories(embedding_model) WHERE embedding_model IS NOT NULL;
+";
+
+/// v25 → v26: conflict-aware-write provenance metadata (issue
+/// yantrikos/yantrikdb#29, RFC 026 v0.8.x experiment).
+///
+/// Four additive columns on `memories`, all NULL on pre-v26 rows:
+///   - prior_rid TEXT NULL — set by the WriteResolution API (issue #30)
+///     when resolution is `update_existing` / `merge_with_existing` /
+///     `supersede_chain`; references the prior memory's rid. NULL for
+///     `append_as_new`.
+///   - resolution_kind TEXT NULL — one of 'append' | 'update' | 'merge'
+///     | 'supersede' | 'dismiss'. NULL on pre-v26 rows (no resolution
+///     was recorded). Feeds H1 paper analytics: `SELECT COUNT(*) GROUP
+///     BY resolution_kind WHERE arm='treatment'` is the headline query.
+///   - dismissal_reason TEXT NULL — non-empty only when
+///     resolution_kind='dismiss'. The WriteResolution API enforces
+///     ≥16 chars at High confidence tier; ≥1 char at Medium. Audit
+///     trail for paper anti-gaming.
+///   - confidence_at_write REAL NULL — conflict detector confidence at
+///     the moment of the write decision, [0.0, 1.0]. NULL on pre-v26
+///     rows. Used for falsification gates (e.g. false-abandonment
+///     rate = `count(dismiss) / count(High-tier opportunities)`).
+///
+/// Plus source-field enum normalization. The `source` column was free-
+/// text TEXT NOT NULL DEFAULT 'user' through v25; v26 conceptually
+/// constrains it to the enum {user, inference, document, system}.
+/// Because the column is NOT NULL we can't tombstone non-conforming
+/// rows; instead we coerce them to 'user' here and log the count of
+/// affected rows once via a `source_normalization_log` row in the
+/// `meta` table. Going forward, app-level validation in the
+/// WriteResolution API (#30) rejects non-enum source values.
+///
+/// Two partial indexes for the resolution/supersession query patterns:
+///   - idx_memories_prior_rid for "what memory supersedes this rid"
+///   - idx_memories_resolution_kind for paper analytics group-by
+///
+/// All ALTER TABLE statements are additive and idempotent (the runner
+/// in engine/mod.rs swallows "duplicate column name" / "already exists"
+/// per the v0.7.3 replay-resilience fix). Safe to re-run.
+pub const MIGRATE_V25_TO_V26: &str = "
+ALTER TABLE memories ADD COLUMN prior_rid TEXT;
+ALTER TABLE memories ADD COLUMN resolution_kind TEXT;
+ALTER TABLE memories ADD COLUMN dismissal_reason TEXT;
+ALTER TABLE memories ADD COLUMN confidence_at_write REAL;
+INSERT OR REPLACE INTO meta (key, value)
+    SELECT 'source_normalization_log_v26',
+           'normalized ' || COUNT(*) || ' rows from non-enum source to user'
+    FROM memories
+    WHERE source NOT IN ('user', 'inference', 'document', 'system');
+UPDATE memories SET source = 'user'
+    WHERE source NOT IN ('user', 'inference', 'document', 'system');
+CREATE INDEX IF NOT EXISTS idx_memories_prior_rid ON memories(prior_rid) WHERE prior_rid IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_memories_resolution_kind ON memories(resolution_kind) WHERE resolution_kind IS NOT NULL;
 ";
