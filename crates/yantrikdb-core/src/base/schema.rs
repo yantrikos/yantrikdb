@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 26;
+pub const SCHEMA_VERSION: i32 = 27;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -56,13 +56,27 @@ CREATE TABLE IF NOT EXISTS memories (
     prior_rid TEXT,                            -- supersedes/updates/merges target rid; NULL for append_as_new
     resolution_kind TEXT,                      -- 'append' | 'update' | 'merge' | 'supersede' | 'dismiss'
     dismissal_reason TEXT,                     -- non-empty when resolution_kind='dismiss'; audit trail
-    confidence_at_write REAL                   -- substrate's conflict-confidence at write time, [0.0, 1.0]
+    confidence_at_write REAL,                  -- substrate's conflict-confidence at write time, [0.0, 1.0]
+
+    -- v27: owner/actor/channel provenance and recall scoping. The caller
+    -- resolves platform-specific identities (Telegram/WhatsApp/CLI/etc.)
+    -- to a canonical owner_id before writing; YantrikDB stores and filters
+    -- the resolved scope without owning identity-alias policy.
+    owner_id TEXT NOT NULL DEFAULT 'default',
+    actor_id TEXT,
+    channel TEXT,
+    conversation_id TEXT,
+    recall_scope TEXT NOT NULL DEFAULT 'same_owner'
 );
 -- v26 partial indexes for the resolution/supersession query patterns the
 -- WriteResolution API will exercise. Partial so they cost nothing on the
 -- (initially) overwhelming majority of rows that are append-with-no-conflict.
 CREATE INDEX IF NOT EXISTS idx_memories_prior_rid ON memories(prior_rid) WHERE prior_rid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_memories_resolution_kind ON memories(resolution_kind) WHERE resolution_kind IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_memories_owner_id ON memories(owner_id);
+CREATE INDEX IF NOT EXISTS idx_memories_owner_channel ON memories(owner_id, channel);
+CREATE INDEX IF NOT EXISTS idx_memories_owner_conversation ON memories(owner_id, conversation_id);
+CREATE INDEX IF NOT EXISTS idx_memories_recall_scope ON memories(recall_scope);
 
 -- Session tracking (V13)
 CREATE TABLE IF NOT EXISTS sessions (
@@ -1940,4 +1954,22 @@ UPDATE memories SET source = 'user'
     WHERE source NOT IN ('user', 'inference', 'document', 'system');
 CREATE INDEX IF NOT EXISTS idx_memories_prior_rid ON memories(prior_rid) WHERE prior_rid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_memories_resolution_kind ON memories(resolution_kind) WHERE resolution_kind IS NOT NULL;
+";
+
+/// v26 → v27: first-class owner/actor/channel provenance and recall scope.
+///
+/// Identity alias resolution stays with the client/application. YantrikDB
+/// stores the resolved canonical owner (`owner_id`) plus raw provenance
+/// (`actor_id`, `channel`, `conversation_id`) and enforces recall scope at
+/// query time.
+pub const MIGRATE_V26_TO_V27: &str = "
+ALTER TABLE memories ADD COLUMN owner_id TEXT NOT NULL DEFAULT 'default';
+ALTER TABLE memories ADD COLUMN actor_id TEXT;
+ALTER TABLE memories ADD COLUMN channel TEXT;
+ALTER TABLE memories ADD COLUMN conversation_id TEXT;
+ALTER TABLE memories ADD COLUMN recall_scope TEXT NOT NULL DEFAULT 'same_owner';
+CREATE INDEX IF NOT EXISTS idx_memories_owner_id ON memories(owner_id);
+CREATE INDEX IF NOT EXISTS idx_memories_owner_channel ON memories(owner_id, channel);
+CREATE INDEX IF NOT EXISTS idx_memories_owner_conversation ON memories(owner_id, conversation_id);
+CREATE INDEX IF NOT EXISTS idx_memories_recall_scope ON memories(recall_scope);
 ";

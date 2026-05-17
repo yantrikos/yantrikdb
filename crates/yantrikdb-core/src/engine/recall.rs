@@ -138,6 +138,28 @@ fn irregular_verb_forms(word: &str) -> Option<&'static [&'static str]> {
 }
 
 impl YantrikDB {
+    fn scope_allows(
+        row: &ScoringRow,
+        owner_id: &str,
+        current_channel: Option<&str>,
+        conversation_id: Option<&str>,
+    ) -> bool {
+        if row.owner_id != owner_id {
+            return false;
+        }
+        match row.recall_scope.as_str() {
+            "all" | "same_owner" => true,
+            "same_channel" => current_channel
+                .map(|ch| row.channel.as_deref() == Some(ch))
+                .unwrap_or(false),
+            "same_conversation" => conversation_id
+                .map(|cid| row.conversation_id.as_deref() == Some(cid))
+                .unwrap_or(false),
+            "private" => false,
+            _ => true,
+        }
+    }
+
     /// Retrieve memories using multi-signal fusion scoring.
     /// When `expand_entities` is true, graph edges are followed to pull in
     /// entity-connected memories that pure vector search would miss.
@@ -1797,6 +1819,160 @@ impl YantrikDB {
 
     /// **Phase 6 RYW** — `recall()` with strict read-your-writes guard.
     ///
+    /// Recall with canonical owner/channel scope enforcement.
+    ///
+    /// Clients resolve raw platform identities to `owner_id` before calling this.
+    /// `current_channel` and `conversation_id` are used only to evaluate
+    /// `same_channel` and `same_conversation` memory scopes.
+    ///
+    /// Unlike a post-filter over `recall()`, this path filters candidate rows by
+    /// owner/scope before final scoring and top-k truncation so other owners'
+    /// memories cannot crowd out in-scope results.
+    #[allow(clippy::too_many_arguments)]
+    pub fn recall_scoped(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        owner_id: &str,
+        current_channel: Option<&str>,
+        conversation_id: Option<&str>,
+        time_window: Option<(f64, f64)>,
+        memory_type: Option<&str>,
+        include_consolidated: bool,
+        expand_entities: bool,
+        query_text: Option<&str>,
+        skip_reinforce: bool,
+        namespace: Option<&str>,
+        domain: Option<&str>,
+        source: Option<&str>,
+    ) -> Result<Vec<RecallResult>> {
+        let _ = expand_entities; // Scoped exact path does not expand graph candidates yet.
+        let ts = now();
+        let learned_weights = self.load_learned_weights()?;
+        let query_sentiment = query_text
+            .map(scoring::detect_query_sentiment)
+            .unwrap_or(0.0);
+
+        let scoped_rids: Vec<String> = {
+            let cache = self.scoring_cache.read();
+            cache
+                .iter()
+                .filter(|(_, row)| {
+                    let status_ok = if include_consolidated {
+                        row.consolidation_status == "active"
+                            || row.consolidation_status == "consolidated"
+                    } else {
+                        row.consolidation_status == "active"
+                    };
+                    status_ok
+                        && Self::scope_allows(row, owner_id, current_channel, conversation_id)
+                        && memory_type.map_or(true, |mt| row.memory_type == mt)
+                        && time_window
+                            .map_or(true, |(s, e)| row.created_at >= s && row.created_at <= e)
+                        && namespace.map_or(true, |ns| row.namespace == ns)
+                        && domain.map_or(true, |d| row.domain == d)
+                        && source.map_or(true, |s| row.source == s)
+                })
+                .map(|(rid, _)| rid.clone())
+                .collect()
+        };
+
+        if scoped_rids.is_empty() {
+            return Ok(vec![]);
+        }
+
+        let rid_refs: Vec<&str> = scoped_rids.iter().map(|r| r.as_str()).collect();
+        let emb_map = self.fetch_embeddings_by_rids(&rid_refs)?;
+
+        let mut scored = Vec::new();
+        {
+            let cache = self.scoring_cache.read();
+            for rid in &scoped_rids {
+                let Some(row) = cache.get(rid) else { continue };
+                let Some(emb_blob) = emb_map.get(rid.as_str()) else {
+                    continue;
+                };
+                let mem_emb = crate::serde_helpers::deserialize_f32(emb_blob);
+                let sim_score =
+                    crate::consolidate::cosine_similarity(query_embedding, &mem_emb) as f64;
+                let elapsed = ts - row.last_access;
+                let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
+                let age = ts - row.created_at;
+                let recency = scoring::recency_score(age);
+                let composite = scoring::adaptive_composite_score(
+                    sim_score,
+                    decay,
+                    recency,
+                    row.importance,
+                    row.valence,
+                    query_sentiment,
+                    &learned_weights,
+                );
+                let mut why = scoring::build_why(sim_score, recency, decay, row.valence);
+                why.push("owner_scope_match".to_string());
+                let contributions = scoring::adaptive_contributions(
+                    sim_score,
+                    decay,
+                    recency,
+                    row.importance,
+                    &learned_weights,
+                );
+                let valence_multiplier = scoring::query_valence_boost(row.valence, query_sentiment);
+
+                scored.push(RecallResult {
+                    rid: rid.clone(),
+                    memory_type: row.memory_type.clone(),
+                    text: String::new(),
+                    created_at: row.created_at,
+                    importance: row.importance,
+                    valence: row.valence,
+                    score: composite,
+                    scores: ScoreBreakdown {
+                        similarity: sim_score,
+                        decay,
+                        recency,
+                        importance: row.importance,
+                        graph_proximity: 0.0,
+                        contributions,
+                        valence_multiplier,
+                    },
+                    why_retrieved: why,
+                    metadata: serde_json::Value::Null,
+                    namespace: row.namespace.clone(),
+                    certainty: row.certainty,
+                    domain: row.domain.clone(),
+                    source: row.source.clone(),
+                    emotional_state: row.emotional_state.clone(),
+                });
+            }
+        }
+
+        scored.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        scored.truncate(top_k);
+
+        let final_rids: Vec<&str> = scored.iter().map(|r| r.rid.as_str()).collect();
+        let text_meta = self.fetch_text_metadata_by_rids(&final_rids)?;
+        for result in &mut scored {
+            if let Some(tm) = text_meta.get(&result.rid) {
+                result.text = tm.text.clone();
+                result.metadata = serde_json::from_str(&tm.metadata)
+                    .unwrap_or(serde_json::Value::Object(Default::default()));
+            }
+        }
+
+        if !skip_reinforce {
+            for r in &scored {
+                self.reinforce(&r.rid)?;
+            }
+        }
+
+        Ok(scored)
+    }
+
     /// Waits up to ``timeout`` for ``visible_seq[namespace] >= min_seq``,
     /// then runs the standard ``recall()`` pipeline. If the watermark is
     /// reached, search proceeds normally; if the timeout expires before

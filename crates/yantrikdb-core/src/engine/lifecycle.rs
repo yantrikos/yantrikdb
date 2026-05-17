@@ -33,6 +33,11 @@ impl YantrikDB {
                 row.get::<_, String>("domain")?,
                 row.get::<_, String>("source")?,
                 row.get::<_, Option<String>>("emotional_state")?,
+                row.get::<_, String>("owner_id")?,
+                row.get::<_, Option<String>>("actor_id")?,
+                row.get::<_, Option<String>>("channel")?,
+                row.get::<_, Option<String>>("conversation_id")?,
+                row.get::<_, String>("recall_scope")?,
                 row.get::<_, Option<String>>("session_id")?,
                 row.get::<_, Option<f64>>("due_at")?,
                 row.get::<_, Option<String>>("temporal_kind")?,
@@ -64,9 +69,14 @@ impl YantrikDB {
                     domain: row.15,
                     source: row.16,
                     emotional_state: row.17,
-                    session_id: row.18,
-                    due_at: row.19,
-                    temporal_kind: row.20,
+                    owner_id: row.18,
+                    actor_id: row.19,
+                    channel: row.20,
+                    conversation_id: row.21,
+                    recall_scope: row.22,
+                    session_id: row.23,
+                    due_at: row.24,
+                    temporal_kind: row.25,
                 }))
             }
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
@@ -125,7 +135,8 @@ impl YantrikDB {
             "SELECT rid, type, text, created_at, importance, valence, half_life, \
              last_access, access_count, consolidation_status, storage_tier, \
              consolidated_into, metadata, namespace, certainty, domain, source, \
-             emotional_state, session_id, due_at, temporal_kind \
+             emotional_state, owner_id, actor_id, channel, conversation_id, recall_scope, \
+             session_id, due_at, temporal_kind \
              FROM memories WHERE {where_clause} ORDER BY {order} LIMIT ?{idx} OFFSET ?{}",
             idx + 1
         );
@@ -155,9 +166,14 @@ impl YantrikDB {
                 row.get::<_, String>(15)?,
                 row.get::<_, String>(16)?,
                 row.get::<_, Option<String>>(17)?,
-                row.get::<_, Option<String>>(18)?,
-                row.get::<_, Option<f64>>(19)?,
+                row.get::<_, String>(18)?,
+                row.get::<_, Option<String>>(19)?,
                 row.get::<_, Option<String>>(20)?,
+                row.get::<_, Option<String>>(21)?,
+                row.get::<_, String>(22)?,
+                row.get::<_, Option<String>>(23)?,
+                row.get::<_, Option<f64>>(24)?,
+                row.get::<_, Option<String>>(25)?,
             ))
         })?;
 
@@ -187,9 +203,14 @@ impl YantrikDB {
                 domain: row.15,
                 source: row.16,
                 emotional_state: row.17,
-                session_id: row.18,
-                due_at: row.19,
-                temporal_kind: row.20,
+                owner_id: row.18,
+                actor_id: row.19,
+                channel: row.20,
+                conversation_id: row.21,
+                recall_scope: row.22,
+                session_id: row.23,
+                due_at: row.24,
+                temporal_kind: row.25,
             });
         }
 

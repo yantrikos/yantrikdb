@@ -445,6 +445,15 @@ fn row_to_memory(row: &rusqlite::Row<'_>) -> rusqlite::Result<Memory> {
         domain: row.get(15)?,
         source: row.get(16)?,
         emotional_state: row.get(17)?,
+        owner_id: row
+            .get("owner_id")
+            .unwrap_or_else(|_| "default".to_string()),
+        actor_id: row.get("actor_id").unwrap_or(None),
+        channel: row.get("channel").unwrap_or(None),
+        conversation_id: row.get("conversation_id").unwrap_or(None),
+        recall_scope: row
+            .get("recall_scope")
+            .unwrap_or_else(|_| "same_owner".to_string()),
         session_id: row.get(18)?,
         due_at: row.get(19)?,
         temporal_kind: row.get(20)?,
