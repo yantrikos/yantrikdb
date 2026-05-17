@@ -13,7 +13,8 @@ impl YantrikDB {
         let mut stmt = conn.prepare(
             "SELECT rid, created_at, importance, half_life, last_access, \
              valence, consolidation_status, type, namespace, access_count, \
-             certainty, domain, source, emotional_state \
+             certainty, domain, source, emotional_state, \
+             owner_id, actor_id, channel, conversation_id, recall_scope \
              FROM memories \
              WHERE consolidation_status != 'tombstoned'",
         )?;
@@ -35,6 +36,11 @@ impl YantrikDB {
                     domain: row.get(11)?,
                     source: row.get(12)?,
                     emotional_state: row.get(13)?,
+                    owner_id: row.get(14)?,
+                    actor_id: row.get(15)?,
+                    channel: row.get(16)?,
+                    conversation_id: row.get(17)?,
+                    recall_scope: row.get(18)?,
                 },
             ))
         })?;

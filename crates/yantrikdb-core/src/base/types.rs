@@ -46,10 +46,43 @@ pub struct Memory {
     pub domain: String,
     pub source: String,
     pub emotional_state: Option<String>,
+    // Owner/actor/channel provenance (V27)
+    pub owner_id: String,
+    pub actor_id: Option<String>,
+    pub channel: Option<String>,
+    pub conversation_id: Option<String>,
+    pub recall_scope: String,
+
     // Session & temporal (V13)
     pub session_id: Option<String>,
     pub due_at: Option<f64>,
     pub temporal_kind: Option<String>,
+}
+
+/// Canonical memory provenance supplied by the host application.
+///
+/// The host resolves platform-specific actors to a canonical `owner_id`;
+/// YantrikDB stores that resolved owner plus raw channel/conversation
+/// provenance for scoped recall.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct MemoryProvenance {
+    pub owner_id: String,
+    pub actor_id: Option<String>,
+    pub channel: Option<String>,
+    pub conversation_id: Option<String>,
+    pub recall_scope: String,
+}
+
+impl Default for MemoryProvenance {
+    fn default() -> Self {
+        Self {
+            owner_id: "default".to_string(),
+            actor_id: None,
+            channel: None,
+            conversation_id: None,
+            recall_scope: "same_owner".to_string(),
+        }
+    }
 }
 
 /// Score breakdown for a recall result.
@@ -241,6 +274,12 @@ pub struct ScoringRow {
     pub domain: String,
     pub source: String,
     pub emotional_state: Option<String>,
+    // Owner/actor/channel provenance (V27)
+    pub owner_id: String,
+    pub actor_id: Option<String>,
+    pub channel: Option<String>,
+    pub conversation_id: Option<String>,
+    pub recall_scope: String,
 }
 
 /// Input for batch record operations.
@@ -581,6 +620,10 @@ pub struct RecallQuery {
     // V10 filters
     pub domain: Option<String>,
     pub source: Option<String>,
+    // V27 owner/channel scope filters
+    pub owner_id: Option<String>,
+    pub current_channel: Option<String>,
+    pub conversation_id: Option<String>,
 }
 
 impl RecallQuery {
@@ -598,6 +641,9 @@ impl RecallQuery {
             namespace: None,
             domain: None,
             source: None,
+            owner_id: None,
+            current_channel: None,
+            conversation_id: None,
         }
     }
 
@@ -653,6 +699,19 @@ impl RecallQuery {
     /// Filter by source (e.g., "user", "system", "document", "inference").
     pub fn source(mut self, s: &str) -> Self {
         self.source = Some(s.to_string());
+        self
+    }
+
+    /// Filter by canonical owner id and apply recall_scope against the current channel.
+    pub fn owner_scope(mut self, owner_id: &str, current_channel: Option<&str>) -> Self {
+        self.owner_id = Some(owner_id.to_string());
+        self.current_channel = current_channel.map(|s| s.to_string());
+        self
+    }
+
+    /// Restrict same_conversation scoped memories to the current conversation.
+    pub fn conversation(mut self, conversation_id: &str) -> Self {
+        self.conversation_id = Some(conversation_id.to_string());
         self
     }
 }

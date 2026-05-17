@@ -24,6 +24,90 @@ impl YantrikDB {
         source: &str,
         emotional_state: Option<&str>,
     ) -> Result<String> {
+        self.record_with_provenance(
+            text,
+            memory_type,
+            importance,
+            valence,
+            half_life,
+            metadata,
+            embedding,
+            namespace,
+            certainty,
+            domain,
+            source,
+            emotional_state,
+            &MemoryProvenance::default(),
+        )
+    }
+
+    /// Store a new memory with first-class owner/actor/channel provenance.
+    ///
+    /// The caller resolves platform-specific identities to `owner_id`; YantrikDB
+    /// stores the canonical owner and raw provenance in the same write path, then
+    /// recall can enforce owner/channel scope without owning alias policy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_scoped(
+        &self,
+        text: &str,
+        memory_type: &str,
+        importance: f64,
+        valence: f64,
+        half_life: f64,
+        metadata: &serde_json::Value,
+        embedding: &[f32],
+        namespace: &str,
+        certainty: f64,
+        domain: &str,
+        source: &str,
+        emotional_state: Option<&str>,
+        owner_id: &str,
+        actor_id: Option<&str>,
+        channel: Option<&str>,
+        conversation_id: Option<&str>,
+        recall_scope: &str,
+    ) -> Result<String> {
+        let provenance = MemoryProvenance {
+            owner_id: owner_id.to_string(),
+            actor_id: actor_id.map(str::to_string),
+            channel: channel.map(str::to_string),
+            conversation_id: conversation_id.map(str::to_string),
+            recall_scope: recall_scope.to_string(),
+        };
+        self.record_with_provenance(
+            text,
+            memory_type,
+            importance,
+            valence,
+            half_life,
+            metadata,
+            embedding,
+            namespace,
+            certainty,
+            domain,
+            source,
+            emotional_state,
+            &provenance,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_with_provenance(
+        &self,
+        text: &str,
+        memory_type: &str,
+        importance: f64,
+        valence: f64,
+        half_life: f64,
+        metadata: &serde_json::Value,
+        embedding: &[f32],
+        namespace: &str,
+        certainty: f64,
+        domain: &str,
+        source: &str,
+        emotional_state: Option<&str>,
+        provenance: &MemoryProvenance,
+    ) -> Result<String> {
         let rid = crate::id::new_id();
         let ts = now();
         let emb_blob = serialize_f32(embedding);
@@ -44,8 +128,9 @@ impl YantrikDB {
                 "INSERT INTO memories \
                  (rid, type, text, embedding, created_at, updated_at, importance, \
                   half_life, last_access, valence, metadata, namespace, \
-                  certainty, domain, source, emotional_state) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                  certainty, domain, source, emotional_state, owner_id, actor_id, \
+                  channel, conversation_id, recall_scope) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21)",
                 params![
                     rid,
                     memory_type,
@@ -62,7 +147,12 @@ impl YantrikDB {
                     certainty,
                     domain,
                     source,
-                    emotional_state
+                    emotional_state,
+                    provenance.owner_id,
+                    provenance.actor_id,
+                    provenance.channel,
+                    provenance.conversation_id,
+                    provenance.recall_scope,
                 ],
             )?;
 
@@ -106,6 +196,11 @@ impl YantrikDB {
                 domain: domain.to_string(),
                 source: source.to_string(),
                 emotional_state: emotional_state.map(|s| s.to_string()),
+                owner_id: provenance.owner_id.clone(),
+                actor_id: provenance.actor_id.clone(),
+                channel: provenance.channel.clone(),
+                conversation_id: provenance.conversation_id.clone(),
+                recall_scope: provenance.recall_scope.clone(),
             },
         );
 
@@ -132,6 +227,11 @@ impl YantrikDB {
                 "domain": domain,
                 "source": source,
                 "emotional_state": emotional_state,
+                "owner_id": provenance.owner_id,
+                "actor_id": provenance.actor_id,
+                "channel": provenance.channel,
+                "conversation_id": provenance.conversation_id,
+                "recall_scope": provenance.recall_scope,
             }),
             Some(&emb_hash),
         )?;
@@ -348,6 +448,11 @@ impl YantrikDB {
                         domain: input.domain.clone(),
                         source: input.source.clone(),
                         emotional_state: input.emotional_state.clone(),
+                        owner_id: "default".to_string(),
+                        actor_id: None,
+                        channel: None,
+                        conversation_id: None,
+                        recall_scope: "same_owner".to_string(),
                     },
                 );
             }
@@ -552,6 +657,11 @@ impl YantrikDB {
                     domain: domain.to_string(),
                     source: source.to_string(),
                     emotional_state: emotional_state.map(|s| s.to_string()),
+                    owner_id: "default".to_string(),
+                    actor_id: None,
+                    channel: None,
+                    conversation_id: None,
+                    recall_scope: "same_owner".to_string(),
                 },
             );
         }

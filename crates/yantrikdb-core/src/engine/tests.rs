@@ -9224,3 +9224,222 @@ fn schema_v26_migration_replay_is_idempotent() {
     )
     .unwrap();
 }
+
+#[test]
+fn record_scoped_persists_owner_actor_channel_fields() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid = db
+        .record_scoped(
+            "Primary user prefers concise replies",
+            "semantic",
+            0.8,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            &vec_seed(1.0, 8),
+            "default",
+            1.0,
+            "preference",
+            "user",
+            None,
+            "owner:primary-user",
+            Some("whatsapp:actor-primary"),
+            Some("whatsapp"),
+            Some("whatsapp:dm:primary-user"),
+            "same_owner",
+        )
+        .expect("record scoped memory");
+
+    let mem = db.get(&rid).unwrap().unwrap();
+    assert_eq!(mem.owner_id, "owner:primary-user");
+    assert_eq!(mem.actor_id.as_deref(), Some("whatsapp:actor-primary"));
+    assert_eq!(mem.channel.as_deref(), Some("whatsapp"));
+    assert_eq!(
+        mem.conversation_id.as_deref(),
+        Some("whatsapp:dm:primary-user")
+    );
+    assert_eq!(mem.recall_scope, "same_owner");
+}
+
+#[test]
+fn recall_scoped_filters_owner_and_channel_scope() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    db.record_scoped(
+        "Primary owner durable preference",
+        "semantic",
+        0.8,
+        0.0,
+        604800.0,
+        &serde_json::json!({}),
+        &vec_seed(1.0, 8),
+        "default",
+        1.0,
+        "preference",
+        "user",
+        None,
+        "owner:primary-user",
+        Some("whatsapp:actor-primary"),
+        Some("whatsapp"),
+        Some("whatsapp:dm:primary-user"),
+        "same_owner",
+    )
+    .unwrap();
+    db.record_scoped(
+        "Primary owner channel-scoped preference",
+        "semantic",
+        0.8,
+        0.0,
+        604800.0,
+        &serde_json::json!({}),
+        &vec_seed(1.0, 8),
+        "default",
+        1.0,
+        "preference",
+        "user",
+        None,
+        "owner:primary-user",
+        Some("whatsapp:actor-primary"),
+        Some("whatsapp"),
+        Some("whatsapp:dm:primary-user"),
+        "same_channel",
+    )
+    .unwrap();
+    db.record_scoped(
+        "Secondary owner separate preference",
+        "semantic",
+        0.8,
+        0.0,
+        604800.0,
+        &serde_json::json!({}),
+        &vec_seed(1.0, 8),
+        "default",
+        1.0,
+        "preference",
+        "user",
+        None,
+        "owner:secondary-user",
+        Some("whatsapp:actor-secondary"),
+        Some("whatsapp"),
+        Some("whatsapp:dm:secondary-user"),
+        "same_owner",
+    )
+    .unwrap();
+
+    let from_telegram = db
+        .recall_scoped(
+            &vec_seed(1.0, 8),
+            10,
+            "owner:primary-user",
+            Some("telegram"),
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let texts: Vec<_> = from_telegram.iter().map(|r| r.text.as_str()).collect();
+    assert!(texts.contains(&"Primary owner durable preference"));
+    assert!(!texts.contains(&"Primary owner channel-scoped preference"));
+    assert!(!texts.contains(&"Secondary owner separate preference"));
+
+    let from_whatsapp = db
+        .recall_scoped(
+            &vec_seed(1.0, 8),
+            10,
+            "owner:primary-user",
+            Some("whatsapp"),
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let texts: Vec<_> = from_whatsapp.iter().map(|r| r.text.as_str()).collect();
+    assert!(texts.contains(&"Primary owner durable preference"));
+    assert!(texts.contains(&"Primary owner channel-scoped preference"));
+    assert!(!texts.contains(&"Secondary owner separate preference"));
+}
+
+#[test]
+fn recall_scoped_filters_before_top_k_ranking() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let query = vec_seed(1.0, 8);
+
+    for i in 0..30 {
+        db.record_scoped(
+            &format!("Secondary owner noisy memory {i}"),
+            "semantic",
+            1.0,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            &query,
+            "default",
+            1.0,
+            "preference",
+            "user",
+            None,
+            "owner:secondary-user",
+            Some("whatsapp:actor-secondary"),
+            Some("whatsapp"),
+            Some("whatsapp:dm:secondary-user"),
+            "same_owner",
+        )
+        .unwrap();
+    }
+
+    db.record_scoped(
+        "Primary owner target memory",
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &serde_json::json!({}),
+        &query,
+        "default",
+        1.0,
+        "preference",
+        "user",
+        None,
+        "owner:primary-user",
+        Some("whatsapp:actor-primary"),
+        Some("whatsapp"),
+        Some("whatsapp:dm:primary-user"),
+        "same_owner",
+    )
+    .unwrap();
+
+    let scoped = db
+        .recall_scoped(
+            &query,
+            1,
+            "owner:primary-user",
+            Some("telegram"),
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(scoped.len(), 1);
+    assert_eq!(scoped[0].text, "Primary owner target memory");
+}

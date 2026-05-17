@@ -275,6 +275,19 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
                         emotional_state: op.payload["emotional_state"]
                             .as_str()
                             .map(|s| s.to_string()),
+                        owner_id: op.payload["owner_id"]
+                            .as_str()
+                            .unwrap_or("default")
+                            .to_string(),
+                        actor_id: op.payload["actor_id"].as_str().map(|s| s.to_string()),
+                        channel: op.payload["channel"].as_str().map(|s| s.to_string()),
+                        conversation_id: op.payload["conversation_id"]
+                            .as_str()
+                            .map(|s| s.to_string()),
+                        recall_scope: op.payload["recall_scope"]
+                            .as_str()
+                            .unwrap_or("same_owner")
+                            .to_string(),
                     },
                 );
             }
@@ -343,6 +356,19 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
                         domain: "general".to_string(),
                         source: "user".to_string(),
                         emotional_state: None,
+                        owner_id: op.payload["owner_id"]
+                            .as_str()
+                            .unwrap_or("default")
+                            .to_string(),
+                        actor_id: op.payload["actor_id"].as_str().map(|s| s.to_string()),
+                        channel: op.payload["channel"].as_str().map(|s| s.to_string()),
+                        conversation_id: op.payload["conversation_id"]
+                            .as_str()
+                            .map(|s| s.to_string()),
+                        recall_scope: op.payload["recall_scope"]
+                            .as_str()
+                            .unwrap_or("same_owner")
+                            .to_string(),
                     },
                 );
             }
@@ -404,6 +430,19 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
                         emotional_state: op.payload["emotional_state"]
                             .as_str()
                             .map(|s| s.to_string()),
+                        owner_id: op.payload["owner_id"]
+                            .as_str()
+                            .unwrap_or("default")
+                            .to_string(),
+                        actor_id: op.payload["actor_id"].as_str().map(|s| s.to_string()),
+                        channel: op.payload["channel"].as_str().map(|s| s.to_string()),
+                        conversation_id: op.payload["conversation_id"]
+                            .as_str()
+                            .map(|s| s.to_string()),
+                        recall_scope: op.payload["recall_scope"]
+                            .as_str()
+                            .unwrap_or("same_owner")
+                            .to_string(),
                     },
                 );
             }
