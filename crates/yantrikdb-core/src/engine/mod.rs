@@ -177,6 +177,18 @@ pub struct YantrikDB {
     embedder: Option<Box<dyn crate::types::Embedder + Send + Sync>>,
     /// Cache of active sessions: namespace → session_id
     pub(crate) active_sessions: RwLock<HashMap<String, String>>,
+    /// **Issue #41 reembed primitive.** Synchronized cutover barrier
+    /// between synchronous writes (`Normal` state) and queued writes
+    /// (`Queueing` state during reembed). Writers acquire via
+    /// `try_enter_sync_writer()` and hold the RAII guard for the full
+    /// memories INSERT + vec_index.append + oplog write critical
+    /// section. Reembed flips state to `Queueing`, waits for
+    /// `wait_for_no_sync_writers()`, then can safely capture
+    /// `build_hwm` knowing no synchronous writer can still commit to
+    /// the old generation. See `engine::write_router` module for the
+    /// brainstorm-2 rationale and the cutover-sequence regression
+    /// test.
+    pub(crate) write_router: crate::engine::write_router::SharedWriteRouter,
 }
 
 impl YantrikDB {
@@ -620,6 +632,14 @@ impl YantrikDB {
             enc,
             embedder: None,
             active_sessions: RwLock::new(active_sessions),
+            // Issue #41: WriteRouter starts in Normal state. Reembed
+            // is the only path that flips it to Queueing; until then,
+            // every record/record_text takes the synchronous path
+            // unchanged. Adding the field is a no-op for non-reembed
+            // code paths until record() is wired to check the gate.
+            write_router: std::sync::Arc::new(
+                crate::engine::write_router::WriteRouter::new(),
+            ),
         })
     }
 
