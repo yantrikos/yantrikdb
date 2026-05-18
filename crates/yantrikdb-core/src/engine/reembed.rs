@@ -341,84 +341,208 @@ pub struct ReembedStatus {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// EmbeddingProvenance — what model produced the vectors in the index
+// ─────────────────────────────────────────────────────────────────────
+
+/// Provenance of vectors currently stored in the active vector index.
+///
+/// **Independent of the runtime embedder.** After restart with no
+/// embedder loaded, the index still has knowable provenance — the
+/// embedder name + digest under which its vectors were built. The
+/// runtime embedder slot tracks "is there a local embedder available
+/// for embed_text() right now?" — a separate question.
+///
+/// Locked by brainstorm-3 round 2: conflating these two facts loses
+/// critical safety information. See yantrikos/yantrikdb#41 comment
+/// chain for the bad-state scenarios.
+#[derive(Debug, Clone)]
+pub enum EmbeddingProvenance {
+    /// Index vectors were built with a known embedder identity. Set by
+    /// a completed reembed() or by initial population of an empty DB
+    /// via record_text() with a configured embedder. The
+    /// `set_embedder*` mode logic uses this to reject silent-corruption
+    /// scenarios (same-dim-different-digest, dim-mismatch).
+    Known {
+        /// Optional human-readable name (e.g. "potion-base-2M").
+        name: Option<String>,
+        /// SHA-256 or equivalent stable fingerprint of the embedder
+        /// model. Compared by `set_embedder*` for exact-identity match.
+        digest: String,
+        /// Dimensionality of vectors in the active index.
+        dim: usize,
+    },
+    /// Index vectors come from external/precomputed input, or from a
+    /// legacy DB created before fingerprint tracking. Dimensionality is
+    /// known (it's the physical index dim); the originating embedder is
+    /// not provable. `set_embedder*` with matching dim can attach a
+    /// runtime embedder via the compat path without claiming the index
+    /// is in the new embedder's vector space.
+    ExternalOrUnknown {
+        dim: usize,
+    },
+}
+
+impl EmbeddingProvenance {
+    /// Dimensionality of vectors in the index, regardless of provenance
+    /// variant. Single accessor so callers don't pattern-match.
+    pub fn dim(&self) -> usize {
+        match self {
+            EmbeddingProvenance::Known { dim, .. } => *dim,
+            EmbeddingProvenance::ExternalOrUnknown { dim } => *dim,
+        }
+    }
+
+    /// Stable fingerprint of the index-building embedder, if known.
+    /// `None` for `ExternalOrUnknown` variant.
+    pub fn digest(&self) -> Option<&str> {
+        match self {
+            EmbeddingProvenance::Known { digest, .. } => Some(digest),
+            EmbeddingProvenance::ExternalOrUnknown { .. } => None,
+        }
+    }
+
+    /// Human-readable name of the index-building embedder, if recorded.
+    pub fn name(&self) -> Option<&str> {
+        match self {
+            EmbeddingProvenance::Known { name, .. } => name.as_deref(),
+            EmbeddingProvenance::ExternalOrUnknown { .. } => None,
+        }
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // SearchState — the single atomic swap unit
 // ─────────────────────────────────────────────────────────────────────
 
-/// The coherent (embedder + index + dim + generation + coverage + HNSW
-/// params) tuple that every read path acquires once via `ArcSwap.load()`
-/// and uses for the entire request. Locked by brainstorm 2 invariant 7:
-/// no code path may observe a mismatched embedder-vs-index pair.
+/// The coherent search-stack snapshot that every read path acquires
+/// once via `ArcSwap.load()` and uses for the entire request. Locked by
+/// brainstorm-2 invariant 7 (atomic SearchState) + brainstorm-3 round 2
+/// (provenance and runtime embedder are separate facts).
 ///
 /// All fields are immutable after construction. Mutation is by
-/// `ArcSwap<SearchState>::store(new_state)`.
+/// `ArcSwap<Arc<SearchState>>::store(new_state)` under the engine's
+/// `index_write_lock`.
 ///
-/// **NOTE**: this struct is the future of embedder ownership on
-/// `YantrikDB`. Today (pre-#41) the engine has a separate `embedder:
-/// Option<Box<dyn Embedder + Send + Sync>>` field that recall + record
-/// paths read directly. The reembed implementation migrates all those
-/// paths to `self.search_state.load().embedder.clone()` and retires the
-/// standalone field. Until that refactor lands, `SearchState` is a
-/// declaration only; live read paths still use the legacy slot.
+/// ## Field design rationale
+///
+/// `index_embedding` describes what's IN the active index — provenance
+/// of stored vectors. `embedder` + `runtime_embedder_*` describes what
+/// the engine can produce NOW for embed_text(). These can disagree: a
+/// freshly-opened DB has `index_embedding = Known(...)` but
+/// `embedder = None` until `set_embedder*` is called.
+///
+/// **`SearchState.dim` is derived**: use `state.index_embedding.dim()`,
+/// not a separate field. The standalone `YantrikDB.embedding_dim` field
+/// retires in this refactor; that derivation is the new source of truth.
+///
+/// ## What's NOT in this struct in v1
+///
+/// The actual HNSW index handle is intentionally NOT a member. The
+/// engine's existing `vec_index: DeltaIndex` continues to own the index
+/// lifecycle. Reembed sequences SearchState.store + vec_index.cold
+/// ArcSwap inside the same critical section (`index_write_lock`) so
+/// they're observed atomically. Moving the index handle into
+/// SearchState is a bigger refactor (changes DeltaIndex ownership)
+/// deferred to a future release.
+///
+/// Compensating invariants enforced at runtime:
+/// - `set_embedder*` empty-DB path resets vec_index to new dim under
+///   the index_write_lock — same critical section as SearchState.store
+/// - reembed() cutover holds the same lock across both swaps
+/// - recall paths debug_assert `state.index_embedding.dim() == vec_index.dim()`
 pub struct SearchState {
-    /// Active embedder. Cloning the Arc is cheap; cloning the embedder
-    /// itself is not (some embedders hold large model weights).
-    pub embedder: Arc<dyn crate::types::Embedder + Send + Sync>,
-    /// User-visible name of the embedder (e.g. "potion-base-2M").
-    /// Stored in `memories.embedding_model` and `oplog.embedding_model`
-    /// alongside written rows so reembed and replay can discriminate.
-    pub embedder_name: String,
-    /// Stronger identifier than name — the SHA-256 of the embedder's
-    /// model weights. Two embedders with the same name but different
-    /// weights have different digests; the no-op detection in
-    /// `db.reembed()` uses digest equality, not name equality.
-    pub embedder_digest: String,
-    /// Embedding dimensionality. Must match the active HNSW's dim.
-    pub dim: usize,
-    /// Monotonic generation id. Incremented at each successful Swap.
-    /// `oplog.applied_generation` references this. Generation 0 is the
-    /// pre-reembed sentinel for "the engine has never reembedded."
+    /// Provenance of vectors currently in the active index. Independent
+    /// of `embedder` below.
+    pub index_embedding: EmbeddingProvenance,
+
+    /// Runtime embedder available now for embed_text(). `None` means
+    /// the caller must supply pre-computed vectors. Cloning the Arc is
+    /// cheap; cloning the embedder itself is expensive (model weights).
+    pub embedder: Option<Arc<dyn crate::types::Embedder + Send + Sync>>,
+
+    /// Human-readable name of the currently-loaded runtime embedder,
+    /// if known. May differ from `index_embedding.name()` during the
+    /// compat-attach path (e.g. legacy DB with ExternalOrUnknown
+    /// provenance + a newly-attached named embedder).
+    pub runtime_embedder_name: Option<String>,
+
+    /// Stable fingerprint of the currently-loaded runtime embedder, if
+    /// known. May differ from `index_embedding.digest()` during compat
+    /// attachment.
+    pub runtime_embedder_digest: Option<String>,
+
+    /// Monotonic generation id. Bumps ONLY when a coherent (index +
+    /// provenance) bundle is atomically published — i.e. completed
+    /// reembed() or empty-DB-with-new-embedder coherent reset. Does NOT
+    /// bump on runtime embedder attachment to an existing populated
+    /// index. Generation 0 is the pre-reembed sentinel for "the engine
+    /// has never published a new index bundle."
     pub generation: u64,
-    /// High-water mark of `vec_seq` captured at the cutover barrier
-    /// for the generation that built this SearchState. Every write
-    /// with `vec_seq <= covers_through_seq` is reflected in the
-    /// `index` below. Writes with `vec_seq > covers_through_seq` are
-    /// replayed by the post-swap materializer.
+
+    /// High-water mark of `vec_seq` captured at the cutover barrier for
+    /// the generation that built this SearchState. Every write with
+    /// `vec_seq <= covers_through_seq` is reflected in the active
+    /// index. Writes with `vec_seq > covers_through_seq` are replayed
+    /// by the post-swap materializer.
     pub covers_through_seq: u64,
-    /// HNSW M parameter at construction time. Stored here (not just on
-    /// the index) so the reembed loop can preserve / override it
-    /// independently of the index's internal state.
+
+    /// HNSW M parameter. Stored on SearchState (not just on the index)
+    /// so reembed can preserve / override it independently.
     pub hnsw_m: u32,
     pub hnsw_ef_construction: u32,
     pub hnsw_ef_search: u32,
-    // NOTE: the actual HNSW index handle (Arc<HnswIndex> or
-    // Arc<DeltaIndex>) is intentionally NOT a member of this struct in
-    // the v1 design. The engine's existing `vec_index: DeltaIndex`
-    // field continues to own the index lifecycle. SearchState's swap
-    // atomically updates the embedder + metadata; the DeltaIndex's
-    // internal ArcSwap<HnswIndex> swap handles the index. Reembed
-    // sequences both swaps inside the same critical section so they
-    // are observed atomically by readers. This avoids a bigger refactor
-    // of DeltaIndex.
-    //
-    // If a future redesign moves the index into SearchState, the
-    // changes are: add `pub index: Arc<HnswIndex>`, retire
-    // `vec_index: DeltaIndex` from YantrikDB, and the reembed swap
-    // becomes a single `search_state.store(new_state)` call. That
-    // change is bigger than v1 reembed scope; deferring.
+}
+
+impl SearchState {
+    /// Initial SearchState for a fresh engine. Provenance is
+    /// `ExternalOrUnknown { dim }` until set_embedder* or
+    /// record_text() with a configured embedder populates the index
+    /// with Known-provenance vectors.
+    pub fn initial(
+        dim: usize,
+        hnsw_m: u32,
+        hnsw_ef_construction: u32,
+        hnsw_ef_search: u32,
+    ) -> Self {
+        SearchState {
+            index_embedding: EmbeddingProvenance::ExternalOrUnknown { dim },
+            embedder: None,
+            runtime_embedder_name: None,
+            runtime_embedder_digest: None,
+            generation: 0,
+            covers_through_seq: 0,
+            hnsw_m,
+            hnsw_ef_construction,
+            hnsw_ef_search,
+        }
+    }
+
+    /// Dimensionality of vectors in the active index. Derived from
+    /// `index_embedding` — the single source of truth.
+    pub fn dim(&self) -> usize {
+        self.index_embedding.dim()
+    }
+
+    /// True if the runtime embedder is present and can encode text.
+    /// Used by `YantrikDB::has_embedder()`.
+    pub fn has_runtime_embedder(&self) -> bool {
+        self.embedder.is_some()
+    }
 }
 
 impl fmt::Debug for SearchState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SearchState")
-            .field("embedder_name", &self.embedder_name)
-            .field("embedder_digest", &self.embedder_digest)
-            .field("dim", &self.dim)
+            .field("index_embedding", &self.index_embedding)
+            .field("runtime_embedder_name", &self.runtime_embedder_name)
+            .field("runtime_embedder_digest", &self.runtime_embedder_digest)
+            .field("has_embedder", &self.embedder.is_some())
             .field("generation", &self.generation)
             .field("covers_through_seq", &self.covers_through_seq)
             .field("hnsw_m", &self.hnsw_m)
             .field("hnsw_ef_construction", &self.hnsw_ef_construction)
             .field("hnsw_ef_search", &self.hnsw_ef_search)
-            .finish_non_exhaustive()
+            .finish()
     }
 }
 
@@ -496,5 +620,85 @@ mod tests {
         assert!(opts.hnsw_ef_search.is_none());
         assert!(opts.resume_from_checkpoint);
         assert!(!opts.dry_run);
+    }
+
+    #[test]
+    fn provenance_known_dim_digest_name_accessors() {
+        let p = EmbeddingProvenance::Known {
+            name: Some("potion-base-2M".to_string()),
+            digest: "sha256:abc123".to_string(),
+            dim: 64,
+        };
+        assert_eq!(p.dim(), 64);
+        assert_eq!(p.digest(), Some("sha256:abc123"));
+        assert_eq!(p.name(), Some("potion-base-2M"));
+    }
+
+    #[test]
+    fn provenance_external_or_unknown_has_dim_no_digest_no_name() {
+        let p = EmbeddingProvenance::ExternalOrUnknown { dim: 384 };
+        assert_eq!(p.dim(), 384);
+        assert_eq!(p.digest(), None);
+        assert_eq!(p.name(), None);
+    }
+
+    #[test]
+    fn search_state_initial_is_external_or_unknown_with_no_embedder() {
+        // Fresh engine state: index_embedding is ExternalOrUnknown (no
+        // embedder has populated the index yet), embedder is None
+        // (caller may pass pre-computed vectors), generation=0,
+        // covers_through_seq=0.
+        let s = SearchState::initial(384, 16, 200, 50);
+        assert_eq!(s.dim(), 384);
+        assert!(matches!(
+            s.index_embedding,
+            EmbeddingProvenance::ExternalOrUnknown { dim: 384 }
+        ));
+        assert!(!s.has_runtime_embedder());
+        assert!(s.embedder.is_none());
+        assert!(s.runtime_embedder_name.is_none());
+        assert!(s.runtime_embedder_digest.is_none());
+        assert_eq!(s.generation, 0);
+        assert_eq!(s.covers_through_seq, 0);
+        assert_eq!(s.hnsw_m, 16);
+        assert_eq!(s.hnsw_ef_construction, 200);
+        assert_eq!(s.hnsw_ef_search, 50);
+    }
+
+    #[test]
+    fn search_state_dim_derives_from_provenance_not_a_separate_field() {
+        // Locked by brainstorm-3: SearchState.dim() must derive from
+        // index_embedding.dim(). A separate `dim` field would risk
+        // drift between "what we think the dim is" and "what's
+        // actually in the index." Failing this test means someone
+        // re-added the standalone field.
+        let s_known = SearchState {
+            index_embedding: EmbeddingProvenance::Known {
+                name: None,
+                digest: "x".into(),
+                dim: 768,
+            },
+            embedder: None,
+            runtime_embedder_name: None,
+            runtime_embedder_digest: None,
+            generation: 5,
+            covers_through_seq: 1000,
+            hnsw_m: 16,
+            hnsw_ef_construction: 200,
+            hnsw_ef_search: 50,
+        };
+        assert_eq!(s_known.dim(), 768);
+        let s_unknown = SearchState {
+            index_embedding: EmbeddingProvenance::ExternalOrUnknown { dim: 128 },
+            embedder: None,
+            runtime_embedder_name: None,
+            runtime_embedder_digest: None,
+            generation: 0,
+            covers_through_seq: 0,
+            hnsw_m: 16,
+            hnsw_ef_construction: 200,
+            hnsw_ef_search: 50,
+        };
+        assert_eq!(s_unknown.dim(), 128);
     }
 }

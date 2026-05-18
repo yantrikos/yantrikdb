@@ -22,6 +22,39 @@ pub trait Embedder: Send + Sync {
 
     /// The dimensionality of produced embeddings.
     fn dim(&self) -> usize;
+
+    /// Stable identity of this embedder. SHA-256 of model weights, or
+    /// equivalent fingerprint that distinguishes one model from another
+    /// even when they share dim. Default `None` for back-compat with
+    /// existing third-party Embedder impls.
+    ///
+    /// Used by `db.set_embedder*` (issue #41) to distinguish:
+    /// - same-model-replacement (matching fingerprint, matching dim) — safe Arc swap
+    /// - different-model-same-dim (different fingerprint, same dim) —
+    ///   silent-corruption risk, rejected on populated `Known`-provenance
+    ///   DBs with `ChangeEmbedderDigestRequiresReembed`
+    ///
+    /// Embedders returning `None` are treated as `ExternalOrUnknown`
+    /// provenance — they may attach to empty or unknown-provenance DBs
+    /// but cannot attach to a `Known`-provenance populated DB without
+    /// going through `db.reembed()`. Conservative-correct: a custom
+    /// embedder without identity cannot prove compatibility with
+    /// previously-indexed vectors.
+    ///
+    /// Bundled embedders + the `set_embedder_named` named-download path
+    /// override this with real fingerprints (SHA-256 from the embedder-
+    /// download registry).
+    fn fingerprint(&self) -> Option<String> {
+        None
+    }
+
+    /// Human-readable name of this embedder (e.g. "potion-base-2M").
+    /// Independent of fingerprint identity; used for observability and
+    /// status reporting. Default `None` for back-compat. Named-download
+    /// embedders override with the registry name.
+    fn name(&self) -> Option<String> {
+        None
+    }
 }
 
 /// A memory record returned by get() and recall().
