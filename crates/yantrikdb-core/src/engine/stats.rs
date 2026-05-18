@@ -292,10 +292,15 @@ impl YantrikDB {
     /// update, graph_index update, scoring_cache insert) — and at that point
     /// foreground record() can stop doing it inline.
     pub fn apply_pending_ops_once(&self, limit: usize) -> Result<usize> {
-        let pending: Vec<(String, String, String)> = {
+        // **Issue #41 Layer 5.** Pull `embedding_model` alongside the
+        // standard tuple so we can dispatch queued-during-reembed
+        // writes through the re-encode path. embedding_model IS NOT
+        // NULL is the v27 signature for record_queued ops (sync
+        // record() leaves it NULL).
+        let pending: Vec<(String, String, String, Option<String>)> = {
             let conn = self.read_conn();
             let mut stmt = conn.prepare(
-                "SELECT op_id, op_type, payload FROM oplog \
+                "SELECT op_id, op_type, payload, embedding_model FROM oplog \
                  WHERE applied = 0 \
                  ORDER BY hlc, op_id \
                  LIMIT ?1",
@@ -305,13 +310,14 @@ impl YantrikDB {
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
                     row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                 ))
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
 
         let mut applied = 0usize;
-        for (op_id, op_type, payload) in &pending {
+        for (op_id, op_type, payload, embedding_model) in &pending {
             match op_type.as_str() {
                 // **Phase 4.3 — saga task 3.** This is the only op_type
                 // whose dispatch is *real* materialization work (the
@@ -366,6 +372,47 @@ impl YantrikDB {
                         }
                     }
                 }
+                // **Issue #41 Layer 5 — Queue-mode record drain.** The
+                // signature embedding_model IS NOT NULL identifies an
+                // op that was queued by `record_queued` during a
+                // reembed cutover. It carries TEXT (not an embedding).
+                // After the swap completes, the materializer drains
+                // these ops by re-encoding the text under the active
+                // generation's embedder + applying directly into the
+                // memories table + new vec_index at the new gen.
+                //
+                // While reembed is still in flight (meta.reembed_state
+                // set), defer: leave applied=0 so the next tick after
+                // completion picks it up. This matches brainstorm-2 §5
+                // "materializer fully PAUSED during reembed" (we pause
+                // only this op class — other op types still drain).
+                "record" if embedding_model.is_some() => {
+                    if self.reembed_status().is_some() {
+                        tracing::trace!(
+                            target: "yantrikdb::ingest::materialize",
+                            op_id = %op_id,
+                            "Layer 5: reembed in flight; deferring queued record"
+                        );
+                        // No mark_op_applied — leave for next tick.
+                        continue;
+                    }
+                    match self.apply_queued_reembed_record(payload) {
+                        Ok(()) => {
+                            if self.mark_op_applied(op_id)? {
+                                applied += 1;
+                            }
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "yantrikdb::ingest::materialize",
+                                op_id = %op_id,
+                                op_type = %op_type,
+                                error = %e,
+                                "Layer 5 queued reembed record apply failed; leaving pending for retry"
+                            );
+                        }
+                    }
+                }
                 "record" | "forget" | "relate" | "correct" | "consolidate" => {
                     tracing::trace!(
                         target: "yantrikdb::ingest::materialize",
@@ -414,6 +461,179 @@ impl YantrikDB {
     ///   "source":    "user"
     /// }
     /// ```
+    /// **Issue #41 Layer 5 — apply a queued-during-reembed record.**
+    ///
+    /// `record_queued` writes oplog rows with applied=0,
+    /// embedding_model=<old_name>, and a payload carrying the
+    /// memory's TEXT (not pre-encoded embedding). After reembed
+    /// completes, this materializer drain re-encodes the text under
+    /// the ACTIVE SearchState's embedder (the new one) and applies
+    /// the row to memories + vec_index at the new generation.
+    ///
+    /// Idempotent: INSERT OR IGNORE on rid + the
+    /// search_state-snapshot-once pattern guarantees a re-apply
+    /// (from worker race or restart) produces identical state.
+    ///
+    /// Caller (apply_pending_ops_once) has already verified the op
+    /// type is "record" AND embedding_model IS NOT NULL AND no
+    /// reembed is in flight.
+    fn apply_queued_reembed_record(&self, payload_json: &str) -> Result<()> {
+        use crate::serde_helpers::serialize_f32;
+
+        let payload: serde_json::Value = serde_json::from_str(payload_json).map_err(|e| {
+            crate::error::YantrikDbError::InvalidInput(format!(
+                "Layer 5 record drain: payload parse failed: {e}"
+            ))
+        })?;
+
+        let rid = payload.get("rid").and_then(|v| v.as_str()).ok_or_else(|| {
+            crate::error::YantrikDbError::InvalidInput(
+                "Layer 5 record drain: missing rid".into(),
+            )
+        })?;
+        let memory_type = payload
+            .get("type")
+            .and_then(|v| v.as_str())
+            .unwrap_or("episodic");
+        let text = payload
+            .get("text")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                crate::error::YantrikDbError::InvalidInput(
+                    "Layer 5 record drain: missing text".into(),
+                )
+            })?;
+        let importance = payload
+            .get("importance")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.5);
+        let valence = payload
+            .get("valence")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let half_life = payload
+            .get("half_life")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(604800.0);
+        let metadata = payload
+            .get("metadata")
+            .cloned()
+            .unwrap_or_else(|| serde_json::json!({}));
+        let ts = payload
+            .get("created_at")
+            .and_then(|v| v.as_f64())
+            .unwrap_or_else(super::now);
+        let namespace = payload
+            .get("namespace")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+        let certainty = payload
+            .get("certainty")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.8);
+        let domain = payload
+            .get("domain")
+            .and_then(|v| v.as_str())
+            .unwrap_or("general");
+        let source = payload
+            .get("source")
+            .and_then(|v| v.as_str())
+            .unwrap_or("user");
+        let emotional_state = payload
+            .get("emotional_state")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        // Snapshot the active SearchState. The embedder + generation
+        // here are the post-swap ones (caller verified no reembed in
+        // flight; the in-memory state is durable).
+        let state = self.search_state.load_full();
+        let embedder = state
+            .embedder
+            .as_ref()
+            .ok_or_else(|| {
+                crate::error::YantrikDbError::Inference(
+                    "Layer 5 record drain: active SearchState has no embedder (cannot re-encode)"
+                        .into(),
+                )
+            })?
+            .clone();
+
+        let new_emb = embedder.embed(text).map_err(|e| {
+            crate::error::YantrikDbError::Inference(format!(
+                "Layer 5 record drain: embedder failed on rid {rid:?}: {e}"
+            ))
+        })?;
+        if new_emb.len() != state.dim() {
+            return Err(crate::error::YantrikDbError::Inference(format!(
+                "Layer 5 record drain: embedder returned len {} but SearchState dim {}",
+                new_emb.len(),
+                state.dim(),
+            )));
+        }
+        let emb_blob = serialize_f32(&new_emb);
+        let stored_emb = self.encrypt_embedding(&emb_blob)?;
+
+        // The payload's text/metadata are already in engine-stored
+        // form (record_queued passed them through). Don't double-
+        // encrypt; just hand back as stored.
+        let stored_text = text.to_string();
+        let stored_meta = serde_json::to_string(&metadata)?;
+
+        let embedding_generation: i64 = state.generation as i64;
+
+        // INSERT OR IGNORE on rid for idempotency. If a prior worker
+        // already inserted this row (race + retry), the OR IGNORE
+        // makes this a no-op AND mark_op_applied lets one worker win
+        // the count.
+        {
+            let conn = self.conn();
+            conn.execute(
+                "INSERT OR IGNORE INTO memories \
+                 (rid, type, text, embedding, created_at, updated_at, importance, \
+                  half_life, last_access, valence, metadata, namespace, \
+                  certainty, domain, source, emotional_state, embedding_generation) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                params![
+                    rid,
+                    memory_type,
+                    stored_text,
+                    stored_emb,
+                    ts,
+                    ts,
+                    importance,
+                    half_life,
+                    ts,
+                    valence,
+                    stored_meta,
+                    namespace,
+                    certainty,
+                    domain,
+                    source,
+                    emotional_state,
+                    embedding_generation,
+                ],
+            )?;
+        }
+
+        // Append into the active vec_index. Idempotent: DeltaIndex
+        // de-dupes on rid+seq.
+        let seq = self
+            .vec_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        state
+            .vec_index
+            .append(rid.to_string(), new_emb, seq)?;
+
+        // Bump visible_seq for RYW. Layer 6 will refine the
+        // generation-aware semantics; for now bump under the
+        // current generation's covers_through_seq logic.
+        self.bump_visible_seq(namespace, seq);
+
+        Ok(())
+    }
+
     fn apply_materialize_record_post(&self, payload_json: &str) -> Result<()> {
         let payload: serde_json::Value = serde_json::from_str(payload_json).map_err(|e| {
             crate::error::YantrikDbError::InvalidInput(format!(

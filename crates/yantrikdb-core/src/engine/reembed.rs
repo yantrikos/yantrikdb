@@ -1739,6 +1739,40 @@ mod tests {
         }
     }
 
+    /// Sentinel variant for Layer 5 drain tests. The first element
+    /// of the produced vector is set to `sentinel`, so tests can
+    /// assert "this embedding came from THIS embedder" by checking
+    /// vec[0].
+    struct PhaseTestEmbedderSentinel {
+        pub dim: usize,
+        pub fp: String,
+        pub name: String,
+        pub sentinel: f32,
+    }
+
+    impl crate::types::Embedder for PhaseTestEmbedderSentinel {
+        fn embed(
+            &self,
+            _text: &str,
+        ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>>
+        {
+            let mut v = vec![0.0_f32; self.dim];
+            if !v.is_empty() {
+                v[0] = self.sentinel;
+            }
+            Ok(v)
+        }
+        fn dim(&self) -> usize {
+            self.dim
+        }
+        fn fingerprint(&self) -> Option<String> {
+            Some(self.fp.clone())
+        }
+        fn name(&self) -> Option<String> {
+            Some(self.name.clone())
+        }
+    }
+
     #[test]
     fn reembed_same_name_is_no_op() {
         // Caller asks for the embedder already loaded — must short-
@@ -1942,6 +1976,197 @@ mod tests {
         assert!(
             db.write_router.try_enter_sync_writer().is_some(),
             "WriteRouter must be Normal after reembed completion"
+        );
+    }
+
+    #[test]
+    fn layer_5_materializer_drains_queued_record_under_new_embedder() {
+        // **Issue #41 Layer 5 — full Queue-mode integration.**
+        // Flow:
+        //   1. Engine at gen 0 with embedder E0 ("sentinel=0.42").
+        //   2. Flip WriteRouter to Queueing manually (simulating
+        //      a reembed in flight at the cutover preamble).
+        //   3. record_text → revalidation loop sees Queueing →
+        //      routes to record_queued → writes oplog applied=0
+        //      with embedding_model="E0-name" and TEXT payload.
+        //   4. Manually swap SearchState to gen 1 with embedder E1
+        //      ("sentinel=0.99") via try_publish_search_state +
+        //      flip router back to Normal (mimics what Phase 2 does).
+        //   5. Run apply_pending_ops_once. Layer 5 picks up the
+        //      queued op, re-encodes the text under E1, INSERTs
+        //      the memory row at embedding_generation=1, appends
+        //      to the active vec_index.
+        //   6. Assert: memories table now has the row with
+        //      embedding_generation=1, the stored bytes encode to
+        //      0.99 (E1's signature, not 0.42 of E0), oplog row
+        //      is applied=1.
+        use std::sync::Arc;
+        let mut db = crate::YantrikDB::new(":memory:", 8).unwrap();
+
+        // Configure E0 as active.
+        db.set_embedder(Box::new(PhaseTestEmbedderSentinel {
+            dim: 8,
+            fp: "sha256:E0".to_string(),
+            name: "E0-name".to_string(),
+            sentinel: 0.42,
+        }))
+        .unwrap();
+
+        // Simulate reembed cutover preamble: flip router to Queueing.
+        db.write_router.switch_to_queueing();
+
+        // record_text routes through the queue path.
+        let queued_rid = db
+            .record_text(
+                "queue-drain-test-text",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({"k": "v"}),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+
+        // memories table is NOT yet written — queue path stores text in oplog.
+        let mem_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE rid = ?1",
+                [&queued_rid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(mem_count, 0, "queue path does not write memories yet");
+
+        // Now simulate Phase 2 completing the swap: build a new
+        // SearchState at gen 1 with embedder E1, publish via CAS,
+        // flip router back to Normal.
+        let old_state = db.search_state.load_full();
+        let e1: Arc<dyn crate::types::Embedder + Send + Sync> =
+            Arc::new(PhaseTestEmbedderSentinel {
+                dim: 8,
+                fp: "sha256:E1".to_string(),
+                name: "E1-name".to_string(),
+                sentinel: 0.99,
+            });
+        let new_state = SearchState {
+            index_embedding: EmbeddingProvenance::Known {
+                name: Some("E1-name".to_string()),
+                digest: "sha256:E1".to_string(),
+                dim: 8,
+            },
+            embedder: Some(Arc::clone(&e1)),
+            runtime_embedder_name: Some("E1-name".to_string()),
+            runtime_embedder_digest: Some("sha256:E1".to_string()),
+            generation: 1,
+            covers_through_seq: old_state.covers_through_seq,
+            hnsw_m: old_state.hnsw_m,
+            hnsw_ef_construction: old_state.hnsw_ef_construction,
+            hnsw_ef_search: old_state.hnsw_ef_search,
+            vec_index: Arc::clone(&old_state.vec_index),
+        };
+        db.try_publish_search_state(new_state).unwrap();
+        db.write_router.switch_to_normal();
+
+        // Layer 5 drain: materializer picks up the queued op and
+        // re-encodes under E1.
+        let n_applied = db.apply_pending_ops_once(100).unwrap();
+        assert!(
+            n_applied >= 1,
+            "Layer 5 materializer must drain the queued record (applied >= 1, got {n_applied})"
+        );
+
+        // Memories row exists, stamped with new generation, encoded
+        // under E1 (sentinel 0.99).
+        let conn = db.conn();
+        let (row_gen, stored_emb_blob): (i64, Vec<u8>) = conn
+            .query_row(
+                "SELECT embedding_generation, embedding FROM memories WHERE rid = ?1",
+                [&queued_rid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(row_gen, 1, "Layer 5 stamped row at new generation 1");
+        let plain = db.decrypt_embedding(&stored_emb_blob).unwrap();
+        let vec = crate::serde_helpers::deserialize_f32(&plain);
+        assert!(
+            (vec[0] - 0.99).abs() < 1e-6,
+            "row encoded under E1 (sentinel 0.99), got vec[0]={}",
+            vec[0]
+        );
+
+        // Oplog op is applied=1.
+        let applied: i64 = conn
+            .query_row(
+                "SELECT applied FROM oplog WHERE target_rid = ?1 AND op_type = 'record'",
+                [&queued_rid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(applied, 1, "queued oplog row marked applied=1 after drain");
+    }
+
+    #[test]
+    fn layer_5_defers_drain_while_reembed_in_flight() {
+        // **Layer 5 invariant — pause-during-reembed.** While
+        // meta.reembed_state is set (reembed mid-flight), Layer 5
+        // must NOT drain queued reembed writes. It returns
+        // applied=0 (the op stays pending) so the next tick after
+        // reembed completes picks it up.
+        let mut db = crate::YantrikDB::new(":memory:", 8).unwrap();
+        db.set_embedder(Box::new(PhaseTestEmbedderSentinel {
+            dim: 8,
+            fp: "sha256:E0".to_string(),
+            name: "E0-name".to_string(),
+            sentinel: 0.42,
+        }))
+        .unwrap();
+
+        // Flip to Queueing + record_text → queued op.
+        db.write_router.switch_to_queueing();
+        let queued_rid = db
+            .record_text(
+                "deferred-drain-test",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+
+        // Manually write meta.reembed_state to simulate reembed in flight.
+        db.write_reembed_state_meta(&serde_json::json!({
+            "generation": 1,
+            "phase": "Encoding",
+        }))
+        .unwrap();
+
+        // Drain should NOT touch the queued op.
+        let _ = db.apply_pending_ops_once(100).unwrap();
+
+        // Oplog row still applied=0.
+        let applied: i64 = db
+            .conn()
+            .query_row(
+                "SELECT applied FROM oplog WHERE target_rid = ?1 AND op_type = 'record'",
+                [&queued_rid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            applied, 0,
+            "Layer 5 must defer drain while reembed in flight; got applied={applied}"
         );
     }
 
