@@ -9443,3 +9443,166 @@ fn recall_scoped_filters_before_top_k_ranking() {
     assert_eq!(scoped.len(), 1);
     assert_eq!(scoped[0].text, "Primary owner target memory");
 }
+
+#[test]
+fn recall_scoped_many_merges_personal_and_group_owner_buckets() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let query = vec_seed(1.0, 8);
+
+    db.record_scoped(
+        "Primary personal memory from a direct chat",
+        "semantic",
+        0.8,
+        0.0,
+        604800.0,
+        &serde_json::json!({}),
+        &query,
+        "default",
+        1.0,
+        "preference",
+        "user",
+        None,
+        "person:primary-user",
+        Some("whatsapp:actor-primary"),
+        Some("whatsapp"),
+        Some("whatsapp:dm:primary-user"),
+        "same_owner",
+    )
+    .unwrap();
+    db.record_scoped(
+        "Household group memory shared by participants",
+        "semantic",
+        0.8,
+        0.0,
+        604800.0,
+        &serde_json::json!({}),
+        &query,
+        "default",
+        1.0,
+        "household",
+        "user",
+        None,
+        "group:household",
+        Some("whatsapp:actor-secondary"),
+        Some("whatsapp"),
+        Some("whatsapp:family-group"),
+        "same_owner",
+    )
+    .unwrap();
+    db.record_scoped(
+        "Secondary user private memory must not leak",
+        "semantic",
+        0.8,
+        0.0,
+        604800.0,
+        &serde_json::json!({}),
+        &query,
+        "default",
+        1.0,
+        "preference",
+        "user",
+        None,
+        "person:secondary-user",
+        Some("whatsapp:actor-secondary"),
+        Some("whatsapp"),
+        Some("whatsapp:dm:secondary-user"),
+        "same_owner",
+    )
+    .unwrap();
+
+    let recalled = db
+        .recall_scoped_many(
+            &query,
+            10,
+            &["person:primary-user", "group:household"],
+            Some("telegram"),
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    let texts: Vec<_> = recalled.iter().map(|r| r.text.as_str()).collect();
+
+    assert!(texts.contains(&"Primary personal memory from a direct chat"));
+    assert!(texts.contains(&"Household group memory shared by participants"));
+    assert!(!texts.contains(&"Secondary user private memory must not leak"));
+}
+
+#[test]
+fn recall_scoped_many_filters_before_global_top_k() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let query = vec_seed(1.0, 8);
+
+    for i in 0..30 {
+        db.record_scoped(
+            &format!("Non-member noisy memory {i}"),
+            "semantic",
+            1.0,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            &query,
+            "default",
+            1.0,
+            "preference",
+            "user",
+            None,
+            "group:other-household",
+            Some("whatsapp:actor-other"),
+            Some("whatsapp"),
+            Some("whatsapp:other-group"),
+            "same_owner",
+        )
+        .unwrap();
+    }
+
+    db.record_scoped(
+        "Allowed group memory survives top one",
+        "semantic",
+        0.4,
+        0.0,
+        604800.0,
+        &serde_json::json!({}),
+        &query,
+        "default",
+        1.0,
+        "household",
+        "user",
+        None,
+        "group:household",
+        Some("whatsapp:actor-primary"),
+        Some("whatsapp"),
+        Some("whatsapp:family-group"),
+        "same_owner",
+    )
+    .unwrap();
+
+    let recalled = db
+        .recall_scoped_many(
+            &query,
+            1,
+            &["person:primary-user", "group:household"],
+            Some("telegram"),
+            None,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(recalled.len(), 1);
+    assert_eq!(recalled[0].text, "Allowed group memory survives top one");
+}

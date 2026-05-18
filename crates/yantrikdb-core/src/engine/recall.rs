@@ -1846,6 +1846,50 @@ impl YantrikDB {
         domain: Option<&str>,
         source: Option<&str>,
     ) -> Result<Vec<RecallResult>> {
+        self.recall_scoped_many(
+            query_embedding,
+            top_k,
+            &[owner_id],
+            current_channel,
+            conversation_id,
+            time_window,
+            memory_type,
+            include_consolidated,
+            expand_entities,
+            query_text,
+            skip_reinforce,
+            namespace,
+            domain,
+            source,
+        )
+    }
+
+    /// Recall with one or more allowed owner buckets.
+    ///
+    /// Hosts can use this for cross-platform personal plus shared-group recall:
+    /// resolve the current actor to a personal owner id, append any group/space
+    /// owners the actor is allowed to access from configuration, and pass the
+    /// resulting allow-list here. Candidate rows are filtered against the full
+    /// allow-list before global top-k ranking, so disallowed owners cannot crowd
+    /// out permitted personal or group memories.
+    #[allow(clippy::too_many_arguments)]
+    pub fn recall_scoped_many(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        owner_ids: &[&str],
+        current_channel: Option<&str>,
+        conversation_id: Option<&str>,
+        time_window: Option<(f64, f64)>,
+        memory_type: Option<&str>,
+        include_consolidated: bool,
+        expand_entities: bool,
+        query_text: Option<&str>,
+        skip_reinforce: bool,
+        namespace: Option<&str>,
+        domain: Option<&str>,
+        source: Option<&str>,
+    ) -> Result<Vec<RecallResult>> {
         let _ = expand_entities; // Scoped exact path does not expand graph candidates yet.
         let ts = now();
         let learned_weights = self.load_learned_weights()?;
@@ -1865,7 +1909,9 @@ impl YantrikDB {
                         row.consolidation_status == "active"
                     };
                     status_ok
-                        && Self::scope_allows(row, owner_id, current_channel, conversation_id)
+                        && owner_ids.iter().any(|owner_id| {
+                            Self::scope_allows(row, owner_id, current_channel, conversation_id)
+                        })
                         && memory_type.map_or(true, |mt| row.memory_type == mt)
                         && time_window
                             .map_or(true, |(s, e)| row.created_at >= s && row.created_at <= e)
