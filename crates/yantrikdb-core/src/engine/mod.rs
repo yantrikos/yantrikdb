@@ -35,6 +35,7 @@ mod planner;
 mod policy;
 mod procedural;
 mod query_dsl;
+mod durable_embeddings;
 mod recall;
 mod receptivity;
 mod record;

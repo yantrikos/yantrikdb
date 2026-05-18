@@ -3876,41 +3876,27 @@ impl YantrikDB {
     }
 
     /// Batch-fetch embeddings for a set of RIDs (for graph-only candidate scoring).
+    ///
+    /// **Issue #41 brainstorm-4 §5 — routes through the
+    /// `DurableEmbeddingStore` module boundary.** Recall is the hot
+    /// user-facing query path and is the file the §5 audit test
+    /// guards; direct `SELECT ... embedding FROM memories` here
+    /// would bypass the generation-stamp surface and silently
+    /// return stale-vector-space bytes during a reembed. Going
+    /// through the store gives every entry an
+    /// `EmbeddingWithGeneration` tag — discarded here for the
+    /// graph-only scoring path which tolerates lag, surfaced where
+    /// callers need to discriminate.
     pub(crate) fn fetch_embeddings_by_rids(
         &self,
         rids: &[&str],
     ) -> Result<HashMap<String, Vec<u8>>> {
-        if rids.is_empty() {
-            return Ok(HashMap::new());
-        }
-        let placeholders: String = (0..rids.len())
-            .map(|i| format!("?{}", i + 1))
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!("SELECT rid, embedding FROM memories WHERE rid IN ({placeholders})");
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        for r in rids {
-            param_values.push(Box::new(r.to_string()));
-        }
-        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
-            param_values.iter().map(|p| p.as_ref()).collect();
-
-        let conn = self.read_conn();
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt
-            .query_map(params_ref.as_slice(), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?))
-            })?
-            .collect::<std::result::Result<Vec<_>, _>>()?;
-        drop(stmt);
-        drop(conn);
-
-        let mut map = HashMap::new();
-        for (rid, stored_emb) in rows {
-            let emb = self.decrypt_embedding(&stored_emb)?;
-            map.insert(rid, emb);
-        }
-        Ok(map)
+        let store = super::durable_embeddings::DurableEmbeddingStore::new(self);
+        let stamped = store.read_embeddings_for_rids(rids)?;
+        Ok(stamped
+            .into_iter()
+            .map(|(rid, entry)| (rid, entry.bytes))
+            .collect())
     }
 
     /// Reinforce a memory on access — increase half_life, update last_access,
