@@ -219,7 +219,12 @@ impl PyYantrikDB {
                 .map_err(|e| {
                 PyRuntimeError::new_err(format!("Failed to load candle embedder: {e}"))
             })?;
-            inner.set_embedder(Box::new(candle_embedder));
+            // set_embedder returns Result post-#41 (mode-aware refactor).
+            // On a freshly-constructed engine (no memories yet) this can
+            // only fail on dim mismatch — surface that as a Python error.
+            inner
+                .set_embedder(Box::new(candle_embedder))
+                .map_err(map_err)?;
         }
 
         #[cfg(not(feature = "candle"))]

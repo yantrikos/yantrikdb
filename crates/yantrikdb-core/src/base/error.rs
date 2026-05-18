@@ -35,6 +35,52 @@ pub enum YantrikDbError {
     #[error("session conflict: {0}")]
     SessionConflict(String),
 
+    /// **Issue #41 / brainstorm-3.** `set_embedder*` was called with a
+    /// candidate embedder whose dimensionality differs from the active
+    /// index. On a populated DB this would produce silent corruption
+    /// (next insert mismatches HNSW's expected dim) so the engine
+    /// rejects. Caller's correct path is `db.reembed(new_embedder_name)`
+    /// which rebuilds the index under the new dim.
+    #[error(
+        "embedder dimensionality change requires db.reembed(): \
+         active index dim is {active_dim} ({memory_count} memories already indexed); \
+         candidate embedder dim is {candidate_dim}. \
+         Call db.reembed(new_embedder_name) to rebuild the index under the new dim."
+    )]
+    ChangeEmbedderDimensionRequiresReembed {
+        active_dim: usize,
+        candidate_dim: usize,
+        memory_count: u64,
+    },
+
+    /// **Issue #41 / brainstorm-3.** `set_embedder*` was called with a
+    /// candidate embedder whose fingerprint differs from the active
+    /// index's embedder, even though dim matches. Same-dim-different-
+    /// embedder is the silent-corruption case: queries encode under E1,
+    /// stored vectors are in E0's space, no panic but bad results.
+    /// Caller's correct path is `db.reembed(new_embedder_name)` to
+    /// re-encode existing memories under the new embedder.
+    ///
+    /// Returned only when the active index has `Known`-provenance. For
+    /// `ExternalOrUnknown` provenance (legacy DBs / external vector
+    /// imports) the same dim is accepted as a compat-attach without
+    /// claiming new provenance.
+    #[error(
+        "embedder change requires db.reembed(): \
+         active index built with embedder digest {active_digest:?}, \
+         candidate digest is {candidate_digest:?} (dim {dim} matches but model differs); \
+         {memory_count} memories already indexed in old embedder's vector space. \
+         Call db.reembed(new_embedder_name) to re-encode safely; \
+         a plain set_embedder() with a different model on a populated index \
+         would silently corrupt search results."
+    )]
+    ChangeEmbedderDigestRequiresReembed {
+        active_digest: Option<String>,
+        candidate_digest: Option<String>,
+        dim: usize,
+        memory_count: u64,
+    },
+
     /// **Decoupled write path RFC, Phase 1.**
     ///
     /// The bounded global ingest queue is full. Foreground writers receive
@@ -81,6 +127,34 @@ pub enum YantrikDbError {
     /// would silently corrupt HNSW state if applied. Reject deterministically.
     #[error("embedding dimension mismatch: expected {expected}, got {got}")]
     EmbeddingDimensionMismatch { expected: usize, got: usize },
+
+    /// **Issue #41 brainstorm-4 §3 — monotonic-generation CAS.**
+    ///
+    /// `try_publish_search_state` rejects publish attempts whose
+    /// `new_state.generation` is strictly less than the
+    /// currently-active SearchState generation. This is the
+    /// brainstorm-4 §3 defense against compactor / reembed /
+    /// long-running write paths publishing stale work that would
+    /// ABA-rollback the active generation (durable data omission
+    /// when a generation regresses from N back to N-1 — the
+    /// post-swap materializer reapplies queued ops that were
+    /// already covered by generation N).
+    ///
+    /// Caller policy: re-load `search_state`, rebuild the proposed
+    /// state under the new active generation, retry. Reembed loops
+    /// abort the entire reembed (clear meta.reembed_state) and
+    /// require a fresh `db.reembed(...)` call from the operator —
+    /// silent retry inside reembed would mask a deeper concurrency
+    /// bug.
+    #[error(
+        "search state publish stale generation: current_generation={current_generation}, \
+         attempted_generation={attempted_generation}. Caller must re-read \
+         search_state and rebuild before retrying."
+    )]
+    SearchStatePublishStaleGeneration {
+        current_generation: u64,
+        attempted_generation: u64,
+    },
 
     #[error("invalid input: {0}")]
     InvalidInput(String),

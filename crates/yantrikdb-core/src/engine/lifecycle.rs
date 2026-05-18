@@ -337,8 +337,11 @@ impl YantrikDB {
         // before SQL has applied. Cluster followers may have the rid in
         // their delta from a recent record_with_rid that has not yet
         // compacted into cold; the tombstone marker covers that window.
+        //
+        // **Issue #41 brainstorm-4 §1.** Snapshot SearchState — the
+        // tombstone lands on the active generation's DeltaIndex.
         let seq = self.assign_seq(seq);
-        self.vec_index.tombstone(rid, seq);
+        self.search_state.load().vec_index.tombstone(rid, seq);
         if let Some(ns) = &ns_to_bump {
             self.bump_visible_seq(ns, seq);
         }

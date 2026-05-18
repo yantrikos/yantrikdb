@@ -1,16 +1,131 @@
 use rusqlite::params;
+use std::sync::Arc;
 
 use crate::error::Result;
 use crate::serde_helpers::serialize_f32;
 use crate::types::*;
 
+use super::reembed::SearchState;
+use super::write_router::SyncWriteGuard;
 use super::{embedding_hash, now, YantrikDB};
 
 impl YantrikDB {
     /// Store a new memory and return its RID.
+    ///
+    /// **Issue #41 layer 3 — WriteRouter gating.** At entry, the writer
+    /// attempts to acquire a `SyncWriteGuard`. If the engine's
+    /// `write_router` is in `Normal` state (no reembed in progress),
+    /// the guard is acquired and the synchronous path runs: INSERT
+    /// memories + vec_index.append + log_op (applied=1). The guard is
+    /// held for the full critical section and drops via RAII when
+    /// `record` returns, decrementing the inflight-writer counter.
+    /// This is the brainstorm-2 invariant that prevents in-flight
+    /// writers from committing `applied=1` against an about-to-be-
+    /// discarded old generation during reembed cutover.
+    ///
+    /// If the router is in `Queueing` state (reembed has flipped the
+    /// gate and is waiting for writers to drain before capturing
+    /// `build_hwm`), `try_enter_sync_writer()` returns None and this
+    /// call routes through the queued path: the op is appended to
+    /// `oplog` with `applied=0`, `embedding_model = old_embedder_name`,
+    /// the full record payload (text + metadata) — the post-swap
+    /// materializer re-encodes under the new embedder + applies to
+    /// the new generation. The caller's return value (rid + seq) is
+    /// the same shape; read-after-write requires `recall_with_seq` to
+    /// wait for the new generation's `visible_seq` to advance.
     #[tracing::instrument(skip(self, metadata, embedding), fields(memory_type, namespace))]
     pub fn record(
         &self,
+        text: &str,
+        memory_type: &str,
+        importance: f64,
+        valence: f64,
+        half_life: f64,
+        metadata: &serde_json::Value,
+        embedding: &[f32],
+        namespace: &str,
+        certainty: f64,
+        domain: &str,
+        source: &str,
+        emotional_state: Option<&str>,
+    ) -> Result<String> {
+        // Issue #41 layer 3: route on write_router state. The guard
+        // (if acquired) is held for the full sync path and drops via
+        // RAII at function return, panic-safe.
+        let sync_guard = self.write_router.try_enter_sync_writer();
+        if sync_guard.is_none() {
+            // Queueing state — take the queued path. Reembed cutover
+            // is in flight; writes go to oplog and the post-swap
+            // materializer applies them under the new embedder.
+            return self.record_queued(
+                text,
+                memory_type,
+                importance,
+                valence,
+                half_life,
+                metadata,
+                embedding,
+                namespace,
+                certainty,
+                domain,
+                source,
+                emotional_state,
+            );
+        }
+        // guard is held; RAII Drop at function exit decrements inflight.
+        let guard = sync_guard.unwrap();
+
+        // **Issue #41 brainstorm-4 §1.** Load SearchState AFTER the
+        // guard is acquired. With the guard held, reembed cannot
+        // complete its swap, so the loaded state is the published
+        // active generation for the entire critical section. Note:
+        // for `record()` (caller-supplied embedding), the engine
+        // cannot verify the embedding's generation provenance — the
+        // caller is responsible for using the embedder consistent
+        // with the active generation. `record_text()` (engine-
+        // supplied embedding) has a revalidation loop that ensures
+        // the embedding and the active generation match.
+        let state = self.search_state.load_full();
+
+        self.record_under_guard_and_state(
+            state,
+            guard,
+            text,
+            memory_type,
+            importance,
+            valence,
+            half_life,
+            metadata,
+            embedding,
+            namespace,
+            certainty,
+            domain,
+            source,
+            emotional_state,
+        )
+    }
+
+    /// **Issue #41 brainstorm-4 §2.** The post-guard, post-load
+    /// critical section shared by `record()` and `record_text()`.
+    ///
+    /// Caller MUST hold the `SyncWriteGuard` — this is the contract
+    /// that prevents reembed from completing its SearchState swap
+    /// while we are mid-commit, and the contract that makes
+    /// `state.generation` the durable answer to "what generation am I
+    /// committing under." The guard is moved in by value and drops
+    /// via RAII at function exit, decrementing the in-flight counter.
+    ///
+    /// Caller MUST also pre-load `state` from `self.search_state` and
+    /// pass it in — this commit path uses the snapshot rather than
+    /// re-loading, so writer revalidation logic in `record_text()`
+    /// (which re-loads after embed to detect a generation advance)
+    /// is the single source of truth for generation safety on the
+    /// text-embed path.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn record_under_guard_and_state(
+        &self,
+        state: Arc<SearchState>,
+        _guard: SyncWriteGuard<'_>,
         text: &str,
         memory_type: &str,
         importance: f64,
@@ -37,6 +152,16 @@ impl YantrikDB {
         // Read active session for this namespace into a local before acquiring conn
         let session_id = self.active_sessions.read().get(namespace).cloned();
 
+        // **Issue #41 brainstorm-4 §6.** Stamp the v28
+        // embedding_generation column with the snapshot's generation
+        // so the post-swap materializer can discriminate "this row
+        // was indexed under the active generation — skip" from "this
+        // row was inserted under an old generation — needs re-encode."
+        // Read from `state.generation` (not a fresh load) because we
+        // hold the SyncWriteGuard for the entire sync path:
+        // search_state cannot advance under us until the guard drops.
+        let embedding_generation: i64 = state.generation as i64;
+
         // Acquire conn, do all SQL, then drop before other locks
         {
             let conn = self.conn();
@@ -44,8 +169,8 @@ impl YantrikDB {
                 "INSERT INTO memories \
                  (rid, type, text, embedding, created_at, updated_at, importance, \
                   half_life, last_access, valence, metadata, namespace, \
-                  certainty, domain, source, emotional_state) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                  certainty, domain, source, emotional_state, embedding_generation) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     rid,
                     memory_type,
@@ -62,7 +187,8 @@ impl YantrikDB {
                     certainty,
                     domain,
                     source,
-                    emotional_state
+                    emotional_state,
+                    embedding_generation,
                 ],
             )?;
 
@@ -85,7 +211,8 @@ impl YantrikDB {
             .vec_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        self.vec_index
+        state
+            .vec_index
             .append(rid.clone(), embedding.to_vec(), seq)?;
         self.bump_visible_seq(namespace, seq);
 
@@ -173,6 +300,11 @@ impl YantrikDB {
             return Ok(vec![]);
         }
 
+        // **Issue #41 brainstorm-4 §1.** SearchState snapshot for the
+        // batch — every append in this batch lands on the same
+        // generation-anchored DeltaIndex.
+        let state = self.search_state.load_full();
+
         // Clone active sessions map before acquiring conn
         let sessions = self.active_sessions.read().clone();
 
@@ -215,16 +347,19 @@ impl YantrikDB {
                 let stored_meta = self.encrypt_text(&meta_str)?;
                 let stored_emb = self.encrypt_embedding(&emb_blob)?;
 
+                // **Issue #41 brainstorm-4 §6.** v28 embedding_generation
+                // stamped from the batch's snapshot.
+                let embedding_generation: i64 = state.generation as i64;
                 let result = conn.execute(
                     "INSERT INTO memories \
                      (rid, type, text, embedding, created_at, updated_at, importance, \
                       half_life, last_access, valence, metadata, namespace, \
-                      certainty, domain, source, emotional_state) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                      certainty, domain, source, emotional_state, embedding_generation) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                     params![rid, input.memory_type, stored_text, stored_emb, ts, ts,
                             input.importance, input.half_life, ts, input.valence, stored_meta,
                             input.namespace, input.certainty, input.domain, input.source,
-                            input.emotional_state],
+                            input.emotional_state, embedding_generation],
                 );
 
                 if let Err(e) = result {
@@ -323,7 +458,8 @@ impl YantrikDB {
                 .vec_seq
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 + 1;
-            self.vec_index
+            state
+                .vec_index
                 .append(rid.clone(), input.embedding.clone(), seq)?;
             self.bump_visible_seq(&input.namespace, seq);
         }
@@ -441,6 +577,11 @@ impl YantrikDB {
             });
         }
 
+        // **Issue #41 brainstorm-4 §1.** SearchState snapshot for the
+        // determinstic-replay path. The replicated write lands on the
+        // currently-active generation's DeltaIndex.
+        let state = self.search_state.load_full();
+
         // Caller-supplied timestamp — NEVER call now() on this path.
         let ts_secs = (created_at_unix_micros as f64) / 1_000_000.0;
         let emb_blob = serialize_f32(embedding);
@@ -466,19 +607,23 @@ impl YantrikDB {
             conn.execute_batch("SAVEPOINT record_with_rid")?;
 
             let result: Result<bool> = (|| {
+                // **Issue #41 brainstorm-4 §6.** v28 embedding_generation
+                // stamp from the SearchState snapshot loaded above.
+                let embedding_generation: i64 = state.generation as i64;
                 let inserted = conn.execute(
                     "INSERT OR IGNORE INTO memories \
                      (rid, type, text, embedding, created_at, updated_at, importance, \
                       half_life, last_access, valence, metadata, namespace, \
                       certainty, domain, source, emotional_state, \
-                      created_at_unix_micros, embedding_model) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?5, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                      created_at_unix_micros, embedding_model, embedding_generation) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?5, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                     params![
                         rid, memory_type, stored_text, stored_emb,
                         ts_secs,
                         importance, half_life, valence, stored_meta, namespace,
                         certainty, domain, source, emotional_state,
                         created_at_unix_micros, embedding_model,
+                        embedding_generation,
                     ],
                 )?;
                 let was_new_row = inserted == 1;
@@ -529,7 +674,8 @@ impl YantrikDB {
         // (single-node retry); the compactor's highest-seq-wins rule
         // converges state identically on both paths.
         let seq = self.assign_seq(seq);
-        self.vec_index
+        state
+            .vec_index
             .append(rid.to_string(), embedding.to_vec(), seq)?;
         self.bump_visible_seq(namespace, seq);
 
@@ -621,5 +767,158 @@ impl YantrikDB {
         }
 
         Ok(())
+    }
+
+    /// **Issue #41 layer 3 — queued write path.** Called from `record()`
+    /// when `write_router.try_enter_sync_writer()` returned None
+    /// (router is in `Queueing` state during reembed cutover). The op
+    /// is logged to `oplog` with `applied=0` and the v27 columns
+    /// (`embedding_model = current_runtime_embedder_name`,
+    /// `applied_generation = NULL`). The post-swap materializer drains
+    /// these ops, re-encodes the text under the new embedder, and
+    /// applies to the new generation's memories table + HNSW.
+    ///
+    /// Important invariants from brainstorm-2/3 enforced here:
+    /// - DO NOT write to `memories` table (would mix old+new dim under
+    ///   the rebuild snapshot)
+    /// - DO NOT call `vec_index.append` (same reason)
+    /// - DO NOT bump `visible_seq` (active generation doesn't yet
+    ///   cover this seq; the post-swap materializer bumps it after
+    ///   applying)
+    /// - DO assign a `vec_seq` for the caller's RYW use
+    ///   (`recall_with_seq(min_seq=N)` waits for the new generation to
+    ///   advance past N)
+    ///
+    /// The pre-computed `embedding` argument is intentionally
+    /// IGNORED. Per brainstorm-3 invariant 8 (queued payload
+    /// correctness), the oplog stores logical text and the materializer
+    /// re-encodes under the NEW embedder at replay time. Storing a
+    /// pre-encoded old-embedder vector in oplog would race against
+    /// post-swap replay and produce dim mismatch when the new HNSW is
+    /// at a different dim.
+    pub(crate) fn record_queued(
+        &self,
+        text: &str,
+        memory_type: &str,
+        importance: f64,
+        valence: f64,
+        half_life: f64,
+        metadata: &serde_json::Value,
+        _embedding: &[f32],
+        namespace: &str,
+        certainty: f64,
+        domain: &str,
+        source: &str,
+        emotional_state: Option<&str>,
+    ) -> Result<String> {
+        let rid = crate::id::new_id();
+        let ts = now();
+
+        // Assign a seq for caller's RYW use. Note we do NOT bump
+        // visible_seq — the active generation doesn't yet cover this
+        // op; the post-swap materializer is responsible for advancing
+        // visible_seq as it drains queued ops.
+        let _seq = self
+            .vec_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+
+        // Capture the current runtime embedder name (the one active
+        // before reembed flipped the router). The post-swap materializer
+        // uses this to discriminate ops queued under the old embedder
+        // (need re-encode) from ops produced by the new generation's
+        // own writers (apply embedding bytes directly).
+        let current_embedder_name = self.search_state.load().runtime_embedder_name.clone();
+
+        // Full record payload — what the materializer needs to
+        // reconstruct the row.
+        let payload = serde_json::json!({
+            "rid": rid,
+            "type": memory_type,
+            "text": text,
+            "importance": importance,
+            "valence": valence,
+            "half_life": half_life,
+            "metadata": metadata,
+            "created_at": ts,
+            "updated_at": ts,
+            "namespace": namespace,
+            "certainty": certainty,
+            "domain": domain,
+            "source": source,
+            "emotional_state": emotional_state,
+        });
+
+        // Write to oplog with applied=0. The v27 `embedding_model`
+        // column carries the OLD embedder name so the post-swap
+        // materializer knows this needs re-encoding (vs being a
+        // legacy pre-v27 op where embedding_model IS NULL and the
+        // materializer trusts the embedding bytes as-is).
+        self.log_op_pending_for_reembed_queue(
+            "record",
+            Some(&rid),
+            &payload,
+            current_embedder_name.as_deref(),
+        )?;
+
+        Ok(rid)
+    }
+
+    /// **Issue #41 layer 3 — variant of `log_op_pending` that populates
+    /// the v27 `oplog.embedding_model` column.** Used by the queued
+    /// write path during reembed; lets the post-swap materializer
+    /// discriminate queued-during-reembed ops (which need re-encoding
+    /// under the new embedder) from legacy pre-v27 ops (which have
+    /// NULL `embedding_model` and trust their stored embedding bytes).
+    pub(crate) fn log_op_pending_for_reembed_queue(
+        &self,
+        op_type: &str,
+        target_rid: Option<&str>,
+        payload: &serde_json::Value,
+        embedding_model: Option<&str>,
+    ) -> Result<String> {
+        use rusqlite::params;
+        use std::sync::atomic::Ordering;
+
+        let op_id = crate::id::new_id();
+        let hlc_ts = self.tick_hlc();
+        let hlc_bytes = hlc_ts.to_bytes().to_vec();
+        let payload_str = serde_json::to_string(payload)?;
+
+        // Backpressure check (mirrors log_op_pending's contract).
+        const MAX_PENDING_OPS: i64 = 10_000;
+        let pending_now = self.pending_op_count.load(Ordering::Relaxed);
+        if pending_now >= MAX_PENDING_OPS {
+            return Err(crate::error::YantrikDbError::Backpressure {
+                pending: pending_now,
+                max: MAX_PENDING_OPS,
+                retry_after_ms: 50,
+            });
+        }
+
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT OR IGNORE INTO oplog \
+             (op_id, op_type, timestamp, target_rid, payload, \
+              actor_id, hlc, embedding_hash, origin_actor, applied, \
+              embedding, embedding_model, applied_generation) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, NULL, ?10, NULL)",
+            params![
+                op_id,
+                op_type,
+                now(),
+                target_rid,
+                payload_str,
+                self.actor_id,
+                hlc_bytes,
+                None::<Vec<u8>>,
+                self.actor_id,
+                embedding_model,
+            ],
+        )?;
+        if conn.changes() > 0 {
+            self.pending_op_count.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(op_id)
     }
 }
