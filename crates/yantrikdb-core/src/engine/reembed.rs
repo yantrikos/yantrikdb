@@ -564,7 +564,10 @@ impl fmt::Debug for SearchState {
 // db.reembed() — engine entry point (Layer 4 phase 1)
 // ─────────────────────────────────────────────────────────────────────
 
+use rusqlite::params;
+
 use crate::error::{Result, YantrikDbError};
+use crate::serde_helpers::serialize_f32;
 use crate::YantrikDB;
 
 impl YantrikDB {
@@ -603,6 +606,71 @@ impl YantrikDB {
     pub fn reembed(
         &self,
         new_embedder_name: &str,
+        options: ReembedOptions,
+    ) -> Result<ReembedReport> {
+        // **Issue #41 brainstorm-4 — Phase 2 part A.**
+        // Resolve the new embedder by name via the embedder-download
+        // registry, then delegate to the internal entrypoint that
+        // accepts a pre-resolved Arc<dyn Embedder>. The split lets
+        // tests inject synthetic embedders without round-tripping
+        // through the registry, while production callers get the
+        // implicit auto-load behavior hermes asked for in swarmcode
+        // msg 0886504c.
+        //
+        // The same-name short-circuit lives in the inner entrypoint
+        // so registry-resolution is skipped for the no-op case.
+        let probing_state_for_name_check = self.search_state.load_full();
+        let active_name_for_check = probing_state_for_name_check
+            .runtime_embedder_name
+            .clone()
+            .unwrap_or_default();
+        if active_name_for_check == new_embedder_name {
+            // Same-name no-op: skip registry resolution entirely.
+            return self.reembed_with_embedder(
+                new_embedder_name,
+                None,
+                options,
+            );
+        }
+        drop(probing_state_for_name_check);
+
+        #[cfg(feature = "embedder-download")]
+        let resolved: std::sync::Arc<dyn crate::types::Embedder + Send + Sync> = {
+            use crate::embedder::DownloadedEmbedder;
+            let downloaded = DownloadedEmbedder::fetch(new_embedder_name).map_err(|e| {
+                YantrikDbError::Inference(format!(
+                    "reembed: failed to resolve embedder {new_embedder_name:?}: {e}"
+                ))
+            })?;
+            std::sync::Arc::new(downloaded)
+        };
+        #[cfg(not(feature = "embedder-download"))]
+        let resolved: std::sync::Arc<dyn crate::types::Embedder + Send + Sync> = {
+            return Err(YantrikDbError::Inference(format!(
+                "reembed by name {new_embedder_name:?} requires the `embedder-download` \
+                 cargo feature (enabled by default). Slim builds must call \
+                 reembed_with_embedder() directly with a Box<dyn Embedder>."
+            )));
+        };
+        self.reembed_with_embedder(new_embedder_name, Some(resolved), options)
+    }
+
+    /// **Issue #41 brainstorm-4 — Phase 2 internal entrypoint.**
+    ///
+    /// Same contract as [`Self::reembed`] but skips registry
+    /// resolution. When `pre_resolved` is `Some`, the embedder is
+    /// used as-is (tests inject synthetic embedders here). When
+    /// `None`, this is the same-name no-op path (the caller already
+    /// confirmed the active embedder matches the requested name, so
+    /// no embedder resolution is needed).
+    ///
+    /// Public-crate-visible so the test module + future callers
+    /// (e.g. an offline test harness that builds embedders without
+    /// the download registry) can drive Phase 2 directly.
+    pub(crate) fn reembed_with_embedder(
+        &self,
+        new_embedder_name: &str,
+        pre_resolved: Option<std::sync::Arc<dyn crate::types::Embedder + Send + Sync>>,
         options: ReembedOptions,
     ) -> Result<ReembedReport> {
         let started_at = SystemTime::now();
@@ -662,12 +730,86 @@ impl YantrikDB {
             }),
         )?;
 
+        // **Issue #41 brainstorm-4 — Phase 2 Encoding implementation.**
+        //
+        // Use the pre-resolved embedder injected by the caller. The
+        // public reembed() entry point resolves via the embedder-
+        // download registry before delegating here; test paths
+        // inject synthetic embedders directly. `pre_resolved` is
+        // None only on the same-name path which short-circuited
+        // above; if we reach here without one, that's an engine
+        // invariant break.
+        let new_embedder = pre_resolved.ok_or_else(|| {
+            YantrikDbError::Inference(
+                "reembed_with_embedder: pre_resolved=None reached past same-name short-circuit \
+                 — engine invariant violation"
+                    .to_string(),
+            )
+        })?;
+
+        let new_dim = new_embedder.dim();
+        let new_embedder_digest = new_embedder
+            .fingerprint()
+            .unwrap_or_default();
+        let new_embedder_name_resolved = new_embedder
+            .name()
+            .unwrap_or_else(|| new_embedder_name.to_string());
+
+        // **Phase 2 v1 limitation — same-dim only.** The engine's
+        // standalone `embedding_dim` field is still consulted by
+        // ~7 sites (engine/conflict.rs, engine/indices.rs,
+        // engine/record.rs, distributed/replication.rs). Until
+        // those migrate to SearchState.dim(), reembed cannot
+        // safely change dim — record_with_rid's determinism gate
+        // would reject post-reembed writes from new-dim leaders.
+        // Cross-dim migration is the next structural increment;
+        // the documented escape hatch is "open a new DB at the
+        // new dim and copy memories over."
+        if new_dim != active_dim {
+            // Abort cleanly — Probing event was already written; emit Aborted.
+            self.write_reembed_event(
+                next_generation,
+                ReembedPhase::Aborted,
+                systime_to_unix_secs(SystemTime::now()),
+                &serde_json::json!({
+                    "reason": "cross-dim reembed not yet supported",
+                    "active_dim": active_dim,
+                    "new_dim": new_dim,
+                }),
+            )?;
+            return Err(YantrikDbError::Inference(format!(
+                "reembed: new embedder {new_embedder_name_resolved:?} dim={new_dim} \
+                 differs from active dim={active_dim}. Cross-dim reembed is not yet \
+                 supported (engine's standalone embedding_dim field still gates \
+                 record_with_rid/replication paths). Workaround: open a new database \
+                 with YantrikDB::new(path, {new_dim}) and copy memories via export/import."
+            )));
+        }
+
+        // Count rows that need re-encoding. Used to populate the
+        // ReembedProgress.total field for hermes's "show 0/N
+        // immediately" UX ask (swarmcode msg 0886504c).
+        let total_to_encode: u64 = {
+            let conn = self.read_conn();
+            let n: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM memories \
+                     WHERE consolidation_status = 'active' \
+                       AND embedding IS NOT NULL \
+                       AND COALESCE(embedding_generation, 0) < ?1",
+                    params![next_generation as i64],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            n.max(0) as u64
+        };
+
         if let Some(cb) = progress_cb {
             cb(ReembedProgress {
                 phase: ReembedPhase::Probing,
                 processed: 0,
-                total: None,
-                elapsed_ms: 0,
+                total: Some(total_to_encode),
+                elapsed_ms: started_at.elapsed().unwrap_or_default().as_millis() as u64,
                 namespace: options.namespace.clone(),
             });
         }
@@ -680,14 +822,14 @@ impl YantrikDB {
             return Ok(ReembedReport {
                 generation: probing_state.generation,
                 encoded_count: 0,
-                skipped_count: 0,
+                skipped_count: total_to_encode,
                 duration,
                 old_embedder: active_name.clone(),
                 old_embedder_digest: active_digest.clone().unwrap_or_default(),
-                new_embedder: new_embedder_name.to_string(),
-                new_embedder_digest: String::new(), // resolved in phase 2
+                new_embedder: new_embedder_name_resolved.clone(),
+                new_embedder_digest,
                 old_dim: active_dim,
-                new_dim: active_dim,
+                new_dim,
                 build_hwm: probing_state.covers_through_seq,
                 per_namespace: HashMap::new(),
             });
@@ -697,11 +839,13 @@ impl YantrikDB {
         // detect the in-flight reembed.
         self.write_reembed_state_meta(&serde_json::json!({
             "generation": next_generation,
-            "phase": "Probing",
+            "phase": "Encoding",
             "old_embedder": active_name,
-            "new_embedder_name": new_embedder_name,
+            "new_embedder_name": new_embedder_name_resolved,
             "old_dim": active_dim,
+            "new_dim": new_dim,
             "started_at_unix": probing_event_ts,
+            "total_to_encode": total_to_encode,
             "namespace": options.namespace,
             "write_policy": match options.write_policy {
                 ReembedWritePolicy::Queue => "Queue",
@@ -709,22 +853,174 @@ impl YantrikDB {
             },
         }))?;
 
-        // ── Layer 4 phase 2 boundary ──
-        // Clean abort: clear meta + write Aborted event, return Err.
+        // ── Phase 2: Encoding ──
+        //
+        // Scan all active rows whose embedding_generation is strictly
+        // less than next_generation, re-encode each row's text under
+        // the new embedder, write the result to
+        // memories.embedding_new + memories.embedding_new_model.
+        // The active `embedding` column is NOT touched here — that
+        // happens atomically inside the Swapping SAVEPOINT in the
+        // next checkpoint.
+        //
+        // Defensive idempotency: clear any leftover staging from a
+        // prior interrupted attempt at the same target generation.
+        // Without this, a retry after a partial Encoding could miss
+        // rows that already have stale staging from the prior run.
+        {
+            let conn = self.conn();
+            conn.execute(
+                "UPDATE memories SET embedding_new = NULL, embedding_new_model = NULL \
+                 WHERE embedding_new IS NOT NULL",
+                [],
+            )?;
+        }
+
+        let encoding_start_ts = systime_to_unix_secs(SystemTime::now());
+        self.write_reembed_event(
+            next_generation,
+            ReembedPhase::Encoding,
+            encoding_start_ts,
+            &serde_json::json!({
+                "total": total_to_encode,
+                "batch_size": options.batch_size,
+            }),
+        )?;
+
+        let batch_size = options.batch_size.max(1);
+        let mut processed: u64 = 0;
+        let mut offset: usize = 0;
+
+        loop {
+            // Read the next batch of (rid, encrypted_text).
+            // Holds the read connection briefly; no embedder calls
+            // happen under the conn lock.
+            let batch: Vec<(String, String)> = {
+                let conn = self.read_conn();
+                let mut stmt = conn.prepare(
+                    "SELECT rid, text FROM memories \
+                     WHERE consolidation_status = 'active' \
+                       AND embedding IS NOT NULL \
+                       AND COALESCE(embedding_generation, 0) < ?1 \
+                     ORDER BY rid \
+                     LIMIT ?2 OFFSET ?3",
+                )?;
+                let rows = stmt
+                    .query_map(
+                        params![next_generation as i64, batch_size as i64, offset as i64],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                    )?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                drop(stmt);
+                drop(conn);
+                rows
+            };
+
+            if batch.is_empty() {
+                break;
+            }
+
+            // Re-encode each row's text under the new embedder.
+            // Done OUTSIDE the conn lock — embedder.embed() can be
+            // slow (model inference) and must not bottleneck SQL.
+            let mut encoded_pairs: Vec<(String, Vec<u8>)> =
+                Vec::with_capacity(batch.len());
+            for (rid, stored_text) in &batch {
+                let plain = self.decrypt_text(stored_text)?;
+                let new_emb = new_embedder.embed(&plain).map_err(|e| {
+                    YantrikDbError::Inference(format!(
+                        "reembed: embedder failed on rid {rid:?}: {e}"
+                    ))
+                })?;
+                if new_emb.len() != new_dim {
+                    return Err(YantrikDbError::Inference(format!(
+                        "reembed: embedder returned vector of len {} but reports dim {}; \
+                         engine cannot trust this embedder",
+                        new_emb.len(),
+                        new_dim
+                    )));
+                }
+                let blob = serialize_f32(&new_emb);
+                let encrypted = self.encrypt_embedding(&blob)?;
+                encoded_pairs.push((rid.clone(), encrypted));
+            }
+
+            // Write the batch under one SAVEPOINT so a mid-batch
+            // crash leaves the prior batches' staging visible and
+            // this batch's atomic. Idempotency on retry: the staging
+            // clear at the start of Encoding wipes whatever this
+            // batch wrote on the prior attempt.
+            {
+                let conn = self.conn();
+                conn.execute_batch("SAVEPOINT reembed_encoding_batch")?;
+                let write_result: Result<()> = (|| {
+                    for (rid, encrypted) in &encoded_pairs {
+                        conn.execute(
+                            "UPDATE memories SET embedding_new = ?1, embedding_new_model = ?2 \
+                             WHERE rid = ?3",
+                            params![encrypted, new_embedder_name_resolved.as_str(), rid],
+                        )?;
+                    }
+                    Ok(())
+                })();
+                match write_result {
+                    Ok(()) => {
+                        conn.execute_batch("RELEASE reembed_encoding_batch")?;
+                    }
+                    Err(e) => {
+                        let _ = conn.execute_batch("ROLLBACK TO reembed_encoding_batch");
+                        let _ = conn.execute_batch("RELEASE reembed_encoding_batch");
+                        return Err(e);
+                    }
+                }
+            }
+
+            processed += encoded_pairs.len() as u64;
+            offset += batch.len();
+
+            if let Some(cb) = progress_cb {
+                cb(ReembedProgress {
+                    phase: ReembedPhase::Encoding,
+                    processed,
+                    total: Some(total_to_encode),
+                    elapsed_ms: started_at.elapsed().unwrap_or_default().as_millis() as u64,
+                    namespace: options.namespace.clone(),
+                });
+            }
+        }
+
+        // Encoding phase complete. Audit event records the final count.
+        self.write_reembed_event(
+            next_generation,
+            ReembedPhase::Encoding,
+            systime_to_unix_secs(SystemTime::now()),
+            &serde_json::json!({
+                "encoded_count": processed,
+                "completed": true,
+            }),
+        )?;
+
+        // ── Layer 4 phase 2.5 boundary ──
+        // Rebuilding + Swapping + Verifying are the next checkpoint.
+        // Clean abort: leave embedding_new staged (resume logic on
+        // open() in Layer 7 will decide); clear meta.reembed_state;
+        // write Aborted event.
         self.clear_reembed_state_meta()?;
         self.write_reembed_event(
             next_generation,
             ReembedPhase::Aborted,
             systime_to_unix_secs(SystemTime::now()),
             &serde_json::json!({
-                "reason": "Encoding+Rebuilding+Swapping+Verifying not yet implemented (Layer 4 phase 2)",
+                "reason": "Rebuilding+Swapping+Verifying not yet implemented (Layer 4 phase 2 part B)",
+                "encoded_count": processed,
             }),
         )?;
 
         Err(YantrikDbError::Inference(format!(
-            "db.reembed() Layer 4 phase 1: Probing complete, but Encoding/Rebuilding/\
-             Swapping/Verifying phases are pending implementation (issue #41 Layer 4 phase 2). \
-             Dry-run mode and same-name no-op work; real migration requires the next checkpoint."
+            "db.reembed() Phase 2 part A complete: Encoding wrote {processed} rows to \
+             memories.embedding_new under embedder {new_embedder_name_resolved:?}. \
+             Rebuilding/Swapping/Verifying are the next checkpoint (issue #41 Layer 4 phase 2 part B). \
+             The staged columns persist; the next reembed call will overwrite them."
         )))
     }
 
@@ -1040,11 +1336,23 @@ mod tests {
         }))
         .unwrap();
 
+        // Use the internal entrypoint with an injected synthetic
+        // embedder — the public reembed() resolves through the
+        // embedder-download registry which is feature-gated and
+        // off in default test builds.
+        let synthetic: std::sync::Arc<dyn crate::types::Embedder + Send + Sync> =
+            std::sync::Arc::new(PhaseTestEmbedder {
+                dim: 8,
+                fp: "sha256:target".to_string(),
+                name: "target-model".to_string(),
+            });
         let opts = ReembedOptions {
             dry_run: true,
             ..Default::default()
         };
-        let report = db.reembed("target-model", opts).unwrap();
+        let report = db
+            .reembed_with_embedder("target-model", Some(synthetic), opts)
+            .unwrap();
         assert_eq!(report.old_embedder, "original-model");
         assert_eq!(report.new_embedder, "target-model");
         // Dry-run must NOT leave an in-flight reembed signal.
@@ -1067,12 +1375,15 @@ mod tests {
     }
 
     #[test]
-    fn reembed_non_no_op_fails_at_layer_4_phase_2_boundary_with_clean_state() {
-        // Layer 4 phase 1 boundary check: a real (non-no-op,
-        // non-dry-run) reembed call enters Probing, writes
-        // meta.reembed_state, then aborts at the Encoding boundary
-        // returning Err. CRITICAL: meta.reembed_state must be CLEARED
-        // before the Err is returned so the DB isn't left mid-reembed.
+    fn reembed_phase_2_part_a_runs_encoding_and_aborts_at_part_b_boundary() {
+        // **Checkpoint 16 boundary check.** A real (non-no-op,
+        // non-dry-run) reembed runs Encoding to completion (writing
+        // embedding_new + embedding_new_model on every active row)
+        // and aborts at the new "Phase 2 part A complete" boundary.
+        // Critical:
+        //   - meta.reembed_state MUST be cleared on the way out
+        //   - the Aborted event MUST be in the audit log
+        //   - the staged columns are populated (Encoding wrote them)
         let mut db = crate::YantrikDB::new(":memory:", 8).unwrap();
         db.set_embedder(Box::new(PhaseTestEmbedder {
             dim: 8,
@@ -1081,30 +1392,53 @@ mod tests {
         }))
         .unwrap();
 
+        // Plant two rows so Encoding has something to scan.
+        for i in 0..2 {
+            db.record(
+                &format!("row {i}"),
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &vec![0.1_f32; 8],
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+        }
+
+        let synthetic: std::sync::Arc<dyn crate::types::Embedder + Send + Sync> =
+            std::sync::Arc::new(PhaseTestEmbedder {
+                dim: 8,
+                fp: "sha256:target".to_string(),
+                name: "target-model".to_string(),
+            });
         let err = db
-            .reembed("target-model", ReembedOptions::default())
+            .reembed_with_embedder("target-model", Some(synthetic), ReembedOptions::default())
             .unwrap_err();
-        // Specific error class — layer 4 phase 2 boundary signal.
         match err {
             crate::error::YantrikDbError::Inference(msg) => {
                 assert!(
-                    msg.contains("Layer 4 phase 2"),
-                    "expected layer-4-phase-2 boundary message, got: {msg}"
+                    msg.contains("Phase 2 part A complete") && msg.contains("part B"),
+                    "expected Phase 2 part A boundary message, got: {msg}"
                 );
+                // Locks the encoded_count surfaces in the error.
+                assert!(msg.contains("Encoding wrote 2 rows"), "msg: {msg}");
             }
-            other => panic!("expected Inference error at phase 2 boundary, got {other:?}"),
+            other => panic!("expected Inference at part-A boundary, got {other:?}"),
         }
 
-        // Critical: meta.reembed_state must have been cleared on the
-        // way out. Else the next open() would see an in-flight reembed
-        // and try to resume into an unimplemented phase.
+        // meta.reembed_state cleared (no in-flight signal lingering).
         assert!(
             db.reembed_status().is_none(),
-            "meta.reembed_state must be cleared on layer-4-phase-2 abort"
+            "meta.reembed_state must be cleared on part-A-boundary abort"
         );
 
-        // The Aborted event MUST be in the audit log with the
-        // boundary reason.
+        // Aborted event in audit log.
         let aborted_count: i64 = db
             .conn()
             .query_row(
@@ -1114,6 +1448,171 @@ mod tests {
             )
             .unwrap();
         assert_eq!(aborted_count, 1, "Aborted event must be logged");
+
+        // Encoding event in audit log (separate event from Probing).
+        let encoding_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM reembed_events WHERE phase = 'Encoding'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            encoding_count >= 1,
+            "Encoding event must be in audit log (got {encoding_count})"
+        );
+
+        // The 2 planted rows MUST have embedding_new + embedding_new_model
+        // populated (Encoding wrote them) AND embedding_generation
+        // unchanged (Swapping is what bumps that — pending).
+        let staged_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE embedding_new IS NOT NULL \
+                 AND embedding_new_model = 'target-model'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(staged_count, 2, "Encoding must have populated staging columns");
+
+        // embedding_generation unchanged at 0 (Phase 2 part B will bump).
+        let gen_zero_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE embedding_generation = 0",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(gen_zero_count, 2, "embedding_generation unchanged before swap");
+    }
+
+    #[test]
+    fn reembed_phase_2_rejects_cross_dim_with_clear_error() {
+        // **Phase 2 v1 limitation.** Same-dim reembeds only;
+        // cross-dim requires retiring the engine's standalone
+        // `embedding_dim` field which is its own structural debt.
+        // The error message must point the caller at the
+        // documented escape hatch.
+        let mut db = crate::YantrikDB::new(":memory:", 8).unwrap();
+        db.set_embedder(Box::new(PhaseTestEmbedder {
+            dim: 8,
+            fp: "sha256:active".to_string(),
+            name: "active".to_string(),
+        }))
+        .unwrap();
+
+        let cross_dim: std::sync::Arc<dyn crate::types::Embedder + Send + Sync> =
+            std::sync::Arc::new(PhaseTestEmbedder {
+                dim: 16, // different from active dim 8
+                fp: "sha256:cross".to_string(),
+                name: "cross-dim-target".to_string(),
+            });
+        let err = db
+            .reembed_with_embedder(
+                "cross-dim-target",
+                Some(cross_dim),
+                ReembedOptions::default(),
+            )
+            .unwrap_err();
+        match err {
+            crate::error::YantrikDbError::Inference(msg) => {
+                assert!(
+                    msg.contains("Cross-dim reembed is not yet supported"),
+                    "expected cross-dim guard message, got: {msg}"
+                );
+                assert!(msg.contains("dim=8") && msg.contains("dim=16"), "msg: {msg}");
+            }
+            other => panic!("expected Inference, got {other:?}"),
+        }
+        // No mid-reembed state leftover.
+        assert!(db.reembed_status().is_none());
+    }
+
+    #[test]
+    fn reembed_phase_2_part_a_with_progress_callback_emits_total() {
+        // **Hermes ask 1 (swarmcode msg 0886504c).** Probing must
+        // emit a progress event with `total` populated (not None),
+        // so CLIs can show "0/N" immediately before Encoding
+        // starts. Locks that the count happens BEFORE the first
+        // progress callback fires.
+        let mut db = crate::YantrikDB::new(":memory:", 8).unwrap();
+        db.set_embedder(Box::new(PhaseTestEmbedder {
+            dim: 8,
+            fp: "sha256:active".to_string(),
+            name: "active".to_string(),
+        }))
+        .unwrap();
+
+        // Plant 3 rows.
+        for i in 0..3 {
+            db.record(
+                &format!("row {i}"),
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &vec![0.1_f32; 8],
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+        }
+
+        use std::sync::{Arc, Mutex};
+        let events: Arc<Mutex<Vec<ReembedProgress>>> = Arc::new(Mutex::new(Vec::new()));
+        let events_clone = Arc::clone(&events);
+        let progress_cb: Box<dyn Fn(ReembedProgress) + Send + Sync> =
+            Box::new(move |p| events_clone.lock().unwrap().push(p));
+
+        let synthetic: std::sync::Arc<dyn crate::types::Embedder + Send + Sync> =
+            std::sync::Arc::new(PhaseTestEmbedder {
+                dim: 8,
+                fp: "sha256:target".to_string(),
+                name: "target".to_string(),
+            });
+        let opts = ReembedOptions {
+            progress_cb: Some(progress_cb),
+            ..Default::default()
+        };
+        // Encoding+abort path; we only care about progress events.
+        let _ = db.reembed_with_embedder("target", Some(synthetic), opts);
+
+        let captured = events.lock().unwrap().clone();
+        assert!(!captured.is_empty(), "at least one progress event fired");
+        // First event must be Probing with total=Some(3).
+        let first = &captured[0];
+        assert!(
+            matches!(first.phase, ReembedPhase::Probing),
+            "first event must be Probing, got {:?}",
+            first.phase
+        );
+        assert_eq!(
+            first.total,
+            Some(3),
+            "Probing must populate total so CLIs show 0/N immediately (hermes ask 1)"
+        );
+        assert_eq!(first.processed, 0, "Probing fires with processed=0");
+
+        // Subsequent Encoding events must have monotonic processed
+        // and the same total.
+        let encoding_events: Vec<&ReembedProgress> = captured
+            .iter()
+            .filter(|e| matches!(e.phase, ReembedPhase::Encoding))
+            .collect();
+        for e in &encoding_events {
+            assert_eq!(e.total, Some(3));
+            assert!(e.processed <= 3);
+        }
+        if let Some(last) = encoding_events.last() {
+            assert_eq!(last.processed, 3, "final Encoding event reflects all rows");
+        }
     }
 
     #[test]
