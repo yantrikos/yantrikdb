@@ -1,9 +1,12 @@
 use rusqlite::params;
+use std::sync::Arc;
 
 use crate::error::Result;
 use crate::serde_helpers::serialize_f32;
 use crate::types::*;
 
+use super::reembed::SearchState;
+use super::write_router::SyncWriteGuard;
 use super::{embedding_hash, now, YantrikDB};
 
 impl YantrikDB {
@@ -70,20 +73,72 @@ impl YantrikDB {
             );
         }
         // guard is held; RAII Drop at function exit decrements inflight.
-        let _guard = sync_guard;
+        let guard = sync_guard.unwrap();
 
-        // **Issue #41 brainstorm-4 §1.** Load SearchState once for
-        // this operation. The Arc<DeltaIndex> in `state.vec_index` is
-        // captured here so the rest of the function — SQL insert,
-        // vec_index.append, oplog log — all references the same
-        // generation-anchored index. The follow-up checkpoint adds
-        // a generation revalidation against `state.generation` at
-        // commit time (brainstorm-4 §2). Until then, the standalone
-        // field and `state.vec_index` point to the same DeltaIndex
-        // so this snapshot pattern is forward-compatible with no
-        // behavior change.
+        // **Issue #41 brainstorm-4 §1.** Load SearchState AFTER the
+        // guard is acquired. With the guard held, reembed cannot
+        // complete its swap, so the loaded state is the published
+        // active generation for the entire critical section. Note:
+        // for `record()` (caller-supplied embedding), the engine
+        // cannot verify the embedding's generation provenance — the
+        // caller is responsible for using the embedder consistent
+        // with the active generation. `record_text()` (engine-
+        // supplied embedding) has a revalidation loop that ensures
+        // the embedding and the active generation match.
         let state = self.search_state.load_full();
 
+        self.record_under_guard_and_state(
+            state,
+            guard,
+            text,
+            memory_type,
+            importance,
+            valence,
+            half_life,
+            metadata,
+            embedding,
+            namespace,
+            certainty,
+            domain,
+            source,
+            emotional_state,
+        )
+    }
+
+    /// **Issue #41 brainstorm-4 §2.** The post-guard, post-load
+    /// critical section shared by `record()` and `record_text()`.
+    ///
+    /// Caller MUST hold the `SyncWriteGuard` — this is the contract
+    /// that prevents reembed from completing its SearchState swap
+    /// while we are mid-commit, and the contract that makes
+    /// `state.generation` the durable answer to "what generation am I
+    /// committing under." The guard is moved in by value and drops
+    /// via RAII at function exit, decrementing the in-flight counter.
+    ///
+    /// Caller MUST also pre-load `state` from `self.search_state` and
+    /// pass it in — this commit path uses the snapshot rather than
+    /// re-loading, so writer revalidation logic in `record_text()`
+    /// (which re-loads after embed to detect a generation advance)
+    /// is the single source of truth for generation safety on the
+    /// text-embed path.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn record_under_guard_and_state(
+        &self,
+        state: Arc<SearchState>,
+        _guard: SyncWriteGuard<'_>,
+        text: &str,
+        memory_type: &str,
+        importance: f64,
+        valence: f64,
+        half_life: f64,
+        metadata: &serde_json::Value,
+        embedding: &[f32],
+        namespace: &str,
+        certainty: f64,
+        domain: &str,
+        source: &str,
+        emotional_state: Option<&str>,
+    ) -> Result<String> {
         let rid = crate::id::new_id();
         let ts = now();
         let emb_blob = serialize_f32(embedding);

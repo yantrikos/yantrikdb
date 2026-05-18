@@ -9461,6 +9461,7 @@ mod mode_test_embedders {
             self.name.clone()
         }
     }
+
 }
 
 #[test]
@@ -9718,6 +9719,340 @@ fn set_embedder_test_7_has_embedder_derives_from_search_state() {
     assert!(db.has_embedder());
     let v = db.embed("anything").unwrap();
     assert!((v[0] - 0.42).abs() < 1e-6);
+}
+
+#[test]
+fn record_text_revalidates_generation_and_retries_after_swap() {
+    // **Issue #41 brainstorm-4 §2 regression test.** Locks the
+    // writer-revalidation invariant: when `record_text`'s engine-side
+    // embed step races a SearchState swap, the writer detects the
+    // generation mismatch under the WriteRouter guard and retries.
+    // Without the loop, the embedding would land in the wrong vector
+    // space (durable silent corruption when dims match).
+    //
+    // Test choreography:
+    //   1. Set up db with BlockingEmbedder. SearchState publishes
+    //      generation G=0 with digest "sha256:initial".
+    //   2. Spawn record_text on a worker thread. It enters embed(),
+    //      signals "started_tx", and blocks on release_rx.
+    //   3. Test thread receives "started" signal. With the worker
+    //      blocked in the embed, the test manually constructs a NEW
+    //      SearchState (generation G=1, digest "sha256:rotated") and
+    //      stores it via `db.search_state.store(...)` — simulating a
+    //      reembed Phase-2 swap completing.
+    //   4. Test thread releases the embedder. record_text returns
+    //      from embed, acquires the sync guard, revalidates
+    //      generation, sees mismatch (0 != 1), drops guard, loops.
+    //   5. Second loop iteration loads the NEW SearchState, embeds
+    //      (now returns immediately — call_count > 0 takes the
+    //      no-block branch), acquires guard, revalidates, MATCH
+    //      (state still G=1), commits.
+    //   6. Assert call_count >= 2 (retry happened) and the recorded
+    //      memory exists in SQL.
+    // Test embedder wraps an Arc<AtomicUsize> so the test thread can
+    // observe call_count after the worker finishes. (The
+    // mode_test_embedders::BlockingEmbedder uses an in-struct
+    // AtomicUsize, which is inaccessible once boxed into Arc<dyn
+    // Embedder> in set_embedder.)
+    use std::sync::mpsc::channel;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    let (started_tx, started_rx) = channel::<()>();
+    let (release_tx, release_rx) = channel::<()>();
+    let call_count = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    struct SharedBlocking {
+        dim: usize,
+        fp: Option<String>,
+        name: Option<String>,
+        sentinel: f32,
+        started_tx: Mutex<Option<std::sync::mpsc::Sender<()>>>,
+        release_rx: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+        call_count: Arc<std::sync::atomic::AtomicUsize>,
+    }
+    impl crate::types::Embedder for SharedBlocking {
+        fn embed(
+            &self,
+            _text: &str,
+        ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>>
+        {
+            let n = self
+                .call_count
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 0 {
+                if let Some(tx) = self.started_tx.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                if let Some(rx) = self.release_rx.lock().unwrap().take() {
+                    let _ = rx.recv();
+                }
+            }
+            let mut v = vec![0.0_f32; self.dim];
+            if !v.is_empty() {
+                v[0] = self.sentinel;
+            }
+            Ok(v)
+        }
+        fn dim(&self) -> usize {
+            self.dim
+        }
+        fn fingerprint(&self) -> Option<String> {
+            self.fp.clone()
+        }
+        fn name(&self) -> Option<String> {
+            self.name.clone()
+        }
+    }
+
+    let mut db = YantrikDB::new(":memory:", 64).unwrap();
+    db.set_embedder(Box::new(SharedBlocking {
+        dim: 64,
+        fp: Some("sha256:initial".to_string()),
+        name: Some("blocking-initial".to_string()),
+        sentinel: 0.42,
+        started_tx: Mutex::new(Some(started_tx)),
+        release_rx: Mutex::new(Some(release_rx)),
+        call_count: Arc::clone(&call_count),
+    }))
+    .unwrap();
+
+    // Snapshot the initial state's generation; capture it for the
+    // post-test assertion below.
+    let gen_before = db.search_state.load().generation;
+    let arc_db = Arc::new(db);
+
+    // Spawn the worker: record_text() runs the revalidation loop.
+    let worker_db = Arc::clone(&arc_db);
+    let worker = std::thread::spawn(move || {
+        worker_db
+            .record_text(
+                "hello",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap()
+    });
+
+    // Wait for the worker to reach the embed step.
+    started_rx
+        .recv_timeout(Duration::from_secs(5))
+        .expect("embed should have started within 5s");
+
+    // Worker is now blocked in embed(). Simulate a reembed Phase-2
+    // swap: construct a new SearchState with generation+1 and a
+    // different digest, leaving the same vec_index (dim unchanged so
+    // we don't trigger downstream dim checks). The new SearchState
+    // is what reembed Phase-2 would publish; the writer's
+    // revalidation loop must detect the change and re-embed.
+    let old_state = arc_db.search_state.load_full();
+    let new_state = crate::engine::reembed::SearchState {
+        index_embedding: crate::engine::reembed::EmbeddingProvenance::Known {
+            name: Some("blocking-rotated".to_string()),
+            digest: "sha256:rotated".to_string(),
+            dim: 64,
+        },
+        embedder: old_state.embedder.clone(),
+        runtime_embedder_name: Some("blocking-rotated".to_string()),
+        runtime_embedder_digest: Some("sha256:rotated".to_string()),
+        generation: old_state.generation + 1,
+        covers_through_seq: old_state.covers_through_seq,
+        hnsw_m: old_state.hnsw_m,
+        hnsw_ef_construction: old_state.hnsw_ef_construction,
+        hnsw_ef_search: old_state.hnsw_ef_search,
+        vec_index: Arc::clone(&old_state.vec_index),
+    };
+    arc_db.search_state.store(Arc::new(new_state));
+
+    // Release the blocked embed so the worker proceeds: acquire
+    // guard, revalidate, see mismatch, retry. The retry iteration
+    // doesn't block (call_count > 0).
+    release_tx.send(()).unwrap();
+
+    let rid = worker.join().expect("record_text must complete");
+
+    // Locks the revalidation contract:
+    //   1. Embed was called at least twice (first under old state,
+    //      retry under new state).
+    //   2. The recorded memory exists.
+    //   3. The active generation advanced (sanity check).
+    let n_calls = call_count.load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        n_calls >= 2,
+        "record_text must re-embed after SearchState swap; got {n_calls} calls"
+    );
+    assert!(!rid.is_empty(), "record_text returns a valid rid");
+    let gen_after = arc_db.search_state.load().generation;
+    assert!(
+        gen_after > gen_before,
+        "test must observe a generation advance: before={gen_before} after={gen_after}"
+    );
+    // Verify the row is durably in SQL.
+    let conn = arc_db.conn();
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM memories WHERE rid = ?1", [&rid], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 1, "the retried record_text must be durably stored");
+}
+
+#[test]
+fn record_text_routes_to_queued_when_router_is_queueing() {
+    // **Issue #41 brainstorm-4 §2 sibling case.** When reembed has
+    // flipped the WriteRouter to Queueing BEFORE record_text reaches
+    // the acquire step, the writer must route to the queued path
+    // (which stores text and lets the post-swap materializer
+    // re-encode), not retry-loop forever. Locks the "Queueing →
+    // queued path" branch of the revalidation loop.
+    use mode_test_embedders::FakeEmbedder;
+    let mut db = YantrikDB::new(":memory:", 64).unwrap();
+    db.set_embedder(Box::new(FakeEmbedder {
+        dim: 64,
+        fp: Some("sha256:initial".to_string()),
+        name: Some("initial".to_string()),
+        sentinel: 0.5,
+    }))
+    .unwrap();
+
+    // Flip the router to Queueing — simulates reembed's
+    // switch_to_queueing() during the cutover preamble.
+    db.write_router.switch_to_queueing();
+
+    // record_text must NOT spin in its revalidation loop — the
+    // Queueing branch returns via record_queued.
+    let rid = db
+        .record_text(
+            "hello-queued",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    assert!(!rid.is_empty());
+
+    // The queued path does NOT write to `memories` (brainstorm-3
+    // invariant 7); it writes an applied=0 op to `oplog` with
+    // `embedding_model = current_runtime_embedder_name`. Verify both
+    // halves of that contract.
+    let conn = db.conn();
+    let memories_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM memories WHERE rid = ?1", [&rid], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(
+        memories_count, 0,
+        "queued path must NOT write to memories table"
+    );
+    let oplog_row: (i64, Option<String>) = conn
+        .query_row(
+            "SELECT applied, embedding_model FROM oplog WHERE target_rid = ?1 AND op_type = 'record'",
+            [&rid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(oplog_row.0, 0, "queued op must be applied=0");
+    assert_eq!(
+        oplog_row.1.as_deref(),
+        Some("initial"),
+        "queued op carries the current runtime embedder name for post-swap re-encode"
+    );
+}
+
+#[test]
+fn log_op_stamps_applied_generation_from_active_search_state() {
+    // **Issue #41 brainstorm-2 §1 / brainstorm-4 §6 regression test.**
+    // Sync-write paths must stamp `oplog.applied_generation` with the
+    // active SearchState generation. Without this, the post-swap
+    // materializer (Layer 5) cannot discriminate "already applied
+    // under old gen — skip" from "queued during reembed — need
+    // re-encode" (both would show applied=0 NULL or applied=1 NULL
+    // and look identical).
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let initial_generation: i64 =
+        db.search_state.load().generation as i64;
+
+    // log_op a synthetic event and assert the column is populated.
+    let op_id = db
+        .log_op(
+            "test_event",
+            None,
+            &serde_json::json!({"x": 1}),
+            None,
+        )
+        .unwrap();
+    // Scope the conn guard tightly — log_op needs the conn lock too,
+    // so don't hold it across the next log_op call (deadlock).
+    let applied_generation: Option<i64> = {
+        let conn = db.conn();
+        conn.query_row(
+            "SELECT applied_generation FROM oplog WHERE op_id = ?1",
+            [&op_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        applied_generation,
+        Some(initial_generation),
+        "log_op must stamp applied_generation with the current SearchState generation"
+    );
+
+    // Bump the generation manually (simulates a reembed swap) and
+    // verify a subsequent log_op picks up the new value.
+    let old_state = db.search_state.load_full();
+    let bumped = crate::engine::reembed::SearchState {
+        index_embedding: old_state.index_embedding.clone(),
+        embedder: old_state.embedder.clone(),
+        runtime_embedder_name: old_state.runtime_embedder_name.clone(),
+        runtime_embedder_digest: old_state.runtime_embedder_digest.clone(),
+        generation: old_state.generation + 1,
+        covers_through_seq: old_state.covers_through_seq,
+        hnsw_m: old_state.hnsw_m,
+        hnsw_ef_construction: old_state.hnsw_ef_construction,
+        hnsw_ef_search: old_state.hnsw_ef_search,
+        vec_index: std::sync::Arc::clone(&old_state.vec_index),
+    };
+    db.search_state.store(std::sync::Arc::new(bumped));
+
+    let op_id2 = db
+        .log_op(
+            "test_event_after_bump",
+            None,
+            &serde_json::json!({"x": 2}),
+            None,
+        )
+        .unwrap();
+    let applied_generation2: Option<i64> = {
+        let conn = db.conn();
+        conn.query_row(
+            "SELECT applied_generation FROM oplog WHERE op_id = ?1",
+            [&op_id2],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(
+        applied_generation2,
+        Some(initial_generation + 1),
+        "log_op picks up the new generation after search_state.store"
+    );
 }
 
 #[test]

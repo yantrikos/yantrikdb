@@ -93,6 +93,18 @@ impl YantrikDB {
     }
 
     /// Append an operation to the oplog with HLC and optional embedding hash.
+    ///
+    /// **Issue #41 brainstorm-2 §1 / brainstorm-4 §6.** Stamps the
+    /// v27 `applied_generation` column with the active SearchState
+    /// generation. The post-swap materializer (Layer 5) uses this
+    /// column to discriminate ops already applied under generation G
+    /// (skip them — they're durably indexed) from queued-during-
+    /// reembed ops (`applied_generation IS NULL` — need re-encode
+    /// under the new embedder). Sync writers call this AFTER their
+    /// `vec_index.append` so the generation read here is the same
+    /// generation the index entry was written against (the
+    /// `SyncWriteGuard` held by the caller prevents reembed from
+    /// completing its swap while we read).
     pub fn log_op(
         &self,
         op_type: &str,
@@ -104,12 +116,13 @@ impl YantrikDB {
         let hlc_ts = self.tick_hlc();
         let hlc_bytes = hlc_ts.to_bytes().to_vec();
         let payload_str = serde_json::to_string(payload)?;
+        let applied_generation: i64 = self.search_state.load().generation as i64;
 
         let conn = self.conn.lock();
         conn.execute(
             "INSERT INTO oplog (op_id, op_type, timestamp, target_rid, payload, \
-             actor_id, hlc, embedding_hash, origin_actor, applied) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1)",
+             actor_id, hlc, embedding_hash, origin_actor, applied, applied_generation) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10)",
             params![
                 op_id,
                 op_type,
@@ -120,6 +133,7 @@ impl YantrikDB {
                 hlc_bytes,
                 emb_hash,
                 self.actor_id,
+                applied_generation,
             ],
         )?;
         Ok(op_id)

@@ -1148,6 +1148,41 @@ impl YantrikDB {
     }
 
     /// Record a memory with automatic embedding generation.
+    ///
+    /// **Issue #41 brainstorm-4 §2 — writer revalidation loop.**
+    /// `record_text` performs the engine-side embed step, which is
+    /// SLOW (e.g. tens of ms for a model embedding). Per brainstorm-4
+    /// the embed runs OUTSIDE the `WriteRouter` guard so reembed
+    /// throughput stays bounded by the index rebuild, not by every
+    /// in-flight `record_text`. The price of "embed outside the
+    /// barrier" is that the active generation can advance between
+    /// the embed and the commit — landing an old-embedder vector in
+    /// the new-generation index is durable silent corruption when
+    /// dims happen to match (and a noisy `EmbeddingDimensionMismatch`
+    /// when they don't).
+    ///
+    /// The loop closes that window:
+    /// 1. Snapshot SearchState (`gen_pre`, embedder, digest_pre).
+    /// 2. Embed under that embedder. NO guard held — slow step.
+    /// 3. Try to acquire the sync guard. If the router has flipped to
+    ///    Queueing, route to `record_queued(text)` — the post-swap
+    ///    materializer will re-encode under the new embedder.
+    /// 4. With guard held, re-snapshot SearchState (`gen_post`,
+    ///    digest_post). Guard prevents reembed from completing its
+    ///    swap from this point onward.
+    /// 5. If `gen_pre == gen_post && digest_pre == digest_post`: the
+    ///    embedding we computed is consistent with the active
+    ///    generation. Commit via `record_under_guard_and_state`.
+    /// 6. Otherwise: a reembed swap completed between step 1 and
+    ///    step 4. Drop the guard and retry from step 1 — the next
+    ///    iteration embeds under the NEW embedder.
+    ///
+    /// The loop is bounded in expectation because reembed completes
+    /// at most once per outer call (it advances generation
+    /// monotonically and waits-for-no-sync-writers before swapping).
+    /// The retry budget is unbounded in the API surface — a
+    /// pathological caller can flap embedders forever, but real
+    /// reembed runs land once and then stay landed.
     pub fn record_text(
         &self,
         text: &str,
@@ -1162,21 +1197,99 @@ impl YantrikDB {
         source: &str,
         emotional_state: Option<&str>,
     ) -> Result<String> {
-        let embedding = self.embed(text)?;
-        self.record(
-            text,
-            memory_type,
-            importance,
-            valence,
-            half_life,
-            metadata,
-            &embedding,
-            namespace,
-            certainty,
-            domain,
-            source,
-            emotional_state,
-        )
+        loop {
+            // Step 1: snapshot SearchState for the embed — capture
+            // generation + digest so we can revalidate after the embed.
+            let state_for_embed = self.search_state.load_full();
+            let gen_pre = state_for_embed.generation;
+            let digest_pre = state_for_embed.runtime_embedder_digest.clone();
+            let embedder = state_for_embed
+                .embedder
+                .as_ref()
+                .ok_or(YantrikDbError::NoEmbedder)?
+                .clone();
+            // Release the Arc<SearchState> BEFORE the slow embed —
+            // brainstorm-4 §4 invariant ("no holding SearchState
+            // across long ops"). The embedder Arc is the small,
+            // bounded retention.
+            drop(state_for_embed);
+
+            // Step 2: embed OUTSIDE any guard. Slow step.
+            let embedding = embedder
+                .embed(text)
+                .map_err(|e| YantrikDbError::Inference(e.to_string()))?;
+
+            // Step 3: try to enter sync path.
+            let sync_guard = match self.write_router.try_enter_sync_writer() {
+                Some(g) => g,
+                None => {
+                    // Queueing state — reembed cutover is in
+                    // flight. Route to the queued path. The
+                    // pre-computed embedding is discarded; the
+                    // queued path stores TEXT and the post-swap
+                    // materializer re-encodes under the new
+                    // embedder (brainstorm-3 invariant 8).
+                    return self.record_queued(
+                        text,
+                        memory_type,
+                        importance,
+                        valence,
+                        half_life,
+                        metadata,
+                        &embedding,
+                        namespace,
+                        certainty,
+                        domain,
+                        source,
+                        emotional_state,
+                    );
+                }
+            };
+
+            // Step 4: re-snapshot SearchState UNDER the guard. From
+            // this point, reembed cannot complete its swap until
+            // our guard drops, so the loaded state is stable for
+            // the rest of the critical section.
+            let state_for_commit = self.search_state.load_full();
+
+            // Step 5: revalidate. If a swap completed between step 1
+            // and step 4, the embedding is in the wrong vector
+            // space and we must retry.
+            if state_for_commit.generation != gen_pre
+                || state_for_commit.runtime_embedder_digest != digest_pre
+            {
+                // Generation or digest advanced. Drop guard and
+                // retry the whole loop — next iteration embeds
+                // under the new active embedder.
+                drop(sync_guard);
+                tracing::info!(
+                    gen_pre,
+                    gen_post = state_for_commit.generation,
+                    "record_text: SearchState advanced mid-embed, retrying",
+                );
+                continue;
+            }
+
+            // Step 6: commit. The shared post-guard helper handles
+            // SQL insert + vec_index.append + log_op (which itself
+            // stamps applied_generation = state.generation).
+            return self.record_under_guard_and_state(
+                state_for_commit,
+                sync_guard,
+                text,
+                memory_type,
+                importance,
+                valence,
+                half_life,
+                metadata,
+                &embedding,
+                namespace,
+                certainty,
+                domain,
+                source,
+                emotional_state,
+            );
+        }
     }
 
     /// Recall memories by text query with automatic embedding.
