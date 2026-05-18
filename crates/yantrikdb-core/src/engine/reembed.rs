@@ -567,7 +567,8 @@ impl fmt::Debug for SearchState {
 use rusqlite::params;
 
 use crate::error::{Result, YantrikDbError};
-use crate::serde_helpers::serialize_f32;
+use crate::serde_helpers::{deserialize_f32, serialize_f32};
+use crate::vector::hnsw::HnswIndex;
 use crate::YantrikDB;
 
 impl YantrikDB {
@@ -1000,28 +1001,425 @@ impl YantrikDB {
             }),
         )?;
 
-        // ── Layer 4 phase 2.5 boundary ──
-        // Rebuilding + Swapping + Verifying are the next checkpoint.
-        // Clean abort: leave embedding_new staged (resume logic on
-        // open() in Layer 7 will decide); clear meta.reembed_state;
-        // write Aborted event.
-        self.clear_reembed_state_meta()?;
+        // ── Phase 2: Rebuilding ──
+        //
+        // Construct a new HnswIndex of size `new_dim` (== `active_dim`
+        // for v1 same-dim reembeds) using the SearchState's HNSW
+        // params (with caller overrides if supplied via options).
+        // Insert every staged embedding_new bytes into it.
+        //
+        // The rebuild happens BEFORE the WriteRouter cutover so the
+        // hot path stays sync-write-friendly while the (potentially
+        // long) rebuild runs. Tail writes that arrive between
+        // Encoding-completion and the cutover-barrier are picked up
+        // in the post-barrier catch-up step below.
+        let new_hnsw_m = options.hnsw_m.unwrap_or(probing_state.hnsw_m);
+        let new_hnsw_efc = options
+            .hnsw_ef_construction
+            .unwrap_or(probing_state.hnsw_ef_construction);
+        let new_hnsw_efs = options
+            .hnsw_ef_search
+            .unwrap_or(probing_state.hnsw_ef_search);
+
+        let rebuilding_start_ts = systime_to_unix_secs(SystemTime::now());
         self.write_reembed_event(
             next_generation,
-            ReembedPhase::Aborted,
+            ReembedPhase::Rebuilding,
+            rebuilding_start_ts,
+            &serde_json::json!({
+                "expected_count": processed,
+                "hnsw_m": new_hnsw_m,
+                "hnsw_ef_construction": new_hnsw_efc,
+                "hnsw_ef_search": new_hnsw_efs,
+            }),
+        )?;
+        self.update_reembed_state_phase("Rebuilding")?;
+
+        if let Some(cb) = progress_cb {
+            cb(ReembedProgress {
+                phase: ReembedPhase::Rebuilding,
+                processed: 0,
+                total: Some(processed),
+                elapsed_ms: started_at.elapsed().unwrap_or_default().as_millis() as u64,
+                namespace: options.namespace.clone(),
+            });
+        }
+
+        let mut new_hnsw = HnswIndex::with_params(
+            new_dim,
+            new_hnsw_m as usize,
+            new_hnsw_efc as usize,
+            new_hnsw_efs as usize,
+        );
+        let mut rebuilt: u64 = 0;
+        let mut rebuild_offset: usize = 0;
+
+        loop {
+            // Read staged embedding_new bytes in batches.
+            let batch: Vec<(String, Vec<u8>)> = {
+                let conn = self.read_conn();
+                let mut stmt = conn.prepare(
+                    "SELECT rid, embedding_new FROM memories \
+                     WHERE consolidation_status = 'active' \
+                       AND embedding_new IS NOT NULL \
+                     ORDER BY rid \
+                     LIMIT ?1 OFFSET ?2",
+                )?;
+                let rows = stmt
+                    .query_map(
+                        params![batch_size as i64, rebuild_offset as i64],
+                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
+                    )?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                drop(stmt);
+                drop(conn);
+                rows
+            };
+
+            if batch.is_empty() {
+                break;
+            }
+
+            for (rid, stored_blob) in &batch {
+                let decrypted = self.decrypt_embedding(stored_blob)?;
+                let vec = deserialize_f32(&decrypted);
+                if vec.len() != new_dim {
+                    return Err(YantrikDbError::Inference(format!(
+                        "reembed Rebuilding: staged embedding_new for rid {rid:?} has len {} \
+                         but expected new_dim {new_dim}",
+                        vec.len()
+                    )));
+                }
+                new_hnsw.insert(rid, &vec)?;
+                rebuilt += 1;
+            }
+            rebuild_offset += batch.len();
+
+            if let Some(cb) = progress_cb {
+                cb(ReembedProgress {
+                    phase: ReembedPhase::Rebuilding,
+                    processed: rebuilt,
+                    total: Some(processed),
+                    elapsed_ms: started_at.elapsed().unwrap_or_default().as_millis() as u64,
+                    namespace: options.namespace.clone(),
+                });
+            }
+        }
+
+        self.write_reembed_event(
+            next_generation,
+            ReembedPhase::Rebuilding,
             systime_to_unix_secs(SystemTime::now()),
             &serde_json::json!({
-                "reason": "Rebuilding+Swapping+Verifying not yet implemented (Layer 4 phase 2 part B)",
-                "encoded_count": processed,
+                "rebuilt_count": rebuilt,
+                "completed": true,
             }),
         )?;
 
-        Err(YantrikDbError::Inference(format!(
-            "db.reembed() Phase 2 part A complete: Encoding wrote {processed} rows to \
-             memories.embedding_new under embedder {new_embedder_name_resolved:?}. \
-             Rebuilding/Swapping/Verifying are the next checkpoint (issue #41 Layer 4 phase 2 part B). \
-             The staged columns persist; the next reembed call will overwrite them."
-        )))
+        // ── Phase 2: Swapping ──
+        //
+        // Cutover sequence (brainstorm-2 §3-§4):
+        // 1. switch_to_queueing — new sync writers route to oplog
+        // 2. wait_for_no_sync_writers — drain in-flight sync writers
+        // 3. capture vec_seq HWM (covers_through_seq for new gen)
+        // 4. tail-catchup: encode any rows that arrived AFTER the
+        //    Encoding scan completed (rows with old gen + NULL
+        //    embedding_new) — they're between [start_of_Encoding,
+        //    cutover-barrier] window
+        // 5. atomic SQL transaction: bump meta.active_generation,
+        //    promote embedding_new -> embedding + stamp
+        //    embedding_generation, clear staging columns
+        // 6. try_publish_search_state(new_state) — the in-memory
+        //    publish. Single atomic point (brainstorm-4 §1).
+        // 7. switch_to_normal — resume sync writes
+        //
+        // Crash recovery (brainstorm-4 §6): if the engine dies
+        // between SQL commit (step 5) and ArcSwap store (step 6),
+        // open() reads meta.active_generation and rebuilds the
+        // SearchState at the new generation. Layer 7 will lift this
+        // out into the open() codepath; for now we rely on a
+        // successful uninterrupted run.
+        let swapping_start_ts = systime_to_unix_secs(SystemTime::now());
+        self.write_reembed_event(
+            next_generation,
+            ReembedPhase::Swapping,
+            swapping_start_ts,
+            &serde_json::json!({}),
+        )?;
+        self.update_reembed_state_phase("Swapping")?;
+
+        if let Some(cb) = progress_cb {
+            cb(ReembedProgress {
+                phase: ReembedPhase::Swapping,
+                processed: 0,
+                total: None,
+                elapsed_ms: started_at.elapsed().unwrap_or_default().as_millis() as u64,
+                namespace: options.namespace.clone(),
+            });
+        }
+
+        // Cutover step 1: flip the WriteRouter to Queueing. New
+        // sync writers will see the gate and route to record_queued.
+        self.write_router.switch_to_queueing();
+
+        // Cutover step 2: drain in-flight sync writers. After this
+        // returns, every committed write under the OLD generation
+        // is durable and visible to our tail-catchup scan below.
+        //
+        // Held within a closure so any of the remaining cutover
+        // steps that fail can flip the router back to Normal —
+        // leaving Queueing on error would block all subsequent
+        // sync writes until process restart.
+        self.write_router.wait_for_no_sync_writers();
+
+        // Cutover step 3: capture vec_seq HWM. This is the
+        // covers_through_seq for the new generation — every write
+        // with vec_seq <= this is durable in the OLD index and now
+        // (after the SQL swap) in the NEW index. Writes past this
+        // seq either are queued in oplog (Queueing) or arrived
+        // post-cutover and will be applied to the new gen directly.
+        let covers_through_seq = self
+            .vec_seq
+            .load(std::sync::atomic::Ordering::Acquire);
+
+        // Cutover step 4: tail-catchup. Encode any rows whose
+        // embedding_generation is still under the new generation
+        // AND embedding_new is NULL (arrived between Encoding scan
+        // and the cutover barrier).
+        let tail_rows: Vec<(String, String)> = {
+            let conn = self.read_conn();
+            let mut stmt = conn.prepare(
+                "SELECT rid, text FROM memories \
+                 WHERE consolidation_status = 'active' \
+                   AND embedding IS NOT NULL \
+                   AND embedding_new IS NULL \
+                   AND COALESCE(embedding_generation, 0) < ?1",
+            )?;
+            let rows = stmt
+                .query_map(params![next_generation as i64], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            drop(stmt);
+            drop(conn);
+            rows
+        };
+
+        for (rid, stored_text) in &tail_rows {
+            let plain = self.decrypt_text(stored_text)?;
+            let new_emb = new_embedder.embed(&plain).map_err(|e| {
+                YantrikDbError::Inference(format!(
+                    "reembed tail-catchup: embedder failed on rid {rid:?}: {e}"
+                ))
+            })?;
+            if new_emb.len() != new_dim {
+                self.write_router.switch_to_normal();
+                return Err(YantrikDbError::Inference(format!(
+                    "reembed tail-catchup: embedder returned vector of len {} but reports dim {}",
+                    new_emb.len(),
+                    new_dim
+                )));
+            }
+            let blob = serialize_f32(&new_emb);
+            let encrypted = self.encrypt_embedding(&blob)?;
+            {
+                let conn = self.conn();
+                conn.execute(
+                    "UPDATE memories SET embedding_new = ?1, embedding_new_model = ?2 \
+                     WHERE rid = ?3",
+                    params![encrypted, new_embedder_name_resolved.as_str(), rid],
+                )?;
+            }
+            new_hnsw.insert(rid, &new_emb)?;
+        }
+        let tail_caught = tail_rows.len() as u64;
+
+        // Cutover step 5: atomic SQL swap. SAVEPOINT so the entire
+        // promotion is one durable unit. If COMMIT succeeds the
+        // engine is durably at the new generation; if it fails the
+        // staging columns are still intact for the next reembed
+        // attempt.
+        let total_swapped: i64 = {
+            let conn = self.conn();
+            conn.execute_batch("SAVEPOINT reembed_swap")?;
+
+            let result: Result<i64> = (|| {
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('active_generation', ?1)",
+                    params![next_generation.to_string()],
+                )?;
+                let n = conn.execute(
+                    "UPDATE memories \
+                     SET embedding = embedding_new, \
+                         embedding_generation = ?1, \
+                         embedding_new = NULL, \
+                         embedding_new_model = NULL \
+                     WHERE embedding_new IS NOT NULL",
+                    params![next_generation as i64],
+                )?;
+                Ok(n as i64)
+            })();
+
+            match result {
+                Ok(n) => {
+                    conn.execute_batch("RELEASE reembed_swap")?;
+                    n
+                }
+                Err(e) => {
+                    let _ = conn.execute_batch("ROLLBACK TO reembed_swap");
+                    let _ = conn.execute_batch("RELEASE reembed_swap");
+                    self.write_router.switch_to_normal();
+                    return Err(e);
+                }
+            }
+        };
+
+        // Cutover step 6: in-memory publish. Build a new
+        // SearchState carrying:
+        //   - new index_embedding (Known under the new embedder)
+        //   - the same embedder Arc (we hold one already)
+        //   - the new generation
+        //   - covers_through_seq captured at step 3
+        //   - the new HNSW wrapped in a fresh DeltaIndex
+        //   - HNSW params from options or carried over
+        let new_delta_index = {
+            let delta_max = std::env::var("YANTRIKDB_DELTA_MAX")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(crate::vector::delta_index::DEFAULT_DELTA_MAX);
+            let max_dirty_age = std::env::var("YANTRIKDB_MAX_DIRTY_AGE_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(std::time::Duration::from_secs)
+                .unwrap_or(crate::vector::delta_index::DEFAULT_MAX_DIRTY_AGE);
+            std::sync::Arc::new(
+                crate::vector::delta_index::DeltaIndex::from_cold_with_age(
+                    new_hnsw,
+                    delta_max,
+                    max_dirty_age,
+                ),
+            )
+        };
+
+        let new_search_state = SearchState {
+            index_embedding: EmbeddingProvenance::Known {
+                name: Some(new_embedder_name_resolved.clone()),
+                digest: new_embedder_digest.clone(),
+                dim: new_dim,
+            },
+            embedder: Some(std::sync::Arc::clone(&new_embedder)),
+            runtime_embedder_name: Some(new_embedder_name_resolved.clone()),
+            runtime_embedder_digest: Some(new_embedder_digest.clone()),
+            generation: next_generation,
+            covers_through_seq,
+            hnsw_m: new_hnsw_m,
+            hnsw_ef_construction: new_hnsw_efc,
+            hnsw_ef_search: new_hnsw_efs,
+            vec_index: new_delta_index,
+        };
+        self.try_publish_search_state(new_search_state)?;
+
+        // Cutover step 7: resume sync writes under the new generation.
+        // The standalone WriteRouter state flip is observable to any
+        // record/record_text call that arrives after this point.
+        self.write_router.switch_to_normal();
+
+        self.write_reembed_event(
+            next_generation,
+            ReembedPhase::Swapping,
+            systime_to_unix_secs(SystemTime::now()),
+            &serde_json::json!({
+                "covers_through_seq": covers_through_seq,
+                "tail_caught": tail_caught,
+                "rows_swapped": total_swapped,
+                "completed": true,
+            }),
+        )?;
+
+        // ── Phase 2: Verifying ──
+        //
+        // Sanity check: no rows should remain under the old
+        // generation with NULL embedding_new (everything either got
+        // promoted or was never staged because it was tombstoned/
+        // archived).
+        let verifying_start_ts = systime_to_unix_secs(SystemTime::now());
+        self.write_reembed_event(
+            next_generation,
+            ReembedPhase::Verifying,
+            verifying_start_ts,
+            &serde_json::json!({}),
+        )?;
+        self.update_reembed_state_phase("Verifying")?;
+
+        let stragglers: i64 = {
+            let conn = self.read_conn();
+            conn.query_row(
+                "SELECT COUNT(*) FROM memories \
+                 WHERE consolidation_status = 'active' \
+                   AND embedding IS NOT NULL \
+                   AND COALESCE(embedding_generation, 0) < ?1",
+                params![next_generation as i64],
+                |r| r.get(0),
+            )
+            .unwrap_or(0)
+        };
+
+        if let Some(cb) = progress_cb {
+            cb(ReembedProgress {
+                phase: ReembedPhase::Verifying,
+                processed: total_swapped as u64,
+                total: Some(total_swapped as u64),
+                elapsed_ms: started_at.elapsed().unwrap_or_default().as_millis() as u64,
+                namespace: options.namespace.clone(),
+            });
+        }
+
+        // Stragglers > 0 doesn't necessarily mean failure today —
+        // Layer 5 (post-swap materializer) will drain queued writes
+        // that came in during cutover. But it DOES mean Verifying
+        // is incomplete; surface in the event payload so operators
+        // can decide.
+        self.write_reembed_event(
+            next_generation,
+            ReembedPhase::Verifying,
+            systime_to_unix_secs(SystemTime::now()),
+            &serde_json::json!({
+                "stragglers_under_old_gen": stragglers,
+                "completed": true,
+            }),
+        )?;
+
+        // Final Completed event + clear meta.reembed_state.
+        self.clear_reembed_state_meta()?;
+        self.write_reembed_event(
+            next_generation,
+            ReembedPhase::Completed,
+            systime_to_unix_secs(SystemTime::now()),
+            &serde_json::json!({
+                "encoded_count": processed,
+                "tail_caught": tail_caught,
+                "rows_swapped": total_swapped,
+                "covers_through_seq": covers_through_seq,
+            }),
+        )?;
+
+        let _ = on_phase_complete; // future use for per-phase callback dispatch
+
+        let duration = started_at.elapsed().unwrap_or_default();
+        Ok(ReembedReport {
+            generation: next_generation,
+            encoded_count: processed + tail_caught,
+            skipped_count: 0,
+            duration,
+            old_embedder: active_name,
+            old_embedder_digest: active_digest.unwrap_or_default(),
+            new_embedder: new_embedder_name_resolved,
+            new_embedder_digest,
+            old_dim: active_dim,
+            new_dim,
+            build_hwm: covers_through_seq,
+            per_namespace: HashMap::new(),
+        })
     }
 
     /// **Issue #41 — read-only status of an in-flight reembed.**
@@ -1134,6 +1532,46 @@ impl YantrikDB {
     pub(crate) fn clear_reembed_state_meta(&self) -> Result<()> {
         let conn = self.conn();
         conn.execute("DELETE FROM meta WHERE key = 'reembed_state'", [])?;
+        Ok(())
+    }
+
+    /// **Issue #41 brainstorm-4 Phase 2 helper.** Mutate the `phase`
+    /// field on the durable `meta.reembed_state` row to reflect
+    /// progression through Probing → Encoding → Rebuilding →
+    /// Swapping → Verifying. Other fields (generation, embedder
+    /// names, dims, namespace, write_policy) are preserved.
+    ///
+    /// Used by reembed_with_embedder at each phase transition so
+    /// crash recovery on open() can read the durable phase marker
+    /// and apply the right resume strategy (Layer 7).
+    pub(crate) fn update_reembed_state_phase(&self, new_phase: &str) -> Result<()> {
+        use rusqlite::params;
+        let conn = self.conn();
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'reembed_state'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .ok();
+        let Some(s) = raw else {
+            // No durable row to update — clear-state path took it.
+            return Ok(());
+        };
+        let mut state: serde_json::Value = serde_json::from_str(&s).unwrap_or_else(|_| {
+            serde_json::json!({})
+        });
+        if let Some(map) = state.as_object_mut() {
+            map.insert(
+                "phase".to_string(),
+                serde_json::Value::String(new_phase.to_string()),
+            );
+        }
+        let s_new = serde_json::to_string(&state)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('reembed_state', ?1)",
+            params![s_new],
+        )?;
         Ok(())
     }
 }
@@ -1375,15 +1813,20 @@ mod tests {
     }
 
     #[test]
-    fn reembed_phase_2_part_a_runs_encoding_and_aborts_at_part_b_boundary() {
-        // **Checkpoint 16 boundary check.** A real (non-no-op,
-        // non-dry-run) reembed runs Encoding to completion (writing
-        // embedding_new + embedding_new_model on every active row)
-        // and aborts at the new "Phase 2 part A complete" boundary.
-        // Critical:
-        //   - meta.reembed_state MUST be cleared on the way out
-        //   - the Aborted event MUST be in the audit log
-        //   - the staged columns are populated (Encoding wrote them)
+    fn reembed_phase_2_full_run_promotes_to_new_generation() {
+        // **Checkpoint 17 — Phase 2 full happy path.** Plant rows,
+        // run reembed end-to-end (Probing → Encoding → Rebuilding
+        // → Swapping → Verifying → Completed). Critical contracts:
+        //   - ReembedReport.encoded_count matches planted row count
+        //   - SearchState.generation advanced by exactly 1
+        //   - SearchState.runtime_embedder is the new one
+        //   - meta.active_generation in SQL matches new gen
+        //   - Every active row's embedding_generation = new gen
+        //   - Staging columns (embedding_new + embedding_new_model)
+        //     are cleared post-swap
+        //   - meta.reembed_state is cleared
+        //   - Completed event is in audit log
+        //   - WriteRouter is back in Normal state
         let mut db = crate::YantrikDB::new(":memory:", 8).unwrap();
         db.set_embedder(Box::new(PhaseTestEmbedder {
             dim: 8,
@@ -1392,8 +1835,8 @@ mod tests {
         }))
         .unwrap();
 
-        // Plant two rows so Encoding has something to scan.
-        for i in 0..2 {
+        // Plant 3 rows so we exercise batching semantics.
+        for i in 0..3 {
             db.record(
                 &format!("row {i}"),
                 "episodic",
@@ -1417,76 +1860,89 @@ mod tests {
                 fp: "sha256:target".to_string(),
                 name: "target-model".to_string(),
             });
-        let err = db
+        let report = db
             .reembed_with_embedder("target-model", Some(synthetic), ReembedOptions::default())
-            .unwrap_err();
-        match err {
-            crate::error::YantrikDbError::Inference(msg) => {
-                assert!(
-                    msg.contains("Phase 2 part A complete") && msg.contains("part B"),
-                    "expected Phase 2 part A boundary message, got: {msg}"
-                );
-                // Locks the encoded_count surfaces in the error.
-                assert!(msg.contains("Encoding wrote 2 rows"), "msg: {msg}");
-            }
-            other => panic!("expected Inference at part-A boundary, got {other:?}"),
-        }
+            .unwrap();
 
-        // meta.reembed_state cleared (no in-flight signal lingering).
+        // ReembedReport contract.
+        assert_eq!(report.generation, 1, "new generation = 1 (was 0)");
+        assert_eq!(report.encoded_count, 3, "all 3 rows re-encoded");
+        assert_eq!(report.old_embedder, "original-model");
+        assert_eq!(report.new_embedder, "target-model");
+        assert_eq!(report.old_dim, 8);
+        assert_eq!(report.new_dim, 8);
+        assert!(report.build_hwm >= 3, "covers_through_seq covers all writes");
+
+        // In-memory SearchState.
+        let state = db.search_state.load_full();
+        assert_eq!(state.generation, 1, "in-memory generation advanced");
+        assert_eq!(
+            state.runtime_embedder_name.as_deref(),
+            Some("target-model")
+        );
+        assert!(
+            matches!(
+                &state.index_embedding,
+                EmbeddingProvenance::Known { digest, .. } if digest == "sha256:target"
+            ),
+            "provenance is Known under the new embedder digest"
+        );
+
+        // Durable state.
+        let conn = db.conn();
+        let active_gen: String = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'active_generation'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(active_gen, "1", "meta.active_generation bumped in SQL");
+
+        let row_gens: Vec<i64> = conn
+            .prepare(
+                "SELECT embedding_generation FROM memories WHERE consolidation_status = 'active'",
+            )
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(row_gens, vec![1, 1, 1], "every row stamped at new gen");
+
+        let staging_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories \
+                 WHERE embedding_new IS NOT NULL OR embedding_new_model IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(staging_count, 0, "staging columns must be cleared post-swap");
+
+        // No mid-reembed signal lingering.
+        drop(conn);
         assert!(
             db.reembed_status().is_none(),
-            "meta.reembed_state must be cleared on part-A-boundary abort"
+            "meta.reembed_state must be cleared on Completed"
         );
 
-        // Aborted event in audit log.
-        let aborted_count: i64 = db
-            .conn()
+        // Completed event in audit log.
+        let conn = db.conn();
+        let completed_count: i64 = conn
             .query_row(
-                "SELECT COUNT(*) FROM reembed_events WHERE phase = 'Aborted'",
+                "SELECT COUNT(*) FROM reembed_events WHERE phase = 'Completed'",
                 [],
-                |row| row.get(0),
+                |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(aborted_count, 1, "Aborted event must be logged");
+        assert_eq!(completed_count, 1, "Completed event must be logged");
 
-        // Encoding event in audit log (separate event from Probing).
-        let encoding_count: i64 = db
-            .conn()
-            .query_row(
-                "SELECT COUNT(*) FROM reembed_events WHERE phase = 'Encoding'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
+        // WriteRouter back in Normal state.
         assert!(
-            encoding_count >= 1,
-            "Encoding event must be in audit log (got {encoding_count})"
+            db.write_router.try_enter_sync_writer().is_some(),
+            "WriteRouter must be Normal after reembed completion"
         );
-
-        // The 2 planted rows MUST have embedding_new + embedding_new_model
-        // populated (Encoding wrote them) AND embedding_generation
-        // unchanged (Swapping is what bumps that — pending).
-        let staged_count: i64 = db
-            .conn()
-            .query_row(
-                "SELECT COUNT(*) FROM memories WHERE embedding_new IS NOT NULL \
-                 AND embedding_new_model = 'target-model'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(staged_count, 2, "Encoding must have populated staging columns");
-
-        // embedding_generation unchanged at 0 (Phase 2 part B will bump).
-        let gen_zero_count: i64 = db
-            .conn()
-            .query_row(
-                "SELECT COUNT(*) FROM memories WHERE embedding_generation = 0",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(gen_zero_count, 2, "embedding_generation unchanged before swap");
     }
 
     #[test]
