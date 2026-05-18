@@ -39,6 +39,7 @@ mod recall;
 mod receptivity;
 mod record;
 pub mod reembed;
+pub mod write_router;
 mod replay_engine;
 mod schema_induction_engine;
 mod session;
