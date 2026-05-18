@@ -135,7 +135,11 @@ impl<'a> DurableEmbeddingStore<'a> {
         let mut stmt = conn.prepare(&sql)?;
         let rows: Vec<(String, Vec<u8>, i64)> = stmt
             .query_map(params_ref.as_slice(), |row| {
-                Ok((row.get::<_, String>(0)?, row.get::<_, Vec<u8>>(1)?, row.get::<_, i64>(2)?))
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, i64>(2)?,
+                ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
         drop(stmt);
@@ -255,10 +259,7 @@ mod tests {
         assert_eq!(map.len(), 1, "exact match");
         let entry = map.get(&rid).unwrap();
         assert!(!entry.bytes.is_empty(), "bytes returned");
-        assert_eq!(
-            entry.generation, 0,
-            "fresh engine writes rows at gen 0"
-        );
+        assert_eq!(entry.generation, 0, "fresh engine writes rows at gen 0");
     }
 
     #[test]

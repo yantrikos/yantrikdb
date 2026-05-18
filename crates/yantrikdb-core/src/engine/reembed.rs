@@ -377,9 +377,7 @@ pub enum EmbeddingProvenance {
     /// not provable. `set_embedder*` with matching dim can attach a
     /// runtime embedder via the compat path without claiming the index
     /// is in the new embedder's vector space.
-    ExternalOrUnknown {
-        dim: usize,
-    },
+    ExternalOrUnknown { dim: usize },
 }
 
 impl EmbeddingProvenance {
@@ -627,11 +625,7 @@ impl YantrikDB {
             .unwrap_or_default();
         if active_name_for_check == new_embedder_name {
             // Same-name no-op: skip registry resolution entirely.
-            return self.reembed_with_embedder(
-                new_embedder_name,
-                None,
-                options,
-            );
+            return self.reembed_with_embedder(new_embedder_name, None, options);
         }
         drop(probing_state_for_name_check);
 
@@ -749,9 +743,7 @@ impl YantrikDB {
         })?;
 
         let new_dim = new_embedder.dim();
-        let new_embedder_digest = new_embedder
-            .fingerprint()
-            .unwrap_or_default();
+        let new_embedder_digest = new_embedder.fingerprint().unwrap_or_default();
         let new_embedder_name_resolved = new_embedder
             .name()
             .unwrap_or_else(|| new_embedder_name.to_string());
@@ -924,8 +916,7 @@ impl YantrikDB {
             // Re-encode each row's text under the new embedder.
             // Done OUTSIDE the conn lock — embedder.embed() can be
             // slow (model inference) and must not bottleneck SQL.
-            let mut encoded_pairs: Vec<(String, Vec<u8>)> =
-                Vec::with_capacity(batch.len());
+            let mut encoded_pairs: Vec<(String, Vec<u8>)> = Vec::with_capacity(batch.len());
             for (rid, stored_text) in &batch {
                 let plain = self.decrypt_text(stored_text)?;
                 let new_emb = new_embedder.embed(&plain).map_err(|e| {
@@ -1066,10 +1057,9 @@ impl YantrikDB {
                      LIMIT ?1 OFFSET ?2",
                 )?;
                 let rows = stmt
-                    .query_map(
-                        params![batch_size as i64, rebuild_offset as i64],
-                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)),
-                    )?
+                    .query_map(params![batch_size as i64, rebuild_offset as i64], |r| {
+                        Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+                    })?
                     .collect::<std::result::Result<Vec<_>, _>>()?;
                 drop(stmt);
                 drop(conn);
@@ -1178,9 +1168,7 @@ impl YantrikDB {
         // (after the SQL swap) in the NEW index. Writes past this
         // seq either are queued in oplog (Queueing) or arrived
         // post-cutover and will be applied to the new gen directly.
-        let covers_through_seq = self
-            .vec_seq
-            .load(std::sync::atomic::Ordering::Acquire);
+        let covers_through_seq = self.vec_seq.load(std::sync::atomic::Ordering::Acquire);
 
         // Cutover step 4: tail-catchup. Encode any rows whose
         // embedding_generation is still under the new generation
@@ -1292,13 +1280,11 @@ impl YantrikDB {
                 .and_then(|v| v.parse::<u64>().ok())
                 .map(std::time::Duration::from_secs)
                 .unwrap_or(crate::vector::delta_index::DEFAULT_MAX_DIRTY_AGE);
-            std::sync::Arc::new(
-                crate::vector::delta_index::DeltaIndex::from_cold_with_age(
-                    new_hnsw,
-                    delta_max,
-                    max_dirty_age,
-                ),
-            )
+            std::sync::Arc::new(crate::vector::delta_index::DeltaIndex::from_cold_with_age(
+                new_hnsw,
+                delta_max,
+                max_dirty_age,
+            ))
         };
 
         let new_search_state = SearchState {
@@ -1453,16 +1439,13 @@ impl YantrikDB {
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        let old_dim = payload
-            .get("old_dim")
-            .and_then(|v| v.as_u64())
-            .unwrap_or(0) as usize;
+        let old_dim = payload.get("old_dim").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
         let started_at_unix = payload
             .get("started_at_unix")
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
-        let started_at = std::time::UNIX_EPOCH
-            + std::time::Duration::from_secs_f64(started_at_unix.max(0.0));
+        let started_at =
+            std::time::UNIX_EPOCH + std::time::Duration::from_secs_f64(started_at_unix.max(0.0));
         let write_policy = match payload.get("write_policy").and_then(|v| v.as_str()) {
             Some("Pause") => ReembedWritePolicy::Pause,
             _ => ReembedWritePolicy::Queue,
@@ -1514,10 +1497,7 @@ impl YantrikDB {
     }
 
     /// Write `meta.reembed_state` with the current job summary JSON.
-    pub(crate) fn write_reembed_state_meta(
-        &self,
-        state_json: &serde_json::Value,
-    ) -> Result<()> {
+    pub(crate) fn write_reembed_state_meta(&self, state_json: &serde_json::Value) -> Result<()> {
         use rusqlite::params;
         let s = serde_json::to_string(state_json)?;
         let conn = self.conn();
@@ -1558,9 +1538,8 @@ impl YantrikDB {
             // No durable row to update — clear-state path took it.
             return Ok(());
         };
-        let mut state: serde_json::Value = serde_json::from_str(&s).unwrap_or_else(|_| {
-            serde_json::json!({})
-        });
+        let mut state: serde_json::Value =
+            serde_json::from_str(&s).unwrap_or_else(|_| serde_json::json!({}));
         if let Some(map) = state.as_object_mut() {
             map.insert(
                 "phase".to_string(),
@@ -1684,9 +1663,7 @@ mod tests {
         // embedder has populated the index yet), embedder is None
         // (caller may pass pre-computed vectors), generation=0,
         // covers_through_seq=0.
-        let vec_index = Arc::new(
-            crate::vector::delta_index::DeltaIndex::new(384),
-        );
+        let vec_index = Arc::new(crate::vector::delta_index::DeltaIndex::new(384));
         let s = SearchState::initial(384, 16, 200, 50, vec_index);
         assert_eq!(s.dim(), 384);
         assert!(matches!(
@@ -1724,8 +1701,7 @@ mod tests {
         fn embed(
             &self,
             _text: &str,
-        ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>>
-        {
+        ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
             Ok(vec![0.1_f32; self.dim])
         }
         fn dim(&self) -> usize {
@@ -1754,8 +1730,7 @@ mod tests {
         fn embed(
             &self,
             _text: &str,
-        ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>>
-        {
+        ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
             let mut v = vec![0.0_f32; self.dim];
             if !v.is_empty() {
                 v[0] = self.sentinel;
@@ -1792,7 +1767,10 @@ mod tests {
         assert_eq!(report.old_embedder, "model-x");
         assert_eq!(report.new_embedder, "model-x");
         // No meta.reembed_state row written — confirms full no-op shape.
-        assert!(db.reembed_status().is_none(), "no-op must not leave reembed_status");
+        assert!(
+            db.reembed_status().is_none(),
+            "no-op must not leave reembed_status"
+        );
     }
 
     #[test]
@@ -1843,7 +1821,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(event_count >= 1, "Probing event must be in audit log even for dry-run");
+        assert!(
+            event_count >= 1,
+            "Probing event must be in audit log even for dry-run"
+        );
     }
 
     #[test]
@@ -1905,15 +1886,15 @@ mod tests {
         assert_eq!(report.new_embedder, "target-model");
         assert_eq!(report.old_dim, 8);
         assert_eq!(report.new_dim, 8);
-        assert!(report.build_hwm >= 3, "covers_through_seq covers all writes");
+        assert!(
+            report.build_hwm >= 3,
+            "covers_through_seq covers all writes"
+        );
 
         // In-memory SearchState.
         let state = db.search_state.load_full();
         assert_eq!(state.generation, 1, "in-memory generation advanced");
-        assert_eq!(
-            state.runtime_embedder_name.as_deref(),
-            Some("target-model")
-        );
+        assert_eq!(state.runtime_embedder_name.as_deref(), Some("target-model"));
         assert!(
             matches!(
                 &state.index_embedding,
@@ -1952,7 +1933,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(staging_count, 0, "staging columns must be cleared post-swap");
+        assert_eq!(
+            staging_count, 0,
+            "staging columns must be cleared post-swap"
+        );
 
         // No mid-reembed signal lingering.
         drop(conn);
@@ -2204,7 +2188,10 @@ mod tests {
                     msg.contains("Cross-dim reembed is not yet supported"),
                     "expected cross-dim guard message, got: {msg}"
                 );
-                assert!(msg.contains("dim=8") && msg.contains("dim=16"), "msg: {msg}");
+                assert!(
+                    msg.contains("dim=8") && msg.contains("dim=16"),
+                    "msg: {msg}"
+                );
             }
             other => panic!("expected Inference, got {other:?}"),
         }
@@ -2303,8 +2290,7 @@ mod tests {
         // drift between "what we think the dim is" and "what's
         // actually in the index." Failing this test means someone
         // re-added the standalone field.
-        let vec_index_known =
-            Arc::new(crate::vector::delta_index::DeltaIndex::new(768));
+        let vec_index_known = Arc::new(crate::vector::delta_index::DeltaIndex::new(768));
         let s_known = SearchState {
             index_embedding: EmbeddingProvenance::Known {
                 name: None,
@@ -2322,8 +2308,7 @@ mod tests {
             vec_index: vec_index_known,
         };
         assert_eq!(s_known.dim(), 768);
-        let vec_index_unknown =
-            Arc::new(crate::vector::delta_index::DeltaIndex::new(128));
+        let vec_index_unknown = Arc::new(crate::vector::delta_index::DeltaIndex::new(128));
         let s_unknown = SearchState {
             index_embedding: EmbeddingProvenance::ExternalOrUnknown { dim: 128 },
             embedder: None,
@@ -2402,7 +2387,9 @@ mod tests {
         // Recall under E1's vector space.
         let query = vec![0.99_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         let results = db
-            .recall(&query, 5, None, None, false, true, None, true, None, None, None)
+            .recall(
+                &query, 5, None, None, false, true, None, true, None, None, None,
+            )
             .unwrap();
         assert_eq!(
             results.len(),
@@ -2447,7 +2434,14 @@ mod tests {
         assert_eq!(report.generation, 1);
         // All phase audit events present even for the empty case.
         let conn = db.conn();
-        for phase in ["Probing", "Encoding", "Rebuilding", "Swapping", "Verifying", "Completed"] {
+        for phase in [
+            "Probing",
+            "Encoding",
+            "Rebuilding",
+            "Swapping",
+            "Verifying",
+            "Completed",
+        ] {
             let count: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM reembed_events WHERE phase = ?1 AND generation = 1",
@@ -2517,7 +2511,10 @@ mod tests {
             .reembed_with_embedder("E2", Some(e2), ReembedOptions::default())
             .unwrap();
         assert_eq!(r2.generation, 2);
-        assert_eq!(r2.encoded_count, 1, "second reembed re-encodes the planted row");
+        assert_eq!(
+            r2.encoded_count, 1,
+            "second reembed re-encodes the planted row"
+        );
 
         // Row's stamp is the latest generation.
         let row_gen: i64 = db
@@ -2581,9 +2578,7 @@ mod tests {
         let phases: Vec<String> = {
             let conn = db.conn();
             let mut stmt = conn
-                .prepare(
-                    "SELECT phase FROM reembed_events WHERE generation = 1 ORDER BY timestamp",
-                )
+                .prepare("SELECT phase FROM reembed_events WHERE generation = 1 ORDER BY timestamp")
                 .unwrap();
             stmt.query_map([], |r| r.get::<_, String>(0))
                 .unwrap()
@@ -2593,7 +2588,13 @@ mod tests {
 
         // First event is Probing; subsequent events include all phases.
         assert_eq!(phases.first().map(String::as_str), Some("Probing"));
-        for required in ["Encoding", "Rebuilding", "Swapping", "Verifying", "Completed"] {
+        for required in [
+            "Encoding",
+            "Rebuilding",
+            "Swapping",
+            "Verifying",
+            "Completed",
+        ] {
             assert!(
                 phases.iter().any(|p| p == required),
                 "audit log missing {required} event; phases recorded: {phases:?}"
@@ -2673,7 +2674,10 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(count, 2, "namespace {ns} must have 2 rows at gen 1, got {count}");
+            assert_eq!(
+                count, 2,
+                "namespace {ns} must have 2 rows at gen 1, got {count}"
+            );
         }
     }
 }

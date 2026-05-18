@@ -828,11 +828,7 @@ impl YantrikDB {
         // uses this to discriminate ops queued under the old embedder
         // (need re-encode) from ops produced by the new generation's
         // own writers (apply embedding bytes directly).
-        let current_embedder_name = self
-            .search_state
-            .load()
-            .runtime_embedder_name
-            .clone();
+        let current_embedder_name = self.search_state.load().runtime_embedder_name.clone();
 
         // Full record payload — what the materializer needs to
         // reconstruct the row.

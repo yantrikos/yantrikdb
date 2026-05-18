@@ -9292,7 +9292,10 @@ fn record_in_normal_state_takes_sync_path() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(count, 1, "sync-path write must land in memories immediately");
+    assert_eq!(
+        count, 1,
+        "sync-path write must land in memories immediately"
+    );
 }
 
 #[test]
@@ -9367,7 +9370,8 @@ fn record_in_queueing_state_routes_to_oplog_does_not_touch_memories() {
         )
         .unwrap();
     assert_eq!(
-        oplog_after, oplog_before + 1,
+        oplog_after,
+        oplog_before + 1,
         "queued path must write the record op to oplog with applied=0"
     );
 
@@ -9461,7 +9465,6 @@ mod mode_test_embedders {
             self.name.clone()
         }
     }
-
 }
 
 #[test]
@@ -9694,7 +9697,10 @@ fn set_embedder_test_6_external_or_unknown_compat_attach_does_not_claim_provenan
         s.index_embedding
     );
     assert!(s.has_runtime_embedder());
-    assert_eq!(s.runtime_embedder_digest.as_deref(), Some("sha256:attached"));
+    assert_eq!(
+        s.runtime_embedder_digest.as_deref(),
+        Some("sha256:attached")
+    );
 }
 
 #[test]
@@ -9775,8 +9781,7 @@ fn record_text_revalidates_generation_and_retries_after_swap() {
         fn embed(
             &self,
             _text: &str,
-        ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>>
-        {
+        ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
             let n = self
                 .call_count
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
@@ -9898,9 +9903,11 @@ fn record_text_revalidates_generation_and_retries_after_swap() {
     // Verify the row is durably in SQL.
     let conn = arc_db.conn();
     let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM memories WHERE rid = ?1", [&rid], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE rid = ?1",
+            [&rid],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(count, 1, "the retried record_text must be durably stored");
 }
@@ -9952,9 +9959,11 @@ fn record_text_routes_to_queued_when_router_is_queueing() {
     // halves of that contract.
     let conn = db.conn();
     let memories_count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM memories WHERE rid = ?1", [&rid], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE rid = ?1",
+            [&rid],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(
         memories_count, 0,
@@ -9985,17 +9994,11 @@ fn log_op_stamps_applied_generation_from_active_search_state() {
     // re-encode" (both would show applied=0 NULL or applied=1 NULL
     // and look identical).
     let db = YantrikDB::new(":memory:", 64).unwrap();
-    let initial_generation: i64 =
-        db.search_state.load().generation as i64;
+    let initial_generation: i64 = db.search_state.load().generation as i64;
 
     // log_op a synthetic event and assert the column is populated.
     let op_id = db
-        .log_op(
-            "test_event",
-            None,
-            &serde_json::json!({"x": 1}),
-            None,
-        )
+        .log_op("test_event", None, &serde_json::json!({"x": 1}), None)
         .unwrap();
     // Scope the conn guard tightly — log_op needs the conn lock too,
     // so don't hold it across the next log_op call (deadlock).
@@ -10204,7 +10207,8 @@ fn schema_v27_migration_from_v26_is_additive_only() {
             [],
         )
         .unwrap();
-        conn.execute("DROP TABLE IF EXISTS reembed_events", []).unwrap();
+        conn.execute("DROP TABLE IF EXISTS reembed_events", [])
+            .unwrap();
         conn.execute("DROP INDEX IF EXISTS idx_reembed_events_generation", [])
             .unwrap();
         // Can't easily drop ALTER-added columns in SQLite without table
@@ -10252,7 +10256,10 @@ fn schema_v27_migration_from_v26_is_additive_only() {
             |row| row.get(0),
         )
         .unwrap();
-    assert_eq!(count, 1, "reembed_events table must be writable post-migration");
+    assert_eq!(
+        count, 1,
+        "reembed_events table must be writable post-migration"
+    );
 }
 
 #[test]
@@ -10472,7 +10479,10 @@ fn schema_v28_fresh_install_has_embedding_generation_and_active_generation() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "28", "fresh install stamps SCHEMA_VERSION = 28");
+    assert_eq!(
+        schema_version, "28",
+        "fresh install stamps SCHEMA_VERSION = 28"
+    );
 }
 
 #[test]
@@ -10511,8 +10521,8 @@ fn schema_v28_migration_from_v27_is_additive_and_idempotent() {
     }
 
     // Re-open — runner must heal idempotently.
-    let db = YantrikDB::new(path, 8)
-        .expect("v28 migration runner must heal rewound-meta deployments");
+    let db =
+        YantrikDB::new(path, 8).expect("v28 migration runner must heal rewound-meta deployments");
     let conn = db.conn();
 
     // Planted row still there with original generation stamp.
@@ -10775,8 +10785,7 @@ fn search_state_publish_is_atomic_under_concurrent_reads() {
             let consistent = (*gen, *dim, *hnsw_m) == baseline
                 || (*gen >= 1
                     && *dim == initial.dim()
-                    && ((*gen % 2 == 0 && *hnsw_m == 16)
-                        || (*gen % 2 == 1 && *hnsw_m == 32)));
+                    && ((*gen % 2 == 0 && *hnsw_m == 16) || (*gen % 2 == 1 && *hnsw_m == 32)));
             assert!(
                 consistent,
                 "torn SearchState observation: gen={gen} dim={dim} hnsw_m={hnsw_m} \
@@ -10844,15 +10853,13 @@ fn open_recovery_discards_staging_when_sql_swap_uncommitted() {
         .unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('reembed_state', ?1)",
-            params![
-                serde_json::json!({
-                    "generation": 5,
-                    "phase": "Encoding",
-                    "old_embedder": "old",
-                    "new_embedder_name": "simulated-target",
-                })
-                .to_string()
-            ],
+            params![serde_json::json!({
+                "generation": 5,
+                "phase": "Encoding",
+                "old_embedder": "old",
+                "new_embedder_name": "simulated-target",
+            })
+            .to_string()],
         )
         .unwrap();
         // active_generation still '0' (the swap commit never ran).
@@ -10885,7 +10892,10 @@ fn open_recovery_discards_staging_when_sql_swap_uncommitted() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(staged, 0, "staging columns must be NULL after discard recovery");
+    assert_eq!(
+        staged, 0,
+        "staging columns must be NULL after discard recovery"
+    );
 
     // active_generation unchanged.
     let active: String = conn
@@ -10964,15 +10974,13 @@ fn open_recovery_durable_swap_resumes_at_new_generation() {
         .unwrap();
         conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('reembed_state', ?1)",
-            params![
-                serde_json::json!({
-                    "generation": 3,
-                    "phase": "Swapping",
-                    "old_embedder": "old",
-                    "new_embedder_name": "new",
-                })
-                .to_string()
-            ],
+            params![serde_json::json!({
+                "generation": 3,
+                "phase": "Swapping",
+                "old_embedder": "old",
+                "new_embedder_name": "new",
+            })
+            .to_string()],
         )
         .unwrap();
     }
@@ -11109,7 +11117,10 @@ fn open_with_uncommitted_staging_columns_stays_at_old_generation() {
             |r| r.get(0),
         )
         .unwrap();
-    assert!(active_present, "pre-reembed active embedding bytes preserved");
+    assert!(
+        active_present,
+        "pre-reembed active embedding bytes preserved"
+    );
 
     // Row's embedding_generation is the pre-reembed value (0).
     let row_gen: i64 = conn
@@ -11119,7 +11130,10 @@ fn open_with_uncommitted_staging_columns_stays_at_old_generation() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(row_gen, 0, "row's stamped generation unchanged by partial staging");
+    assert_eq!(
+        row_gen, 0,
+        "row's stamped generation unchanged by partial staging"
+    );
 }
 
 #[test]

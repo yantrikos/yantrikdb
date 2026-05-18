@@ -222,7 +222,9 @@ impl PyYantrikDB {
             // set_embedder returns Result post-#41 (mode-aware refactor).
             // On a freshly-constructed engine (no memories yet) this can
             // only fail on dim mismatch — surface that as a Python error.
-            inner.set_embedder(Box::new(candle_embedder)).map_err(map_err)?;
+            inner
+                .set_embedder(Box::new(candle_embedder))
+                .map_err(map_err)?;
         }
 
         #[cfg(not(feature = "candle"))]

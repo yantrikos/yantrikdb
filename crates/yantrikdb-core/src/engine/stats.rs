@@ -487,9 +487,7 @@ impl YantrikDB {
         })?;
 
         let rid = payload.get("rid").and_then(|v| v.as_str()).ok_or_else(|| {
-            crate::error::YantrikDbError::InvalidInput(
-                "Layer 5 record drain: missing rid".into(),
-            )
+            crate::error::YantrikDbError::InvalidInput("Layer 5 record drain: missing rid".into())
         })?;
         let memory_type = payload
             .get("type")
@@ -622,9 +620,7 @@ impl YantrikDB {
             .vec_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        state
-            .vec_index
-            .append(rid.to_string(), new_emb, seq)?;
+        state.vec_index.append(rid.to_string(), new_emb, seq)?;
 
         // Bump visible_seq for RYW. Layer 6 will refine the
         // generation-aware semantics; for now bump under the

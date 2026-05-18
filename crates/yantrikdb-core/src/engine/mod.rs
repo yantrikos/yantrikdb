@@ -10,6 +10,7 @@ mod cognition;
 mod coherence;
 mod conflict;
 mod counterfactual_engine;
+mod durable_embeddings;
 mod evaluator;
 mod experimenter;
 mod extractor;
@@ -35,12 +36,10 @@ mod planner;
 mod policy;
 mod procedural;
 mod query_dsl;
-mod durable_embeddings;
 mod recall;
 mod receptivity;
 mod record;
 pub mod reembed;
-pub mod write_router;
 mod replay_engine;
 mod schema_induction_engine;
 mod session;
@@ -57,6 +56,7 @@ mod tests;
 mod tick;
 mod warrant;
 mod world_model;
+pub mod write_router;
 
 use std::collections::HashMap;
 // parking_lot::Mutex and RwLock: non-poisoning (no PoisonError on panic),
@@ -82,9 +82,9 @@ use crate::schema::{
     MIGRATE_V14_TO_V15, MIGRATE_V15_TO_V16, MIGRATE_V16_TO_V17, MIGRATE_V17_TO_V18,
     MIGRATE_V18_TO_V19, MIGRATE_V19_TO_V20, MIGRATE_V1_TO_V2, MIGRATE_V20_TO_V21,
     MIGRATE_V21_TO_V22, MIGRATE_V22_TO_V23, MIGRATE_V23_TO_V24, MIGRATE_V24_TO_V25,
-    MIGRATE_V25_TO_V26, MIGRATE_V26_TO_V27, MIGRATE_V27_TO_V28, MIGRATE_V2_TO_V3, MIGRATE_V3_TO_V4, MIGRATE_V4_TO_V5,
-    MIGRATE_V5_TO_V6, MIGRATE_V6_TO_V7, MIGRATE_V7_TO_V8, MIGRATE_V8_TO_V9, MIGRATE_V9_TO_V10,
-    SCHEMA_SQL, SCHEMA_VERSION,
+    MIGRATE_V25_TO_V26, MIGRATE_V26_TO_V27, MIGRATE_V27_TO_V28, MIGRATE_V2_TO_V3, MIGRATE_V3_TO_V4,
+    MIGRATE_V4_TO_V5, MIGRATE_V5_TO_V6, MIGRATE_V6_TO_V7, MIGRATE_V7_TO_V8, MIGRATE_V8_TO_V9,
+    MIGRATE_V9_TO_V10, SCHEMA_SQL, SCHEMA_VERSION,
 };
 use crate::types::*;
 
@@ -626,10 +626,7 @@ impl YantrikDB {
                          embedding_new_model = NULL WHERE embedding_new IS NOT NULL",
                         [],
                     )?;
-                    conn.execute(
-                        "DELETE FROM meta WHERE key = 'reembed_state'",
-                        [],
-                    )?;
+                    conn.execute("DELETE FROM meta WHERE key = 'reembed_state'", [])?;
                     let evt_payload = serde_json::json!({
                         "recovery": "discarded_staging",
                         "reason": format!(
@@ -663,10 +660,7 @@ impl YantrikDB {
                          embedding_new_model = NULL WHERE embedding_new IS NOT NULL",
                         [],
                     )?;
-                    conn.execute(
-                        "DELETE FROM meta WHERE key = 'reembed_state'",
-                        [],
-                    )?;
+                    conn.execute("DELETE FROM meta WHERE key = 'reembed_state'", [])?;
                     let evt_payload = serde_json::json!({
                         "recovery": "completed_durable",
                         "reason": format!(
@@ -830,13 +824,11 @@ impl YantrikDB {
                 .and_then(|v| v.parse::<u64>().ok())
                 .map(std::time::Duration::from_secs)
                 .unwrap_or(crate::vector::delta_index::DEFAULT_MAX_DIRTY_AGE);
-            std::sync::Arc::new(
-                crate::vector::delta_index::DeltaIndex::from_cold_with_age(
-                    vec_index,
-                    delta_max,
-                    max_dirty_age,
-                ),
-            )
+            std::sync::Arc::new(crate::vector::delta_index::DeltaIndex::from_cold_with_age(
+                vec_index,
+                delta_max,
+                max_dirty_age,
+            ))
         };
 
         Ok(Self {
@@ -861,9 +853,7 @@ impl YantrikDB {
             // every record/record_text takes the synchronous path
             // unchanged. Adding the field is a no-op for non-reembed
             // code paths until record() is wired to check the gate.
-            write_router: std::sync::Arc::new(
-                crate::engine::write_router::WriteRouter::new(),
-            ),
+            write_router: std::sync::Arc::new(crate::engine::write_router::WriteRouter::new()),
             // Issue #41 layer 2: initial SearchState mirrors the
             // legacy embedder/embedding_dim fields. Provenance is
             // ExternalOrUnknown(embedding_dim) until set_embedder*
