@@ -9224,3 +9224,198 @@ fn schema_v26_migration_replay_is_idempotent() {
     )
     .unwrap();
 }
+
+// ============================================================================
+// v0.8.x — schema v27 reembed-operation foundation
+// (issue yantrikos/yantrikdb#41).
+//
+// v27 introduces:
+//   - `memories.embedding_new` BLOB + `memories.embedding_new_model` TEXT
+//     staging columns for the `db.reembed()` Encoding phase.
+//   - `oplog.embedding_model` TEXT to discriminate pre-reembed pending ops
+//     (where oplog.embedding is trustworthy) from post-reembed-queued ops
+//     (where the materializer must re-encode from text under the new
+//     embedder after the SearchState swap).
+//   - `reembed_events` audit-log table with `(generation, phase,
+//     timestamp, payload_json)` rows. Authoritative source for crash
+//     recovery on open().
+//
+// Tests cover three paths:
+//   1. Fresh install: all v27 surfaces exist (columns + table + index).
+//   2. Pre-v27 migration: upgrade cleanly from v26, additive only, no
+//      data touched on existing rows.
+//   3. Replay-resilience: rewinding meta to 26 on an already-v27 DB
+//      doesn't break the second open (per v0.7.3 idempotent runner).
+// ============================================================================
+
+#[test]
+fn schema_v27_fresh_install_has_reembed_surfaces() {
+    // Fresh DB takes the SCHEMA_SQL path. Locks the invariant that
+    // SCHEMA_SQL stays in sync with MIGRATE_V26_TO_V27. If someone adds
+    // a column to one but not the other, this test catches the drift
+    // before it ships (same shape as the v26 fresh-install test).
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let conn = db.conn();
+
+    let memories_cols = table_columns(&conn, "memories");
+    for required in ["embedding_new", "embedding_new_model"] {
+        assert!(
+            memories_cols.iter().any(|c| c == required),
+            "v27: fresh-install memories table missing column {required}, got: {memories_cols:?}"
+        );
+    }
+
+    let oplog_cols = table_columns(&conn, "oplog");
+    assert!(
+        oplog_cols.iter().any(|c| c == "embedding_model"),
+        "v27: fresh-install oplog table missing column embedding_model, got: {oplog_cols:?}"
+    );
+    assert!(
+        oplog_cols.iter().any(|c| c == "applied_generation"),
+        "v27: fresh-install oplog table missing column applied_generation \
+         (brainstorm-2 correction \u{2014} per-generation application tracking \
+         replaces boolean `applied` as truth), got: {oplog_cols:?}"
+    );
+
+    // reembed_events table exists with the right shape
+    let events_cols = table_columns(&conn, "reembed_events");
+    for required in ["generation", "phase", "timestamp", "payload_json"] {
+        assert!(
+            events_cols.iter().any(|c| c == required),
+            "v27: fresh-install reembed_events missing column {required}, got: {events_cols:?}"
+        );
+    }
+
+    for required_idx in [
+        "idx_reembed_events_generation",
+        "idx_oplog_applied_generation",
+    ] {
+        assert!(
+            index_exists(&conn, required_idx),
+            "v27: fresh-install missing index {required_idx}"
+        );
+    }
+}
+
+#[test]
+fn schema_v27_migration_from_v26_is_additive_only() {
+    // Plant a row under v27 schema, then manually rewind meta to 26 and
+    // re-open to trigger MIGRATE_V26_TO_V27. Verify:
+    //   - the row is untouched (additive migration, no data mutation)
+    //   - new columns appear as NULL
+    //   - new table exists + is writable
+    use tempfile::NamedTempFile;
+    let tmp = NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap();
+
+    let planted_rid = "01900000-0000-7000-8000-00000000c027";
+    {
+        let db = YantrikDB::new(path, 8).unwrap();
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO memories (rid, type, text, embedding, created_at, updated_at, last_access, source) \
+             VALUES (?1, 'episodic', 'planted under v27 schema', X'01020304', 0.0, 0.0, 0.0, 'user')",
+            params![planted_rid],
+        )
+        .unwrap();
+    }
+
+    // Rewind meta + drop v27 surfaces so the migration recreates them.
+    {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '26')",
+            [],
+        )
+        .unwrap();
+        conn.execute("DROP TABLE IF EXISTS reembed_events", []).unwrap();
+        conn.execute("DROP INDEX IF EXISTS idx_reembed_events_generation", [])
+            .unwrap();
+        // Can't easily drop ALTER-added columns in SQLite without table
+        // rebuild; the idempotent runner swallows the duplicate-column
+        // errors on the ALTER re-run instead.
+    }
+
+    let db = YantrikDB::new(path, 8)
+        .expect("v27 migration must run cleanly against a rewound-meta v26 DB");
+    let conn = db.conn();
+
+    // Row preserved untouched (the migration must not touch existing data)
+    let (preserved_text, embedding_new): (String, Option<Vec<u8>>) = conn
+        .query_row(
+            "SELECT text, embedding_new FROM memories WHERE rid = ?1",
+            params![planted_rid],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<Vec<u8>>>(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        preserved_text, "planted under v27 schema",
+        "v27 migration must NOT mutate existing memory data"
+    );
+    assert!(
+        embedding_new.is_none(),
+        "v27 migration must leave embedding_new as NULL on pre-existing rows"
+    );
+
+    assert!(
+        index_exists(&conn, "idx_reembed_events_generation"),
+        "v27 migration must recreate idx_reembed_events_generation"
+    );
+
+    // Verify the reembed_events table is writable + readable end-to-end
+    conn.execute(
+        "INSERT INTO reembed_events (generation, phase, timestamp, payload_json) \
+         VALUES (?1, ?2, ?3, ?4)",
+        params![1_i64, "Probing", 0.0_f64, "{}"],
+    )
+    .unwrap();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM reembed_events WHERE generation = 1",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "reembed_events table must be writable post-migration");
+}
+
+#[test]
+fn schema_v27_migration_replay_is_idempotent() {
+    // Same shape as the v26 replay test. Rewind meta to 26 on an
+    // already-v27 DB and verify the second open heals cleanly. The
+    // idempotent runner swallows the duplicate-column errors that the
+    // ALTER TABLE statements would raise on the second pass.
+    use tempfile::NamedTempFile;
+    let tmp = NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap();
+
+    {
+        let _db = YantrikDB::new(path, 8).unwrap();
+    }
+    {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '26')",
+            [],
+        )
+        .unwrap();
+    }
+    let db = YantrikDB::new(path, 8)
+        .expect("v27 migration runner must heal rewound-meta deployments on a v27-schema DB");
+
+    db.record(
+        "post-v27-heal smoke",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+}

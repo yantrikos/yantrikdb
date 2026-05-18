@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 26;
+pub const SCHEMA_VERSION: i32 = 27;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -56,7 +56,20 @@ CREATE TABLE IF NOT EXISTS memories (
     prior_rid TEXT,                            -- supersedes/updates/merges target rid; NULL for append_as_new
     resolution_kind TEXT,                      -- 'append' | 'update' | 'merge' | 'supersede' | 'dismiss'
     dismissal_reason TEXT,                     -- non-empty when resolution_kind='dismiss'; audit trail
-    confidence_at_write REAL                   -- substrate's conflict-confidence at write time, [0.0, 1.0]
+    confidence_at_write REAL,                  -- substrate's conflict-confidence at write time, [0.0, 1.0]
+
+    -- v27 (issue #41): staging columns for db.reembed() operation.
+    -- During Encoding phase, new embeddings are written here under the new
+    -- embedder. During Swap phase, an atomic transaction moves these into
+    -- the active `embedding` + `embedding_model` columns. Verifying phase
+    -- nulls them out. On non-reembed rows, both are NULL and cost is zero.
+    -- Pre-existing recall paths NEVER read these columns; only the reembed
+    -- machinery does. See the brainstorm comment chain on #41 for why a
+    -- two-column staging approach is required (recall re-reads active
+    -- `embedding` post-HNSW; in-place mutation would dim-mismatch concurrent
+    -- recalls).
+    embedding_new BLOB,                        -- pending new embedding bytes; NULL except during active reembed
+    embedding_new_model TEXT                   -- name of embedder that produced embedding_new; NULL when no pending reembed
 );
 -- v26 partial indexes for the resolution/supersession query patterns the
 -- WriteResolution API will exercise. Partial so they cost nothing on the
@@ -620,14 +633,52 @@ CREATE TABLE IF NOT EXISTS oplog (
     embedding_hash BLOB,                -- BLAKE3 hash of embedding (if applicable)
     origin_actor TEXT NOT NULL DEFAULT 'local', -- which device originally created this op
     applied INTEGER NOT NULL DEFAULT 1, -- 1 = materialized locally, 0 = pending
-    embedding BLOB                      -- v24: full embedding bytes for ingest replay (NULL for non-record ops)
+    embedding BLOB,                     -- v24: full embedding bytes for ingest replay (NULL for non-record ops)
+
+    -- v27 (issue #41): name of the embedder that produced the embedding
+    -- bytes above. Used by the materializer drain post-reembed-swap to
+    -- detect ops queued under the old embedder and re-encode them from
+    -- text. Pre-v27 ops have NULL here; materializer treats NULL as the
+    -- trust-embedding-as-is fallback for back-compat. Reembed Queue-mode
+    -- writes set this column on log_op_pending.
+    embedding_model TEXT,
+
+    -- v27 (issue #41, brainstorm-2 correction): per-generation application
+    -- tracking. Boolean `applied` above is ambiguous during reembed
+    -- (applied to OLD generation index? new? logical DB only?), so the
+    -- post-swap materializer cannot trust it. This column carries the
+    -- index generation the op was applied to. NULL means
+    -- never-applied-to-any-generation; the v27 materializer treats
+    -- NULL OR (applied_generation < current_generation) as needs-replay.
+    -- Boolean `applied` is kept as a derived hint for back-compat but is
+    -- no longer the truth.
+    applied_generation INTEGER
 );
+-- v27 index for the post-swap materializer query. Without this index,
+-- post-swap drain is a full oplog scan on every materializer wakeup.
+CREATE INDEX IF NOT EXISTS idx_oplog_applied_generation
+    ON oplog(applied_generation, op_id);
 
 -- Schema version tracking
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- v27 (issue #41): durable audit log of db.reembed() phase transitions.
+-- Authoritative source for crash recovery and observability. The
+-- in-memory on_phase_complete callback in ReembedOptions is best-effort
+-- only; this table is what the engine reads on open() to decide
+-- whether/how to resume an interrupted reembed. One row per (generation,
+-- phase) pair; phase strings are 'Probing' | 'Encoding' | 'Rebuilding'
+-- | 'Swapping' | 'Verifying' | 'Aborted' | 'Completed'.
+CREATE TABLE IF NOT EXISTS reembed_events (
+    generation   INTEGER NOT NULL,
+    phase        TEXT NOT NULL,
+    timestamp    REAL NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_reembed_events_generation ON reembed_events(generation);
 
 -- Peer tracking for delta sync
 CREATE TABLE IF NOT EXISTS sync_peers (
@@ -1940,4 +1991,84 @@ UPDATE memories SET source = 'user'
     WHERE source NOT IN ('user', 'inference', 'document', 'system');
 CREATE INDEX IF NOT EXISTS idx_memories_prior_rid ON memories(prior_rid) WHERE prior_rid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_memories_resolution_kind ON memories(resolution_kind) WHERE resolution_kind IS NOT NULL;
+";
+
+/// v26 → v27: foundation for `db.reembed()` operation (issue #41).
+///
+/// Three additive columns + one new audit-log table, all purely additive
+/// and replay-safe per the v0.7.3 idempotent runner contract.
+///
+/// ## On `memories`
+///
+/// - `embedding_new BLOB NULL` — staging column for new-embedder bytes
+///   written during the Encoding phase of `db.reembed()`. The active
+///   `embedding` column stays untouched throughout Encoding/Rebuilding,
+///   so concurrent recall traffic continues to score consistently against
+///   old-dim vectors. At the Swap phase, an atomic SQL transaction copies
+///   `embedding_new` → `embedding` (and clears the staging column) inside
+///   the same critical section as the `ArcSwap<SearchState>::store`. The
+///   Verifying phase ensures any remaining non-NULL staging values are
+///   cleaned up (defensive against partial failures).
+///
+///   Why two columns and not in-place mutation: the recall path
+///   (`fetch_embeddings_by_rids` in engine/recall.rs and ~13 sibling
+///   call-sites) re-reads `memories.embedding` AFTER HNSW returns
+///   candidate rids, to rescore via `serde_helpers::deserialize_f32`.
+///   In-place `UPDATE memories.embedding = <new-dim bytes>` during
+///   Encoding would cause concurrent recalls to deserialize new-dim
+///   bytes and compare them against old-dim query vectors. Garbage
+///   scores or panic on dim_mismatch. Verified by grep prior to
+///   shipping this migration; see the brainstorm comment chain on #41.
+///
+/// - `embedding_new_model TEXT NULL` — name of the embedder that
+///   produced `embedding_new`. Used by the Swap phase to populate
+///   `embedding_model` correctly, and by the reembed crash-recovery
+///   path on open() to verify the staged work matches the persisted
+///   `meta.reembed_state` target embedder.
+///
+/// ## On `oplog`
+///
+/// - `embedding_model TEXT NULL` — name of the embedder active when
+///   this oplog row's `embedding` BLOB (v24-added column) was produced.
+///   Necessary for Queue-mode reembed: when concurrent record() calls
+///   during reembed go through `log_op_pending`, they record the
+///   embedder name in this column. After the SearchState swap, the
+///   materializer drain compares each pending op's `embedding_model`
+///   against the active SearchState's embedder name. If they differ,
+///   the materializer re-encodes the op's text under the new embedder
+///   (ignoring the now-stale `oplog.embedding` bytes). If they match,
+///   the existing `oplog.embedding` is applied directly. Pre-v27 ops
+///   have NULL `embedding_model`; the materializer treats NULL as
+///   "trust embedding as-is" for backwards compatibility.
+///
+/// ## New table: `reembed_events`
+///
+/// Durable audit log of every phase transition during a `db.reembed()`
+/// call. Authoritative source of truth for crash recovery — on open(),
+/// the engine reads the latest non-Completed/non-Aborted event for the
+/// current generation in `meta.reembed_state` and resumes from there.
+///
+/// The in-memory `on_phase_complete` callback in `ReembedOptions` is
+/// best-effort notification only. If the process dies between callback
+/// invocation and the next phase transition, the callback's side
+/// effects might be lost — but `reembed_events` has the durable record.
+///
+/// One row per `(generation, phase)` pair. Phase strings match the
+/// `ReembedPhase` enum string repr: 'Probing' | 'Encoding' |
+/// 'Rebuilding' | 'Swapping' | 'Verifying' | 'Aborted' | 'Completed'.
+/// `payload_json` carries phase-specific detail (memories_total,
+/// memories_encoded, last_error, etc.).
+pub const MIGRATE_V26_TO_V27: &str = "
+ALTER TABLE memories ADD COLUMN embedding_new BLOB;
+ALTER TABLE memories ADD COLUMN embedding_new_model TEXT;
+ALTER TABLE oplog ADD COLUMN embedding_model TEXT;
+ALTER TABLE oplog ADD COLUMN applied_generation INTEGER;
+CREATE TABLE IF NOT EXISTS reembed_events (
+    generation   INTEGER NOT NULL,
+    phase        TEXT NOT NULL,
+    timestamp    REAL NOT NULL,
+    payload_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_reembed_events_generation ON reembed_events(generation);
+CREATE INDEX IF NOT EXISTS idx_oplog_applied_generation ON oplog(applied_generation, op_id);
 ";
