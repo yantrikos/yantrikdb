@@ -2338,4 +2338,342 @@ mod tests {
         };
         assert_eq!(s_unknown.dim(), 128);
     }
+
+    // ─────────────────────────────────────────────────────────────
+    // Layer 8 — functional matrix. Integration tests covering the
+    // happy paths + corner cases that aren't structurally proven
+    // by checkpoint-9–19 unit tests.
+    // ─────────────────────────────────────────────────────────────
+
+    #[test]
+    fn reembed_post_swap_recall_returns_rows_under_new_embedder() {
+        // **Layer 8 end-to-end correctness.** After db.reembed(),
+        // a recall against the new embedder must return the
+        // memory rows that existed before the swap. Locks the
+        // "user-facing query still works" contract — the most
+        // important property the feature delivers.
+        use std::sync::Arc;
+        let mut db = crate::YantrikDB::new(":memory:", 8).unwrap();
+
+        // E0: sentinel 0.42 (every vec has [0.42, 0, ...]).
+        db.set_embedder(Box::new(PhaseTestEmbedderSentinel {
+            dim: 8,
+            fp: "sha256:E0".to_string(),
+            name: "E0-name".to_string(),
+            sentinel: 0.42,
+        }))
+        .unwrap();
+
+        // Plant 5 rows via record_text so the engine computes
+        // embeddings under E0.
+        let rids: Vec<String> = (0..5)
+            .map(|i| {
+                db.record_text(
+                    &format!("layer-8 row {i}"),
+                    "episodic",
+                    0.5,
+                    0.0,
+                    604800.0,
+                    &serde_json::json!({"i": i}),
+                    "default",
+                    0.8,
+                    "general",
+                    "user",
+                    None,
+                )
+                .unwrap()
+            })
+            .collect();
+
+        // Run a full reembed under E1.
+        let e1: Arc<dyn crate::types::Embedder + Send + Sync> =
+            Arc::new(PhaseTestEmbedderSentinel {
+                dim: 8,
+                fp: "sha256:E1".to_string(),
+                name: "E1-name".to_string(),
+                sentinel: 0.99,
+            });
+        let report = db
+            .reembed_with_embedder("E1-name", Some(e1), ReembedOptions::default())
+            .unwrap();
+        assert_eq!(report.generation, 1);
+        assert_eq!(report.encoded_count, 5);
+
+        // Recall under E1's vector space.
+        let query = vec![0.99_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let results = db
+            .recall(&query, 5, None, None, false, true, None, true, None, None, None)
+            .unwrap();
+        assert_eq!(
+            results.len(),
+            5,
+            "recall must return all 5 planted rows after reembed; got {}",
+            results.len()
+        );
+        for r in &results {
+            assert!(
+                rids.contains(&r.rid),
+                "recall returned unexpected rid {:?}",
+                r.rid
+            );
+        }
+    }
+
+    #[test]
+    fn reembed_on_empty_engine_returns_gracefully() {
+        // **Layer 8 corner case.** Fresh engine with no rows: a
+        // full reembed should run through every phase and return
+        // a clean report with encoded_count=0.
+        use std::sync::Arc;
+        let mut db = crate::YantrikDB::new(":memory:", 8).unwrap();
+        db.set_embedder(Box::new(PhaseTestEmbedderSentinel {
+            dim: 8,
+            fp: "sha256:E0".to_string(),
+            name: "E0".to_string(),
+            sentinel: 0.42,
+        }))
+        .unwrap();
+        let e1: Arc<dyn crate::types::Embedder + Send + Sync> =
+            Arc::new(PhaseTestEmbedderSentinel {
+                dim: 8,
+                fp: "sha256:E1".to_string(),
+                name: "E1".to_string(),
+                sentinel: 0.99,
+            });
+        let report = db
+            .reembed_with_embedder("E1", Some(e1), ReembedOptions::default())
+            .unwrap();
+        assert_eq!(report.encoded_count, 0);
+        assert_eq!(report.generation, 1);
+        // All phase audit events present even for the empty case.
+        let conn = db.conn();
+        for phase in ["Probing", "Encoding", "Rebuilding", "Swapping", "Verifying", "Completed"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM reembed_events WHERE phase = ?1 AND generation = 1",
+                    params![phase],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(
+                count >= 1,
+                "expected {phase} event for empty-engine reembed (got {count})"
+            );
+        }
+    }
+
+    #[test]
+    fn reembed_sequential_runs_advance_generation_monotonically() {
+        // **Layer 8 corner case.** Two back-to-back reembeds.
+        // Generation must advance 0 → 1 → 2; the second reembed
+        // sees rows stamped at gen 1 and re-encodes them again.
+        use std::sync::Arc;
+        let mut db = crate::YantrikDB::new(":memory:", 8).unwrap();
+        db.set_embedder(Box::new(PhaseTestEmbedderSentinel {
+            dim: 8,
+            fp: "sha256:E0".to_string(),
+            name: "E0".to_string(),
+            sentinel: 0.10,
+        }))
+        .unwrap();
+        let rid = db
+            .record_text(
+                "seq",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+
+        // First reembed: gen 0 → 1.
+        let e1: Arc<dyn crate::types::Embedder + Send + Sync> =
+            Arc::new(PhaseTestEmbedderSentinel {
+                dim: 8,
+                fp: "sha256:E1".to_string(),
+                name: "E1".to_string(),
+                sentinel: 0.50,
+            });
+        let r1 = db
+            .reembed_with_embedder("E1", Some(e1), ReembedOptions::default())
+            .unwrap();
+        assert_eq!(r1.generation, 1);
+
+        // Second reembed: gen 1 → 2.
+        let e2: Arc<dyn crate::types::Embedder + Send + Sync> =
+            Arc::new(PhaseTestEmbedderSentinel {
+                dim: 8,
+                fp: "sha256:E2".to_string(),
+                name: "E2".to_string(),
+                sentinel: 0.90,
+            });
+        let r2 = db
+            .reembed_with_embedder("E2", Some(e2), ReembedOptions::default())
+            .unwrap();
+        assert_eq!(r2.generation, 2);
+        assert_eq!(r2.encoded_count, 1, "second reembed re-encodes the planted row");
+
+        // Row's stamp is the latest generation.
+        let row_gen: i64 = db
+            .conn()
+            .query_row(
+                "SELECT embedding_generation FROM memories WHERE rid = ?1",
+                [&rid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(row_gen, 2);
+
+        // Engine SearchState is at gen 2.
+        assert_eq!(db.search_state.load().generation, 2);
+    }
+
+    #[test]
+    fn reembed_audit_event_sequence_is_complete_and_ordered() {
+        // **Layer 8 audit-trail lock.** A successful reembed must
+        // emit the full state-machine event sequence in order:
+        // Probing → Encoding → Rebuilding → Swapping → Verifying
+        // → Completed. Per phase there are start + completion
+        // events; Probing emits one (start only). The audit log
+        // is what operators read post-incident to understand
+        // what happened.
+        use std::sync::Arc;
+        let mut db = crate::YantrikDB::new(":memory:", 8).unwrap();
+        db.set_embedder(Box::new(PhaseTestEmbedderSentinel {
+            dim: 8,
+            fp: "sha256:E0".to_string(),
+            name: "E0".to_string(),
+            sentinel: 0.10,
+        }))
+        .unwrap();
+        let _ = db.record_text(
+            "audit",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        );
+
+        let e1: Arc<dyn crate::types::Embedder + Send + Sync> =
+            Arc::new(PhaseTestEmbedderSentinel {
+                dim: 8,
+                fp: "sha256:E1".to_string(),
+                name: "E1".to_string(),
+                sentinel: 0.50,
+            });
+        let _ = db
+            .reembed_with_embedder("E1", Some(e1), ReembedOptions::default())
+            .unwrap();
+
+        // Read all events for gen 1 in timestamp order.
+        let phases: Vec<String> = {
+            let conn = db.conn();
+            let mut stmt = conn
+                .prepare(
+                    "SELECT phase FROM reembed_events WHERE generation = 1 ORDER BY timestamp",
+                )
+                .unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap()
+        };
+
+        // First event is Probing; subsequent events include all phases.
+        assert_eq!(phases.first().map(String::as_str), Some("Probing"));
+        for required in ["Encoding", "Rebuilding", "Swapping", "Verifying", "Completed"] {
+            assert!(
+                phases.iter().any(|p| p == required),
+                "audit log missing {required} event; phases recorded: {phases:?}"
+            );
+        }
+        // Completed is the last meaningful event (followups would
+        // come from a NEXT reembed at gen 2).
+        let last_meaningful = phases.last().map(String::as_str);
+        assert_eq!(
+            last_meaningful,
+            Some("Completed"),
+            "Completed must be the terminal event for the reembed run; got {last_meaningful:?}"
+        );
+    }
+
+    #[test]
+    fn reembed_re_encodes_rows_from_multiple_namespaces() {
+        // **Layer 8 multi-namespace coverage.** A reembed without
+        // a `namespace` option re-encodes EVERY active row
+        // regardless of namespace. Locks the cross-namespace
+        // uniformity invariant — without this, a reembed could
+        // silently skip namespaces the agent forgot to pass
+        // (a bug class the user hits when namespaces are
+        // dynamically created).
+        use std::sync::Arc;
+        let mut db = crate::YantrikDB::new(":memory:", 8).unwrap();
+        db.set_embedder(Box::new(PhaseTestEmbedderSentinel {
+            dim: 8,
+            fp: "sha256:E0".to_string(),
+            name: "E0".to_string(),
+            sentinel: 0.10,
+        }))
+        .unwrap();
+
+        for ns in ["alpha", "beta", "gamma"] {
+            for i in 0..2 {
+                db.record_text(
+                    &format!("{ns} row {i}"),
+                    "episodic",
+                    0.5,
+                    0.0,
+                    604800.0,
+                    &serde_json::json!({}),
+                    ns,
+                    0.8,
+                    "general",
+                    "user",
+                    None,
+                )
+                .unwrap();
+            }
+        }
+
+        let e1: Arc<dyn crate::types::Embedder + Send + Sync> =
+            Arc::new(PhaseTestEmbedderSentinel {
+                dim: 8,
+                fp: "sha256:E1".to_string(),
+                name: "E1".to_string(),
+                sentinel: 0.90,
+            });
+        let report = db
+            .reembed_with_embedder("E1", Some(e1), ReembedOptions::default())
+            .unwrap();
+        assert_eq!(
+            report.encoded_count, 6,
+            "6 rows across 3 namespaces must all be re-encoded"
+        );
+
+        // Every row in every namespace has embedding_generation = 1.
+        let conn = db.conn();
+        for ns in ["alpha", "beta", "gamma"] {
+            let count: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM memories WHERE namespace = ?1 \
+                     AND embedding_generation = 1 AND consolidation_status = 'active'",
+                    params![ns],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(count, 2, "namespace {ns} must have 2 rows at gen 1, got {count}");
+        }
+    }
 }
