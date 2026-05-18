@@ -10697,3 +10697,381 @@ fn set_embedder_routes_through_try_publish_search_state() {
     );
     assert!(db.has_embedder(), "set_embedder must have published");
 }
+
+// ─────────────────────────────────────────────────────────────────
+// Issue #41 brainstorm-4 §10 — remaining regression tests.
+// Items #2, #3, #4, #7, #8 are locked in checkpoints 11-14. The
+// 5 tests below close items #1, #5, #6, plus a meta-test for the
+// boundary audit logic and a Queue-mode round-trip.
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn search_state_publish_is_atomic_under_concurrent_reads() {
+    // **Brainstorm-4 §10.1 — no read-side dim split-brain.** Spawn
+    // many reader threads that capture `search_state.load_full()`
+    // and inspect *all* fields of the snapshot. Concurrently, the
+    // main thread publishes N alternating SearchStates. Each
+    // reader's snapshot must be consistent — every field comes
+    // from the same generation. Without SearchState as the single
+    // atomic publication unit (brainstorm-4 §1), readers could
+    // observe new provenance + old embedder + old vec_index. The
+    // ArcSwap guarantees the atomic flip; this test locks the
+    // invariant.
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    use std::thread;
+
+    let db = Arc::new(YantrikDB::new(":memory:", 64).unwrap());
+    let initial = db.search_state.load_full();
+    let stop = Arc::new(AtomicBool::new(false));
+
+    // Reader threads — each captures one snapshot per iteration
+    // and asserts the (generation, provenance.dim, hnsw_m) tuple
+    // is one of the published combinations, never a mix.
+    let mut handles = Vec::new();
+    for _ in 0..4 {
+        let db_c = Arc::clone(&db);
+        let stop_c = Arc::clone(&stop);
+        handles.push(thread::spawn(move || {
+            let mut observations: Vec<(u64, usize, u32)> = Vec::new();
+            while !stop_c.load(Ordering::Relaxed) {
+                let s = db_c.search_state.load_full();
+                observations.push((s.generation, s.dim(), s.hnsw_m));
+            }
+            observations
+        }));
+    }
+
+    // Publish 50 alternating SearchStates, each consistent within
+    // itself. Use try_publish_search_state so generation is
+    // monotonic-advanced (each call bumps by 1).
+    for n in 1..=50u64 {
+        let prev = db.search_state.load_full();
+        let next = crate::engine::reembed::SearchState {
+            index_embedding: prev.index_embedding.clone(),
+            embedder: prev.embedder.clone(),
+            runtime_embedder_name: prev.runtime_embedder_name.clone(),
+            runtime_embedder_digest: prev.runtime_embedder_digest.clone(),
+            generation: prev.generation + 1,
+            covers_through_seq: prev.covers_through_seq + n,
+            // hnsw_m alternates so we can detect a torn read
+            // (would manifest as gen even / hnsw_m odd or vice versa).
+            hnsw_m: if n % 2 == 0 { 16 } else { 32 },
+            hnsw_ef_construction: prev.hnsw_ef_construction,
+            hnsw_ef_search: prev.hnsw_ef_search,
+            vec_index: std::sync::Arc::clone(&prev.vec_index),
+        };
+        db.try_publish_search_state(next).unwrap();
+    }
+
+    stop.store(true, Ordering::Relaxed);
+
+    let baseline = (initial.generation, initial.dim(), initial.hnsw_m);
+    for handle in handles {
+        let observations = handle.join().unwrap();
+        for (gen, dim, hnsw_m) in &observations {
+            // Two valid forms per generation: even-gen → hnsw_m=16,
+            // odd-gen → hnsw_m=32. (Or the initial baseline.)
+            let consistent = (*gen, *dim, *hnsw_m) == baseline
+                || (*gen >= 1
+                    && *dim == initial.dim()
+                    && ((*gen % 2 == 0 && *hnsw_m == 16)
+                        || (*gen % 2 == 1 && *hnsw_m == 32)));
+            assert!(
+                consistent,
+                "torn SearchState observation: gen={gen} dim={dim} hnsw_m={hnsw_m} \
+                 (expected even-gen→16 or odd-gen→32, or baseline)"
+            );
+        }
+    }
+}
+
+#[test]
+fn open_with_uncommitted_staging_columns_stays_at_old_generation() {
+    // **Brainstorm-4 §10.5 — crash before SQL promotion commit.**
+    // Simulate a Phase-2 Encoding run that wrote to
+    // memories.embedding_new BUT crashed before the swap
+    // SAVEPOINT committed (meta.active_generation still records
+    // the old generation). open() must read the OLD generation
+    // and ignore the staged columns — promoting would mix old and
+    // new vector spaces.
+    //
+    // The staged rows themselves are not corrupted because
+    // embedding_new is in its own column; the active `embedding`
+    // column still carries old-generation bytes. A subsequent
+    // reembed call will overwrite embedding_new and run to
+    // completion.
+    use tempfile::NamedTempFile;
+    let tmp = NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap();
+
+    // Establish a baseline row + active_generation=0.
+    let planted_rid = {
+        let db = YantrikDB::new(path, 8).unwrap();
+        db.record(
+            "pre-reembed row",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(0.5, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap()
+    };
+
+    // Simulate a partial Phase-2 Encoding: write to embedding_new
+    // and embedding_new_model on the planted row, but do NOT
+    // bump meta.active_generation (the commit never happened).
+    {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute(
+            "UPDATE memories SET embedding_new = X'AABBCCDD', \
+             embedding_new_model = 'simulated-new-embedder' WHERE rid = ?1",
+            params![planted_rid],
+        )
+        .unwrap();
+    }
+
+    // Re-open. SearchState.generation must STILL be 0 (no
+    // promotion happened). The staged columns are present but
+    // not active.
+    let db = YantrikDB::new(path, 8).unwrap();
+    assert_eq!(
+        db.search_state.load().generation,
+        0,
+        "open() must not promote partial staging into the active generation"
+    );
+
+    let conn = db.conn();
+    let staged_present: bool = conn
+        .query_row(
+            "SELECT embedding_new IS NOT NULL FROM memories WHERE rid = ?1",
+            [&planted_rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        staged_present,
+        "staged column survives the open (Phase-2 resume logic decides what to do with it)"
+    );
+
+    // The active embedding column is unchanged — readers see the
+    // pre-reembed bytes (gen 0).
+    let active_present: bool = conn
+        .query_row(
+            "SELECT embedding IS NOT NULL FROM memories WHERE rid = ?1",
+            [&planted_rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(active_present, "pre-reembed active embedding bytes preserved");
+
+    // Row's embedding_generation is the pre-reembed value (0).
+    let row_gen: i64 = conn
+        .query_row(
+            "SELECT embedding_generation FROM memories WHERE rid = ?1",
+            [&planted_rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(row_gen, 0, "row's stamped generation unchanged by partial staging");
+}
+
+#[test]
+fn covers_through_seq_is_durably_carried_on_published_search_state() {
+    // **Brainstorm-4 §10.6 — covers_through_seq invariant.** Phase 2's
+    // cutover captures `vec_seq.load(Acquire)` at the barrier and
+    // stamps it into `SearchState.covers_through_seq` for the new
+    // generation. The post-swap materializer uses this to decide
+    // which oplog ops still need replay (those with seq >
+    // covers_through_seq). Locks the struct-level invariant that
+    // try_publish_search_state preserves the value verbatim.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let initial = db.search_state.load_full();
+    assert_eq!(initial.covers_through_seq, 0, "fresh engine: covers 0");
+
+    // Simulate a Phase-2 cutover that captured vec_seq high-water
+    // mark = 12345 and published a new generation with that
+    // coverage.
+    let next = crate::engine::reembed::SearchState {
+        index_embedding: initial.index_embedding.clone(),
+        embedder: initial.embedder.clone(),
+        runtime_embedder_name: initial.runtime_embedder_name.clone(),
+        runtime_embedder_digest: initial.runtime_embedder_digest.clone(),
+        generation: initial.generation + 1,
+        covers_through_seq: 12345,
+        hnsw_m: initial.hnsw_m,
+        hnsw_ef_construction: initial.hnsw_ef_construction,
+        hnsw_ef_search: initial.hnsw_ef_search,
+        vec_index: std::sync::Arc::clone(&initial.vec_index),
+    };
+    db.try_publish_search_state(next).unwrap();
+    assert_eq!(
+        db.search_state.load().covers_through_seq,
+        12345,
+        "published covers_through_seq must be readable from the active SearchState"
+    );
+
+    // covers_through_seq is independent of generation — verify by
+    // publishing again with a DIFFERENT covers_through_seq at the
+    // SAME generation increment shape (different runtime metadata
+    // but same gen advance pattern).
+    let bumped = crate::engine::reembed::SearchState {
+        index_embedding: initial.index_embedding.clone(),
+        embedder: initial.embedder.clone(),
+        runtime_embedder_name: initial.runtime_embedder_name.clone(),
+        runtime_embedder_digest: initial.runtime_embedder_digest.clone(),
+        generation: initial.generation + 2,
+        covers_through_seq: 98765,
+        hnsw_m: initial.hnsw_m,
+        hnsw_ef_construction: initial.hnsw_ef_construction,
+        hnsw_ef_search: initial.hnsw_ef_search,
+        vec_index: std::sync::Arc::clone(&initial.vec_index),
+    };
+    db.try_publish_search_state(bumped).unwrap();
+    assert_eq!(
+        db.search_state.load().covers_through_seq,
+        98765,
+        "covers_through_seq advances per swap"
+    );
+}
+
+#[test]
+fn record_text_round_trip_through_queue_path_under_reembed() {
+    // **Brainstorm-2 invariant 8 + brainstorm-4 §2 sibling test.**
+    // Full round-trip of the queued write path: record_text with
+    // the WriteRouter in Queueing state stores TEXT in oplog
+    // (applied=0) with embedding_model set to the active runtime
+    // embedder. The pre-computed embedding is intentionally
+    // discarded — when Phase-2 / Layer-5 materializer drains the
+    // op, it re-encodes the text under the NEW embedder.
+    //
+    // This test locks the integration shape end-to-end:
+    //   - record_text → embed → router check → queue path
+    //   - oplog row carries applied=0, applied_generation=NULL,
+    //     embedding_model=<current name>, payload text intact
+    //   - memories table is NOT written (post-swap materializer
+    //     is responsible for that under the new generation)
+    use mode_test_embedders::FakeEmbedder;
+
+    let mut db = YantrikDB::new(":memory:", 64).unwrap();
+    db.set_embedder(Box::new(FakeEmbedder {
+        dim: 64,
+        fp: Some("sha256:queued-test".to_string()),
+        name: Some("queued-test-embedder".to_string()),
+        sentinel: 0.7,
+    }))
+    .unwrap();
+
+    // Reembed flips router to Queueing during the cutover preamble.
+    db.write_router.switch_to_queueing();
+
+    let rid = db
+        .record_text(
+            "queued-round-trip-text",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({"k": "v"}),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    let conn = db.conn();
+    // memories table NOT written.
+    let mem_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE rid = ?1",
+            [&rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(mem_count, 0, "queued write does not touch memories table");
+
+    // Oplog has the queued record op.
+    let (op_type, applied, applied_generation, embedding_model, payload): (
+        String,
+        i64,
+        Option<i64>,
+        Option<String>,
+        String,
+    ) = conn
+        .query_row(
+            "SELECT op_type, applied, applied_generation, embedding_model, payload \
+             FROM oplog WHERE target_rid = ?1 AND op_type = 'record'",
+            [&rid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .unwrap();
+    assert_eq!(op_type, "record");
+    assert_eq!(applied, 0, "queued op is applied=0");
+    assert_eq!(
+        applied_generation, None,
+        "queued op has applied_generation=NULL (post-swap materializer fills under new gen)"
+    );
+    assert_eq!(
+        embedding_model.as_deref(),
+        Some("queued-test-embedder"),
+        "queued op carries the active runtime embedder name"
+    );
+    let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(
+        v["text"].as_str(),
+        Some("queued-round-trip-text"),
+        "payload preserves the original text for re-encode"
+    );
+}
+
+#[test]
+fn boundary_audit_pattern_detects_synthetic_violation() {
+    // **Meta-test for the brainstorm-4 §5 boundary audit logic.**
+    // The audit in `engine::durable_embeddings::tests::
+    // recall_rs_has_no_raw_sql_embedding_reads` greps recall.rs at
+    // test-build time. If the pattern logic is broken, the audit
+    // could silently pass even on a violation. This test
+    // exercises the SAME pattern logic against a synthetic
+    // string that DOES contain a forbidden pattern, asserting
+    // the detector catches it.
+    let synthetic_violation =
+        "    let sql = \"SELECT rid, embedding FROM memories WHERE rid = ?1\";";
+    let lower = synthetic_violation.to_ascii_lowercase();
+    let patterns = [
+        "select embedding ",
+        "select embedding,",
+        "select embedding\"",
+        "select embedding\\",
+        ", embedding ",
+        ", embedding,",
+        ", embedding\"",
+        ", embedding\\",
+        ", embedding\n",
+    ];
+    let any_match = patterns.iter().any(|p| lower.contains(p));
+    assert!(
+        any_match,
+        "boundary audit pattern must catch the synthetic raw-SQL-embedding pattern; \
+         if this asserts, the audit in durable_embeddings.rs is letting violations slip"
+    );
+
+    // And the inverse: an allowlist-safe pattern (suffixed name)
+    // does NOT match.
+    let allowlist_safe = "    let sql = \"SELECT rid, embedding_hash FROM memories\";";
+    let lower_safe = allowlist_safe.to_ascii_lowercase();
+    let safe_match = patterns.iter().any(|p| lower_safe.contains(p));
+    assert!(
+        !safe_match,
+        "audit must NOT flag the allowlist-safe `embedding_hash` pattern; \
+         the audit over-rejects which would prevent legitimate refactors"
+    );
+}
