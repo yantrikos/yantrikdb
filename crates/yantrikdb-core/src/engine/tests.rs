@@ -10427,6 +10427,250 @@ fn try_publish_search_state_accepts_strictly_advancing_generation() {
     );
 }
 
+// ─────────────────────────────────────────────────────────────────
+// Issue #41 brainstorm-4 §6 — v28 durable-linearization regression
+// tests. Locks (a) fresh install + migration both produce the v28
+// surfaces, (b) record/record_batch/record_with_rid stamp the new
+// column with state.generation, (c) open() reads the durable
+// meta.active_generation back into SearchState.
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn schema_v28_fresh_install_has_embedding_generation_and_active_generation() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let conn = db.conn();
+
+    let cols = table_columns(&conn, "memories");
+    assert!(
+        cols.iter().any(|c| c == "embedding_generation"),
+        "v28: fresh install must add memories.embedding_generation column, got: {cols:?}"
+    );
+
+    assert!(
+        index_exists(&conn, "idx_memories_embedding_generation"),
+        "v28: fresh install must create idx_memories_embedding_generation"
+    );
+
+    let active_gen: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'active_generation'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    assert_eq!(
+        active_gen.as_deref(),
+        Some("0"),
+        "v28: fresh install must seed meta.active_generation = '0'"
+    );
+
+    // Schema version stamp is at v28.
+    let schema_version: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(schema_version, "28", "fresh install stamps SCHEMA_VERSION = 28");
+}
+
+#[test]
+fn schema_v28_migration_from_v27_is_additive_and_idempotent() {
+    // Plant a row under v28 schema, then rewind meta.schema_version to 27
+    // and re-open to trigger MIGRATE_V27_TO_V28. Verify:
+    //   - existing row untouched (additive migration)
+    //   - embedding_generation column still present (won't error on duplicate)
+    //   - meta.active_generation still '0' (INSERT OR IGNORE preserves)
+    //   - re-open succeeds (the run_migration_idempotent runner swallows
+    //     "duplicate column name" on the ALTER TABLE ADD COLUMN)
+    use tempfile::NamedTempFile;
+    let tmp = NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap();
+
+    let planted_rid = "01900000-0000-7000-8000-00000000c028";
+    {
+        let db = YantrikDB::new(path, 8).unwrap();
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO memories (rid, type, text, embedding, created_at, updated_at, last_access, source, embedding_generation) \
+             VALUES (?1, 'episodic', 'planted under v28 schema', X'01020304', 0.0, 0.0, 0.0, 'user', 42)",
+            params![planted_rid],
+        )
+        .unwrap();
+    }
+
+    // Rewind meta to 27 to force the v27 -> v28 migration replay path.
+    {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '27')",
+            [],
+        )
+        .unwrap();
+    }
+
+    // Re-open — runner must heal idempotently.
+    let db = YantrikDB::new(path, 8)
+        .expect("v28 migration runner must heal rewound-meta deployments");
+    let conn = db.conn();
+
+    // Planted row still there with original generation stamp.
+    let (text, gen): (String, i64) = conn
+        .query_row(
+            "SELECT text, embedding_generation FROM memories WHERE rid = ?1",
+            [&planted_rid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(text, "planted under v28 schema");
+    assert_eq!(gen, 42, "migration must not mutate existing row data");
+
+    // Schema version stamped back to v28.
+    let schema_version: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(schema_version, "28");
+
+    // meta.active_generation preserved (INSERT OR IGNORE didn't clobber).
+    let active_gen: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'active_generation'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(active_gen, "0");
+}
+
+#[test]
+fn record_stamps_embedding_generation_from_search_state() {
+    // **Brainstorm-4 §6 row-level invariant.** Every sync-path insert
+    // stamps memories.embedding_generation = state.generation. Phase-2
+    // swap (when it lands) advances state.generation, and the post-swap
+    // materializer's scan uses this column to find rows that need
+    // re-encode. If the stamp is wrong, the scan returns the wrong
+    // population.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid = db
+        .record(
+            "stamped",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    let conn = db.conn();
+    let stamped: i64 = conn
+        .query_row(
+            "SELECT embedding_generation FROM memories WHERE rid = ?1",
+            [&rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stamped, 0, "fresh engine: state.generation = 0, stamp = 0");
+
+    drop(conn);
+
+    // Manually advance the engine SearchState to gen=7 (simulates a
+    // future Phase-2 swap publishing). Subsequent record must stamp 7.
+    let old_state = db.search_state.load_full();
+    let advanced = crate::engine::reembed::SearchState {
+        index_embedding: old_state.index_embedding.clone(),
+        embedder: old_state.embedder.clone(),
+        runtime_embedder_name: old_state.runtime_embedder_name.clone(),
+        runtime_embedder_digest: old_state.runtime_embedder_digest.clone(),
+        generation: 7,
+        covers_through_seq: old_state.covers_through_seq,
+        hnsw_m: old_state.hnsw_m,
+        hnsw_ef_construction: old_state.hnsw_ef_construction,
+        hnsw_ef_search: old_state.hnsw_ef_search,
+        vec_index: std::sync::Arc::clone(&old_state.vec_index),
+    };
+    db.try_publish_search_state(advanced).unwrap();
+
+    let rid2 = db
+        .record(
+            "stamped at gen 7",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    let conn = db.conn();
+    let stamped2: i64 = conn
+        .query_row(
+            "SELECT embedding_generation FROM memories WHERE rid = ?1",
+            [&rid2],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        stamped2, 7,
+        "record after generation advance must stamp the new generation"
+    );
+}
+
+#[test]
+fn open_reads_durable_active_generation_into_search_state() {
+    // **Brainstorm-4 §6 durable linearization point.** open() must
+    // read meta.active_generation and initialize SearchState.generation
+    // from it. Without this, crash recovery between Phase-2's SQL
+    // swap-commit and the ArcSwap store would leave the in-memory
+    // SearchState at the OLD generation while SQL claims the NEW
+    // generation — split-brain on restart.
+    use tempfile::NamedTempFile;
+    let tmp = NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap();
+
+    // First open at fresh install — initial gen = 0.
+    {
+        let db = YantrikDB::new(path, 8).unwrap();
+        assert_eq!(db.search_state.load().generation, 0);
+    }
+
+    // Simulate Phase-2's SQL commit (without the matching in-memory
+    // store) by manually updating meta.active_generation = 3 in SQL.
+    {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('active_generation', '3')",
+            [],
+        )
+        .unwrap();
+    }
+
+    // Re-open. SearchState.generation must come back as 3.
+    let db = YantrikDB::new(path, 8).unwrap();
+    assert_eq!(
+        db.search_state.load().generation,
+        3,
+        "open() must read meta.active_generation into SearchState.generation"
+    );
+}
+
 #[test]
 fn set_embedder_routes_through_try_publish_search_state() {
     // Coverage check: confirm set_embedder calls go through the

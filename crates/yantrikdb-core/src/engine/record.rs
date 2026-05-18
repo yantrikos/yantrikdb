@@ -152,6 +152,16 @@ impl YantrikDB {
         // Read active session for this namespace into a local before acquiring conn
         let session_id = self.active_sessions.read().get(namespace).cloned();
 
+        // **Issue #41 brainstorm-4 §6.** Stamp the v28
+        // embedding_generation column with the snapshot's generation
+        // so the post-swap materializer can discriminate "this row
+        // was indexed under the active generation — skip" from "this
+        // row was inserted under an old generation — needs re-encode."
+        // Read from `state.generation` (not a fresh load) because we
+        // hold the SyncWriteGuard for the entire sync path:
+        // search_state cannot advance under us until the guard drops.
+        let embedding_generation: i64 = state.generation as i64;
+
         // Acquire conn, do all SQL, then drop before other locks
         {
             let conn = self.conn();
@@ -159,8 +169,8 @@ impl YantrikDB {
                 "INSERT INTO memories \
                  (rid, type, text, embedding, created_at, updated_at, importance, \
                   half_life, last_access, valence, metadata, namespace, \
-                  certainty, domain, source, emotional_state) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                  certainty, domain, source, emotional_state, embedding_generation) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                 params![
                     rid,
                     memory_type,
@@ -177,7 +187,8 @@ impl YantrikDB {
                     certainty,
                     domain,
                     source,
-                    emotional_state
+                    emotional_state,
+                    embedding_generation,
                 ],
             )?;
 
@@ -336,16 +347,19 @@ impl YantrikDB {
                 let stored_meta = self.encrypt_text(&meta_str)?;
                 let stored_emb = self.encrypt_embedding(&emb_blob)?;
 
+                // **Issue #41 brainstorm-4 §6.** v28 embedding_generation
+                // stamped from the batch's snapshot.
+                let embedding_generation: i64 = state.generation as i64;
                 let result = conn.execute(
                     "INSERT INTO memories \
                      (rid, type, text, embedding, created_at, updated_at, importance, \
                       half_life, last_access, valence, metadata, namespace, \
-                      certainty, domain, source, emotional_state) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                      certainty, domain, source, emotional_state, embedding_generation) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                     params![rid, input.memory_type, stored_text, stored_emb, ts, ts,
                             input.importance, input.half_life, ts, input.valence, stored_meta,
                             input.namespace, input.certainty, input.domain, input.source,
-                            input.emotional_state],
+                            input.emotional_state, embedding_generation],
                 );
 
                 if let Err(e) = result {
@@ -593,19 +607,23 @@ impl YantrikDB {
             conn.execute_batch("SAVEPOINT record_with_rid")?;
 
             let result: Result<bool> = (|| {
+                // **Issue #41 brainstorm-4 §6.** v28 embedding_generation
+                // stamp from the SearchState snapshot loaded above.
+                let embedding_generation: i64 = state.generation as i64;
                 let inserted = conn.execute(
                     "INSERT OR IGNORE INTO memories \
                      (rid, type, text, embedding, created_at, updated_at, importance, \
                       half_life, last_access, valence, metadata, namespace, \
                       certainty, domain, source, emotional_state, \
-                      created_at_unix_micros, embedding_model) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?5, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                      created_at_unix_micros, embedding_model, embedding_generation) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?5, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                     params![
                         rid, memory_type, stored_text, stored_emb,
                         ts_secs,
                         importance, half_life, valence, stored_meta, namespace,
                         certainty, domain, source, emotional_state,
                         created_at_unix_micros, embedding_model,
+                        embedding_generation,
                     ],
                 )?;
                 let was_new_row = inserted == 1;

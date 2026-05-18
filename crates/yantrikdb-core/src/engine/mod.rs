@@ -81,7 +81,7 @@ use crate::schema::{
     MIGRATE_V14_TO_V15, MIGRATE_V15_TO_V16, MIGRATE_V16_TO_V17, MIGRATE_V17_TO_V18,
     MIGRATE_V18_TO_V19, MIGRATE_V19_TO_V20, MIGRATE_V1_TO_V2, MIGRATE_V20_TO_V21,
     MIGRATE_V21_TO_V22, MIGRATE_V22_TO_V23, MIGRATE_V23_TO_V24, MIGRATE_V24_TO_V25,
-    MIGRATE_V25_TO_V26, MIGRATE_V26_TO_V27, MIGRATE_V2_TO_V3, MIGRATE_V3_TO_V4, MIGRATE_V4_TO_V5,
+    MIGRATE_V25_TO_V26, MIGRATE_V26_TO_V27, MIGRATE_V27_TO_V28, MIGRATE_V2_TO_V3, MIGRATE_V3_TO_V4, MIGRATE_V4_TO_V5,
     MIGRATE_V5_TO_V6, MIGRATE_V6_TO_V7, MIGRATE_V7_TO_V8, MIGRATE_V8_TO_V9, MIGRATE_V9_TO_V10,
     SCHEMA_SQL, SCHEMA_VERSION,
 };
@@ -476,6 +476,7 @@ impl YantrikDB {
             (24, MIGRATE_V24_TO_V25),
             (25, MIGRATE_V25_TO_V26),
             (26, MIGRATE_V26_TO_V27),
+            (27, MIGRATE_V27_TO_V28),
         ];
         if let Some(v) = existing_version {
             for &(from_v, sql) in migrations {
@@ -516,6 +517,19 @@ impl YantrikDB {
             params![stamp.to_string()],
         )?;
 
+        // **v28 (issue #41 brainstorm-4 §6).** Seed meta.active_generation
+        // on first install. INSERT OR IGNORE preserves the durable
+        // value on subsequent opens — reembed Phase-2's swap
+        // transaction is the only path that mutates it. If a fresh
+        // install runs without ever reembedding, the row stays '0'
+        // for the engine's entire lifetime, and pre-v28 rows whose
+        // embedding_generation IS NULL are correctly treated as
+        // "covered by generation 0."
+        conn.execute(
+            "INSERT OR IGNORE INTO meta (key, value) VALUES ('active_generation', '0')",
+            [],
+        )?;
+
         // Resolve actor_id: explicit > stored in meta > generate new
         let actor_id = if let Some(id) = actor_id {
             conn.execute(
@@ -536,6 +550,16 @@ impl YantrikDB {
                 }
             }
         };
+
+        // **v28 (issue #41 brainstorm-4 §6).** Read the durable
+        // active SearchState generation. Defaults to 0 if missing —
+        // covers both fresh installs (the INSERT OR IGNORE above
+        // wrote '0') and pre-v28 DBs that haven't been touched by
+        // the v28 migration yet (shouldn't happen — migration ran
+        // above — but defensive).
+        let active_generation: u64 = Self::get_meta(&conn, "active_generation")?
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
 
         // Resolve node_id: stored in meta > generate random
         let node_id: u32 = match Self::get_meta(&conn, "node_id")? {
@@ -709,15 +733,27 @@ impl YantrikDB {
             // forward; the future migration sweep retires the legacy
             // embedding_dim + embedder fields and points all readers
             // here.
-            search_state: arc_swap::ArcSwap::from(std::sync::Arc::new(
-                crate::engine::reembed::SearchState::initial(
+            //
+            // **v28 (issue #41 brainstorm-4 §6).** Override the
+            // initial generation (which SearchState::initial defaults
+            // to 0) with `meta.active_generation` read above. This is
+            // the durable-linearization-point read at open: if the
+            // engine crashed between reembed's SQL swap-commit (which
+            // updates meta.active_generation) and the in-memory
+            // SearchState publish, open() recovers the correct
+            // generation here. Pre-v28 DBs and fresh installs both
+            // read 0, preserving existing behavior.
+            search_state: arc_swap::ArcSwap::from(std::sync::Arc::new({
+                let mut s = crate::engine::reembed::SearchState::initial(
                     embedding_dim,
                     16,
                     200,
                     50,
                     vec_index_arc,
-                ),
-            )),
+                );
+                s.generation = active_generation;
+                s
+            })),
             index_write_lock: parking_lot::Mutex::new(()),
         })
     }

@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 27;
+pub const SCHEMA_VERSION: i32 = 28;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -69,8 +69,20 @@ CREATE TABLE IF NOT EXISTS memories (
     -- `embedding` post-HNSW; in-place mutation would dim-mismatch concurrent
     -- recalls).
     embedding_new BLOB,                        -- pending new embedding bytes; NULL except during active reembed
-    embedding_new_model TEXT                   -- name of embedder that produced embedding_new; NULL when no pending reembed
+    embedding_new_model TEXT,                  -- name of embedder that produced embedding_new; NULL when no pending reembed
+
+    -- v28 (issue #41 brainstorm-4 section 6): durable per-row generation stamp.
+    -- Records which SearchState generation this row embedding column
+    -- was encoded under. NULL on pre-v28 rows (treated as generation 0 by
+    -- the post-swap materializer). Reembed Phase-2 swap transaction
+    -- writes the new generation here atomically with promoting
+    -- embedding_new into embedding. The materializer scan for rows under
+    -- a stale generation uses idx_memories_embedding_generation.
+    embedding_generation INTEGER
 );
+-- v28 index for the post-swap materializer scan of stale-generation rows.
+CREATE INDEX IF NOT EXISTS idx_memories_embedding_generation
+    ON memories(embedding_generation);
 -- v26 partial indexes for the resolution/supersession query patterns the
 -- WriteResolution API will exercise. Partial so they cost nothing on the
 -- (initially) overwhelming majority of rows that are append-with-no-conflict.
@@ -2071,4 +2083,49 @@ CREATE TABLE IF NOT EXISTS reembed_events (
 );
 CREATE INDEX IF NOT EXISTS idx_reembed_events_generation ON reembed_events(generation);
 CREATE INDEX IF NOT EXISTS idx_oplog_applied_generation ON oplog(applied_generation, op_id);
+";
+
+/// **Issue #41 brainstorm-4 §6 — durable linearization point for
+/// reembed crash recovery.**
+///
+/// Two surfaces locked together:
+///
+/// 1. `memories.embedding_generation INTEGER` — per-row stamp of
+///    which SearchState generation the row's `embedding` column was
+///    encoded under. NULL on pre-v28 rows (treated by the post-swap
+///    materializer as "covered by generation 0 — the initial
+///    pre-reembed generation"). Reembed Phase-2's swap transaction
+///    writes the new generation here atomically with promoting
+///    `embedding_new` into `embedding`.
+///
+/// 2. `meta.active_generation` row — durable record of the current
+///    active SearchState generation. Initialized to '0' on v28
+///    install / migration. Phase-2 swap atomically increments this
+///    AND swaps the in-memory SearchState; if the engine crashes
+///    after the SQL transaction commits but before the ArcSwap
+///    store, `open()` reads `meta.active_generation` and rebuilds
+///    the SearchState at the new generation from the v28 column —
+///    no replay logic, just "the durable record says what it is."
+///
+/// 3. Index on `(embedding_generation)` — the post-swap materializer
+///    scans for "rows under generation < active" to apply queued
+///    re-encode ops; this needs index support to be O(N_changed)
+///    not O(N_total) for large DBs.
+///
+/// Brainstorm-4 §6 motivation: without a single durable linearization
+/// point, crash recovery needed multi-step replay logic that
+/// re-derived the active generation from oplog scans + reembed_events
+/// table joins. That logic is itself the bug surface (the
+/// reembed_events table is best-effort; oplog scans miss tail writes
+/// during the SQL transaction window). One column + one row + one
+/// transaction is the clean answer.
+///
+/// Additive-only migration. Idempotent (the runner in engine/mod.rs
+/// swallows "duplicate column name" / "already exists" / "duplicate
+/// key" per the v0.7.3 replay-resilience fix). Safe to re-run.
+pub const MIGRATE_V27_TO_V28: &str = "
+ALTER TABLE memories ADD COLUMN embedding_generation INTEGER;
+CREATE INDEX IF NOT EXISTS idx_memories_embedding_generation
+    ON memories(embedding_generation);
+INSERT OR IGNORE INTO meta (key, value) VALUES ('active_generation', '0');
 ";
