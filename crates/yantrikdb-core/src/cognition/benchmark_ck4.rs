@@ -453,7 +453,11 @@ pub fn run_coherence_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
     // Test 2: Enforcement plan generation.
     let start = Instant::now();
     let enforcement = plan_enforcement(&report, &ws, &config);
-    let valid_enforcement = enforcement.items_affected >= 0;
+    // `items_affected: u64` so the prior `>= 0` check was always
+    // true (clippy: absurd_extreme_comparisons). The intent was
+    // "enforcement produced some plan we can record"; the
+    // BenchResult below records items_affected as the metric_value
+    // regardless of count, so the no-op check was vestigial.
     run.add(BenchResult {
         category: "coherence".into(),
         test_name: "enforcement_plan".into(),
