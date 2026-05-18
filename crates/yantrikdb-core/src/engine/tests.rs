@@ -9255,6 +9255,172 @@ fn schema_v26_migration_replay_is_idempotent() {
 // ============================================================================
 
 // ============================================================================
+// Issue #41 layer 3: record() routing through WriteRouter
+// ============================================================================
+
+#[test]
+fn record_in_normal_state_takes_sync_path() {
+    // Sanity: default router state is Normal, record() takes the sync
+    // path and the memory is immediately in `memories` + vec_index.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    assert_eq!(
+        db.write_router.state(),
+        crate::engine::write_router::RouterState::Normal
+    );
+    let rid = db
+        .record(
+            "sync path test",
+            "episodic",
+            0.5,
+            0.0,
+            86400.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.9,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    // Row immediately visible in memories table (sync path completed).
+    let count: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE rid = ?1",
+            params![rid],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 1, "sync-path write must land in memories immediately");
+}
+
+#[test]
+fn record_in_queueing_state_routes_to_oplog_does_not_touch_memories() {
+    // Locks the brainstorm-2/3 invariant: when reembed cutover has
+    // flipped the router to Queueing, record() must NOT write to
+    // memories (would mix old+new dim under the rebuild snapshot)
+    // and must NOT call vec_index.append. The op goes to oplog
+    // applied=0 with embedding_model populated for the post-swap
+    // materializer to re-encode under the new embedder.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    // Flip router as reembed cutover would.
+    db.write_router.switch_to_queueing();
+    assert_eq!(
+        db.write_router.state(),
+        crate::engine::write_router::RouterState::Queueing
+    );
+    // Count memories + oplog before the queued record.
+    let mem_before: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
+        .unwrap();
+    let oplog_before: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM oplog WHERE applied = 0 AND op_type = 'record'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+
+    let rid = db
+        .record(
+            "queued path test",
+            "episodic",
+            0.5,
+            0.0,
+            86400.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.9,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    // memories table count must NOT have grown — the queued path
+    // skips the memories INSERT entirely.
+    let mem_after: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(
+        mem_after, mem_before,
+        "queued path must NOT write to memories table during reembed cutover \
+         (brainstorm-2/3 invariant 1: queued-after-barrier writes are replayed \
+         by post-swap materializer, not committed to old generation)"
+    );
+
+    // oplog count must have grown by 1, with applied=0, op_type='record',
+    // target_rid=the new rid, and embedding_model set to whatever the
+    // active runtime embedder was (None here since no embedder is set).
+    let oplog_after: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM oplog WHERE applied = 0 AND op_type = 'record' \
+             AND target_rid = ?1",
+            params![rid],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        oplog_after, oplog_before + 1,
+        "queued path must write the record op to oplog with applied=0"
+    );
+
+    // applied_generation must be NULL (this op will be applied to the
+    // new generation by the post-swap materializer; until then it's
+    // not applied to any generation).
+    let applied_gen: Option<i64> = db
+        .conn()
+        .query_row(
+            "SELECT applied_generation FROM oplog WHERE target_rid = ?1",
+            params![rid],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        applied_gen.is_none(),
+        "applied_generation must be NULL for queued ops; got Some({applied_gen:?})"
+    );
+
+    // Restore Normal for any subsequent test in the same DB.
+    db.write_router.switch_to_normal();
+}
+
+#[test]
+fn record_guard_drops_inflight_counter_panic_safe_via_raii() {
+    // Locks brainstorm-2 invariant 2 (no old application after barrier)
+    // by exercising the panic-safety of the SyncWriteGuard. Even if
+    // record() panics mid-write (simulated here by a record_batch
+    // wrapping that panics after the guard is acquired), the inflight
+    // counter must return to 0 via Drop.
+    let db = std::sync::Arc::new(YantrikDB::new(":memory:", 8).unwrap());
+    assert_eq!(db.write_router.inflight(), 0);
+
+    let db_panic = std::sync::Arc::clone(&db);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _guard = db_panic
+            .write_router
+            .try_enter_sync_writer()
+            .expect("Normal state must yield guard");
+        // inflight = 1 here
+        assert_eq!(db_panic.write_router.inflight(), 1);
+        panic!("simulated mid-write panic");
+    }));
+    assert!(result.is_err(), "panic must propagate up");
+    // Guard's Drop ran via panic unwind; inflight back to 0.
+    assert_eq!(
+        db.write_router.inflight(),
+        0,
+        "panic-safe inflight counter (RAII Drop) — required for reembed cutover correctness"
+    );
+}
+
+// ============================================================================
 // Issue #41 layer 2: set_embedder mode-aware regression tests
 // (brainstorm-3 round 2 §11, 8 cases). These lock the brainstorm-3
 // design decisions. Each test names the failure mode it prevents.
