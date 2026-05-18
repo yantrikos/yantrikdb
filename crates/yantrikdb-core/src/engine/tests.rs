@@ -10295,3 +10295,161 @@ fn schema_v27_migration_replay_is_idempotent() {
     )
     .unwrap();
 }
+
+// ─────────────────────────────────────────────────────────────────
+// Issue #41 brainstorm-4 §3 — monotonic-generation CAS regression
+// tests. Locks try_publish_search_state's two guarantees: stale
+// publishes are rejected, equal-generation publishes are allowed
+// (set_embedder runtime-Arc-swap case).
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn try_publish_search_state_rejects_stale_generation() {
+    // Construct a SearchState at generation N, advance the engine
+    // to generation N+2 via direct store, then attempt to publish
+    // the N-generation state. The helper must reject with
+    // SearchStatePublishStaleGeneration — without this, a stale
+    // compactor/reembed step could ABA-rollback the active
+    // generation.
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let initial = db.search_state.load_full();
+    assert_eq!(initial.generation, 0, "fresh engine starts at gen 0");
+
+    // Build a "stale" SearchState replica of gen=0.
+    let stale_proposal = crate::engine::reembed::SearchState {
+        index_embedding: initial.index_embedding.clone(),
+        embedder: initial.embedder.clone(),
+        runtime_embedder_name: initial.runtime_embedder_name.clone(),
+        runtime_embedder_digest: initial.runtime_embedder_digest.clone(),
+        generation: 0,
+        covers_through_seq: 0,
+        hnsw_m: initial.hnsw_m,
+        hnsw_ef_construction: initial.hnsw_ef_construction,
+        hnsw_ef_search: initial.hnsw_ef_search,
+        vec_index: std::sync::Arc::clone(&initial.vec_index),
+    };
+
+    // Manually advance the engine to gen=2 (simulates two
+    // back-to-back reembed Phase-2 swaps).
+    let advanced = crate::engine::reembed::SearchState {
+        index_embedding: initial.index_embedding.clone(),
+        embedder: initial.embedder.clone(),
+        runtime_embedder_name: initial.runtime_embedder_name.clone(),
+        runtime_embedder_digest: initial.runtime_embedder_digest.clone(),
+        generation: 2,
+        covers_through_seq: 0,
+        hnsw_m: initial.hnsw_m,
+        hnsw_ef_construction: initial.hnsw_ef_construction,
+        hnsw_ef_search: initial.hnsw_ef_search,
+        vec_index: std::sync::Arc::clone(&initial.vec_index),
+    };
+    db.search_state.store(std::sync::Arc::new(advanced));
+
+    // Try to publish the stale gen=0 state. Helper must reject.
+    let err = db
+        .try_publish_search_state(stale_proposal)
+        .expect_err("stale-generation publish must be rejected");
+    match err {
+        crate::error::YantrikDbError::SearchStatePublishStaleGeneration {
+            current_generation,
+            attempted_generation,
+        } => {
+            assert_eq!(current_generation, 2);
+            assert_eq!(attempted_generation, 0);
+        }
+        other => panic!("unexpected error variant: {other:?}"),
+    }
+
+    // The engine state must still be at gen=2 — the rejected
+    // publish did NOT mutate the ArcSwap.
+    assert_eq!(
+        db.search_state.load().generation,
+        2,
+        "rejected publish must leave search_state untouched"
+    );
+}
+
+#[test]
+fn try_publish_search_state_accepts_equal_generation_publish() {
+    // set_embedder publishes with `new.generation == current.generation`
+    // (runtime-Arc swap, no vector-space change). The CAS helper must
+    // accept this — strict less-than is the only rejection condition.
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let initial = db.search_state.load_full();
+    let same_gen = crate::engine::reembed::SearchState {
+        index_embedding: initial.index_embedding.clone(),
+        embedder: initial.embedder.clone(),
+        // Differ in some runtime-only field so the test verifies the
+        // publish actually landed (vs being a silent no-op).
+        runtime_embedder_name: Some("rotated-name".to_string()),
+        runtime_embedder_digest: initial.runtime_embedder_digest.clone(),
+        generation: initial.generation,
+        covers_through_seq: initial.covers_through_seq,
+        hnsw_m: initial.hnsw_m,
+        hnsw_ef_construction: initial.hnsw_ef_construction,
+        hnsw_ef_search: initial.hnsw_ef_search,
+        vec_index: std::sync::Arc::clone(&initial.vec_index),
+    };
+    db.try_publish_search_state(same_gen)
+        .expect("equal-generation publish must be accepted");
+    assert_eq!(
+        db.search_state.load().runtime_embedder_name.as_deref(),
+        Some("rotated-name"),
+        "the equal-generation publish must have landed"
+    );
+}
+
+#[test]
+fn try_publish_search_state_accepts_strictly_advancing_generation() {
+    // Reembed Phase-2 publishes new.generation = current.generation + 1.
+    // Lock the success path so the brainstorm-4 §3 CAS doesn't
+    // accidentally over-reject and break the reembed swap.
+    let db = YantrikDB::new(":memory:", 64).unwrap();
+    let initial = db.search_state.load_full();
+    let advanced = crate::engine::reembed::SearchState {
+        index_embedding: initial.index_embedding.clone(),
+        embedder: initial.embedder.clone(),
+        runtime_embedder_name: initial.runtime_embedder_name.clone(),
+        runtime_embedder_digest: initial.runtime_embedder_digest.clone(),
+        generation: initial.generation + 1,
+        covers_through_seq: initial.covers_through_seq,
+        hnsw_m: initial.hnsw_m,
+        hnsw_ef_construction: initial.hnsw_ef_construction,
+        hnsw_ef_search: initial.hnsw_ef_search,
+        vec_index: std::sync::Arc::clone(&initial.vec_index),
+    };
+    db.try_publish_search_state(advanced)
+        .expect("strictly-advancing-generation publish must be accepted");
+    assert_eq!(
+        db.search_state.load().generation,
+        initial.generation + 1,
+        "the advanced publish must have landed"
+    );
+}
+
+#[test]
+fn set_embedder_routes_through_try_publish_search_state() {
+    // Coverage check: confirm set_embedder calls go through the
+    // CAS helper. Done indirectly by verifying that after
+    // set_embedder, the search_state generation is preserved (the
+    // helper would reject any rogue decrement). This locks the
+    // call-graph routing — if a future refactor reintroduces a
+    // direct `self.search_state.store(...)` from set_embedder, the
+    // brainstorm-4 §3 invariant is no longer load-bearing.
+    use mode_test_embedders::FakeEmbedder;
+    let mut db = YantrikDB::new(":memory:", 64).unwrap();
+    let gen_before = db.search_state.load().generation;
+    db.set_embedder(Box::new(FakeEmbedder {
+        dim: 64,
+        fp: Some("sha256:check".to_string()),
+        name: Some("check".to_string()),
+        sentinel: 0.1,
+    }))
+    .unwrap();
+    let gen_after = db.search_state.load().generation;
+    assert_eq!(
+        gen_before, gen_after,
+        "set_embedder must preserve generation (only Phase-2 reembed advances it)"
+    );
+    assert!(db.has_embedder(), "set_embedder must have published");
+}

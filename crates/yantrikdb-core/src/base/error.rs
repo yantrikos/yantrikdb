@@ -128,6 +128,34 @@ pub enum YantrikDbError {
     #[error("embedding dimension mismatch: expected {expected}, got {got}")]
     EmbeddingDimensionMismatch { expected: usize, got: usize },
 
+    /// **Issue #41 brainstorm-4 §3 — monotonic-generation CAS.**
+    ///
+    /// `try_publish_search_state` rejects publish attempts whose
+    /// `new_state.generation` is strictly less than the
+    /// currently-active SearchState generation. This is the
+    /// brainstorm-4 §3 defense against compactor / reembed /
+    /// long-running write paths publishing stale work that would
+    /// ABA-rollback the active generation (durable data omission
+    /// when a generation regresses from N back to N-1 — the
+    /// post-swap materializer reapplies queued ops that were
+    /// already covered by generation N).
+    ///
+    /// Caller policy: re-load `search_state`, rebuild the proposed
+    /// state under the new active generation, retry. Reembed loops
+    /// abort the entire reembed (clear meta.reembed_state) and
+    /// require a fresh `db.reembed(...)` call from the operator —
+    /// silent retry inside reembed would mask a deeper concurrency
+    /// bug.
+    #[error(
+        "search state publish stale generation: current_generation={current_generation}, \
+         attempted_generation={attempted_generation}. Caller must re-read \
+         search_state and rebuild before retrying."
+    )]
+    SearchStatePublishStaleGeneration {
+        current_generation: u64,
+        attempted_generation: u64,
+    },
+
     #[error("invalid input: {0}")]
     InvalidInput(String),
 }

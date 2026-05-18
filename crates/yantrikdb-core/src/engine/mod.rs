@@ -1108,11 +1108,84 @@ impl YantrikDB {
             }
         };
 
-        self.search_state.store(std::sync::Arc::new(new_state));
+        // **Issue #41 brainstorm-4 §3.** Route through the
+        // monotonic-generation CAS helper so the invariant
+        // "SearchState generation never regresses" is enforced
+        // uniformly across every publisher. set_embedder publishes
+        // with `new_state.generation == state.generation` (it does
+        // not advance the vector-space generation; only reembed
+        // Phase-2 does), so the >= check inside the helper passes
+        // here trivially.
+        self.try_publish_search_state(new_state)?;
         // Legacy slot retired post-#41: all reads now route through
         // search_state. Clear it to catch any latent reader.
         self.embedder = None;
         Ok(())
+    }
+
+    /// **Issue #41 brainstorm-4 §3 — monotonic-generation CAS for
+    /// SearchState publication.**
+    ///
+    /// The single chokepoint through which any code path mutates
+    /// `self.search_state`. The invariant is strict: a new
+    /// SearchState may only be published if its `generation` is
+    /// `>= self.search_state.load().generation`. Strictly-lesser
+    /// generations are rejected — they represent stale work from a
+    /// compactor / writer / reembed step whose snapshot was
+    /// invalidated by a concurrent generation advance.
+    ///
+    /// brainstorm-4 §3 motivation: without this, a future
+    /// compactor-style path that runs on the OLD SearchState and
+    /// republishes after a reembed swap would ABA-rollback the
+    /// active generation. That rollback is durable data omission —
+    /// the post-swap materializer reapplies queued ops that were
+    /// already covered by the new generation's `covers_through_seq`,
+    /// double-applying writes and breaking RYW semantics.
+    ///
+    /// CAS implementation: uses ArcSwap's `compare_and_swap` so
+    /// concurrent publishers race only on pointer identity, not
+    /// generation values. The retry loop re-validates the
+    /// generation guard each iteration; if a concurrent publisher
+    /// races AND has a higher generation, this call returns
+    /// `SearchStatePublishStaleGeneration` instead of looping
+    /// forever — caller must rebuild their proposed state under the
+    /// new active generation.
+    ///
+    /// Equal-generation publishes (same vector-space, different
+    /// runtime metadata — e.g. set_embedder runtime-only Arc swap)
+    /// are allowed: the generation tracks the index's vector space,
+    /// not arbitrary state changes.
+    pub(crate) fn try_publish_search_state(
+        &self,
+        new_state: crate::engine::reembed::SearchState,
+    ) -> Result<()> {
+        let new_arc = std::sync::Arc::new(new_state);
+        loop {
+            let current = self.search_state.load_full();
+            if new_arc.generation < current.generation {
+                return Err(YantrikDbError::SearchStatePublishStaleGeneration {
+                    current_generation: current.generation,
+                    attempted_generation: new_arc.generation,
+                });
+            }
+            // ArcSwap::compare_and_swap returns the previous Arc.
+            // If it's pointer-equal to `current`, the swap landed.
+            // Otherwise a concurrent publisher raced; loop and
+            // re-validate against the new current.
+            let prev = self
+                .search_state
+                .compare_and_swap(&current, std::sync::Arc::clone(&new_arc));
+            if std::sync::Arc::ptr_eq(&prev, &current) {
+                return Ok(());
+            }
+            // Concurrent publisher swapped between load and CAS.
+            // Loop: re-load, re-validate. The retry budget is
+            // bounded by the number of concurrent publishers, which
+            // is bounded by the index_write_lock (today only
+            // set_embedder + reembed contend, and the lock
+            // serializes them anyway — the CAS is defense in
+            // depth).
+        }
     }
 
     /// Internal helper for `set_embedder*` / future `reembed()`: count
