@@ -10786,6 +10786,245 @@ fn search_state_publish_is_atomic_under_concurrent_reads() {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────
+// Issue #41 Layer 7 — crash-recovery regression tests. Two branches
+// of the recovery decision on open():
+//   (1) active_generation < in_flight_generation
+//       → SQL swap did NOT commit; discard staging.
+//   (2) active_generation >= in_flight_generation
+//       → SQL swap DID commit; SearchState rebuilds at new gen.
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn open_recovery_discards_staging_when_sql_swap_uncommitted() {
+    // **Layer 7 — branch 1.** Simulate a crash during Encoding/
+    // Rebuilding/Swapping BEFORE the SQL swap transaction
+    // committed. Plant: meta.reembed_state with gen=5,
+    // phase='Encoding', AND populated embedding_new columns,
+    // AND meta.active_generation still at '0' (the swap commit
+    // never happened).
+    //
+    // Expected on open():
+    //   - meta.reembed_state cleared
+    //   - embedding_new + embedding_new_model NULLed
+    //   - active_generation unchanged at 0
+    //   - SearchState.generation = 0
+    //   - reembed_events has an Aborted event for gen 5 with
+    //     recovery="discarded_staging"
+    use tempfile::NamedTempFile;
+    let tmp = NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap();
+
+    let planted_rid = "01900000-0000-7000-8000-00000000d017";
+    {
+        let db = YantrikDB::new(path, 8).unwrap();
+        db.record(
+            "pre-reembed row",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(0.5, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+        // Plant the staging columns + the in-flight reembed_state
+        // directly so we don't need the full reembed machinery.
+        let conn = db.conn();
+        conn.execute(
+            "UPDATE memories SET embedding_new = X'AABBCCDD', \
+             embedding_new_model = 'simulated-target' WHERE rowid = 1",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('reembed_state', ?1)",
+            params![
+                serde_json::json!({
+                    "generation": 5,
+                    "phase": "Encoding",
+                    "old_embedder": "old",
+                    "new_embedder_name": "simulated-target",
+                })
+                .to_string()
+            ],
+        )
+        .unwrap();
+        // active_generation still '0' (the swap commit never ran).
+        let _ = planted_rid;
+    }
+
+    // Re-open: Layer 7 recovery decides "discard staging".
+    let db = YantrikDB::new(path, 8).unwrap();
+    let conn = db.conn();
+
+    // meta.reembed_state cleared.
+    let still_in_flight: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'reembed_state'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    assert!(
+        still_in_flight.is_none(),
+        "Layer 7 must clear meta.reembed_state on uncommitted-swap recovery; got: {still_in_flight:?}"
+    );
+
+    // Staging NULLed.
+    let staged: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE embedding_new IS NOT NULL OR \
+             embedding_new_model IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(staged, 0, "staging columns must be NULL after discard recovery");
+
+    // active_generation unchanged.
+    let active: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'active_generation'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(active, "0");
+
+    // SearchState.generation = 0.
+    assert_eq!(db.search_state.load().generation, 0);
+
+    // Aborted recovery event present.
+    let aborted_recovery: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM reembed_events WHERE phase = 'Aborted' AND generation = 5 \
+             AND payload_json LIKE '%discarded_staging%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(aborted_recovery, 1, "Aborted recovery event must be logged");
+}
+
+#[test]
+fn open_recovery_durable_swap_resumes_at_new_generation() {
+    // **Layer 7 — branch 2.** Simulate a crash AFTER the SQL swap
+    // committed but before the in-memory ArcSwap store landed
+    // (the §10.4 case). Plant: meta.active_generation = '3'
+    // (durable swap done) AND meta.reembed_state with gen=3
+    // (the in-flight marker that never got cleared).
+    //
+    // Expected on open():
+    //   - meta.reembed_state cleared
+    //   - SearchState.generation = 3 (durable + rebuilt)
+    //   - active_generation = '3' (unchanged)
+    //   - Staging defensively cleared (should already be empty)
+    //   - reembed_events has a Completed event for gen 3 with
+    //     recovery="completed_durable"
+    use tempfile::NamedTempFile;
+    let tmp = NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap();
+
+    {
+        let db = YantrikDB::new(path, 8).unwrap();
+        let _ = db.record(
+            "pre-reembed row",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(0.5, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        );
+        // Simulate: swap COMMITTED (active_generation bumped to 3,
+        // row's embedding_generation stamped 3) but the matching
+        // in-memory publish never landed AND meta.reembed_state
+        // marker still says "we're in flight at gen 3".
+        let conn = db.conn();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('active_generation', '3')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE memories SET embedding_generation = 3 WHERE embedding IS NOT NULL",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('reembed_state', ?1)",
+            params![
+                serde_json::json!({
+                    "generation": 3,
+                    "phase": "Swapping",
+                    "old_embedder": "old",
+                    "new_embedder_name": "new",
+                })
+                .to_string()
+            ],
+        )
+        .unwrap();
+    }
+
+    let db = YantrikDB::new(path, 8).unwrap();
+    let conn = db.conn();
+
+    // meta.reembed_state cleared.
+    let still_in_flight: Option<String> = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'reembed_state'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    assert!(
+        still_in_flight.is_none(),
+        "Layer 7 must clear meta.reembed_state on durable-swap recovery"
+    );
+
+    // SearchState.generation = 3.
+    assert_eq!(
+        db.search_state.load().generation,
+        3,
+        "SearchState rebuilds at durable active generation"
+    );
+
+    // active_generation preserved.
+    let active: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'active_generation'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(active, "3");
+
+    // Completed recovery event present.
+    let completed_recovery: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM reembed_events WHERE phase = 'Completed' AND generation = 3 \
+             AND payload_json LIKE '%completed_durable%'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        completed_recovery, 1,
+        "Completed recovery event must be logged"
+    );
+}
+
 #[test]
 fn open_with_uncommitted_staging_columns_stays_at_old_generation() {
     // **Brainstorm-4 §10.5 — crash before SQL promotion commit.**

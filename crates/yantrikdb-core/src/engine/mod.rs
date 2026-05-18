@@ -562,6 +562,147 @@ impl YantrikDB {
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
 
+        // **Layer 7 — crash recovery for in-flight reembed.**
+        //
+        // If `meta.reembed_state` is set, the engine crashed mid-
+        // reembed. Decide what to do based on the durable
+        // `meta.active_generation`:
+        //
+        // - If `active_generation < in_flight_generation`: the SQL
+        //   swap transaction (Phase 2 step 5) did NOT commit before
+        //   the crash. The staging columns (`memories.embedding_new`
+        //   + `embedding_new_model`) may be partially populated; we
+        //   discard them and clear `meta.reembed_state`. The next
+        //   `db.reembed(target_name)` call starts fresh and
+        //   overwrites whatever staging survived.
+        //
+        // - If `active_generation >= in_flight_generation`: the SQL
+        //   swap DID commit; the in-memory SearchState publish
+        //   (step 6) is what was lost. SQL is durably at the new
+        //   generation. The SearchState is rebuilt at the new
+        //   generation by the standard open path. Staging columns
+        //   should already be cleared by the swap transaction, but
+        //   we defensively clear any leftover (the in-memory
+        //   `apply_pending_ops_once` / Layer 5 path is fine here:
+        //   any queued ops with embedding_model NOT NULL get
+        //   re-encoded under the new embedder via the standard
+        //   drain).
+        //
+        // The decision is durable + idempotent (re-running open()
+        // produces the same result). An audit event is written to
+        // reembed_events so operators can see "this reembed crashed
+        // and was recovered as discarded / completed".
+        let reembed_recovery_summary: Option<String> = {
+            let in_flight: Option<(u64, String)> = {
+                let payload_json: Option<String> = conn
+                    .query_row(
+                        "SELECT value FROM meta WHERE key = 'reembed_state'",
+                        [],
+                        |row| row.get::<_, String>(0),
+                    )
+                    .ok();
+                payload_json.and_then(|s| {
+                    let v: serde_json::Value = serde_json::from_str(&s).ok()?;
+                    let g = v.get("generation")?.as_u64()?;
+                    let phase = v
+                        .get("phase")
+                        .and_then(|p| p.as_str())
+                        .unwrap_or("Probing")
+                        .to_string();
+                    Some((g, phase))
+                })
+            };
+
+            if let Some((in_flight_gen, in_flight_phase)) = in_flight {
+                let recovery_event_ts = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs_f64())
+                    .unwrap_or(0.0);
+
+                if active_generation < in_flight_gen {
+                    // SQL swap didn't commit. Discard staging.
+                    conn.execute(
+                        "UPDATE memories SET embedding_new = NULL, \
+                         embedding_new_model = NULL WHERE embedding_new IS NOT NULL",
+                        [],
+                    )?;
+                    conn.execute(
+                        "DELETE FROM meta WHERE key = 'reembed_state'",
+                        [],
+                    )?;
+                    let evt_payload = serde_json::json!({
+                        "recovery": "discarded_staging",
+                        "reason": format!(
+                            "crash at phase {in_flight_phase}; SQL swap not committed \
+                             (active_generation={active_generation} < \
+                             in_flight_generation={in_flight_gen})"
+                        ),
+                        "active_generation_after": active_generation,
+                    });
+                    conn.execute(
+                        "INSERT INTO reembed_events (generation, phase, timestamp, payload_json) \
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![
+                            in_flight_gen as i64,
+                            "Aborted",
+                            recovery_event_ts,
+                            serde_json::to_string(&evt_payload)?,
+                        ],
+                    )?;
+                    Some(format!(
+                        "discarded_staging (in-flight gen {in_flight_gen} phase {in_flight_phase})"
+                    ))
+                } else {
+                    // SQL swap committed before crash. SearchState will
+                    // rebuild at the new generation (active_generation
+                    // read above). Defensive: clear any staging
+                    // leftover; the swap transaction normally clears
+                    // it but we don't trust a crashed transaction.
+                    conn.execute(
+                        "UPDATE memories SET embedding_new = NULL, \
+                         embedding_new_model = NULL WHERE embedding_new IS NOT NULL",
+                        [],
+                    )?;
+                    conn.execute(
+                        "DELETE FROM meta WHERE key = 'reembed_state'",
+                        [],
+                    )?;
+                    let evt_payload = serde_json::json!({
+                        "recovery": "completed_durable",
+                        "reason": format!(
+                            "crash at phase {in_flight_phase}; SQL swap committed \
+                             (active_generation={active_generation} >= \
+                             in_flight_generation={in_flight_gen}); SearchState \
+                             rebuilt at new generation"
+                        ),
+                        "active_generation_after": active_generation,
+                    });
+                    conn.execute(
+                        "INSERT INTO reembed_events (generation, phase, timestamp, payload_json) \
+                         VALUES (?1, ?2, ?3, ?4)",
+                        params![
+                            in_flight_gen as i64,
+                            "Completed",
+                            recovery_event_ts,
+                            serde_json::to_string(&evt_payload)?,
+                        ],
+                    )?;
+                    Some(format!(
+                        "completed_durable (gen {in_flight_gen} phase {in_flight_phase})"
+                    ))
+                }
+            } else {
+                None
+            }
+        };
+        if let Some(summary) = &reembed_recovery_summary {
+            tracing::warn!(
+                target: "yantrikdb::reembed::recovery",
+                summary = %summary,
+                "open(): in-flight reembed detected; applied crash-recovery decision"
+            );
+        }
+
         // Resolve node_id: stored in meta > generate random
         let node_id: u32 = match Self::get_meta(&conn, "node_id")? {
             Some(s) => s.parse().unwrap_or_else(|_| {
