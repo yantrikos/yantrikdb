@@ -547,6 +547,294 @@ impl fmt::Debug for SearchState {
 }
 
 // ─────────────────────────────────────────────────────────────────────
+// db.reembed() — engine entry point (Layer 4 phase 1)
+// ─────────────────────────────────────────────────────────────────────
+
+use crate::error::{Result, YantrikDbError};
+use crate::YantrikDB;
+
+impl YantrikDB {
+    /// **Issue #41 layer 4 — in-place embedder migration.**
+    ///
+    /// Re-encodes every memory under a new embedder and atomically
+    /// swaps the active SearchState to the new generation. Concurrent
+    /// recall traffic continues throughout (against the old generation
+    /// until Swap completes); concurrent writes follow the policy in
+    /// `ReembedOptions::write_policy` (default `Queue`).
+    ///
+    /// ## Layer 4 phase 1 scope (this commit)
+    ///
+    /// - Probing phase (resolve embedder name → same-name no-op check)
+    /// - Dry-run path (Probing only, no state mutations beyond audit
+    ///   event)
+    /// - Same-name no-op detection (returns `Ok(report)` immediately
+    ///   without touching anything)
+    /// - `reembed_status()` API reading meta.reembed_state
+    ///
+    /// ## Layer 4 phase 2 (next checkpoint)
+    ///
+    /// - Encoding phase (batch iterate memories, encode under new
+    ///   embedder via embedder-download resolver, write to staging
+    ///   columns embedding_new + embedding_new_model)
+    /// - Rebuilding phase (build new HNSW from staging columns)
+    /// - Swapping phase (atomic ArcSwap + UPDATE memories.embedding =
+    ///   embedding_new inside one transaction)
+    /// - Verifying phase (sanity check + staging cleanup)
+    /// - Crash recovery on open()
+    ///
+    /// Currently returns `Err` at the Encoding phase boundary if the
+    /// call would proceed past Probing for a non-no-op reembed. The
+    /// boundary is clean — meta.reembed_state is cleared on the way
+    /// out so the DB is not left mid-reembed.
+    pub fn reembed(
+        &self,
+        new_embedder_name: &str,
+        options: ReembedOptions,
+    ) -> Result<ReembedReport> {
+        let started_at = SystemTime::now();
+        let progress_cb = options.progress_cb.as_ref();
+        let on_phase_complete = options.on_phase_complete.as_ref();
+
+        // Acquire index_write_lock for the full reembed duration.
+        // Serializes against concurrent set_embedder + other reembed
+        // calls (single-job invariant from brainstorm-3).
+        let _index_guard = self.index_write_lock.lock();
+
+        // ── Phase 1: Probing ──
+        let probing_state = self.search_state.load_full();
+        let active_dim = probing_state.dim();
+        let active_digest = probing_state.runtime_embedder_digest.clone();
+        let active_name = probing_state
+            .runtime_embedder_name
+            .clone()
+            .unwrap_or_default();
+
+        let same_name = active_name == new_embedder_name;
+        if same_name {
+            // No-op: caller asked for the embedder already loaded.
+            // Brainstorm-3 same-digest no-op rule. No generation bump,
+            // no covers_through_seq change, no meta.reembed_state
+            // write — fully transparent to crash recovery.
+            let duration = started_at.elapsed().unwrap_or_default();
+            let _ = progress_cb;
+            let _ = on_phase_complete;
+            return Ok(ReembedReport {
+                generation: probing_state.generation,
+                encoded_count: 0,
+                skipped_count: 0,
+                duration,
+                old_embedder: active_name.clone(),
+                old_embedder_digest: active_digest.clone().unwrap_or_default(),
+                new_embedder: active_name,
+                new_embedder_digest: active_digest.unwrap_or_default(),
+                old_dim: active_dim,
+                new_dim: active_dim,
+                build_hwm: probing_state.covers_through_seq,
+                per_namespace: HashMap::new(),
+            });
+        }
+
+        let next_generation = probing_state.generation + 1;
+        let probing_event_ts = systime_to_unix_secs(started_at);
+        self.write_reembed_event(
+            next_generation,
+            ReembedPhase::Probing,
+            probing_event_ts,
+            &serde_json::json!({
+                "old_embedder": active_name,
+                "new_embedder_name": new_embedder_name,
+                "old_dim": active_dim,
+                "namespace": options.namespace,
+            }),
+        )?;
+
+        if let Some(cb) = progress_cb {
+            cb(ReembedProgress {
+                phase: ReembedPhase::Probing,
+                processed: 0,
+                total: None,
+                elapsed_ms: 0,
+                namespace: options.namespace.clone(),
+            });
+        }
+
+        // Dry-run path: Probing completed, return predicted shape.
+        // The Probing audit event is permanent (intentional — dry-runs
+        // are observable in the event log).
+        if options.dry_run {
+            let duration = started_at.elapsed().unwrap_or_default();
+            return Ok(ReembedReport {
+                generation: probing_state.generation,
+                encoded_count: 0,
+                skipped_count: 0,
+                duration,
+                old_embedder: active_name.clone(),
+                old_embedder_digest: active_digest.clone().unwrap_or_default(),
+                new_embedder: new_embedder_name.to_string(),
+                new_embedder_digest: String::new(), // resolved in phase 2
+                old_dim: active_dim,
+                new_dim: active_dim,
+                build_hwm: probing_state.covers_through_seq,
+                per_namespace: HashMap::new(),
+            });
+        }
+
+        // Persist meta.reembed_state so crash recovery on open() can
+        // detect the in-flight reembed.
+        self.write_reembed_state_meta(&serde_json::json!({
+            "generation": next_generation,
+            "phase": "Probing",
+            "old_embedder": active_name,
+            "new_embedder_name": new_embedder_name,
+            "old_dim": active_dim,
+            "started_at_unix": probing_event_ts,
+            "namespace": options.namespace,
+            "write_policy": match options.write_policy {
+                ReembedWritePolicy::Queue => "Queue",
+                ReembedWritePolicy::Pause => "Pause",
+            },
+        }))?;
+
+        // ── Layer 4 phase 2 boundary ──
+        // Clean abort: clear meta + write Aborted event, return Err.
+        self.clear_reembed_state_meta()?;
+        self.write_reembed_event(
+            next_generation,
+            ReembedPhase::Aborted,
+            systime_to_unix_secs(SystemTime::now()),
+            &serde_json::json!({
+                "reason": "Encoding+Rebuilding+Swapping+Verifying not yet implemented (Layer 4 phase 2)",
+            }),
+        )?;
+
+        Err(YantrikDbError::Inference(format!(
+            "db.reembed() Layer 4 phase 1: Probing complete, but Encoding/Rebuilding/\
+             Swapping/Verifying phases are pending implementation (issue #41 Layer 4 phase 2). \
+             Dry-run mode and same-name no-op work; real migration requires the next checkpoint."
+        )))
+    }
+
+    /// **Issue #41 — read-only status of an in-flight reembed.**
+    /// Returns `None` if no reembed is active. Reads from
+    /// `meta.reembed_state` (the durable summary row).
+    ///
+    /// Layer 4 phase 1: returns minimal status (phase + old/new names
+    /// + start time + write policy). Phase 2 will populate the
+    /// memories_total / memories_encoded counts once Encoding is
+    /// implemented.
+    pub fn reembed_status(&self) -> Option<ReembedStatus> {
+        let conn = self.read_conn();
+        let payload_json: Option<String> = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'reembed_state'",
+                [],
+                |row| row.get(0),
+            )
+            .ok();
+        let payload: serde_json::Value = serde_json::from_str(&payload_json?).ok()?;
+
+        let generation = payload.get("generation")?.as_u64()?;
+        let phase = ReembedPhase::parse(payload.get("phase")?.as_str()?)?;
+        let old_name = payload
+            .get("old_embedder")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let new_name = payload
+            .get("new_embedder_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let old_dim = payload
+            .get("old_dim")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0) as usize;
+        let started_at_unix = payload
+            .get("started_at_unix")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let started_at = std::time::UNIX_EPOCH
+            + std::time::Duration::from_secs_f64(started_at_unix.max(0.0));
+        let write_policy = match payload.get("write_policy").and_then(|v| v.as_str()) {
+            Some("Pause") => ReembedWritePolicy::Pause,
+            _ => ReembedWritePolicy::Queue,
+        };
+
+        Some(ReembedStatus {
+            generation,
+            phase,
+            old_embedder: old_name,
+            old_embedder_digest: String::new(),
+            new_embedder: new_name,
+            new_embedder_digest: String::new(),
+            old_dim,
+            new_dim: old_dim,
+            memories_total: 0,
+            memories_encoded: 0,
+            queued_writes: 0,
+            checkpoint_rid: None,
+            started_at,
+            last_event_at: started_at,
+            last_error: None,
+            write_policy,
+        })
+    }
+
+    /// Write a row to `reembed_events` (durable audit log). Called at
+    /// each phase transition.
+    pub(crate) fn write_reembed_event(
+        &self,
+        generation: u64,
+        phase: ReembedPhase,
+        timestamp_unix_secs: f64,
+        payload: &serde_json::Value,
+    ) -> Result<()> {
+        use rusqlite::params;
+        let payload_str = serde_json::to_string(payload)?;
+        let conn = self.conn();
+        conn.execute(
+            "INSERT INTO reembed_events (generation, phase, timestamp, payload_json) \
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                generation as i64,
+                phase.as_str(),
+                timestamp_unix_secs,
+                payload_str
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Write `meta.reembed_state` with the current job summary JSON.
+    pub(crate) fn write_reembed_state_meta(
+        &self,
+        state_json: &serde_json::Value,
+    ) -> Result<()> {
+        use rusqlite::params;
+        let s = serde_json::to_string(state_json)?;
+        let conn = self.conn();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('reembed_state', ?1)",
+            params![s],
+        )?;
+        Ok(())
+    }
+
+    /// Clear `meta.reembed_state`, signaling no in-flight reembed.
+    pub(crate) fn clear_reembed_state_meta(&self) -> Result<()> {
+        let conn = self.conn();
+        conn.execute("DELETE FROM meta WHERE key = 'reembed_state'", [])?;
+        Ok(())
+    }
+}
+
+fn systime_to_unix_secs(t: SystemTime) -> f64 {
+    t.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+// ─────────────────────────────────────────────────────────────────────
 // Tests
 // ─────────────────────────────────────────────────────────────────────
 
@@ -663,6 +951,148 @@ mod tests {
         assert_eq!(s.hnsw_m, 16);
         assert_eq!(s.hnsw_ef_construction, 200);
         assert_eq!(s.hnsw_ef_search, 50);
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // Layer 4 phase 1: db.reembed() entry-point tests
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Helper Embedder for reembed phase-1 tests — has a fingerprint
+    /// so the engine's set_embedder can attach it as Known provenance.
+    struct PhaseTestEmbedder {
+        pub dim: usize,
+        pub fp: String,
+        pub name: String,
+    }
+
+    impl crate::types::Embedder for PhaseTestEmbedder {
+        fn embed(
+            &self,
+            _text: &str,
+        ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>>
+        {
+            Ok(vec![0.1_f32; self.dim])
+        }
+        fn dim(&self) -> usize {
+            self.dim
+        }
+        fn fingerprint(&self) -> Option<String> {
+            Some(self.fp.clone())
+        }
+        fn name(&self) -> Option<String> {
+            Some(self.name.clone())
+        }
+    }
+
+    #[test]
+    fn reembed_same_name_is_no_op() {
+        // Caller asks for the embedder already loaded — must short-
+        // circuit immediately without writing meta.reembed_state or
+        // even a Probing audit event, and return encoded_count=0.
+        let mut db = crate::YantrikDB::new(":memory:", 8).unwrap();
+        db.set_embedder(Box::new(PhaseTestEmbedder {
+            dim: 8,
+            fp: "sha256:same".to_string(),
+            name: "model-x".to_string(),
+        }))
+        .unwrap();
+
+        let report = db.reembed("model-x", ReembedOptions::default()).unwrap();
+        assert_eq!(report.encoded_count, 0, "same-name no-op encodes 0");
+        assert_eq!(report.skipped_count, 0);
+        assert_eq!(report.old_embedder, "model-x");
+        assert_eq!(report.new_embedder, "model-x");
+        // No meta.reembed_state row written — confirms full no-op shape.
+        assert!(db.reembed_status().is_none(), "no-op must not leave reembed_status");
+    }
+
+    #[test]
+    fn reembed_dry_run_returns_predicted_report_and_clears_state() {
+        // Dry-run: Probing event is written (audit trail), but
+        // meta.reembed_state is NOT (no in-flight signal), and the
+        // call returns the predicted ReembedReport.
+        let mut db = crate::YantrikDB::new(":memory:", 8).unwrap();
+        db.set_embedder(Box::new(PhaseTestEmbedder {
+            dim: 8,
+            fp: "sha256:original".to_string(),
+            name: "original-model".to_string(),
+        }))
+        .unwrap();
+
+        let opts = ReembedOptions {
+            dry_run: true,
+            ..Default::default()
+        };
+        let report = db.reembed("target-model", opts).unwrap();
+        assert_eq!(report.old_embedder, "original-model");
+        assert_eq!(report.new_embedder, "target-model");
+        // Dry-run must NOT leave an in-flight reembed signal.
+        assert!(
+            db.reembed_status().is_none(),
+            "dry-run must NOT write meta.reembed_state"
+        );
+
+        // The Probing audit event IS in reembed_events (dry-runs are
+        // observable in the event log — intentional design choice).
+        let event_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM reembed_events WHERE phase = 'Probing'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(event_count >= 1, "Probing event must be in audit log even for dry-run");
+    }
+
+    #[test]
+    fn reembed_non_no_op_fails_at_layer_4_phase_2_boundary_with_clean_state() {
+        // Layer 4 phase 1 boundary check: a real (non-no-op,
+        // non-dry-run) reembed call enters Probing, writes
+        // meta.reembed_state, then aborts at the Encoding boundary
+        // returning Err. CRITICAL: meta.reembed_state must be CLEARED
+        // before the Err is returned so the DB isn't left mid-reembed.
+        let mut db = crate::YantrikDB::new(":memory:", 8).unwrap();
+        db.set_embedder(Box::new(PhaseTestEmbedder {
+            dim: 8,
+            fp: "sha256:original".to_string(),
+            name: "original-model".to_string(),
+        }))
+        .unwrap();
+
+        let err = db
+            .reembed("target-model", ReembedOptions::default())
+            .unwrap_err();
+        // Specific error class — layer 4 phase 2 boundary signal.
+        match err {
+            crate::error::YantrikDbError::Inference(msg) => {
+                assert!(
+                    msg.contains("Layer 4 phase 2"),
+                    "expected layer-4-phase-2 boundary message, got: {msg}"
+                );
+            }
+            other => panic!("expected Inference error at phase 2 boundary, got {other:?}"),
+        }
+
+        // Critical: meta.reembed_state must have been cleared on the
+        // way out. Else the next open() would see an in-flight reembed
+        // and try to resume into an unimplemented phase.
+        assert!(
+            db.reembed_status().is_none(),
+            "meta.reembed_state must be cleared on layer-4-phase-2 abort"
+        );
+
+        // The Aborted event MUST be in the audit log with the
+        // boundary reason.
+        let aborted_count: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM reembed_events WHERE phase = 'Aborted'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(aborted_count, 1, "Aborted event must be logged");
     }
 
     #[test]
