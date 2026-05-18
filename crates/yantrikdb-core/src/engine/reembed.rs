@@ -491,6 +491,18 @@ pub struct SearchState {
     pub hnsw_m: u32,
     pub hnsw_ef_construction: u32,
     pub hnsw_ef_search: u32,
+
+    /// **Brainstorm-4 design pivot.** The active vector index lives
+    /// INSIDE SearchState so search_state.store() is the single atomic
+    /// publication unit. Holding two separate ArcSwaps (search_state +
+    /// vec_index) would have created a split-brain window — readers
+    /// could observe new embedder/dim with old index or vice versa.
+    /// Moving vec_index in here eliminates the class.
+    ///
+    /// Arc shared with the engine's prior `vec_index` field (now
+    /// retired). DeltaIndex's internal locks handle concurrent
+    /// append/search; this Arc is just for ArcSwap-friendly publication.
+    pub vec_index: Arc<crate::vector::delta_index::DeltaIndex>,
 }
 
 impl SearchState {
@@ -503,6 +515,7 @@ impl SearchState {
         hnsw_m: u32,
         hnsw_ef_construction: u32,
         hnsw_ef_search: u32,
+        vec_index: Arc<crate::vector::delta_index::DeltaIndex>,
     ) -> Self {
         SearchState {
             index_embedding: EmbeddingProvenance::ExternalOrUnknown { dim },
@@ -514,6 +527,7 @@ impl SearchState {
             hnsw_m,
             hnsw_ef_construction,
             hnsw_ef_search,
+            vec_index,
         }
     }
 
@@ -936,7 +950,10 @@ mod tests {
         // embedder has populated the index yet), embedder is None
         // (caller may pass pre-computed vectors), generation=0,
         // covers_through_seq=0.
-        let s = SearchState::initial(384, 16, 200, 50);
+        let vec_index = Arc::new(
+            crate::vector::delta_index::DeltaIndex::new(384),
+        );
+        let s = SearchState::initial(384, 16, 200, 50, vec_index);
         assert_eq!(s.dim(), 384);
         assert!(matches!(
             s.index_embedding,
@@ -951,6 +968,10 @@ mod tests {
         assert_eq!(s.hnsw_m, 16);
         assert_eq!(s.hnsw_ef_construction, 200);
         assert_eq!(s.hnsw_ef_search, 50);
+        // Brainstorm-4: SearchState owns its DeltaIndex; the freshly-
+        // constructed initial state has a delta-only index with no
+        // entries yet.
+        assert_eq!(s.vec_index.len(), 0);
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -1102,6 +1123,8 @@ mod tests {
         // drift between "what we think the dim is" and "what's
         // actually in the index." Failing this test means someone
         // re-added the standalone field.
+        let vec_index_known =
+            Arc::new(crate::vector::delta_index::DeltaIndex::new(768));
         let s_known = SearchState {
             index_embedding: EmbeddingProvenance::Known {
                 name: None,
@@ -1116,8 +1139,11 @@ mod tests {
             hnsw_m: 16,
             hnsw_ef_construction: 200,
             hnsw_ef_search: 50,
+            vec_index: vec_index_known,
         };
         assert_eq!(s_known.dim(), 768);
+        let vec_index_unknown =
+            Arc::new(crate::vector::delta_index::DeltaIndex::new(128));
         let s_unknown = SearchState {
             index_embedding: EmbeddingProvenance::ExternalOrUnknown { dim: 128 },
             embedder: None,
@@ -1128,6 +1154,7 @@ mod tests {
             hnsw_m: 16,
             hnsw_ef_construction: 200,
             hnsw_ef_search: 50,
+            vec_index: vec_index_unknown,
         };
         assert_eq!(s_unknown.dim(), 128);
     }

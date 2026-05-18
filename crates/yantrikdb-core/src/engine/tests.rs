@@ -9700,11 +9700,16 @@ fn set_embedder_test_6_external_or_unknown_compat_attach_does_not_claim_provenan
 fn set_embedder_test_7_has_embedder_derives_from_search_state() {
     // Locks the brainstorm-3 invariant: has_embedder() reads from
     // search_state, NOT from the (now-retired) legacy embedder slot.
-    let mut db = YantrikDB::new(":memory:", 64).unwrap();
+    //
+    // Opens at dim=384 so the bundled-embedder auto-attach (which is
+    // dim=64 and silently fails on dim mismatch) cannot pollute the
+    // "fresh engine, no embedder" precondition. With dim=64 the test
+    // would race against the `bundled-embedder` cargo feature.
+    let mut db = YantrikDB::new(":memory:", 384).unwrap();
     assert!(!db.has_embedder(), "fresh engine: no embedder");
     use mode_test_embedders::FakeEmbedder;
     db.set_embedder(Box::new(FakeEmbedder {
-        dim: 64,
+        dim: 384,
         fp: Some("sha256:x".to_string()),
         name: None,
         sentinel: 0.42,

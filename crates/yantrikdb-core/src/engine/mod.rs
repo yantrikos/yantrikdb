@@ -124,7 +124,24 @@ pub struct YantrikDB {
     pub(crate) hlc: Mutex<HLC>,
     pub(crate) actor_id: String,
     pub(crate) scoring_cache: RwLock<HashMap<String, ScoringRow>>,
-    pub(crate) vec_index: crate::vector::delta_index::DeltaIndex,
+    /// **Issue #41 brainstorm-4 transitional shape.** Held as
+    /// `Arc<DeltaIndex>` (not bare `DeltaIndex`) so this slot can share
+    /// the exact same `DeltaIndex` allocation as
+    /// `SearchState.vec_index` — `Arc::clone` here is the publication
+    /// primitive. All `DeltaIndex` methods take `&self`, so the
+    /// `Arc<_>` deref-coerces and existing `self.vec_index.X()` call
+    /// sites compile unchanged. A follow-up checkpoint migrates hot
+    /// paths to load `Arc<SearchState>` once per operation and use
+    /// `state.vec_index` (single atomic snapshot — provenance + dim +
+    /// index all in one Arc), at which point this standalone field
+    /// retires. Until then, the field exists only because it is also
+    /// the field name on `YantrikDB` that ~20 call sites still
+    /// reference; the underlying `DeltaIndex` is the same object as
+    /// the one in `SearchState`, so today there is no split-brain
+    /// possible (reembed phase 2 swap, which would publish a *new*
+    /// `DeltaIndex` and create the split-brain risk, has not landed
+    /// yet — the migration sweep precedes it).
+    pub(crate) vec_index: std::sync::Arc<crate::vector::delta_index::DeltaIndex>,
     /// Monotonic seq counter for vec_index appends/tombstones.
     /// Used by Phase 6 RYW (recall_with_seq); also feeds DeltaIndex's
     /// per-entry seq tag for compaction ordering.
@@ -637,6 +654,33 @@ impl YantrikDB {
             })
             .unwrap_or(0);
 
+        // Build the DeltaIndex once, wrap in Arc, then share the same
+        // Arc between the standalone `vec_index` field and the
+        // initial `SearchState.vec_index` slot. This is the
+        // brainstorm-4 transitional shape: today both paths read the
+        // same `DeltaIndex` object so there is no split-brain; once
+        // the call-site migration sweep retires the standalone field,
+        // `SearchState.vec_index` is the only path and reembed phase
+        // 2 can republish a new `DeltaIndex` atomically.
+        let vec_index_arc: std::sync::Arc<crate::vector::delta_index::DeltaIndex> = {
+            let delta_max = std::env::var("YANTRIKDB_DELTA_MAX")
+                .ok()
+                .and_then(|v| v.parse::<usize>().ok())
+                .unwrap_or(crate::vector::delta_index::DEFAULT_DELTA_MAX);
+            let max_dirty_age = std::env::var("YANTRIKDB_MAX_DIRTY_AGE_SECS")
+                .ok()
+                .and_then(|v| v.parse::<u64>().ok())
+                .map(std::time::Duration::from_secs)
+                .unwrap_or(crate::vector::delta_index::DEFAULT_MAX_DIRTY_AGE);
+            std::sync::Arc::new(
+                crate::vector::delta_index::DeltaIndex::from_cold_with_age(
+                    vec_index,
+                    delta_max,
+                    max_dirty_age,
+                ),
+            )
+        };
+
         Ok(Self {
             conn: Mutex::new(conn),
             read_conns,
@@ -645,22 +689,7 @@ impl YantrikDB {
             hlc: Mutex::new(HLC::new(node_id)),
             actor_id,
             scoring_cache: RwLock::new(scoring_cache),
-            vec_index: {
-                let delta_max = std::env::var("YANTRIKDB_DELTA_MAX")
-                    .ok()
-                    .and_then(|v| v.parse::<usize>().ok())
-                    .unwrap_or(crate::vector::delta_index::DEFAULT_DELTA_MAX);
-                let max_dirty_age = std::env::var("YANTRIKDB_MAX_DIRTY_AGE_SECS")
-                    .ok()
-                    .and_then(|v| v.parse::<u64>().ok())
-                    .map(std::time::Duration::from_secs)
-                    .unwrap_or(crate::vector::delta_index::DEFAULT_MAX_DIRTY_AGE);
-                crate::vector::delta_index::DeltaIndex::from_cold_with_age(
-                    vec_index,
-                    delta_max,
-                    max_dirty_age,
-                )
-            },
+            vec_index: std::sync::Arc::clone(&vec_index_arc),
             vec_seq: std::sync::atomic::AtomicU64::new(0),
             pending_op_count: std::sync::atomic::AtomicI64::new(initial_pending),
             visible_seq: dashmap::DashMap::new(),
@@ -695,6 +724,7 @@ impl YantrikDB {
                     16,
                     200,
                     50,
+                    std::sync::Arc::clone(&vec_index_arc),
                 ),
             )),
             index_write_lock: parking_lot::Mutex::new(()),
@@ -1034,6 +1064,11 @@ impl YantrikDB {
                 hnsw_m: state.hnsw_m,
                 hnsw_ef_construction: state.hnsw_ef_construction,
                 hnsw_ef_search: state.hnsw_ef_search,
+                // set_embedder never swaps the physical index — only
+                // embedder/provenance. Reuse the same Arc<DeltaIndex>
+                // so reembed phase 2 stays the only path that
+                // republishes a new `vec_index` (brainstorm-4 §1).
+                vec_index: std::sync::Arc::clone(&state.vec_index),
             }
         } else {
             match &state.index_embedding {
@@ -1058,6 +1093,7 @@ impl YantrikDB {
                         hnsw_m: state.hnsw_m,
                         hnsw_ef_construction: state.hnsw_ef_construction,
                         hnsw_ef_search: state.hnsw_ef_search,
+                        vec_index: std::sync::Arc::clone(&state.vec_index),
                     }
                 }
                 crate::engine::reembed::EmbeddingProvenance::ExternalOrUnknown { .. } => {
@@ -1075,6 +1111,7 @@ impl YantrikDB {
                         hnsw_m: state.hnsw_m,
                         hnsw_ef_construction: state.hnsw_ef_construction,
                         hnsw_ef_search: state.hnsw_ef_search,
+                        vec_index: std::sync::Arc::clone(&state.vec_index),
                     }
                 }
             }
