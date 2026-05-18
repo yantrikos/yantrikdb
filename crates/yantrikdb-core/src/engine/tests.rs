@@ -9249,6 +9249,32 @@ fn schema_v26_migration_replay_is_idempotent() {
 // ============================================================================
 
 #[test]
+fn search_state_initial_on_fresh_engine() {
+    // Issue #41 layer 2: fresh engine must initialize a SearchState with
+    // provenance=ExternalOrUnknown(embedding_dim) and no runtime embedder.
+    // The standalone embedding_dim field is still source of truth at THIS
+    // layer (retired in a later checkpoint); we only verify here that the
+    // new search_state field is initialized with the expected initial shape.
+    let db = YantrikDB::new(":memory:", 384).unwrap();
+    let state = db.search_state.load_full();
+    assert_eq!(
+        state.dim(),
+        384,
+        "initial dim must match constructor parameter"
+    );
+    assert!(matches!(
+        state.index_embedding,
+        crate::engine::reembed::EmbeddingProvenance::ExternalOrUnknown { dim: 384 }
+    ));
+    assert!(
+        !state.has_runtime_embedder(),
+        "fresh engine must have no runtime embedder until set_embedder*"
+    );
+    assert_eq!(state.generation, 0);
+    assert_eq!(state.covers_through_seq, 0);
+}
+
+#[test]
 fn schema_v27_fresh_install_has_reembed_surfaces() {
     // Fresh DB takes the SCHEMA_SQL path. Locks the invariant that
     // SCHEMA_SQL stays in sync with MIGRATE_V26_TO_V27. If someone adds

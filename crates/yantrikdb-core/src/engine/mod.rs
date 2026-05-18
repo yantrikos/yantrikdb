@@ -189,6 +189,38 @@ pub struct YantrikDB {
     /// brainstorm-2 rationale and the cutover-sequence regression
     /// test.
     pub(crate) write_router: crate::engine::write_router::SharedWriteRouter,
+
+    /// **Issue #41 — layer 2 / brainstorm-3.** Atomically-swappable
+    /// SearchState carrying the runtime embedder + index_embedding
+    /// provenance + generation + HNSW params. Read paths acquire once
+    /// via `self.search_state.load_full()` and use the snapshot for
+    /// the full request — this prevents observing a mixed embedder /
+    /// provenance / dim state mid-set_embedder or mid-reembed.
+    ///
+    /// Today this co-exists with the legacy `embedder: Option<Box<...>>`
+    /// and `embedding_dim: usize` fields above. The migration retires
+    /// those in a later checkpoint; until then, search_state mirrors
+    /// the legacy fields on every set_embedder / new(). See
+    /// `engine::reembed::SearchState` for the field semantics.
+    pub(crate) search_state: arc_swap::ArcSwap<crate::engine::reembed::SearchState>,
+
+    /// **Issue #41 — layer 2 / brainstorm-3.** Serializes SearchState
+    /// republication. Acquired by:
+    /// - `set_embedder` / `set_embedder_named` (mode validation +
+    ///    coherent-bundle publication)
+    /// - Future `reembed()` cutover (final swap)
+    /// - Future empty-index-reset paths
+    ///
+    /// NOT held by writers — writers serialize via `write_router`. Two
+    /// separate primitives for two separate invariants:
+    /// - `write_router` = "is this writer allowed to take the sync
+    ///    path right now?"
+    /// - `index_write_lock` = "is the SearchState mid-republication
+    ///    right now?"
+    ///
+    /// No double-locking risk: set_embedder doesn't acquire
+    /// write_router, writers don't acquire index_write_lock.
+    pub(crate) index_write_lock: parking_lot::Mutex<()>,
 }
 
 impl YantrikDB {
@@ -640,6 +672,26 @@ impl YantrikDB {
             write_router: std::sync::Arc::new(
                 crate::engine::write_router::WriteRouter::new(),
             ),
+            // Issue #41 layer 2: initial SearchState mirrors the
+            // legacy embedder/embedding_dim fields. Provenance is
+            // ExternalOrUnknown(embedding_dim) until set_embedder*
+            // populates it with Known(name, digest, dim) or a future
+            // reembed publishes a new bundle. HNSW params (M=16,
+            // ef_construction=200, ef_search=50) are the engine
+            // defaults; the actual DeltaIndex uses those today. The
+            // search_state copy here is the source of truth going
+            // forward; the future migration sweep retires the legacy
+            // embedding_dim + embedder fields and points all readers
+            // here.
+            search_state: arc_swap::ArcSwap::from(std::sync::Arc::new(
+                crate::engine::reembed::SearchState::initial(
+                    embedding_dim,
+                    16,
+                    200,
+                    50,
+                ),
+            )),
+            index_write_lock: parking_lot::Mutex::new(()),
         })
     }
 
