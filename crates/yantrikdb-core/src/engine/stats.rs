@@ -86,7 +86,7 @@ impl YantrikDB {
             pending_triggers,
             active_patterns,
             scoring_cache_entries: self.scoring_cache.read().len(),
-            vec_index_entries: self.vec_index.len(),
+            vec_index_entries: self.search_state.load().vec_index.len(),
             graph_index_entities: self.graph_index.read().entity_count(),
             graph_index_edges: self.graph_index.read().edge_count(),
         })

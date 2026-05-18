@@ -43,7 +43,8 @@ impl YantrikDB {
             .vec_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        self.vec_index.tombstone(rid, seq);
+        // **Issue #41 brainstorm-4 §1.** Snapshot through SearchState.
+        self.search_state.load().vec_index.tombstone(rid, seq);
 
         self.log_op(
             "archive",
@@ -95,7 +96,11 @@ impl YantrikDB {
             .vec_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        self.vec_index
+        // **Issue #41 brainstorm-4 §1.** Hydration writes land on the
+        // active-generation DeltaIndex via SearchState.
+        self.search_state
+            .load()
+            .vec_index
             .append(rid.to_string(), embedding.clone(), seq)?;
 
         self.log_op(
@@ -138,7 +143,11 @@ impl YantrikDB {
             .vec_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        self.vec_index
+        // **Issue #41 brainstorm-4 §1.** Replication-backfill writes
+        // route through the active SearchState's DeltaIndex.
+        self.search_state
+            .load()
+            .vec_index
             .append(rid.to_string(), embedding.to_vec(), seq)
             .map(|_| ())
     }

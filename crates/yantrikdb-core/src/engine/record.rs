@@ -72,6 +72,18 @@ impl YantrikDB {
         // guard is held; RAII Drop at function exit decrements inflight.
         let _guard = sync_guard;
 
+        // **Issue #41 brainstorm-4 §1.** Load SearchState once for
+        // this operation. The Arc<DeltaIndex> in `state.vec_index` is
+        // captured here so the rest of the function — SQL insert,
+        // vec_index.append, oplog log — all references the same
+        // generation-anchored index. The follow-up checkpoint adds
+        // a generation revalidation against `state.generation` at
+        // commit time (brainstorm-4 §2). Until then, the standalone
+        // field and `state.vec_index` point to the same DeltaIndex
+        // so this snapshot pattern is forward-compatible with no
+        // behavior change.
+        let state = self.search_state.load_full();
+
         let rid = crate::id::new_id();
         let ts = now();
         let emb_blob = serialize_f32(embedding);
@@ -133,7 +145,8 @@ impl YantrikDB {
             .vec_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        self.vec_index
+        state
+            .vec_index
             .append(rid.clone(), embedding.to_vec(), seq)?;
         self.bump_visible_seq(namespace, seq);
 
@@ -220,6 +233,11 @@ impl YantrikDB {
         if inputs.is_empty() {
             return Ok(vec![]);
         }
+
+        // **Issue #41 brainstorm-4 §1.** SearchState snapshot for the
+        // batch — every append in this batch lands on the same
+        // generation-anchored DeltaIndex.
+        let state = self.search_state.load_full();
 
         // Clone active sessions map before acquiring conn
         let sessions = self.active_sessions.read().clone();
@@ -371,7 +389,8 @@ impl YantrikDB {
                 .vec_seq
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 + 1;
-            self.vec_index
+            state
+                .vec_index
                 .append(rid.clone(), input.embedding.clone(), seq)?;
             self.bump_visible_seq(&input.namespace, seq);
         }
@@ -489,6 +508,11 @@ impl YantrikDB {
             });
         }
 
+        // **Issue #41 brainstorm-4 §1.** SearchState snapshot for the
+        // determinstic-replay path. The replicated write lands on the
+        // currently-active generation's DeltaIndex.
+        let state = self.search_state.load_full();
+
         // Caller-supplied timestamp — NEVER call now() on this path.
         let ts_secs = (created_at_unix_micros as f64) / 1_000_000.0;
         let emb_blob = serialize_f32(embedding);
@@ -577,7 +601,8 @@ impl YantrikDB {
         // (single-node retry); the compactor's highest-seq-wins rule
         // converges state identically on both paths.
         let seq = self.assign_seq(seq);
-        self.vec_index
+        state
+            .vec_index
             .append(rid.to_string(), embedding.to_vec(), seq)?;
         self.bump_visible_seq(namespace, seq);
 

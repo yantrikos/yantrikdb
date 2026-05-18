@@ -91,11 +91,15 @@ use crate::types::*;
 ///
 /// Thread-safe: all internal state is protected by `Mutex` or `RwLock`.
 /// `conn` uses `Mutex` because `rusqlite::Connection` is `!Sync`.
-/// Read-heavy fields (`scoring_cache`, `vec_index`, `graph_index`,
+/// Read-heavy fields (`scoring_cache`, `graph_index`,
 /// `active_sessions`) use `RwLock` for concurrent reader throughput.
+/// The vector index lives inside `search_state` as `Arc<DeltaIndex>`
+/// (issue #41 brainstorm-4 §1) — `DeltaIndex` carries its own
+/// internal locks, and `ArcSwap<SearchState>` is the atomic
+/// publication wrapper.
 ///
 /// **Lock ordering** (always acquire in this order to prevent deadlocks):
-///   conn → hlc → scoring_cache → vec_index → graph_index → active_sessions
+///   conn → hlc → scoring_cache → SearchState.vec_index → graph_index → active_sessions
 ///
 /// ## Concurrent recall (read pool)
 ///
@@ -124,25 +128,15 @@ pub struct YantrikDB {
     pub(crate) hlc: Mutex<HLC>,
     pub(crate) actor_id: String,
     pub(crate) scoring_cache: RwLock<HashMap<String, ScoringRow>>,
-    /// **Issue #41 brainstorm-4 transitional shape.** Held as
-    /// `Arc<DeltaIndex>` (not bare `DeltaIndex`) so this slot can share
-    /// the exact same `DeltaIndex` allocation as
-    /// `SearchState.vec_index` — `Arc::clone` here is the publication
-    /// primitive. All `DeltaIndex` methods take `&self`, so the
-    /// `Arc<_>` deref-coerces and existing `self.vec_index.X()` call
-    /// sites compile unchanged. A follow-up checkpoint migrates hot
-    /// paths to load `Arc<SearchState>` once per operation and use
-    /// `state.vec_index` (single atomic snapshot — provenance + dim +
-    /// index all in one Arc), at which point this standalone field
-    /// retires. Until then, the field exists only because it is also
-    /// the field name on `YantrikDB` that ~20 call sites still
-    /// reference; the underlying `DeltaIndex` is the same object as
-    /// the one in `SearchState`, so today there is no split-brain
-    /// possible (reembed phase 2 swap, which would publish a *new*
-    /// `DeltaIndex` and create the split-brain risk, has not landed
-    /// yet — the migration sweep precedes it).
-    pub(crate) vec_index: std::sync::Arc<crate::vector::delta_index::DeltaIndex>,
-    /// Monotonic seq counter for vec_index appends/tombstones.
+    // Issue #41 brainstorm-4 §1: standalone `vec_index` field retired.
+    // The vector index now lives ONLY inside `search_state` as
+    // `Arc<DeltaIndex>`, so `search_state.store(new_state)` becomes the
+    // single atomic publication unit for (embedder + provenance + dim
+    // + generation + vec_index). Reembed Phase-2 swap can republish a
+    // brand-new `DeltaIndex` atomically with the rest of SearchState
+    // without any split-brain window. Readers do
+    // `self.search_state.load[_full]().vec_index.X(...)`.
+    /// Monotonic seq counter for SearchState.vec_index appends/tombstones.
     /// Used by Phase 6 RYW (recall_with_seq); also feeds DeltaIndex's
     /// per-entry seq tag for compaction ordering.
     pub(crate) vec_seq: std::sync::atomic::AtomicU64,
@@ -654,14 +648,12 @@ impl YantrikDB {
             })
             .unwrap_or(0);
 
-        // Build the DeltaIndex once, wrap in Arc, then share the same
-        // Arc between the standalone `vec_index` field and the
-        // initial `SearchState.vec_index` slot. This is the
-        // brainstorm-4 transitional shape: today both paths read the
-        // same `DeltaIndex` object so there is no split-brain; once
-        // the call-site migration sweep retires the standalone field,
-        // `SearchState.vec_index` is the only path and reembed phase
-        // 2 can republish a new `DeltaIndex` atomically.
+        // Build the DeltaIndex once, wrap in Arc, and move it into the
+        // initial `SearchState`. After issue #41 brainstorm-4 §1, the
+        // SearchState is the only owner of the index — there is no
+        // standalone field anymore. Reembed Phase-2 can later publish
+        // a brand-new `DeltaIndex` atomically with the rest of the
+        // SearchState bundle via `search_state.store(new_state)`.
         let vec_index_arc: std::sync::Arc<crate::vector::delta_index::DeltaIndex> = {
             let delta_max = std::env::var("YANTRIKDB_DELTA_MAX")
                 .ok()
@@ -689,7 +681,6 @@ impl YantrikDB {
             hlc: Mutex::new(HLC::new(node_id)),
             actor_id,
             scoring_cache: RwLock::new(scoring_cache),
-            vec_index: std::sync::Arc::clone(&vec_index_arc),
             vec_seq: std::sync::atomic::AtomicU64::new(0),
             pending_op_count: std::sync::atomic::AtomicI64::new(initial_pending),
             visible_seq: dashmap::DashMap::new(),
@@ -724,7 +715,7 @@ impl YantrikDB {
                     16,
                     200,
                     50,
-                    std::sync::Arc::clone(&vec_index_arc),
+                    vec_index_arc,
                 ),
             )),
             index_write_lock: parking_lot::Mutex::new(()),
@@ -916,13 +907,13 @@ impl YantrikDB {
     /// engine capacity — see CONCURRENCY.md and the cross-stack rule
     /// "engine pressure suppresses enrichment" (saga task 16).
     pub fn delta_max(&self) -> usize {
-        self.vec_index.delta_max()
+        self.search_state.load().vec_index.delta_max()
     }
 
     /// Current delta-tier length (live entries + tombstone markers).
     /// Pairs with `delta_max()` for pressure-ratio computation.
     pub fn delta_len(&self) -> usize {
-        self.vec_index.delta_len()
+        self.search_state.load().vec_index.delta_len()
     }
 
     /// Current cold-tier length (entries that have been merged into
@@ -930,7 +921,7 @@ impl YantrikDB {
     /// hot/cold split — most reads against a healthy engine should
     /// hit cold rather than the linear delta scan.
     pub fn cold_len(&self) -> usize {
-        self.vec_index.cold_len()
+        self.search_state.load().vec_index.cold_len()
     }
 
     /// Get the embedding dimension.

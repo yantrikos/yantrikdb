@@ -218,8 +218,28 @@ fn compactor_loop(weak: Weak<YantrikDB>, shutdown: Arc<AtomicBool>) {
             break;
         };
 
-        if db.vec_index.should_compact() {
-            match db.vec_index.compact() {
+        // **Issue #41 brainstorm-4 §1.** Load the SearchState snapshot
+        // once, extract the Arc<DeltaIndex>, drop the SearchState Arc
+        // BEFORE the long blocking wait. Holding Arc<SearchState>
+        // across the wait would pin the old HNSW cold tier in
+        // memory across a reembed swap (multi-GB on large DBs);
+        // holding Arc<DeltaIndex> only is bounded — the DeltaIndex is
+        // the working set, not the historical state.
+        //
+        // If a Phase-2 swap publishes a NEW SearchState mid-iteration,
+        // this iteration's `vec_index` Arc is the OLD DeltaIndex. The
+        // install_cold call (inside compact) writes to the OLD
+        // DeltaIndex's internal cold slot — harmless waste, not
+        // corruption, because the OLD DeltaIndex is no longer the
+        // published vec_index. The next loop iteration loads the NEW
+        // SearchState and operates on the NEW DeltaIndex.
+        let vec_index = {
+            let state = db.search_state.load_full();
+            std::sync::Arc::clone(&state.vec_index)
+        };
+
+        if vec_index.should_compact() {
+            match vec_index.compact() {
                 Ok(0) => {}
                 Ok(n) => {
                     tracing::debug!(applied = n, "compaction drained delta into cold");
@@ -238,7 +258,8 @@ fn compactor_loop(weak: Weak<YantrikDB>, shutdown: Arc<AtomicBool>) {
         // shutdown. yantrikdb-server bench (msg b9c98a4d) showed
         // the unconditional sleep racing the delta refill at
         // 1000 wps; this closes that race.
-        let _ = db.vec_index.wait_for_compaction_signal(COMPACTOR_INTERVAL);
+        let _ = vec_index.wait_for_compaction_signal(COMPACTOR_INTERVAL);
+        drop(vec_index);
         drop(db);
     }
 
@@ -407,7 +428,9 @@ mod tests {
                 .vec_seq
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 + 1;
-            db.vec_index
+            db.search_state
+                .load()
+                .vec_index
                 .append(format!("rid_{i}"), normalized, seq)
                 .unwrap();
         }
@@ -432,13 +455,14 @@ mod tests {
         // variance, still fails fast if the compactor is genuinely
         // stuck.
         let mut tries = 0;
-        while db.vec_index.delta_len() >= 128 && tries < 300 {
+        while db.search_state.load().vec_index.delta_len() >= 128 && tries < 300 {
             std::thread::sleep(Duration::from_millis(100));
             tries += 1;
         }
 
-        let cold = db.vec_index.cold_len();
-        let delta = db.vec_index.delta_len();
+        let state = db.search_state.load_full();
+        let cold = state.vec_index.cold_len();
+        let delta = state.vec_index.delta_len();
         assert!(
             delta < 128,
             "compactor should have drained delta below half-cap within 30s, \

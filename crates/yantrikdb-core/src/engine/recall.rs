@@ -169,9 +169,14 @@ impl YantrikDB {
         // Step 1: Vector candidate generation via HNSW
         // Fetch a large pool to ensure diverse, high-quality candidates survive MMR filtering.
         let fetch_k = (top_k * 20).min(500);
+        // **Issue #41 brainstorm-4 §1.** Snapshot SearchState once for
+        // the full recall path so the HNSW search sees the same
+        // generation-anchored index every time it's queried within
+        // this call.
+        let state = self.search_state.load_full();
         let vec_results = {
             let _span = tracing::debug_span!("hnsw_search", fetch_k).entered();
-            self.vec_index.search(query_embedding, fetch_k)?
+            state.vec_index.search(query_embedding, fetch_k)?
         };
 
         if vec_results.is_empty() {
@@ -2289,7 +2294,11 @@ impl YantrikDB {
         let t_vec = Instant::now();
         let ts = now();
         let fetch_k = (top_k * 20).min(500);
-        let vec_results = self.vec_index.search(query_embedding, fetch_k)?;
+        // **Issue #41 brainstorm-4 §1.** SearchState snapshot for the
+        // profiled-recall variant. Same generation-anchoring contract
+        // as `recall_ranked`.
+        let state = self.search_state.load_full();
+        let vec_results = state.vec_index.search(query_embedding, fetch_k)?;
         let vec_search_ms = t_vec.elapsed().as_secs_f64() * 1000.0;
         let candidate_count = vec_results.len();
 

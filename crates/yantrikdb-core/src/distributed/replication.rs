@@ -314,7 +314,10 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
                     .vec_seq
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                     + 1;
-                db.vec_index.tombstone(rid, _seq);
+                // **Issue #41 brainstorm-4 §1.** Replication-applied
+                // tombstones land on the active SearchState's
+                // DeltaIndex.
+                db.search_state.load().vec_index.tombstone(rid, _seq);
                 db.graph_index.write().unlink_memory(rid);
             }
         }
@@ -368,7 +371,9 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
                         .vec_seq
                         .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                         + 1;
-                    db.vec_index.tombstone(loser, _seq);
+                    // **Issue #41 brainstorm-4 §1.** Active-generation
+                    // SearchState tombstone.
+                    db.search_state.load().vec_index.tombstone(loser, _seq);
                 }
             }
         }
@@ -414,7 +419,12 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
                     .vec_seq
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                     + 1;
-                db.vec_index.tombstone(original_rid, _seq);
+                // **Issue #41 brainstorm-4 §1.** Active-generation
+                // SearchState tombstone for correct's "original_rid".
+                db.search_state
+                    .load()
+                    .vec_index
+                    .tombstone(original_rid, _seq);
             }
         }
         "trigger_fire" => {

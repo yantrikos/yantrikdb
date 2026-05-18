@@ -537,8 +537,12 @@ fn mine_cross_domain_patterns(db: &YantrikDB, config: &PatternConfig) -> Result<
     // Also need domain for neighbors not in candidates
     // We'll query from DB as needed
 
+    // **Issue #41 brainstorm-4 §1.** Snapshot SearchState once for the
+    // pattern-detection scan so every neighbor query within this scan
+    // hits the same generation-anchored index.
+    let state = db.search_state.load_full();
     for (rid_a, domain_a, embedding) in &candidates {
-        let neighbors = match db.vec_index.search(embedding, 10) {
+        let neighbors = match state.vec_index.search(embedding, 10) {
             Ok(n) => n,
             Err(_) => continue,
         };
