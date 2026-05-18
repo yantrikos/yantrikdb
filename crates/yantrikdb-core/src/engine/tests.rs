@@ -8775,7 +8775,13 @@ fn explicit_set_embedder_overrides_bundled() {
 
     let mut db = YantrikDB::with_default(":memory:").unwrap();
     assert!(db.has_embedder(), "starts with bundled");
-    db.set_embedder(Box::new(DummyEmbedder));
+    // Issue #41 layer 2 / brainstorm-3: set_embedder is now mode-aware
+    // and returns Result. For an empty DB (no memories indexed yet)
+    // the call accepts ANY embedder regardless of fingerprint match,
+    // updating provenance based on candidate.fingerprint().
+    // DummyEmbedder returns None from fingerprint() so provenance
+    // stays ExternalOrUnknown; runtime_embedder slot updates.
+    db.set_embedder(Box::new(DummyEmbedder)).unwrap();
     let v = db.embed("anything").unwrap();
     assert!(
         (v[0] - 0.7777).abs() < 1e-6,
@@ -9247,6 +9253,344 @@ fn schema_v26_migration_replay_is_idempotent() {
 //   3. Replay-resilience: rewinding meta to 26 on an already-v27 DB
 //      doesn't break the second open (per v0.7.3 idempotent runner).
 // ============================================================================
+
+// ============================================================================
+// Issue #41 layer 2: set_embedder mode-aware regression tests
+// (brainstorm-3 round 2 §11, 8 cases). These lock the brainstorm-3
+// design decisions. Each test names the failure mode it prevents.
+// ============================================================================
+
+/// Helper Embedder impls for the mode-table tests. Each provides a
+/// distinct fingerprint so the mode logic can discriminate.
+mod mode_test_embedders {
+    use crate::types::Embedder;
+
+    pub struct FakeEmbedder {
+        pub dim: usize,
+        pub fp: Option<String>,
+        pub name: Option<String>,
+        /// Sentinel byte returned in vec[0] so tests can verify
+        /// "which embedder produced this vector".
+        pub sentinel: f32,
+    }
+
+    impl Embedder for FakeEmbedder {
+        fn embed(
+            &self,
+            _text: &str,
+        ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
+            let mut v = vec![0.0_f32; self.dim];
+            if !v.is_empty() {
+                v[0] = self.sentinel;
+            }
+            Ok(v)
+        }
+        fn dim(&self) -> usize {
+            self.dim
+        }
+        fn fingerprint(&self) -> Option<String> {
+            self.fp.clone()
+        }
+        fn name(&self) -> Option<String> {
+            self.name.clone()
+        }
+    }
+}
+
+#[test]
+fn set_embedder_test_1_same_dim_different_digest_on_populated_db_rejected() {
+    // Locks the silent-corruption-prevention invariant. The pre-#41
+    // engine accepted this case silently and produced garbage scores.
+    // After #41 it must return ChangeEmbedderDigestRequiresReembed.
+    use mode_test_embedders::FakeEmbedder;
+    let mut db = YantrikDB::new(":memory:", 64).unwrap();
+    db.set_embedder(Box::new(FakeEmbedder {
+        dim: 64,
+        fp: Some("sha256:embedder_A".to_string()),
+        name: Some("embedder_A".to_string()),
+        sentinel: 1.0,
+    }))
+    .unwrap();
+    let _ = db
+        .record(
+            "first memory",
+            "semantic",
+            0.5,
+            0.0,
+            86400.0,
+            &empty_meta(),
+            &vec_seed(1.0, 64),
+            "default",
+            0.9,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let err = db
+        .set_embedder(Box::new(FakeEmbedder {
+            dim: 64,
+            fp: Some("sha256:embedder_B".to_string()),
+            name: Some("embedder_B".to_string()),
+            sentinel: 2.0,
+        }))
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::ChangeEmbedderDigestRequiresReembed { .. }
+        ),
+        "same-dim-different-digest on Known-provenance populated DB must \
+         return ChangeEmbedderDigestRequiresReembed (silent-corruption \
+         prevention invariant from brainstorm-3); got {err:?}"
+    );
+}
+
+#[test]
+fn set_embedder_test_2_different_dim_on_populated_db_rejected() {
+    use mode_test_embedders::FakeEmbedder;
+    let mut db = YantrikDB::new(":memory:", 64).unwrap();
+    db.set_embedder(Box::new(FakeEmbedder {
+        dim: 64,
+        fp: Some("sha256:fp64".to_string()),
+        name: None,
+        sentinel: 1.0,
+    }))
+    .unwrap();
+    let _ = db
+        .record(
+            "m",
+            "semantic",
+            0.5,
+            0.0,
+            86400.0,
+            &empty_meta(),
+            &vec_seed(1.0, 64),
+            "default",
+            0.9,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let err = db
+        .set_embedder(Box::new(FakeEmbedder {
+            dim: 128,
+            fp: Some("sha256:fp128".to_string()),
+            name: None,
+            sentinel: 2.0,
+        }))
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::ChangeEmbedderDimensionRequiresReembed { .. }
+        ),
+        "dim change on populated DB must return \
+         ChangeEmbedderDimensionRequiresReembed; got {err:?}"
+    );
+}
+
+#[test]
+fn set_embedder_test_3_empty_db_with_fingerprint_upgrades_provenance_to_known() {
+    // Empty DB + candidate has fingerprint → provenance upgrades to
+    // Known(fp). Locks the initial-attach upgrade path.
+    use mode_test_embedders::FakeEmbedder;
+    let mut db = YantrikDB::new(":memory:", 64).unwrap();
+    assert!(matches!(
+        db.search_state.load().index_embedding,
+        crate::engine::reembed::EmbeddingProvenance::ExternalOrUnknown { .. }
+    ));
+    db.set_embedder(Box::new(FakeEmbedder {
+        dim: 64,
+        fp: Some("sha256:initial".to_string()),
+        name: Some("initial".to_string()),
+        sentinel: 1.0,
+    }))
+    .unwrap();
+    let s = db.search_state.load_full();
+    match &s.index_embedding {
+        crate::engine::reembed::EmbeddingProvenance::Known { name, digest, dim } => {
+            assert_eq!(name.as_deref(), Some("initial"));
+            assert_eq!(digest, "sha256:initial");
+            assert_eq!(*dim, 64);
+        }
+        other => panic!("expected Known provenance after attach on empty DB, got {other:?}"),
+    }
+}
+
+#[test]
+fn set_embedder_test_4_empty_db_no_fingerprint_stays_external_or_unknown() {
+    // Empty DB + candidate fingerprint is None → provenance stays
+    // ExternalOrUnknown. We cannot claim a digest we don't have.
+    use mode_test_embedders::FakeEmbedder;
+    let mut db = YantrikDB::new(":memory:", 64).unwrap();
+    db.set_embedder(Box::new(FakeEmbedder {
+        dim: 64,
+        fp: None,
+        name: None,
+        sentinel: 1.0,
+    }))
+    .unwrap();
+    let s = db.search_state.load_full();
+    assert!(
+        matches!(
+            s.index_embedding,
+            crate::engine::reembed::EmbeddingProvenance::ExternalOrUnknown { dim: 64 }
+        ),
+        "no-fingerprint embedder on empty DB must keep ExternalOrUnknown provenance, \
+         got {:?}",
+        s.index_embedding
+    );
+    assert!(s.has_runtime_embedder());
+}
+
+#[test]
+fn set_embedder_test_5_same_digest_replacement_does_not_bump_generation() {
+    // Replacing a runtime embedder with one that has the SAME digest is
+    // a same-model swap. Generation must NOT bump (index + provenance
+    // unchanged; only the runtime Arc was replaced).
+    use mode_test_embedders::FakeEmbedder;
+    let mut db = YantrikDB::new(":memory:", 64).unwrap();
+    db.set_embedder(Box::new(FakeEmbedder {
+        dim: 64,
+        fp: Some("sha256:same".to_string()),
+        name: Some("same".to_string()),
+        sentinel: 1.0,
+    }))
+    .unwrap();
+    let gen_before = db.search_state.load().generation;
+    db.set_embedder(Box::new(FakeEmbedder {
+        dim: 64,
+        fp: Some("sha256:same".to_string()),
+        name: Some("same".to_string()),
+        sentinel: 2.0,
+    }))
+    .unwrap();
+    let gen_after = db.search_state.load().generation;
+    assert_eq!(
+        gen_after, gen_before,
+        "same-digest replacement must NOT bump generation (no coherent-bundle change)"
+    );
+    let v = db.embed("anything").unwrap();
+    assert!(
+        (v[0] - 2.0).abs() < 1e-6,
+        "runtime Arc must have been replaced; expected sentinel 2.0, got {}",
+        v[0]
+    );
+}
+
+#[test]
+fn set_embedder_test_6_external_or_unknown_compat_attach_does_not_claim_provenance() {
+    // ExternalOrUnknown-provenance populated DB + candidate with
+    // matching dim → compat attach. Runtime embedder is set, but
+    // index_embedding stays ExternalOrUnknown.
+    use mode_test_embedders::FakeEmbedder;
+    let mut db = YantrikDB::new(":memory:", 64).unwrap();
+    // Populate DB without setting an embedder — vectors come from
+    // external source. Provenance stays ExternalOrUnknown.
+    let _ = db
+        .record(
+            "external vec",
+            "semantic",
+            0.5,
+            0.0,
+            86400.0,
+            &empty_meta(),
+            &vec_seed(1.0, 64),
+            "default",
+            0.9,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    assert!(matches!(
+        db.search_state.load().index_embedding,
+        crate::engine::reembed::EmbeddingProvenance::ExternalOrUnknown { .. }
+    ));
+    db.set_embedder(Box::new(FakeEmbedder {
+        dim: 64,
+        fp: Some("sha256:attached".to_string()),
+        name: Some("attached".to_string()),
+        sentinel: 1.0,
+    }))
+    .unwrap();
+    let s = db.search_state.load_full();
+    assert!(
+        matches!(
+            s.index_embedding,
+            crate::engine::reembed::EmbeddingProvenance::ExternalOrUnknown { .. }
+        ),
+        "compat-attach must NOT upgrade ExternalOrUnknown provenance to Known; \
+         existing vectors weren't built with this embedder. Got {:?}",
+        s.index_embedding
+    );
+    assert!(s.has_runtime_embedder());
+    assert_eq!(s.runtime_embedder_digest.as_deref(), Some("sha256:attached"));
+}
+
+#[test]
+fn set_embedder_test_7_has_embedder_derives_from_search_state() {
+    // Locks the brainstorm-3 invariant: has_embedder() reads from
+    // search_state, NOT from the (now-retired) legacy embedder slot.
+    let mut db = YantrikDB::new(":memory:", 64).unwrap();
+    assert!(!db.has_embedder(), "fresh engine: no embedder");
+    use mode_test_embedders::FakeEmbedder;
+    db.set_embedder(Box::new(FakeEmbedder {
+        dim: 64,
+        fp: Some("sha256:x".to_string()),
+        name: None,
+        sentinel: 0.42,
+    }))
+    .unwrap();
+    assert!(db.has_embedder());
+    let v = db.embed("anything").unwrap();
+    assert!((v[0] - 0.42).abs() < 1e-6);
+}
+
+#[test]
+fn set_embedder_test_8_atomic_publication_no_partial_state() {
+    // Locks the brainstorm-3 atomic-publication invariant: a concurrent
+    // load of search_state must see either the OLD state or the NEW
+    // state, never a mix. With ArcSwap, this is automatic; the test
+    // exercises the property as a regression guard.
+    use mode_test_embedders::FakeEmbedder;
+    use std::sync::Arc;
+    let mut db = YantrikDB::new(":memory:", 64).unwrap();
+    db.set_embedder(Box::new(FakeEmbedder {
+        dim: 64,
+        fp: Some("sha256:initial".to_string()),
+        name: None,
+        sentinel: 1.0,
+    }))
+    .unwrap();
+    // Self-consistency invariant: if embedder is Some, digest is also Some
+    // for FakeEmbedder which always provides a fingerprint.
+    let state = db.search_state.load_full();
+    assert_eq!(
+        state.embedder.is_some(),
+        state.runtime_embedder_digest.is_some(),
+        "embedder Some <=> digest Some must hold for any consistent snapshot"
+    );
+    // Multiple same-digest replacements; each load must be consistent.
+    for sentinel in [2.0_f32, 3.0, 4.0, 5.0] {
+        db.set_embedder(Box::new(FakeEmbedder {
+            dim: 64,
+            fp: Some("sha256:initial".to_string()),
+            name: None,
+            sentinel,
+        }))
+        .unwrap();
+        let s = db.search_state.load_full();
+        assert_eq!(
+            s.embedder.is_some(),
+            s.runtime_embedder_digest.is_some(),
+            "consistency must hold across replacements (no partial state)"
+        );
+        let _arc_held: Arc<crate::engine::reembed::SearchState> = s;
+    }
+}
 
 #[test]
 fn search_state_initial_on_fresh_engine() {

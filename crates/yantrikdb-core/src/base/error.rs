@@ -35,6 +35,52 @@ pub enum YantrikDbError {
     #[error("session conflict: {0}")]
     SessionConflict(String),
 
+    /// **Issue #41 / brainstorm-3.** `set_embedder*` was called with a
+    /// candidate embedder whose dimensionality differs from the active
+    /// index. On a populated DB this would produce silent corruption
+    /// (next insert mismatches HNSW's expected dim) so the engine
+    /// rejects. Caller's correct path is `db.reembed(new_embedder_name)`
+    /// which rebuilds the index under the new dim.
+    #[error(
+        "embedder dimensionality change requires db.reembed(): \
+         active index dim is {active_dim} ({memory_count} memories already indexed); \
+         candidate embedder dim is {candidate_dim}. \
+         Call db.reembed(new_embedder_name) to rebuild the index under the new dim."
+    )]
+    ChangeEmbedderDimensionRequiresReembed {
+        active_dim: usize,
+        candidate_dim: usize,
+        memory_count: u64,
+    },
+
+    /// **Issue #41 / brainstorm-3.** `set_embedder*` was called with a
+    /// candidate embedder whose fingerprint differs from the active
+    /// index's embedder, even though dim matches. Same-dim-different-
+    /// embedder is the silent-corruption case: queries encode under E1,
+    /// stored vectors are in E0's space, no panic but bad results.
+    /// Caller's correct path is `db.reembed(new_embedder_name)` to
+    /// re-encode existing memories under the new embedder.
+    ///
+    /// Returned only when the active index has `Known`-provenance. For
+    /// `ExternalOrUnknown` provenance (legacy DBs / external vector
+    /// imports) the same dim is accepted as a compat-attach without
+    /// claiming new provenance.
+    #[error(
+        "embedder change requires db.reembed(): \
+         active index built with embedder digest {active_digest:?}, \
+         candidate digest is {candidate_digest:?} (dim {dim} matches but model differs); \
+         {memory_count} memories already indexed in old embedder's vector space. \
+         Call db.reembed(new_embedder_name) to re-encode safely; \
+         a plain set_embedder() with a different model on a populated index \
+         would silently corrupt search results."
+    )]
+    ChangeEmbedderDigestRequiresReembed {
+        active_digest: Option<String>,
+        candidate_digest: Option<String>,
+        dim: usize,
+        memory_count: u64,
+    },
+
     /// **Decoupled write path RFC, Phase 1.**
     ///
     /// The bounded global ingest queue is full. Foreground writers receive

@@ -337,7 +337,7 @@ impl YantrikDB {
                 downloaded.dim(),
             )));
         }
-        self.set_embedder(Box::new(downloaded));
+        self.set_embedder(Box::new(downloaded))?;
         Ok(())
     }
 
@@ -377,7 +377,13 @@ impl YantrikDB {
         {
             use crate::embedder::{BundledEmbedder, BUNDLED_EMBEDDER_DIM};
             if db.embedding_dim() == BUNDLED_EMBEDDER_DIM {
-                db.set_embedder(Box::new(BundledEmbedder::new()));
+                // set_embedder returns Result post-#41 (mode-aware
+                // refactor). Auto-attach is best-effort — if it fails
+                // for any reason (currently only dim mismatch, but
+                // that's already gated by the if above) we proceed
+                // without an embedder and the user can wire one
+                // manually. Failure here is not catastrophic.
+                let _ = db.set_embedder(Box::new(BundledEmbedder::new()));
             }
         }
     }
@@ -965,24 +971,150 @@ impl YantrikDB {
             .map_err(|(_, e)| YantrikDbError::Database(e))
     }
 
-    // ── Embedder integration ──
+    // ── Embedder integration (issue #41 layer 2: SearchState-derived) ──
 
-    /// Set the text-to-embedding converter. Enables `embed()`, `record_text()`,
-    /// and `recall_text()` which auto-embed text without an external server.
-    pub fn set_embedder(&mut self, embedder: Box<dyn crate::types::Embedder + Send + Sync>) {
-        self.embedder = Some(embedder);
+    /// Set the text-to-embedding converter (mode-aware per brainstorm-3).
+    /// Enables `embed()`, `record_text()`, and `recall_text()`.
+    ///
+    /// **Behavior change vs pre-#41:** the call now returns `Result<()>`
+    /// and rejects the silent-corruption shape:
+    /// - Different dim → `Err(ChangeEmbedderDimensionRequiresReembed)`
+    /// - Different fingerprint on populated `Known`-provenance DB →
+    ///   `Err(ChangeEmbedderDigestRequiresReembed)`
+    /// - Compatible cases (empty DB, matching digest, or compat-attach
+    ///   to `ExternalOrUnknown` provenance) → `Ok(())`
+    ///
+    /// All publication is under `index_write_lock` so concurrent
+    /// set_embedder/reembed calls serialize cleanly.
+    pub fn set_embedder(
+        &mut self,
+        embedder: Box<dyn crate::types::Embedder + Send + Sync>,
+    ) -> Result<()> {
+        let candidate_dim = embedder.dim();
+        let candidate_fp = embedder.fingerprint();
+        let candidate_name = embedder.name();
+        let arc_embedder: std::sync::Arc<dyn crate::types::Embedder + Send + Sync> =
+            std::sync::Arc::from(embedder);
+
+        let _guard = self.index_write_lock.lock();
+        let state = self.search_state.load_full();
+
+        if candidate_dim != state.dim() {
+            let memory_count = self.count_indexed_memories_for_set_embedder()?;
+            return Err(YantrikDbError::ChangeEmbedderDimensionRequiresReembed {
+                active_dim: state.dim(),
+                candidate_dim,
+                memory_count,
+            });
+        }
+
+        let memory_count = self.count_indexed_memories_for_set_embedder()?;
+        let index_empty = memory_count == 0;
+
+        let new_state = if index_empty {
+            // Empty index: attach + (if candidate has fingerprint)
+            // upgrade provenance to Known. Otherwise stay ExternalOrUnknown.
+            let new_provenance = match candidate_fp.as_deref() {
+                Some(fp) => crate::engine::reembed::EmbeddingProvenance::Known {
+                    name: candidate_name.clone(),
+                    digest: fp.to_string(),
+                    dim: candidate_dim,
+                },
+                None => crate::engine::reembed::EmbeddingProvenance::ExternalOrUnknown {
+                    dim: candidate_dim,
+                },
+            };
+            crate::engine::reembed::SearchState {
+                index_embedding: new_provenance,
+                embedder: Some(arc_embedder),
+                runtime_embedder_name: candidate_name,
+                runtime_embedder_digest: candidate_fp,
+                generation: state.generation,
+                covers_through_seq: state.covers_through_seq,
+                hnsw_m: state.hnsw_m,
+                hnsw_ef_construction: state.hnsw_ef_construction,
+                hnsw_ef_search: state.hnsw_ef_search,
+            }
+        } else {
+            match &state.index_embedding {
+                crate::engine::reembed::EmbeddingProvenance::Known { digest, dim, .. } => {
+                    if candidate_fp.as_deref() != Some(digest.as_str()) {
+                        return Err(YantrikDbError::ChangeEmbedderDigestRequiresReembed {
+                            active_digest: Some(digest.clone()),
+                            candidate_digest: candidate_fp,
+                            dim: *dim,
+                            memory_count,
+                        });
+                    }
+                    // Same digest: Arc-swap runtime embedder, no
+                    // generation/provenance change.
+                    crate::engine::reembed::SearchState {
+                        index_embedding: state.index_embedding.clone(),
+                        embedder: Some(arc_embedder),
+                        runtime_embedder_name: candidate_name,
+                        runtime_embedder_digest: candidate_fp,
+                        generation: state.generation,
+                        covers_through_seq: state.covers_through_seq,
+                        hnsw_m: state.hnsw_m,
+                        hnsw_ef_construction: state.hnsw_ef_construction,
+                        hnsw_ef_search: state.hnsw_ef_search,
+                    }
+                }
+                crate::engine::reembed::EmbeddingProvenance::ExternalOrUnknown { .. } => {
+                    // Compat-attach: dim matches, provenance stays
+                    // ExternalOrUnknown (we cannot claim the index is
+                    // in this embedder's vector space — we don't know
+                    // who built the existing vectors).
+                    crate::engine::reembed::SearchState {
+                        index_embedding: state.index_embedding.clone(),
+                        embedder: Some(arc_embedder),
+                        runtime_embedder_name: candidate_name,
+                        runtime_embedder_digest: candidate_fp,
+                        generation: state.generation,
+                        covers_through_seq: state.covers_through_seq,
+                        hnsw_m: state.hnsw_m,
+                        hnsw_ef_construction: state.hnsw_ef_construction,
+                        hnsw_ef_search: state.hnsw_ef_search,
+                    }
+                }
+            }
+        };
+
+        self.search_state.store(std::sync::Arc::new(new_state));
+        // Legacy slot retired post-#41: all reads now route through
+        // search_state. Clear it to catch any latent reader.
+        self.embedder = None;
+        Ok(())
     }
 
-    /// Whether an embedder is configured.
+    /// Internal helper for `set_embedder*` / future `reembed()`: count
+    /// memories that have an embedding (indexed vectors). Uses SQL count
+    /// for consistency across delta / cold / tombstoned states. Called
+    /// under `index_write_lock`.
+    pub(crate) fn count_indexed_memories_for_set_embedder(&self) -> Result<u64> {
+        let conn = self.read_conn();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM memories WHERE embedding IS NOT NULL \
+             AND consolidation_status = 'active'",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(n.max(0) as u64)
+    }
+
+    /// Whether a runtime embedder is configured. Derives from
+    /// SearchState — single source of truth after #41 layer 2.
     pub fn has_embedder(&self) -> bool {
-        self.embedder.is_some()
+        self.search_state.load().embedder.is_some()
     }
 
-    /// Embed text using the configured embedder.
+    /// Embed text using the configured runtime embedder. Acquires one
+    /// SearchState snapshot at the start so the call uses a consistent
+    /// embedder even if set_embedder/reembed runs concurrently.
     pub fn embed(&self, text: &str) -> Result<Vec<f32>> {
-        self.embedder
-            .as_ref()
-            .ok_or(YantrikDbError::NoEmbedder)?
+        let state = self.search_state.load_full();
+        let embedder = state.embedder.as_ref().ok_or(YantrikDbError::NoEmbedder)?;
+        embedder
             .embed(text)
             .map_err(|e| YantrikDbError::Inference(e.to_string()))
     }
