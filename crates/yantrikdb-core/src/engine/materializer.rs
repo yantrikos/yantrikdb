@@ -209,6 +209,81 @@ pub fn spawn_compactor(db: &Arc<YantrikDB>) -> CompactorGuard {
     }
 }
 
+/// Bundle of all engine background workers' shutdown guards.
+///
+/// Holds both [`MaterializerGuard`]s (oplog drain workers) AND the
+/// [`CompactorGuard`] (in-memory `DeltaIndex` → cold-HNSW tier
+/// transferrer). Drop the bundle for orderly shutdown of all
+/// engine-internal background work.
+///
+/// **Issue surfaced 2026-05-20 (CT 132 wedge): yantrikdb-server v0.8.16
+/// was calling [`spawn_materializers`] but not [`spawn_compactor`].
+/// Without the compactor, the in-memory delta tier filled to
+/// `delta_max` (default 256) and every subsequent `record_with_rid`
+/// returned `Backpressure { max: 256 }` indefinitely.** The 503 in
+/// the wild looked like "ingest queue full (256 pending ops,
+/// max=256); retry after 50ms" — operators saw it as "the queue
+/// isn't draining," but the *queue* (oplog applied=0) WAS draining;
+/// the *delta tier* (in-memory `Vec<DeltaEntry>` under
+/// `DeltaIndex.delta` RwLock) was not, because no thread was
+/// calling `vec_index.compact()`.
+///
+/// [`spawn_all_workers`] is the new recommended entry point: one
+/// call, both worker pools spawned, one bundle to drop. Callers no
+/// longer need to remember the compactor exists.
+pub struct AllWorkerGuards {
+    /// `materializer_count` worker threads draining `oplog` rows
+    /// with `applied=0` into the in-memory indexes.
+    pub materializers: Vec<MaterializerGuard>,
+    /// Single thread polling `vec_index.should_compact()` and
+    /// invoking `vec_index.compact()` to seal the delta tier into
+    /// the cold HNSW. **Critical**: without this thread, the
+    /// engine's hot delta tier fills past `delta_max` and every
+    /// subsequent write returns `Backpressure`.
+    pub compactor: CompactorGuard,
+}
+
+/// **Recommended entry point** for spawning the engine's background
+/// workers. Spawns BOTH the materializer pool (drains oplog) AND
+/// the compactor (drains in-memory delta tier into cold HNSW) in
+/// a single call.
+///
+/// Without the compactor, the engine wedges at `delta_max` writes
+/// (default 256). The wedge is silent from the operator perspective
+/// because:
+///   - oplog drains correctly (materializer is independent)
+///   - `db.stats()` returns sane numbers (operations counter
+///     increments even when the in-memory vec_index doesn't)
+///   - Reads continue to work (cold HNSW serves them)
+///   - Only NEW writes fail, with a misleading error mentioning
+///     "ingest queue full" that points operators at oplog tuning
+///     instead of the actual problem.
+///
+/// The legacy [`spawn_materializers`] + [`spawn_compactor`]
+/// primitives remain available for tests + advanced callers.
+/// Production callers (`yantrikdb-server`, plugin embedded mode,
+/// CLI applications) should prefer `spawn_all_workers` so the
+/// compactor is impossible to forget.
+///
+/// # Example
+///
+/// ```no_run
+/// use std::sync::Arc;
+/// use yantrikdb::engine::materializer::{recommended_worker_count, spawn_all_workers};
+/// use yantrikdb::YantrikDB;
+///
+/// let db = Arc::new(YantrikDB::new(":memory:", 384).unwrap());
+/// let _workers = spawn_all_workers(&db, recommended_worker_count());
+/// // workers run until `_workers` is dropped; engine drop also
+/// // signals shutdown via the Weak<YantrikDB> upgrade failure.
+/// ```
+pub fn spawn_all_workers(db: &Arc<YantrikDB>, materializer_count: usize) -> AllWorkerGuards {
+    AllWorkerGuards {
+        materializers: spawn_materializers(db, materializer_count),
+        compactor: spawn_compactor(db),
+    }
+}
+
 fn compactor_loop(weak: Weak<YantrikDB>, shutdown: Arc<AtomicBool>) {
     tracing::debug!("compactor started");
 
@@ -273,6 +348,126 @@ mod tests {
 
     fn open_test_db() -> Arc<YantrikDB> {
         Arc::new(YantrikDB::new(":memory:", 64).expect("open"))
+    }
+
+    #[test]
+    fn spawn_all_workers_bundles_materializer_and_compactor() {
+        // **Regression test for 2026-05-20 CT 132 wedge.** Without
+        // both worker pools, the engine wedges at delta_max writes.
+        // This test simulates the production sequence: spawn all
+        // workers, drive 350+ writes (past the default delta_max=256
+        // backpressure boundary), confirm none of them 503 because
+        // the compactor is draining the delta tier alongside the
+        // materializer draining the oplog.
+        use crate::serde_helpers::serialize_f32;
+
+        let db = open_test_db();
+        let _workers = spawn_all_workers(&db, recommended_worker_count());
+
+        // Drive 350 writes via the engine record_with_rid path. With
+        // delta_max=256 default + no compactor, write #257 would 503.
+        // With the compactor running, delta drains and the writes
+        // sail through.
+        let dim = db.embedding_dim();
+        for i in 0..350 {
+            let embedding: Vec<f32> = (0..dim).map(|j| ((i + j) as f32) * 0.001).collect();
+            // Use the seq-allocated single-node path (None) to match
+            // the wedge_repro and Pranab's lane-b@algo iter shape.
+            let _ = serialize_f32(&embedding);
+            db.record_with_rid(
+                &format!("seq-test-rid-{i}"),
+                &format!("seq-test-text-{i}"),
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &embedding,
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+                (i as i64) * 1_000_000,
+                &[],
+                "test-embedder",
+                None,
+            )
+            .expect("with the compactor running, 350 writes must not 503 at delta_max=256");
+        }
+
+        // Sanity: at least most rows landed in SQL. (Exact equality
+        // depends on the compactor's progress; we tolerate "compactor
+        // is still mid-drain at the time we check".)
+        let conn = db.conn();
+        let memories_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+            .unwrap();
+        assert!(
+            memories_count >= 350,
+            "all 350 writes must reach the memories table; got {memories_count}"
+        );
+    }
+
+    #[test]
+    fn spawn_materializers_without_compactor_wedges_at_delta_max() {
+        // **Regression test confirming the bug exists when callers
+        // forget the compactor.** This is the failure mode CT 132
+        // exhibited: materializer up, compactor missing, writes
+        // wedge at delta_max. The test asserts that we DO see
+        // Backpressure (proving the bug is real) — and the previous
+        // test proves the bundled fix avoids it.
+        let db = open_test_db();
+        // Spawn ONLY materializers, deliberately omitting the compactor
+        // (mirroring the CT 132 server-side bug).
+        let _materializers = spawn_materializers(&db, 1);
+
+        // Drive writes past delta_max. With no compactor, the delta
+        // tier saturates and subsequent appends return Backpressure.
+        let dim = db.embedding_dim();
+        let mut last_err: Option<crate::error::YantrikDbError> = None;
+        for i in 0..400 {
+            let embedding: Vec<f32> = (0..dim).map(|j| ((i + j) as f32) * 0.001).collect();
+            let res = db.record_with_rid(
+                &format!("nocompact-rid-{i}"),
+                &format!("nocompact-text-{i}"),
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &embedding,
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+                (i as i64) * 1_000_000,
+                &[],
+                "test-embedder",
+                None,
+            );
+            if let Err(e) = res {
+                last_err = Some(e);
+                break;
+            }
+        }
+        let err = last_err.expect(
+            "without the compactor, write must eventually return Backpressure at delta_max",
+        );
+        match err {
+            crate::error::YantrikDbError::Backpressure { pending, max, .. } => {
+                assert!(
+                    max >= 1,
+                    "Backpressure max should be a positive bound; got {max}"
+                );
+                assert!(
+                    pending >= max,
+                    "Backpressure fires when pending >= max; got pending={pending} max={max}"
+                );
+            }
+            other => panic!("expected Backpressure on delta saturation, got {other:?}"),
+        }
     }
 
     #[test]
