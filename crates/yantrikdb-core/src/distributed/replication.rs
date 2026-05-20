@@ -244,7 +244,12 @@ pub fn apply_ops(db: &YantrikDB, ops: &[OplogEntry]) -> Result<SyncStats> {
 fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
     match op.op_type.as_str() {
         "record" => {
-            materialize_record(&*db.conn(), &op.payload, db.embedding_dim())?;
+            materialize_record(
+                &*db.conn(),
+                &op.payload,
+                db.embedding_dim(),
+                &op.origin_actor,
+            )?;
             // Update scoring cache with new record
             let rid = op.payload["rid"].as_str().unwrap_or_default();
             if !rid.is_empty() {
@@ -378,7 +383,7 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             }
         }
         "correct" => {
-            materialize_correct(&*db.conn(), &op.payload)?;
+            materialize_correct(&*db.conn(), &op.payload, &op.origin_actor)?;
             // Cache: insert new corrected memory, remove original
             let new_rid = op.payload["new_rid"].as_str().unwrap_or_default();
             if !new_rid.is_empty() {
@@ -452,6 +457,7 @@ fn materialize_record(
     conn: &Connection,
     payload: &serde_json::Value,
     _embedding_dim: usize,
+    source_actor: &str,
 ) -> Result<()> {
     let rid = payload["rid"].as_str().unwrap_or_default();
     let mem_type = payload["type"].as_str().unwrap_or("episodic");
@@ -483,6 +489,18 @@ fn materialize_record(
             valence, metadata, namespace,
         ],
     )?;
+
+    // **v0.7.19 replication audit (postmortem 2026-05-20).** Stamp a
+    // row in replication_apply_log so audit queries can distinguish
+    // "received via replication" from "true orphan". See
+    // base/schema.rs::MIGRATE_V28_TO_V29 for the three-population
+    // audit query shape.
+    let applied_at = crate::time::now_secs();
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO replication_apply_log (rid, op_type, source_actor, applied_at) \
+         VALUES (?1, 'record', ?2, ?3)",
+        params![rid, source_actor, applied_at],
+    );
 
     // Note: we can't insert into the HNSW vec index without the actual embedding data.
     // The oplog only stores the embedding_hash. The rebuild_vec_index() function
@@ -603,6 +621,13 @@ fn materialize_consolidate(
                 namespace,
             ],
         )?;
+
+        // **v0.7.19 replication audit (postmortem 2026-05-20).**
+        let _ = conn.execute(
+            "INSERT OR IGNORE INTO replication_apply_log (rid, op_type, source_actor, applied_at) \
+             VALUES (?1, 'consolidate', ?2, ?3)",
+            params![consolidated_rid, actor_id, ts],
+        );
     }
 
     // Insert consolidation_members entries (set-union CRDT: INSERT OR IGNORE)
@@ -718,7 +743,11 @@ fn materialize_conflict_resolve(conn: &Connection, payload: &serde_json::Value) 
 }
 
 /// Materialize a "correct" op: create new memory and tombstone original.
-fn materialize_correct(conn: &Connection, payload: &serde_json::Value) -> Result<()> {
+fn materialize_correct(
+    conn: &Connection,
+    payload: &serde_json::Value,
+    source_actor: &str,
+) -> Result<()> {
     let new_rid = payload["new_rid"].as_str().unwrap_or_default();
     if new_rid.is_empty() {
         return Ok(());
@@ -746,6 +775,14 @@ fn materialize_correct(conn: &Connection, payload: &serde_json::Value) -> Result
             valence, metadata, namespace,
         ],
     )?;
+
+    // **v0.7.19 replication audit (postmortem 2026-05-20).**
+    let applied_at = crate::time::now_secs();
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO replication_apply_log (rid, op_type, source_actor, applied_at) \
+         VALUES (?1, 'correct', ?2, ?3)",
+        params![new_rid, source_actor, applied_at],
+    );
 
     // Tombstone the original memory
     let original_rid = payload["original_rid"].as_str().unwrap_or_default();
@@ -1087,6 +1124,95 @@ mod tests {
         assert_eq!(mem.text, "test mem");
         assert_eq!(mem.memory_type, "semantic");
         assert_eq!(mem.importance, 0.8);
+    }
+
+    #[test]
+    fn test_materialize_record_writes_replication_apply_log() {
+        // **v0.7.19 audit-table verification (postmortem 2026-05-20).**
+        // When a record op arrives via replication apply, the
+        // replication_apply_log table gets a row stamping op_type +
+        // source_actor + applied_at. Three-population audit query
+        // can then distinguish:
+        //   - locally originated: in oplog with origin_actor = self
+        //   - received via replication: in replication_apply_log
+        //   - true orphan (Backpressure-orphan or bug): in neither
+        let a = YantrikDB::new_with_actor(":memory:", 8, "actor-A").unwrap();
+        let rid = a
+            .record(
+                "from A",
+                "semantic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &vec_seed(1.0, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+
+        let ops = extract_ops_since(&*a.conn(), None, None, None, 100).unwrap();
+        let record_op = ops.iter().find(|o| o.op_type == "record").unwrap();
+
+        // B is a separate engine instance — apply the remote op.
+        let b = YantrikDB::new_with_actor(":memory:", 8, "actor-B").unwrap();
+        apply_ops(&b, &[record_op.clone()]).unwrap();
+
+        // On B: memories row exists, AND replication_apply_log row exists.
+        let conn = b.conn();
+        let mem_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE rid = ?1",
+                params![&rid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(mem_count, 1, "B materialized the row");
+
+        let (op_type, source_actor): (String, String) = conn
+            .query_row(
+                "SELECT op_type, source_actor FROM replication_apply_log WHERE rid = ?1",
+                params![&rid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap_or_else(|_| {
+                panic!("v0.7.19: replication_apply_log must have a row for replicated rid {rid}")
+            });
+        assert_eq!(op_type, "record");
+        assert_eq!(
+            source_actor, "actor-A",
+            "source_actor records the originator's actor_id"
+        );
+
+        // Audit-query: on B, the row is NOT in B's local oplog (B
+        // didn't originate it) but IS in replication_apply_log. So
+        // the three-population shape works:
+        let received_via_replication: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories \
+                 WHERE rid IN (SELECT rid FROM replication_apply_log)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(received_via_replication, 1);
+
+        let true_orphans: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories \
+                 WHERE rid NOT IN (SELECT target_rid FROM oplog WHERE target_rid IS NOT NULL) \
+                   AND rid NOT IN (SELECT rid FROM replication_apply_log)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            true_orphans, 0,
+            "no true orphans on B — every memories row is accounted for by replication_apply_log"
+        );
     }
 
     #[test]

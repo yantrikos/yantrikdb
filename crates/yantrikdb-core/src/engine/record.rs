@@ -211,9 +211,25 @@ impl YantrikDB {
             .vec_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
-        state
-            .vec_index
-            .append(rid.clone(), embedding.to_vec(), seq)?;
+        // **Issue surfaced in CT 132 bench post-v0.7.18 (2026-05-20):
+        // orphan-on-Backpressure pattern.** If the vec_index.append
+        // returns Err (Backpressure when delta is full, dim mismatch,
+        // etc.), the memories row inserted above is already committed
+        // but the rest of the critical section (vec_index, oplog,
+        // visible_seq, materializer enqueue) is skipped. The caller
+        // sees an Err and assumes the write failed — but the row
+        // exists in SQL with no oplog provenance. Over 39 days on
+        // trader's `default` DB, this leaked 23k rows.
+        //
+        // The compensating DELETE here runs only on the rare failure
+        // path. On Backpressure (the common error), the DELETE
+        // immediately reclaims the row so SQL state matches what the
+        // caller observes (write rejected, no row created).
+        if let Err(e) = state.vec_index.append(rid.clone(), embedding.to_vec(), seq) {
+            let conn = self.conn();
+            let _ = conn.execute("DELETE FROM memories WHERE rid = ?1", params![rid]);
+            return Err(e);
+        }
         self.bump_visible_seq(namespace, seq);
 
         // Insert into scoring cache (conn and vec_index dropped)
@@ -452,15 +468,32 @@ impl YantrikDB {
             );
         }
 
-        // Append to vec_index (DeltaIndex) after SQL commit
-        for (rid, input) in rids.iter().zip(inputs.iter()) {
+        // Append to vec_index (DeltaIndex) after SQL commit.
+        // **v0.7.19 orphan-on-Backpressure fix.** If any append in
+        // the batch fails (delta saturation, dim mismatch), the
+        // SAVEPOINT above has already committed all N memories
+        // rows. Compensating DELETE clears the entire batch so the
+        // caller sees an atomic batch-fail outcome rather than
+        // partial-commit state. See record() for the rationale on
+        // single-row writes.
+        for (idx, (rid, input)) in rids.iter().zip(inputs.iter()).enumerate() {
             let seq = self
                 .vec_seq
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 + 1;
-            state
+            if let Err(e) = state
                 .vec_index
-                .append(rid.clone(), input.embedding.clone(), seq)?;
+                .append(rid.clone(), input.embedding.clone(), seq)
+            {
+                // Roll back all N rows from memories (DELETE is fast
+                // under a single conn lock; idempotent via WHERE).
+                let conn = self.conn();
+                for r in &rids {
+                    let _ = conn.execute("DELETE FROM memories WHERE rid = ?1", params![r]);
+                }
+                let _ = idx; // index of the failing entry, kept for future logging
+                return Err(e);
+            }
             self.bump_visible_seq(&input.namespace, seq);
         }
         // vec_index dropped, now scoring_cache
@@ -674,9 +707,25 @@ impl YantrikDB {
         // (single-node retry); the compactor's highest-seq-wins rule
         // converges state identically on both paths.
         let seq = self.assign_seq(seq);
-        state
+        // **v0.7.19 orphan-on-Backpressure fix.** The trader's
+        // `trader_ledger` DB shows `record_with_rid` pinned at
+        // exactly 256 (the v0.7.17 delta_max wedge ceiling) — every
+        // additional call after that left a memories row from the
+        // INSERT OR IGNORE above with no oplog provenance because
+        // the vec_index.append Err short-circuited the log_op below.
+        // Compensating DELETE on failure. Skip the delete when
+        // was_new_row=false (replay path: the row pre-existed; we
+        // shouldn't yank it).
+        if let Err(e) = state
             .vec_index
-            .append(rid.to_string(), embedding.to_vec(), seq)?;
+            .append(rid.to_string(), embedding.to_vec(), seq)
+        {
+            if was_new_row {
+                let conn = self.conn();
+                let _ = conn.execute("DELETE FROM memories WHERE rid = ?1", params![rid]);
+            }
+            return Err(e);
+        }
         self.bump_visible_seq(namespace, seq);
 
         // Scoring cache (engine-internal; replay safe since insert is
