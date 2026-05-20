@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 28;
+pub const SCHEMA_VERSION: i32 = 29;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -691,6 +691,18 @@ CREATE TABLE IF NOT EXISTS reembed_events (
     payload_json TEXT NOT NULL DEFAULT '{}'
 );
 CREATE INDEX IF NOT EXISTS idx_reembed_events_generation ON reembed_events(generation);
+
+-- v29 (2026-05-20 postmortem): replication apply audit log.
+-- Replication-apply paths INSERT a row here so audit queries
+-- distinguish memories received via replication from true orphans.
+CREATE TABLE IF NOT EXISTS replication_apply_log (
+    rid           TEXT PRIMARY KEY,
+    op_type       TEXT NOT NULL,
+    source_actor  TEXT NOT NULL,
+    applied_at    REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_replication_apply_log_source_actor
+    ON replication_apply_log(source_actor, applied_at);
 
 -- Peer tracking for delta sync
 CREATE TABLE IF NOT EXISTS sync_peers (
@@ -2128,4 +2140,45 @@ ALTER TABLE memories ADD COLUMN embedding_generation INTEGER;
 CREATE INDEX IF NOT EXISTS idx_memories_embedding_generation
     ON memories(embedding_generation);
 INSERT OR IGNORE INTO meta (key, value) VALUES ('active_generation', '0');
+";
+
+/// **v0.7.19 — replication apply audit log.**
+///
+/// Surfaced by trader's default-DB postmortem (2026-05-20): 23k
+/// memories rows with zero corresponding `record` / `record_with_rid`
+/// oplog ops. Replication apply paths (`materialize_record`,
+/// `materialize_consolidate`, `materialize_correct` in
+/// `distributed/replication.rs`) INSERT into `memories` but do NOT
+/// write a local oplog row (that would create a replication loop).
+/// Without a sibling audit table, "received via replication" is
+/// indistinguishable at SQL level from "true orphan from a write-path
+/// bug" — both look like memories.rid NOT IN oplog.
+///
+/// `replication_apply_log` is that sibling. Each replication-apply
+/// site writes a row at apply time. Audit queries then distinguish
+/// three populations:
+///
+/// - **Locally originated**: `memories.rid` IN (SELECT target_rid FROM oplog WHERE origin_actor = self.actor_id AND op_type IN ('record', 'record_with_rid', 'consolidate', 'correct'))
+/// - **Received via replication**: `memories.rid` IN (SELECT rid FROM replication_apply_log)
+/// - **True orphan** (Backpressure-orphan or bug): in neither
+///
+/// `source_actor` records WHO sent the op so cross-cluster origin
+/// can be traced. `applied_at` is when this node applied it (NOT the
+/// originator's creation time — that's on `memories.created_at`).
+///
+/// Retroactive backfill (e.g. trader's 23k existing rows) is NOT in
+/// scope for this migration. Operators with pre-existing replication
+/// traffic can run a one-off SQL probe to seed it if desired:
+/// `INSERT INTO replication_apply_log SELECT rid, 'record', origin_actor, updated_at FROM memories WHERE rid NOT IN (SELECT target_rid FROM oplog WHERE target_rid IS NOT NULL)`.
+///
+/// Additive-only migration. Idempotent (CREATE TABLE IF NOT EXISTS).
+pub const MIGRATE_V28_TO_V29: &str = "
+CREATE TABLE IF NOT EXISTS replication_apply_log (
+    rid           TEXT PRIMARY KEY,
+    op_type       TEXT NOT NULL,
+    source_actor  TEXT NOT NULL,
+    applied_at    REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_replication_apply_log_source_actor
+    ON replication_apply_log(source_actor, applied_at);
 ";

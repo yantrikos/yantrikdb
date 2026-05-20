@@ -10480,8 +10480,9 @@ fn schema_v28_fresh_install_has_embedding_generation_and_active_generation() {
         )
         .unwrap();
     assert_eq!(
-        schema_version, "28",
-        "fresh install stamps SCHEMA_VERSION = 28"
+        schema_version,
+        crate::base::schema::SCHEMA_VERSION.to_string(),
+        "fresh install stamps SCHEMA_VERSION"
     );
 }
 
@@ -10536,7 +10537,7 @@ fn schema_v28_migration_from_v27_is_additive_and_idempotent() {
     assert_eq!(text, "planted under v28 schema");
     assert_eq!(gen, 42, "migration must not mutate existing row data");
 
-    // Schema version stamped back to v28.
+    // Schema version stamped back to the current SCHEMA_VERSION.
     let schema_version: String = conn
         .query_row(
             "SELECT value FROM meta WHERE key = 'schema_version'",
@@ -10544,7 +10545,10 @@ fn schema_v28_migration_from_v27_is_additive_and_idempotent() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "28");
+    assert_eq!(
+        schema_version,
+        crate::base::schema::SCHEMA_VERSION.to_string()
+    );
 
     // meta.active_generation preserved (INSERT OR IGNORE didn't clobber).
     let active_gen: String = conn
@@ -11328,3 +11332,122 @@ fn boundary_audit_pattern_detects_synthetic_violation() {
          the audit over-rejects which would prevent legitimate refactors"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────
+// v0.7.19 regression tests — orphan-on-Backpressure compensating
+// DELETE + replication_apply_log audit table.
+// ─────────────────────────────────────────────────────────────────
+
+#[test]
+fn record_with_rid_backpressure_does_not_leak_orphan_memories_row() {
+    // **v0.7.19 fix verification.** Reproduces the trader's
+    // 23k-orphan pattern in miniature: fill the DeltaIndex to its
+    // delta_max cap without a compactor, then the next record_with_rid
+    // call must (a) return Backpressure (the bug never had a fix for
+    // this — that's intentional, surfaces the limit), AND
+    // (b) NOT leave a memories row behind.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    // No compactor spawned — delta fills to cap and never drains.
+    // Drive enough writes via insert_vector to saturate the delta
+    // tier (default delta_max = 256). We use insert_vector for the
+    // pump because record_with_rid already includes the fix; the
+    // test simulates the failure mode before the fix.
+    let _ = db; // suppress unused: we'll exercise via record_with_rid
+
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    // Pump until delta_max reached. The exact count doesn't matter
+    // — we just need vec_index.append to return Backpressure on the
+    // next call.
+    let dim = db.embedding_dim();
+    let mut last_backpressure_rid: Option<String> = None;
+    for i in 0..400 {
+        let embedding: Vec<f32> = (0..dim).map(|j| ((i + j) as f32) * 0.001).collect();
+        let attempted_rid = format!("orphan-test-rid-{i}");
+        let res = db.record_with_rid(
+            &attempted_rid,
+            &format!("orphan-test-text-{i}"),
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            &embedding,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+            (i as i64) * 1_000_000,
+            &[],
+            "test-embedder",
+            None,
+        );
+        if let Err(crate::error::YantrikDbError::Backpressure { .. }) = res {
+            last_backpressure_rid = Some(attempted_rid);
+            break;
+        }
+    }
+    let rid = last_backpressure_rid
+        .expect("test infrastructure: pump must produce a Backpressure within 400 writes");
+
+    // The compensating DELETE must have run. memories table should
+    // have NO row for the rid that hit Backpressure.
+    let conn = db.conn();
+    let exists: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE rid = ?1",
+            params![&rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        exists, 0,
+        "v0.7.19: compensating DELETE must remove memories row when Backpressure fires; \
+         leaving the row is the trader's 23k-orphan pattern"
+    );
+
+    // Sanity: oplog also has NO record_with_rid op for this rid
+    // (the log_op was correctly short-circuited by the error path).
+    let oplog_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM oplog WHERE target_rid = ?1 AND op_type = 'record_with_rid'",
+            params![&rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        oplog_count, 0,
+        "Backpressure path correctly leaves no oplog entry"
+    );
+}
+
+#[test]
+fn schema_v29_fresh_install_has_replication_apply_log_table() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let conn = db.conn();
+
+    let cols = table_columns(&conn, "replication_apply_log");
+    for required in ["rid", "op_type", "source_actor", "applied_at"] {
+        assert!(
+            cols.iter().any(|c| c == required),
+            "v29: replication_apply_log missing column {required}, got: {cols:?}"
+        );
+    }
+    assert!(
+        index_exists(&conn, "idx_replication_apply_log_source_actor"),
+        "v29: idx_replication_apply_log_source_actor must exist"
+    );
+
+    let schema_version: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(schema_version, "29");
+}
+
+// Note: replication_apply_log audit-row verification lives in
+// distributed/replication.rs's tests module where materialize_record
+// is in scope. See test_materialize_record_writes_audit_log there.
