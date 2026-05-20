@@ -269,8 +269,13 @@ mod tests {
                 drop(g);
             }));
         }
-        // Give threads a moment to all acquire their guards.
-        thread::sleep(Duration::from_millis(10));
+        // Wait for at least one writer thread to acquire its guard.
+        // Polling avoids the macos-14 aarch64 flake where 10ms fixed
+        // sleep wasn't enough for scheduler warm-up (sibling fix above).
+        let acquire_deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while r.inflight() == 0 && std::time::Instant::now() < acquire_deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
         let observed = r.inflight();
         assert!(
             observed > 0 && observed <= 10,
@@ -300,10 +305,23 @@ mod tests {
             drop(g);
         });
 
-        // Give writer time to acquire.
-        thread::sleep(Duration::from_millis(20));
-        // Should be inflight=1 right now.
-        assert_eq!(r.inflight(), 1);
+        // Wait for the writer thread to acquire the guard. Polling
+        // is used instead of a fixed sleep because the macos-14
+        // aarch64 CI runner sometimes hasn't scheduled the spawned
+        // thread within 20ms — failure mode locked by PR #43 CI
+        // (job 76888502814, 2026-05-20). Up to 500ms is plenty for
+        // any plausible scheduler stall; the test still completes
+        // within tens of ms on healthy hosts.
+        let acquire_deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while r.inflight() == 0 && std::time::Instant::now() < acquire_deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
+        // Should be inflight=1 once the writer acquired.
+        assert_eq!(
+            r.inflight(),
+            1,
+            "writer should have acquired guard within 500ms"
+        );
         // wait must block until the writer drops the guard.
         r.wait_for_no_sync_writers();
         assert!(
@@ -358,8 +376,12 @@ mod tests {
             thread::sleep(Duration::from_millis(200));
             drop(g);
         });
-        // Let A acquire.
-        thread::sleep(Duration::from_millis(20));
+        // Let A acquire — poll instead of fixed sleep (macos-14
+        // aarch64 scheduler warm-up flake; see sibling fixes above).
+        let acquire_deadline = std::time::Instant::now() + Duration::from_millis(500);
+        while r.inflight() == 0 && std::time::Instant::now() < acquire_deadline {
+            thread::sleep(Duration::from_millis(1));
+        }
         assert_eq!(r.inflight(), 1);
 
         // Reembed cutover: flip state.
