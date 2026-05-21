@@ -1,7 +1,29 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
+use std::sync::Arc;
 use std::time::Duration;
 use yantrikdb::bench_utils::{query_embedding, seed_db_scaled, vec_seed_dim};
+use yantrikdb::engine::materializer::{
+    recommended_worker_count, spawn_all_workers, AllWorkerGuards,
+};
+use yantrikdb::error::YantrikDbError;
 use yantrikdb::{RecordInput, YantrikDB};
+
+// ── Bench harness discipline (post v0.7.18) ──────────────────────────
+//
+// Every bench MUST spawn the materializer + compactor workers via
+// `spawn_all_workers`, otherwise `db.record()` saturates the in-memory
+// delta tier at `delta_max=256` during warm-up and the harness panics
+// (see materializer.rs comment block on the CT 132 wedge).
+//
+// Writers inside `b.iter()` also need to tolerate transient `Backpressure`
+// — at criterion's hot-loop iteration rate (microsecond record latency),
+// the compactor cycle (~5-20ms) cannot keep up indefinitely, so peaks
+// will see `Backpressure { retry_after_ms }` and the bench retries after
+// sleeping. This means measured latency is *sustained throughput under
+// saturation*, not pure cold-path latency. That is the production-honest
+// number — callers experience backpressure too. Pure cold-path latency
+// requires a separate bench shape (iter_batched fresh-db per closure)
+// and can be added in a follow-up.
 
 fn vec_seed(seed: f32, dim: usize) -> Vec<f32> {
     let raw: Vec<f32> = (0..dim).map(|i| (seed + i as f32) * 0.1).collect();
@@ -9,11 +31,70 @@ fn vec_seed(seed: f32, dim: usize) -> Vec<f32> {
     raw.iter().map(|x| x / norm).collect()
 }
 
+fn open_db_with_workers(dim: usize) -> (Arc<YantrikDB>, AllWorkerGuards) {
+    let db = Arc::new(YantrikDB::new(":memory:", dim).unwrap());
+    let workers = spawn_all_workers(&db, recommended_worker_count());
+    (db, workers)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_or_wait(
+    db: &YantrikDB,
+    text: &str,
+    memory_type: &str,
+    importance: f64,
+    valence: f64,
+    half_life: f64,
+    metadata: &serde_json::Value,
+    embedding: &[f32],
+    namespace: &str,
+    certainty: f64,
+    domain: &str,
+    source: &str,
+    emotional_state: Option<&str>,
+) -> String {
+    loop {
+        match db.record(
+            text,
+            memory_type,
+            importance,
+            valence,
+            half_life,
+            metadata,
+            embedding,
+            namespace,
+            certainty,
+            domain,
+            source,
+            emotional_state,
+        ) {
+            Ok(rid) => return rid,
+            Err(YantrikDbError::Backpressure { retry_after_ms, .. }) => {
+                std::thread::sleep(Duration::from_millis(retry_after_ms.max(1)));
+            }
+            Err(e) => panic!("bench record failed: {e}"),
+        }
+    }
+}
+
+fn record_batch_or_wait(db: &YantrikDB, inputs: &[RecordInput]) -> Vec<String> {
+    loop {
+        match db.record_batch(inputs) {
+            Ok(rids) => return rids,
+            Err(YantrikDbError::Backpressure { retry_after_ms, .. }) => {
+                std::thread::sleep(Duration::from_millis(retry_after_ms.max(1)));
+            }
+            Err(e) => panic!("bench record_batch failed: {e}"),
+        }
+    }
+}
+
 fn seed_db(db: &YantrikDB, n: usize, dim: usize) {
     let meta = serde_json::json!({});
     for i in 0..n {
         let emb = vec_seed(i as f32 * 0.37, dim);
-        db.record(
+        record_or_wait(
+            db,
             &format!("Memory number {} about topic {}", i, i % 10),
             if i % 2 == 0 { "episodic" } else { "semantic" },
             0.3 + (i % 7) as f64 * 0.1,
@@ -26,21 +107,21 @@ fn seed_db(db: &YantrikDB, n: usize, dim: usize) {
             "general",
             "user",
             None,
-        )
-        .unwrap();
+        );
     }
 }
 
 fn bench_record(c: &mut Criterion) {
     let dim = 64;
-    let db = YantrikDB::new(":memory:", dim).unwrap();
+    let (db, _workers) = open_db_with_workers(dim);
     let meta = serde_json::json!({});
     let mut i = 0u64;
 
     c.bench_function("record", |b| {
         b.iter(|| {
             let emb = vec_seed(i as f32 * 0.37 + 10000.0, dim);
-            db.record(
+            record_or_wait(
+                &db,
                 black_box(&format!("bench record {}", i)),
                 "episodic",
                 0.5,
@@ -53,8 +134,7 @@ fn bench_record(c: &mut Criterion) {
                 "general",
                 "user",
                 None,
-            )
-            .unwrap();
+            );
             i += 1;
         })
     });
@@ -65,7 +145,7 @@ fn bench_recall(c: &mut Criterion) {
     let mut group = c.benchmark_group("recall");
 
     for &n in &[100, 500, 1000] {
-        let db = YantrikDB::new(":memory:", dim).unwrap();
+        let (db, _workers) = open_db_with_workers(dim);
         seed_db(&db, n, dim);
         let query = vec_seed(999.0, dim);
 
@@ -93,31 +173,30 @@ fn bench_recall(c: &mut Criterion) {
 
 fn bench_get(c: &mut Criterion) {
     let dim = 64;
-    let db = YantrikDB::new(":memory:", dim).unwrap();
+    let (db, _workers) = open_db_with_workers(dim);
     let meta = serde_json::json!({});
-    let rid = db
-        .record(
-            "lookup target",
-            "episodic",
-            0.5,
-            0.0,
-            604800.0,
-            &meta,
-            &vec_seed(1.0, dim),
-            "default",
-            0.8,
-            "general",
-            "user",
-            None,
-        )
-        .unwrap();
+    let rid = record_or_wait(
+        &db,
+        "lookup target",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &meta,
+        &vec_seed(1.0, dim),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    );
 
     c.bench_function("get", |b| b.iter(|| db.get(black_box(&rid)).unwrap()));
 }
 
 fn bench_stats(c: &mut Criterion) {
     let dim = 64;
-    let db = YantrikDB::new(":memory:", dim).unwrap();
+    let (db, _workers) = open_db_with_workers(dim);
     seed_db(&db, 100, dim);
 
     c.bench_function("stats_100", |b| b.iter(|| db.stats(None).unwrap()));
@@ -125,7 +204,7 @@ fn bench_stats(c: &mut Criterion) {
 
 fn bench_relate(c: &mut Criterion) {
     let dim = 64;
-    let db = YantrikDB::new(":memory:", dim).unwrap();
+    let (db, _workers) = open_db_with_workers(dim);
     seed_db(&db, 100, dim);
     let mut i = 0u64;
 
@@ -145,7 +224,7 @@ fn bench_relate(c: &mut Criterion) {
 
 fn bench_decay(c: &mut Criterion) {
     let dim = 64;
-    let db = YantrikDB::new(":memory:", dim).unwrap();
+    let (db, _workers) = open_db_with_workers(dim);
     seed_db(&db, 100, dim);
 
     c.bench_function("decay_100", |b| {
@@ -159,10 +238,11 @@ fn bench_bulk_insert(c: &mut Criterion) {
 
     c.bench_function("bulk_insert_500", |b| {
         b.iter(|| {
-            let db = YantrikDB::new(":memory:", dim).unwrap();
+            let (db, _workers) = open_db_with_workers(dim);
             for i in 0..500 {
                 let emb = vec_seed(i as f32 * 0.37, dim);
-                db.record(
+                record_or_wait(
+                    &db,
                     &format!("bulk {}", i),
                     "episodic",
                     0.5,
@@ -175,8 +255,7 @@ fn bench_bulk_insert(c: &mut Criterion) {
                     "general",
                     "user",
                     None,
-                )
-                .unwrap();
+                );
             }
         })
     });
@@ -187,7 +266,7 @@ fn bench_record_batch(c: &mut Criterion) {
 
     c.bench_function("record_batch_500", |b| {
         b.iter(|| {
-            let db = YantrikDB::new(":memory:", dim).unwrap();
+            let (db, _workers) = open_db_with_workers(dim);
             let inputs: Vec<RecordInput> = (0..500)
                 .map(|i| RecordInput {
                     text: format!("batch memory {i}"),
@@ -204,7 +283,7 @@ fn bench_record_batch(c: &mut Criterion) {
                     emotional_state: None,
                 })
                 .collect();
-            db.record_batch(black_box(&inputs)).unwrap();
+            record_batch_or_wait(&db, black_box(&inputs));
         })
     });
 }
@@ -215,28 +294,27 @@ fn bench_archive(c: &mut Criterion) {
     c.bench_function("archive", |b| {
         b.iter_batched(
             || {
-                // Setup: create a DB with one hot memory
-                let db = YantrikDB::new(":memory:", dim).unwrap();
+                // Setup: create a DB with workers + one hot memory
+                let (db, workers) = open_db_with_workers(dim);
                 let emb = vec_seed(42.0, dim);
-                let rid = db
-                    .record(
-                        "archive target",
-                        "episodic",
-                        0.5,
-                        0.0,
-                        604800.0,
-                        &serde_json::json!({}),
-                        &emb,
-                        "default",
-                        0.8,
-                        "general",
-                        "user",
-                        None,
-                    )
-                    .unwrap();
-                (db, rid)
+                let rid = record_or_wait(
+                    &db,
+                    "archive target",
+                    "episodic",
+                    0.5,
+                    0.0,
+                    604800.0,
+                    &serde_json::json!({}),
+                    &emb,
+                    "default",
+                    0.8,
+                    "general",
+                    "user",
+                    None,
+                );
+                (db, workers, rid)
             },
-            |(db, rid)| {
+            |(db, _workers, rid)| {
                 db.archive(black_box(&rid)).unwrap();
             },
             criterion::BatchSize::SmallInput,
@@ -250,29 +328,28 @@ fn bench_hydrate(c: &mut Criterion) {
     c.bench_function("hydrate", |b| {
         b.iter_batched(
             || {
-                // Setup: create a DB with one archived memory
-                let db = YantrikDB::new(":memory:", dim).unwrap();
+                // Setup: create a DB with workers + one archived memory
+                let (db, workers) = open_db_with_workers(dim);
                 let emb = vec_seed(42.0, dim);
-                let rid = db
-                    .record(
-                        "hydrate target",
-                        "episodic",
-                        0.5,
-                        0.0,
-                        604800.0,
-                        &serde_json::json!({}),
-                        &emb,
-                        "default",
-                        0.8,
-                        "general",
-                        "user",
-                        None,
-                    )
-                    .unwrap();
+                let rid = record_or_wait(
+                    &db,
+                    "hydrate target",
+                    "episodic",
+                    0.5,
+                    0.0,
+                    604800.0,
+                    &serde_json::json!({}),
+                    &emb,
+                    "default",
+                    0.8,
+                    "general",
+                    "user",
+                    None,
+                );
                 db.archive(&rid).unwrap();
-                (db, rid)
+                (db, workers, rid)
             },
-            |(db, rid)| {
+            |(db, _workers, rid)| {
                 db.hydrate(black_box(&rid)).unwrap();
             },
             criterion::BatchSize::SmallInput,
@@ -285,7 +362,7 @@ fn bench_evict(c: &mut Criterion) {
 
     c.bench_function("evict_500_to_200", |b| {
         b.iter(|| {
-            let db = YantrikDB::new(":memory:", dim).unwrap();
+            let (db, _workers) = open_db_with_workers(dim);
             seed_db(&db, 500, dim);
             db.evict(black_box(200)).unwrap();
         })
@@ -297,7 +374,7 @@ fn bench_recall_scaled(c: &mut Criterion) {
     let mut group = c.benchmark_group("recall_scaled");
 
     for &n in &[100, 1000, 5000] {
-        let db = YantrikDB::new(":memory:", dim).unwrap();
+        let (db, _workers) = open_db_with_workers(dim);
         seed_db(&db, n, dim);
         let query = vec_seed(999.0, dim);
 
@@ -332,7 +409,7 @@ fn bench_recall_dim_comparison(c: &mut Criterion) {
 
     for &dim in &[64, 384] {
         for &n in &[1000, 10_000] {
-            let db = YantrikDB::new(":memory:", dim).unwrap();
+            let (db, _workers) = open_db_with_workers(dim);
             seed_db_scaled(&db, n, dim, false);
             let query = query_embedding(dim);
 
@@ -372,7 +449,7 @@ fn bench_recall_100k(c: &mut Criterion) {
     group.warm_up_time(Duration::from_secs(5));
 
     eprintln!("Seeding 100K memories at dim=384 (this takes a while)...");
-    let db = YantrikDB::new(":memory:", dim).unwrap();
+    let (db, _workers) = open_db_with_workers(dim);
     seed_db_scaled(&db, n, dim, false);
     let query = query_embedding(dim);
     eprintln!("Seeding complete.");
@@ -407,7 +484,7 @@ fn bench_recall_with_graph(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(30));
 
     for &n in &[1000, 10_000] {
-        let db = YantrikDB::new(":memory:", dim).unwrap();
+        let (db, _workers) = open_db_with_workers(dim);
         seed_db_scaled(&db, n, dim, true);
         let query = query_embedding(dim);
 
@@ -459,8 +536,8 @@ fn bench_reinforce_overhead(c: &mut Criterion) {
     group.sample_size(10);
     group.measurement_time(Duration::from_secs(20));
 
-    let db_with = YantrikDB::new(":memory:", dim).unwrap();
-    let db_without = YantrikDB::new(":memory:", dim).unwrap();
+    let (db_with, _workers_with) = open_db_with_workers(dim);
+    let (db_without, _workers_without) = open_db_with_workers(dim);
     seed_db_scaled(&db_with, n, dim, false);
     seed_db_scaled(&db_without, n, dim, false);
     let query = query_embedding(dim);
@@ -515,7 +592,7 @@ fn bench_record_scaled(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(10));
 
     for &existing in &[0, 1000, 10_000] {
-        let db = YantrikDB::new(":memory:", dim).unwrap();
+        let (db, _workers) = open_db_with_workers(dim);
         if existing > 0 {
             seed_db_scaled(&db, existing, dim, false);
         }
@@ -528,7 +605,8 @@ fn bench_record_scaled(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     let emb = vec_seed_dim(i as f32 * 0.37 + 100000.0, dim);
-                    db.record(
+                    record_or_wait(
+                        &db,
                         black_box(&format!("bench scaled record {}", i)),
                         "episodic",
                         0.5,
@@ -541,8 +619,7 @@ fn bench_record_scaled(c: &mut Criterion) {
                         "general",
                         "user",
                         None,
-                    )
-                    .unwrap();
+                    );
                     i += 1;
                 })
             },
@@ -562,7 +639,7 @@ fn bench_record_batch_scaled(c: &mut Criterion) {
             &batch_size,
             |b, &bs| {
                 b.iter(|| {
-                    let db = YantrikDB::new(":memory:", dim).unwrap();
+                    let (db, _workers) = open_db_with_workers(dim);
                     let inputs: Vec<RecordInput> = (0..bs)
                         .map(|i| RecordInput {
                             text: format!("batch memory {i}"),
@@ -579,7 +656,7 @@ fn bench_record_batch_scaled(c: &mut Criterion) {
                             emotional_state: None,
                         })
                         .collect();
-                    db.record_batch(black_box(&inputs)).unwrap();
+                    record_batch_or_wait(&db, black_box(&inputs));
                 })
             },
         );

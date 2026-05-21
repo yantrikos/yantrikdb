@@ -1,6 +1,16 @@
 //! Shared utilities for benchmarks and profiling.
+//!
+//! **Backpressure discipline (post v0.7.18):** seed paths use a
+//! retry-on-`Backpressure` wrapper around `record_batch` so that
+//! bench harness seeding does not panic when the in-memory delta
+//! tier saturates at `delta_max` ahead of the compactor drain.
+//! Callers are expected to have spawned workers via
+//! [`crate::engine::materializer::spawn_all_workers`] — without
+//! the compactor running, the retry loop sleeps forever.
 
+use crate::error::YantrikDbError;
 use crate::{RecordInput, YantrikDB};
+use std::time::Duration;
 
 /// Generate a deterministic unit-norm embedding of given dimension.
 ///
@@ -20,6 +30,21 @@ pub fn vec_seed_dim(seed: f32, dim: usize) -> Vec<f32> {
 /// Standard query embedding for benchmarks.
 pub fn query_embedding(dim: usize) -> Vec<f32> {
     vec_seed_dim(999.0, dim)
+}
+
+/// Backpressure-aware wrapper around `record_batch`. Retries the
+/// whole batch after `retry_after_ms` if the engine returns
+/// `Backpressure`. Other errors panic.
+fn record_batch_or_wait(db: &YantrikDB, inputs: &[RecordInput]) {
+    loop {
+        match db.record_batch(inputs) {
+            Ok(_) => return,
+            Err(YantrikDbError::Backpressure { retry_after_ms, .. }) => {
+                std::thread::sleep(Duration::from_millis(retry_after_ms.max(1)));
+            }
+            Err(e) => panic!("seed_db_scaled record_batch failed: {e}"),
+        }
+    }
 }
 
 /// Seed a database with N memories at given dimension using record_batch.
@@ -69,7 +94,7 @@ pub fn seed_db_scaled(db: &YantrikDB, n: usize, dim: usize, with_graph: bool) {
                 }
             })
             .collect();
-        db.record_batch(&inputs).unwrap();
+        record_batch_or_wait(db, &inputs);
     }
 
     if with_graph {
