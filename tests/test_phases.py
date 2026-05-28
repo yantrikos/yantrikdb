@@ -198,7 +198,11 @@ class TestPhase3RicherDimensions:
 
     # 8
     def test_correct_preserves_dimensions(self, db):
-        """Correcting a memory should preserve the original dimensions."""
+        """Correcting a memory should preserve the original dimensions.
+
+        Issue #47 (v0.7.20): correct() is now in-place. `reason` is
+        required, `embedding` removed (HNSW limitation).
+        """
         rid = db.record(
             "original text",
             embedding=_vec(7.0),
@@ -206,7 +210,7 @@ class TestPhase3RicherDimensions:
             source="manager",
             certainty=0.85,
         )
-        result = db.correct(rid, new_text="corrected text", embedding=_vec(7.1))
+        result = db.correct(rid, reason="test", new_text="corrected text")
         corrected = db.get(result["corrected_rid"])
         assert corrected["domain"] == "work"
         assert corrected["source"] == "manager"
@@ -545,8 +549,8 @@ class TestPhaseIntegration:
         )
         assert resp["results"][0]["domain"] == "science"
 
-        # Correct
-        correction = db.correct(rid, new_text="corrected flow test", embedding=_vec(70.1))
+        # Correct — Issue #47 (v0.7.20): in-place, `reason` required.
+        correction = db.correct(rid, reason="test", new_text="corrected flow test")
         corrected = db.get(correction["corrected_rid"])
         assert corrected["domain"] == "science"
         assert corrected["source"] == "experiment"

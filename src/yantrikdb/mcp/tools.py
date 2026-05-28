@@ -263,39 +263,51 @@ def memory_forget(rid: str, ctx: Context = None) -> str:
 @mcp.tool()
 def memory_correct(
     rid: str,
-    new_text: str,
+    reason: str,
+    new_text: str | None = None,
+    metadata_merge: dict | None = None,
     new_importance: float | None = None,
     new_valence: float | None = None,
-    correction_note: str | None = None,
     ctx: Context = None,
 ) -> str:
-    """Correct an existing memory with updated information.
+    """Correct an existing memory in place (Issue #47, v0.7.20).
 
-    The original memory is tombstoned and a new corrected version is created,
-    preserving the history. Entity relationships are transferred to the new memory.
+    Preserves the original `rid` + `created_at` and appends a revision row
+    to the queryable history. Inbound graph edges and any other
+    references to this rid continue to resolve. `reason` is REQUIRED and
+    must be non-empty — the audit trail is load-bearing.
+
+    Embedding changes are NOT supported by `correct()` (HNSW limitation).
+    To change the embedding, use forget+record.
 
     Args:
         rid: The memory ID to correct.
-        new_text: The corrected text content.
+        reason: Required non-empty string explaining why the correction
+                was made.
+        new_text: Optional new text. Pass None to keep the existing text.
+        metadata_merge: Optional dict patch-merged into existing metadata.
         new_importance: Optional new importance score (0.0 to 1.0).
         new_valence: Optional new emotional valence (-1.0 to 1.0).
-        correction_note: Optional note explaining why the correction was made.
 
-    Returns the original and corrected memory IDs.
+    Returns: dict with `original_rid` (== rid), `corrected_rid` (== rid),
+    `original_tombstoned` (always False under the new semantics), and
+    `revision_num` (1-indexed, monotonically increasing per-rid).
     """
     db, lock = _get_db(ctx)
     with lock:
         result = db.correct(
             rid,
-            new_text,
+            reason,
+            new_text=new_text,
+            metadata_merge=metadata_merge,
             new_importance=new_importance,
             new_valence=new_valence,
-            correction_note=correction_note,
         )
     return json.dumps({
         "original_rid": result["original_rid"],
         "corrected_rid": result["corrected_rid"],
         "original_tombstoned": result["original_tombstoned"],
+        "revision_num": result["revision_num"],
     })
 
 

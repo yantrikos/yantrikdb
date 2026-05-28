@@ -102,14 +102,20 @@ class TestMemoryEndpoints:
         assert resp.json()["consolidation_status"] == "tombstoned"
 
     def test_correct_memory(self, client):
+        # Issue #47 (v0.7.20): correct() is now in-place; `reason` is
+        # required, `correction_note` removed, `embedding` removed.
         rid = client.post("/memories", json={"text": "wrong"}).json()["rid"]
         resp = client.post(f"/memories/{rid}/correct", json={
             "new_text": "correct",
-            "correction_note": "fixed",
+            "reason": "fixed",
         })
         assert resp.status_code == 200
         data = resp.json()
-        assert "new_rid" in data or "corrected_rid" in data
+        # In-place mutation: corrected_rid == original rid.
+        assert data["corrected_rid"] == rid
+        assert data["original_rid"] == rid
+        assert data["original_tombstoned"] is False
+        assert data["revision_num"] == 1
 
     def test_record_with_fields(self, client):
         resp = client.post("/memories", json={
