@@ -46,6 +46,8 @@ impl YantrikDB {
             namespace,
             domain,
             None, // no source filter
+            None, // no certainty_min (#46)
+            None, // default relevance order (#46)
         )
     }
 

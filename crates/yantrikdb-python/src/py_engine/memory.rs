@@ -58,7 +58,8 @@ impl PyYantrikDB {
         .map_err(map_err)
     }
 
-    #[pyo3(signature = (query=None, query_embedding=None, top_k=10, time_window=None, memory_type=None, include_consolidated=false, expand_entities=true, skip_reinforce=false, namespace=None, domain=None, source=None))]
+    #[pyo3(signature = (query=None, query_embedding=None, top_k=10, time_window=None, memory_type=None, include_consolidated=false, expand_entities=true, skip_reinforce=false, namespace=None, domain=None, source=None, certainty_min=None, order=None))]
+    #[allow(clippy::too_many_arguments)]
     fn recall(
         &self,
         py: Python<'_>,
@@ -73,6 +74,11 @@ impl PyYantrikDB {
         namespace: Option<&str>,
         domain: Option<&str>,
         source: Option<&str>,
+        // Issue #46: confidence first-class on recall. `certainty_min`
+        // filters candidates whose `certainty < min`. `order` re-sorts
+        // the final top_k: "relevance" (default) | "certainty" | "recency".
+        certainty_min: Option<f64>,
+        order: Option<&str>,
     ) -> PyResult<Vec<PyObject>> {
         let db = self
             .inner
@@ -104,6 +110,8 @@ impl PyYantrikDB {
                 namespace,
                 domain,
                 source,
+                certainty_min,
+                order,
             )
             .map_err(map_err)?;
 
