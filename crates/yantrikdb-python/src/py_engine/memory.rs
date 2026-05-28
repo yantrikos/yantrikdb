@@ -253,6 +253,8 @@ impl PyYantrikDB {
                 namespace,
                 domain,
                 source,
+                None, // certainty_min (#46)
+                None, // order (#46) — relevance default
             )
             .map_err(map_err)?;
 
