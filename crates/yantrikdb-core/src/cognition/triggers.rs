@@ -12,6 +12,27 @@ fn now() -> f64 {
     crate::time::now_secs()
 }
 
+/// Maximum length (chars) for a `snippet_*` field on a redundancy /
+/// potential_conflict trigger's `context`. Issue #45: the trigger payload
+/// previously carried full `text_a` / `text_b` which can be kilobytes;
+/// snippet fields give callers a quick visual diff without the bloat.
+const TRIGGER_SNIPPET_MAX_CHARS: usize = 120;
+
+/// Truncate `text` to at most `TRIGGER_SNIPPET_MAX_CHARS` characters at a
+/// char-boundary, appending an ellipsis when truncated. Used by the
+/// redundancy / potential_conflict triggers' `context.snippet_a` /
+/// `context.snippet_b` fields so consumers can preview both memories
+/// without pulling the full text via a separate recall.
+fn snippet_for_trigger(text: &str) -> String {
+    if text.chars().count() <= TRIGGER_SNIPPET_MAX_CHARS {
+        text.to_string()
+    } else {
+        let mut s: String = text.chars().take(TRIGGER_SNIPPET_MAX_CHARS).collect();
+        s.push('…');
+        s
+    }
+}
+
 // ── Existing trigger checks ──
 
 /// Find important memories that are decaying significantly.
@@ -285,10 +306,25 @@ pub fn check_redundancy(db: &YantrikDB, _sim_threshold: f64) -> Result<Vec<Trigg
             let sim = crate::consolidate::cosine_similarity(&emb_a, &emb_b);
 
             if sim > threshold {
+                // **Issue #45 — name the rids in the trigger payload.**
+                // The trigger struct's `source_rids` field has always carried
+                // the pair, but consumers reading only the `reason` string
+                // (or the MCP tool surface which sometimes truncates context)
+                // saw an opaque "Two memories are X% similar" with no way to
+                // act on it. Embed the rids in `reason` itself + add compact
+                // snippets in `context` so the trigger output is actionable
+                // without a separate recall round-trip. See yantrikdb-agi
+                // Phase 1 gap T1 + Phase 2 Proposal 7.1.
+                let snippet_a = snippet_for_trigger(&rows[i].1);
+                let snippet_b = snippet_for_trigger(&rows[j].1);
                 let mut context = HashMap::new();
                 context.insert("text_a".to_string(), serde_json::json!(rows[i].1));
                 context.insert("text_b".to_string(), serde_json::json!(rows[j].1));
+                context.insert("snippet_a".to_string(), serde_json::json!(snippet_a));
+                context.insert("snippet_b".to_string(), serde_json::json!(snippet_b));
                 context.insert("similarity".to_string(), serde_json::json!(sim));
+                context.insert("rid_a".to_string(), serde_json::json!(rows[i].0));
+                context.insert("rid_b".to_string(), serde_json::json!(rows[j].0));
 
                 // Check if the pair shares entities — if so, this is likely a
                 // contradiction (same topic, different facts) not a simple duplicate.
@@ -319,9 +355,11 @@ pub fn check_redundancy(db: &YantrikDB, _sim_threshold: f64) -> Result<Vec<Trigg
                     triggers.push(Trigger {
                         trigger_type: "potential_conflict".to_string(),
                         reason: format!(
-                            "Two memories about '{}' are {:.0}% similar but may contradict each other",
+                            "Two memories about '{}' are {:.0}% similar but may contradict each other (rid_a={}, rid_b={})",
                             shared.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", "),
-                            sim * 100.0
+                            sim * 100.0,
+                            rows[i].0,
+                            rows[j].0
                         ),
                         urgency: sim,
                         source_rids: vec![rows[i].0.clone(), rows[j].0.clone()],
@@ -341,11 +379,13 @@ pub fn check_redundancy(db: &YantrikDB, _sim_threshold: f64) -> Result<Vec<Trigg
                 } {
                     // Substitution category match -> create actual conflict record
                     let reason = format!(
-                        "{} substitution: '{}' vs '{}' (similarity={:.0}%)",
+                        "{} substitution: '{}' vs '{}' (similarity={:.0}%, rid_a={}, rid_b={})",
                         cat_name,
                         token_a,
                         token_b,
-                        sim * 100.0
+                        sim * 100.0,
+                        rows[i].0,
+                        rows[j].0
                     );
                     if !crate::conflict::conflict_exists(db, &rows[i].0, &rows[j].0).unwrap_or(true)
                     {
@@ -376,8 +416,12 @@ pub fn check_redundancy(db: &YantrikDB, _sim_threshold: f64) -> Result<Vec<Trigg
                     triggers.push(Trigger {
                         trigger_type: "redundancy".to_string(),
                         reason: format!(
-                            "Two memories are {:.0}% similar and may be redundant",
-                            sim * 100.0
+                            "Two memories are {:.0}% similar and may be redundant (rid_a={}, rid_b={}): '{}' vs '{}'",
+                            sim * 100.0,
+                            rows[i].0,
+                            rows[j].0,
+                            snippet_a,
+                            snippet_b,
                         ),
                         urgency: sim,
                         source_rids: vec![rows[i].0.clone(), rows[j].0.clone()],
@@ -409,11 +453,13 @@ pub fn check_redundancy(db: &YantrikDB, _sim_threshold: f64) -> Result<Vec<Trigg
                     check_substitution_category_pair(&*conn, &rows[i].1, &rows[j].1)
                 } {
                     let reason = format!(
-                        "{} substitution: '{}' vs '{}' (similarity={:.0}%)",
+                        "{} substitution: '{}' vs '{}' (similarity={:.0}%, rid_a={}, rid_b={})",
                         cat_name,
                         token_a,
                         token_b,
-                        sim * 100.0
+                        sim * 100.0,
+                        rows[i].0,
+                        rows[j].0
                     );
                     if !crate::conflict::conflict_exists(db, &rows[i].0, &rows[j].0).unwrap_or(true)
                     {
@@ -429,10 +475,21 @@ pub fn check_redundancy(db: &YantrikDB, _sim_threshold: f64) -> Result<Vec<Trigg
                             &reason,
                         );
                     }
+                    // Issue #45: include compact snippets + explicit rid_a/rid_b
+                    // in context so consumers reading the trigger payload see
+                    // the matching rid pair + a quick visual diff without a
+                    // separate recall round-trip. Keep full text_a/text_b for
+                    // existing callers; this is additive.
+                    let snippet_a = snippet_for_trigger(&rows[i].1);
+                    let snippet_b = snippet_for_trigger(&rows[j].1);
                     let mut context = HashMap::new();
                     context.insert("text_a".to_string(), serde_json::json!(rows[i].1));
                     context.insert("text_b".to_string(), serde_json::json!(rows[j].1));
+                    context.insert("snippet_a".to_string(), serde_json::json!(snippet_a));
+                    context.insert("snippet_b".to_string(), serde_json::json!(snippet_b));
                     context.insert("similarity".to_string(), serde_json::json!(sim));
+                    context.insert("rid_a".to_string(), serde_json::json!(rows[i].0));
+                    context.insert("rid_b".to_string(), serde_json::json!(rows[j].0));
                     context.insert("category".to_string(), serde_json::json!(cat_name));
                     context.insert("token_a".to_string(), serde_json::json!(token_a));
                     context.insert("token_b".to_string(), serde_json::json!(token_b));
@@ -1313,6 +1370,182 @@ mod tests {
         assert_eq!(
             conflict_count, 1,
             "expected exactly one conflict record between the substitution pair"
+        );
+    }
+
+    /// Issue #45 regression: the redundancy trigger's `reason` string must
+    /// name the rid pair so consumers that only see `reason` (and not
+    /// `source_rids` / `context`) can still act on it. Phase 1 gap T1 from
+    /// the yantrikdb-agi gap analysis: "It never tells me WHICH two
+    /// memories. I have to manually search for duplicates."
+    #[test]
+    fn test_redundancy_trigger_names_rids_in_reason() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let emb = vec_seed(1.0, 8);
+
+        let rid_a = db
+            .record(
+                "compression wonder: parametric walls help",
+                "semantic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &emb,
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+        let rid_b = db
+            .record(
+                "compression wonder: parametric walls assist",
+                "semantic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &emb,
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+
+        let triggers = check_redundancy(&db, 0.85).unwrap();
+        let redundancy: Vec<&Trigger> = triggers
+            .iter()
+            .filter(|t| t.trigger_type == "redundancy")
+            .collect();
+        assert!(
+            !redundancy.is_empty(),
+            "expected a redundancy trigger for identical embeddings, got: {:?}",
+            triggers
+        );
+
+        let trig = redundancy[0];
+        assert!(
+            trig.reason.contains(&rid_a) && trig.reason.contains(&rid_b),
+            "redundancy trigger `reason` must name both rids (rid_a={rid_a}, rid_b={rid_b}), got: {}",
+            trig.reason
+        );
+        assert_eq!(
+            trig.source_rids.len(),
+            2,
+            "redundancy trigger must carry both rids in source_rids"
+        );
+        assert!(
+            trig.source_rids.contains(&rid_a) && trig.source_rids.contains(&rid_b),
+            "source_rids must include rid_a and rid_b, got: {:?}",
+            trig.source_rids
+        );
+    }
+
+    /// Issue #45: trigger `context` must include compact `snippet_a` /
+    /// `snippet_b` + explicit `rid_a` / `rid_b` keys so callers can
+    /// preview the matching pair without a separate recall.
+    #[test]
+    fn test_redundancy_trigger_provides_snippets_and_rids_in_context() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let emb = vec_seed(1.0, 8);
+
+        let rid_a = db
+            .record(
+                "test memory alpha",
+                "semantic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &emb,
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+        let rid_b = db
+            .record(
+                "test memory beta",
+                "semantic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &emb,
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+
+        let triggers = check_redundancy(&db, 0.85).unwrap();
+        let trig = triggers
+            .iter()
+            .find(|t| t.trigger_type == "redundancy")
+            .expect("expected redundancy trigger");
+
+        let ctx_rid_a = trig
+            .context
+            .get("rid_a")
+            .and_then(|v| v.as_str())
+            .expect("context.rid_a must be present");
+        let ctx_rid_b = trig
+            .context
+            .get("rid_b")
+            .and_then(|v| v.as_str())
+            .expect("context.rid_b must be present");
+        // Pair may surface in either order; assert as an unordered pair.
+        let pair: std::collections::HashSet<&str> = [ctx_rid_a, ctx_rid_b].into_iter().collect();
+        let expected: std::collections::HashSet<&str> =
+            [rid_a.as_str(), rid_b.as_str()].into_iter().collect();
+        assert_eq!(
+            pair, expected,
+            "context.rid_a/rid_b must match the seeded pair"
+        );
+
+        assert!(
+            trig.context.get("snippet_a").is_some(),
+            "context.snippet_a must be present"
+        );
+        assert!(
+            trig.context.get("snippet_b").is_some(),
+            "context.snippet_b must be present"
+        );
+        // `similarity` was already in pre-#45 context; assert it survived.
+        assert!(
+            trig.context.get("similarity").is_some(),
+            "context.similarity must remain in payload (back-compat)"
+        );
+    }
+
+    /// Issue #45: `snippet_for_trigger` truncates beyond
+    /// `TRIGGER_SNIPPET_MAX_CHARS` characters with an ellipsis, leaving
+    /// short text untouched.
+    #[test]
+    fn test_snippet_for_trigger_truncates_long_text() {
+        let short = "hello world";
+        assert_eq!(snippet_for_trigger(short), short);
+
+        let long: String = "x".repeat(TRIGGER_SNIPPET_MAX_CHARS + 50);
+        let snipped = snippet_for_trigger(&long);
+        assert!(
+            snipped.ends_with('…'),
+            "long text must be truncated with an ellipsis, got: {snipped:?}"
+        );
+        // Ellipsis is multi-byte but a single char; total char count =
+        // TRIGGER_SNIPPET_MAX_CHARS + 1.
+        assert_eq!(
+            snipped.chars().count(),
+            TRIGGER_SNIPPET_MAX_CHARS + 1,
+            "snippet must be exactly TRIGGER_SNIPPET_MAX_CHARS + ellipsis chars"
         );
     }
 }
