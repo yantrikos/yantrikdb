@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 29;
+pub const SCHEMA_VERSION: i32 = 30;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -703,6 +703,27 @@ CREATE TABLE IF NOT EXISTS replication_apply_log (
 );
 CREATE INDEX IF NOT EXISTS idx_replication_apply_log_source_actor
     ON replication_apply_log(source_actor, applied_at);
+
+-- v30 (issue #47): record_revisions — append-only audit log of correct()
+-- calls. The new correct() mutates memories in place (preserves rid +
+-- created_at) and writes the prior state here. revision_num starts at 1
+-- and increments per-rid. reason is required (engine-enforced).
+CREATE TABLE IF NOT EXISTS record_revisions (
+    revision_id       TEXT PRIMARY KEY,
+    rid               TEXT NOT NULL,
+    revision_num      INTEGER NOT NULL,
+    prior_text        TEXT NOT NULL,
+    prior_metadata    TEXT NOT NULL,
+    prior_importance  REAL NOT NULL,
+    prior_valence     REAL NOT NULL,
+    reason            TEXT NOT NULL,
+    applied_at        REAL NOT NULL,
+    hlc               BLOB NOT NULL,
+    origin_actor      TEXT NOT NULL,
+    UNIQUE(rid, revision_num)
+);
+CREATE INDEX IF NOT EXISTS idx_record_revisions_rid
+    ON record_revisions(rid, revision_num);
 
 -- Peer tracking for delta sync
 CREATE TABLE IF NOT EXISTS sync_peers (
@@ -2181,4 +2202,41 @@ CREATE TABLE IF NOT EXISTS replication_apply_log (
 );
 CREATE INDEX IF NOT EXISTS idx_replication_apply_log_source_actor
     ON replication_apply_log(source_actor, applied_at);
+";
+
+// **Issue #47 — `correct()` revision history (v0.7.20).**
+//
+// The previous `correct()` minted a new rid + tombstoned the original.
+// That broke link integrity (every inbound reference dangled) and lost
+// the audit trail (the only record of WHY a correction happened was a
+// metadata.correction_note on the new row, easily missed). The v0.7.20
+// `correct()` mutates in place, preserving rid + created_at, and writes
+// a revision row capturing the prior state.
+//
+// `revision_num` is monotonically increasing per-rid starting at 1.
+// `reason` is REQUIRED (engine validates non-empty); the audit trail is
+// load-bearing.
+//
+// Embedding changes are NOT supported by the new `correct()` — HNSW
+// doesn't support in-place update of an existing entry, and rebuilding
+// the cold tier on every correction is too expensive. Embedding-level
+// corrections still go through forget+record. The revision table
+// therefore stores text + metadata + importance + valence only.
+pub const MIGRATE_V29_TO_V30: &str = "
+CREATE TABLE IF NOT EXISTS record_revisions (
+    revision_id       TEXT PRIMARY KEY,
+    rid               TEXT NOT NULL,
+    revision_num      INTEGER NOT NULL,
+    prior_text        TEXT NOT NULL,
+    prior_metadata    TEXT NOT NULL,
+    prior_importance  REAL NOT NULL,
+    prior_valence     REAL NOT NULL,
+    reason            TEXT NOT NULL,
+    applied_at        REAL NOT NULL,
+    hlc               BLOB NOT NULL,
+    origin_actor      TEXT NOT NULL,
+    UNIQUE(rid, revision_num)
+);
+CREATE INDEX IF NOT EXISTS idx_record_revisions_rid
+    ON record_revisions(rid, revision_num);
 ";

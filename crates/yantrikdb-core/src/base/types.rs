@@ -370,11 +370,36 @@ pub struct ConflictResolutionResult {
 }
 
 /// Result of a user-initiated correction.
+///
+/// **Issue #47 (v0.7.20):** `correct()` now mutates the memory in place,
+/// preserving `rid` and `created_at`. `original_rid` and `corrected_rid`
+/// are therefore always equal; `original_tombstoned` is always `false`.
+/// The fields are kept for back-compat with v0.7.19-and-earlier consumers
+/// that destructured this struct. `revision_num` is new — it tells the
+/// caller which revision number the correction wrote (1-indexed,
+/// monotonically increasing per-rid).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CorrectionResult {
     pub original_rid: String,
     pub corrected_rid: String,
     pub original_tombstoned: bool,
+    pub revision_num: i64,
+}
+
+/// A single entry from a `correct()` revision history query.
+/// See `YantrikDB::history()`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RecordRevision {
+    pub revision_id: String,
+    pub rid: String,
+    pub revision_num: i64,
+    pub prior_text: String,
+    pub prior_metadata: serde_json::Value,
+    pub prior_importance: f64,
+    pub prior_valence: f64,
+    pub reason: String,
+    pub applied_at: f64,
+    pub origin_actor: String,
 }
 
 // ── Cognition types (V3) ──

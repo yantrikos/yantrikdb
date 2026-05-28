@@ -645,22 +645,25 @@ fn test_correct_memory() {
     let result = db
         .correct(
             &rid,
-            "favorite color is blue",
-            Some(0.9),
-            None,
-            &vec_seed(2.0, 8),
-            Some("User corrected their favorite color"),
+            Some("favorite color is blue"),
+            None,                                  // metadata_merge
+            Some(0.9),                             // new_importance
+            None,                                  // new_valence
+            "User corrected their favorite color", // reason (required, #47)
         )
         .unwrap();
 
-    assert!(result.original_tombstoned);
+    // Issue #47 (v0.7.20): correct() now mutates in place. rid is
+    // preserved; original is not tombstoned; revision_num is 1.
+    assert_eq!(result.corrected_rid, rid);
+    assert_eq!(result.original_rid, rid);
+    assert!(!result.original_tombstoned);
+    assert_eq!(result.revision_num, 1);
 
-    let original = db.get(&rid).unwrap().unwrap();
-    assert_eq!(original.consolidation_status, "tombstoned");
-
-    let corrected = db.get(&result.corrected_rid).unwrap().unwrap();
-    assert_eq!(corrected.text, "favorite color is blue");
-    assert_eq!(corrected.importance, 0.9);
+    let updated = db.get(&rid).unwrap().unwrap();
+    assert_ne!(updated.consolidation_status, "tombstoned");
+    assert_eq!(updated.text, "favorite color is blue");
+    assert!((updated.importance - 0.9).abs() < 1e-9);
 }
 
 #[test]
@@ -4195,18 +4198,20 @@ fn test_encrypted_correct_memory() {
     let result = db
         .correct(
             &rid,
-            "color is blue",
+            Some("color is blue"),
+            None,
             Some(0.9),
             None,
-            &vec_seed(2.0, 8),
-            Some("fixed"),
+            "fixed", // reason (required, #47)
         )
         .unwrap();
 
-    assert!(result.original_tombstoned);
-    let corrected = db.get(&result.corrected_rid).unwrap().unwrap();
-    assert_eq!(corrected.text, "color is blue");
-    assert_eq!(corrected.importance, 0.9);
+    // Issue #47 (v0.7.20): in-place mutation; rid preserved.
+    assert_eq!(result.corrected_rid, rid);
+    assert!(!result.original_tombstoned);
+    let updated = db.get(&rid).unwrap().unwrap();
+    assert_eq!(updated.text, "color is blue");
+    assert!((updated.importance - 0.9).abs() < 1e-9);
 }
 
 #[test]
@@ -4686,28 +4691,31 @@ fn test_dimensions_preserved_on_correct() {
         )
         .unwrap();
 
-    // Correct the memory text
+    // Correct the memory text. Issue #47 (v0.7.20): in-place mutation,
+    // rid preserved, reason required.
     let result = db
         .correct(
             &rid,
-            "the sky is blue",
+            Some("the sky is blue"),
+            None,
             Some(0.9),
             None,
-            &vec_seed(2.0, 8),
-            Some("color fix"),
+            "color fix", // reason
         )
         .unwrap();
-    assert!(result.original_tombstoned);
+    assert!(!result.original_tombstoned);
+    assert_eq!(result.corrected_rid, rid);
 
-    // Verify the corrected memory preserves domain, source, and emotional_state
-    let corrected = db.get(&result.corrected_rid).unwrap().unwrap();
-    assert_eq!(corrected.text, "the sky is blue");
+    // Verify the in-place mutation preserves domain, source, and emotional_state
+    // (these aren't touched by correct() since they're not in the signature).
+    let updated = db.get(&rid).unwrap().unwrap();
+    assert_eq!(updated.text, "the sky is blue");
     assert_eq!(
-        corrected.domain, "work",
+        updated.domain, "work",
         "domain should be preserved after correction"
     );
     assert_eq!(
-        corrected.source, "document",
+        updated.source, "document",
         "source should be preserved after correction"
     );
 }
@@ -11445,9 +11453,334 @@ fn schema_v29_fresh_install_has_replication_apply_log_table() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(schema_version, "29");
+    // v29 was bumped to v30 by issue #47 (record_revisions table). The
+    // v29 test predates that — keep it as a fresh-install smoke check on
+    // the v29 invariants (replication_apply_log table + index) but
+    // accept any schema_version >= 29.
+    let v: i32 = schema_version.parse().unwrap();
+    assert!(
+        v >= 29,
+        "schema_version should be at least 29 (when replication_apply_log landed), got {v}",
+    );
 }
 
 // Note: replication_apply_log audit-row verification lives in
 // distributed/replication.rs's tests module where materialize_record
 // is in scope. See test_materialize_record_writes_audit_log there.
+
+// ── Issue #47: correct() semantics tightened (v0.7.20) ───────────────
+
+#[test]
+fn correct_preserves_rid_and_created_at() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid = db
+        .record(
+            "original text",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let original = db.get(&rid).unwrap().unwrap();
+    let original_created_at = original.created_at;
+    std::thread::sleep(std::time::Duration::from_millis(10));
+
+    let result = db
+        .correct(
+            &rid,
+            Some("corrected text"),
+            None,
+            None,
+            None,
+            "test correction",
+        )
+        .unwrap();
+    assert_eq!(result.corrected_rid, rid, "rid must be preserved");
+    assert_eq!(result.original_rid, rid);
+    assert!(!result.original_tombstoned);
+    assert_eq!(result.revision_num, 1);
+
+    let updated = db.get(&rid).unwrap().unwrap();
+    assert_eq!(updated.text, "corrected text");
+    assert!(
+        (updated.created_at - original_created_at).abs() < 1e-9,
+        "created_at must be preserved (was {}, became {})",
+        original_created_at,
+        updated.created_at,
+    );
+}
+
+#[test]
+fn correct_writes_revision_row_with_prior_state() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid = db
+        .record(
+            "v0",
+            "episodic",
+            0.5,
+            -0.2,
+            604800.0,
+            &serde_json::json!({"key": "before"}),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let _ = db
+        .correct(
+            &rid,
+            Some("v1"),
+            Some(&serde_json::json!({"key": "after"})),
+            Some(0.7),
+            Some(0.3),
+            "first correction",
+        )
+        .unwrap();
+    let history = db.history(&rid).unwrap();
+    assert_eq!(history.len(), 1, "one revision expected");
+    let rev = &history[0];
+    assert_eq!(rev.revision_num, 1);
+    assert_eq!(rev.prior_text, "v0");
+    assert!((rev.prior_importance - 0.5).abs() < 1e-9);
+    assert!((rev.prior_valence + 0.2).abs() < 1e-9);
+    assert_eq!(rev.reason, "first correction");
+    assert_eq!(
+        rev.prior_metadata.get("key").and_then(|v| v.as_str()),
+        Some("before")
+    );
+}
+
+#[test]
+fn correct_multiple_revisions_increment_revision_num() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid = db
+        .record(
+            "v0",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let r1 = db
+        .correct(&rid, Some("v1"), None, None, None, "first")
+        .unwrap();
+    let r2 = db
+        .correct(&rid, Some("v2"), None, None, None, "second")
+        .unwrap();
+    let r3 = db
+        .correct(&rid, Some("v3"), None, None, None, "third")
+        .unwrap();
+    assert_eq!(r1.revision_num, 1);
+    assert_eq!(r2.revision_num, 2);
+    assert_eq!(r3.revision_num, 3);
+
+    let history = db.history(&rid).unwrap();
+    assert_eq!(history.len(), 3, "three revisions expected");
+    // history returns oldest-first
+    assert_eq!(history[0].prior_text, "v0");
+    assert_eq!(history[1].prior_text, "v1");
+    assert_eq!(history[2].prior_text, "v2");
+
+    let final_state = db.get(&rid).unwrap().unwrap();
+    assert_eq!(final_state.text, "v3");
+}
+
+#[test]
+fn correct_rejects_empty_reason() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid = db
+        .record(
+            "text",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    // Empty string.
+    let err = db
+        .correct(&rid, Some("new"), None, None, None, "")
+        .expect_err("empty reason must be rejected");
+    match err {
+        crate::error::YantrikDbError::InvalidInput(msg) => {
+            assert!(msg.contains("reason"), "got: {msg}");
+        }
+        other => panic!("expected InvalidInput, got {other:?}"),
+    }
+
+    // Whitespace-only.
+    let err2 = db
+        .correct(&rid, Some("new"), None, None, None, "   \t\n  ")
+        .expect_err("whitespace-only reason must be rejected");
+    assert!(matches!(
+        err2,
+        crate::error::YantrikDbError::InvalidInput(_)
+    ));
+}
+
+#[test]
+fn correct_rejects_no_mutation_fields() {
+    // All None mutation fields == no-op correction; must be rejected.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid = db
+        .record(
+            "text",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let err = db
+        .correct(&rid, None, None, None, None, "no fields supplied")
+        .expect_err("no-op correction must be rejected");
+    assert!(matches!(err, crate::error::YantrikDbError::InvalidInput(_)));
+}
+
+#[test]
+fn correct_preserves_inbound_graph_edges() {
+    // Inbound link integrity: a graph edge pointing TO the corrected
+    // rid must continue to resolve after correct(). This is the central
+    // win of the v0.7.20 semantics over the v0.7.19 "tombstone + new rid"
+    // approach where inbound references dangled.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid_subject = db
+        .record(
+            "subject memory",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    // Create an entity-graph edge that mentions rid_subject as an
+    // endpoint. Using the entity-relate path (rid acts as one of two
+    // entity names — the test only cares that an edge persists).
+    db.relate("anchor_entity", &rid_subject, "tags", 1.0)
+        .unwrap();
+    let edges_before = db.get_edges(&rid_subject).unwrap();
+    assert!(!edges_before.is_empty(), "edge should exist before correct");
+
+    // Correct the memory.
+    db.correct(
+        &rid_subject,
+        Some("updated subject"),
+        None,
+        None,
+        None,
+        "test link integrity",
+    )
+    .unwrap();
+
+    // Inbound edges must still resolve (rid_subject still exists).
+    let edges_after = db.get_edges(&rid_subject).unwrap();
+    assert_eq!(
+        edges_before.len(),
+        edges_after.len(),
+        "inbound edges must be preserved across correct(); \
+         this is the central v0.7.20 win over the v0.7.19 tombstone semantics"
+    );
+}
+
+#[test]
+fn correct_history_empty_for_never_corrected_record() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid = db
+        .record(
+            "never corrected",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let history = db.history(&rid).unwrap();
+    assert!(
+        history.is_empty(),
+        "never-corrected record has no revisions"
+    );
+}
+
+#[test]
+fn schema_v30_fresh_install_has_record_revisions_table() {
+    // Fresh install must apply v30 schema and create the
+    // record_revisions table + its index. Regression guard against
+    // forgetting to add the table to SCHEMA_SQL alongside the migration.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let conn = db.conn();
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type = 'table' AND name = 'record_revisions'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        count, 1,
+        "record_revisions table must exist on fresh install"
+    );
+
+    // Schema version meta should be at least 30.
+    let schema_version: String = conn
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let v: i32 = schema_version.parse().unwrap();
+    assert!(
+        v >= crate::base::schema::SCHEMA_VERSION,
+        "schema_version must be at least {}, got {v}",
+        crate::base::schema::SCHEMA_VERSION,
+    );
+}
