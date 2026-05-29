@@ -1,4 +1,4 @@
-# RFC: First-class record-to-record link model on the `remember` write path (engine v0.8.0)
+# RFC: First-class record-to-record link model on the `remember` write path (0.7.x series, schema v31)
 
 **Status:** draft (v2 — post-redteam)
 **Author:** yantrikdb-core
@@ -41,7 +41,7 @@ Tempting (cheapest; reuses `expand_entities`), but rejected for four verified re
 3. **Schema mismatch.** `claims` carries 20+ columns specific to NLP-extracted entity assertions: `polarity`, `modality`, `valid_from`/`valid_to`, `extractor_version`, `confidence_band`, `proposition_id`, `regime_tag`, `self_generated`, `source_lineage`, `modality_signal`. Record links need almost none of these and need things `claims` lacks (link lifecycle status tied to `forget()`). Forcing record links into this shape inherits accidental semantics.
 4. **`expand_entities` budget contention.** Its BFS has a 30-node cap and 8-seed cap (`recall.rs:1476-1485`). If rids enter as pseudo-entities, record chains consume the budget meant for semantic neighbourhoods.
 
-### (C) Full unification — one typed graph; records and entities are both first-class node kinds (`node_kind ∈ {entity, record}`). **Deferred — this is the eventual endgame, not v0.8.0.**
+### (C) Full unification — one typed graph; records and entities are both first-class node kinds (`node_kind ∈ {entity, record}`). **Deferred — this is the eventual endgame, not the first link cut.**
 
 The redteam (gpt-5.5) makes the strongest case for C as the *long-term* shape, and it's right that it's the cleanest model: one `graph_nodes` / `graph_edges` substrate, typed endpoints, edge classes, relation-aware traversal, no UUIDs masquerading as entities. We agree C is where this lands eventually.
 
@@ -59,7 +59,7 @@ This is the part v1 of this RFC got wrong by deferring. The redteam surfaced a c
 
 > A `supersedes` B. A user query is semantically close to B. HNSW retrieves B by embedding match. `expand_entities` expands the *entity* graph around B but knows nothing about `record_links`. MMR runs. B survives, A is never surfaced. **The engine returns a stale memory it explicitly knows was superseded.**
 
-Therefore record-link expansion at recall time is **in scope for v0.8.0, not a follow-up.** A separate table whose links don't reach recall would ship the correctness bug. The good news from the code-grounding pass: we do **not** invent new scoring — the machinery already exists and is reused.
+Therefore record-link expansion at recall time is **in scope for the first link cut, not a follow-up.** A separate table whose links don't reach recall would ship the correctness bug. The good news from the code-grounding pass: we do **not** invent new scoring — the machinery already exists and is reused.
 
 ### Reusing the existing `graph_proximity` machinery
 
@@ -185,7 +185,7 @@ Code-grounding (`hlc.rs`, `replication.rs`) confirmed v1's `zeroblob(8)` HLC was
 
 ### 7. Migration v31 reifies `metadata.supersedes`
 
-Algo's pre-v0.8.0 workflow encodes supersession as a `metadata.supersedes = "<rid>"` string. The migration reifies these into `Supersedes` links:
+Algo's pre-link-model workflow encodes supersession as a `metadata.supersedes = "<rid>"` string. The migration reifies these into `Supersedes` links:
 
 ```sql
 INSERT OR IGNORE INTO record_links
@@ -204,7 +204,7 @@ WHERE json_extract(m.metadata, '$.supersedes') IS NOT NULL
   AND json_extract(m.metadata, '$.supersedes') != '';
 ```
 
-(SQL shown illustratively; the HLC + uuid stamping happen in Rust at migration time, not in pure SQL, precisely because HLC must come from the engine clock.) The original `metadata.supersedes` field is **left in place** for back-compat; removal is opt-in via a later `compact_metadata()` (not v0.8.0). Open question for algo: are there other metadata-as-link conventions (`metadata.advances`, `metadata.derives_from`) worth reifying in the same pass? (§ Open questions.)
+(SQL shown illustratively; the HLC + uuid stamping happen in Rust at migration time, not in pure SQL, precisely because HLC must come from the engine clock.) The original `metadata.supersedes` field is **left in place** for back-compat; removal is opt-in via a later `compact_metadata()` (not this cut). Open question for algo: are there other metadata-as-link conventions (`metadata.advances`, `metadata.derives_from`) worth reifying in the same pass? (§ Open questions.)
 
 ### 8. Forward compatibility to (C)
 
@@ -224,7 +224,7 @@ The redteam raised "if A is corrected, what happens to A's outgoing links?" The 
 
 Consistent with the engine's audit-trail bias (`forget()` tombstones; `correct()` keeps history). On `forget(rid)`: outbound links from rid → `status='broken_source_forgotten'`; inbound links to rid → `status='broken_target_forgotten'`. Traversal + recall filter `WHERE status='active'`. The same handling extends to the replication apply path. No cascade delete — the fact that a link existed before an endpoint was forgotten is retained.
 
-## Open questions — RESOLVED for v0.8.0 implementation
+## Open questions — RESOLVED for the link-model implementation
 
 **Implementation decision (2026-05-28):** algo + server run autonomously on a lower-capability model and cannot meaningfully redteam the API in the abstract — they validate by *using* it. So the three remaining open questions are decided here by the authoring model, with reversible-by-default choices, and algo validates empirically against the rc build:
 
@@ -236,7 +236,11 @@ Resolved-by-decision (were open in v1): recall integration is mandatory not defe
 
 ### Implementation deviation from §2 API (2026-05-28)
 
-§2 specs `record(... links: &[RecordLink])`. **Implementation will instead add a separate `record_with_links(...)` atomic primitive and leave `record()`'s signature untouched** (it delegates with `&[]`). Rationale: `record()` has 100+ call sites across the engine, benches, examples, tests, and the pyo3 binding; the v0.7.20 `correct()` and `recall()` signature changes both caused call-site-cascade CI failures that the Windows dev environment could not catch locally (no pyo3 build). A new method preserves identical atomicity with zero cascade. The batch path gains `RecordInput.links: Vec<RecordLink>` for the same reason.
+§2 specs `record(... links: &[RecordLink])` and §3 specs `recall(... expand_links)`. **Implementation instead adds separate `record_with_links(...)` and `recall_with_links(...)` methods, leaving `record()` and `recall()` signatures untouched** (they delegate / are called internally). Rationale: `record()` and `recall()` have 100+ call sites across the engine, benches, examples, tests, and the pyo3 binding; the v0.7.20 `correct()` and `recall()` signature changes both caused call-site-cascade CI failures that the Windows dev environment could not catch locally (no pyo3 build). New methods preserve identical semantics with zero cascade. The batch path gains `RecordInput.links: Vec<RecordLink>` for the same reason.
+
+**Consequence — no feature flag needed.** Because the link model is delivered entirely through *new* methods, every existing path (`record()`, `recall()`, etc.) is byte-identical with the feature present-but-unused. There is no existing-path behavior change to gate, so the RFC's "feature flag for soak" is unnecessary: a node can carry the link model dormant and behave exactly as before until something calls a `*_with_links` method. The one existing-path touch is `forget()` updating `record_links` rows, which is a no-op on an empty table. (The `relate()` prerequisite is a separate bugfix PR and does change `relate()` behavior, but that's a phantom-entity fix, not the link feature.)
+
+**Recall integration — isolated post-pass, not a core weave.** `recall_with_links()` runs `recall()` for a larger base pool then applies supersedes-demotion + budget-capped neighbor surfacing as a bounded transform on the result set. Tradeoff: surfaced neighbors skip MMR diversity (the post-pass runs after `recall()`'s MMR). Chosen over weaving into the 3700-line recall hot path because an isolated transform is testable and low-blast-radius; the MMR tradeoff is acceptable for v1 since link sets are small and intentional. A future rev can move pre-MMR if empirically warranted.
 
 ## Test plan
 
@@ -264,7 +268,7 @@ Resolved-by-decision (were open in v1): recall integration is mandatory not defe
 ## Coordination
 
 - **yantrikdb-agi**: review the link-type closed set + `Supersedes` semantics (open questions #1, #2) + other-metadata-to-reify (#3). Their lived experience is ground truth.
-- **yantrikdb-server**: MCP tool surface for `link`/`unlink`/`linked_records` — recommend mirroring the engine `LinkType` strings (closed set + `custom:<name>`) rather than a server-defined vocabulary, for one source of truth. Also: schema-timing — at least one clean production week on v0.7.20+v30 before cutting v0.8.0+v31; want a v0.8.0-rc1 on trader (CT 168) behind the feature flag for soak + bench re-run.
+- **yantrikdb-server**: MCP tool surface for `link`/`unlink`/`linked_records` — recommend mirroring the engine `LinkType` strings (closed set + `custom:<name>`) rather than a server-defined vocabulary, for one source of truth. Also: schema-timing — at least one clean production week on v0.7.20+v30 before cutting the schema-v31 release; want an rc build on trader (CT 168) behind the feature flag for soak + bench re-run.
 - **trader**: the pre-v0.7.19 23k-orphan postmortem may want an rc1 build — link traversal could help characterise the orphan source.
 
 ## Decision summary
@@ -272,20 +276,20 @@ Resolved-by-decision (were open in v1): recall integration is mandatory not defe
 1. **`record_links` table** (v31), physically separate from `claims`/entities — chosen over reusing `claims` (B, schema abuse + pollution) and over full graph unification (C, over-architecture for current scale; deferred as the eventual endgame with A as a forward-compatible stepping stone).
 2. **`db.record(... links)`** — atomic with the write.
 3. **`db.link` / `unlink` / `linked_records`** — explicit traversal; `contradicts` bidirectional.
-4. **`recall(... expand_links)` is mandatory in v0.8.0, not deferred** — record links must reach recall or they ship a stale-recall correctness bug. Reuses the existing `graph_proximity` machinery with relation-aware polarity (`supersedes` boosts successor + demotes predecessor, `contradicts` relevant-not-endorsing, etc.).
+4. **`recall(... expand_links)` is mandatory in the first link cut, not deferred** — record links must reach recall or they ship a stale-recall correctness bug. Reuses the existing `graph_proximity` machinery with relation-aware polarity (`supersedes` boosts successor + demotes predecessor, `contradicts` relevant-not-endorsing, etc.).
 5. **`forget()` marks links broken**, never deletes.
 6. **Migration v31 reifies `metadata.supersedes`** with real `tick_hlc()` HLC + `origin_actor='migration_v31'` (NOT zeroblob).
 7. **Prerequisite PR**: fix `relate()` so rid endpoints don't create phantom entities; clean up existing `consolidate.rs`-origin phantoms.
-8. **v0.8.0 release vehicle**, feature-flagged for rc soak.
+8. **0.7.x release vehicle (schema v31)** — likely v0.7.21+, consistent with v0.7.20 shipping a breaking `correct()` change as a patch. No feature flag needed (additive-method design = no existing-path behavior change to gate). Still gated on a clean v0.7.20 soak week + algo's empirical validation on an rc build before GA.
 
-The engine HAS a graph layer; v0.8.0 makes record-to-record relations a first-class concern of the **write path** *and* the **recall path**, with the atomicity + link-integrity + recall-visibility guarantees mechanical rather than caller-discipline.
+The engine HAS a graph layer; the schema-v31 link model makes record-to-record relations a first-class concern of the **write path** *and* the **recall path**, with the atomicity + link-integrity + recall-visibility guarantees mechanical rather than caller-discipline.
 
 ---
 
 ## Changelog v1 → v2 (post-redteam)
 
 - **Added Considered-Alternatives section** weighing A/B/C explicitly. v1 asserted "separate table" without earning it against the minimal-fix baseline or the unification endgame.
-- **Recall integration promoted from a deferred hand-wave to a mandatory, fully-specified v0.8.0 component**, motivated by the stale-recall *correctness* failure the redteam surfaced. v1 said "graph-proximity boost (mirrors expand_entities)" with no detail; v2 specifies reuse of `expand_bfs`/`graph_proximity`/`adaptive_graph_composite_score` with the real constants.
+- **Recall integration promoted from a deferred hand-wave to a mandatory, fully-specified component**, motivated by the stale-recall *correctness* failure the redteam surfaced. v1 said "graph-proximity boost (mirrors expand_entities)" with no detail; v2 specifies reuse of `expand_bfs`/`graph_proximity`/`adaptive_graph_composite_score` with the real constants.
 - **Added relation-aware scoring** — the single biggest technical gap in v1. `supersedes` demotes predecessor; `contradicts` is relevant-not-endorsing; etc.
 - **Cut the `weight` column** — v1 carried it with no defined semantics. Replaced by `link_type`-derived proximity polarity.
 - **Fixed the migration HLC** — v1's `zeroblob(8)` was a verified replication bug (locks rows out behind the watermark). v2 uses `tick_hlc()` at migration time + `origin_actor='migration_v31'`.
