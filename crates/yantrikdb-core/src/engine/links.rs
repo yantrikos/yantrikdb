@@ -26,9 +26,17 @@
 use rusqlite::params;
 
 use crate::error::{Result, YantrikDbError};
-use crate::types::{LinkDirection, LinkType, LinkedRecord, RecordLink};
+use crate::types::{
+    LinkDirection, LinkType, LinkedRecord, RecallResult, RecordLink, ScoreBreakdown,
+    ScoreContributions,
+};
 
 use super::{now, YantrikDB};
+
+/// Shared candidate-budget cap for link expansion at recall time (RFC §3):
+/// `expand_links` and `expand_entities` together must not add more than
+/// this many candidates, bounding worst-case fan-out.
+const LINK_EXPANSION_BUDGET: usize = 50;
 
 impl YantrikDB {
     /// Record a memory and atomically(-ish; see module docs) attach
@@ -224,6 +232,172 @@ impl YantrikDB {
             created += 1;
         }
         Ok(created)
+    }
+
+    /// Issue #48 — recall with record-link expansion.
+    ///
+    /// Additive sibling of `recall()` (NOT a signature change to it — same
+    /// call-site-cascade rationale as `record_with_links`). `expand_links`
+    /// is the hop budget; `0` makes this identical to `recall()`.
+    ///
+    /// **Design — isolated post-pass, not a weave into the recall core.**
+    /// Runs the standard `recall()` for a slightly larger base pool, then
+    /// applies two link-aware transforms:
+    /// 1. **Supersedes demotion** — any base result that is the TARGET of
+    ///    an active `supersedes` link is multiplied by its
+    ///    `demote_self_as_target` factor (0.5). This is the half of the
+    ///    fix that stops a stale, superseded record from dominating.
+    /// 2. **Neighbor surfacing** — for each base result, active outbound
+    ///    links (and symmetric `contradicts`) surface the linked record
+    ///    (if active + not already present), scored at
+    ///    `seed.score * neighbor_factor / 4` (1-hop decay mirroring the
+    ///    entity graph's `4^hops`). This is the half that pulls the
+    ///    superseder/contradictor in even when it isn't semantically near
+    ///    the query. Budget-capped at [`LINK_EXPANSION_BUDGET`].
+    ///
+    /// Then re-sort by score and truncate to `top_k`.
+    ///
+    /// **Tradeoff (documented):** surfaced neighbors do NOT pass through
+    /// MMR diversity (the post-pass runs after `recall()`'s MMR). For v1
+    /// this is acceptable — the link set is small and intentional, unlike
+    /// the entity graph. A future revision can move expansion pre-MMR by
+    /// weaving into the recall core if diversity over linked records
+    /// proves to matter empirically.
+    #[allow(clippy::too_many_arguments)]
+    pub fn recall_with_links(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        time_window: Option<(f64, f64)>,
+        memory_type: Option<&str>,
+        include_consolidated: bool,
+        expand_entities: bool,
+        query_text: Option<&str>,
+        skip_reinforce: bool,
+        namespace: Option<&str>,
+        domain: Option<&str>,
+        source: Option<&str>,
+        certainty_min: Option<f64>,
+        order: Option<&str>,
+        expand_links: usize,
+    ) -> Result<Vec<RecallResult>> {
+        // Larger base pool when expanding so demotion/expansion has room
+        // to reorder before the final truncate.
+        let base_k = if expand_links == 0 {
+            top_k
+        } else {
+            top_k.saturating_add(LINK_EXPANSION_BUDGET)
+        };
+
+        let mut base = self.recall(
+            query_embedding,
+            base_k,
+            time_window,
+            memory_type,
+            include_consolidated,
+            expand_entities,
+            query_text,
+            skip_reinforce,
+            namespace,
+            domain,
+            source,
+            certainty_min,
+            order,
+        )?;
+
+        if expand_links == 0 {
+            base.truncate(top_k);
+            return Ok(base);
+        }
+
+        let mut present: std::collections::HashSet<String> =
+            base.iter().map(|r| r.rid.clone()).collect();
+
+        // Phase 1: supersedes demotion.
+        let demote = LinkType::Supersedes.recall_polarity().demote_self_as_target;
+        for r in base.iter_mut() {
+            let superseded_by =
+                self.linked_records(&r.rid, LinkDirection::Inbound, Some(&LinkType::Supersedes))?;
+            if !superseded_by.is_empty() {
+                r.score *= demote;
+                r.why_retrieved
+                    .push("demoted: superseded by a newer record".to_string());
+            }
+        }
+
+        // Phase 2: neighbor surfacing (budget-capped).
+        let mut added: Vec<RecallResult> = Vec::new();
+        let mut budget = LINK_EXPANSION_BUDGET;
+        let seeds: Vec<(String, f64)> = base.iter().map(|r| (r.rid.clone(), r.score)).collect();
+        'seeds: for (seed_rid, seed_score) in &seeds {
+            if budget == 0 {
+                break;
+            }
+            let links = self.linked_records(seed_rid, LinkDirection::Outbound, None)?;
+            for l in links {
+                if budget == 0 {
+                    break 'seeds;
+                }
+                if present.contains(&l.rid) {
+                    continue;
+                }
+                let lt = LinkType::from_str_lenient(&l.link_type);
+                let pol = lt.recall_polarity();
+                if pol.neighbor_factor <= 0.0 {
+                    continue;
+                }
+                let Some(mem) = self.get(&l.rid)? else {
+                    continue;
+                };
+                if mem.consolidation_status != "active" {
+                    continue;
+                }
+                // 1-hop proximity decay mirrors the entity graph's 4^hops.
+                let nscore = seed_score * pol.neighbor_factor / 4.0;
+                present.insert(l.rid.clone());
+                budget -= 1;
+                added.push(RecallResult {
+                    rid: mem.rid,
+                    memory_type: mem.memory_type,
+                    text: mem.text,
+                    created_at: mem.created_at,
+                    importance: mem.importance,
+                    valence: mem.valence,
+                    score: nscore,
+                    scores: ScoreBreakdown {
+                        similarity: 0.0,
+                        decay: 0.0,
+                        recency: 0.0,
+                        importance: mem.importance,
+                        graph_proximity: nscore,
+                        contributions: ScoreContributions {
+                            similarity: 0.0,
+                            decay: 0.0,
+                            recency: 0.0,
+                            importance: 0.0,
+                            graph_proximity: nscore,
+                        },
+                        valence_multiplier: 1.0,
+                    },
+                    why_retrieved: vec![format!("linked via {} from {}", l.link_type, seed_rid)],
+                    metadata: mem.metadata,
+                    namespace: mem.namespace,
+                    certainty: mem.certainty,
+                    domain: mem.domain,
+                    source: mem.source,
+                    emotional_state: mem.emotional_state,
+                });
+            }
+        }
+
+        base.extend(added);
+        base.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        base.truncate(top_k);
+        Ok(base)
     }
 
     /// Traverse links from `rid`. Only `status='active'` links are
@@ -608,6 +782,166 @@ mod tests {
             .linked_records(&new, LinkDirection::Outbound, Some(&LinkType::Supersedes))
             .unwrap();
         assert_eq!(out2.len(), 1, "reify is idempotent");
+    }
+
+    #[test]
+    fn expand_links_demotes_superseded_and_surfaces_superseder() {
+        // The redteam's motivating correctness scenario. A supersedes B.
+        // A query close to B should, with expand_links, demote B and
+        // surface A above it.
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        // B and the query are near-identical; A is also near but we rely
+        // on the link, not similarity, to rank it.
+        let b = rec(&db, "old fact about widgets", 5.0);
+        let a = rec(&db, "corrected fact about widgets", 5.05);
+        db.link(
+            &a,
+            &RecordLink {
+                target_rid: b.clone(),
+                link_type: LinkType::Supersedes,
+            },
+        )
+        .unwrap();
+
+        let query = vec_seed(5.0, 8); // closest to B
+
+        // Baseline (expand_links=0): B is present, not demoted.
+        let base = db
+            .recall_with_links(
+                &query, 5, None, None, false, false, None, true, None, None, None, None, None, 0,
+            )
+            .unwrap();
+        let base_b = base.iter().find(|r| r.rid == b).expect("B in baseline");
+        let base_b_score = base_b.score;
+
+        // With expansion: B is demoted (score strictly lower than baseline)
+        // and A is present.
+        let expanded = db
+            .recall_with_links(
+                &query, 5, None, None, false, false, None, true, None, None, None, None, None, 1,
+            )
+            .unwrap();
+        let exp_b = expanded
+            .iter()
+            .find(|r| r.rid == b)
+            .expect("B still present");
+        assert!(
+            exp_b.score < base_b_score,
+            "superseded B must be demoted: baseline={base_b_score}, expanded={}",
+            exp_b.score
+        );
+        assert!(
+            expanded.iter().any(|r| r.rid == a),
+            "superseder A must be present in expanded results"
+        );
+        // A should rank above B after demotion.
+        let pos_a = expanded.iter().position(|r| r.rid == a).unwrap();
+        let pos_b = expanded.iter().position(|r| r.rid == b).unwrap();
+        assert!(pos_a < pos_b, "A (superseder) must rank above demoted B");
+    }
+
+    #[test]
+    fn expand_links_zero_is_identical_to_recall() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let _a = rec(&db, "alpha", 1.0);
+        let _b = rec(&db, "beta", 2.0);
+        let query = vec_seed(1.0, 8);
+        let via_links = db
+            .recall_with_links(
+                &query, 5, None, None, false, false, None, true, None, None, None, None, None, 0,
+            )
+            .unwrap();
+        let direct = db
+            .recall(
+                &query, 5, None, None, false, false, None, true, None, None, None, None, None,
+            )
+            .unwrap();
+        assert_eq!(
+            via_links.iter().map(|r| &r.rid).collect::<Vec<_>>(),
+            direct.iter().map(|r| &r.rid).collect::<Vec<_>>(),
+            "expand_links=0 must match recall() exactly"
+        );
+    }
+
+    #[test]
+    fn expand_links_surfaces_neighbor_excluded_from_base_pool() {
+        // B supports A. A is in a different domain, so a domain-filtered
+        // recall excludes A from the base pool entirely — yet expand_links
+        // must still surface A via B's outbound support link, labelled as
+        // link-sourced. (In a tiny DB without the filter, A would already
+        // be in the base pool; the domain filter is what forces the
+        // genuine neighbor-surfacing path.)
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let b = db
+            .record(
+                "matches query in default domain",
+                "semantic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &vec_seed(3.0, 8),
+                "default",
+                0.8,
+                "default", // domain
+                "user",
+                None,
+            )
+            .unwrap();
+        let a = db
+            .record(
+                "supporting evidence in a hidden domain",
+                "semantic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &vec_seed(3.05, 8),
+                "default",
+                0.8,
+                "hidden", // different domain -> excluded by the filter below
+                "user",
+                None,
+            )
+            .unwrap();
+        db.link(
+            &b,
+            &RecordLink {
+                target_rid: a.clone(),
+                link_type: LinkType::Supports,
+            },
+        )
+        .unwrap();
+
+        let query = vec_seed(3.0, 8);
+        // domain="default" excludes A from the base recall pool.
+        let expanded = db
+            .recall_with_links(
+                &query,
+                5,
+                None,
+                None,
+                false,
+                false,
+                None,
+                true,
+                None,
+                Some("default"),
+                None,
+                None,
+                None,
+                1,
+            )
+            .unwrap();
+        let a_res = expanded
+            .iter()
+            .find(|r| r.rid == a)
+            .expect("linked supporter A must surface even though excluded from base pool");
+        assert!(
+            a_res.why_retrieved.iter().any(|w| w.contains("linked via")),
+            "surfaced neighbor must be labelled as link-sourced, got {:?}",
+            a_res.why_retrieved
+        );
     }
 
     #[test]
