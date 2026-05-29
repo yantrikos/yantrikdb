@@ -552,6 +552,182 @@ impl PyYantrikDB {
             .collect()
     }
 
+    // ── Issue #48 — record-to-record links ──
+
+    /// Record a memory and atomically attach record-to-record links.
+    /// `links` is a list of dicts: `{"target_rid": "...", "link_type": "supersedes"}`.
+    /// link_type is one of advances/supersedes/contradicts/supports/
+    /// questions/derived_from, or "custom:<name>".
+    #[pyo3(signature = (text, links, memory_type="episodic", importance=0.5, valence=0.0, half_life=604800.0, metadata=None, embedding=None, namespace="default", certainty=0.8, domain="general", source="user", emotional_state=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn record_with_links(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        links: Vec<Bound<'_, PyDict>>,
+        memory_type: &str,
+        importance: f64,
+        valence: f64,
+        half_life: f64,
+        metadata: Option<&Bound<'_, PyDict>>,
+        embedding: Option<Vec<f32>>,
+        namespace: &str,
+        certainty: f64,
+        domain: &str,
+        source: &str,
+        emotional_state: Option<&str>,
+    ) -> PyResult<String> {
+        let db = self.get_inner()?;
+        let emb = match embedding {
+            Some(e) => e,
+            None => self.embed_text(py, text)?,
+        };
+        let meta = match metadata {
+            Some(d) => py_to_json(&d.as_any())?,
+            None => serde_json::json!({}),
+        };
+        let parsed = parse_links(&links)?;
+        db.record_with_links(
+            text,
+            memory_type,
+            importance,
+            valence,
+            half_life,
+            &meta,
+            &emb,
+            namespace,
+            certainty,
+            domain,
+            source,
+            emotional_state,
+            &parsed,
+        )
+        .map_err(map_err)
+    }
+
+    /// Add a single record-to-record link. Returns the link_id.
+    fn link(&self, source_rid: &str, target_rid: &str, link_type: &str) -> PyResult<String> {
+        let db = self.get_inner()?;
+        let rl = yantrikdb_core::RecordLink {
+            target_rid: target_rid.to_string(),
+            link_type: yantrikdb_core::LinkType::from_str_lenient(link_type),
+        };
+        db.link(source_rid, &rl).map_err(map_err)
+    }
+
+    /// Remove a single link. Returns True if a row was deleted.
+    fn unlink(&self, source_rid: &str, target_rid: &str, link_type: &str) -> PyResult<bool> {
+        let db = self.get_inner()?;
+        db.unlink(
+            source_rid,
+            target_rid,
+            &yantrikdb_core::LinkType::from_str_lenient(link_type),
+        )
+        .map_err(map_err)
+    }
+
+    /// Traverse links from `rid`. `direction` is "outbound" | "inbound" |
+    /// "both"; `link_type` filters to one type (None = all). Returns a list
+    /// of dicts {rid, link_type, created_at, direction}.
+    #[pyo3(signature = (rid, direction="both", link_type=None))]
+    fn linked_records(
+        &self,
+        py: Python<'_>,
+        rid: &str,
+        direction: &str,
+        link_type: Option<&str>,
+    ) -> PyResult<Vec<PyObject>> {
+        let db = self.get_inner()?;
+        let dir = match direction {
+            "outbound" => yantrikdb_core::LinkDirection::Outbound,
+            "inbound" => yantrikdb_core::LinkDirection::Inbound,
+            "both" => yantrikdb_core::LinkDirection::Both,
+            other => {
+                return Err(PyValueError::new_err(format!(
+                    "linked_records: invalid direction {other:?}; expected \
+                     \"outbound\" | \"inbound\" | \"both\""
+                )))
+            }
+        };
+        let lt = link_type.map(yantrikdb_core::LinkType::from_str_lenient);
+        let out = db.linked_records(rid, dir, lt.as_ref()).map_err(map_err)?;
+        out.iter()
+            .map(|l| {
+                let d = PyDict::new(py);
+                d.set_item("rid", &l.rid)?;
+                d.set_item("link_type", &l.link_type)?;
+                d.set_item("created_at", l.created_at)?;
+                d.set_item("direction", &l.direction)?;
+                Ok::<PyObject, pyo3::PyErr>(d.into())
+            })
+            .collect()
+    }
+
+    /// Recall with record-link expansion. `expand_links` is the hop budget
+    /// (0 = identical to recall()). Mirrors `recall()` args otherwise.
+    #[pyo3(signature = (query=None, query_embedding=None, top_k=10, expand_links=1, time_window=None, memory_type=None, include_consolidated=false, expand_entities=true, skip_reinforce=false, namespace=None, domain=None, source=None, certainty_min=None, order=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn recall_with_links(
+        &self,
+        py: Python<'_>,
+        query: Option<&str>,
+        query_embedding: Option<Vec<f32>>,
+        top_k: usize,
+        expand_links: usize,
+        time_window: Option<(f64, f64)>,
+        memory_type: Option<&str>,
+        include_consolidated: bool,
+        expand_entities: bool,
+        skip_reinforce: bool,
+        namespace: Option<&str>,
+        domain: Option<&str>,
+        source: Option<&str>,
+        certainty_min: Option<f64>,
+        order: Option<&str>,
+    ) -> PyResult<Vec<PyObject>> {
+        let db = self.get_inner()?;
+        let emb = match query_embedding {
+            Some(e) => e,
+            None => match query {
+                Some(q) => self.embed_text(py, q)?,
+                None => {
+                    return Err(PyValueError::new_err(
+                        "Must provide either query or query_embedding",
+                    ))
+                }
+            },
+        };
+        let results = db
+            .recall_with_links(
+                &emb,
+                top_k,
+                time_window,
+                memory_type,
+                include_consolidated,
+                expand_entities,
+                query,
+                skip_reinforce,
+                namespace,
+                domain,
+                source,
+                certainty_min,
+                order,
+                expand_links,
+            )
+            .map_err(map_err)?;
+        results
+            .iter()
+            .map(|r| recall_result_to_dict(py, r))
+            .collect()
+    }
+
+    /// One-shot reification of legacy `metadata.supersedes` strings into
+    /// Supersedes links. Returns the count created. Idempotent.
+    fn reify_supersedes_links(&self) -> PyResult<usize> {
+        let db = self.get_inner()?;
+        db.reify_supersedes_links().map_err(map_err)
+    }
+
     fn record_batch(
         &self,
         py: Python<'_>,
@@ -696,4 +872,25 @@ impl PyYantrikDB {
     fn embed(&self, py: Python<'_>, text: &str) -> PyResult<Vec<f32>> {
         self.embed_text(py, text)
     }
+}
+
+/// Parse a Python list of `{"target_rid": str, "link_type": str}` dicts
+/// into `Vec<RecordLink>` for `record_with_links`. (Issue #48.)
+fn parse_links(links: &[Bound<'_, PyDict>]) -> PyResult<Vec<yantrikdb_core::RecordLink>> {
+    let mut out = Vec::with_capacity(links.len());
+    for d in links {
+        let target_rid: String = d
+            .get_item("target_rid")?
+            .ok_or_else(|| PyValueError::new_err("each link must have a 'target_rid' key"))?
+            .extract()?;
+        let link_type: String = d
+            .get_item("link_type")?
+            .ok_or_else(|| PyValueError::new_err("each link must have a 'link_type' key"))?
+            .extract()?;
+        out.push(yantrikdb_core::RecordLink {
+            target_rid,
+            link_type: yantrikdb_core::LinkType::from_str_lenient(&link_type),
+        });
+    }
+    Ok(out)
 }

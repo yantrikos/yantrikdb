@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 30;
+pub const SCHEMA_VERSION: i32 = 31;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -724,6 +724,29 @@ CREATE TABLE IF NOT EXISTS record_revisions (
 );
 CREATE INDEX IF NOT EXISTS idx_record_revisions_rid
     ON record_revisions(rid, revision_num);
+
+-- v31 (issue #48): record_links — first-class record-to-record links.
+-- Distinct from the entity graph (`claims`): rid-specific semantics, a
+-- small closed set of link_types, and a forget()-aware lifecycle status.
+-- Atomic with the write via record_with_links(). See
+-- docs/record_link_model_rfc.md. Column order/naming deliberately mirror
+-- a future typed graph_edges row so this can fold into a unified graph
+-- later without a semantic rewrite.
+CREATE TABLE IF NOT EXISTS record_links (
+    link_id        TEXT PRIMARY KEY,
+    source_rid     TEXT NOT NULL,
+    target_rid     TEXT NOT NULL,
+    link_type      TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'active',
+    created_at     REAL NOT NULL,
+    hlc            BLOB NOT NULL,
+    origin_actor   TEXT NOT NULL,
+    UNIQUE(source_rid, target_rid, link_type)
+);
+CREATE INDEX IF NOT EXISTS idx_record_links_source
+    ON record_links(source_rid, link_type, status);
+CREATE INDEX IF NOT EXISTS idx_record_links_target
+    ON record_links(target_rid, link_type, status);
 
 -- Peer tracking for delta sync
 CREATE TABLE IF NOT EXISTS sync_peers (
@@ -2239,4 +2262,31 @@ CREATE TABLE IF NOT EXISTS record_revisions (
 );
 CREATE INDEX IF NOT EXISTS idx_record_revisions_rid
     ON record_revisions(rid, revision_num);
+";
+
+// **Issue #48 — first-class record-to-record links (schema v31).**
+//
+// `record_links` is a dedicated table (NOT a reuse of `claims`) so
+// record-to-record relations get rid-specific semantics without
+// polluting the entity graph with phantom `unknown`-typed entity rows
+// (see RFC §"Considered alternatives"). The migration only creates the
+// table + indexes; the metadata.supersedes reification runs in Rust at
+// migration time (it needs the engine HLC clock — pure SQL can't stamp
+// a real HLC). See engine/mod.rs migration registration.
+pub const MIGRATE_V30_TO_V31: &str = "
+CREATE TABLE IF NOT EXISTS record_links (
+    link_id        TEXT PRIMARY KEY,
+    source_rid     TEXT NOT NULL,
+    target_rid     TEXT NOT NULL,
+    link_type      TEXT NOT NULL,
+    status         TEXT NOT NULL DEFAULT 'active',
+    created_at     REAL NOT NULL,
+    hlc            BLOB NOT NULL,
+    origin_actor   TEXT NOT NULL,
+    UNIQUE(source_rid, target_rid, link_type)
+);
+CREATE INDEX IF NOT EXISTS idx_record_links_source
+    ON record_links(source_rid, link_type, status);
+CREATE INDEX IF NOT EXISTS idx_record_links_target
+    ON record_links(target_rid, link_type, status);
 ";

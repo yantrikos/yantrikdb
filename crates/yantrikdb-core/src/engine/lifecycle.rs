@@ -351,6 +351,29 @@ impl YantrikDB {
         if was_newly_tombstoned {
             self.graph_index.write().unlink_memory(rid);
             self.cache_remove(rid);
+
+            // **Issue #48.** Mark record_links touching this rid as broken
+            // rather than deleting them — the audit trail (this link
+            // existed before the endpoint was forgotten) is retained, and
+            // traversal/recall filter on status='active'. Outbound links
+            // from the forgotten rid => broken_source_forgotten; inbound
+            // links to it => broken_target_forgotten. No oplog op is
+            // emitted: the existing 'forget' op replays this same status
+            // transition on followers via the deterministic SQL below.
+            {
+                let conn = self.conn();
+                conn.execute(
+                    "UPDATE record_links SET status = 'broken_source_forgotten' \
+                     WHERE source_rid = ?1 AND status = 'active'",
+                    params![rid],
+                )?;
+                conn.execute(
+                    "UPDATE record_links SET status = 'broken_target_forgotten' \
+                     WHERE target_rid = ?1 AND status = 'active'",
+                    params![rid],
+                )?;
+            }
+
             self.log_op(
                 "forget",
                 Some(rid),
