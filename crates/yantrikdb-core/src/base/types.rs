@@ -639,6 +639,9 @@ pub struct RecallQuery {
     // V10 filters
     pub domain: Option<String>,
     pub source: Option<String>,
+    // Issue #46: confidence first-class on recall.
+    pub certainty_min: Option<f64>,
+    pub order: Option<String>,
 }
 
 impl RecallQuery {
@@ -656,7 +659,23 @@ impl RecallQuery {
             namespace: None,
             domain: None,
             source: None,
+            certainty_min: None,
+            order: None,
         }
+    }
+
+    /// Issue #46: drop results whose certainty falls below `min`.
+    pub fn certainty_min(mut self, min: f64) -> Self {
+        self.certainty_min = Some(min);
+        self
+    }
+
+    /// Issue #46: re-sort the top_k by `"relevance"` (default),
+    /// `"certainty"`, or `"recency"`. Invalid strings surface as
+    /// `YantrikDbError::InvalidInput` on `execute()`.
+    pub fn order(mut self, order: &str) -> Self {
+        self.order = Some(order.to_string());
+        self
     }
 
     /// Set maximum number of results to return.

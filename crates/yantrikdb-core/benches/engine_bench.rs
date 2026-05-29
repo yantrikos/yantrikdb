@@ -163,6 +163,8 @@ fn bench_recall(c: &mut Criterion) {
                     None,
                     None,
                     None,
+                    None,
+                    None,
                 )
                 .unwrap()
             })
@@ -392,6 +394,8 @@ fn bench_recall_scaled(c: &mut Criterion) {
                     None,
                     None,
                     None,
+                    None,
+                    None,
                 )
                 .unwrap()
             })
@@ -427,6 +431,8 @@ fn bench_recall_dim_comparison(c: &mut Criterion) {
                             false,
                             None,
                             true,
+                            None,
+                            None,
                             None,
                             None,
                             None,
@@ -469,6 +475,8 @@ fn bench_recall_100k(c: &mut Criterion) {
                     None,
                     None,
                     None,
+                    None,
+                    None,
                 )
                 .unwrap()
             })
@@ -502,6 +510,8 @@ fn bench_recall_with_graph(c: &mut Criterion) {
                     None,
                     None,
                     None,
+                    None,
+                    None,
                 )
                 .unwrap()
             })
@@ -518,6 +528,8 @@ fn bench_recall_with_graph(c: &mut Criterion) {
                     false,
                     None,
                     true,
+                    None,
+                    None,
                     None,
                     None,
                     None,
@@ -557,6 +569,8 @@ fn bench_reinforce_overhead(c: &mut Criterion) {
                     None,
                     None,
                     None,
+                    None,
+                    None,
                 )
                 .unwrap()
         })
@@ -574,6 +588,8 @@ fn bench_reinforce_overhead(c: &mut Criterion) {
                     false,
                     None,
                     true,
+                    None,
+                    None,
                     None,
                     None,
                     None,
