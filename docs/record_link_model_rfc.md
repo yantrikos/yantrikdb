@@ -224,15 +224,19 @@ The redteam raised "if A is corrected, what happens to A's outgoing links?" The 
 
 Consistent with the engine's audit-trail bias (`forget()` tombstones; `correct()` keeps history). On `forget(rid)`: outbound links from rid → `status='broken_source_forgotten'`; inbound links to rid → `status='broken_target_forgotten'`. Traversal + recall filter `WHERE status='active'`. The same handling extends to the replication apply path. No cascade delete — the fact that a link existed before an endpoint was forgotten is retained.
 
-## Open questions (narrowed from v1's six)
+## Open questions — RESOLVED for v0.8.0 implementation
 
-The redteam resolved several v1 open questions by decision; these remain genuinely caller-dependent:
+**Implementation decision (2026-05-28):** algo + server run autonomously on a lower-capability model and cannot meaningfully redteam the API in the abstract — they validate by *using* it. So the three remaining open questions are decided here by the authoring model, with reversible-by-default choices, and algo validates empirically against the rc build:
 
-1. **`Supersedes` auto-tombstone?** RFC says **NO** (semantic claim ≠ lifecycle action; recall predecessor-demotion already de-emphasises the superseded record without removing it). Confirm against algo's mental model — if they expect advance-and-retire as one unit, that changes the API.
-2. **Right closed set?** 6 types + `custom:`. Specifically: does `derived_from` collapse into `advances`? Is a 7th wanted (`summarizes`, `instance_of`)? Algo's lived experience is ground truth.
-3. **Other metadata-as-link conventions to reify** in v31 beyond `metadata.supersedes`? (§7.)
+1. **`Supersedes` auto-tombstone? → NO.** Recall predecessor-demotion already de-emphasises the superseded record; the audit-trail bias says keep it; and the choice is reversible (adding auto-tombstone later is cheap, un-deleting is not). Algo can `forget()` explicitly to retire the predecessor.
+2. **Closed set → keep all 6 + `custom:`, do NOT merge `derived_from` into `advances`.** Provenance ("came from", no correctness claim) and improvement ("is better than") are distinct; merging is lossy and hard to reverse, keeping them separate costs nothing (algo simply doesn't use one if unneeded). No speculative 7th — `custom:<name>` is the escape hatch.
+3. **Reify only `metadata.supersedes` in v31.** Reifying conventions algo may not use consistently risks garbage links. Expandable in a later migration once algo confirms what else they encode as string fields.
 
 Resolved-by-decision (were open in v1): recall integration is mandatory not deferred; `weight` cut in favour of type-derived polarity; `expand_links`/`expand_entities` share one budget cap; migration HLC uses `tick_hlc()` not zero.
+
+### Implementation deviation from §2 API (2026-05-28)
+
+§2 specs `record(... links: &[RecordLink])`. **Implementation will instead add a separate `record_with_links(...)` atomic primitive and leave `record()`'s signature untouched** (it delegates with `&[]`). Rationale: `record()` has 100+ call sites across the engine, benches, examples, tests, and the pyo3 binding; the v0.7.20 `correct()` and `recall()` signature changes both caused call-site-cascade CI failures that the Windows dev environment could not catch locally (no pyo3 build). A new method preserves identical atomicity with zero cascade. The batch path gains `RecordInput.links: Vec<RecordLink>` for the same reason.
 
 ## Test plan
 
