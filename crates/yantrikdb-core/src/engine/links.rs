@@ -1,4 +1,4 @@
-//! Issue #48 — first-class record-to-record links (v0.8.0).
+//! Issue #48 — first-class record-to-record links (schema v31, 0.7.x series).
 //!
 //! Record links live in their own `record_links` table, distinct from the
 //! entity graph (`claims`), so rids don't pollute the entity classifier
@@ -179,7 +179,7 @@ impl YantrikDB {
     /// for free. `origin_actor` is the calling node's actor (a real
     /// owner) rather than a synthetic 'migration_v31' tag — which is more
     /// correct for replication. Operators run this once during the
-    /// v0.8.0 upgrade. Idempotent: safe to run repeatedly.
+    /// schema-v31 upgrade. Idempotent: safe to run repeatedly.
     ///
     /// Reads metadata via the decrypt path so it works on encrypted DBs.
     pub fn reify_supersedes_links(&self) -> Result<usize> {

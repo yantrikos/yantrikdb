@@ -2264,7 +2264,7 @@ CREATE INDEX IF NOT EXISTS idx_record_revisions_rid
     ON record_revisions(rid, revision_num);
 ";
 
-// **Issue #48 — first-class record-to-record links (v0.8.0).**
+// **Issue #48 — first-class record-to-record links (schema v31).**
 //
 // `record_links` is a dedicated table (NOT a reuse of `claims`) so
 // record-to-record relations get rid-specific semantics without

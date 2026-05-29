@@ -402,7 +402,7 @@ pub struct RecordRevision {
     pub origin_actor: String,
 }
 
-// ── Issue #48 — record-to-record link model (v0.8.0) ──
+// ── Issue #48 — record-to-record link model (schema v31) ──
 
 /// Closed set of record-to-record link types + a `Custom` escape hatch.
 ///
