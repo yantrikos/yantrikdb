@@ -1,8 +1,8 @@
 # RFC: First-class record-to-record link model on the `remember` write path (0.7.x series, schema v31)
 
-**Status:** draft (v2 — post-redteam)
+**Status:** v3 — **IMPLEMENTED on `main`** (substrate #53 + recall/bindings #55). Ships in the 0.7.x series (v0.7.21+) after a clean v0.7.20 soak + algo rc-validation. Phantom-entity prerequisite deferred to [#56](https://github.com/yantrikos/yantrikdb/issues/56). This doc is the design record.
 **Author:** yantrikdb-core
-**Date:** 2026-05-28
+**Date:** 2026-05-28 (implementation landed 2026-05-29)
 **Tracking:** engine main; closes [#48](https://github.com/yantrikos/yantrikdb/issues/48); responds to Phase 1 XC1 / Phase 2 Proposal 2 from the [yantrikdb-agi gap analysis](https://github.com/yantrikos/yantrikdb-agi) (2026-05-26 / 2026-05-27). Coordinated with yantrikdb-server v0.9.x MCP roadmap.
 **Redteam:** v2 incorporates adversarial review (gpt-5.5, deepseek-chat) + three code-grounding investigations of `recall.rs` / `graph_ops.rs` / `hlc.rs`. Changes from v1 summarised in the changelog at the end.
 
