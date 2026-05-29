@@ -402,6 +402,154 @@ pub struct RecordRevision {
     pub origin_actor: String,
 }
 
+// ── Issue #48 — record-to-record link model (schema v31) ──
+
+/// Closed set of record-to-record link types + a `Custom` escape hatch.
+///
+/// See docs/record_link_model_rfc.md. The recall-time proximity polarity
+/// (whether surfacing one endpoint should boost or demote the other) is a
+/// pure function of the variant — see [`LinkType::recall_polarity`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinkType {
+    /// This record builds on / improves the target (newer is better).
+    Advances,
+    /// This record replaces the target. Does NOT auto-tombstone the
+    /// target (semantic claim, not a lifecycle action). Recall demotes
+    /// the superseded predecessor.
+    Supersedes,
+    /// This record disagrees with the target. Quasi-symmetric — queried
+    /// bidirectionally.
+    Contradicts,
+    /// This record provides evidence for the target.
+    Supports,
+    /// This record raises a question about the target.
+    Questions,
+    /// This record was derived from / inspired by the target (provenance,
+    /// no correctness claim — distinct from Advances).
+    DerivedFrom,
+    /// Extensibility hatch. Stored as `custom:<name>`; engine does not
+    /// interpret the name (treated as a weak positive at recall time).
+    Custom(String),
+}
+
+/// How a link affects recall when traversing from one endpoint to the
+/// other. Multiplier applied to the graph-proximity contribution of the
+/// linked record; <1.0 demotes, >0 with <1 dampens, 1.0 is neutral-positive.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LinkRecallPolarity {
+    /// Multiplier for the LINKED (target/other-endpoint) record's
+    /// proximity contribution.
+    pub neighbor_factor: f64,
+    /// Multiplier applied to the SEED record's own score when it is the
+    /// target of this link type (used by Supersedes to demote a
+    /// superseded predecessor). 1.0 = no self-demotion.
+    pub demote_self_as_target: f64,
+}
+
+impl LinkType {
+    /// Serialize to the canonical string stored in `record_links.link_type`.
+    pub fn as_str(&self) -> String {
+        match self {
+            LinkType::Advances => "advances".to_string(),
+            LinkType::Supersedes => "supersedes".to_string(),
+            LinkType::Contradicts => "contradicts".to_string(),
+            LinkType::Supports => "supports".to_string(),
+            LinkType::Questions => "questions".to_string(),
+            LinkType::DerivedFrom => "derived_from".to_string(),
+            LinkType::Custom(name) => format!("custom:{name}"),
+        }
+    }
+
+    /// Parse from the stored string. `custom:<name>` round-trips to
+    /// `Custom(name)`; any other unrecognized string also becomes
+    /// `Custom(...)` so forward-compat strings from a newer node don't
+    /// hard-error on an older one.
+    pub fn from_str_lenient(s: &str) -> LinkType {
+        match s {
+            "advances" => LinkType::Advances,
+            "supersedes" => LinkType::Supersedes,
+            "contradicts" => LinkType::Contradicts,
+            "supports" => LinkType::Supports,
+            "questions" => LinkType::Questions,
+            "derived_from" => LinkType::DerivedFrom,
+            other => {
+                let name = other.strip_prefix("custom:").unwrap_or(other);
+                LinkType::Custom(name.to_string())
+            }
+        }
+    }
+
+    /// Whether this link type is treated as undirected at traversal /
+    /// recall time. Only `Contradicts` is symmetric.
+    pub fn is_symmetric(&self) -> bool {
+        matches!(self, LinkType::Contradicts)
+    }
+
+    /// Recall-time polarity. Pure function of the variant. See the
+    /// relation-aware-scoring table in the RFC.
+    pub fn recall_polarity(&self) -> LinkRecallPolarity {
+        match self {
+            // Positive: pull the neighbor in at full proximity.
+            LinkType::Supports | LinkType::Advances => LinkRecallPolarity {
+                neighbor_factor: 1.0,
+                demote_self_as_target: 1.0,
+            },
+            // Provenance: weaker positive.
+            LinkType::DerivedFrom => LinkRecallPolarity {
+                neighbor_factor: 0.6,
+                demote_self_as_target: 1.0,
+            },
+            // Supersedes: boost the successor (neighbor) AND demote the
+            // superseded predecessor when IT is the surfaced record.
+            LinkType::Supersedes => LinkRecallPolarity {
+                neighbor_factor: 1.0,
+                demote_self_as_target: 0.5,
+            },
+            // Relevant-but-not-endorsing: surface the contradictor so the
+            // caller sees the conflict, but no positive relevance halo.
+            LinkType::Contradicts => LinkRecallPolarity {
+                neighbor_factor: 0.3,
+                demote_self_as_target: 1.0,
+            },
+            // Weak relevance / uncertainty.
+            LinkType::Questions => LinkRecallPolarity {
+                neighbor_factor: 0.3,
+                demote_self_as_target: 1.0,
+            },
+            // Engine doesn't interpret custom — weak positive.
+            LinkType::Custom(_) => LinkRecallPolarity {
+                neighbor_factor: 0.5,
+                demote_self_as_target: 1.0,
+            },
+        }
+    }
+}
+
+/// A record-to-record link to create alongside (or after) a record write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecordLink {
+    pub target_rid: String,
+    pub link_type: LinkType,
+}
+
+/// Direction filter for [`YantrikDB::linked_records`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LinkDirection {
+    Outbound,
+    Inbound,
+    Both,
+}
+
+/// A single result from a `linked_records` traversal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LinkedRecord {
+    pub rid: String,
+    pub link_type: String,
+    pub created_at: f64,
+    /// "outbound" or "inbound" relative to the queried rid.
+    pub direction: String,
+}
+
 // ── Cognition types (V3) ──
 
 /// Trigger type classification.
