@@ -292,6 +292,8 @@ fn test_recall_basic() {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
     assert_eq!(results.len(), 2);
@@ -310,6 +312,8 @@ fn test_recall_empty() {
             false,
             None,
             false,
+            None,
+            None,
             None,
             None,
             None,
@@ -2966,17 +2970,17 @@ fn test_recall_deterministic_with_skip_reinforce() {
 
     let r1 = db
         .recall(
-            &query, 5, None, None, false, false, None, true, None, None, None,
+            &query, 5, None, None, false, false, None, true, None, None, None, None, None,
         )
         .unwrap();
     let r2 = db
         .recall(
-            &query, 5, None, None, false, false, None, true, None, None, None,
+            &query, 5, None, None, false, false, None, true, None, None, None, None, None,
         )
         .unwrap();
     let r3 = db
         .recall(
-            &query, 5, None, None, false, false, None, true, None, None, None,
+            &query, 5, None, None, false, false, None, true, None, None, None, None, None,
         )
         .unwrap();
 
@@ -3032,6 +3036,8 @@ fn test_reinforce_mutates_but_skip_does_not() {
         None,
         None,
         None,
+        None,
+        None,
     )
     .unwrap();
     let after_skip = db.get(&rid).unwrap().unwrap().half_life;
@@ -3047,6 +3053,8 @@ fn test_reinforce_mutates_but_skip_does_not() {
         false,
         None,
         false,
+        None,
+        None,
         None,
         None,
         None,
@@ -3106,6 +3114,8 @@ fn test_graph_expansion_off_no_graph_results() {
             false,
             Some("Alice"),
             false,
+            None,
+            None,
             None,
             None,
             None,
@@ -3169,6 +3179,8 @@ fn test_graph_expansion_on_boosts_connected_memory() {
             true,
             Some("What is Alice working on?"),
             true,
+            None,
+            None,
             None,
             None,
             None,
@@ -3277,6 +3289,8 @@ fn test_recall_scores_bounded() {
             false,
             None,
             true,
+            None,
+            None,
             None,
             None,
             None,
@@ -3391,6 +3405,8 @@ fn test_recall_top_k_respected_with_graph_expansion() {
             true,
             Some("Entity0 topic"),
             true,
+            None,
+            None,
             None,
             None,
             None,
@@ -3618,6 +3634,8 @@ fn test_archive_memory() {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
     assert!(
@@ -3659,7 +3677,7 @@ fn test_hydrate_memory() {
     // Should be back in recall
     let results = db
         .recall(
-            &emb, 10, None, None, false, false, None, true, None, None, None,
+            &emb, 10, None, None, false, false, None, true, None, None, None, None, None,
         )
         .unwrap();
     assert!(
@@ -3773,6 +3791,8 @@ fn test_evict() {
             false,
             None,
             true,
+            None,
+            None,
             None,
             None,
             None,
@@ -4089,6 +4109,8 @@ fn test_encrypted_recall_roundtrip() {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
     assert_eq!(results.len(), 2);
@@ -4165,7 +4187,7 @@ fn test_encrypted_archive_hydrate() {
     // Should be findable in recall after hydration
     let results = db
         .recall(
-            &emb, 10, None, None, false, false, None, true, None, None, None,
+            &emb, 10, None, None, false, false, None, true, None, None, None, None, None,
         )
         .unwrap();
     assert!(results.iter().any(|r| r.rid == rid));
@@ -4458,6 +4480,8 @@ fn test_domain_filter() {
             None,
             Some("work"),
             None,
+            None,
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -4536,6 +4560,8 @@ fn test_source_filter() {
             None,
             None,
             Some("user"),
+            None,
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -4629,6 +4655,8 @@ fn test_domain_and_source_combined_filter() {
             None,
             Some("work"),
             Some("user"),
+            None,
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -4654,6 +4682,8 @@ fn test_domain_and_source_combined_filter() {
             None,
             Some("health"),
             Some("system"),
+            None,
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -4982,6 +5012,8 @@ fn test_recall_refine_excludes_originals() {
             false,
             None,
             true,
+            None,
+            None,
             None,
             None,
             None,
@@ -7405,6 +7437,8 @@ fn test_insert_vector_makes_recall_find_it() {
             None,
             None,
             None,
+            None,
+            None,
         )
         .unwrap();
 
@@ -7732,7 +7766,7 @@ fn record_with_rid_makes_recall_find_it() {
 
     let results = db
         .recall(
-            &emb, 5, None, None, false, false, None, true, None, None, None,
+            &emb, 5, None, None, false, false, None, true, None, None, None, None, None,
         )
         .unwrap();
     assert!(
@@ -7986,7 +8020,7 @@ fn tombstone_with_rid_hides_from_recall() {
     // Sanity: visible before tombstone.
     let r = db
         .recall(
-            &emb, 5, None, None, false, false, None, true, None, None, None,
+            &emb, 5, None, None, false, false, None, true, None, None, None, None, None,
         )
         .unwrap();
     assert!(r.iter().any(|x| x.rid == rid), "visible before tombstone");
@@ -7997,7 +8031,7 @@ fn tombstone_with_rid_hides_from_recall() {
     // Hidden after.
     let r2 = db
         .recall(
-            &emb, 5, None, None, false, false, None, true, None, None, None,
+            &emb, 5, None, None, false, false, None, true, None, None, None, None, None,
         )
         .unwrap();
     assert!(!r2.iter().any(|x| x.rid == rid), "hidden after tombstone");
@@ -8391,7 +8425,7 @@ fn issue_8_tombstoned_memories_excluded_from_recall() {
     // Sanity: visible before forget.
     let before = db
         .recall(
-            &emb, 5, None, None, false, false, None, true, None, None, None,
+            &emb, 5, None, None, false, false, None, true, None, None, None, None, None,
         )
         .unwrap();
     assert!(
@@ -8404,7 +8438,7 @@ fn issue_8_tombstoned_memories_excluded_from_recall() {
     // After forget, should NOT appear in recall.
     let after = db
         .recall(
-            &emb, 5, None, None, false, false, None, true, None, None, None,
+            &emb, 5, None, None, false, false, None, true, None, None, None, None, None,
         )
         .unwrap();
     assert!(
@@ -8448,7 +8482,7 @@ fn issue_8_tombstoned_persists_across_engine_reopen() {
         let db2 = YantrikDB::new(path_str, 64).unwrap();
         let after = db2
             .recall(
-                &emb, 5, None, None, false, false, None, true, None, None, None,
+                &emb, 5, None, None, false, false, None, true, None, None, None, None, None,
             )
             .unwrap();
         assert!(
@@ -11451,3 +11485,239 @@ fn schema_v29_fresh_install_has_replication_apply_log_table() {
 // Note: replication_apply_log audit-row verification lives in
 // distributed/replication.rs's tests module where materialize_record
 // is in scope. See test_materialize_record_writes_audit_log there.
+
+// ── Issue #46: confidence first-class on recall ───────────────────────
+
+/// Seed a small DB with N records, each carrying a different `certainty`.
+/// The i-th record has `certainty = (i + 1) as f64 / N as f64` (so 1..=N
+/// maps to evenly-spaced certainty in (0, 1.0]). Embeddings are nearly
+/// identical (same `vec_seed(1.0, ...)` shape) so that all candidates
+/// survive the HNSW pass and downstream filtering / re-sorting is the
+/// only thing distinguishing them.
+fn seed_for_certainty_test(db: &YantrikDB, n: usize) -> Vec<String> {
+    let mut rids = Vec::with_capacity(n);
+    for i in 0..n {
+        let certainty = (i as f64 + 1.0) / (n as f64);
+        let rid = db
+            .record(
+                &format!("certainty test memory {i}"),
+                "semantic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &vec_seed(1.0 + (i as f32) * 0.001, 8),
+                "default",
+                certainty,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+        rids.push(rid);
+        // Space out created_at so order=recency has a meaningful ranking.
+        std::thread::sleep(std::time::Duration::from_millis(2));
+    }
+    rids
+}
+
+#[test]
+fn recall_certainty_min_filters_low_certainty() {
+    // Issue #46: candidates whose certainty falls below the requested
+    // floor must NOT appear in results. Seed 5 memories with certainty
+    // 0.2, 0.4, 0.6, 0.8, 1.0; recall with certainty_min=0.5 must
+    // return at most 3 (the 0.6/0.8/1.0 ones).
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let _rids = seed_for_certainty_test(&db, 5);
+
+    let results = db
+        .recall(
+            &vec_seed(1.0, 8),
+            10,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+            Some(0.5), // certainty_min
+            None,
+        )
+        .unwrap();
+
+    assert!(
+        !results.is_empty(),
+        "expected at least one high-certainty result"
+    );
+    for r in &results {
+        assert!(
+            r.certainty >= 0.5,
+            "certainty_min=0.5 must filter out cert={}: rid={}",
+            r.certainty,
+            r.rid
+        );
+    }
+}
+
+#[test]
+fn recall_order_certainty_returns_results_in_certainty_desc() {
+    // Issue #46: order="certainty" must re-sort the final top_k by
+    // certainty descending. Seed 5 memories with varying certainty,
+    // recall all 5 with order="certainty", assert the sequence is
+    // monotonically non-increasing.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let _rids = seed_for_certainty_test(&db, 5);
+
+    let results = db
+        .recall(
+            &vec_seed(1.0, 8),
+            10,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+            None,
+            Some("certainty"),
+        )
+        .unwrap();
+
+    assert!(
+        results.len() >= 2,
+        "need at least 2 results to verify ordering, got {}",
+        results.len()
+    );
+    for w in results.windows(2) {
+        assert!(
+            w[0].certainty >= w[1].certainty,
+            "order=certainty must be non-increasing; got [{}, {}]",
+            w[0].certainty,
+            w[1].certainty,
+        );
+    }
+}
+
+#[test]
+fn recall_order_recency_returns_results_in_created_at_desc() {
+    // Issue #46: order="recency" must re-sort the final top_k by
+    // created_at descending (newest first). The seed helper spaces out
+    // writes by 2ms each so created_at has a strict ordering.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let _rids = seed_for_certainty_test(&db, 5);
+
+    let results = db
+        .recall(
+            &vec_seed(1.0, 8),
+            10,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+            None,
+            Some("recency"),
+        )
+        .unwrap();
+
+    assert!(
+        results.len() >= 2,
+        "need at least 2 results to verify ordering, got {}",
+        results.len()
+    );
+    for w in results.windows(2) {
+        assert!(
+            w[0].created_at >= w[1].created_at,
+            "order=recency must be non-increasing on created_at; got [{}, {}]",
+            w[0].created_at,
+            w[1].created_at,
+        );
+    }
+}
+
+#[test]
+fn recall_order_invalid_string_returns_invalid_input_error() {
+    // Issue #46: unknown `order` values must surface as a typed
+    // InvalidInput error rather than silently falling back to relevance.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let _rids = seed_for_certainty_test(&db, 3);
+
+    let err = db
+        .recall(
+            &vec_seed(1.0, 8),
+            10,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+            None,
+            Some("most_relevant"), // typo / not a valid order
+        )
+        .expect_err("invalid order string must return error");
+
+    match err {
+        crate::error::YantrikDbError::InvalidInput(msg) => {
+            assert!(
+                msg.contains("order") && msg.contains("most_relevant"),
+                "error message should name the bad order value, got: {msg}"
+            );
+        }
+        other => panic!("expected InvalidInput, got {other:?}"),
+    }
+}
+
+#[test]
+fn recall_default_order_is_relevance_unchanged() {
+    // Issue #46: passing None for `order` must NOT change the existing
+    // relevance-based behaviour. The first result's score must be >= the
+    // last result's score (monotone non-increasing on score).
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let _rids = seed_for_certainty_test(&db, 5);
+
+    let results = db
+        .recall(
+            &vec_seed(1.0, 8),
+            10,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None, // default order = relevance
+        )
+        .unwrap();
+
+    assert!(
+        results.len() >= 2,
+        "need at least 2 results to verify default order, got {}",
+        results.len()
+    );
+    for w in results.windows(2) {
+        assert!(
+            w[0].score >= w[1].score,
+            "default order must be score-desc (relevance); got [{}, {}]",
+            w[0].score,
+            w[1].score,
+        );
+    }
+}

@@ -1549,6 +1549,8 @@ impl YantrikDB {
             None,  // namespace
             None,  // domain
             None,  // source
+            None,  // certainty_min (#46)
+            None,  // order (#46) — relevance
         )
     }
 
@@ -1577,6 +1579,8 @@ impl YantrikDB {
             None,  // namespace
             domain,
             source,
+            None, // certainty_min (#46)
+            None, // order (#46) — relevance
         )
     }
 }

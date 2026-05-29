@@ -299,7 +299,7 @@ fn run() {
                 let query = vec_seed((q_seed as f32) * 0.71 + 7.0, dim);
                 let t = Instant::now();
                 let _ = db_c.recall(
-                    &query, 10, None, None, false, false, None, false, None, None, None,
+                    &query, 10, None, None, false, false, None, false, None, None, None, None, None,
                 );
                 let dur_ns = t.elapsed().as_nanos() as u64;
                 let bucket = started.elapsed().as_secs();

@@ -542,7 +542,7 @@ mod tests {
         // A can recall (has vec_memories entries)
         let a_results = a
             .recall(
-                &emb1, 2, None, None, false, false, None, false, None, None, None,
+                &emb1, 2, None, None, false, false, None, false, None, None, None, None, None,
             )
             .unwrap();
         assert!(!a_results.is_empty());

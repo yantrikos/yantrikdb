@@ -2,11 +2,44 @@ use std::collections::HashMap;
 
 use rusqlite::params;
 
-use crate::error::Result;
+use crate::error::{Result, YantrikDbError};
 use crate::scoring;
 use crate::types::*;
 
 use super::{now, TextMetadataRow, YantrikDB};
+
+/// Issue #46: how the final `recall()` top_k is ordered after MMR.
+///
+/// - `Relevance` (default): the existing behaviour — sort by composite
+///   relevance score descending. This is what users have always seen.
+/// - `Certainty`: re-sort the top_k by `certainty` descending. Useful for
+///   "give me the most-confident matches first" when downstream consumers
+///   want to weight their reasoning toward high-confidence claims.
+/// - `Recency`: re-sort the top_k by `created_at` descending. Useful for
+///   "what did I write about this recently?" The candidate set is still
+///   the MMR-diverse relevance pool, but presentation is recency-first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecallOrder {
+    Relevance,
+    Certainty,
+    Recency,
+}
+
+/// Parse the `order` string from the engine `recall()` surface. Accepts:
+/// `"relevance"`, `"certainty"`, `"recency"`. `None` and `Some("relevance")`
+/// both map to `Relevance` so the default is stable. Unknown strings
+/// return a typed error so callers see the typo immediately.
+pub(crate) fn parse_recall_order(order: Option<&str>) -> Result<RecallOrder> {
+    match order {
+        None | Some("relevance") => Ok(RecallOrder::Relevance),
+        Some("certainty") => Ok(RecallOrder::Certainty),
+        Some("recency") => Ok(RecallOrder::Recency),
+        Some(other) => Err(YantrikDbError::InvalidInput(format!(
+            "recall: invalid `order` value {other:?}; expected one of \
+             \"relevance\" (default) | \"certainty\" | \"recency\""
+        ))),
+    }
+}
 
 /// Simple English suffix stripping for FTS5 query expansion.
 ///
@@ -141,6 +174,7 @@ impl YantrikDB {
     /// Retrieve memories using multi-signal fusion scoring.
     /// When `expand_entities` is true, graph edges are followed to pull in
     /// entity-connected memories that pure vector search would miss.
+    #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(skip(self, query_embedding), fields(top_k, expand_entities, namespace))]
     pub fn recall(
         &self,
@@ -155,7 +189,21 @@ impl YantrikDB {
         namespace: Option<&str>,
         domain: Option<&str>,
         source: Option<&str>,
+        // Issue #46: confidence first-class on recall.
+        // `certainty_min` filters out candidates whose `certainty < min`
+        // BEFORE scoring (saves work). `order` re-sorts the final top_k
+        // AFTER MMR diversity selection so callers can request "most
+        // recent matches first" or "most confident matches first" without
+        // the engine abandoning its relevance-based candidate retrieval.
+        // Naming note: engine-internal field stays `certainty`; the param
+        // mirrors that. MCP-layer can re-expose as `confidence_min` /
+        // `confidence` order if it wants the user-facing rename.
+        certainty_min: Option<f64>,
+        order: Option<&str>,
     ) -> Result<Vec<RecallResult>> {
+        // Validate `order` upfront so callers get a clear error rather
+        // than silently falling back to relevance when they typo a value.
+        let recall_order = parse_recall_order(order)?;
         let ts = now();
 
         // Load per-database learned weights (falls back to defaults if none learned yet)
@@ -232,6 +280,16 @@ impl YantrikDB {
                 // Filter: source (V10)
                 if let Some(s) = source {
                     if row.source != s {
+                        continue;
+                    }
+                }
+
+                // Filter: certainty_min (Issue #46). Drop candidates whose
+                // stored certainty falls below the requested floor. Done
+                // before scoring so we don't waste work on rows that won't
+                // make the result set.
+                if let Some(min_cert) = certainty_min {
+                    if row.certainty < min_cert {
                         continue;
                     }
                 }
@@ -1776,6 +1834,30 @@ impl YantrikDB {
             scored.truncate(top_k);
         }
 
+        // Issue #46: optional reorder of the final top_k. Candidate
+        // retrieval + MMR still operate on relevance — we re-sort the
+        // selected diverse set here so the caller-requested presentation
+        // order (most-confident-first, most-recent-first) does not
+        // sacrifice diversity. Default (`Relevance`) leaves the existing
+        // score-desc order untouched.
+        match recall_order {
+            RecallOrder::Relevance => {}
+            RecallOrder::Certainty => {
+                scored.sort_by(|a, b| {
+                    b.certainty
+                        .partial_cmp(&a.certainty)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            RecallOrder::Recency => {
+                scored.sort_by(|a, b| {
+                    b.created_at
+                        .partial_cmp(&a.created_at)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+        }
+
         // Step 5: Hydrate final top_k with text + metadata from SQLite
         let final_rids: Vec<&str> = scored.iter().map(|r| r.rid.as_str()).collect();
         let text_meta = {
@@ -1851,6 +1933,8 @@ impl YantrikDB {
             namespace,
             domain,
             source,
+            None, // certainty_min (#46) — recall_with_seq path defers to caller-side filtering
+            None, // order (#46) — default relevance
         )
     }
 
@@ -1876,6 +1960,8 @@ impl YantrikDB {
             q.namespace.as_deref(),
             q.domain.as_deref(),
             q.source.as_deref(),
+            q.certainty_min,
+            q.order.as_deref(),
         )
     }
 
@@ -1909,6 +1995,8 @@ impl YantrikDB {
             namespace,
             domain,
             source,
+            None, // certainty_min (#46) — recall_with_response defers to caller-side filtering
+            None, // order (#46) — default relevance
         )?;
 
         // Determine which retrieval sources were used
