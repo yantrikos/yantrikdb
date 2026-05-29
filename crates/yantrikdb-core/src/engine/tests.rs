@@ -11819,6 +11819,36 @@ fn schema_v30_fresh_install_has_record_revisions_table() {
     );
 }
 
+#[test]
+fn schema_v31_fresh_install_has_record_links_table() {
+    // Issue #48: fresh install must create record_links + both covering
+    // indexes. Regression guard against forgetting the table in SCHEMA_SQL
+    // alongside MIGRATE_V30_TO_V31.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let conn = db.conn();
+    let table: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type = 'table' AND name = 'record_links'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(table, 1, "record_links table must exist on fresh install");
+
+    let idx: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' \
+             AND name IN ('idx_record_links_source', 'idx_record_links_target')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(idx, 2, "both record_links covering indexes must exist");
+
+    assert!(crate::base::schema::SCHEMA_VERSION >= 31);
+}
+
 // ── Issue #46: confidence first-class on recall ───────────────────────
 
 /// Seed a small DB with N records, each carrying a different `certainty`.

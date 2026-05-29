@@ -24,6 +24,7 @@ mod intent;
 mod introspection;
 mod learning;
 mod lifecycle;
+mod links;
 pub mod materializer;
 mod metacognition;
 pub mod moves;
@@ -83,9 +84,9 @@ use crate::schema::{
     MIGRATE_V18_TO_V19, MIGRATE_V19_TO_V20, MIGRATE_V1_TO_V2, MIGRATE_V20_TO_V21,
     MIGRATE_V21_TO_V22, MIGRATE_V22_TO_V23, MIGRATE_V23_TO_V24, MIGRATE_V24_TO_V25,
     MIGRATE_V25_TO_V26, MIGRATE_V26_TO_V27, MIGRATE_V27_TO_V28, MIGRATE_V28_TO_V29,
-    MIGRATE_V29_TO_V30, MIGRATE_V2_TO_V3, MIGRATE_V3_TO_V4, MIGRATE_V4_TO_V5, MIGRATE_V5_TO_V6,
-    MIGRATE_V6_TO_V7, MIGRATE_V7_TO_V8, MIGRATE_V8_TO_V9, MIGRATE_V9_TO_V10, SCHEMA_SQL,
-    SCHEMA_VERSION,
+    MIGRATE_V29_TO_V30, MIGRATE_V2_TO_V3, MIGRATE_V30_TO_V31, MIGRATE_V3_TO_V4, MIGRATE_V4_TO_V5,
+    MIGRATE_V5_TO_V6, MIGRATE_V6_TO_V7, MIGRATE_V7_TO_V8, MIGRATE_V8_TO_V9, MIGRATE_V9_TO_V10,
+    SCHEMA_SQL, SCHEMA_VERSION,
 };
 use crate::types::*;
 
@@ -481,6 +482,7 @@ impl YantrikDB {
             (27, MIGRATE_V27_TO_V28),
             (28, MIGRATE_V28_TO_V29),
             (29, MIGRATE_V29_TO_V30),
+            (30, MIGRATE_V30_TO_V31),
         ];
         if let Some(v) = existing_version {
             for &(from_v, sql) in migrations {

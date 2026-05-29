@@ -441,6 +441,13 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
         "pattern_upsert" => {
             materialize_pattern(&*db.conn(), &op.payload, &op.hlc, &op.origin_actor)?
         }
+        // **Issue #48 — record-to-record links.**
+        "link" => {
+            materialize_link(&*db.conn(), &op.payload, &op.hlc, &op.origin_actor)?;
+        }
+        "unlink" => {
+            materialize_unlink(&*db.conn(), &op.payload)?;
+        }
         "reinforce" | "think" => {
             // Local-only ops; skip during replication
         }
@@ -562,6 +569,19 @@ fn materialize_forget(conn: &Connection, payload: &serde_json::Value) -> Result<
     conn.execute(
         "UPDATE memories SET consolidation_status = 'tombstoned', updated_at = ?1 WHERE rid = ?2",
         params![updated_at, rid],
+    )?;
+
+    // **Issue #48.** Replay the link-status transition the leader applied
+    // in tombstone_inner so followers' record_links stay in lockstep.
+    conn.execute(
+        "UPDATE record_links SET status = 'broken_source_forgotten' \
+         WHERE source_rid = ?1 AND status = 'active'",
+        params![rid],
+    )?;
+    conn.execute(
+        "UPDATE record_links SET status = 'broken_target_forgotten' \
+         WHERE target_rid = ?1 AND status = 'active'",
+        params![rid],
     )?;
 
     // HNSW vec index removal is handled by the materialize_op dispatcher
@@ -891,6 +911,70 @@ fn materialize_correct(
         params![rid, source_actor, applied_at],
     );
 
+    Ok(())
+}
+
+/// Materialize a "link" op (Issue #48) on a replica. Idempotent via the
+/// UNIQUE(source_rid, target_rid, link_type) constraint + INSERT OR
+/// IGNORE — re-applying the same link op across re-syncs is a no-op. The
+/// leader's HLC is carried on the op and stored verbatim so the
+/// follower's link row sorts identically in any HLC-ordered scan.
+fn materialize_link(
+    conn: &Connection,
+    payload: &serde_json::Value,
+    hlc: &[u8],
+    source_actor: &str,
+) -> Result<()> {
+    let source_rid = payload["source_rid"].as_str().unwrap_or_default();
+    let target_rid = payload["target_rid"].as_str().unwrap_or_default();
+    let link_type = payload["link_type"].as_str().unwrap_or_default();
+    if source_rid.is_empty() || target_rid.is_empty() || link_type.is_empty() {
+        return Ok(());
+    }
+    let created_at = payload["created_at"]
+        .as_f64()
+        .unwrap_or_else(crate::time::now_secs);
+    let link_id = crate::id::new_id();
+
+    conn.execute(
+        "INSERT OR IGNORE INTO record_links \
+         (link_id, source_rid, target_rid, link_type, status, created_at, hlc, origin_actor) \
+         VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?6, ?7)",
+        params![
+            link_id,
+            source_rid,
+            target_rid,
+            link_type,
+            created_at,
+            hlc,
+            source_actor
+        ],
+    )?;
+
+    let applied_at = crate::time::now_secs();
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO replication_apply_log (rid, op_type, source_actor, applied_at) \
+         VALUES (?1, 'link', ?2, ?3)",
+        params![source_rid, source_actor, applied_at],
+    );
+
+    Ok(())
+}
+
+/// Materialize an "unlink" op (Issue #48) on a replica. A user
+/// retraction — hard-deletes the matching active/broken row.
+fn materialize_unlink(conn: &Connection, payload: &serde_json::Value) -> Result<()> {
+    let source_rid = payload["source_rid"].as_str().unwrap_or_default();
+    let target_rid = payload["target_rid"].as_str().unwrap_or_default();
+    let link_type = payload["link_type"].as_str().unwrap_or_default();
+    if source_rid.is_empty() || target_rid.is_empty() || link_type.is_empty() {
+        return Ok(());
+    }
+    conn.execute(
+        "DELETE FROM record_links \
+         WHERE source_rid = ?1 AND target_rid = ?2 AND link_type = ?3",
+        params![source_rid, target_rid, link_type],
+    )?;
     Ok(())
 }
 
