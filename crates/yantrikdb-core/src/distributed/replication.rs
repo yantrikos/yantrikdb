@@ -742,37 +742,144 @@ fn materialize_conflict_resolve(conn: &Connection, payload: &serde_json::Value) 
     Ok(())
 }
 
-/// Materialize a "correct" op: create new memory and tombstone original.
+/// Materialize a "correct" op on a replica (Issue #47, v0.7.20).
+///
+/// New payload shape (v0.7.20+):
+/// ```json
+/// {
+///   "rid": "...",
+///   "revision_num": N,
+///   "new_text": "..." or null,
+///   "metadata_merge": {...} or null,
+///   "new_importance": 0.7 or null,
+///   "new_valence": 0.0 or null,
+///   "reason": "...",
+///   "applied_at": ts
+/// }
+/// ```
+///
+/// Applies the same in-place UPDATE the leader did + writes the
+/// corresponding `record_revisions` row so the follower's history
+/// stays in lockstep with the leader's. If the rid does not exist on
+/// the follower (replication apply on a cold node, or the prior `record`
+/// op hasn't materialised yet), silently skip — the regular oplog
+/// reorder + replay path will catch this on the next pass.
+///
+/// Cross-version note: a v0.7.19 leader's `correct` op had a different
+/// payload (new_rid + original_rid + full text/type/etc.). If a
+/// v0.7.20 follower sees the old shape, payload["rid"] is missing and
+/// this function no-ops cleanly. Operators must roll forward
+/// in-order; rolling back v0.7.20 -> v0.7.19 after correct() calls
+/// have landed is unsupported (the in-place mutation cannot be
+/// reversed automatically).
 fn materialize_correct(
     conn: &Connection,
     payload: &serde_json::Value,
     source_actor: &str,
 ) -> Result<()> {
-    let new_rid = payload["new_rid"].as_str().unwrap_or_default();
-    if new_rid.is_empty() {
+    let rid = payload["rid"].as_str().unwrap_or_default();
+    if rid.is_empty() {
         return Ok(());
     }
 
-    let text = payload["text"].as_str().unwrap_or("");
-    let mem_type = payload["type"].as_str().unwrap_or("episodic");
-    let importance = payload["importance"].as_f64().unwrap_or(0.5);
-    let valence = payload["valence"].as_f64().unwrap_or(0.0);
-    let half_life = payload["half_life"].as_f64().unwrap_or(604800.0);
-    let created_at = payload["created_at"].as_f64().unwrap_or(0.0);
-    let metadata = payload
-        .get("metadata")
-        .map(|m| serde_json::to_string(m).unwrap_or_else(|_| "{}".to_string()))
-        .unwrap_or_else(|| "{}".to_string());
+    // Read existing row to compute merged metadata + carry-forward
+    // unchanged fields. If the rid doesn't exist on this follower yet,
+    // skip; the oplog replay order will get to it.
+    let existing: Option<(String, String, f64, f64)> = conn
+        .query_row(
+            "SELECT text, metadata, importance, valence FROM memories WHERE rid = ?1",
+            params![rid],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, f64>(2)?,
+                    row.get::<_, f64>(3)?,
+                ))
+            },
+        )
+        .ok();
 
-    let namespace = payload["namespace"].as_str().unwrap_or("default");
-    conn.execute(
-        "INSERT OR IGNORE INTO memories
-         (rid, type, text, created_at, updated_at, importance,
-          half_life, last_access, valence, metadata, namespace)
+    let Some((existing_text, existing_metadata_str, existing_importance, existing_valence)) =
+        existing
+    else {
+        return Ok(());
+    };
+
+    let new_text = payload["new_text"]
+        .as_str()
+        .map(|s| s.to_string())
+        .unwrap_or(existing_text.clone());
+    let new_importance = payload["new_importance"]
+        .as_f64()
+        .unwrap_or(existing_importance);
+    let new_valence = payload["new_valence"].as_f64().unwrap_or(existing_valence);
+
+    // Metadata merge: parse existing, apply patch, re-serialise.
+    let existing_metadata: serde_json::Value =
+        serde_json::from_str(&existing_metadata_str).unwrap_or(serde_json::json!({}));
+    let new_metadata_val: serde_json::Value = match payload.get("metadata_merge") {
+        Some(patch) if !patch.is_null() => {
+            let mut merged = existing_metadata.clone();
+            if let (Some(obj), Some(patch_obj)) = (merged.as_object_mut(), patch.as_object()) {
+                for (k, v) in patch_obj {
+                    obj.insert(k.clone(), v.clone());
+                }
+                merged
+            } else {
+                patch.clone()
+            }
+        }
+        _ => existing_metadata,
+    };
+    let new_metadata_str =
+        serde_json::to_string(&new_metadata_val).unwrap_or_else(|_| "{}".to_string());
+
+    let revision_num = payload["revision_num"].as_i64().unwrap_or(1);
+    let reason = payload["reason"].as_str().unwrap_or("");
+    let applied_at_payload = payload["applied_at"]
+        .as_f64()
+        .unwrap_or_else(crate::time::now_secs);
+
+    // Insert the revision row mirroring the leader's. revision_id is
+    // freshly minted on the follower (the leader's revision_id is not
+    // in the payload — only revision_num is, and that's what the
+    // UNIQUE(rid, revision_num) constraint cares about).
+    let revision_id = crate::id::new_id();
+    let hlc_bytes = Vec::<u8>::new(); // followers don't have the leader's HLC for this revision
+    let _ = conn.execute(
+        "INSERT OR IGNORE INTO record_revisions \
+         (revision_id, rid, revision_num, prior_text, prior_metadata, \
+          prior_importance, prior_valence, reason, applied_at, hlc, origin_actor) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![
-            new_rid, mem_type, text, created_at, created_at, importance, half_life, created_at,
-            valence, metadata, namespace,
+            revision_id,
+            rid,
+            revision_num,
+            existing_text,
+            existing_metadata_str,
+            existing_importance,
+            existing_valence,
+            reason,
+            applied_at_payload,
+            hlc_bytes,
+            source_actor,
+        ],
+    );
+
+    // UPDATE the memory in place.
+    conn.execute(
+        "UPDATE memories \
+         SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
+             last_access = ?5 \
+         WHERE rid = ?6",
+        params![
+            new_text,
+            new_metadata_str,
+            new_importance,
+            new_valence,
+            applied_at_payload,
+            rid,
         ],
     )?;
 
@@ -781,19 +888,8 @@ fn materialize_correct(
     let _ = conn.execute(
         "INSERT OR IGNORE INTO replication_apply_log (rid, op_type, source_actor, applied_at) \
          VALUES (?1, 'correct', ?2, ?3)",
-        params![new_rid, source_actor, applied_at],
+        params![rid, source_actor, applied_at],
     );
-
-    // Tombstone the original memory
-    let original_rid = payload["original_rid"].as_str().unwrap_or_default();
-    if !original_rid.is_empty() {
-        conn.execute(
-            "UPDATE memories SET consolidation_status = 'tombstoned', updated_at = ?1
-             WHERE rid = ?2",
-            params![created_at, original_rid],
-        )?;
-        // HNSW vec index removal is handled by the materialize_op dispatcher
-    }
 
     Ok(())
 }

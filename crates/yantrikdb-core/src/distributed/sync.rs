@@ -660,27 +660,39 @@ mod tests {
             .unwrap();
         sync_bidirectional(&a, &b).unwrap();
 
-        // Correct on A
+        // Correct on A. Issue #47 (v0.7.20): correct() now mutates in
+        // place, preserves rid + created_at, requires a non-empty reason.
+        // The signature dropped `new_embedding` (HNSW doesn't support
+        // in-place vector update).
         let result = a
             .correct(
                 &rid,
-                "color is blue",
-                Some(0.9),
-                None,
-                &vec_seed(2.0, 8),
-                Some("User said blue"),
+                Some("color is blue"),
+                None,             // metadata_merge
+                Some(0.9),        // new_importance
+                None,             // new_valence
+                "User said blue", // reason (required)
             )
             .unwrap();
+        assert_eq!(result.corrected_rid, rid, "rid must be preserved");
+        assert!(
+            !result.original_tombstoned,
+            "original must not be tombstoned"
+        );
         sync_bidirectional(&a, &b).unwrap();
 
-        // B should have original tombstoned
-        let original = b.get(&rid).unwrap().unwrap();
-        assert_eq!(original.consolidation_status, "tombstoned");
-
-        // B should have the corrected memory
-        let corrected = b.get(&result.corrected_rid).unwrap();
-        assert!(corrected.is_some());
-        assert_eq!(corrected.unwrap().text, "color is blue");
+        // B should see the in-place mutation: same rid, updated text,
+        // not tombstoned.
+        let on_b = b.get(&rid).unwrap().unwrap();
+        assert_ne!(
+            on_b.consolidation_status, "tombstoned",
+            "v0.7.20 correct() does NOT tombstone the original"
+        );
+        assert_eq!(on_b.text, "color is blue", "B must see the updated text");
+        assert!(
+            (on_b.importance - 0.9).abs() < 1e-9,
+            "B must see the updated importance"
+        );
     }
 
     #[test]

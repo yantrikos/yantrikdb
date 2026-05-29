@@ -196,27 +196,30 @@ class TestMemoryForget:
 
 
 class TestMemoryCorrect:
-    def test_correct_creates_new_memory(self, db, ctx):
+    def test_correct_mutates_in_place(self, db, ctx):
+        """Issue #47 (v0.7.20): correct() is now in-place. `reason` is
+        required, `correction_note` removed. rid is preserved, original
+        is NOT tombstoned, and the revision is recorded with revision_num=1.
+        """
         from yantrikdb.mcp.tools import memory_correct
 
         rid = db.record("wrong fact", embedding=_vec(1.0))
         result = json.loads(memory_correct(
             rid=rid,
+            reason="fixed typo",
             new_text="correct fact",
-            correction_note="fixed typo",
             ctx=ctx,
         ))
+        # In-place: rid is preserved, original is NOT tombstoned.
         assert result["original_rid"] == rid
-        assert result["corrected_rid"] != rid
-        assert result["original_tombstoned"] is True
+        assert result["corrected_rid"] == rid
+        assert result["original_tombstoned"] is False
+        assert result["revision_num"] == 1
 
-        # Original is tombstoned
-        orig = db.get(rid)
-        assert orig["consolidation_status"] == "tombstoned"
-
-        # New memory exists
-        corrected = db.get(result["corrected_rid"])
-        assert corrected["text"] == "correct fact"
+        # Memory still exists at same rid, with updated text.
+        updated = db.get(rid)
+        assert updated["consolidation_status"] != "tombstoned"
+        assert updated["text"] == "correct fact"
 
 
 # ── entity_relate ──

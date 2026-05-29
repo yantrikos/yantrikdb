@@ -480,37 +480,76 @@ impl PyYantrikDB {
         decayed.iter().map(|d| decayed_to_dict(py, d)).collect()
     }
 
-    #[pyo3(signature = (rid, new_text, new_importance=None, new_valence=None, embedding=None, correction_note=None))]
+    /// Issue #47 (v0.7.20): in-place correct() with revision history.
+    /// **Breaking change vs v0.7.19:**
+    /// - `reason` is now REQUIRED and must be non-empty
+    /// - `embedding` / `correction_note` params REMOVED
+    /// - `new_text` is now Optional (was required); pass None to keep
+    /// - `metadata_merge` added (Optional dict to merge into existing
+    ///   metadata; None = keep existing)
+    /// - `corrected_rid` in result == `rid` (in-place mutation)
+    /// - `original_tombstoned` always False
+    /// - new `revision_num` field on result (1-indexed)
+    ///
+    /// Embedding-level corrections still go through forget+record (HNSW
+    /// does not support in-place vector update).
+    #[pyo3(signature = (rid, reason, new_text=None, metadata_merge=None, new_importance=None, new_valence=None))]
+    #[allow(clippy::too_many_arguments)]
     fn correct(
         &self,
         py: Python<'_>,
         rid: &str,
-        new_text: &str,
+        reason: &str,
+        new_text: Option<&str>,
+        metadata_merge: Option<&Bound<'_, PyDict>>,
         new_importance: Option<f64>,
         new_valence: Option<f64>,
-        embedding: Option<Vec<f32>>,
-        correction_note: Option<&str>,
     ) -> PyResult<PyObject> {
         let db = self.get_inner()?;
-        let emb = match embedding {
-            Some(e) => e,
-            None => self.embed_text(py, new_text)?,
+        let metadata_json = match metadata_merge {
+            Some(d) => Some(py_to_json(&d.as_any())?),
+            None => None,
         };
         let result = db
             .correct(
                 rid,
                 new_text,
+                metadata_json.as_ref(),
                 new_importance,
                 new_valence,
-                &emb,
-                correction_note,
+                reason,
             )
             .map_err(map_err)?;
         let dict = PyDict::new(py);
         dict.set_item("original_rid", &result.original_rid)?;
         dict.set_item("corrected_rid", &result.corrected_rid)?;
         dict.set_item("original_tombstoned", result.original_tombstoned)?;
+        dict.set_item("revision_num", result.revision_num)?;
         Ok(dict.into())
+    }
+
+    /// Issue #47: query the revision history for a record.
+    /// Returns a list of dicts, oldest-first.
+    fn history(&self, py: Python<'_>, rid: &str) -> PyResult<Vec<PyObject>> {
+        let db = self.get_inner()?;
+        let revisions = db.history(rid).map_err(map_err)?;
+        revisions
+            .iter()
+            .map(|r| {
+                let d = PyDict::new(py);
+                d.set_item("revision_id", &r.revision_id)?;
+                d.set_item("rid", &r.rid)?;
+                d.set_item("revision_num", r.revision_num)?;
+                d.set_item("prior_text", &r.prior_text)?;
+                d.set_item("prior_metadata", json_to_py(py, &r.prior_metadata)?)?;
+                d.set_item("prior_importance", r.prior_importance)?;
+                d.set_item("prior_valence", r.prior_valence)?;
+                d.set_item("reason", &r.reason)?;
+                d.set_item("applied_at", r.applied_at)?;
+                d.set_item("origin_actor", &r.origin_actor)?;
+                Ok::<PyObject, pyo3::PyErr>(d.into())
+            })
+            .collect()
     }
 
     fn record_batch(

@@ -39,10 +39,16 @@ class RecallRequest(BaseModel):
 
 
 class CorrectRequest(BaseModel):
-    new_text: str
+    # Issue #47 (v0.7.20): correct() is now in-place mutation with an
+    # audit trail. `reason` is REQUIRED. `new_text` is optional (pass None
+    # to keep). `metadata_merge` is a new optional patch dict. `embedding`
+    # / `correction_note` were removed — embedding changes still go
+    # through forget+record; correction_note is replaced by `reason`.
+    reason: str
+    new_text: str | None = None
+    metadata_merge: dict | None = None
     new_importance: float | None = None
     new_valence: float | None = None
-    correction_note: str | None = None
 
 
 class RelateRequest(BaseModel):
@@ -176,14 +182,17 @@ async def forget_memory(rid: str):
 
 @app.post("/memories/{rid}/correct", tags=["memories"])
 async def correct_memory(rid: str, req: CorrectRequest):
-    """Correct a memory — tombstones original, creates corrected version."""
+    """Correct a memory in place — preserves rid + created_at, appends
+    revision history. Issue #47 (v0.7.20)."""
     db, lock = _db()
     with lock:
         result = db.correct(
-            rid, req.new_text,
+            rid,
+            req.reason,
+            new_text=req.new_text,
+            metadata_merge=req.metadata_merge,
             new_importance=req.new_importance,
             new_valence=req.new_valence,
-            correction_note=req.correction_note,
         )
     return result
 

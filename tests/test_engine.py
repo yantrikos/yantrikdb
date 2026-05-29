@@ -597,9 +597,13 @@ class TestNamespace:
         assert db.get(rids[2])["namespace"] == "default"
 
     def test_namespace_preserved_on_correct(self, db):
-        """Correcting a memory preserves its namespace."""
+        """Correcting a memory preserves its namespace.
+
+        Issue #47 (v0.7.20): correct() is now in-place. `reason` is
+        required, `embedding` removed (HNSW limitation).
+        """
         rid = db.record("original", embedding=_vec(1.0), namespace="my-ns")
-        result = db.correct(rid, new_text="corrected", embedding=_vec(1.1))
+        result = db.correct(rid, reason="test", new_text="corrected")
         corrected = db.get(result["corrected_rid"])
         assert corrected["namespace"] == "my-ns"
 
