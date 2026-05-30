@@ -728,6 +728,110 @@ impl PyYantrikDB {
         db.reify_supersedes_links().map_err(map_err)
     }
 
+    /// Like `record_with_links` but returns `(rid, [per_link_result])`
+    /// instead of failing fast. Each result dict has `result` in
+    /// {"inserted","already_exists","failed"}, `target_rid`, `link_type`,
+    /// and (for failed) `error`. The record commits even if a link fails.
+    #[pyo3(signature = (text, links, memory_type="episodic", importance=0.5, valence=0.0, half_life=604800.0, metadata=None, embedding=None, namespace="default", certainty=0.8, domain="general", source="user", emotional_state=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn record_with_links_partial(
+        &self,
+        py: Python<'_>,
+        text: &str,
+        links: Vec<Bound<'_, PyDict>>,
+        memory_type: &str,
+        importance: f64,
+        valence: f64,
+        half_life: f64,
+        metadata: Option<&Bound<'_, PyDict>>,
+        embedding: Option<Vec<f32>>,
+        namespace: &str,
+        certainty: f64,
+        domain: &str,
+        source: &str,
+        emotional_state: Option<&str>,
+    ) -> PyResult<(String, Vec<PyObject>)> {
+        let db = self.get_inner()?;
+        let emb = match embedding {
+            Some(e) => e,
+            None => self.embed_text(py, text)?,
+        };
+        let meta = match metadata {
+            Some(d) => py_to_json(&d.as_any())?,
+            None => serde_json::json!({}),
+        };
+        let parsed = parse_links(&links)?;
+        let (rid, results) = db
+            .record_with_links_partial(
+                text,
+                memory_type,
+                importance,
+                valence,
+                half_life,
+                &meta,
+                &emb,
+                namespace,
+                certainty,
+                domain,
+                source,
+                emotional_state,
+                &parsed,
+            )
+            .map_err(map_err)?;
+        let dicts: Vec<PyObject> = results
+            .iter()
+            .map(|r| {
+                let d = PyDict::new(py);
+                use yantrikdb_core::LinkResult::*;
+                match r {
+                    Inserted {
+                        target_rid,
+                        link_type,
+                    } => {
+                        d.set_item("result", "inserted")?;
+                        d.set_item("target_rid", target_rid)?;
+                        d.set_item("link_type", link_type)?;
+                    }
+                    AlreadyExists {
+                        target_rid,
+                        link_type,
+                    } => {
+                        d.set_item("result", "already_exists")?;
+                        d.set_item("target_rid", target_rid)?;
+                        d.set_item("link_type", link_type)?;
+                    }
+                    Failed {
+                        target_rid,
+                        link_type,
+                        error,
+                    } => {
+                        d.set_item("result", "failed")?;
+                        d.set_item("target_rid", target_rid)?;
+                        d.set_item("link_type", link_type)?;
+                        d.set_item("error", error)?;
+                    }
+                }
+                Ok::<PyObject, pyo3::PyErr>(d.into())
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        Ok((rid, dicts))
+    }
+
+    /// Windowed leak-candidate audit (issue #48 follow-up). Returns a dict
+    /// {window_floor, candidate_count, candidate_rids}. Replaces the
+    /// compaction-confused "orphan" metric — only flags in-window memories
+    /// that genuinely lack oplog + replication provenance.
+    #[pyo3(signature = (max_rids=100))]
+    fn audit_leak_candidates(&self, py: Python<'_>, max_rids: usize) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let report = db.audit_leak_candidates(max_rids).map_err(map_err)?;
+        let d = PyDict::new(py);
+        d.set_item("window_floor", report.window_floor)?;
+        d.set_item("candidate_count", report.candidate_count)?;
+        d.set_item("candidate_rids", report.candidate_rids)?;
+        Ok(d.into())
+    }
+
     fn record_batch(
         &self,
         py: Python<'_>,

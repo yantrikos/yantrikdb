@@ -27,7 +27,7 @@ use rusqlite::params;
 
 use crate::error::{Result, YantrikDbError};
 use crate::types::{
-    LinkDirection, LinkType, LinkedRecord, RecallResult, RecordLink, ScoreBreakdown,
+    LinkDirection, LinkResult, LinkType, LinkedRecord, RecallResult, RecordLink, ScoreBreakdown,
     ScoreContributions,
 };
 
@@ -80,6 +80,72 @@ impl YantrikDB {
         Ok(rid)
     }
 
+    /// Like [`Self::record_with_links`] but returns a per-link outcome
+    /// instead of failing fast (issue #48, v0.7.22). The record commits
+    /// first (durable via the oplog); then each link is attempted
+    /// independently — a failing link is captured as
+    /// [`LinkResult::Failed`] and does NOT abort the remaining links or
+    /// fail the call. Returns `(rid, per_link_results)`.
+    ///
+    /// This is the surface the MCP layer wants: it avoids re-querying to
+    /// reconstruct which links landed after a fail-fast `?` short-circuit.
+    /// `AlreadyExists` (the idempotent UNIQUE hit) is distinguished from
+    /// `Inserted` for telemetry; algo's retry path treats them the same.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_with_links_partial(
+        &self,
+        text: &str,
+        memory_type: &str,
+        importance: f64,
+        valence: f64,
+        half_life: f64,
+        metadata: &serde_json::Value,
+        embedding: &[f32],
+        namespace: &str,
+        certainty: f64,
+        domain: &str,
+        source: &str,
+        emotional_state: Option<&str>,
+        links: &[RecordLink],
+    ) -> Result<(String, Vec<LinkResult>)> {
+        let rid = self.record(
+            text,
+            memory_type,
+            importance,
+            valence,
+            half_life,
+            metadata,
+            embedding,
+            namespace,
+            certainty,
+            domain,
+            source,
+            emotional_state,
+        )?;
+
+        let mut results = Vec::with_capacity(links.len());
+        for link in links {
+            let target_rid = link.target_rid.clone();
+            let link_type = link.link_type.as_str();
+            match self.link_core(&rid, link) {
+                Ok((_id, true)) => results.push(LinkResult::Inserted {
+                    target_rid,
+                    link_type,
+                }),
+                Ok((_id, false)) => results.push(LinkResult::AlreadyExists {
+                    target_rid,
+                    link_type,
+                }),
+                Err(e) => results.push(LinkResult::Failed {
+                    target_rid,
+                    link_type,
+                    error: e.to_string(),
+                }),
+            }
+        }
+        Ok((rid, results))
+    }
+
     /// Add a single record-to-record link from `source_rid`.
     ///
     /// Validates: `source_rid` non-empty, `target_rid` non-empty, and
@@ -88,6 +154,17 @@ impl YantrikDB {
     /// `INSERT OR IGNORE`. Returns the `link_id` (freshly minted even if
     /// the row already existed and the insert was ignored).
     pub fn link(&self, source_rid: &str, link: &RecordLink) -> Result<String> {
+        let (link_id, _inserted) = self.link_core(source_rid, link)?;
+        Ok(link_id)
+    }
+
+    /// Core link insert shared by [`Self::link`] and
+    /// [`Self::record_with_links_partial`]. Returns `(link_id, inserted)`
+    /// where `inserted` is `true` if a new row was written and `false` if
+    /// the UNIQUE constraint made the INSERT OR IGNORE a no-op (the link
+    /// already existed). Always logs a `link` oplog op (idempotent on the
+    /// follower via the same UNIQUE constraint).
+    fn link_core(&self, source_rid: &str, link: &RecordLink) -> Result<(String, bool)> {
         if source_rid.is_empty() {
             return Err(YantrikDbError::InvalidInput(
                 "link: source_rid must be non-empty".to_string(),
@@ -109,7 +186,7 @@ impl YantrikDB {
         let ts = now();
         let hlc_bytes = self.tick_hlc().to_bytes().to_vec();
 
-        {
+        let inserted = {
             let conn = self.conn.lock();
             conn.execute(
                 "INSERT OR IGNORE INTO record_links \
@@ -126,7 +203,8 @@ impl YantrikDB {
                     self.actor_id,
                 ],
             )?;
-        }
+            conn.changes() > 0
+        };
 
         self.log_op(
             "link",
@@ -140,7 +218,7 @@ impl YantrikDB {
             None,
         )?;
 
-        Ok(link_id)
+        Ok((link_id, inserted))
     }
 
     /// Remove a single link. Returns `true` if a row was deleted.
@@ -942,6 +1020,74 @@ mod tests {
             "surfaced neighbor must be labelled as link-sourced, got {:?}",
             a_res.why_retrieved
         );
+    }
+
+    #[test]
+    fn record_with_links_partial_reports_per_link_outcomes() {
+        use crate::types::LinkResult;
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let b = rec(&db, "target b", 1.0);
+
+        // links array: valid Advances→b, a DUPLICATE Advances→b (same
+        // source/target/type within the call → AlreadyExists on the
+        // second), and an empty-target link (Failed). The record must
+        // still commit despite the failure.
+        let (rid, results) = db
+            .record_with_links_partial(
+                "partial test",
+                "semantic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &vec_seed(3.0, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+                &[
+                    RecordLink {
+                        target_rid: b.clone(),
+                        link_type: LinkType::Advances,
+                    },
+                    RecordLink {
+                        target_rid: b.clone(),
+                        link_type: LinkType::Advances,
+                    },
+                    RecordLink {
+                        target_rid: String::new(),
+                        link_type: LinkType::Supports,
+                    },
+                ],
+            )
+            .unwrap();
+
+        // Record committed despite the failing link.
+        assert!(db.get(&rid).unwrap().is_some());
+        assert_eq!(results.len(), 3);
+        assert!(
+            matches!(results[0], LinkResult::Inserted { .. }),
+            "first link inserted, got {:?}",
+            results[0]
+        );
+        assert!(
+            matches!(results[1], LinkResult::AlreadyExists { .. }),
+            "duplicate link already-exists, got {:?}",
+            results[1]
+        );
+        assert!(
+            matches!(results[2], LinkResult::Failed { .. }),
+            "empty-target link failed, got {:?}",
+            results[2]
+        );
+
+        // Net effect: exactly one active Advances link to b.
+        let out = db
+            .linked_records(&rid, LinkDirection::Outbound, Some(&LinkType::Advances))
+            .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].rid, b);
     }
 
     #[test]

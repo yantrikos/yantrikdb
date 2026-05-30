@@ -1,6 +1,7 @@
 mod action;
 mod agenda;
 mod analogy_engine;
+mod audit;
 mod belief;
 mod belief_network_engine;
 mod cache;

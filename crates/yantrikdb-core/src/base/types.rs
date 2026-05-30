@@ -550,6 +550,58 @@ pub struct LinkedRecord {
     pub direction: String,
 }
 
+/// Per-link outcome from `record_with_links_partial` (issue #48). The
+/// record always commits first (durable via the oplog); each link is
+/// then attempted independently — a `Failed` on one does not abort the
+/// others or fail the call. Callers get the rid + a full per-link vec.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LinkResult {
+    /// Link row was newly inserted.
+    Inserted {
+        target_rid: String,
+        link_type: String,
+    },
+    /// Link already existed (UNIQUE(source,target,type) hit; INSERT OR
+    /// IGNORE was a no-op). Retry-safe; algo treats it like `Inserted`
+    /// but it's distinguished for telemetry.
+    AlreadyExists {
+        target_rid: String,
+        link_type: String,
+    },
+    /// Link insert failed; the record itself is still durable.
+    Failed {
+        target_rid: String,
+        link_type: String,
+        error: String,
+    },
+}
+
+/// Result of [`YantrikDB::audit_leak_candidates`] (issue #48 follow-up).
+///
+/// Replaces the broken "orphan" metric (memories lacking oplog presence),
+/// which the trader postmortem proved is a benign **oplog-compaction
+/// artifact**, not a leak: locally-originated memories whose oplog rows
+/// aged out of the retention window look orphan-shaped but are healthy.
+///
+/// The windowed check only flags memories created *within* the surviving
+/// oplog window (`created_at >= window_floor`, where `window_floor =
+/// MIN(oplog.timestamp)`) that nonetheless have no oplog op and no
+/// `replication_apply_log` entry. Inside the window the oplog row SHOULD
+/// still exist, so its absence is a genuine signal (write-path bug /
+/// direct-SQL injection). Outside the window, absence is expected
+/// compaction and is NOT counted.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LeakAuditReport {
+    /// `MIN(oplog.timestamp)` — the compaction boundary. `None` if the
+    /// oplog is empty (no window can be established; `candidate_count` 0).
+    pub window_floor: Option<f64>,
+    /// Exact count of in-window leak candidates.
+    pub candidate_count: usize,
+    /// Up to `max_rids` candidate rids (the count is exact; this is a
+    /// bounded sample for investigation).
+    pub candidate_rids: Vec<String>,
+}
+
 // ── Cognition types (V3) ──
 
 /// Trigger type classification.
