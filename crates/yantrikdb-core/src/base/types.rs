@@ -692,6 +692,14 @@ pub struct ThinkConfig {
     pub consolidation_require_entity_overlap: bool,
     pub min_active_memories: i64,
     pub run_personality: bool,
+    /// **v0.7.23 prototype.** When true, `think()` extracts simple
+    /// "<subject> is <value>" assertions from free-text memories into the
+    /// claim layer so `scan_claim_conflicts` can detect attribute-value
+    /// updates made via plain `record()` (e.g. "brand color is blue" →
+    /// "brand color is now green"). Off by default — opt-in because the
+    /// copular heuristic can flag non-exclusive values for review. Skipped
+    /// when encryption is enabled (stored text is ciphertext).
+    pub extract_attribute_claims: bool,
 }
 
 impl Default for ThinkConfig {
@@ -710,6 +718,7 @@ impl Default for ThinkConfig {
             consolidation_require_entity_overlap: true,
             min_active_memories: 10,
             run_personality: true,
+            extract_attribute_claims: false,
         }
     }
 }

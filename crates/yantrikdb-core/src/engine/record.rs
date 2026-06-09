@@ -9,6 +9,23 @@ use super::reembed::SearchState;
 use super::write_router::SyncWriteGuard;
 use super::{embedding_hash, now, YantrikDB};
 
+/// Coerce a blank namespace to the canonical default (v0.7.23).
+///
+/// The schema column default and the Python/MCP bindings all use
+/// `"default"`; an empty or whitespace-only namespace is virtually always
+/// a caller-side defaulting accident (e.g. a server gateway doing
+/// `unwrap_or("")`). Normalizing it at the engine boundary keeps a single
+/// canonical value so writes, point reads, list filters, and recall all
+/// agree across every consumer instead of silently persisting an unscoped
+/// `""` partition that no reader queries for.
+pub(crate) fn normalize_namespace(ns: &str) -> &str {
+    if ns.trim().is_empty() {
+        "default"
+    } else {
+        ns
+    }
+}
+
 impl YantrikDB {
     /// Store a new memory and return its RID.
     ///
@@ -49,6 +66,10 @@ impl YantrikDB {
         source: &str,
         emotional_state: Option<&str>,
     ) -> Result<String> {
+        // v0.7.23: coerce a blank namespace to the canonical default so no
+        // consumer persists an unscoped "" partition. Shadows the param so
+        // both the sync and queued paths below see the normalized value.
+        let namespace = normalize_namespace(namespace);
         // Issue #41 layer 3: route on write_router state. The guard
         // (if acquired) is held for the full sync path and drops via
         // RAII at function return, panic-safe.
@@ -228,6 +249,18 @@ impl YantrikDB {
         if let Err(e) = state.vec_index.append(rid.clone(), embedding.to_vec(), seq) {
             let conn = self.conn();
             let _ = conn.execute("DELETE FROM memories WHERE rid = ?1", params![rid]);
+            // **v0.7.23 residual fix.** The compensating DELETE above
+            // reclaims the orphaned memories row, but the session
+            // `memory_count` bumped in the conn block above survives the
+            // delete and over-counts by 1 per backpressure-rejected
+            // record. Reverse it so the session stat matches the rows
+            // that actually exist.
+            if let Some(session_id) = &session_id {
+                let _ = conn.execute(
+                    "UPDATE sessions SET memory_count = memory_count - 1 WHERE session_id = ?1",
+                    params![session_id],
+                );
+            }
             return Err(e);
         }
         self.bump_visible_seq(namespace, seq);
@@ -491,6 +524,19 @@ impl YantrikDB {
                 for r in &rids {
                     let _ = conn.execute("DELETE FROM memories WHERE rid = ?1", params![r]);
                 }
+                // **v0.7.23 residual fix.** Reverse the per-session
+                // `memory_count` bumps committed in the SAVEPOINT above,
+                // once per memory that was session-linked — mirrors the
+                // increment loop exactly so the stat matches the rows the
+                // compensating DELETE just removed.
+                for input in inputs.iter() {
+                    if let Some(session_id) = sessions.get(&input.namespace) {
+                        let _ = conn.execute(
+                            "UPDATE sessions SET memory_count = memory_count - 1 WHERE session_id = ?1",
+                            params![session_id],
+                        );
+                    }
+                }
                 let _ = idx; // index of the failing entry, kept for future logging
                 return Err(e);
             }
@@ -602,6 +648,11 @@ impl YantrikDB {
         embedding_model: &str,
         seq: Option<u64>,
     ) -> Result<()> {
+        // v0.7.23: coerce a blank namespace to the canonical default. This is
+        // the path the server's commit applier uses (record_with_rid on every
+        // node), so it closes the gateway `unwrap_or("")` footgun at the
+        // engine boundary for all replicas.
+        let namespace = normalize_namespace(namespace);
         // Determinism gate: dim must match. Diverged dim = silent corruption.
         if embedding.len() != self.embedding_dim {
             return Err(crate::error::YantrikDbError::EmbeddingDimensionMismatch {
@@ -723,6 +774,17 @@ impl YantrikDB {
             if was_new_row {
                 let conn = self.conn();
                 let _ = conn.execute("DELETE FROM memories WHERE rid = ?1", params![rid]);
+                // **v0.7.23 residual fix.** The session `memory_count`
+                // bumped inside the (already-RELEASEd) SAVEPOINT survives
+                // the compensating DELETE. Reverse it so the stat matches
+                // the surviving rows. Mirrors the was_new_row guard on the
+                // original bump — replay (was_new_row=false) never bumped.
+                if let Some(session_id) = &session_id {
+                    let _ = conn.execute(
+                        "UPDATE sessions SET memory_count = memory_count - 1 WHERE session_id = ?1",
+                        params![session_id],
+                    );
+                }
             }
             return Err(e);
         }

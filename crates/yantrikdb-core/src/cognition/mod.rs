@@ -2,6 +2,7 @@ pub mod action;
 pub mod agenda;
 pub mod analogy;
 pub mod attention;
+pub mod attribute_claims;
 pub mod belief;
 pub mod belief_network;
 pub mod belief_query;

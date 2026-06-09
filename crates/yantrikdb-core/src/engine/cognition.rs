@@ -5,8 +5,75 @@ use crate::types::*;
 
 use super::{now, YantrikDB};
 
+/// Upper bound on memories scanned per `think()` for attribute-value claim
+/// extraction (v0.7.23 prototype). Bounded so the opt-in pass stays O(1) per
+/// call on large stores; recent memories are processed first.
+const ATTR_CLAIM_SCAN_LIMIT: usize = 500;
+
 impl YantrikDB {
     // ── Cognition loop (V3) ──
+
+    /// **v0.7.23 prototype.** Extract "<subject> is <value>" assertions from
+    /// recent active memories and write them into the claim layer via
+    /// [`Self::ingest_claim`], so the existing
+    /// [`crate::conflict::scan_claim_conflicts`] detector fires on attribute-
+    /// value updates made through the free-text `record()` path.
+    ///
+    /// Idempotent: `ingest_claim`'s `ON CONFLICT(src,dst,rel_type,extractor,
+    /// polarity,namespace)` scoping dedups identical re-extractions, so
+    /// re-running across `think()` calls does not multiply claims. Returns the
+    /// number of `(subject, value)` claims ingested this pass. Best-effort per
+    /// memory: a single malformed claim is skipped, not propagated.
+    pub(crate) fn ingest_attribute_claims(&self, max_memories: usize) -> Result<usize> {
+        // Snapshot (rid, text, namespace) under the conn lock, then release it
+        // BEFORE calling ingest_claim (which acquires the conn lock itself).
+        let rows: Vec<(String, String, String)> = {
+            let conn = self.conn();
+            let mut stmt = conn.prepare(
+                "SELECT rid, text, namespace FROM memories \
+                 WHERE consolidation_status = 'active' \
+                 ORDER BY created_at DESC LIMIT ?1",
+            )?;
+            let mapped = stmt.query_map(params![max_memories as i64], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?;
+            mapped.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+
+        let mut ingested = 0usize;
+        for (rid, text, namespace) in rows {
+            for claim in crate::cognition::attribute_claims::extract_attribute_value_claims(&text) {
+                match self.ingest_claim(
+                    &claim.subject,
+                    &claim.rel,
+                    &claim.value,
+                    &namespace,
+                    1,          // polarity: positive assertion
+                    "asserted", // modality
+                    None,       // valid_from
+                    None,       // valid_to
+                    "attr_value_v1",
+                    Some("0.1.0"),
+                    "medium",   // confidence_band
+                    Some(&rid), // provenance
+                    None,       // span_start
+                    None,       // span_end
+                    1.0,        // weight
+                ) {
+                    Ok(_) => ingested += 1,
+                    Err(e) => tracing::warn!(
+                        rid = %rid, error = %e,
+                        "ingest_attribute_claims: skipped a claim"
+                    ),
+                }
+            }
+        }
+        Ok(ingested)
+    }
 
     /// Run the full cognition loop: trigger detection, conflict scanning,
     /// consolidation, and pattern mining. Returns a prioritized list of triggers
@@ -40,6 +107,17 @@ impl YantrikDB {
         all_triggers.extend(crate::triggers::check_relationship_insight(self)?);
         all_triggers.extend(crate::triggers::check_valence_trend(self)?);
         all_triggers.extend(crate::triggers::check_entity_anomaly(self)?);
+
+        // Phase 1.9 (v0.7.23 prototype): bridge free-text attribute-value
+        // facts into the claim layer so the conflict scan below can see
+        // "<subject> is <value>" updates made via plain record(). Opt-in and
+        // skipped under encryption (stored text is ciphertext). Best-effort:
+        // a failure here must not abort the cognition loop.
+        if config.extract_attribute_claims && config.run_conflict_scan && !self.is_encrypted() {
+            if let Err(e) = self.ingest_attribute_claims(ATTR_CLAIM_SCAN_LIMIT) {
+                tracing::warn!(error = %e, "attribute-claim extraction pass failed");
+            }
+        }
 
         // Phase 2: Scan for conflicts BEFORE consolidation
         // (so contradictions are flagged before similar memories get merged)

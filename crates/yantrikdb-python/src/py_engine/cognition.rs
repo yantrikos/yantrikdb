@@ -48,6 +48,9 @@ impl PyYantrikDB {
             if let Ok(Some(v)) = d.get_item("consolidation_sim_threshold") {
                 c.consolidation_sim_threshold = v.extract()?;
             }
+            if let Ok(Some(v)) = d.get_item("extract_attribute_claims") {
+                c.extract_attribute_claims = v.extract()?;
+            }
             c
         } else {
             yantrikdb_core::ThinkConfig::default()

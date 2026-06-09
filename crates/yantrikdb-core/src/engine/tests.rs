@@ -11464,6 +11464,256 @@ fn record_with_rid_backpressure_does_not_leak_orphan_memories_row() {
 }
 
 #[test]
+fn record_with_rid_backpressure_does_not_overcount_session_memory_count() {
+    // **v0.7.23 residual fix verification.** The v0.7.19 compensating
+    // DELETE reclaims the orphaned memories row, but before this fix it
+    // left the session `memory_count` bumped for a row that no longer
+    // exists — over-counting by 1 per backpressure-rejected record.
+    // After the fix, the session's stored memory_count must equal the
+    // number of memories rows actually linked to that session.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let sid = db
+        .session_start("default", "claude", &serde_json::json!({}))
+        .unwrap();
+    let dim = db.embedding_dim();
+
+    // Pump until at least one Backpressure fires (delta saturates with
+    // no compactor draining it). Successful records bump the count and
+    // insert a row; rejected ones must do neither.
+    let mut saw_backpressure = false;
+    for i in 0..400 {
+        let embedding: Vec<f32> = (0..dim).map(|j| ((i + j) as f32) * 0.001).collect();
+        let res = db.record_with_rid(
+            &format!("sess-count-rid-{i}"),
+            &format!("sess-count-text-{i}"),
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            &embedding,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+            (i as i64) * 1_000_000,
+            &[],
+            "test-embedder",
+            None,
+        );
+        if let Err(crate::error::YantrikDbError::Backpressure { .. }) = res {
+            saw_backpressure = true;
+            break;
+        }
+    }
+    assert!(
+        saw_backpressure,
+        "test infrastructure: pump must produce a Backpressure within 400 writes"
+    );
+
+    let conn = db.conn();
+    let actual_rows: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE session_id = ?1",
+            params![&sid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let stored_count: i64 = conn
+        .query_row(
+            "SELECT memory_count FROM sessions WHERE session_id = ?1",
+            params![&sid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        stored_count, actual_rows,
+        "v0.7.23: session memory_count ({stored_count}) must match the number of \
+         memories rows actually linked to the session ({actual_rows}); a higher \
+         count means the backpressure compensation failed to reverse the bump"
+    );
+}
+
+#[test]
+fn record_coerces_blank_namespace_to_default() {
+    // **v0.7.23.** A blank namespace is a caller-side defaulting accident
+    // (e.g. a server gateway `unwrap_or("")`). The engine coerces it to the
+    // canonical "default" so writes/reads/recall all agree on one value.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+
+    // record() with empty namespace → coerced to "default".
+    let rid = db
+        .record(
+            "alpha",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "",
+            0.8,
+            "d",
+            "user",
+            None,
+        )
+        .unwrap();
+    assert_eq!(db.get(&rid).unwrap().unwrap().namespace, "default");
+
+    // whitespace-only namespace → also coerced.
+    let rid_ws = db
+        .record(
+            "beta",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "   ",
+            0.8,
+            "d",
+            "user",
+            None,
+        )
+        .unwrap();
+    assert_eq!(db.get(&rid_ws).unwrap().unwrap().namespace, "default");
+
+    // explicit namespace is preserved untouched.
+    let rid_ns = db
+        .record(
+            "gamma",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(3.0, 8),
+            "acme",
+            0.8,
+            "d",
+            "user",
+            None,
+        )
+        .unwrap();
+    assert_eq!(db.get(&rid_ns).unwrap().unwrap().namespace, "acme");
+}
+
+#[test]
+fn record_with_rid_coerces_blank_namespace_to_default() {
+    // The server's commit applier writes via record_with_rid; this is the
+    // path that turned the gateway's `unwrap_or("")` into stored `""` rows.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    db.record_with_rid(
+        "blank-ns-rid",
+        "alpha",
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "",
+        0.8,
+        "d",
+        "user",
+        None,
+        1_000_000,
+        &[],
+        "test-embedder",
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        db.get("blank-ns-rid").unwrap().unwrap().namespace,
+        "default",
+        "record_with_rid must coerce blank namespace to default (server write path)"
+    );
+}
+
+#[test]
+fn think_extract_attribute_claims_detects_free_text_value_update() {
+    // **v0.7.23 prototype verification.** Reproduces the reported gap
+    // (yantrikdb_conflict_gap.md): a free-text "<subject> is <value>" update
+    // ("brand color is blue" → "brand color is now green") is not detected as
+    // a conflict by default — then shows the opt-in extractor bridging it into
+    // the claim layer so the EXISTING scan_claim_conflicts detector fires.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    db.record(
+        "Brand color is blue #1F4E79.",
+        "semantic",
+        0.9,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "u",
+        0.8,
+        "brand_color",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.record(
+        "Brand color is now green #2E7D32.",
+        "semantic",
+        0.95,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(2.0, 8),
+        "u",
+        0.8,
+        "brand_color",
+        "user",
+        None,
+    )
+    .unwrap();
+
+    // Baseline: flag OFF reproduces the gap — no conflict detected.
+    let off = ThinkConfig {
+        run_consolidation: false,
+        run_personality: false,
+        ..Default::default()
+    };
+    assert_eq!(
+        db.think(&off).unwrap().conflicts_found,
+        0,
+        "baseline: free-text attribute-value update is not detected (the reported gap)"
+    );
+
+    // Opt-in: flag ON — the existing claim-conflict detector now fires.
+    let on = ThinkConfig {
+        run_consolidation: false,
+        run_personality: false,
+        extract_attribute_claims: true,
+        ..Default::default()
+    };
+    let res = db.think(&on).unwrap();
+    assert!(
+        res.conflicts_found >= 1,
+        "v0.7.23: attribute-value conflict should be detected, got {}",
+        res.conflicts_found
+    );
+
+    // Extraction sanity: exactly two distinct values claimed for the same
+    // (subject, relation) — "blue" and "green" — visible via the edges view.
+    let conn = db.conn();
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM edges WHERE src = 'brand color' AND rel_type = 'is'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        n, 2,
+        "two attribute-value claims (blue, green) should exist for (brand color, is)"
+    );
+}
+
+#[test]
 fn schema_v29_fresh_install_has_replication_apply_log_table() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let conn = db.conn();
