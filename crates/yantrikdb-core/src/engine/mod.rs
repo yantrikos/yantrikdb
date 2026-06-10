@@ -20,6 +20,7 @@ mod flywheel;
 mod graph_ops;
 pub mod graph_state;
 mod hawkes;
+mod importance;
 mod indices;
 mod intent;
 mod introspection;
@@ -1453,6 +1454,10 @@ impl YantrikDB {
         // artifact. Borrowed (no allocation) on the clean path.
         let sanitized = sanitize::sanitize_tool_call_artifacts(text);
         let text = sanitized.as_ref();
+        // Task 31 (Ingest Integrity): calibrate importance once, before the
+        // (retryable) embed loop, so a generation-swap retry never
+        // double-counts the namespace distribution.
+        let importance = self.calibrate_importance(namespace, importance)?;
         loop {
             // Step 1: snapshot SearchState for the embed — capture
             // generation + digest so we can revalidate after the embed.

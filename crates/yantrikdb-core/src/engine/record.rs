@@ -78,6 +78,10 @@ impl YantrikDB {
         // consumer persists an unscoped "" partition. Shadows the param so
         // both the sync and queued paths below see the normalized value.
         let namespace = normalize_namespace(namespace);
+        // Task 31 (Ingest Integrity): calibrate importance against this
+        // namespace's running distribution before it is stored OR replicated
+        // (the sync, queued, and oplog paths all flow from the value below).
+        let importance = self.calibrate_importance(namespace, importance)?;
         // Issue #41 layer 3: route on write_router state. The guard
         // (if acquired) is held for the full sync path and drops via
         // RAII at function return, panic-safe.
@@ -368,6 +372,15 @@ impl YantrikDB {
             .map(|i| sanitize::sanitize_tool_call_artifacts(&i.text))
             .collect();
 
+        // Task 31 (Ingest Integrity): calibrate each input's importance
+        // against its namespace distribution (positionally aligned with
+        // `inputs`). Calls run in order, so later items in the batch see the
+        // running-mean effect of earlier ones in the same namespace.
+        let calibrated_importances: Vec<f64> = inputs
+            .iter()
+            .map(|i| self.calibrate_importance(&i.namespace, i.importance))
+            .collect::<Result<Vec<_>>>()?;
+
         // **Issue #41 brainstorm-4 §1.** SearchState snapshot for the
         // batch — every append in this batch lands on the same
         // generation-anchored DeltaIndex.
@@ -428,7 +441,7 @@ impl YantrikDB {
                       certainty, domain, source, emotional_state, embedding_generation) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                     params![rid, input.memory_type, stored_text, stored_emb, ts, ts,
-                            input.importance, input.half_life, ts, input.valence, stored_meta,
+                            calibrated_importances[idx], input.half_life, ts, input.valence, stored_meta,
                             input.namespace, input.certainty, input.domain, input.source,
                             input.emotional_state, embedding_generation],
                 );
@@ -569,13 +582,13 @@ impl YantrikDB {
         // vec_index dropped, now scoring_cache
         {
             let mut cache = self.scoring_cache.write();
-            for (rid, input) in rids.iter().zip(inputs.iter()) {
+            for (idx, (rid, input)) in rids.iter().zip(inputs.iter()).enumerate() {
                 let ts = now();
                 cache.insert(
                     rid.clone(),
                     ScoringRow {
                         created_at: ts,
-                        importance: input.importance,
+                        importance: calibrated_importances[idx],
                         half_life: input.half_life,
                         last_access: ts,
                         access_count: 0,

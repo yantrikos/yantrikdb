@@ -8944,6 +8944,63 @@ fn repair_tool_call_artifacts_cleans_legacy_corpus() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
+fn importance_calibration_deflates_saturated_namespace() {
+    // Task 31 end-to-end. A fresh namespace preserves importance exactly
+    // (identity — this is why existing exact-importance tests still pass);
+    // a namespace saturated with max-importance writes deflates further
+    // high marks below 1.0 while keeping them in the high band.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+
+    let read_importance = |rid: &str| -> f64 {
+        let conn = db.conn();
+        conn.query_row(
+            "SELECT importance FROM memories WHERE rid = ?1",
+            rusqlite::params![rid],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+
+    // Fresh namespace: a single max mark is stored exactly.
+    let rid0 = db
+        .record_text(
+            "first genuinely critical fact", "semantic", 1.0, 0.0, 604800.0, &empty_meta(),
+            "fresh", 0.8, "general", "user", None,
+        )
+        .unwrap();
+    assert!(
+        (read_importance(&rid0) - 1.0).abs() < 1e-9,
+        "fresh namespace preserves importance exactly: {}",
+        read_importance(&rid0)
+    );
+
+    // Saturate a different namespace with max-importance writes.
+    for i in 0..12 {
+        db.record_text(
+            &format!("everything here is marked critical {i}"), "semantic", 1.0, 0.0, 604800.0,
+            &empty_meta(), "saturated", 0.8, "general", "user", None,
+        )
+        .unwrap();
+    }
+
+    // The next max-importance write is deflated.
+    let rid = db
+        .record_text(
+            "yet another self-declared critical fact", "semantic", 1.0, 0.0, 604800.0,
+            &empty_meta(), "saturated", 0.8, "general", "user", None,
+        )
+        .unwrap();
+    let imp = read_importance(&rid);
+    assert!(imp < 1.0, "saturated namespace deflates importance: {imp}");
+    assert!(imp >= 0.70, "but keeps it in the high band: {imp}");
+
+    // The deflated memory is still retrievable.
+    let hits = db.recall_text("self-declared critical fact", 5).unwrap();
+    assert!(hits.iter().any(|h| h.rid == rid));
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
 fn explicit_set_embedder_overrides_bundled() {
     // Slim-build path or custom-model path: set_embedder() after new()
     // takes precedence. The bundled embedder gets dropped; the user's

@@ -991,6 +991,17 @@ CREATE TABLE IF NOT EXISTS learned_weights (
 );
 INSERT OR IGNORE INTO learned_weights (id) VALUES (1);
 
+-- Per-namespace importance distribution, for write-time importance
+-- calibration (task 31). An EWMA of the raw importance writers request,
+-- used to detect saturation (everything-marked-critical) and deflate
+-- further high marks so the scale keeps headroom and 1.0 stays rare.
+CREATE TABLE IF NOT EXISTS namespace_importance_stats (
+    namespace TEXT PRIMARY KEY,
+    ewma REAL NOT NULL,
+    count INTEGER NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 -- Personality traits (V11)
 CREATE TABLE IF NOT EXISTS personality_traits (
     trait_name TEXT PRIMARY KEY,
