@@ -518,6 +518,17 @@ impl PyYantrikDB {
         Ok(dict.into())
     }
 
+    /// Return the head (most recent entry) of a chain-shaped namespace, or
+    /// None if empty (task 36). Exact and O(log n) — for identity / narrative
+    /// chains where `recall` cannot guarantee the latest entry.
+    fn chain_head(&self, py: Python<'_>, namespace: &str) -> PyResult<Option<PyObject>> {
+        let db = self.get_inner()?;
+        match db.chain_head(namespace).map_err(map_err)? {
+            Some(m) => Ok(Some(memory_to_dict(py, &m)?)),
+            None => Ok(None),
+        }
+    }
+
     #[pyo3(signature = (threshold=0.01))]
     fn decay(&self, py: Python<'_>, threshold: f64) -> PyResult<Vec<PyObject>> {
         let db = self.get_inner()?;

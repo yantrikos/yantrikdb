@@ -2171,6 +2171,42 @@ impl YantrikDB {
     ) -> Vec<RefinementHint> {
         let mut hints = Vec::new();
 
+        // Hint 0 (task 35): structural intent. Recency / enumeration / count
+        // questions want an EXACT answer, not similarity ranking — `recall`
+        // can never guarantee one. Detect the intent and point at the
+        // structural path so the agent stops trusting a probabilistic recall
+        // for a deterministic question.
+        if let Some(qt) = query_text {
+            let lq = qt.to_lowercase();
+            let recency = ["most recent", "latest", "last entry", "newest", "chain head"]
+                .iter()
+                .any(|k| lq.contains(k));
+            let enumeration = ["list all", "all records", "all memories", "enumerate", "every record"]
+                .iter()
+                .any(|k| lq.contains(k));
+            let counting =
+                lq.contains("how many") || lq.starts_with("count ") || lq.contains("number of");
+            if recency || enumeration || counting {
+                let suggestion = if counting {
+                    "This looks like a count. recall returns a ranked sample, not a total — \
+                     enumerate with list_records(...) and count."
+                } else if recency {
+                    "This looks like a recency question. recall ranks by similarity, not time — \
+                     for the exact latest entry use chain_head(namespace) or \
+                     list_records(order=\"desc\", limit=1)."
+                } else {
+                    "This looks like an enumeration. recall returns a ranked top-k, not the full \
+                     set — use list_records(kind/namespace/..., order, since_rid) to page all \
+                     matching records exactly."
+                };
+                hints.push(RefinementHint {
+                    hint_type: "structural".to_string(),
+                    suggestion: suggestion.to_string(),
+                    related_entities: vec![],
+                });
+            }
+        }
+
         // Hint 1: Specificity — if query is very short, suggest adding detail
         if let Some(qt) = query_text {
             let word_count = qt.split_whitespace().count();

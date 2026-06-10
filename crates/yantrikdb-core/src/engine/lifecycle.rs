@@ -196,6 +196,24 @@ impl YantrikDB {
         Ok((memories, total))
     }
 
+    /// Return the head of a chain-shaped namespace — its most recent entry.
+    ///
+    /// Identity / narrative chains (e.g. a `claude_self_narrative` namespace
+    /// whose entries are appended over time) need *exact* "latest entry"
+    /// semantics. `recall` ranks by similarity × importance × decay, so it can
+    /// never guarantee it returns the chain head; this does. Because rids are
+    /// UUIDv7 (lexically chronological), the greatest active rid in the
+    /// namespace is exactly the latest write — an O(log n) index seek on the
+    /// primary key, not a retrieval lottery.
+    ///
+    /// Walk backwards from the head with
+    /// `list_records(namespace, order="desc", since_rid=head.rid, ...)`.
+    pub fn chain_head(&self, namespace: &str) -> Result<Option<Memory>> {
+        let (mut records, _) =
+            self.list_records(Some(namespace), None, None, None, None, None, 1, "desc")?;
+        Ok(records.pop())
+    }
+
     /// **v0.7.24 — structural query path.** Typed enumeration by indexed
     /// metadata fields with a stable keyset cursor — the relational counterpart
     /// to similarity `recall`. All filters are optional and AND-compose. The

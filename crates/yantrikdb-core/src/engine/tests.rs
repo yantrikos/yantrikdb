@@ -9393,6 +9393,86 @@ fn maintenance_cycle_runs_passes_and_records_last_run() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
+fn recall_emits_structural_intent_hint() {
+    // Task 35. A recency-intent query gets a hint pointing at the exact
+    // structural path instead of silently returning a similarity-ranked guess.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    db.record_text("entry one of the narrative", "episodic", 0.5, 0.0, 604800.0, &empty_meta(),
+        "chain", 0.8, "self", "user", None)
+        .unwrap();
+
+    let emb = db.embed("the most recent entry in the chain").unwrap();
+    let response = db
+        .recall_with_response(
+            &emb,
+            5,
+            None,
+            None,
+            false,
+            true,
+            Some("what is the most recent entry in the chain"),
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    assert!(
+        response
+            .hints
+            .iter()
+            .any(|h| h.hint_type == "structural" && h.suggestion.contains("chain_head")),
+        "a recency query yields a structural hint: {:?}",
+        response.hints
+    );
+
+    // A plain semantic query gets no structural hint.
+    let emb2 = db.embed("tell me about the narrative").unwrap();
+    let plain = db
+        .recall_with_response(
+            &emb2, 5, None, None, false, true, Some("tell me about the narrative content"),
+            true, None, None, None,
+        )
+        .unwrap();
+    assert!(
+        !plain.hints.iter().any(|h| h.hint_type == "structural"),
+        "no structural hint for a non-structural query"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn chain_head_returns_exact_latest_entry() {
+    // Task 36. The chain head is exactly the latest write, independent of
+    // importance — proving it is not the recall lottery.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    assert!(db.chain_head("chain").unwrap().is_none(), "empty chain has no head");
+
+    let _e1 = db
+        .record_text("entry one of the narrative", "episodic", 1.0, 0.0, 604800.0, &empty_meta(),
+            "chain", 0.8, "self", "user", None)
+        .unwrap();
+    let _e2 = db
+        .record_text("entry two of the narrative", "episodic", 0.6, 0.0, 604800.0, &empty_meta(),
+            "chain", 0.8, "self", "user", None)
+        .unwrap();
+    // The most recent entry is given the LOWEST importance, so a recall would
+    // rank it last — chain_head must still return it.
+    let e3 = db
+        .record_text("entry three, the most recent", "episodic", 0.3, 0.0, 604800.0, &empty_meta(),
+            "chain", 0.8, "self", "user", None)
+        .unwrap();
+
+    let head = db.chain_head("chain").unwrap().expect("head exists");
+    assert_eq!(head.rid, e3, "head is the latest write, not the highest-importance");
+    assert!(head.text.contains("most recent"));
+
+    // A different namespace is unaffected.
+    assert!(db.chain_head("other").unwrap().is_none());
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
 fn explicit_set_embedder_overrides_bundled() {
     // Slim-build path or custom-model path: set_embedder() after new()
     // takes precedence. The bundled embedder gets dropped; the user's
