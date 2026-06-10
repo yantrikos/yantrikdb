@@ -8849,6 +8849,101 @@ fn record_text_strips_leaked_tool_call_artifact_end_to_end() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
+fn repair_tool_call_artifacts_cleans_legacy_corpus() {
+    // Task 30 end-to-end. Simulates a row corrupted BEFORE the write-time
+    // sanitizer existed, then proves the repair migration detects it
+    // (dry-run, no mutation), cleans + re-embeds it (apply), preserves the
+    // original for recovery, is idempotent, and leaves recall working.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let clean = "Postgres was chosen for the metadata store";
+    let rid = db
+        .record_text(
+            clean, "semantic", 0.6, 0.0, 604800.0, &empty_meta(), "default", 0.8, "general",
+            "user", None,
+        )
+        .unwrap();
+
+    // Inject a legacy artifact directly into storage, bypassing record_text
+    // (which would now sanitize it). The :memory: db has no encryption, so
+    // the stored text is plaintext.
+    let dirty = "Postgres was chosen for the metadata store</text>\n\
+                 <parameter name=\"memory_type\">semantic";
+    {
+        let conn = db.conn();
+        conn.execute(
+            "UPDATE memories SET text = ?1 WHERE rid = ?2",
+            rusqlite::params![dirty, rid],
+        )
+        .unwrap();
+    }
+
+    // Dry run detects but does not mutate.
+    let dry = db.repair_tool_call_artifacts(true).unwrap();
+    assert!(dry.dry_run);
+    assert_eq!(dry.artifacts_found, 1);
+    assert_eq!(dry.repaired, 0);
+    assert!(dry.stripped_bytes > 0);
+    {
+        let conn = db.conn();
+        let t: String = conn
+            .query_row(
+                "SELECT text FROM memories WHERE rid = ?1",
+                rusqlite::params![rid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(t.contains("</text>"), "dry run must NOT mutate");
+    }
+
+    // Apply: clean + re-embed + update.
+    let applied = db.repair_tool_call_artifacts(false).unwrap();
+    assert!(!applied.dry_run);
+    assert_eq!(applied.artifacts_found, 1);
+    assert_eq!(applied.repaired, 1);
+    assert_eq!(applied.skipped_concurrent_modification, 0);
+    assert!(applied.errors.is_empty(), "errors: {:?}", applied.errors);
+
+    // The row is now clean.
+    {
+        let conn = db.conn();
+        let t: String = conn
+            .query_row(
+                "SELECT text FROM memories WHERE rid = ?1",
+                rusqlite::params![rid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(t, clean);
+    }
+
+    // The original was preserved for recovery.
+    {
+        let conn = db.conn();
+        let orig: String = conn
+            .query_row(
+                "SELECT original_text FROM artifact_repair_audit WHERE rid = ?1",
+                rusqlite::params![rid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(orig.contains("</text>"), "audit preserves the dirty original");
+    }
+
+    // Idempotent: a second apply finds nothing.
+    let again = db.repair_tool_call_artifacts(false).unwrap();
+    assert_eq!(again.artifacts_found, 0);
+    assert_eq!(again.repaired, 0);
+
+    // Recall still works — the vector index was rebuilt consistently.
+    let hits = db.recall_text("database for metadata", 5).unwrap();
+    assert!(
+        hits.iter().any(|h| h.rid == rid),
+        "repaired memory is still retrievable"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
 fn explicit_set_embedder_overrides_bundled() {
     // Slim-build path or custom-model path: set_embedder() after new()
     // takes precedence. The bundled embedder gets dropped; the user's

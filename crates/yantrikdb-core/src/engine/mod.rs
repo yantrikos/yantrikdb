@@ -42,6 +42,7 @@ mod recall;
 mod receptivity;
 mod record;
 pub mod reembed;
+pub mod repair;
 mod replay_engine;
 mod sanitize;
 mod schema_induction_engine;

@@ -160,4 +160,36 @@ impl PyYantrikDB {
         let db = self.get_inner()?;
         db.rebuild_graph_index().map_err(map_err)
     }
+
+    /// Repair memories whose stored text carries a leaked tool-call
+    /// serialization artifact (task 30). Call with `dry_run=True` first to
+    /// see the scope, then `dry_run=False` to apply. Returns a report dict.
+    #[pyo3(signature = (dry_run = true))]
+    fn repair_tool_call_artifacts(&self, py: Python<'_>, dry_run: bool) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let report = db.repair_tool_call_artifacts(dry_run).map_err(map_err)?;
+
+        let dict = PyDict::new(py);
+        dict.set_item("dry_run", report.dry_run)?;
+        dict.set_item("scanned", report.scanned)?;
+        dict.set_item("artifacts_found", report.artifacts_found)?;
+        dict.set_item("repaired", report.repaired)?;
+        dict.set_item(
+            "skipped_concurrent_modification",
+            report.skipped_concurrent_modification,
+        )?;
+        dict.set_item("stripped_bytes", report.stripped_bytes)?;
+        dict.set_item("sample_rids", report.sample_rids)?;
+
+        let errors = pyo3::types::PyList::empty(py);
+        for e in &report.errors {
+            let ed = PyDict::new(py);
+            ed.set_item("rid", &e.rid)?;
+            ed.set_item("message", &e.message)?;
+            errors.append(ed)?;
+        }
+        dict.set_item("errors", errors)?;
+
+        Ok(dict.into())
+    }
 }
