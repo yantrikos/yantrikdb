@@ -9354,6 +9354,45 @@ fn skill_outcomes_are_recorded_durably() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
+fn maintenance_cycle_runs_passes_and_records_last_run() {
+    // Task 24. The cycle runs the default hygiene passes with per-pass error
+    // isolation, leaves the opt-in heavy passes off, and persists a last-run
+    // summary for stats / the boot digest.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    db.record_text("fact one about the project", "semantic", 0.6, 0.0, 604800.0, &empty_meta(),
+        "ns", 0.8, "work", "user", None).unwrap();
+    db.record_text("fact two about the project", "semantic", 0.6, 0.0, 604800.0, &empty_meta(),
+        "ns", 0.8, "work", "user", None).unwrap();
+
+    assert!(db.last_maintenance_cycle().unwrap().is_none(), "no cycle yet");
+
+    let report = db
+        .run_maintenance_cycle(&crate::MaintenanceCycleConfig::default())
+        .unwrap();
+    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+    assert!(report.ran_at > 0.0);
+    // Default config: think + conflicts + triggers + importance ran.
+    assert!(report.think_consolidations.is_some());
+    assert!(report.conflicts.is_some());
+    assert!(report.triggers.is_some());
+    assert!(report.importance.is_some());
+    // Heavy passes are opt-in.
+    assert!(report.split.is_none());
+    assert!(report.repair.is_none());
+
+    // The last-run summary is persisted and retrievable.
+    let last = db.last_maintenance_cycle().unwrap().expect("last run recorded");
+    assert!(last.contains("ran_at"));
+
+    // Idempotent: a second cycle also succeeds with no errors.
+    let again = db
+        .run_maintenance_cycle(&crate::MaintenanceCycleConfig::default())
+        .unwrap();
+    assert!(again.errors.is_empty());
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
 fn explicit_set_embedder_overrides_bundled() {
     // Slim-build path or custom-model path: set_embedder() after new()
     // takes precedence. The bundled embedder gets dropped; the user's

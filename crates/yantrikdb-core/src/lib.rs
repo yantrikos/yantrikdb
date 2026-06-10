@@ -35,6 +35,7 @@ pub use consolidate::{consolidate, find_consolidation_candidates};
 pub use cognition::triggers::TriggerPruneReport;
 pub use engine::conflict::ConflictBurndownReport;
 pub use engine::importance::ImportanceRecalibrationReport;
+pub use engine::maintenance::{MaintenanceCycleConfig, MaintenanceCycleReport};
 pub use engine::repair::{RepairError, RepairReport};
 pub use engine::split::SplitReport;
 pub use engine::tenant::{TenantConfig, TenantManager};

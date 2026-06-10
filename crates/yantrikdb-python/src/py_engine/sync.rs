@@ -280,4 +280,51 @@ impl PyYantrikDB {
         let db = self.get_inner()?;
         db.skill_outcome_count().map_err(map_err)
     }
+
+    /// Run one maintenance cycle — the sleep cycle (task 24). Drives the
+    /// enabled hygiene passes once and returns a JSON summary string. The
+    /// heavier corpus-rewriting passes (split, repair) are opt-in. A host
+    /// schedules this on a timer; the engine does not own one.
+    #[pyo3(signature = (
+        run_think = true,
+        burn_down_conflicts = true,
+        prune_triggers = true,
+        max_pending_triggers = 64,
+        recalibrate_importance = true,
+        split_oversized = false,
+        split_min_chars = 1500,
+        repair_artifacts = false
+    ))]
+    #[allow(clippy::too_many_arguments)]
+    fn run_maintenance_cycle(
+        &self,
+        run_think: bool,
+        burn_down_conflicts: bool,
+        prune_triggers: bool,
+        max_pending_triggers: usize,
+        recalibrate_importance: bool,
+        split_oversized: bool,
+        split_min_chars: usize,
+        repair_artifacts: bool,
+    ) -> PyResult<String> {
+        let db = self.get_inner()?;
+        let cfg = yantrikdb_core::MaintenanceCycleConfig {
+            run_think,
+            burn_down_conflicts,
+            prune_triggers,
+            max_pending_triggers,
+            recalibrate_importance,
+            split_oversized,
+            split_min_chars,
+            repair_artifacts,
+        };
+        let report = db.run_maintenance_cycle(&cfg).map_err(map_err)?;
+        Ok(serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string()))
+    }
+
+    /// The last persisted maintenance-cycle summary (JSON), or None.
+    fn last_maintenance_cycle(&self) -> PyResult<Option<String>> {
+        let db = self.get_inner()?;
+        db.last_maintenance_cycle().map_err(map_err)
+    }
 }
