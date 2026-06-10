@@ -49,6 +49,7 @@ mod sanitize;
 mod schema_induction_engine;
 mod session;
 mod skills;
+pub mod split;
 mod stats;
 mod storage;
 mod suggest;

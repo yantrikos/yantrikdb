@@ -209,4 +209,30 @@ impl PyYantrikDB {
         dict.set_item("sample_rids", report.sample_rids)?;
         Ok(dict.into())
     }
+
+    /// Split oversized episodic memories into atomic semantic facts linked
+    /// back to the source episode (task 33). Background maintenance; call
+    /// with `dry_run=True` first. `min_chars` is the plaintext length above
+    /// which an episode is a candidate. Returns a report dict.
+    #[pyo3(signature = (dry_run = true, min_chars = 1500))]
+    fn split_oversized_episodes(
+        &self,
+        py: Python<'_>,
+        dry_run: bool,
+        min_chars: usize,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let report = db
+            .split_oversized_episodes(dry_run, min_chars)
+            .map_err(map_err)?;
+
+        let dict = PyDict::new(py);
+        dict.set_item("dry_run", report.dry_run)?;
+        dict.set_item("episodes_scanned", report.episodes_scanned)?;
+        dict.set_item("episodes_split", report.episodes_split)?;
+        dict.set_item("atomic_facts_created", report.atomic_facts_created)?;
+        dict.set_item("sample_parent_rids", report.sample_parent_rids)?;
+        dict.set_item("errors", report.errors)?;
+        Ok(dict.into())
+    }
 }

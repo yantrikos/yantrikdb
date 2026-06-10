@@ -9065,6 +9065,71 @@ fn recalibrate_unused_importance_reverts_stale_high_marks() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
+fn split_oversized_episodes_extracts_linked_atomic_facts() {
+    // Task 33 end-to-end. An oversized episodic dump is split into atomic
+    // facts, each linked back to the source episode; the parent is demoted
+    // out of primary recall; and a query for a specific fact returns the
+    // atomic child, not the wall-of-text parent.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+
+    let episode = "Session recap. Alice was promoted to engineering lead this week. \
+                   The team chose Postgres for the metadata store after benchmarking. \
+                   The production launch slipped to March 30 because of the migration. \
+                   Bob will own the on-call rotation starting next sprint. \
+                   We agreed to cap importance writes so the signal stays meaningful.";
+    let parent = db
+        .record_text(
+            episode, "episodic", 1.0, 0.0, 604800.0, &empty_meta(), "recap", 0.9, "work",
+            "user", None,
+        )
+        .unwrap();
+
+    // Dry run reports the split without performing it.
+    let dry = db.split_oversized_episodes(true, 120).unwrap();
+    assert_eq!(dry.episodes_scanned, 1);
+    assert_eq!(dry.episodes_split, 0);
+    assert!(dry.atomic_facts_created >= 2);
+
+    // Apply.
+    let applied = db.split_oversized_episodes(false, 120).unwrap();
+    assert_eq!(applied.episodes_split, 1);
+    assert!(applied.atomic_facts_created >= 2, "{applied:?}");
+    assert!(applied.errors.is_empty(), "errors: {:?}", applied.errors);
+
+    // The parent is demoted to consolidated (retained, out of primary recall).
+    {
+        let conn = db.conn();
+        let status: String = conn
+            .query_row(
+                "SELECT consolidation_status FROM memories WHERE rid = ?1",
+                rusqlite::params![parent],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "consolidated", "parent episode demoted from recall");
+    }
+
+    // Atomic-fact children exist, linked back to the parent.
+    let children = db.linked_records(&parent, crate::types::LinkDirection::Inbound, None).unwrap();
+    assert!(
+        children.len() >= 2,
+        "parent has atomic-fact children linked back: {}",
+        children.len()
+    );
+    assert!(children.iter().all(|c| c.link_type == "derived_from"));
+
+    // A query for a specific fact returns the atomic child, not the parent.
+    let hits = db.recall_text("who owns the on-call rotation", 5).unwrap();
+    assert!(!hits.is_empty());
+    assert_ne!(hits[0].rid, parent, "top hit is an atomic fact, not the dump");
+    assert!(
+        hits[0].text.chars().count() < episode.chars().count(),
+        "the returned fact is shorter than the original dump"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
 fn explicit_set_embedder_overrides_bundled() {
     // Slim-build path or custom-model path: set_embedder() after new()
     // takes precedence. The bundled embedder gets dropped; the user's

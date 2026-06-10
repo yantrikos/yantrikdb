@@ -34,6 +34,7 @@ pub use conflict::{
 pub use consolidate::{consolidate, find_consolidation_candidates};
 pub use engine::importance::ImportanceRecalibrationReport;
 pub use engine::repair::{RepairError, RepairReport};
+pub use engine::split::SplitReport;
 pub use engine::tenant::{TenantConfig, TenantManager};
 pub use engine::YantrikDB;
 pub use error::YantrikDbError;
