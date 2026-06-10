@@ -32,6 +32,7 @@ pub use conflict::{
     scan_conflicts_limited,
 };
 pub use consolidate::{consolidate, find_consolidation_candidates};
+pub use cognition::triggers::TriggerPruneReport;
 pub use engine::conflict::ConflictBurndownReport;
 pub use engine::importance::ImportanceRecalibrationReport;
 pub use engine::repair::{RepairError, RepairReport};

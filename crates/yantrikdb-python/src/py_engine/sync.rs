@@ -253,4 +253,25 @@ impl PyYantrikDB {
         dict.set_item("errors", report.errors)?;
         Ok(dict.into())
     }
+
+    /// Bound the pending-trigger backlog: expire overdue triggers and evict
+    /// the lowest-urgency excess over `max_pending` (task 27). Dry-run first.
+    #[pyo3(signature = (dry_run = true, max_pending = 64))]
+    fn prune_triggers(
+        &self,
+        py: Python<'_>,
+        dry_run: bool,
+        max_pending: usize,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let report = db.prune_triggers(dry_run, max_pending).map_err(map_err)?;
+
+        let dict = PyDict::new(py);
+        dict.set_item("dry_run", report.dry_run)?;
+        dict.set_item("pending_before", report.pending_before)?;
+        dict.set_item("expired_overdue", report.expired_overdue)?;
+        dict.set_item("expired_over_cap", report.expired_over_cap)?;
+        dict.set_item("pending_after", report.pending_after)?;
+        Ok(dict.into())
+    }
 }

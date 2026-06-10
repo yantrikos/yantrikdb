@@ -9248,6 +9248,82 @@ fn auto_resolve_routes_identity_conflicts_to_operator() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
+fn trigger_prune_bounds_pending_backlog() {
+    // Task 27. Overdue triggers expire (TTL); the remaining pending backlog
+    // is bounded to max_pending by evicting the lowest-urgency excess;
+    // acknowledge removes a trigger from pending. Idempotent.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let insert = |id: &str, urgency: f64, expires_at: Option<f64>| {
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO trigger_log \
+             (trigger_id, trigger_type, urgency, status, reason, suggested_action, \
+              source_rids, context, created_at, expires_at, hlc, origin_actor) \
+             VALUES (?1, 'decay_review', ?2, 'pending', 'r', 'a', '[]', '{}', 100.0, ?3, \
+                     X'00', 'test')",
+            rusqlite::params![id, urgency, expires_at],
+        )
+        .unwrap();
+    };
+    insert("t_overdue1", 0.9, Some(1.0));
+    insert("t_overdue2", 0.9, Some(1.0));
+    insert("t_live_lo", 0.1, None);
+    insert("t_live_mid", 0.5, None);
+    insert("t_live_hi1", 0.8, None);
+    insert("t_live_hi2", 0.9, None);
+    insert("t_live_hi3", 0.95, None);
+
+    let count_pending = || -> i64 {
+        let conn = db.conn();
+        conn.query_row(
+            "SELECT COUNT(*) FROM trigger_log WHERE status = 'pending'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+
+    // Dry run: 7 pending, 2 overdue, 5 live capped to 3 → 2 over-cap.
+    let dry = db.prune_triggers(true, 3).unwrap();
+    assert_eq!(dry.pending_before, 7);
+    assert_eq!(dry.expired_overdue, 2);
+    assert_eq!(dry.expired_over_cap, 2);
+    assert_eq!(dry.pending_after, 3);
+    assert_eq!(count_pending(), 7, "dry run mutates nothing");
+
+    // Apply: bound to 3.
+    let applied = db.prune_triggers(false, 3).unwrap();
+    assert_eq!(applied.pending_after, 3);
+    assert_eq!(count_pending(), 3);
+    {
+        let conn = db.conn();
+        let lo: String = conn
+            .query_row(
+                "SELECT status FROM trigger_log WHERE trigger_id = 't_live_lo'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(lo, "expired", "lowest-urgency evicted");
+        let hi: String = conn
+            .query_row(
+                "SELECT status FROM trigger_log WHERE trigger_id = 't_live_hi3'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(hi, "pending", "highest-urgency retained");
+    }
+
+    // Re-running is stable now that the backlog is at the cap.
+    let again = db.prune_triggers(false, 3).unwrap();
+    assert_eq!(again.expired_overdue, 0);
+    assert_eq!(again.expired_over_cap, 0);
+    assert_eq!(again.pending_after, 3);
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
 fn explicit_set_embedder_overrides_bundled() {
     // Slim-build path or custom-model path: set_embedder() after new()
     // takes precedence. The bundled embedder gets dropped; the user's

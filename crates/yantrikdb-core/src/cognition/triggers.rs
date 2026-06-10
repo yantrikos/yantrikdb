@@ -809,6 +809,84 @@ pub fn expire_triggers(db: &YantrikDB, ts: f64) -> Result<usize> {
     Ok(changes)
 }
 
+/// Outcome of a [`YantrikDB::prune_triggers`] pass (task 27).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct TriggerPruneReport {
+    pub dry_run: bool,
+    /// Pending triggers at the start of the pass.
+    pub pending_before: usize,
+    /// Pending triggers expired for being past their `expires_at` (TTL).
+    pub expired_overdue: usize,
+    /// Pending triggers expired to keep the backlog under the cap.
+    pub expired_over_cap: usize,
+    /// Pending triggers remaining after the pass.
+    pub pending_after: usize,
+}
+
+impl YantrikDB {
+    /// Task 27 — bound the pending-trigger backlog so it never grows
+    /// unbounded (16 and climbing at audit time, nothing ever expiring them).
+    /// First expires overdue triggers (past `expires_at`), then, if still over
+    /// `max_pending`, expires the lowest-urgency / oldest excess. Expired
+    /// triggers are retained with `status = 'expired'` and remain auditable.
+    /// Dry-run reports what would change.
+    pub fn prune_triggers(&self, dry_run: bool, max_pending: usize) -> Result<TriggerPruneReport> {
+        let ts = now();
+        let conn = self.conn();
+
+        let pending_before = conn.query_row(
+            "SELECT COUNT(*) FROM trigger_log WHERE status = 'pending'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as usize;
+        let overdue = conn.query_row(
+            "SELECT COUNT(*) FROM trigger_log \
+             WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?1",
+            params![ts],
+            |r| r.get::<_, i64>(0),
+        )? as usize;
+        let remaining_after_overdue = pending_before.saturating_sub(overdue);
+        let over_cap = remaining_after_overdue.saturating_sub(max_pending);
+
+        let mut report = TriggerPruneReport {
+            dry_run,
+            pending_before,
+            expired_overdue: overdue,
+            expired_over_cap: over_cap,
+            pending_after: remaining_after_overdue.saturating_sub(over_cap),
+        };
+
+        if dry_run {
+            return Ok(report);
+        }
+
+        // 1) TTL expiry.
+        conn.execute(
+            "UPDATE trigger_log SET status = 'expired' \
+             WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?1",
+            params![ts],
+        )?;
+        // 2) Over-cap eviction: lowest urgency, then oldest, from what remains.
+        if over_cap > 0 {
+            conn.execute(
+                "UPDATE trigger_log SET status = 'expired' WHERE trigger_id IN (\
+                   SELECT trigger_id FROM trigger_log WHERE status = 'pending' \
+                   ORDER BY urgency ASC, created_at ASC LIMIT ?1)",
+                params![over_cap as i64],
+            )?;
+        }
+
+        // Recompute the true remaining count (defensive against drift).
+        report.pending_after = conn.query_row(
+            "SELECT COUNT(*) FROM trigger_log WHERE status = 'pending'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )? as usize;
+
+        Ok(report)
+    }
+}
+
 /// Filter triggers by cooldown and persist. Returns only non-suppressed triggers.
 pub fn filter_and_persist_triggers(
     db: &YantrikDB,
