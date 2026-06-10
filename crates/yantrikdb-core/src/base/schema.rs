@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 31;
+pub const SCHEMA_VERSION: i32 = 32;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -78,7 +78,20 @@ CREATE TABLE IF NOT EXISTS memories (
     -- writes the new generation here atomically with promoting
     -- embedding_new into embedding. The materializer scan for rows under
     -- a stale generation uses idx_memories_embedding_generation.
-    embedding_generation INTEGER
+    embedding_generation INTEGER,
+
+    -- v32 (structural query / list_records): indexed generated columns that
+    -- extract JSON metadata fields for typed enumeration without scanning the
+    -- opaque metadata blob. VIRTUAL = computed on read; the secondary index
+    -- materializes the value. The json_valid guard makes encrypted-metadata
+    -- rows (ciphertext, not valid JSON) resolve to NULL instead of erroring
+    -- the insert/index build. NULL when the key is absent.
+    kind TEXT GENERATED ALWAYS AS (
+        CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.kind') END
+    ) VIRTUAL,
+    drive_id TEXT GENERATED ALWAYS AS (
+        CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.drive_id') END
+    ) VIRTUAL
 );
 -- v28 index for the post-swap materializer scan of stale-generation rows.
 CREATE INDEX IF NOT EXISTS idx_memories_embedding_generation
@@ -832,6 +845,11 @@ CREATE INDEX IF NOT EXISTS idx_memories_consolidation ON memories(consolidation_
 CREATE INDEX IF NOT EXISTS idx_memories_storage_tier ON memories(storage_tier);
 CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace);
 CREATE INDEX IF NOT EXISTS idx_memories_access_count ON memories(access_count);
+-- v32 (structural query / list_records): secondary indexes over the generated
+-- metadata columns, so list-by-kind / FK-by-drive_id are O(log n) index walks
+-- instead of full-table json_extract scans.
+CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind);
+CREATE INDEX IF NOT EXISTS idx_memories_drive_id ON memories(drive_id);
 CREATE INDEX IF NOT EXISTS idx_memories_domain ON memories(domain);
 CREATE INDEX IF NOT EXISTS idx_memories_source ON memories(source);
 CREATE INDEX IF NOT EXISTS idx_memories_emotional_state ON memories(emotional_state);
@@ -2289,4 +2307,25 @@ CREATE INDEX IF NOT EXISTS idx_record_links_source
     ON record_links(source_rid, link_type, status);
 CREATE INDEX IF NOT EXISTS idx_record_links_target
     ON record_links(target_rid, link_type, status);
+";
+
+// **Structural query — list_records (schema v32).**
+//
+// Adds indexed VIRTUAL generated columns over JSON metadata fields so typed
+// enumeration ("newest N records of kind=X", "records where drive_id=D") is an
+// O(log n) index walk instead of a full-table json_extract scan. VIRTUAL
+// generated columns ARE addable via ALTER TABLE (unlike STORED); the index
+// materializes the computed value on insert. The json_valid guard keeps
+// encrypted-metadata rows (ciphertext, not JSON) from erroring the index
+// build — they resolve to NULL. run_migration_idempotent swallows the
+// duplicate-column / duplicate-index errors on forward-upgrade replays.
+pub const MIGRATE_V31_TO_V32: &str = "
+ALTER TABLE memories ADD COLUMN kind TEXT GENERATED ALWAYS AS (
+    CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.kind') END
+) VIRTUAL;
+ALTER TABLE memories ADD COLUMN drive_id TEXT GENERATED ALWAYS AS (
+    CASE WHEN json_valid(metadata) THEN json_extract(metadata, '$.drive_id') END
+) VIRTUAL;
+CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind);
+CREATE INDEX IF NOT EXISTS idx_memories_drive_id ON memories(drive_id);
 ";

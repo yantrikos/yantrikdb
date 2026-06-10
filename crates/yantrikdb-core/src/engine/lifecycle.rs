@@ -196,6 +196,142 @@ impl YantrikDB {
         Ok((memories, total))
     }
 
+    /// **v0.7.24 — structural query path.** Typed enumeration by indexed
+    /// metadata fields with a stable keyset cursor — the relational counterpart
+    /// to similarity `recall`. All filters are optional and AND-compose. The
+    /// `kind` / `drive_id` predicates ride the v32 generated-column indexes
+    /// (`idx_memories_kind` / `idx_memories_drive_id`), and pagination is a
+    /// keyset walk over the UUIDv7 `rid` primary key (lexically = chronological),
+    /// so it stays O(log n) and is stable under concurrent inserts — unlike the
+    /// `LIMIT/OFFSET` path in `list_memories`.
+    ///
+    /// `order`: `"desc"` (newest-first) walks `rid < since_rid`; anything else
+    /// (default `"asc"`, oldest-first) walks `rid > since_rid`. Returns the page
+    /// plus `next_cursor` = the last rid of a *full* page (pass it back as the
+    /// next `since_rid`), or `None` when the page was not filled (end reached).
+    #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(skip(self))]
+    pub fn list_records(
+        &self,
+        namespace: Option<&str>,
+        kind: Option<&str>,
+        drive_id: Option<&str>,
+        memory_type: Option<&str>,
+        domain: Option<&str>,
+        since_rid: Option<&str>,
+        limit: usize,
+        order: &str,
+    ) -> Result<(Vec<Memory>, Option<String>)> {
+        let desc = order.eq_ignore_ascii_case("desc");
+        let cursor_op = if desc { "<" } else { ">" };
+        let order_sql = if desc { "DESC" } else { "ASC" };
+
+        let mut conditions = vec!["consolidation_status = 'active'".to_string()];
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        let mut idx = 1;
+
+        // All optional, AND-composed. Order chosen so the most selective
+        // indexed predicates (kind/drive_id) appear first.
+        for (col, val) in [
+            ("kind", kind),
+            ("drive_id", drive_id),
+            ("namespace", namespace),
+            ("type", memory_type),
+            ("domain", domain),
+        ] {
+            if let Some(v) = val {
+                conditions.push(format!("{col} = ?{idx}"));
+                param_values.push(Box::new(v.to_string()));
+                idx += 1;
+            }
+        }
+        if let Some(cursor) = since_rid {
+            conditions.push(format!("rid {cursor_op} ?{idx}"));
+            param_values.push(Box::new(cursor.to_string()));
+            idx += 1;
+        }
+
+        let where_clause = conditions.join(" AND ");
+        let sql = format!(
+            "SELECT rid, type, text, created_at, importance, valence, half_life, \
+             last_access, access_count, consolidation_status, storage_tier, \
+             consolidated_into, metadata, namespace, certainty, domain, source, \
+             emotional_state, session_id, due_at, temporal_kind \
+             FROM memories WHERE {where_clause} ORDER BY rid {order_sql} LIMIT ?{idx}"
+        );
+        param_values.push(Box::new(limit as i64));
+
+        let conn = self.conn();
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(params_ref.as_slice(), |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, f64>(3)?,
+                row.get::<_, f64>(4)?,
+                row.get::<_, f64>(5)?,
+                row.get::<_, f64>(6)?,
+                row.get::<_, f64>(7)?,
+                row.get::<_, i64>(8)?,
+                row.get::<_, String>(9)?,
+                row.get::<_, String>(10)?,
+                row.get::<_, Option<String>>(11)?,
+                row.get::<_, String>(12)?,
+                row.get::<_, String>(13)?,
+                row.get::<_, f64>(14)?,
+                row.get::<_, String>(15)?,
+                row.get::<_, String>(16)?,
+                row.get::<_, Option<String>>(17)?,
+                row.get::<_, Option<String>>(18)?,
+                row.get::<_, Option<f64>>(19)?,
+                row.get::<_, Option<String>>(20)?,
+            ))
+        })?;
+
+        let mut memories = Vec::new();
+        for row in rows {
+            let row = row?;
+            let text = self.decrypt_text(&row.2)?;
+            let meta_str = self.decrypt_text(&row.12)?;
+            let metadata: serde_json::Value = serde_json::from_str(&meta_str)
+                .unwrap_or(serde_json::Value::Object(Default::default()));
+            memories.push(Memory {
+                rid: row.0,
+                memory_type: row.1,
+                text,
+                created_at: row.3,
+                importance: row.4,
+                valence: row.5,
+                half_life: row.6,
+                last_access: row.7,
+                access_count: row.8 as u32,
+                consolidation_status: row.9,
+                storage_tier: row.10,
+                consolidated_into: row.11,
+                metadata,
+                namespace: row.13,
+                certainty: row.14,
+                domain: row.15,
+                source: row.16,
+                emotional_state: row.17,
+                session_id: row.18,
+                due_at: row.19,
+                temporal_kind: row.20,
+            });
+        }
+
+        // next_cursor = last rid only when the page was filled (more may exist).
+        let next_cursor = if memories.len() == limit {
+            memories.last().map(|m| m.rid.clone())
+        } else {
+            None
+        };
+        Ok((memories, next_cursor))
+    }
+
     /// Find memories that have decayed below a threshold.
     #[tracing::instrument(skip(self))]
     pub fn decay(&self, threshold: f64) -> Result<Vec<DecayedMemory>> {

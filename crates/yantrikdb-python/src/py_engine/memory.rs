@@ -473,6 +473,51 @@ impl PyYantrikDB {
         Ok(dict.into())
     }
 
+    /// **v0.7.24 — structural query path.** Typed enumeration by indexed
+    /// metadata fields (`kind`, `drive_id`) with a keyset cursor over the
+    /// UUIDv7 `rid` — the relational counterpart to similarity `recall`. All
+    /// filters optional + AND-composed. Returns
+    /// `{ "records": [...], "next_cursor": <last_rid|None>, "limit": N }`;
+    /// pass `next_cursor` back as `since_rid` to page. `order` is
+    /// `"asc"` (oldest-first, default) or `"desc"` (newest-first).
+    #[pyo3(signature = (namespace=None, kind=None, drive_id=None, memory_type=None, domain=None, since_rid=None, limit=50, order="asc"))]
+    #[allow(clippy::too_many_arguments)]
+    fn list_records(
+        &self,
+        py: Python<'_>,
+        namespace: Option<&str>,
+        kind: Option<&str>,
+        drive_id: Option<&str>,
+        memory_type: Option<&str>,
+        domain: Option<&str>,
+        since_rid: Option<&str>,
+        limit: usize,
+        order: &str,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let (records, next_cursor) = db
+            .list_records(
+                namespace,
+                kind,
+                drive_id,
+                memory_type,
+                domain,
+                since_rid,
+                limit,
+                order,
+            )
+            .map_err(map_err)?;
+        let dict = pyo3::types::PyDict::new(py);
+        let items: Vec<PyObject> = records
+            .iter()
+            .map(|m| memory_to_dict(py, m))
+            .collect::<PyResult<Vec<_>>>()?;
+        dict.set_item("records", items)?;
+        dict.set_item("next_cursor", next_cursor)?;
+        dict.set_item("limit", limit)?;
+        Ok(dict.into())
+    }
+
     #[pyo3(signature = (threshold=0.01))]
     fn decay(&self, py: Python<'_>, threshold: f64) -> PyResult<Vec<PyObject>> {
         let db = self.get_inner()?;

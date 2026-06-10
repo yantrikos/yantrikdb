@@ -11633,6 +11633,235 @@ fn record_with_rid_coerces_blank_namespace_to_default() {
 }
 
 #[test]
+fn list_records_enumerates_by_kind_with_keyset_cursor() {
+    // **v0.7.24 structural query.** The relational counterpart to recall:
+    // reliably enumerate ALL records of metadata.kind=X, ordered, paginated by
+    // rid keyset — the thing similarity recall structurally cannot do.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let meta = |k: &str, d: &str| serde_json::json!({ "kind": k, "drive_id": d });
+
+    // Interleave two kinds so a kind filter must actually discriminate.
+    let mut reply_rids = Vec::new();
+    for i in 0..5 {
+        reply_rids.push(
+            db.record(
+                &format!("reply {i}"),
+                "semantic",
+                0.5,
+                0.0,
+                604800.0,
+                &meta("operator_reply_v1", "D1"),
+                &vec_seed(i as f32, 8),
+                "ns",
+                0.8,
+                "d",
+                "user",
+                None,
+            )
+            .unwrap(),
+        );
+        db.record(
+            &format!("thought {i}"),
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &meta("focal_thought", "D2"),
+            &vec_seed((i + 100) as f32, 8),
+            "ns",
+            0.8,
+            "d",
+            "user",
+            None,
+        )
+        .unwrap();
+    }
+
+    // Page 1 (asc, limit 3): exactly 3 replies, rid-ascending, full-page cursor.
+    let (p1, c1) = db
+        .list_records(
+            Some("ns"),
+            Some("operator_reply_v1"),
+            None,
+            None,
+            None,
+            None,
+            3,
+            "asc",
+        )
+        .unwrap();
+    assert_eq!(p1.len(), 3);
+    assert!(p1.iter().all(|m| m.metadata["kind"] == "operator_reply_v1"));
+    assert!(
+        p1[0].rid < p1[1].rid && p1[1].rid < p1[2].rid,
+        "rid ascending"
+    );
+    let c1 = c1.expect("full page yields a cursor");
+
+    // Page 2 via keyset cursor: remaining 2, then no cursor (end reached).
+    let (p2, c2) = db
+        .list_records(
+            Some("ns"),
+            Some("operator_reply_v1"),
+            None,
+            None,
+            None,
+            Some(&c1),
+            3,
+            "asc",
+        )
+        .unwrap();
+    assert_eq!(p2.len(), 2);
+    assert!(c2.is_none(), "partial page yields no cursor");
+
+    // Completeness: the two pages together == ALL 5 replies (recall can't promise this).
+    let mut got: Vec<String> = p1.iter().chain(p2.iter()).map(|m| m.rid.clone()).collect();
+    got.sort();
+    let mut want = reply_rids.clone();
+    want.sort();
+    assert_eq!(
+        got, want,
+        "keyset pages cover the full kind=X set exactly once"
+    );
+
+    // Descending order = newest first.
+    let (desc, _) = db
+        .list_records(
+            Some("ns"),
+            Some("operator_reply_v1"),
+            None,
+            None,
+            None,
+            None,
+            10,
+            "desc",
+        )
+        .unwrap();
+    assert_eq!(desc.len(), 5);
+    assert!(desc[0].rid > desc[4].rid, "desc = newest first");
+
+    // drive_id FK filter (referential integrity): all D1 rows are the replies.
+    let (d1, _) = db
+        .list_records(Some("ns"), None, Some("D1"), None, None, None, 100, "asc")
+        .unwrap();
+    assert_eq!(d1.len(), 5);
+    assert!(d1.iter().all(|m| m.metadata["drive_id"] == "D1"));
+
+    // Unknown kind → empty page, no cursor.
+    let (none, cn) = db
+        .list_records(Some("ns"), Some("nope"), None, None, None, None, 10, "asc")
+        .unwrap();
+    assert!(none.is_empty() && cn.is_none());
+}
+
+#[test]
+fn list_records_tolerates_non_json_metadata() {
+    // **v0.7.24.** The generated kind/drive_id columns guard json_extract with
+    // json_valid, so a row whose metadata is NOT valid JSON (encrypted
+    // ciphertext, or corruption) resolves to NULL instead of erroring the
+    // index build / query. Enumeration of the valid rows must still work.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let good = db
+        .record(
+            "good",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({ "kind": "k1" }),
+            &vec_seed(1.0, 8),
+            "ns",
+            0.8,
+            "d",
+            "user",
+            None,
+        )
+        .unwrap();
+    let bad = db
+        .record(
+            "bad",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "ns",
+            0.8,
+            "d",
+            "user",
+            None,
+        )
+        .unwrap();
+    // Corrupt one row's metadata to non-JSON (simulates ciphertext / malformed).
+    db.conn()
+        .execute(
+            "UPDATE memories SET metadata = 'not::json::{' WHERE rid = ?1",
+            params![bad],
+        )
+        .unwrap();
+
+    // kind enumeration returns only the valid row — and does NOT error.
+    let (page, _) = db
+        .list_records(Some("ns"), Some("k1"), None, None, None, None, 10, "asc")
+        .unwrap();
+    assert_eq!(page.len(), 1);
+    assert_eq!(page[0].rid, good);
+
+    // A broad listing also must not blow up on the bad row.
+    let (all, _) = db
+        .list_records(Some("ns"), None, None, None, None, None, 10, "asc")
+        .unwrap();
+    assert_eq!(all.len(), 2);
+}
+
+#[test]
+fn migrate_v31_to_v32_indexes_existing_rows_and_tolerates_bad_json() {
+    // **v0.7.24.** Fresh-install is covered above; this exercises the UPGRADE
+    // path: ALTER TABLE ADD a VIRTUAL generated column + build its index over
+    // PRE-EXISTING rows, including one whose metadata is not valid JSON.
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE memories (rid TEXT PRIMARY KEY, metadata TEXT, consolidation_status TEXT);\
+         INSERT INTO memories VALUES ('r1', '{\"kind\":\"operator_reply_v1\",\"drive_id\":\"D1\"}', 'active');\
+         INSERT INTO memories VALUES ('r2', 'not-valid-json-{', 'active');",
+    )
+    .unwrap();
+
+    // Apply the v32 migration to the pre-existing (v31-shaped) table.
+    conn.execute_batch(crate::schema::MIGRATE_V31_TO_V32)
+        .unwrap();
+
+    // Existing valid row is now queryable via the generated + indexed columns.
+    let kind: Option<String> = conn
+        .query_row("SELECT kind FROM memories WHERE rid='r1'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(kind.as_deref(), Some("operator_reply_v1"));
+    let drive: Option<String> = conn
+        .query_row("SELECT drive_id FROM memories WHERE rid='r1'", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(drive.as_deref(), Some("D1"));
+
+    // The non-JSON row resolved to NULL via the json_valid guard — no error.
+    let bad: Option<String> = conn
+        .query_row("SELECT kind FROM memories WHERE rid='r2'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(bad, None);
+
+    // The index covers the pre-existing row.
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE kind='operator_reply_v1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1);
+}
+
+#[test]
 fn think_extract_attribute_claims_detects_free_text_value_update() {
     // **v0.7.23 prototype verification.** Reproduces the reported gap
     // (yantrikdb_conflict_gap.md): a free-text "<subject> is <value>" update
