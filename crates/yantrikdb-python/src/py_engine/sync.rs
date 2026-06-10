@@ -291,6 +291,7 @@ impl PyYantrikDB {
         prune_triggers = true,
         max_pending_triggers = 64,
         recalibrate_importance = true,
+        backfill_entities = true,
         split_oversized = false,
         split_min_chars = 1500,
         repair_artifacts = false
@@ -303,6 +304,7 @@ impl PyYantrikDB {
         prune_triggers: bool,
         max_pending_triggers: usize,
         recalibrate_importance: bool,
+        backfill_entities: bool,
         split_oversized: bool,
         split_min_chars: usize,
         repair_artifacts: bool,
@@ -314,6 +316,7 @@ impl PyYantrikDB {
             prune_triggers,
             max_pending_triggers,
             recalibrate_importance,
+            backfill_entities,
             split_oversized,
             split_min_chars,
             repair_artifacts,

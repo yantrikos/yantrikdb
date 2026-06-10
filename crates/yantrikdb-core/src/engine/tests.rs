@@ -9371,8 +9371,9 @@ fn maintenance_cycle_runs_passes_and_records_last_run() {
         .unwrap();
     assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
     assert!(report.ran_at > 0.0);
-    // Default config: think + conflicts + triggers + importance ran.
+    // Default config: think + entities + conflicts + triggers + importance ran.
     assert!(report.think_consolidations.is_some());
+    assert!(report.entities_linked.is_some());
     assert!(report.conflicts.is_some());
     assert!(report.triggers.is_some());
     assert!(report.importance.is_some());

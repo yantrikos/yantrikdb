@@ -42,6 +42,9 @@ pub struct MaintenanceCycleConfig {
     pub max_pending_triggers: usize,
     /// Revert stale, unused, high-importance memories toward baseline.
     pub recalibrate_importance: bool,
+    /// Backfill missing memory↔entity links so the knowledge graph keeps
+    /// pace with the corpus (continuous extraction; task 42).
+    pub backfill_entities: bool,
     /// Split oversized episodic dumps into atomic facts (heavier; opt-in).
     pub split_oversized: bool,
     /// Minimum plaintext length for the split pass.
@@ -58,6 +61,7 @@ impl Default for MaintenanceCycleConfig {
             prune_triggers: true,
             max_pending_triggers: 64,
             recalibrate_importance: true,
+            backfill_entities: true,
             split_oversized: false,
             split_min_chars: 1500,
             repair_artifacts: false,
@@ -74,6 +78,8 @@ pub struct MaintenanceCycleReport {
     pub think_consolidations: Option<usize>,
     pub think_conflicts_found: Option<usize>,
     pub think_triggers_expired: Option<usize>,
+    /// memory↔entity links created by the continuous backfill (task 42).
+    pub entities_linked: Option<usize>,
     pub conflicts: Option<ConflictBurndownReport>,
     pub triggers: Option<TriggerPruneReport>,
     pub importance: Option<ImportanceRecalibrationReport>,
@@ -107,6 +113,22 @@ impl YantrikDB {
                     report.think_triggers_expired = Some(tr.expired_triggers);
                 }
                 Err(e) => report.errors.push(format!("think: {e}")),
+            }
+        }
+
+        // Keep the knowledge graph in pace with the corpus: backfill any
+        // memory↔entity links the at-write (materializer) extraction missed,
+        // then refresh the in-memory graph index so recall's expand_entities
+        // sees them.
+        if config.backfill_entities {
+            match self.backfill_memory_entities() {
+                Ok(n) => {
+                    report.entities_linked = Some(n);
+                    if n > 0 {
+                        let _ = self.rebuild_graph_index();
+                    }
+                }
+                Err(e) => report.errors.push(format!("entities: {e}")),
             }
         }
 
