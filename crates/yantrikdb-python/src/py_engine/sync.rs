@@ -235,4 +235,22 @@ impl PyYantrikDB {
         dict.set_item("errors", report.errors)?;
         Ok(dict.into())
     }
+
+    /// Burn down open conflicts: auto-resolve the unambiguous ones
+    /// (newer-supersedes) and leave ambiguous/high-stakes ones for an
+    /// operator (task 26). Dry-run first. Returns a report dict.
+    #[pyo3(signature = (dry_run = true))]
+    fn auto_resolve_conflicts(&self, py: Python<'_>, dry_run: bool) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let report = db.auto_resolve_conflicts(dry_run).map_err(map_err)?;
+
+        let dict = PyDict::new(py);
+        dict.set_item("dry_run", report.dry_run)?;
+        dict.set_item("open_before", report.open_before)?;
+        dict.set_item("auto_resolved", report.auto_resolved)?;
+        dict.set_item("routed_to_operator", report.routed_to_operator)?;
+        dict.set_item("sample_resolved", report.sample_resolved)?;
+        dict.set_item("errors", report.errors)?;
+        Ok(dict.into())
+    }
 }

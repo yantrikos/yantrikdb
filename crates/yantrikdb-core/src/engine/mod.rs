@@ -9,7 +9,7 @@ mod calibration;
 mod causal;
 mod cognition;
 mod coherence;
-mod conflict;
+pub mod conflict;
 mod counterfactual_engine;
 mod durable_embeddings;
 mod evaluator;

@@ -9130,6 +9130,124 @@ fn split_oversized_episodes_extracts_linked_atomic_facts() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
+fn conflict_stamping_and_auto_resolution() {
+    // Tasks 25 + 26. An open conflict between two memories is surfaced on
+    // recall hits (stamp), then auto-resolved by newer-supersedes when it is
+    // an unambiguous low/medium type.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let older = db
+        .record_text(
+            "The launch date is March 15", "semantic", 0.7, 0.0, 604800.0, &empty_meta(),
+            "ns", 0.8, "work", "user", None,
+        )
+        .unwrap();
+    // Force the first memory to be strictly older than the second.
+    {
+        let conn = db.conn();
+        conn.execute(
+            "UPDATE memories SET created_at = 1000.0 WHERE rid = ?1",
+            rusqlite::params![older],
+        )
+        .unwrap();
+    }
+    let newer = db
+        .record_text(
+            "The launch date is March 30", "semantic", 0.7, 0.0, 604800.0, &empty_meta(),
+            "ns", 0.8, "work", "user", None,
+        )
+        .unwrap();
+
+    // Insert an open, auto-resolvable (temporal, medium) conflict.
+    {
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO conflicts \
+             (conflict_id, conflict_type, priority, status, memory_a, memory_b, \
+              detected_at, detected_by, detection_reason, hlc, origin_actor) \
+             VALUES ('cf1', 'temporal', 'medium', 'open', ?1, ?2, 2000.0, 'test', \
+                     'same attribute, different value', X'00', 'test')",
+            rusqlite::params![older, newer],
+        )
+        .unwrap();
+    }
+
+    // Task 25: the conflict is surfaced on the affected recall hits.
+    let hits = db.recall_text("when is the launch date", 5).unwrap();
+    let flagged = hits.iter().any(|h| {
+        (h.rid == older || h.rid == newer)
+            && h.why_retrieved
+                .iter()
+                .any(|w| w.contains("unresolved") && w.contains("conflict"))
+    });
+    assert!(flagged, "recall hits carry the conflict warning");
+
+    // Task 26: dry-run reports it as auto-resolvable, mutating nothing.
+    let dry = db.auto_resolve_conflicts(true).unwrap();
+    assert_eq!(dry.open_before, 1);
+    assert_eq!(dry.auto_resolved, 1);
+    assert_eq!(dry.routed_to_operator, 0);
+
+    // Apply: newer wins, older is tombstoned, the conflict is resolved.
+    let applied = db.auto_resolve_conflicts(false).unwrap();
+    assert_eq!(applied.auto_resolved, 1);
+    {
+        let conn = db.conn();
+        let status: String = conn
+            .query_row(
+                "SELECT status FROM conflicts WHERE conflict_id = 'cf1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "resolved");
+        let older_status: String = conn
+            .query_row(
+                "SELECT consolidation_status FROM memories WHERE rid = ?1",
+                rusqlite::params![older],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(older_status, "tombstoned", "the older, superseded memory is tombstoned");
+    }
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn auto_resolve_routes_identity_conflicts_to_operator() {
+    // High-stakes conflicts are never auto-resolved.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let a = db
+        .record_text("Pranab lives in Seattle", "semantic", 0.9, 0.0, 604800.0, &empty_meta(),
+            "ns", 0.9, "people", "user", None)
+        .unwrap();
+    let b = db
+        .record_text("Pranab lives in Austin", "semantic", 0.9, 0.0, 604800.0, &empty_meta(),
+            "ns", 0.9, "people", "user", None)
+        .unwrap();
+    {
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO conflicts \
+             (conflict_id, conflict_type, priority, status, memory_a, memory_b, \
+              detected_at, detected_by, detection_reason, hlc, origin_actor) \
+             VALUES ('cf2', 'identity_fact', 'high', 'open', ?1, ?2, 1.0, 'test', \
+                     'identity conflict', X'00', 'test')",
+            rusqlite::params![a, b],
+        )
+        .unwrap();
+    }
+    let report = db.auto_resolve_conflicts(false).unwrap();
+    assert_eq!(report.auto_resolved, 0, "identity/high conflicts are not auto-resolved");
+    assert_eq!(report.routed_to_operator, 1);
+    let conn = db.conn();
+    let status: String = conn
+        .query_row("SELECT status FROM conflicts WHERE conflict_id = 'cf2'", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(status, "open", "left open for an operator");
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
 fn explicit_set_embedder_overrides_bundled() {
     // Slim-build path or custom-model path: set_embedder() after new()
     // takes precedence. The bundled embedder gets dropped; the user's

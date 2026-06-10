@@ -1879,6 +1879,11 @@ impl YantrikDB {
             }
         }
 
+        // Task 25: surface unresolved conflicts at the moment of use, so a
+        // contradicted memory arrives visibly flagged rather than asserted
+        // as current fact.
+        self.stamp_open_conflicts(&mut scored)?;
+
         Ok(scored)
     }
 

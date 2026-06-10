@@ -5,6 +5,23 @@ use crate::types::*;
 
 use super::{now, YantrikDB};
 
+/// Outcome of a [`YantrikDB::auto_resolve_conflicts`] burn-down pass (task 26).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ConflictBurndownReport {
+    pub dry_run: bool,
+    /// Open conflicts at the start of the pass.
+    pub open_before: usize,
+    /// Conflicts auto-resolved (newer value superseded).
+    pub auto_resolved: usize,
+    /// Conflicts deliberately left open for an operator (ambiguous or
+    /// high-stakes).
+    pub routed_to_operator: usize,
+    /// Sample of auto-resolved conflict ids.
+    pub sample_resolved: Vec<String>,
+    /// Per-conflict errors; the sweep continues past them.
+    pub errors: Vec<String>,
+}
+
 /// Common English stopwords that should never be added to substitution categories.
 const RECLASSIFY_STOPWORDS: &[&str] = &[
     "a",
@@ -391,6 +408,124 @@ impl YantrikDB {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// Task 25 — annotate recall hits that participate in an unresolved
+    /// conflict so staleness is visible at the moment of use rather than
+    /// sitting in a queue nobody reads. Pushes a note onto each affected
+    /// hit's `why_retrieved`. Batched against the indexed `(memory_a,
+    /// memory_b, status)` columns; capped per hit to avoid spam.
+    pub(crate) fn stamp_open_conflicts(&self, results: &mut [RecallResult]) -> Result<()> {
+        if results.is_empty() {
+            return Ok(());
+        }
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT conflict_type, priority, memory_a, memory_b FROM conflicts \
+             WHERE status = 'open' AND (memory_a = ?1 OR memory_b = ?1) \
+             ORDER BY CASE priority \
+                 WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3 END \
+             LIMIT 3",
+        )?;
+        for r in results.iter_mut() {
+            let rows = stmt
+                .query_map(params![r.rid], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for (ctype, priority, memory_a, memory_b) in rows {
+                let other = if memory_a == r.rid { memory_b } else { memory_a };
+                r.why_retrieved.push(format!(
+                    "⚠ unresolved {priority} conflict ({ctype}) with {other} — verify before relying"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Task 26 — burn down open conflicts by auto-resolving the unambiguous
+    /// ones and leaving the genuinely ambiguous / high-stakes ones for an
+    /// operator. Dry-run first.
+    ///
+    /// Auto-resolution policy (deliberately conservative): a conflict is
+    /// auto-resolved only when it is low/medium priority AND of a type where
+    /// "newer value supersedes" is clearly correct (temporal / preference /
+    /// minor / consolidation). The newer memory (by `created_at`) wins; the
+    /// older is tombstoned via [`Self::resolve_conflict`]. Identity facts and
+    /// high/critical conflicts are always routed to an operator — the engine
+    /// never silently picks a winner on something load-bearing.
+    pub fn auto_resolve_conflicts(&self, dry_run: bool) -> Result<ConflictBurndownReport> {
+        let mut report = ConflictBurndownReport {
+            dry_run,
+            ..Default::default()
+        };
+        let open = self.get_conflicts(Some("open"), None, None, None, None, 10_000)?;
+        report.open_before = open.len();
+
+        for c in open {
+            let unambiguous = matches!(c.priority.as_str(), "low" | "medium")
+                && matches!(
+                    c.conflict_type.as_str(),
+                    "temporal" | "preference" | "minor" | "consolidation"
+                );
+            if !unambiguous {
+                report.routed_to_operator += 1;
+                continue;
+            }
+
+            // Newer fact supersedes. If either memory is missing (already
+            // gone), don't guess — route to operator.
+            let created_a = self.get(&c.memory_a)?.map(|m| m.created_at);
+            let created_b = self.get(&c.memory_b)?.map(|m| m.created_at);
+            let (strategy, winner) = match (created_a, created_b) {
+                (Some(ca), Some(cb)) if ca >= cb => ("keep_a", c.memory_a.clone()),
+                (Some(_), Some(_)) => ("keep_b", c.memory_b.clone()),
+                _ => {
+                    report.routed_to_operator += 1;
+                    continue;
+                }
+            };
+
+            if dry_run {
+                report.auto_resolved += 1;
+                if report.sample_resolved.len() < 50 {
+                    report.sample_resolved.push(c.conflict_id.clone());
+                }
+                continue;
+            }
+
+            match self.resolve_conflict(
+                &c.conflict_id,
+                strategy,
+                Some(&winner),
+                None,
+                Some("auto-resolved: newer value supersedes (task 26)"),
+            ) {
+                Ok(_) => {
+                    report.auto_resolved += 1;
+                    if report.sample_resolved.len() < 50 {
+                        report.sample_resolved.push(c.conflict_id);
+                    }
+                }
+                Err(e) => report.errors.push(format!("{}: {e}", c.conflict_id)),
+            }
+        }
+
+        tracing::info!(
+            target: "yantrikdb::audit::conflict",
+            open_before = report.open_before,
+            auto_resolved = report.auto_resolved,
+            routed_to_operator = report.routed_to_operator,
+            errors = report.errors.len(),
+            "conflict burn-down complete",
+        );
+
+        Ok(report)
     }
 
     /// Resolve a conflict with a chosen strategy.
