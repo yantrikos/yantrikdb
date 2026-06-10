@@ -20,7 +20,7 @@ mod flywheel;
 mod graph_ops;
 pub mod graph_state;
 mod hawkes;
-mod importance;
+pub mod importance;
 mod indices;
 mod intent;
 mod introspection;

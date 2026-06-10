@@ -9001,6 +9001,70 @@ fn importance_calibration_deflates_saturated_namespace() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
+fn recalibrate_unused_importance_reverts_stale_high_marks() {
+    // Task 32 end-to-end. A high-importance memory that is never accessed
+    // reverts toward baseline; a recently-written one is untouched; and the
+    // pass is idempotent (re-running does not compound the reversion).
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let read_imp = |rid: &str| -> f64 {
+        let conn = db.conn();
+        conn.query_row(
+            "SELECT importance FROM memories WHERE rid = ?1",
+            rusqlite::params![rid],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+
+    let stale = db
+        .record_text(
+            "a once-critical fact nobody revisits", "semantic", 1.0, 0.0, 604800.0,
+            &empty_meta(), "ns", 0.8, "general", "user", None,
+        )
+        .unwrap();
+    let fresh = db
+        .record_text(
+            "a fact that was just written", "semantic", 1.0, 0.0, 604800.0, &empty_meta(),
+            "ns", 0.8, "general", "user", None,
+        )
+        .unwrap();
+
+    // Age the first far into the past, never re-accessed.
+    {
+        let conn = db.conn();
+        conn.execute(
+            "UPDATE memories SET last_access = 1000.0, access_count = 0 WHERE rid = ?1",
+            rusqlite::params![stale],
+        )
+        .unwrap();
+    }
+
+    // Dry run detects exactly the stale candidate, mutating nothing.
+    let dry = db.recalibrate_unused_importance(true).unwrap();
+    assert!(dry.dry_run);
+    assert_eq!(dry.adjusted, 1);
+    assert!((read_imp(&stale) - 1.0).abs() < 1e-9, "dry run must not mutate");
+
+    // Apply: the stale mark reverts; the fresh one is untouched.
+    let applied = db.recalibrate_unused_importance(false).unwrap();
+    assert_eq!(applied.adjusted, 1);
+    assert!(applied.total_drift > 0.0);
+    let reverted = read_imp(&stale);
+    assert!(reverted < 1.0, "stale unused high mark reverted: {reverted}");
+    assert!(reverted >= 0.5, "but not below baseline: {reverted}");
+    assert!(
+        (read_imp(&fresh) - 1.0).abs() < 1e-9,
+        "a freshly-written memory is untouched"
+    );
+
+    // Idempotent: re-running at the same staleness changes nothing further.
+    let again = db.recalibrate_unused_importance(false).unwrap();
+    assert_eq!(again.adjusted, 0, "reversion does not compound across passes");
+    assert!((read_imp(&stale) - reverted).abs() < 1e-9);
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
 fn explicit_set_embedder_overrides_bundled() {
     // Slim-build path or custom-model path: set_embedder() after new()
     // takes precedence. The bundled embedder gets dropped; the user's

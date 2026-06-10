@@ -192,4 +192,21 @@ impl PyYantrikDB {
 
         Ok(dict.into())
     }
+
+    /// Revert stale, unused, high-importance memories toward baseline
+    /// (use-it-or-lose-it, task 32). Background maintenance; call with
+    /// `dry_run=True` first. Returns a report dict.
+    #[pyo3(signature = (dry_run = true))]
+    fn recalibrate_unused_importance(&self, py: Python<'_>, dry_run: bool) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let report = db.recalibrate_unused_importance(dry_run).map_err(map_err)?;
+
+        let dict = PyDict::new(py);
+        dict.set_item("dry_run", report.dry_run)?;
+        dict.set_item("scanned", report.scanned)?;
+        dict.set_item("adjusted", report.adjusted)?;
+        dict.set_item("total_drift", report.total_drift)?;
+        dict.set_item("sample_rids", report.sample_rids)?;
+        Ok(dict.into())
+    }
 }

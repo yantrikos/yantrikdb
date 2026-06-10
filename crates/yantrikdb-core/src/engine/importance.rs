@@ -127,6 +127,186 @@ impl YantrikDB {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// Task 32 — usage-corrected importance (use-it-or-lose-it)
+//
+// Calibration (above) sets the importance *prior* at write time. Over time
+// that prior should be corrected by usage: a memory written at high
+// importance that is never retrieved is probably not actually that important,
+// so its stored importance should revert toward a baseline. This runs as a
+// background maintenance pass (driven by the sleep cycle, task 24, or invoked
+// directly), NOT on the recall hot path — so it changes the durable prior
+// that recall already reads, with no per-query cost and no ranking-formula
+// surgery.
+//
+// It deliberately does only the half that is observable without an external
+// signal: deflating *unused* high marks. "Retrieved and acted on" requires
+// downstream feedback (the explicit `recall` feedback loop) which the engine
+// cannot synthesize on its own without circularity.
+// ─────────────────────────────────────────────────────────────────────────
+
+/// Importance that unused high marks revert toward.
+const REVERSION_BASELINE: f64 = 0.5;
+/// Seconds since last access at which reversion reaches full strength (90d).
+const REVERSION_TENURE_SECS: f64 = 90.0 * 86_400.0;
+/// Strongest reversion: an untouched, never-accessed high mark at/after full
+/// tenure is pulled this fraction of the way to baseline.
+const MAX_REVERSION: f64 = 0.6;
+/// Cap on rids echoed back in a recalibration report.
+const SAMPLE_CAP: usize = 50;
+
+/// Pure usage correction: given a memory's prior importance, lifetime access
+/// count, and seconds since it was last accessed, return the importance it
+/// should revert to.
+///
+/// Properties:
+/// - **Only deflates.** Marks at or below baseline are returned unchanged —
+///   we never inflate a low-importance memory just because it sits unused.
+/// - **Identity when fresh.** Zero time since access ⇒ returns the prior, so
+///   a just-written or just-recalled memory is untouched.
+/// - **Access-resistant.** More lifetime accesses slow reversion (diminishing
+///   returns via `ln`), so a frequently-used memory keeps its importance.
+/// - **Bounded & monotonic** in staleness.
+/// - **Idempotent.** The result reverts toward a staleness-anchored *target*
+///   via `min`, so re-running the pass at the same staleness is a no-op — the
+///   correction does not compound across repeated maintenance cycles. It also
+///   never inflates: the value can only move down toward the target, never up.
+pub(crate) fn usage_corrected_importance(
+    prior: f64,
+    access_count: i64,
+    secs_since_access: f64,
+) -> f64 {
+    if prior <= REVERSION_BASELINE {
+        return prior;
+    }
+    let staleness = (secs_since_access / REVERSION_TENURE_SECS).clamp(0.0, 1.0);
+    // Each access adds resistance (diminishing); never-accessed ⇒ resistance 1.
+    let resistance = 1.0 + (access_count.max(0) as f64).ln_1p();
+    let reversion = (MAX_REVERSION * staleness / resistance).clamp(0.0, MAX_REVERSION);
+    // Target importance for this staleness, anchored to the top of the range
+    // (1.0) so the target is a fixed function of (staleness, access) — not of
+    // the current value. Taking the min makes the pass idempotent and
+    // non-inflating: a memory only ever settles toward its staleness target.
+    let target = REVERSION_BASELINE + (1.0 - REVERSION_BASELINE) * (1.0 - reversion);
+    prior.min(target)
+}
+
+/// Outcome of a [`YantrikDB::recalibrate_unused_importance`] pass.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ImportanceRecalibrationReport {
+    pub dry_run: bool,
+    /// Active memories above baseline that were examined.
+    pub scanned: usize,
+    /// Memories whose importance was (or would be) reverted downward.
+    pub adjusted: usize,
+    /// Sum of the downward importance drift across adjusted memories.
+    pub total_drift: f64,
+    /// Sample of adjusted rids for operator spot-checking.
+    pub sample_rids: Vec<String>,
+}
+
+impl YantrikDB {
+    /// Revert stale, never-/rarely-accessed, high-importance memories toward
+    /// the baseline (use-it-or-lose-it). Background maintenance, not a recall
+    /// hot-path operation. Run with `dry_run = true` to preview.
+    ///
+    /// Updates both the durable `memories.importance` column and the scoring
+    /// cache so recall sees the corrected prior immediately.
+    pub fn recalibrate_unused_importance(
+        &self,
+        dry_run: bool,
+    ) -> Result<ImportanceRecalibrationReport> {
+        let mut report = ImportanceRecalibrationReport {
+            dry_run,
+            ..Default::default()
+        };
+        let now_ts = now();
+
+        // Scan only candidates that can possibly change: active + above baseline.
+        let rows: Vec<(String, f64, i64, f64)> = {
+            let conn = self.conn();
+            let mut stmt = conn.prepare(
+                "SELECT rid, importance, access_count, last_access FROM memories \
+                 WHERE consolidation_status = 'active' AND importance > ?1",
+            )?;
+            let rows = stmt
+                .query_map(params![REVERSION_BASELINE], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, f64>(1)?,
+                        r.get::<_, i64>(2)?,
+                        r.get::<_, f64>(3)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
+        };
+        report.scanned = rows.len();
+
+        let mut pending: Vec<(String, f64)> = Vec::new();
+        for (rid, importance, access_count, last_access) in rows {
+            let secs = (now_ts - last_access).max(0.0);
+            let corrected = usage_corrected_importance(importance, access_count, secs);
+            if importance - corrected > 1e-6 {
+                report.adjusted += 1;
+                report.total_drift += importance - corrected;
+                if report.sample_rids.len() < SAMPLE_CAP {
+                    report.sample_rids.push(rid.clone());
+                }
+                pending.push((rid, corrected));
+            }
+        }
+
+        if dry_run || pending.is_empty() {
+            return Ok(report);
+        }
+
+        // Apply durably in one transaction.
+        {
+            let conn = self.conn();
+            conn.execute_batch("SAVEPOINT importance_recal")?;
+            let apply: Result<()> = (|| {
+                for (rid, corrected) in &pending {
+                    conn.execute(
+                        "UPDATE memories SET importance = ?1 WHERE rid = ?2",
+                        params![corrected, rid],
+                    )?;
+                }
+                Ok(())
+            })();
+            match apply {
+                Ok(()) => conn.execute_batch("RELEASE importance_recal")?,
+                Err(e) => {
+                    let _ = conn
+                        .execute_batch("ROLLBACK TO importance_recal; RELEASE importance_recal");
+                    return Err(e);
+                }
+            }
+        }
+
+        // Keep the scoring cache in step so recall reflects the new prior at
+        // once rather than waiting for eviction.
+        {
+            let mut cache = self.scoring_cache.write();
+            for (rid, corrected) in &pending {
+                if let Some(row) = cache.get_mut(rid) {
+                    row.importance = *corrected;
+                }
+            }
+        }
+
+        tracing::info!(
+            target: "yantrikdb::audit::importance",
+            scanned = report.scanned,
+            adjusted = report.adjusted,
+            total_drift = report.total_drift,
+            "unused-importance recalibration complete",
+        );
+
+        Ok(report)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -189,5 +369,45 @@ mod tests {
                 assert!((0.0..=1.0).contains(&c), "raw={raw} ewma={ewma} -> {c}");
             }
         }
+    }
+
+    // ── Task 32: usage correction ──
+
+    #[test]
+    fn usage_identity_when_fresh() {
+        // Just accessed ⇒ no reversion, regardless of how high the prior is.
+        assert_eq!(usage_corrected_importance(1.0, 0, 0.0), 1.0);
+        assert_eq!(usage_corrected_importance(0.9, 5, 0.0), 0.9);
+    }
+
+    #[test]
+    fn usage_never_inflates_low_marks() {
+        // At or below baseline, stale or not, the value is untouched.
+        let ancient = REVERSION_TENURE_SECS * 4.0;
+        assert_eq!(usage_corrected_importance(0.5, 0, ancient), 0.5);
+        assert_eq!(usage_corrected_importance(0.3, 0, ancient), 0.3);
+    }
+
+    #[test]
+    fn usage_reverts_unused_high_importance() {
+        let c = usage_corrected_importance(1.0, 0, REVERSION_TENURE_SECS);
+        assert!(c < 1.0, "an unused high mark deflates: {c}");
+        assert!(c >= REVERSION_BASELINE, "but never below baseline: {c}");
+    }
+
+    #[test]
+    fn usage_access_resists_reversion() {
+        let unused = usage_corrected_importance(1.0, 0, REVERSION_TENURE_SECS);
+        let used = usage_corrected_importance(1.0, 50, REVERSION_TENURE_SECS);
+        assert!(used > unused, "frequent access slows reversion: {used} > {unused}");
+    }
+
+    #[test]
+    fn usage_monotonic_in_staleness() {
+        let prior = 1.0;
+        let young = usage_corrected_importance(prior, 0, REVERSION_TENURE_SECS * 0.25);
+        let old = usage_corrected_importance(prior, 0, REVERSION_TENURE_SECS * 0.75);
+        assert!(old < young, "more staleness ⇒ more reversion: {old} < {young}");
+        assert!(young <= prior && old >= REVERSION_BASELINE);
     }
 }
