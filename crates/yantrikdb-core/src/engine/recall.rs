@@ -1884,7 +1884,51 @@ impl YantrikDB {
         // as current fact.
         self.stamp_open_conflicts(&mut scored)?;
 
+        // Task 41: surface trust metadata (aged-unconfirmed, superseded) so a
+        // stale fact arrives visibly hedged rather than asserted as current.
+        self.stamp_trust_metadata(&mut scored)?;
+
         Ok(scored)
+    }
+
+    /// Task 41 — annotate recall hits with trust signals so staleness is
+    /// visible at the moment of use: a memory that is old AND rarely
+    /// re-accessed (low confirmation), or one that a newer record supersedes,
+    /// gets a `why_retrieved` hedge. Batched against the result rids.
+    fn stamp_trust_metadata(&self, results: &mut [RecallResult]) -> Result<()> {
+        if results.is_empty() {
+            return Ok(());
+        }
+        const STALE_AGE_DAYS: f64 = 90.0;
+        const LOW_CONFIRMATION: i64 = 1;
+        let now_ts = crate::time::now_secs();
+        let conn = self.conn();
+        // Read created_at + access_count from the table (the source of truth),
+        // not the RecallResult, whose created_at comes from the scoring cache.
+        let mut access_stmt =
+            conn.prepare("SELECT created_at, access_count FROM memories WHERE rid = ?1")?;
+        let mut superseded_stmt = conn.prepare(
+            "SELECT COUNT(*) FROM record_links WHERE target_rid = ?1 AND link_type = 'supersedes'",
+        )?;
+        for r in results.iter_mut() {
+            let (created_at, access_count): (f64, i64) = access_stmt
+                .query_row(params![r.rid], |row| Ok((row.get(0)?, row.get(1)?)))
+                .unwrap_or((now_ts, 0));
+            let age_days = (now_ts - created_at).max(0.0) / 86_400.0;
+            if age_days > STALE_AGE_DAYS && access_count <= LOW_CONFIRMATION {
+                r.why_retrieved.push(format!(
+                    "⚠ {age_days:.0}d old, rarely confirmed — verify it is still current"
+                ));
+            }
+            let superseded: i64 = superseded_stmt
+                .query_row(params![r.rid], |row| row.get(0))
+                .unwrap_or(0);
+            if superseded > 0 {
+                r.why_retrieved
+                    .push("⚠ superseded by a newer record — likely outdated".to_string());
+            }
+        }
+        Ok(())
     }
 
     /// **Phase 6 RYW** — `recall()` with strict read-your-writes guard.

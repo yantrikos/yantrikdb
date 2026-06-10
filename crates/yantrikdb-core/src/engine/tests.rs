@@ -9442,6 +9442,108 @@ fn recall_emits_structural_intent_hint() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
+fn recall_stamps_trust_metadata() {
+    // Task 41. An aged, rarely-confirmed memory and a superseded memory each
+    // arrive on recall with a trust hedge in why_retrieved.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+
+    let aged = db
+        .record_text("an old fact about the deployment process", "semantic", 0.7, 0.0, 604800.0,
+            &empty_meta(), "ns", 0.8, "work", "user", None)
+        .unwrap();
+    {
+        let conn = db.conn();
+        conn.execute(
+            "UPDATE memories SET created_at = ?1, access_count = 0 WHERE rid = ?2",
+            rusqlite::params![crate::time::now_secs() - 200.0 * 86_400.0, aged],
+        )
+        .unwrap();
+    }
+    let hits = db.recall_text("deployment process fact", 5).unwrap();
+    let h = hits.iter().find(|h| h.rid == aged).expect("aged hit present");
+    assert!(
+        h.why_retrieved
+            .iter()
+            .any(|w| w.contains("old") && w.contains("verify")),
+        "aged-unconfirmed hedge present: {:?}",
+        h.why_retrieved
+    );
+
+    // Supersession hedge.
+    let old_v = db
+        .record_text("the API key rotates monthly", "semantic", 0.6, 0.0, 604800.0, &empty_meta(),
+            "ns2", 0.8, "work", "user", None)
+        .unwrap();
+    let new_v = db
+        .record_text("the API key rotates weekly now", "semantic", 0.6, 0.0, 604800.0,
+            &empty_meta(), "ns2", 0.8, "work", "user", None)
+        .unwrap();
+    db.link(
+        &new_v,
+        &crate::types::RecordLink {
+            target_rid: old_v.clone(),
+            link_type: crate::types::LinkType::Supersedes,
+        },
+    )
+    .unwrap();
+    let hits2 = db.recall_text("how often does the API key rotate", 5).unwrap();
+    let ho = hits2.iter().find(|h| h.rid == old_v).expect("superseded hit present");
+    assert!(
+        ho.why_retrieved.iter().any(|w| w.contains("superseded")),
+        "superseded hedge present: {:?}",
+        ho.why_retrieved
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn session_digest_assembles_boot_briefing() {
+    // Task 38. One call returns the narrative head (latest, not
+    // highest-importance), the top live decisions (high importance only), and
+    // the open-conflict / pending-trigger counts.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let _n1 = db
+        .record_text("narrative entry one", "episodic", 0.9, 0.0, 604800.0, &empty_meta(),
+            "narr", 0.9, "self", "user", None)
+        .unwrap();
+    let n2 = db
+        .record_text("narrative entry two, the latest self-state", "episodic", 0.5, 0.0, 604800.0,
+            &empty_meta(), "narr", 0.9, "self", "user", None)
+        .unwrap();
+    db.record_text("decided to adopt keyset cursors for enumeration", "semantic", 0.95, 0.0,
+        604800.0, &empty_meta(), "work", 0.9, "work", "user", None)
+        .unwrap();
+    db.record_text("a trivial passing aside", "semantic", 0.2, 0.0, 604800.0, &empty_meta(),
+        "work", 0.5, "work", "user", None)
+        .unwrap();
+
+    let cfg = crate::SessionDigestConfig {
+        narrative_namespace: Some("narr".to_string()),
+        ..Default::default()
+    };
+    let digest = db.session_digest(&cfg).unwrap();
+
+    // Head is the latest entry, not the higher-importance one.
+    let head = digest.narrative_head.expect("narrative head present");
+    assert_eq!(head.rid, n2);
+    assert!(head.snippet.contains("latest self-state"));
+
+    // Top decisions: high-importance only.
+    assert!(digest
+        .top_decisions
+        .iter()
+        .any(|d| d.snippet.contains("keyset cursors")));
+    assert!(!digest
+        .top_decisions
+        .iter()
+        .any(|d| d.snippet.contains("trivial passing aside")));
+
+    assert_eq!(digest.open_conflict_count, 0);
+    assert_eq!(digest.pending_trigger_count, 0);
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
 fn chain_head_returns_exact_latest_entry() {
     // Task 36. The chain head is exactly the latest write, independent of
     // importance — proving it is not the recall lottery.

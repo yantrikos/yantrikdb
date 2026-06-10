@@ -327,4 +327,34 @@ impl PyYantrikDB {
         let db = self.get_inner()?;
         db.last_maintenance_cycle().map_err(map_err)
     }
+
+    /// Materialize the session-start digest (task 38) — narrative chain head,
+    /// top live decisions, open conflicts, pending triggers, last maintenance.
+    /// One call, host-injected at boot. Returns a JSON string.
+    #[pyo3(signature = (
+        narrative_namespace = None,
+        max_decisions = 8,
+        max_conflicts = 5,
+        max_triggers = 5,
+        snippet_chars = 240
+    ))]
+    fn session_digest(
+        &self,
+        narrative_namespace: Option<String>,
+        max_decisions: usize,
+        max_conflicts: usize,
+        max_triggers: usize,
+        snippet_chars: usize,
+    ) -> PyResult<String> {
+        let db = self.get_inner()?;
+        let cfg = yantrikdb_core::SessionDigestConfig {
+            narrative_namespace,
+            max_decisions,
+            max_conflicts,
+            max_triggers,
+            snippet_chars,
+        };
+        let digest = db.session_digest(&cfg).map_err(map_err)?;
+        Ok(serde_json::to_string(&digest).unwrap_or_else(|_| "{}".to_string()))
+    }
 }

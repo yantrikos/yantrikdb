@@ -11,6 +11,7 @@ mod cognition;
 mod coherence;
 pub mod conflict;
 mod counterfactual_engine;
+pub mod digest;
 mod durable_embeddings;
 mod evaluator;
 mod experimenter;
