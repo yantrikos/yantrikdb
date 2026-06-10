@@ -43,6 +43,7 @@ mod receptivity;
 mod record;
 pub mod reembed;
 mod replay_engine;
+mod sanitize;
 mod schema_induction_engine;
 mod session;
 mod skills;
@@ -1445,6 +1446,12 @@ impl YantrikDB {
         source: &str,
         emotional_state: Option<&str>,
     ) -> Result<String> {
+        // Task 29 (Ingest Integrity): strip any leaked tool-call
+        // serialization tail BEFORE embedding, so both the computed vector
+        // and the stored text reflect the real memory rather than the
+        // artifact. Borrowed (no allocation) on the clean path.
+        let sanitized = sanitize::sanitize_tool_call_artifacts(text);
+        let text = sanitized.as_ref();
         loop {
             // Step 1: snapshot SearchState for the embed — capture
             // generation + digest so we can revalidate after the embed.

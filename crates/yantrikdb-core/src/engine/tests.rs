@@ -8795,6 +8795,60 @@ fn bundled_embedder_record_text_round_trip() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
+fn record_text_strips_leaked_tool_call_artifact_end_to_end() {
+    // Task 29 (Ingest Integrity) wiring regression. Proves the sanitizer is
+    // actually invoked on the `record_text` path — not just unit-correct —
+    // by storing the exact corpus-signature artifact and asserting the
+    // persisted text is clean. The leaked tail must never reach storage or
+    // the embedding.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let mangled =
+        "Decision: adopt keyset cursors for list_records.</text>\n\
+         <parameter name=\"memory_type\">episodic";
+    let rid = db
+        .record_text(
+            mangled,
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .expect("record_text stores sanitized text");
+
+    let results = db.recall_text("keyset cursors list_records", 5).unwrap();
+    let hit = results
+        .iter()
+        .find(|r| r.rid == rid)
+        .expect("the recorded memory is retrievable");
+    assert!(
+        hit.text.contains("keyset cursors"),
+        "real content is preserved; got: {:?}",
+        hit.text
+    );
+    assert!(
+        !hit.text.contains("</text>"),
+        "the leaked closing tag must be stripped; got: {:?}",
+        hit.text
+    );
+    assert!(
+        !hit.text.contains("<parameter name="),
+        "the leaked parameter fragment must be stripped; got: {:?}",
+        hit.text
+    );
+    assert_eq!(
+        hit.text, "Decision: adopt keyset cursors for list_records.",
+        "stored text is exactly the cleaned content"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
 fn explicit_set_embedder_overrides_bundled() {
     // Slim-build path or custom-model path: set_embedder() after new()
     // takes precedence. The bundled embedder gets dropped; the user's

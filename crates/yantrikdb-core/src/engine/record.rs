@@ -7,7 +7,7 @@ use crate::types::*;
 
 use super::reembed::SearchState;
 use super::write_router::SyncWriteGuard;
-use super::{embedding_hash, now, YantrikDB};
+use super::{embedding_hash, now, sanitize, YantrikDB};
 
 /// Coerce a blank namespace to the canonical default (v0.7.23).
 ///
@@ -66,6 +66,14 @@ impl YantrikDB {
         source: &str,
         emotional_state: Option<&str>,
     ) -> Result<String> {
+        // Task 29 (Ingest Integrity): strip any leaked tool-call
+        // serialization tail from the stored text. On this entry point the
+        // caller supplies the embedding, so the vector may still reflect the
+        // pre-clean text; that minor staleness is strictly better than
+        // persisting the artifact, and the dominant ingest paths
+        // (`record_text`, MCP/HTTP) embed engine-side on the cleaned text.
+        let sanitized = sanitize::sanitize_tool_call_artifacts(text);
+        let text = sanitized.as_ref();
         // v0.7.23: coerce a blank namespace to the canonical default so no
         // consumer persists an unscoped "" partition. Shadows the param so
         // both the sync and queued paths below see the normalized value.
@@ -349,6 +357,17 @@ impl YantrikDB {
             return Ok(vec![]);
         }
 
+        // Task 29 (Ingest Integrity): strip any leaked tool-call
+        // serialization tail from every input's text once, up front. The
+        // same cleaned text feeds entity extraction, the stored row, and the
+        // audit features below (indexed positionally — `rids` preserves input
+        // order). Borrowed (no allocation) on the clean path; the
+        // caller-supplied embedding is left as-is, as in `record`.
+        let sanitized_texts: Vec<std::borrow::Cow<'_, str>> = inputs
+            .iter()
+            .map(|i| sanitize::sanitize_tool_call_artifacts(&i.text))
+            .collect();
+
         // **Issue #41 brainstorm-4 §1.** SearchState snapshot for the
         // batch — every append in this batch lands on the same
         // generation-anchored DeltaIndex.
@@ -362,11 +381,13 @@ impl YantrikDB {
         //   (a) heuristic extraction from text (capitalized proper-nouns)
         //   (b) match against already-known entities in graph_index
         let known_entities = self.graph_index.read().all_entity_names();
-        let per_memory_linkage: Vec<(Vec<String>, std::collections::HashSet<String>)> = inputs
+        let per_memory_linkage: Vec<(Vec<String>, std::collections::HashSet<String>)> =
+            sanitized_texts
             .iter()
-            .map(|input| {
-                let text_tokens = crate::graph::tokenize(&input.text);
-                let heuristic = crate::graph::extract_heuristic_entities(&input.text);
+            .map(|text| {
+                let text = text.as_ref();
+                let text_tokens = crate::graph::tokenize(text);
+                let heuristic = crate::graph::extract_heuristic_entities(text);
                 let mut candidates: std::collections::HashSet<String> =
                     heuristic.iter().cloned().collect();
                 for known in &known_entities {
@@ -385,14 +406,15 @@ impl YantrikDB {
             let conn = self.conn();
             conn.execute_batch("SAVEPOINT batch_record")?;
 
-            for input in inputs {
+            for (idx, input) in inputs.iter().enumerate() {
                 let rid = crate::id::new_id();
                 let ts = now();
                 let emb_blob = serialize_f32(&input.embedding);
                 let meta_str = serde_json::to_string(&input.metadata)?;
 
-                // Encrypt fields if encryption is enabled
-                let stored_text = self.encrypt_text(&input.text)?;
+                // Encrypt fields if encryption is enabled. Task 29: store the
+                // sanitized text (positionally aligned with `inputs`).
+                let stored_text = self.encrypt_text(sanitized_texts[idx].as_ref())?;
                 let stored_meta = self.encrypt_text(&meta_str)?;
                 let stored_emb = self.encrypt_embedding(&emb_blob)?;
 
@@ -474,12 +496,14 @@ impl YantrikDB {
         }
 
         // RFC 006 Phase 0: emit one audit event per memory in the batch.
-        for (rid, (input, (heuristic_entities, candidates))) in rids
+        for (idx, (rid, (input, (heuristic_entities, candidates)))) in rids
             .iter()
             .zip(inputs.iter().zip(per_memory_linkage.iter()))
+            .enumerate()
         {
             let heuristic_vec: Vec<String> = heuristic_entities.iter().cloned().collect();
-            let features = crate::graph::analyze_text_features(&input.text, &heuristic_vec);
+            let features =
+                crate::graph::analyze_text_features(sanitized_texts[idx].as_ref(), &heuristic_vec);
             tracing::info!(
                 target: "yantrikdb::audit::extraction",
                 namespace = %input.namespace,
