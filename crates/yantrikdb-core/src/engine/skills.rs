@@ -142,6 +142,7 @@ impl YantrikDB {
         if let Some(skill) = registry.find_mut(dedup_key) {
             skill.record_acceptance(ts);
             self.save_skill_registry(&registry)?;
+            self.record_skill_outcome_event(dedup_key, "accepted")?;
             Ok(true)
         } else {
             Ok(false)
@@ -155,6 +156,7 @@ impl YantrikDB {
         if let Some(skill) = registry.find_mut(dedup_key) {
             skill.record_success(ts);
             self.save_skill_registry(&registry)?;
+            self.record_skill_outcome_event(dedup_key, "succeeded")?;
             Ok(true)
         } else {
             Ok(false)
@@ -168,6 +170,7 @@ impl YantrikDB {
         if let Some(skill) = registry.find_mut(dedup_key) {
             skill.record_failure(ts);
             self.save_skill_registry(&registry)?;
+            self.record_skill_outcome_event(dedup_key, "failed")?;
             Ok(true)
         } else {
             Ok(false)
@@ -181,10 +184,33 @@ impl YantrikDB {
         if let Some(skill) = registry.find_mut(dedup_key) {
             skill.record_rejection(ts);
             self.save_skill_registry(&registry)?;
+            self.record_skill_outcome_event(dedup_key, "rejected")?;
             Ok(true)
         } else {
             Ok(false)
         }
+    }
+
+    /// Task 28 — append a skill outcome to the durable, auditable timeline.
+    /// Called by the outcome methods above when a skill is actually found, so
+    /// the count rises only on real outcomes.
+    fn record_skill_outcome_event(&self, dedup_key: &str, outcome: &str) -> Result<()> {
+        self.conn().execute(
+            "INSERT INTO skill_outcomes (dedup_key, outcome, created_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params![dedup_key, outcome, now()],
+        )?;
+        Ok(())
+    }
+
+    /// Total skill outcomes recorded (task 28). Drives the
+    /// `skill_outcomes_recorded` visibility the audit flagged at 0.
+    pub fn skill_outcome_count(&self) -> Result<usize> {
+        let n: i64 = self.conn().query_row(
+            "SELECT COUNT(*) FROM skill_outcomes",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
     }
 
     /// Manually deprecate a skill.

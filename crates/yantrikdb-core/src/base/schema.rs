@@ -1002,6 +1002,18 @@ CREATE TABLE IF NOT EXISTS namespace_importance_stats (
     updated_at REAL NOT NULL
 );
 
+-- Durable, auditable timeline of skill outcomes (task 28). The skill
+-- registry keeps rolling aggregate counts; this records each individual
+-- outcome event so effectiveness change is auditable and countable
+-- (the skill_outcomes_recorded > 0 visibility the audit flagged).
+CREATE TABLE IF NOT EXISTS skill_outcomes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    dedup_key TEXT NOT NULL,
+    outcome TEXT NOT NULL,              -- accepted | succeeded | failed | rejected
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_skill_outcomes_key ON skill_outcomes(dedup_key);
+
 -- Personality traits (V11)
 CREATE TABLE IF NOT EXISTS personality_traits (
     trait_name TEXT PRIMARY KEY,

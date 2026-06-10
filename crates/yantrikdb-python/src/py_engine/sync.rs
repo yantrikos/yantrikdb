@@ -274,4 +274,10 @@ impl PyYantrikDB {
         dict.set_item("pending_after", report.pending_after)?;
         Ok(dict.into())
     }
+
+    /// Total skill outcomes recorded in the durable timeline (task 28).
+    fn skill_outcome_count(&self) -> PyResult<usize> {
+        let db = self.get_inner()?;
+        db.skill_outcome_count().map_err(map_err)
+    }
 }

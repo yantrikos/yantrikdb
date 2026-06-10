@@ -9324,6 +9324,36 @@ fn trigger_prune_bounds_pending_backlog() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
+fn skill_outcomes_are_recorded_durably() {
+    // Task 28. Each real skill outcome appends to the durable timeline so the
+    // count rises; outcomes against a non-existent skill record nothing.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    assert_eq!(db.skill_outcome_count().unwrap(), 0);
+
+    let taught = db
+        .teach_skill(
+            "deploy the staging build".to_string(),
+            "k1".to_string(),
+            vec![],
+            crate::skills::SkillTrigger::default(),
+        )
+        .unwrap();
+    assert!(taught);
+
+    assert!(db.skill_succeeded("k1").unwrap());
+    assert!(db.skill_failed("k1").unwrap());
+    assert!(db.skill_accepted("k1").unwrap());
+    assert!(!db.skill_succeeded("does_not_exist").unwrap());
+
+    assert_eq!(
+        db.skill_outcome_count().unwrap(),
+        3,
+        "one durable event per real outcome, none for the missing skill"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
 fn explicit_set_embedder_overrides_bundled() {
     // Slim-build path or custom-model path: set_embedder() after new()
     // takes precedence. The bundled embedder gets dropped; the user's
