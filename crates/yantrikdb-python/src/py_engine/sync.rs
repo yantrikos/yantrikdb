@@ -357,4 +357,18 @@ impl PyYantrikDB {
         let digest = db.session_digest(&cfg).map_err(map_err)?;
         Ok(serde_json::to_string(&digest).unwrap_or_else(|_| "{}".to_string()))
     }
+
+    /// End-of-session auto-capture (task 40): atomize an agent-provided
+    /// session summary into provisional candidate memories. Returns new rids.
+    #[pyo3(signature = (summary, namespace = "default", domain = "general"))]
+    fn draft_memories_from_summary(
+        &self,
+        summary: &str,
+        namespace: &str,
+        domain: &str,
+    ) -> PyResult<Vec<String>> {
+        let db = self.get_inner()?;
+        db.draft_memories_from_summary(summary, namespace, domain)
+            .map_err(map_err)
+    }
 }

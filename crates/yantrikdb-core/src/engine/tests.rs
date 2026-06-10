@@ -9442,6 +9442,36 @@ fn recall_emits_structural_intent_hint() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
+fn draft_memories_from_summary_atomizes_and_flags_provisional() {
+    // Task 40. An agent's end-of-session summary is atomized into provisional,
+    // retrievable candidate memories without the agent calling remember.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let summary = "We decided to use keyset cursors for list_records. \
+                   Alice will own the database migration next sprint. \
+                   The production launch slipped to March 30 because of it.";
+    let rids = db
+        .draft_memories_from_summary(summary, "session", "work")
+        .unwrap();
+    assert!(rids.len() >= 2, "summary atomized into facts: {}", rids.len());
+
+    for rid in &rids {
+        let conn = db.conn();
+        let meta: String = conn
+            .query_row(
+                "SELECT metadata FROM memories WHERE rid = ?1",
+                rusqlite::params![rid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(meta.contains("provisional"), "drafted memory is flagged provisional");
+    }
+
+    let hits = db.recall_text("who owns the database migration", 5).unwrap();
+    assert!(hits.iter().any(|h| h.text.contains("migration")));
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
 fn recall_stamps_trust_metadata() {
     // Task 41. An aged, rarely-confirmed memory and a superseded memory each
     // arrive on recall with a trust hedge in why_retrieved.

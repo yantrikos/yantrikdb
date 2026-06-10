@@ -191,4 +191,48 @@ impl YantrikDB {
 
         Ok(digest)
     }
+
+    /// Task 40 — end-of-session auto-capture. Takes an agent-provided session
+    /// summary and drafts candidate memories from it: atomized into facts
+    /// (the same segmenter as the mega-blob split), stored as low-importance
+    /// PROVISIONAL semantic memories (`metadata.provisional = true`,
+    /// `source = "session_auto_capture"`) for cheap later review / the sleep
+    /// cycle to consolidate. Returns the new rids.
+    ///
+    /// This moves the structuring work off the agent's hot path — a session
+    /// that never paused to call `remember` still yields well-formed memories
+    /// at the end. (The summary itself is the agent's to produce; the engine
+    /// cannot observe the conversation.)
+    pub fn draft_memories_from_summary(
+        &self,
+        summary: &str,
+        namespace: &str,
+        domain: &str,
+    ) -> Result<Vec<String>> {
+        // Smaller target than the mega-blob split — auto-capture wants
+        // granular candidate facts (one thought each) for review.
+        let facts = super::split::segment_into_atomic_facts(summary, 120, 60);
+        let meta = serde_json::json!({
+            "provisional": true,
+            "kind": "session_auto_capture",
+        });
+        let mut rids = Vec::with_capacity(facts.len());
+        for fact in facts {
+            let rid = self.record_text(
+                &fact,
+                "semantic",
+                0.5,
+                0.0,
+                604_800.0,
+                &meta,
+                namespace,
+                0.7,
+                domain,
+                "session_auto_capture",
+                None,
+            )?;
+            rids.push(rid);
+        }
+        Ok(rids)
+    }
 }
