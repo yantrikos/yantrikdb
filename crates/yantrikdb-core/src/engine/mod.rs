@@ -18,7 +18,7 @@ mod experimenter;
 mod extractor;
 mod feedback;
 mod flywheel;
-mod graph_ops;
+pub mod graph_ops;
 pub mod graph_state;
 mod hawkes;
 pub mod importance;

@@ -5,6 +5,16 @@ use crate::types::{Edge, Entity};
 
 use super::{now, YantrikDB};
 
+/// Outcome of a [`YantrikDB::auto_relate`] pass (task 44).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct AutoRelateReport {
+    pub dry_run: bool,
+    /// Co-occurring entity pairs considered this pass.
+    pub pairs_considered: usize,
+    /// Edges upserted (idempotent — re-running refreshes rather than dupes).
+    pub edges_upserted: usize,
+}
+
 /// Resolve (src, rel_type, dst, namespace) to a proposition_id, creating
 /// the proposition row if it doesn't exist. Propositions are the canonical
 /// identity under which all claim rows about the same triple aggregate;
@@ -118,6 +128,83 @@ impl YantrikDB {
         )?;
 
         Ok(edge_id)
+    }
+
+    /// Task 44 — auto-relate: raise graph density from plain writes (no agent
+    /// `relate` call) by linking entities that co-occur in the same memory.
+    /// The graph-lift eval (task 43) showed connectivity improves recall on
+    /// connected data; this creates that connectivity continuously.
+    ///
+    /// Edges are `co_occurs_with`, weighted by co-occurrence count, upserted
+    /// idempotently (the claims UNIQUE key), strongest pairs first and capped
+    /// at `max_edges` per pass so it stays cheap; the sleep cycle runs it
+    /// incrementally. Refreshes the in-memory graph index so recall's
+    /// expand_entities sees the new edges.
+    pub fn auto_relate(&self, dry_run: bool, max_edges: usize) -> Result<AutoRelateReport> {
+        let mut report = AutoRelateReport {
+            dry_run,
+            ..Default::default()
+        };
+
+        // Co-occurring entity pairs (same memory), strongest first. `a < b`
+        // dedups the symmetric pair and rules out self-loops.
+        let pairs: Vec<(String, String, i64)> = {
+            let conn = self.conn.lock();
+            let mut stmt = conn.prepare(
+                "SELECT a.entity_name, b.entity_name, COUNT(*) AS cooccur \
+                 FROM memory_entities a \
+                 JOIN memory_entities b \
+                   ON a.memory_rid = b.memory_rid AND a.entity_name < b.entity_name \
+                 GROUP BY a.entity_name, b.entity_name \
+                 ORDER BY cooccur DESC LIMIT ?1",
+            )?;
+            let collected = stmt
+                .query_map(params![max_edges as i64], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, i64>(2)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            collected
+        };
+        report.pairs_considered = pairs.len();
+
+        if dry_run || pairs.is_empty() {
+            return Ok(report);
+        }
+
+        let ts = now();
+        {
+            let conn = self.conn.lock();
+            for (src, dst, cooccur) in &pairs {
+                let edge_id = crate::id::new_id();
+                // Normalize co-occurrence count into a [0.1, 1.0] weight.
+                let weight = ((*cooccur as f64) / 10.0).clamp(0.1, 1.0);
+                conn.execute(
+                    "INSERT INTO claims (claim_id, src, dst, rel_type, weight, created_at) \
+                     VALUES (?1, ?2, ?3, 'co_occurs_with', ?4, ?5) \
+                     ON CONFLICT(src, dst, rel_type, extractor, polarity, namespace) \
+                     DO UPDATE SET weight = ?4, created_at = ?5",
+                    params![edge_id, src, dst, weight, ts],
+                )?;
+                report.edges_upserted += 1;
+            }
+        }
+
+        // Refresh the in-memory graph index so recall's expand_entities picks
+        // up the new edges.
+        self.rebuild_graph_index()?;
+
+        tracing::info!(
+            target: "yantrikdb::audit::graph",
+            pairs = report.pairs_considered,
+            edges_upserted = report.edges_upserted,
+            "auto-relate pass complete",
+        );
+
+        Ok(report)
     }
 
     /// **Issue #9 — deterministic entity-edge upsert primitive for cluster replication.**

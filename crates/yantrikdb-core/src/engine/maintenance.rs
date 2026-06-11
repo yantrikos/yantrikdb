@@ -45,6 +45,10 @@ pub struct MaintenanceCycleConfig {
     /// Backfill missing memory↔entity links so the knowledge graph keeps
     /// pace with the corpus (continuous extraction; task 42).
     pub backfill_entities: bool,
+    /// Auto-relate co-occurring entities to raise edge density (task 44).
+    pub auto_relate: bool,
+    /// Cap on edges upserted per auto-relate pass.
+    pub max_auto_relate_edges: usize,
     /// Split oversized episodic dumps into atomic facts (heavier; opt-in).
     pub split_oversized: bool,
     /// Minimum plaintext length for the split pass.
@@ -62,6 +66,8 @@ impl Default for MaintenanceCycleConfig {
             max_pending_triggers: 64,
             recalibrate_importance: true,
             backfill_entities: true,
+            auto_relate: true,
+            max_auto_relate_edges: 500,
             split_oversized: false,
             split_min_chars: 1500,
             repair_artifacts: false,
@@ -80,6 +86,8 @@ pub struct MaintenanceCycleReport {
     pub think_triggers_expired: Option<usize>,
     /// memory↔entity links created by the continuous backfill (task 42).
     pub entities_linked: Option<usize>,
+    /// co-occurrence edges upserted by auto-relate (task 44).
+    pub relations_upserted: Option<usize>,
     pub conflicts: Option<ConflictBurndownReport>,
     pub triggers: Option<TriggerPruneReport>,
     pub importance: Option<ImportanceRecalibrationReport>,
@@ -129,6 +137,14 @@ impl YantrikDB {
                     }
                 }
                 Err(e) => report.errors.push(format!("entities: {e}")),
+            }
+        }
+
+        // Raise edge density: relate entities that co-occur in a memory.
+        if config.auto_relate {
+            match self.auto_relate(false, config.max_auto_relate_edges) {
+                Ok(r) => report.relations_upserted = Some(r.edges_upserted),
+                Err(e) => report.errors.push(format!("auto_relate: {e}")),
             }
         }
 

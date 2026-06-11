@@ -292,6 +292,8 @@ impl PyYantrikDB {
         max_pending_triggers = 64,
         recalibrate_importance = true,
         backfill_entities = true,
+        auto_relate = true,
+        max_auto_relate_edges = 500,
         split_oversized = false,
         split_min_chars = 1500,
         repair_artifacts = false
@@ -305,6 +307,8 @@ impl PyYantrikDB {
         max_pending_triggers: usize,
         recalibrate_importance: bool,
         backfill_entities: bool,
+        auto_relate: bool,
+        max_auto_relate_edges: usize,
         split_oversized: bool,
         split_min_chars: usize,
         repair_artifacts: bool,
@@ -317,6 +321,8 @@ impl PyYantrikDB {
             max_pending_triggers,
             recalibrate_importance,
             backfill_entities,
+            auto_relate,
+            max_auto_relate_edges,
             split_oversized,
             split_min_chars,
             repair_artifacts,
@@ -373,5 +379,18 @@ impl PyYantrikDB {
         let db = self.get_inner()?;
         db.draft_memories_from_summary(summary, namespace, domain)
             .map_err(map_err)
+    }
+
+    /// Auto-relate co-occurring entities to raise graph density (task 44).
+    /// Dry-run first. Returns a report dict.
+    #[pyo3(signature = (dry_run = true, max_edges = 500))]
+    fn auto_relate(&self, py: Python<'_>, dry_run: bool, max_edges: usize) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let report = db.auto_relate(dry_run, max_edges).map_err(map_err)?;
+        let dict = PyDict::new(py);
+        dict.set_item("dry_run", report.dry_run)?;
+        dict.set_item("pairs_considered", report.pairs_considered)?;
+        dict.set_item("edges_upserted", report.edges_upserted)?;
+        Ok(dict.into())
     }
 }

@@ -9371,9 +9371,10 @@ fn maintenance_cycle_runs_passes_and_records_last_run() {
         .unwrap();
     assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
     assert!(report.ran_at > 0.0);
-    // Default config: think + entities + conflicts + triggers + importance ran.
+    // Default config: think + entities + relations + conflicts + triggers + importance ran.
     assert!(report.think_consolidations.is_some());
     assert!(report.entities_linked.is_some());
+    assert!(report.relations_upserted.is_some());
     assert!(report.conflicts.is_some());
     assert!(report.triggers.is_some());
     assert!(report.importance.is_some());
@@ -9524,6 +9525,45 @@ fn recall_stamps_trust_metadata() {
         "superseded hedge present: {:?}",
         ho.why_retrieved
     );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn auto_relate_creates_cooccurrence_edges() {
+    // Task 44. Entities that co-occur in a memory get linked, raising graph
+    // density from plain writes. Idempotent.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let r1 = db
+        .record_text("Alice and Acme launched the Falcon project", "semantic", 0.7, 0.0, 604800.0,
+            &empty_meta(), "ns", 0.8, "work", "user", None)
+        .unwrap();
+    let r2 = db
+        .record_text("Alice and Acme shipped Falcon version two", "semantic", 0.7, 0.0, 604800.0,
+            &empty_meta(), "ns", 0.8, "work", "user", None)
+        .unwrap();
+    // Simulate the entity extraction (async materializer in production) having
+    // linked entities to these memories, so auto-relate has co-occurrences.
+    {
+        let conn = db.conn();
+        for (rid, ent) in [(&r1, "Alice"), (&r1, "Acme"), (&r2, "Alice"), (&r2, "Acme")] {
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) VALUES (?1, ?2)",
+                rusqlite::params![rid, ent],
+            )
+            .unwrap();
+        }
+    }
+
+    let dry = db.auto_relate(true, 100).unwrap();
+    assert!(dry.pairs_considered >= 1, "co-occurring pairs: {}", dry.pairs_considered);
+    assert_eq!(dry.edges_upserted, 0, "dry run upserts nothing");
+
+    let applied = db.auto_relate(false, 100).unwrap();
+    assert!(applied.edges_upserted >= 1, "edges created: {}", applied.edges_upserted);
+
+    // Idempotent: re-running considers the same pairs and errors-free.
+    let again = db.auto_relate(false, 100).unwrap();
+    assert_eq!(again.pairs_considered, applied.pairs_considered);
 }
 
 #[cfg(feature = "bundled-embedder")]
