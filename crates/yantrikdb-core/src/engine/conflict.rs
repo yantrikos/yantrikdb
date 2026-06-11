@@ -439,7 +439,11 @@ impl YantrikDB {
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             for (ctype, priority, memory_a, memory_b) in rows {
-                let other = if memory_a == r.rid { memory_b } else { memory_a };
+                let other = if memory_a == r.rid {
+                    memory_b
+                } else {
+                    memory_a
+                };
                 r.why_retrieved.push(format!(
                     "⚠ unresolved {priority} conflict ({ctype}) with {other} — verify before relying"
                 ));

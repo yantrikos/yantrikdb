@@ -205,11 +205,9 @@ impl YantrikDB {
     /// Total skill outcomes recorded (task 28). Drives the
     /// `skill_outcomes_recorded` visibility the audit flagged at 0.
     pub fn skill_outcome_count(&self) -> Result<usize> {
-        let n: i64 = self.conn().query_row(
-            "SELECT COUNT(*) FROM skill_outcomes",
-            [],
-            |r| r.get(0),
-        )?;
+        let n: i64 = self
+            .conn()
+            .query_row("SELECT COUNT(*) FROM skill_outcomes", [], |r| r.get(0))?;
         Ok(n as usize)
     }
 

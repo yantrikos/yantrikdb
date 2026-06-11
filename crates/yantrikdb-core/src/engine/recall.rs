@@ -2222,12 +2222,24 @@ impl YantrikDB {
         // for a deterministic question.
         if let Some(qt) = query_text {
             let lq = qt.to_lowercase();
-            let recency = ["most recent", "latest", "last entry", "newest", "chain head"]
-                .iter()
-                .any(|k| lq.contains(k));
-            let enumeration = ["list all", "all records", "all memories", "enumerate", "every record"]
-                .iter()
-                .any(|k| lq.contains(k));
+            let recency = [
+                "most recent",
+                "latest",
+                "last entry",
+                "newest",
+                "chain head",
+            ]
+            .iter()
+            .any(|k| lq.contains(k));
+            let enumeration = [
+                "list all",
+                "all records",
+                "all memories",
+                "enumerate",
+                "every record",
+            ]
+            .iter()
+            .any(|k| lq.contains(k));
             let counting =
                 lq.contains("how many") || lq.starts_with("count ") || lq.contains("number of");
             if recency || enumeration || counting {

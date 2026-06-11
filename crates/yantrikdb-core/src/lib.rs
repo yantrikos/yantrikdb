@@ -27,12 +27,12 @@ pub use vector::hnsw;
 
 // ── Convenience re-exports ──
 pub use attention::{AttentionConfig, WorkingSet};
+pub use cognition::triggers::TriggerPruneReport;
 pub use conflict::{
     create_conflict, detect_edge_conflicts, scan_claim_conflicts, scan_conflicts,
     scan_conflicts_limited,
 };
 pub use consolidate::{consolidate, find_consolidation_candidates};
-pub use cognition::triggers::TriggerPruneReport;
 pub use engine::conflict::ConflictBurndownReport;
 pub use engine::digest::{SessionDigest, SessionDigestConfig};
 pub use engine::graph_ops::AutoRelateReport;

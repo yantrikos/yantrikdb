@@ -8802,8 +8802,7 @@ fn record_text_strips_leaked_tool_call_artifact_end_to_end() {
     // persisted text is clean. The leaked tail must never reach storage or
     // the embedding.
     let db = YantrikDB::with_default(":memory:").unwrap();
-    let mangled =
-        "Decision: adopt keyset cursors for list_records.</text>\n\
+    let mangled = "Decision: adopt keyset cursors for list_records.</text>\n\
          <parameter name=\"memory_type\">episodic";
     let rid = db
         .record_text(
@@ -8858,8 +8857,17 @@ fn repair_tool_call_artifacts_cleans_legacy_corpus() {
     let clean = "Postgres was chosen for the metadata store";
     let rid = db
         .record_text(
-            clean, "semantic", 0.6, 0.0, 604800.0, &empty_meta(), "default", 0.8, "general",
-            "user", None,
+            clean,
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
         )
         .unwrap();
 
@@ -8926,7 +8934,10 @@ fn repair_tool_call_artifacts_cleans_legacy_corpus() {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!(orig.contains("</text>"), "audit preserves the dirty original");
+        assert!(
+            orig.contains("</text>"),
+            "audit preserves the dirty original"
+        );
     }
 
     // Idempotent: a second apply finds nothing.
@@ -8964,8 +8975,17 @@ fn importance_calibration_deflates_saturated_namespace() {
     // Fresh namespace: a single max mark is stored exactly.
     let rid0 = db
         .record_text(
-            "first genuinely critical fact", "semantic", 1.0, 0.0, 604800.0, &empty_meta(),
-            "fresh", 0.8, "general", "user", None,
+            "first genuinely critical fact",
+            "semantic",
+            1.0,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "fresh",
+            0.8,
+            "general",
+            "user",
+            None,
         )
         .unwrap();
     assert!(
@@ -8977,8 +8997,17 @@ fn importance_calibration_deflates_saturated_namespace() {
     // Saturate a different namespace with max-importance writes.
     for i in 0..12 {
         db.record_text(
-            &format!("everything here is marked critical {i}"), "semantic", 1.0, 0.0, 604800.0,
-            &empty_meta(), "saturated", 0.8, "general", "user", None,
+            &format!("everything here is marked critical {i}"),
+            "semantic",
+            1.0,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "saturated",
+            0.8,
+            "general",
+            "user",
+            None,
         )
         .unwrap();
     }
@@ -8986,8 +9015,17 @@ fn importance_calibration_deflates_saturated_namespace() {
     // The next max-importance write is deflated.
     let rid = db
         .record_text(
-            "yet another self-declared critical fact", "semantic", 1.0, 0.0, 604800.0,
-            &empty_meta(), "saturated", 0.8, "general", "user", None,
+            "yet another self-declared critical fact",
+            "semantic",
+            1.0,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "saturated",
+            0.8,
+            "general",
+            "user",
+            None,
         )
         .unwrap();
     let imp = read_importance(&rid);
@@ -9018,14 +9056,32 @@ fn recalibrate_unused_importance_reverts_stale_high_marks() {
 
     let stale = db
         .record_text(
-            "a once-critical fact nobody revisits", "semantic", 1.0, 0.0, 604800.0,
-            &empty_meta(), "ns", 0.8, "general", "user", None,
+            "a once-critical fact nobody revisits",
+            "semantic",
+            1.0,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "ns",
+            0.8,
+            "general",
+            "user",
+            None,
         )
         .unwrap();
     let fresh = db
         .record_text(
-            "a fact that was just written", "semantic", 1.0, 0.0, 604800.0, &empty_meta(),
-            "ns", 0.8, "general", "user", None,
+            "a fact that was just written",
+            "semantic",
+            1.0,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "ns",
+            0.8,
+            "general",
+            "user",
+            None,
         )
         .unwrap();
 
@@ -9043,14 +9099,20 @@ fn recalibrate_unused_importance_reverts_stale_high_marks() {
     let dry = db.recalibrate_unused_importance(true).unwrap();
     assert!(dry.dry_run);
     assert_eq!(dry.adjusted, 1);
-    assert!((read_imp(&stale) - 1.0).abs() < 1e-9, "dry run must not mutate");
+    assert!(
+        (read_imp(&stale) - 1.0).abs() < 1e-9,
+        "dry run must not mutate"
+    );
 
     // Apply: the stale mark reverts; the fresh one is untouched.
     let applied = db.recalibrate_unused_importance(false).unwrap();
     assert_eq!(applied.adjusted, 1);
     assert!(applied.total_drift > 0.0);
     let reverted = read_imp(&stale);
-    assert!(reverted < 1.0, "stale unused high mark reverted: {reverted}");
+    assert!(
+        reverted < 1.0,
+        "stale unused high mark reverted: {reverted}"
+    );
     assert!(reverted >= 0.5, "but not below baseline: {reverted}");
     assert!(
         (read_imp(&fresh) - 1.0).abs() < 1e-9,
@@ -9059,7 +9121,10 @@ fn recalibrate_unused_importance_reverts_stale_high_marks() {
 
     // Idempotent: re-running at the same staleness changes nothing further.
     let again = db.recalibrate_unused_importance(false).unwrap();
-    assert_eq!(again.adjusted, 0, "reversion does not compound across passes");
+    assert_eq!(
+        again.adjusted, 0,
+        "reversion does not compound across passes"
+    );
     assert!((read_imp(&stale) - reverted).abs() < 1e-9);
 }
 
@@ -9079,8 +9144,17 @@ fn split_oversized_episodes_extracts_linked_atomic_facts() {
                    We agreed to cap importance writes so the signal stays meaningful.";
     let parent = db
         .record_text(
-            episode, "episodic", 1.0, 0.0, 604800.0, &empty_meta(), "recap", 0.9, "work",
-            "user", None,
+            episode,
+            "episodic",
+            1.0,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "recap",
+            0.9,
+            "work",
+            "user",
+            None,
         )
         .unwrap();
 
@@ -9110,7 +9184,9 @@ fn split_oversized_episodes_extracts_linked_atomic_facts() {
     }
 
     // Atomic-fact children exist, linked back to the parent.
-    let children = db.linked_records(&parent, crate::types::LinkDirection::Inbound, None).unwrap();
+    let children = db
+        .linked_records(&parent, crate::types::LinkDirection::Inbound, None)
+        .unwrap();
     assert!(
         children.len() >= 2,
         "parent has atomic-fact children linked back: {}",
@@ -9121,7 +9197,10 @@ fn split_oversized_episodes_extracts_linked_atomic_facts() {
     // A query for a specific fact returns the atomic child, not the parent.
     let hits = db.recall_text("who owns the on-call rotation", 5).unwrap();
     assert!(!hits.is_empty());
-    assert_ne!(hits[0].rid, parent, "top hit is an atomic fact, not the dump");
+    assert_ne!(
+        hits[0].rid, parent,
+        "top hit is an atomic fact, not the dump"
+    );
     assert!(
         hits[0].text.chars().count() < episode.chars().count(),
         "the returned fact is shorter than the original dump"
@@ -9137,8 +9216,17 @@ fn conflict_stamping_and_auto_resolution() {
     let db = YantrikDB::with_default(":memory:").unwrap();
     let older = db
         .record_text(
-            "The launch date is March 15", "semantic", 0.7, 0.0, 604800.0, &empty_meta(),
-            "ns", 0.8, "work", "user", None,
+            "The launch date is March 15",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "ns",
+            0.8,
+            "work",
+            "user",
+            None,
         )
         .unwrap();
     // Force the first memory to be strictly older than the second.
@@ -9152,8 +9240,17 @@ fn conflict_stamping_and_auto_resolution() {
     }
     let newer = db
         .record_text(
-            "The launch date is March 30", "semantic", 0.7, 0.0, 604800.0, &empty_meta(),
-            "ns", 0.8, "work", "user", None,
+            "The launch date is March 30",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "ns",
+            0.8,
+            "work",
+            "user",
+            None,
         )
         .unwrap();
 
@@ -9207,7 +9304,10 @@ fn conflict_stamping_and_auto_resolution() {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(older_status, "tombstoned", "the older, superseded memory is tombstoned");
+        assert_eq!(
+            older_status, "tombstoned",
+            "the older, superseded memory is tombstoned"
+        );
     }
 }
 
@@ -9217,12 +9317,34 @@ fn auto_resolve_routes_identity_conflicts_to_operator() {
     // High-stakes conflicts are never auto-resolved.
     let db = YantrikDB::with_default(":memory:").unwrap();
     let a = db
-        .record_text("Pranab lives in Seattle", "semantic", 0.9, 0.0, 604800.0, &empty_meta(),
-            "ns", 0.9, "people", "user", None)
+        .record_text(
+            "Pranab lives in Seattle",
+            "semantic",
+            0.9,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "ns",
+            0.9,
+            "people",
+            "user",
+            None,
+        )
         .unwrap();
     let b = db
-        .record_text("Pranab lives in Austin", "semantic", 0.9, 0.0, 604800.0, &empty_meta(),
-            "ns", 0.9, "people", "user", None)
+        .record_text(
+            "Pranab lives in Austin",
+            "semantic",
+            0.9,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "ns",
+            0.9,
+            "people",
+            "user",
+            None,
+        )
         .unwrap();
     {
         let conn = db.conn();
@@ -9237,11 +9359,18 @@ fn auto_resolve_routes_identity_conflicts_to_operator() {
         .unwrap();
     }
     let report = db.auto_resolve_conflicts(false).unwrap();
-    assert_eq!(report.auto_resolved, 0, "identity/high conflicts are not auto-resolved");
+    assert_eq!(
+        report.auto_resolved, 0,
+        "identity/high conflicts are not auto-resolved"
+    );
     assert_eq!(report.routed_to_operator, 1);
     let conn = db.conn();
     let status: String = conn
-        .query_row("SELECT status FROM conflicts WHERE conflict_id = 'cf2'", [], |r| r.get(0))
+        .query_row(
+            "SELECT status FROM conflicts WHERE conflict_id = 'cf2'",
+            [],
+            |r| r.get(0),
+        )
         .unwrap();
     assert_eq!(status, "open", "left open for an operator");
 }
@@ -9359,12 +9488,39 @@ fn maintenance_cycle_runs_passes_and_records_last_run() {
     // isolation, leaves the opt-in heavy passes off, and persists a last-run
     // summary for stats / the boot digest.
     let db = YantrikDB::with_default(":memory:").unwrap();
-    db.record_text("fact one about the project", "semantic", 0.6, 0.0, 604800.0, &empty_meta(),
-        "ns", 0.8, "work", "user", None).unwrap();
-    db.record_text("fact two about the project", "semantic", 0.6, 0.0, 604800.0, &empty_meta(),
-        "ns", 0.8, "work", "user", None).unwrap();
+    db.record_text(
+        "fact one about the project",
+        "semantic",
+        0.6,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        "ns",
+        0.8,
+        "work",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.record_text(
+        "fact two about the project",
+        "semantic",
+        0.6,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        "ns",
+        0.8,
+        "work",
+        "user",
+        None,
+    )
+    .unwrap();
 
-    assert!(db.last_maintenance_cycle().unwrap().is_none(), "no cycle yet");
+    assert!(
+        db.last_maintenance_cycle().unwrap().is_none(),
+        "no cycle yet"
+    );
 
     let report = db
         .run_maintenance_cycle(&crate::MaintenanceCycleConfig::default())
@@ -9383,7 +9539,10 @@ fn maintenance_cycle_runs_passes_and_records_last_run() {
     assert!(report.repair.is_none());
 
     // The last-run summary is persisted and retrievable.
-    let last = db.last_maintenance_cycle().unwrap().expect("last run recorded");
+    let last = db
+        .last_maintenance_cycle()
+        .unwrap()
+        .expect("last run recorded");
     assert!(last.contains("ran_at"));
 
     // Idempotent: a second cycle also succeeds with no errors.
@@ -9399,9 +9558,20 @@ fn recall_emits_structural_intent_hint() {
     // Task 35. A recency-intent query gets a hint pointing at the exact
     // structural path instead of silently returning a similarity-ranked guess.
     let db = YantrikDB::with_default(":memory:").unwrap();
-    db.record_text("entry one of the narrative", "episodic", 0.5, 0.0, 604800.0, &empty_meta(),
-        "chain", 0.8, "self", "user", None)
-        .unwrap();
+    db.record_text(
+        "entry one of the narrative",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        "chain",
+        0.8,
+        "self",
+        "user",
+        None,
+    )
+    .unwrap();
 
     let emb = db.embed("the most recent entry in the chain").unwrap();
     let response = db
@@ -9432,8 +9602,17 @@ fn recall_emits_structural_intent_hint() {
     let emb2 = db.embed("tell me about the narrative").unwrap();
     let plain = db
         .recall_with_response(
-            &emb2, 5, None, None, false, true, Some("tell me about the narrative content"),
-            true, None, None, None,
+            &emb2,
+            5,
+            None,
+            None,
+            false,
+            true,
+            Some("tell me about the narrative content"),
+            true,
+            None,
+            None,
+            None,
         )
         .unwrap();
     assert!(
@@ -9454,7 +9633,11 @@ fn draft_memories_from_summary_atomizes_and_flags_provisional() {
     let rids = db
         .draft_memories_from_summary(summary, "session", "work")
         .unwrap();
-    assert!(rids.len() >= 2, "summary atomized into facts: {}", rids.len());
+    assert!(
+        rids.len() >= 2,
+        "summary atomized into facts: {}",
+        rids.len()
+    );
 
     for rid in &rids {
         let conn = db.conn();
@@ -9465,10 +9648,15 @@ fn draft_memories_from_summary_atomizes_and_flags_provisional() {
                 |r| r.get(0),
             )
             .unwrap();
-        assert!(meta.contains("provisional"), "drafted memory is flagged provisional");
+        assert!(
+            meta.contains("provisional"),
+            "drafted memory is flagged provisional"
+        );
     }
 
-    let hits = db.recall_text("who owns the database migration", 5).unwrap();
+    let hits = db
+        .recall_text("who owns the database migration", 5)
+        .unwrap();
     assert!(hits.iter().any(|h| h.text.contains("migration")));
 }
 
@@ -9480,8 +9668,19 @@ fn recall_stamps_trust_metadata() {
     let db = YantrikDB::with_default(":memory:").unwrap();
 
     let aged = db
-        .record_text("an old fact about the deployment process", "semantic", 0.7, 0.0, 604800.0,
-            &empty_meta(), "ns", 0.8, "work", "user", None)
+        .record_text(
+            "an old fact about the deployment process",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "ns",
+            0.8,
+            "work",
+            "user",
+            None,
+        )
         .unwrap();
     {
         let conn = db.conn();
@@ -9492,7 +9691,10 @@ fn recall_stamps_trust_metadata() {
         .unwrap();
     }
     let hits = db.recall_text("deployment process fact", 5).unwrap();
-    let h = hits.iter().find(|h| h.rid == aged).expect("aged hit present");
+    let h = hits
+        .iter()
+        .find(|h| h.rid == aged)
+        .expect("aged hit present");
     assert!(
         h.why_retrieved
             .iter()
@@ -9503,12 +9705,34 @@ fn recall_stamps_trust_metadata() {
 
     // Supersession hedge.
     let old_v = db
-        .record_text("the API key rotates monthly", "semantic", 0.6, 0.0, 604800.0, &empty_meta(),
-            "ns2", 0.8, "work", "user", None)
+        .record_text(
+            "the API key rotates monthly",
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "ns2",
+            0.8,
+            "work",
+            "user",
+            None,
+        )
         .unwrap();
     let new_v = db
-        .record_text("the API key rotates weekly now", "semantic", 0.6, 0.0, 604800.0,
-            &empty_meta(), "ns2", 0.8, "work", "user", None)
+        .record_text(
+            "the API key rotates weekly now",
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "ns2",
+            0.8,
+            "work",
+            "user",
+            None,
+        )
         .unwrap();
     db.link(
         &new_v,
@@ -9518,8 +9742,13 @@ fn recall_stamps_trust_metadata() {
         },
     )
     .unwrap();
-    let hits2 = db.recall_text("how often does the API key rotate", 5).unwrap();
-    let ho = hits2.iter().find(|h| h.rid == old_v).expect("superseded hit present");
+    let hits2 = db
+        .recall_text("how often does the API key rotate", 5)
+        .unwrap();
+    let ho = hits2
+        .iter()
+        .find(|h| h.rid == old_v)
+        .expect("superseded hit present");
     assert!(
         ho.why_retrieved.iter().any(|w| w.contains("superseded")),
         "superseded hedge present: {:?}",
@@ -9534,12 +9763,34 @@ fn auto_relate_creates_cooccurrence_edges() {
     // density from plain writes. Idempotent.
     let db = YantrikDB::with_default(":memory:").unwrap();
     let r1 = db
-        .record_text("Alice and Acme launched the Falcon project", "semantic", 0.7, 0.0, 604800.0,
-            &empty_meta(), "ns", 0.8, "work", "user", None)
+        .record_text(
+            "Alice and Acme launched the Falcon project",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "ns",
+            0.8,
+            "work",
+            "user",
+            None,
+        )
         .unwrap();
     let r2 = db
-        .record_text("Alice and Acme shipped Falcon version two", "semantic", 0.7, 0.0, 604800.0,
-            &empty_meta(), "ns", 0.8, "work", "user", None)
+        .record_text(
+            "Alice and Acme shipped Falcon version two",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "ns",
+            0.8,
+            "work",
+            "user",
+            None,
+        )
         .unwrap();
     // Simulate the entity extraction (async materializer in production) having
     // linked entities to these memories, so auto-relate has co-occurrences.
@@ -9555,11 +9806,19 @@ fn auto_relate_creates_cooccurrence_edges() {
     }
 
     let dry = db.auto_relate(true, 100).unwrap();
-    assert!(dry.pairs_considered >= 1, "co-occurring pairs: {}", dry.pairs_considered);
+    assert!(
+        dry.pairs_considered >= 1,
+        "co-occurring pairs: {}",
+        dry.pairs_considered
+    );
     assert_eq!(dry.edges_upserted, 0, "dry run upserts nothing");
 
     let applied = db.auto_relate(false, 100).unwrap();
-    assert!(applied.edges_upserted >= 1, "edges created: {}", applied.edges_upserted);
+    assert!(
+        applied.edges_upserted >= 1,
+        "edges created: {}",
+        applied.edges_upserted
+    );
 
     // Idempotent: re-running considers the same pairs and errors-free.
     let again = db.auto_relate(false, 100).unwrap();
@@ -9574,19 +9833,63 @@ fn session_digest_assembles_boot_briefing() {
     // the open-conflict / pending-trigger counts.
     let db = YantrikDB::with_default(":memory:").unwrap();
     let _n1 = db
-        .record_text("narrative entry one", "episodic", 0.9, 0.0, 604800.0, &empty_meta(),
-            "narr", 0.9, "self", "user", None)
+        .record_text(
+            "narrative entry one",
+            "episodic",
+            0.9,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "narr",
+            0.9,
+            "self",
+            "user",
+            None,
+        )
         .unwrap();
     let n2 = db
-        .record_text("narrative entry two, the latest self-state", "episodic", 0.5, 0.0, 604800.0,
-            &empty_meta(), "narr", 0.9, "self", "user", None)
+        .record_text(
+            "narrative entry two, the latest self-state",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "narr",
+            0.9,
+            "self",
+            "user",
+            None,
+        )
         .unwrap();
-    db.record_text("decided to adopt keyset cursors for enumeration", "semantic", 0.95, 0.0,
-        604800.0, &empty_meta(), "work", 0.9, "work", "user", None)
-        .unwrap();
-    db.record_text("a trivial passing aside", "semantic", 0.2, 0.0, 604800.0, &empty_meta(),
-        "work", 0.5, "work", "user", None)
-        .unwrap();
+    db.record_text(
+        "decided to adopt keyset cursors for enumeration",
+        "semantic",
+        0.95,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        "work",
+        0.9,
+        "work",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.record_text(
+        "a trivial passing aside",
+        "semantic",
+        0.2,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        "work",
+        0.5,
+        "work",
+        "user",
+        None,
+    )
+    .unwrap();
 
     let cfg = crate::SessionDigestConfig {
         narrative_namespace: Some("narr".to_string()),
@@ -9619,25 +9922,64 @@ fn chain_head_returns_exact_latest_entry() {
     // Task 36. The chain head is exactly the latest write, independent of
     // importance — proving it is not the recall lottery.
     let db = YantrikDB::with_default(":memory:").unwrap();
-    assert!(db.chain_head("chain").unwrap().is_none(), "empty chain has no head");
+    assert!(
+        db.chain_head("chain").unwrap().is_none(),
+        "empty chain has no head"
+    );
 
     let _e1 = db
-        .record_text("entry one of the narrative", "episodic", 1.0, 0.0, 604800.0, &empty_meta(),
-            "chain", 0.8, "self", "user", None)
+        .record_text(
+            "entry one of the narrative",
+            "episodic",
+            1.0,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "chain",
+            0.8,
+            "self",
+            "user",
+            None,
+        )
         .unwrap();
     let _e2 = db
-        .record_text("entry two of the narrative", "episodic", 0.6, 0.0, 604800.0, &empty_meta(),
-            "chain", 0.8, "self", "user", None)
+        .record_text(
+            "entry two of the narrative",
+            "episodic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "chain",
+            0.8,
+            "self",
+            "user",
+            None,
+        )
         .unwrap();
     // The most recent entry is given the LOWEST importance, so a recall would
     // rank it last — chain_head must still return it.
     let e3 = db
-        .record_text("entry three, the most recent", "episodic", 0.3, 0.0, 604800.0, &empty_meta(),
-            "chain", 0.8, "self", "user", None)
+        .record_text(
+            "entry three, the most recent",
+            "episodic",
+            0.3,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "chain",
+            0.8,
+            "self",
+            "user",
+            None,
+        )
         .unwrap();
 
     let head = db.chain_head("chain").unwrap().expect("head exists");
-    assert_eq!(head.rid, e3, "head is the latest write, not the highest-importance");
+    assert_eq!(
+        head.rid, e3,
+        "head is the latest write, not the highest-importance"
+    );
     assert!(head.text.contains("most recent"));
 
     // A different namespace is unaffected.

@@ -396,21 +396,21 @@ impl YantrikDB {
         let known_entities = self.graph_index.read().all_entity_names();
         let per_memory_linkage: Vec<(Vec<String>, std::collections::HashSet<String>)> =
             sanitized_texts
-            .iter()
-            .map(|text| {
-                let text = text.as_ref();
-                let text_tokens = crate::graph::tokenize(text);
-                let heuristic = crate::graph::extract_heuristic_entities(text);
-                let mut candidates: std::collections::HashSet<String> =
-                    heuristic.iter().cloned().collect();
-                for known in &known_entities {
-                    if crate::graph::entity_matches_text(known, &text_tokens) {
-                        candidates.insert(known.clone());
+                .iter()
+                .map(|text| {
+                    let text = text.as_ref();
+                    let text_tokens = crate::graph::tokenize(text);
+                    let heuristic = crate::graph::extract_heuristic_entities(text);
+                    let mut candidates: std::collections::HashSet<String> =
+                        heuristic.iter().cloned().collect();
+                    for known in &known_entities {
+                        if crate::graph::entity_matches_text(known, &text_tokens) {
+                            candidates.insert(known.clone());
+                        }
                     }
-                }
-                (heuristic, candidates)
-            })
-            .collect();
+                    (heuristic, candidates)
+                })
+                .collect();
 
         let mut rids = Vec::with_capacity(inputs.len());
 

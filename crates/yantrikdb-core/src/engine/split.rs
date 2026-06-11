@@ -75,10 +75,7 @@ pub(crate) fn segment_into_atomic_facts(
         cur.push(c);
         let boundary = match c {
             '\n' => true,
-            '.' | '!' | '?' => chars
-                .peek()
-                .map(|n| n.is_whitespace())
-                .unwrap_or(true),
+            '.' | '!' | '?' => chars.peek().map(|n| n.is_whitespace()).unwrap_or(true),
             _ => false,
         };
         if boundary {
@@ -228,7 +225,9 @@ impl YantrikDB {
                         created += 1;
                     }
                     Err(e) => {
-                        report.errors.push(format!("{rid}: child record failed: {e}"));
+                        report
+                            .errors
+                            .push(format!("{rid}: child record failed: {e}"));
                         child_failed = true;
                     }
                 }

@@ -157,7 +157,10 @@ mod tests {
     fn clean_text_is_borrowed_unchanged() {
         let s = "Alice is the engineering lead. Deadline is March 30.";
         let out = sanitize_tool_call_artifacts(s);
-        assert!(matches!(out, Cow::Borrowed(_)), "clean text must not allocate");
+        assert!(
+            matches!(out, Cow::Borrowed(_)),
+            "clean text must not allocate"
+        );
         assert_eq!(out, s);
         assert!(!has_tool_call_artifact(s));
     }

@@ -338,7 +338,10 @@ mod tests {
     #[test]
     fn deflates_high_values_when_saturated() {
         let c = calibrate_importance_value(1.0, 1.0, 100);
-        assert!(c < 1.0, "max importance deflates under full saturation: {c}");
+        assert!(
+            c < 1.0,
+            "max importance deflates under full saturation: {c}"
+        );
         assert!(c >= MIN_CEILING, "but never below the floor ceiling: {c}");
     }
 
@@ -399,7 +402,10 @@ mod tests {
     fn usage_access_resists_reversion() {
         let unused = usage_corrected_importance(1.0, 0, REVERSION_TENURE_SECS);
         let used = usage_corrected_importance(1.0, 50, REVERSION_TENURE_SECS);
-        assert!(used > unused, "frequent access slows reversion: {used} > {unused}");
+        assert!(
+            used > unused,
+            "frequent access slows reversion: {used} > {unused}"
+        );
     }
 
     #[test]
@@ -407,7 +413,10 @@ mod tests {
         let prior = 1.0;
         let young = usage_corrected_importance(prior, 0, REVERSION_TENURE_SECS * 0.25);
         let old = usage_corrected_importance(prior, 0, REVERSION_TENURE_SECS * 0.75);
-        assert!(old < young, "more staleness ⇒ more reversion: {old} < {young}");
+        assert!(
+            old < young,
+            "more staleness ⇒ more reversion: {old} < {young}"
+        );
         assert!(young <= prior && old >= REVERSION_BASELINE);
     }
 }

@@ -112,9 +112,7 @@ impl YantrikDB {
                  ORDER BY rid",
             )?;
             let rows = stmt
-                .query_map([], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
-                })?
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             rows
         };
@@ -256,7 +254,8 @@ impl YantrikDB {
             match apply {
                 Ok(()) => conn.execute_batch("RELEASE artifact_repair")?,
                 Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK TO artifact_repair; RELEASE artifact_repair");
+                    let _ =
+                        conn.execute_batch("ROLLBACK TO artifact_repair; RELEASE artifact_repair");
                     return Err(e);
                 }
             }

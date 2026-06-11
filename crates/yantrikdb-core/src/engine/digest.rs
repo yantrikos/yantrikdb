@@ -93,9 +93,7 @@ impl YantrikDB {
     /// Materialize the session-start digest. One call, host-injected at boot.
     pub fn session_digest(&self, config: &SessionDigestConfig) -> Result<SessionDigest> {
         let mut digest = SessionDigest::default();
-        let snip = |s: &str, n: usize| -> String {
-            s.chars().take(n).collect::<String>()
-        };
+        let snip = |s: &str, n: usize| -> String { s.chars().take(n).collect::<String>() };
 
         // Narrative chain head — the latest verified self-entry.
         if let Some(ns) = config.narrative_namespace.as_deref() {
