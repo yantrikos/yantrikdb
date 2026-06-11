@@ -12,6 +12,27 @@ from yantrikdb.eval.synthetic import GOLDEN_QUERIES, SESSIONS, load_sessions_int
 DIM = 64
 
 
+def test_graph_lift_eval_runs_and_produces_verdict():
+    """Task 43 plumbing: the graph-lift eval runs end-to-end and yields valid
+    metrics + a verdict. (The real invest/drop number comes from a run with a
+    real embedder; this guards the harness against regressions.)"""
+    from yantrikdb.eval.graph_lift import GraphLiftReport, run_graph_lift_eval
+
+    report = run_graph_lift_eval(embedder=MockEmbedder())
+    assert isinstance(report, GraphLiftReport)
+    for v in (
+        report.recall_on,
+        report.recall_off,
+        report.precision_on,
+        report.precision_off,
+        report.mrr_on,
+        report.mrr_off,
+    ):
+        assert 0.0 <= v <= 1.0
+    assert report.verdict()
+    assert "graph ON" in report.summary()
+
+
 class MockEmbedder:
     """Deterministic embedder that hashes text into a unit vector.
 
