@@ -1,0 +1,49 @@
+name: Benchmark
+
+# Continuous self-benchmark (tasks 46 + 47): keeps the core claims —
+# "more memories don't degrade recall" and "recall stays fast" — living,
+# regression-gated facts rather than static README lines. Also reports the
+# graph-lift invest/drop verdict (task 43).
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  benchmark:
+    name: Self-benchmark (precision@scale + latency SLO + graph-lift)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install maturin and build the package
+        run: |
+          python -m pip install --upgrade pip
+          pip install "maturin>=1.5" pytest
+          pip install -e ".[all,dev]"
+
+      # Gates on BenchmarkReport.regression_check(): non-zero exit if recall
+      # collapses as the corpus grows, or p95 recall latency exceeds budget.
+      - name: Scaling self-benchmark (precision@scale + latency SLO)
+        run: python -m yantrikdb.eval.benchmark
+
+      # Informational: prints the graph-lift invest/drop verdict on connected data.
+      - name: Graph-lift eval (invest/drop verdict)
+        run: python -m yantrikdb.eval.graph_lift
+
+      - name: Eval test suite
+        run: pytest tests/test_eval.py -v

@@ -33,6 +33,23 @@ def test_graph_lift_eval_runs_and_produces_verdict():
     assert "graph ON" in report.summary()
 
 
+def test_benchmark_runs_and_gates():
+    """Tasks 46 + 47 plumbing: the scaling self-benchmark runs and produces
+    precision + latency points with a regression gate."""
+    from yantrikdb.eval.benchmark import BenchmarkReport, run_benchmark
+
+    report = run_benchmark(scales=(0, 50))
+    assert isinstance(report, BenchmarkReport)
+    assert len(report.points) == 2
+    for p in report.points:
+        assert 0.0 <= p.recall_at_k <= 1.0
+        assert 0.0 <= p.precision_at_k <= 1.0
+        assert p.latency_p50_ms >= 0.0
+        assert p.latency_p95_ms >= 0.0
+    assert isinstance(report.regression_check(), list)
+    assert "Self-Benchmark" in report.summary()
+
+
 class MockEmbedder:
     """Deterministic embedder that hashes text into a unit vector.
 
