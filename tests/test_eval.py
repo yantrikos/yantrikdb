@@ -33,6 +33,22 @@ def test_graph_lift_eval_runs_and_produces_verdict():
     assert "graph ON" in report.summary()
 
 
+def test_competitive_benchmark_runs_yantrikdb_and_reports_missing():
+    """Task 45: the harness scores YantrikDB and reports uninstalled
+    competitors as unavailable (never silently dropped)."""
+    from yantrikdb.eval.competitors import run_competitive_benchmark, summary
+
+    results = run_competitive_benchmark()
+    by_name = {r.name: r for r in results}
+    assert by_name["yantrikdb"].available
+    assert 0.0 <= by_name["yantrikdb"].recall_at_k <= 1.0
+    for name in ("mem0", "zep", "letta"):
+        assert name in by_name
+        if not by_name[name].available:
+            assert by_name[name].note
+    assert "Competitive Benchmark" in summary(results)
+
+
 def test_benchmark_runs_and_gates():
     """Tasks 46 + 47 plumbing: the scaling self-benchmark runs and produces
     precision + latency points with a regression gate."""
