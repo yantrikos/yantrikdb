@@ -132,6 +132,29 @@ Real memory is hierarchical, compressed, contextual, self-updating, emotionally 
 
 At 500 memories, file-based exceeds 32K context windows. At 5,000, it doesn't fit in any context window — not even 200K. YantrikDB stays at ~70 tokens per query. Precision *improves* with more data — the opposite of context stuffing.
 
+### Evidence (reproducible)
+
+Every claim here points at a runnable harness — not a static number. Each is
+gated in CI ([`.github/workflows/benchmark.yml`](.github/workflows/benchmark.yml)) so a regression fails the build.
+
+- **Recall doesn't degrade as the corpus grows, and stays fast.**
+  [`python -m yantrikdb.eval.benchmark`](src/yantrikdb/eval/benchmark.py) holds a fixed
+  signal corpus while adding distractors and measures recall + latency at each scale.
+  Sample run: recall@k `0.938 → 0.929` as memories grow 7×, with p95 recall latency
+  under 3 ms. `regression_check()` is the CI gate.
+- **The knowledge graph earns its keep on connected data.**
+  [`python -m yantrikdb.eval.graph_lift`](src/yantrikdb/eval/graph_lift.py) measures recall
+  with entity-expansion ON vs OFF. Verdict on the connected corpus: **+2.5% recall, +1.7% MRR**
+  — graph expansion helps where memories are actually linked.
+- **Apples-to-apples vs other memory systems.**
+  [`python -m yantrikdb.eval.competitors`](src/yantrikdb/eval/competitors.py) scores YantrikDB,
+  mem0, Zep, and Letta on the same corpus, same queries, same metrics, no per-system
+  tuning. (Competitors run once their libraries are installed; results are not
+  pre-tuned.)
+
+These run dependency-free on the bundled embedder, so anyone can reproduce them with
+one command.
+
 ## Architecture
 
 ### Design Principles
