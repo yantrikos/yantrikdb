@@ -9988,6 +9988,57 @@ fn chain_head_returns_exact_latest_entry() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
+fn evict_protects_frequently_recalled_memories() {
+    // Feature A (v0.9.0): hot/cold tiering uses recall frequency — a stale but
+    // frequently-recalled memory is NOT evicted just for being old, while
+    // equally-stale never-recalled peers are.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let mut rids = Vec::new();
+    for i in 0..5 {
+        rids.push(
+            db.record_text(
+                &format!("memory number {i} about assorted unrelated topics"),
+                "semantic", 0.5, 0.0, 604800.0, &empty_meta(), "ns", 0.8, "general",
+                "user", None,
+            )
+            .unwrap(),
+        );
+    }
+    let hot = rids[0].clone();
+    {
+        let conn = db.conn();
+        // Make ALL equally old / stale / never-recalled...
+        conn.execute(
+            "UPDATE memories SET created_at = 1000.0, last_access = 1000.0, access_count = 0",
+            [],
+        )
+        .unwrap();
+        // ...except one, which has been recalled many times.
+        conn.execute(
+            "UPDATE memories SET access_count = 50 WHERE rid = ?1",
+            rusqlite::params![hot],
+        )
+        .unwrap();
+    }
+
+    let evicted = db.evict(2).unwrap();
+    assert_eq!(evicted.len(), 3, "evicts down to max_active = 2");
+    assert!(!evicted.contains(&hot), "the frequently-recalled memory survives");
+
+    let tier: String = {
+        let conn = db.conn();
+        conn.query_row(
+            "SELECT storage_tier FROM memories WHERE rid = ?1",
+            rusqlite::params![hot],
+            |r| r.get(0),
+        )
+        .unwrap()
+    };
+    assert_eq!(tier, "hot", "the hot memory stays hot");
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
 fn explicit_set_embedder_overrides_bundled() {
     // Slim-build path or custom-model path: set_embedder() after new()
     // takes precedence. The bundled embedder gets dropped; the user's

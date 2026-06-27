@@ -330,10 +330,23 @@ pub fn graph_contributions(
 }
 
 /// Score for eviction prioritization (lower = more evictable).
-/// Combines decay strength and recency to identify stale memories.
-pub fn eviction_score(decay: f64, recency: f64) -> f64 {
-    0.6 * decay + 0.4 * recency
+///
+/// Combines decay strength, recency, AND recall frequency: a memory that is
+/// recalled often is "hot" and should resist demotion to cold even when it is
+/// old. `access_count` is folded in as a saturating resistance term
+/// (~`ACCESS_SATURATION` recalls ≈ fully protected), so frequently-used
+/// memories are not evicted just for age. Without this, hotness is tracked but
+/// never used in the tiering decision.
+pub fn eviction_score(decay: f64, recency: f64, access_count: u32) -> f64 {
+    let access_resist =
+        ((access_count as f64).ln_1p() / (ACCESS_SATURATION as f64).ln_1p()).min(1.0);
+    0.6 * decay + 0.4 * recency + ACCESS_WEIGHT * access_resist
 }
+
+/// Recall count at which a memory is treated as fully "hot" for tiering.
+pub const ACCESS_SATURATION: u32 = 20;
+/// How strongly recall frequency protects a memory from eviction.
+pub const ACCESS_WEIGHT: f64 = 0.5;
 
 /// Build a human-readable explanation for why a memory was retrieved.
 pub fn build_why(similarity: f64, recency: f64, decay: f64, valence: f64) -> Vec<String> {
@@ -758,21 +771,29 @@ mod tests {
 
     #[test]
     fn test_eviction_score() {
-        let score = eviction_score(1.0, 1.0);
-        assert!((score - 1.0).abs() < 1e-10, "max inputs should give 1.0");
+        // With zero recalls the access term vanishes (back-compatible).
+        let score = eviction_score(1.0, 1.0, 0);
+        assert!((score - 1.0).abs() < 1e-10, "max inputs, no access => 1.0");
 
-        let score_zero = eviction_score(0.0, 0.0);
+        let score_zero = eviction_score(0.0, 0.0, 0);
         assert!(
             (score_zero - 0.0).abs() < 1e-10,
-            "zero inputs should give 0.0"
+            "zero inputs, no access => 0.0"
         );
 
-        let low = eviction_score(0.1, 0.5);
-        let high = eviction_score(0.9, 0.5);
-        assert!(
-            high > low,
-            "higher decay should yield higher eviction score"
-        );
+        let low = eviction_score(0.1, 0.5, 0);
+        let high = eviction_score(0.9, 0.5, 0);
+        assert!(high > low, "higher decay => higher eviction score");
+
+        // Recall frequency protects from eviction: a stale-but-hot memory
+        // scores higher (less evictable) than the same memory never recalled.
+        let cold = eviction_score(0.2, 0.2, 0);
+        let hot = eviction_score(0.2, 0.2, 25);
+        assert!(hot > cold, "frequent recall must resist eviction: {hot} > {cold}");
+        // Saturating: beyond ACCESS_SATURATION the resistance is capped.
+        let at_sat = eviction_score(0.2, 0.2, ACCESS_SATURATION);
+        let beyond = eviction_score(0.2, 0.2, ACCESS_SATURATION * 100);
+        assert!((beyond - at_sat).abs() < 0.05, "access resistance saturates");
     }
 
     // ── Regression: the "Staff Engineer domination" bug ──

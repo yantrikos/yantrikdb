@@ -187,7 +187,8 @@ impl YantrikDB {
             let ts = now();
 
             let mut stmt = conn.prepare(
-                "SELECT rid, importance, half_life, last_access, created_at FROM memories \
+                "SELECT rid, importance, half_life, last_access, created_at, access_count \
+                 FROM memories \
                  WHERE consolidation_status = 'active' AND storage_tier = 'hot'",
             )?;
 
@@ -198,11 +199,14 @@ impl YantrikDB {
                     let half_life: f64 = row.get("half_life")?;
                     let last_access: f64 = row.get("last_access")?;
                     let created_at: f64 = row.get("created_at")?;
+                    let access_count: i64 = row.get("access_count")?;
                     let elapsed = ts - last_access;
                     let decay = crate::scoring::decay_score(importance, half_life, elapsed);
                     let age = ts - created_at;
                     let recency = crate::scoring::recency_score(age);
-                    let score = crate::scoring::eviction_score(decay, recency);
+                    // Recall frequency resists eviction (hot memories stay hot).
+                    let score =
+                        crate::scoring::eviction_score(decay, recency, access_count.max(0) as u32);
                     Ok((rid, score))
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
