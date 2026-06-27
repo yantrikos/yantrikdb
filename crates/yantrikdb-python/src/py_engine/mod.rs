@@ -11,6 +11,9 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyTuple};
 type PyObject = pyo3::Py<pyo3::PyAny>;
 
+use yantrikdb_core::engine::materializer::{
+    recommended_worker_count, spawn_all_workers, AllWorkerGuards,
+};
 use yantrikdb_core::YantrikDB;
 
 use crate::py_types::*;
@@ -20,6 +23,29 @@ use crate::py_types::*;
 pub struct PyYantrikDB {
     pub(crate) inner: Option<Arc<YantrikDB>>,
     pub(crate) embedder: Option<PyObject>,
+    /// Background worker pool (materializers + compactor). MUST be held for the
+    /// engine's lifetime: without the compactor the in-memory delta tier fills
+    /// to `delta_max` (256) and every subsequent write returns Backpressure
+    /// ("ingest queue full"). The pyo3 constructors previously forgot to spawn
+    /// these, wedging any long write session (e.g. writing a full novel) after
+    /// ~256 records. Dropped with the struct → Weak<YantrikDB> upgrade fails →
+    /// workers shut down cleanly.
+    pub(crate) _workers: Option<AllWorkerGuards>,
+}
+
+impl PyYantrikDB {
+    /// Wrap a freshly-constructed engine AND spawn its background workers
+    /// (materializer pool + compactor). This is the single place that owns the
+    /// "don't forget the compactor" rule for the Python binding.
+    pub(crate) fn from_engine(inner: YantrikDB, embedder: Option<PyObject>) -> Self {
+        let inner = Arc::new(inner);
+        let workers = spawn_all_workers(&inner, recommended_worker_count());
+        Self {
+            inner: Some(inner),
+            embedder,
+            _workers: Some(workers),
+        }
+    }
 }
 
 /// A thin proxy exposing execute() and commit() on the underlying connection.
@@ -234,10 +260,7 @@ impl PyYantrikDB {
             ));
         }
 
-        Ok(Self {
-            inner: Some(Arc::new(inner)),
-            embedder,
-        })
+        Ok(Self::from_engine(inner, embedder))
     }
 
     /// **v0.7.4** — open with the engine's bundled embedder pre-attached.
@@ -255,10 +278,7 @@ impl PyYantrikDB {
     #[staticmethod]
     fn with_default(db_path: &str) -> PyResult<Self> {
         let inner = YantrikDB::with_default(db_path).map_err(map_err)?;
-        Ok(Self {
-            inner: Some(Arc::new(inner)),
-            embedder: None,
-        })
+        Ok(Self::from_engine(inner, None))
     }
 
     /// Whether this instance has encryption enabled.

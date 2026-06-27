@@ -101,10 +101,7 @@ impl PyTenantManager {
             None => YantrikDB::new(&db_path, dim).map_err(map_err)?,
         };
 
-        Ok(PyYantrikDB {
-            inner: Some(Arc::new(inner)),
-            embedder,
-        })
+        Ok(PyYantrikDB::from_engine(inner, embedder))
     }
 
     /// List all tenant DB files discovered in the base directory.
