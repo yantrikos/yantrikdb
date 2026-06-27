@@ -42,6 +42,7 @@ pub use engine::importance::ImportanceRecalibrationReport;
 pub use engine::maintenance::{MaintenanceCycleConfig, MaintenanceCycleReport};
 pub use engine::repair::{RepairError, RepairReport};
 pub use engine::split::SplitReport;
+pub use engine::tasks::Task;
 pub use engine::tenant::{TenantConfig, TenantManager};
 pub use engine::YantrikDB;
 pub use error::YantrikDbError;

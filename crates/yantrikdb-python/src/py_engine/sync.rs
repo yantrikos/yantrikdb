@@ -7,6 +7,20 @@ use crate::py_types::*;
 
 use super::{map_err, PyYantrikDB};
 
+/// Convert a core `Task` into a Python dict.
+fn task_to_dict(py: Python<'_>, t: &yantrikdb_core::Task) -> PyResult<PyObject> {
+    let d = PyDict::new(py);
+    d.set_item("id", &t.id)?;
+    d.set_item("namespace", &t.namespace)?;
+    d.set_item("title", &t.title)?;
+    d.set_item("status", &t.status)?;
+    d.set_item("priority", &t.priority)?;
+    d.set_item("parent_id", &t.parent_id)?;
+    d.set_item("created_at", t.created_at)?;
+    d.set_item("updated_at", t.updated_at)?;
+    Ok(d.into())
+}
+
 #[pymethods]
 impl PyYantrikDB {
     // ── Storage tier operations ──
@@ -465,5 +479,59 @@ impl PyYantrikDB {
                 Ok(d.into())
             })
             .collect()
+    }
+
+    /// Create a task/chore in a namespace. Returns the new task id. (v0.9.0)
+    #[pyo3(signature = (namespace, title, priority = "medium", parent_id = None))]
+    fn task_add(
+        &self,
+        namespace: &str,
+        title: &str,
+        priority: &str,
+        parent_id: Option<&str>,
+    ) -> PyResult<String> {
+        let db = self.get_inner()?;
+        db.task_add(namespace, title, priority, parent_id)
+            .map_err(map_err)
+    }
+
+    /// Update a task's status and/or priority. Returns whether it existed.
+    #[pyo3(signature = (id, status = None, priority = None))]
+    fn task_update(
+        &self,
+        id: &str,
+        status: Option<&str>,
+        priority: Option<&str>,
+    ) -> PyResult<bool> {
+        let db = self.get_inner()?;
+        db.task_update(id, status, priority).map_err(map_err)
+    }
+
+    /// List tasks in a namespace, optionally filtered by status, priority-ordered.
+    #[pyo3(signature = (namespace, status = None))]
+    fn task_list(
+        &self,
+        py: Python<'_>,
+        namespace: &str,
+        status: Option<&str>,
+    ) -> PyResult<Vec<PyObject>> {
+        let db = self.get_inner()?;
+        let tasks = db.task_list(namespace, status).map_err(map_err)?;
+        tasks.iter().map(|t| task_to_dict(py, t)).collect()
+    }
+
+    /// Get one task by id, or None.
+    fn task_get(&self, py: Python<'_>, id: &str) -> PyResult<Option<PyObject>> {
+        let db = self.get_inner()?;
+        match db.task_get(id).map_err(map_err)? {
+            Some(t) => Ok(Some(task_to_dict(py, &t)?)),
+            None => Ok(None),
+        }
+    }
+
+    /// Delete a task. Returns whether a row was removed.
+    fn task_delete(&self, id: &str) -> PyResult<bool> {
+        let db = self.get_inner()?;
+        db.task_delete(id).map_err(map_err)
     }
 }

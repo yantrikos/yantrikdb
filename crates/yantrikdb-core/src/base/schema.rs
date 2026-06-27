@@ -1042,6 +1042,24 @@ CREATE TABLE IF NOT EXISTS recall_demand (
 );
 CREATE INDEX IF NOT EXISTS idx_recall_demand_count ON recall_demand(count);
 
+-- Task / chore store (v0.9.0): a minimal, GENERAL operational task primitive
+-- — flat tasks with status, priority, and an optional parent for subtasks —
+-- so an agent can maintain its chores in the same substrate as its memory,
+-- cheaply (not embedded). Deliberately NOT a project/epic PM hierarchy; that
+-- opinionated structure stays a convention on top. title encrypted like
+-- memory text.
+CREATE TABLE IF NOT EXISTS tasks (
+    id TEXT PRIMARY KEY,
+    namespace TEXT NOT NULL,
+    title TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',     -- open | in_progress | done | cancelled
+    priority TEXT NOT NULL DEFAULT 'medium', -- low | medium | high | critical
+    parent_id TEXT,                          -- optional subtask parent
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_tasks_ns_status ON tasks(namespace, status);
+
 -- Personality traits (V11)
 CREATE TABLE IF NOT EXISTS personality_traits (
     trait_name TEXT PRIMARY KEY,

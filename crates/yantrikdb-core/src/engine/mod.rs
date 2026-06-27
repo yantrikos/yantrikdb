@@ -58,6 +58,7 @@ mod stats;
 mod storage;
 mod suggest;
 mod surfacing;
+pub mod tasks;
 mod temporal;
 mod temporal_helpers;
 pub mod tenant;
