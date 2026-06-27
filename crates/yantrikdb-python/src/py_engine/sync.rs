@@ -438,4 +438,32 @@ impl PyYantrikDB {
         let db = self.get_inner()?;
         db.clear_turns(namespace).map_err(map_err)
     }
+
+    /// Surface knowledge gaps — frequently-asked, poorly-answered queries the
+    /// substrate should satisfy but can't (v0.9.0). Returns a list of
+    /// {query, count, avg_top_score, avg_results, last_seen} dicts.
+    #[pyo3(signature = (min_count = 3, max_avg_top_score = 0.4, limit = 20))]
+    fn knowledge_gaps(
+        &self,
+        py: Python<'_>,
+        min_count: u64,
+        max_avg_top_score: f64,
+        limit: usize,
+    ) -> PyResult<Vec<PyObject>> {
+        let db = self.get_inner()?;
+        let gaps = db
+            .knowledge_gaps(min_count, max_avg_top_score, limit)
+            .map_err(map_err)?;
+        gaps.iter()
+            .map(|g| {
+                let d = PyDict::new(py);
+                d.set_item("query", &g.query)?;
+                d.set_item("count", g.count)?;
+                d.set_item("avg_top_score", g.avg_top_score)?;
+                d.set_item("avg_results", g.avg_results)?;
+                d.set_item("last_seen", g.last_seen)?;
+                Ok(d.into())
+            })
+            .collect()
+    }
 }

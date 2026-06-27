@@ -10039,6 +10039,45 @@ fn evict_protects_frequently_recalled_memories() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
+fn recall_logs_demand_and_surfaces_gaps() {
+    // Feature B (v0.9.0): a user-facing recall auto-logs demand; a frequently
+    // asked, poorly-answered query surfaces as a knowledge gap.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    // One unrelated memory so recall reaches the demand-logging tail (an empty
+    // corpus short-circuits before it). The query stays poorly answered.
+    db.record_text("the orchard wall was painted blue last spring", "semantic", 0.5, 0.0,
+        604800.0, &empty_meta(), "ns", 0.8, "general", "user", None)
+        .unwrap();
+    for _ in 0..4 {
+        let _ = db.recall_text("how do I rotate the encryption keys", 5).unwrap();
+    }
+    let (count, avg_top) = db
+        .recall_demand_for("how do I rotate the encryption keys")
+        .unwrap()
+        .expect("the query was logged as demand");
+    assert_eq!(count, 4, "asked four times");
+
+    // Surfaces as a gap at a threshold just above its (low) answer quality.
+    let gaps = db.knowledge_gaps(3, avg_top + 0.01, 10).unwrap();
+    assert!(
+        gaps.iter().any(|g| g.query.contains("rotate the encryption keys")),
+        "frequent poorly-answered query surfaces as a gap: {gaps:?}"
+    );
+
+    // An internal recall (skip_reinforce) must NOT pollute the demand log.
+    let emb = db.embed("a different internal probe query").unwrap();
+    let _ = db
+        .recall(&emb, 5, None, None, false, true, Some("a different internal probe query"),
+            true, None, None, None, None, None)
+        .unwrap();
+    assert!(
+        db.recall_demand_for("a different internal probe query").unwrap().is_none(),
+        "internal (skip_reinforce) recalls are not logged as demand"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
 fn explicit_set_embedder_overrides_bundled() {
     // Slim-build path or custom-model path: set_embedder() after new()
     // takes precedence. The bundled embedder gets dropped; the user's

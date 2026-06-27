@@ -12,6 +12,7 @@ mod coherence;
 pub mod conflict;
 pub mod conversation;
 mod counterfactual_engine;
+pub mod demand;
 pub mod digest;
 mod durable_embeddings;
 mod evaluator;

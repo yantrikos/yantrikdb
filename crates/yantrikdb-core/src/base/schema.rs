@@ -1027,6 +1027,21 @@ CREATE TABLE IF NOT EXISTS conversation_turns (
 );
 CREATE INDEX IF NOT EXISTS idx_conversation_turns_ns ON conversation_turns(namespace, id);
 
+-- Recall demand log (v0.9.0): cheap O(1)-per-recall aggregate of what gets
+-- queried and how well it's answered, keyed by the NORMALIZED query. Lets the
+-- substrate surface its own knowledge gaps — frequently-asked queries that
+-- return little/nothing (high count, low avg top score). Bounded by distinct
+-- query cardinality, not total recalls.
+CREATE TABLE IF NOT EXISTS recall_demand (
+    query_norm TEXT PRIMARY KEY,        -- normalized query (cluster key)
+    sample_text TEXT NOT NULL,          -- a recent raw form, for display
+    count INTEGER NOT NULL,             -- times asked
+    sum_top_score REAL NOT NULL,        -- Σ best-hit score (avg = /count)
+    sum_results INTEGER NOT NULL,       -- Σ result counts (avg = /count)
+    last_seen REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_recall_demand_count ON recall_demand(count);
+
 -- Personality traits (V11)
 CREATE TABLE IF NOT EXISTS personality_traits (
     trait_name TEXT PRIMARY KEY,

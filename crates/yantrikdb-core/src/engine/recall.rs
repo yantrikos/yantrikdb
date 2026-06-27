@@ -1888,6 +1888,16 @@ impl YantrikDB {
         // stale fact arrives visibly hedged rather than asserted as current.
         self.stamp_trust_metadata(&mut scored)?;
 
+        // v0.9.0: record demand (what was asked + how well it was answered) so
+        // the substrate can surface its own knowledge gaps. Skipped for
+        // internal / eval recalls; best-effort (never fails the recall).
+        if !skip_reinforce {
+            if let Some(qt) = query_text {
+                let top = scored.first().map(|r| r.score).unwrap_or(0.0);
+                let _ = self.record_recall_demand(qt, scored.len(), top);
+            }
+        }
+
         Ok(scored)
     }
 
