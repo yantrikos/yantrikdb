@@ -34,6 +34,7 @@ pub use conflict::{
 };
 pub use consolidate::{consolidate, find_consolidation_candidates};
 pub use engine::conflict::ConflictBurndownReport;
+pub use engine::conversation::{Turn, DEFAULT_TURN_WINDOW};
 pub use engine::digest::{SessionDigest, SessionDigestConfig};
 pub use engine::graph_ops::AutoRelateReport;
 pub use engine::importance::ImportanceRecalibrationReport;

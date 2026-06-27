@@ -393,4 +393,49 @@ impl PyYantrikDB {
         dict.set_item("edges_upserted", report.edges_upserted)?;
         Ok(dict.into())
     }
+
+    /// Append a raw conversation turn to the namespace's working-memory ring
+    /// buffer, pruned to the last `max_turns` (v0.9.0). Verbatim, not embedded.
+    /// Returns the turn id.
+    #[pyo3(signature = (namespace, role, content, max_turns = 10))]
+    fn record_turn(
+        &self,
+        namespace: &str,
+        role: &str,
+        content: &str,
+        max_turns: usize,
+    ) -> PyResult<i64> {
+        let db = self.get_inner()?;
+        db.record_turn(namespace, role, content, max_turns)
+            .map_err(map_err)
+    }
+
+    /// The last `limit` turns for a namespace, oldest-first (ready to prepend
+    /// to a prompt as recent context).
+    #[pyo3(signature = (namespace, limit = 10))]
+    fn recent_turns(
+        &self,
+        py: Python<'_>,
+        namespace: &str,
+        limit: usize,
+    ) -> PyResult<Vec<PyObject>> {
+        let db = self.get_inner()?;
+        let turns = db.recent_turns(namespace, limit).map_err(map_err)?;
+        turns
+            .iter()
+            .map(|t| {
+                let d = PyDict::new(py);
+                d.set_item("role", &t.role)?;
+                d.set_item("content", &t.content)?;
+                d.set_item("created_at", t.created_at)?;
+                Ok(d.into())
+            })
+            .collect()
+    }
+
+    /// Clear a namespace's conversation buffer. Returns rows removed.
+    fn clear_turns(&self, namespace: &str) -> PyResult<usize> {
+        let db = self.get_inner()?;
+        db.clear_turns(namespace).map_err(map_err)
+    }
 }

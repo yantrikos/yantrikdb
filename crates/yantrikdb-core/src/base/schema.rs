@@ -1014,6 +1014,19 @@ CREATE TABLE IF NOT EXISTS skill_outcomes (
 );
 CREATE INDEX IF NOT EXISTS idx_skill_outcomes_key ON skill_outcomes(dedup_key);
 
+-- Conversation working-memory ring buffer (v0.9.0). Cheap, verbatim,
+-- bounded FIFO of raw both-sides turns per namespace — short-term context,
+-- distinct from semantic memory: NOT embedded and NOT kept forever (pruned to
+-- the last N per namespace on insert). content is encrypted like memory text.
+CREATE TABLE IF NOT EXISTS conversation_turns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    namespace TEXT NOT NULL,
+    role TEXT NOT NULL,                 -- 'user' | 'assistant' | ...
+    content TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_conversation_turns_ns ON conversation_turns(namespace, id);
+
 -- Personality traits (V11)
 CREATE TABLE IF NOT EXISTS personality_traits (
     trait_name TEXT PRIMARY KEY,
