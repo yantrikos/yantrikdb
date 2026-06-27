@@ -11,6 +11,12 @@ jobs:
   test:
     name: Test (${{ matrix.os }}, ${{ matrix.target }})
     runs-on: ${{ matrix.os }}
+    # Hard cap so a genuine test hang fails fast instead of running until the
+    # 24-hour workflow ceiling. (Note: this bounds a job once it STARTS — it
+    # does not bound time spent `queued` waiting for a runner, which is why the
+    # unschedulable macos-13 entry below was removed rather than merely capped.)
+    # 45 min is well above the slowest healthy run (~18 min on Windows).
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:
@@ -24,12 +30,18 @@ jobs:
           # Windows x86_64
           - os: windows-latest
             target: x86_64-pc-windows-msvc
-          # macOS Apple Silicon
+          # macOS Apple Silicon — sole macOS runtime coverage.
           - os: macos-14
             target: aarch64-apple-darwin
-          # macOS Intel
-          - os: macos-13
-            target: x86_64-apple-darwin
+          # macOS Intel (x86_64-apple-darwin) is intentionally NOT tested here:
+          # GitHub's hosted macos-13 Intel runners are deprecated and routinely
+          # unschedulable, so the job sat `queued` until the 24-hour workflow
+          # ceiling and was cancelled — marking Tests red on EVERY release from
+          # v0.7.22 onward (always exactly 24h0m2s). timeout-minutes does not
+          # cap queue time, so the only real fix is to not depend on that
+          # runner. The x86_64-apple-darwin WHEEL is still built and published
+          # via cross-compile on an ARM runner in pypi.yml — that path is
+          # unaffected; only the (low-value, vs ARM-mac) Intel test run is gone.
 
     steps:
       - uses: actions/checkout@v4
