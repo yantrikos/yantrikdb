@@ -63,7 +63,9 @@ class Mem0System(MemorySystem):
     name = "mem0"
 
     def __init__(self):
-        from mem0 import Memory  # ImportError if mem0ai not installed
+        # Optional competitor dep, not installed in CI — the ImportError is the
+        # intended signal that this adapter is unavailable.
+        from mem0 import Memory  # pylint: disable=import-error
 
         self.m = Memory()
         self.user = "bench"
@@ -81,7 +83,8 @@ class ZepSystem(MemorySystem):
     name = "zep"
 
     def __init__(self):
-        from zep_python.client import Zep  # ImportError if not installed
+        # Optional competitor dep, not installed in CI (see Mem0System).
+        from zep_python.client import Zep  # pylint: disable=import-error
 
         self.client = Zep(api_key="bench")
         self.session = "bench"
@@ -98,7 +101,8 @@ class LettaSystem(MemorySystem):
     name = "letta"
 
     def __init__(self):
-        from letta_client import Letta  # ImportError if not installed
+        # Optional competitor dep, not installed in CI (see Mem0System).
+        from letta_client import Letta  # pylint: disable=import-error
 
         self.client = Letta(base_url="http://localhost:8283")
         self.agent = self.client.agents.create(name="bench")
