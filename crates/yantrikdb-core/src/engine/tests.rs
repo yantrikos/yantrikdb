@@ -9998,8 +9998,16 @@ fn evict_protects_frequently_recalled_memories() {
         rids.push(
             db.record_text(
                 &format!("memory number {i} about assorted unrelated topics"),
-                "semantic", 0.5, 0.0, 604800.0, &empty_meta(), "ns", 0.8, "general",
-                "user", None,
+                "semantic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                "ns",
+                0.8,
+                "general",
+                "user",
+                None,
             )
             .unwrap(),
         );
@@ -10023,7 +10031,10 @@ fn evict_protects_frequently_recalled_memories() {
 
     let evicted = db.evict(2).unwrap();
     assert_eq!(evicted.len(), 3, "evicts down to max_active = 2");
-    assert!(!evicted.contains(&hot), "the frequently-recalled memory survives");
+    assert!(
+        !evicted.contains(&hot),
+        "the frequently-recalled memory survives"
+    );
 
     let tier: String = {
         let conn = db.conn();
@@ -10045,11 +10056,24 @@ fn recall_logs_demand_and_surfaces_gaps() {
     let db = YantrikDB::with_default(":memory:").unwrap();
     // One unrelated memory so recall reaches the demand-logging tail (an empty
     // corpus short-circuits before it). The query stays poorly answered.
-    db.record_text("the orchard wall was painted blue last spring", "semantic", 0.5, 0.0,
-        604800.0, &empty_meta(), "ns", 0.8, "general", "user", None)
-        .unwrap();
+    db.record_text(
+        "the orchard wall was painted blue last spring",
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        "ns",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
     for _ in 0..4 {
-        let _ = db.recall_text("how do I rotate the encryption keys", 5).unwrap();
+        let _ = db
+            .recall_text("how do I rotate the encryption keys", 5)
+            .unwrap();
     }
     let (count, avg_top) = db
         .recall_demand_for("how do I rotate the encryption keys")
@@ -10060,18 +10084,34 @@ fn recall_logs_demand_and_surfaces_gaps() {
     // Surfaces as a gap at a threshold just above its (low) answer quality.
     let gaps = db.knowledge_gaps(3, avg_top + 0.01, 10).unwrap();
     assert!(
-        gaps.iter().any(|g| g.query.contains("rotate the encryption keys")),
+        gaps.iter()
+            .any(|g| g.query.contains("rotate the encryption keys")),
         "frequent poorly-answered query surfaces as a gap: {gaps:?}"
     );
 
     // An internal recall (skip_reinforce) must NOT pollute the demand log.
     let emb = db.embed("a different internal probe query").unwrap();
     let _ = db
-        .recall(&emb, 5, None, None, false, true, Some("a different internal probe query"),
-            true, None, None, None, None, None)
+        .recall(
+            &emb,
+            5,
+            None,
+            None,
+            false,
+            true,
+            Some("a different internal probe query"),
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
         .unwrap();
     assert!(
-        db.recall_demand_for("a different internal probe query").unwrap().is_none(),
+        db.recall_demand_for("a different internal probe query")
+            .unwrap()
+            .is_none(),
         "internal (skip_reinforce) recalls are not logged as demand"
     );
 }

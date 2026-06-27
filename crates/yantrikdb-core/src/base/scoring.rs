@@ -789,11 +789,17 @@ mod tests {
         // scores higher (less evictable) than the same memory never recalled.
         let cold = eviction_score(0.2, 0.2, 0);
         let hot = eviction_score(0.2, 0.2, 25);
-        assert!(hot > cold, "frequent recall must resist eviction: {hot} > {cold}");
+        assert!(
+            hot > cold,
+            "frequent recall must resist eviction: {hot} > {cold}"
+        );
         // Saturating: beyond ACCESS_SATURATION the resistance is capped.
         let at_sat = eviction_score(0.2, 0.2, ACCESS_SATURATION);
         let beyond = eviction_score(0.2, 0.2, ACCESS_SATURATION * 100);
-        assert!((beyond - at_sat).abs() < 0.05, "access resistance saturates");
+        assert!(
+            (beyond - at_sat).abs() < 0.05,
+            "access resistance saturates"
+        );
     }
 
     // ── Regression: the "Staff Engineer domination" bug ──
