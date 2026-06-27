@@ -135,8 +135,14 @@ mod tests {
 
     #[test]
     fn normalize_clusters_punctuation_and_case() {
-        assert_eq!(normalize_query("Who Owns  the rotation?"), "who owns the rotation");
-        assert_eq!(normalize_query("who owns the rotation"), "who owns the rotation");
+        assert_eq!(
+            normalize_query("Who Owns  the rotation?"),
+            "who owns the rotation"
+        );
+        assert_eq!(
+            normalize_query("who owns the rotation"),
+            "who owns the rotation"
+        );
     }
 
     #[cfg(feature = "bundled-embedder")]
@@ -145,14 +151,16 @@ mod tests {
         let db = YantrikDB::with_default(":memory:").unwrap();
         // A frequently-asked, poorly-answered query.
         for _ in 0..5 {
-            db.record_recall_demand("how do I configure the widget", 0, 0.0).unwrap();
+            db.record_recall_demand("how do I configure the widget", 0, 0.0)
+                .unwrap();
         }
         // A frequently-asked, WELL-answered query (should NOT be a gap).
         for _ in 0..5 {
             db.record_recall_demand("who is alice", 3, 1.1).unwrap();
         }
         // A rare poorly-answered query (below min_count, not yet a gap).
-        db.record_recall_demand("obscure one-off question", 0, 0.0).unwrap();
+        db.record_recall_demand("obscure one-off question", 0, 0.0)
+            .unwrap();
 
         let gaps = db.knowledge_gaps(3, 0.4, 10).unwrap();
         assert_eq!(gaps.len(), 1, "only the frequent low-yield query: {gaps:?}");

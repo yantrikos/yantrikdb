@@ -78,7 +78,11 @@ impl YantrikDB {
             )?;
             let collected = stmt
                 .query_map(params![ns, limit as i64], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, f64>(2)?))
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, f64>(2)?,
+                    ))
                 })?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             collected
@@ -116,7 +120,8 @@ mod tests {
         let db = YantrikDB::with_default(":memory:").unwrap();
         for i in 0..15 {
             let role = if i % 2 == 0 { "user" } else { "assistant" };
-            db.record_turn("chat", role, &format!("turn {i}"), 10).unwrap();
+            db.record_turn("chat", role, &format!("turn {i}"), 10)
+                .unwrap();
         }
         let turns = db.recent_turns("chat", 10).unwrap();
         assert_eq!(turns.len(), 10, "pruned to the window");
@@ -139,6 +144,10 @@ mod tests {
         assert_eq!(db.recent_turns("b", 10).unwrap().len(), 1);
         assert_eq!(db.clear_turns("a").unwrap(), 1);
         assert_eq!(db.recent_turns("a", 10).unwrap().len(), 0);
-        assert_eq!(db.recent_turns("b", 10).unwrap().len(), 1, "other ns untouched");
+        assert_eq!(
+            db.recent_turns("b", 10).unwrap().len(),
+            1,
+            "other ns untouched"
+        );
     }
 }
