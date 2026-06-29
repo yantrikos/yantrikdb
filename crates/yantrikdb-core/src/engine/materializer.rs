@@ -410,6 +410,35 @@ mod tests {
     }
 
     #[test]
+    fn workers_weak_refs_block_then_release_exclusive_access() {
+        // **Regression for issue #58.** The pyo3 binding's `set_embedder_named`
+        // reaches the engine via `Arc::get_mut`, which hands out a `&mut` only
+        // when strong count == 1 AND weak count == 0. Worker threads each hold a
+        // `Weak<YantrikDB>`, so while the pool runs, `get_mut` is blocked — which
+        // is exactly why the v0.9.0 constructor change (spawning workers) broke
+        // `set_embedder_named`. The binding's fix stops the pool (dropping the
+        // guards JOINs the threads, releasing their weak refs) before the swap,
+        // then respawns. This test locks the invariant that fix depends on: a
+        // running pool blocks exclusive access, and stopping it restores it. If
+        // a future change made workers hold a STRONG ref instead, the binding's
+        // stop-swap-respawn would silently stop working — this catches that.
+        let mut db = open_test_db();
+        assert_eq!(Arc::strong_count(&db), 1);
+
+        let workers = spawn_all_workers(&db, 2);
+        assert!(
+            Arc::get_mut(&mut db).is_none(),
+            "while the worker pool runs, its Weak refs must block exclusive access"
+        );
+
+        drop(workers); // joins all worker threads → their Weak refs are released
+        assert!(
+            Arc::get_mut(&mut db).is_some(),
+            "after the worker pool is stopped, exclusive access must be regained"
+        );
+    }
+
+    #[test]
     fn spawn_materializers_without_compactor_wedges_at_delta_max() {
         // **Regression test confirming the bug exists when callers
         // forget the compactor.** This is the failure mode CT 132

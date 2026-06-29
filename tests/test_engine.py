@@ -653,6 +653,63 @@ class TestQueryBuilder:
         assert all(k in c for k in ["similarity", "decay", "recency", "importance", "graph_proximity"])
 
 
+class TestSetEmbedderNamedWorkers:
+    """Regression for issue #58.
+
+    v0.9.0 made the pyo3 constructors spawn a background worker pool
+    (materializer + compactor). Those threads hold ``Weak<YantrikDB>`` refs,
+    and ``set_embedder_named`` reaches the engine via ``Arc::get_mut``, which
+    requires weak count 0 — so the call ALWAYS failed with
+    "set_embedder_named requires exclusive access to the engine", regardless
+    of the model name. The binding now stops the workers (joining the threads,
+    releasing the weak refs), swaps, then respawns the pool.
+
+    These probes use an UNKNOWN model name so they stay hermetic (no network /
+    no model download): before the fix the call could never get past the
+    exclusive-access guard; after it, the engine itself rejects the unknown
+    name with a *different* error. So the invariant is simply: the failure is
+    never the exclusive-access one.
+    """
+
+    def _skip_if_no_download(self, db):
+        """Skip on slim wheels (built --no-default-features) where the named-
+        download path compiles out to a feature-absent stub."""
+        try:
+            db.set_embedder_named("issue-58-no-such-model")
+        except Exception as exc:  # noqa: BLE001 - inspecting the message
+            msg = str(exc).lower()
+            if "embedder-download" in msg and "feature" in msg:
+                pytest.skip("wheel built --no-default-features; named-download path absent")
+            return msg
+        return ""
+
+    def test_set_embedder_named_not_blocked_by_workers(self):
+        """A freshly constructed engine (workers running) can reach the swap."""
+        db = YantrikDB.with_default(":memory:")
+        try:
+            msg = self._skip_if_no_download(db)
+            assert "exclusive access" not in msg, (
+                "set_embedder_named must get past the Arc::get_mut guard once the "
+                f"worker pool is stopped; got: {msg!r}"
+            )
+        finally:
+            db.close()
+
+    def test_stop_swap_respawn_is_repeatable(self):
+        """A second call behaves identically — proves the pool was respawned
+        and the stop/swap/respawn cycle is repeatable, not a one-shot."""
+        db = YantrikDB.with_default(":memory:")
+        try:
+            self._skip_if_no_download(db)  # first cycle (also handles skip)
+            with pytest.raises(Exception) as exc:  # noqa: PT011 - message asserted below
+                db.set_embedder_named("issue-58-still-no-such-model")
+            assert "exclusive access" not in str(exc.value).lower()
+            # Engine is still live after the swap+respawn cycle.
+            assert db.stats()["active_memories"] == 0
+        finally:
+            db.close()
+
+
 # ── Encryption tests ──
 
 

@@ -46,6 +46,18 @@ impl PyYantrikDB {
             _workers: Some(workers),
         }
     }
+
+    /// (Re)spawn the background worker pool against the live engine `Arc`.
+    /// Paired with `self._workers = None` (which drops the guards and JOINs
+    /// the worker threads) around any operation that needs exclusive
+    /// `Arc::get_mut` access — the workers hold `Weak<YantrikDB>` refs, and
+    /// `get_mut` requires weak count 0. No-op if the engine is closed.
+    #[cfg(feature = "embedder-download")]
+    fn respawn_workers(&mut self) {
+        if let Some(arc) = self.inner.as_ref() {
+            self._workers = Some(spawn_all_workers(arc, recommended_worker_count()));
+        }
+    }
 }
 
 /// A thin proxy exposing execute() and commit() on the underlying connection.
@@ -394,17 +406,36 @@ impl PyYantrikDB {
     /// any `_conn` proxy is still live — drop it first).
     #[cfg(feature = "embedder-download")]
     fn set_embedder_named(&mut self, name: &str) -> PyResult<()> {
-        let arc = self
-            .inner
-            .as_mut()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
-        let engine = Arc::get_mut(arc).ok_or_else(|| {
-            PyRuntimeError::new_err(
-                "set_embedder_named requires exclusive access to the engine; \
-                 drop any ConnectionProxy / cloned YantrikDB references before calling",
-            )
-        })?;
-        engine.set_embedder_named(name).map_err(map_err)
+        if self.inner.is_none() {
+            return Err(PyRuntimeError::new_err("YantrikDB is closed"));
+        }
+        // The engine swap needs exclusive (`&mut`) access via `Arc::get_mut`,
+        // which requires strong count 1 AND weak count 0. Since v0.9.0 the
+        // constructors spawn a background worker pool (materializer + compactor)
+        // whose threads hold `Weak<YantrikDB>` refs (issue #58) — those alone
+        // make `get_mut` return `None`. So stop the workers first: dropping the
+        // guards JOINs the threads, releasing their weak refs. Respawn after the
+        // swap (success or failure) so the engine keeps its compactor — without
+        // it, writes wedge at delta_max. This is an infrequent, operator-
+        // initiated call, so the brief worker pause is acceptable.
+        self._workers = None;
+
+        let swap = {
+            let arc = self.inner.as_mut().expect("checked is_some above");
+            match Arc::get_mut(arc) {
+                Some(engine) => engine.set_embedder_named(name).map_err(map_err),
+                // A real external clone is still live (e.g. a ConnectionProxy or
+                // a cloned YantrikDB) — the original, legitimate guard. Preserve
+                // its actionable message.
+                None => Err(PyRuntimeError::new_err(
+                    "set_embedder_named requires exclusive access to the engine; \
+                     drop any ConnectionProxy / cloned YantrikDB references before calling",
+                )),
+            }
+        };
+
+        self.respawn_workers();
+        swap
     }
 
     /// Slim-build stub. When the Python crate is built with
