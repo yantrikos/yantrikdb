@@ -399,7 +399,7 @@ impl DeltaIndex {
         }
 
         // Sort by distance ascending, take top-k.
-        merged.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        merged.sort_by(|a, b| a.1.total_cmp(&b.1));
         merged.truncate(k);
         Ok(merged)
     }

@@ -254,12 +254,7 @@ impl WorkingSet {
     /// Get all nodes sorted by activation (descending).
     pub fn by_activation(&self) -> Vec<&CognitiveNode> {
         let mut nodes: Vec<_> = self.nodes.values().collect();
-        nodes.sort_by(|a, b| {
-            b.attrs
-                .activation
-                .partial_cmp(&a.attrs.activation)
-                .unwrap_or(Ordering::Equal)
-        });
+        nodes.sort_by(|a, b| b.attrs.activation.total_cmp(&a.attrs.activation));
         nodes
     }
 
@@ -269,8 +264,7 @@ impl WorkingSet {
         nodes.sort_by(|a, b| {
             b.attrs
                 .relevance_score()
-                .partial_cmp(&a.attrs.relevance_score())
-                .unwrap_or(Ordering::Equal)
+                .total_cmp(&a.attrs.relevance_score())
         });
         nodes
     }
@@ -302,12 +296,7 @@ impl WorkingSet {
         let ids: Vec<u32> = heap.into_iter().map(|e| e.raw_id).collect();
         let mut result: Vec<&CognitiveNode> =
             ids.iter().filter_map(|id| self.nodes.get(id)).collect();
-        result.sort_by(|a, b| {
-            b.attrs
-                .activation
-                .partial_cmp(&a.attrs.activation)
-                .unwrap_or(Ordering::Equal)
-        });
+        result.sort_by(|a, b| b.attrs.activation.total_cmp(&a.attrs.activation));
         result
     }
 
@@ -552,7 +541,7 @@ impl WorkingSet {
 
             // Top-K truncation: only keep the most activated nodes in the frontier
             if next_frontier.len() > self.config.top_k_per_hop {
-                next_frontier.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+                next_frontier.sort_by(|a, b| b.1.total_cmp(&a.1));
                 next_frontier.truncate(self.config.top_k_per_hop);
             }
 
@@ -629,7 +618,7 @@ impl WorkingSet {
             }
 
             if next_frontier.len() > self.config.top_k_per_hop {
-                next_frontier.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
+                next_frontier.sort_by(|a, b| b.1.total_cmp(&a.1));
                 next_frontier.truncate(self.config.top_k_per_hop);
             }
 
@@ -680,12 +669,7 @@ impl WorkingSet {
         self.nodes
             .values()
             .filter(|n| n.kind() == kind)
-            .max_by(|a, b| {
-                a.attrs
-                    .activation
-                    .partial_cmp(&b.attrs.activation)
-                    .unwrap_or(Ordering::Equal)
-            })
+            .max_by(|a, b| a.attrs.activation.total_cmp(&b.attrs.activation))
     }
 
     /// Find all active beliefs (activation > threshold).
@@ -703,12 +687,7 @@ impl WorkingSet {
             .values()
             .filter(|n| n.attrs.urgency > threshold)
             .collect();
-        nodes.sort_by(|a, b| {
-            b.attrs
-                .urgency
-                .partial_cmp(&a.attrs.urgency)
-                .unwrap_or(Ordering::Equal)
-        });
+        nodes.sort_by(|a, b| b.attrs.urgency.total_cmp(&a.attrs.urgency));
         nodes
     }
 
@@ -809,11 +788,7 @@ impl WorkingSet {
             })
             .collect();
 
-        node_summaries.sort_by(|a, b| {
-            b.activation
-                .partial_cmp(&a.activation)
-                .unwrap_or(Ordering::Equal)
-        });
+        node_summaries.sort_by(|a, b| b.activation.total_cmp(&a.activation));
 
         let edge_count: usize = self.adjacency.values().map(|v| v.len()).sum();
 
@@ -839,8 +814,7 @@ impl WorkingSet {
             .min_by(|a, b| {
                 a.attrs
                     .relevance_score()
-                    .partial_cmp(&b.attrs.relevance_score())
-                    .unwrap_or(Ordering::Equal)
+                    .total_cmp(&b.attrs.relevance_score())
             })
             .map(|n| n.id)
     }
@@ -877,10 +851,7 @@ impl PartialOrd for ActivationEntry {
 impl Ord for ActivationEntry {
     fn cmp(&self, other: &Self) -> Ordering {
         // REVERSED: min-heap behavior — lowest activation at top
-        other
-            .activation
-            .partial_cmp(&self.activation)
-            .unwrap_or(Ordering::Equal)
+        other.activation.total_cmp(&self.activation)
     }
 }
 

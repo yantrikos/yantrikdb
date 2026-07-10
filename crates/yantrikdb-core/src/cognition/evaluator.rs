@@ -405,11 +405,7 @@ pub fn evaluate_candidates(
         .collect();
 
     // Sort by utility descending
-    evaluated.sort_by(|a, b| {
-        b.utility
-            .partial_cmp(&a.utility)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    evaluated.sort_by(|a, b| b.utility.total_cmp(&a.utility));
 
     // Filter by min_utility
     let filtered: Vec<EvaluatedAction> = evaluated

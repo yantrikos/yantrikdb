@@ -559,20 +559,16 @@ impl ReceptivityEstimate {
 
     /// The single most negative factor (biggest reason not to interrupt).
     pub fn top_blocker(&self) -> Option<&ReceptivityFactor> {
-        self.factors.iter().min_by(|a, b| {
-            a.contribution
-                .partial_cmp(&b.contribution)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+        self.factors
+            .iter()
+            .min_by(|a, b| a.contribution.total_cmp(&b.contribution))
     }
 
     /// The single most positive factor (biggest reason to interrupt).
     pub fn top_enabler(&self) -> Option<&ReceptivityFactor> {
-        self.factors.iter().max_by(|a, b| {
-            a.contribution
-                .partial_cmp(&b.contribution)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        })
+        self.factors
+            .iter()
+            .max_by(|a, b| a.contribution.total_cmp(&b.contribution))
     }
 }
 

@@ -348,7 +348,7 @@ impl OutcomeDistribution {
         let idx = posteriors
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
             .map(|(i, _)| i)
             .unwrap_or(0);
         match idx {
@@ -492,7 +492,7 @@ impl TransitionModel {
             .max_by(|&&a, &&b| {
                 let ra = self.expected_success(features, a);
                 let rb = self.expected_success(features, b);
-                ra.partial_cmp(&rb).unwrap()
+                ra.total_cmp(&rb)
             })
             .copied()
     }

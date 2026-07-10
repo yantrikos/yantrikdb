@@ -313,7 +313,7 @@ pub fn rank_by_recency(events: &[(u64, f64)], now: f64, config: &RecencyConfig) 
         .iter()
         .map(|&(id, time)| (id, recency_relevance(time, now, config)))
         .collect();
-    scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
     scored
 }
 
@@ -407,7 +407,7 @@ pub fn detect_periodicity(timestamps: &[f64], config: &PeriodicityConfig) -> Per
     }
 
     let mut sorted = timestamps.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| a.total_cmp(b));
 
     let span = sorted.last().unwrap() - sorted.first().unwrap();
     if span <= 0.0 {
@@ -472,11 +472,7 @@ pub fn detect_periodicity(timestamps: &[f64], config: &PeriodicityConfig) -> Per
     }
 
     // Sort by correlation descending
-    detected.sort_by(|a, b| {
-        b.correlation
-            .partial_cmp(&a.correlation)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    detected.sort_by(|a, b| b.correlation.total_cmp(&a.correlation));
 
     PeriodicityResult {
         detected,
@@ -683,7 +679,7 @@ pub fn detect_bursts(timestamps: &[f64], config: &BurstConfig) -> BurstResult {
     }
 
     let mut sorted = timestamps.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| a.total_cmp(b));
 
     let first = sorted[0];
     let last = sorted[sorted.len() - 1];
@@ -814,11 +810,7 @@ pub fn mine_temporal_motifs(events: &[LabeledEvent], config: &MotifConfig) -> Ve
 
     // Sort by timestamp
     let mut sorted: Vec<&LabeledEvent> = events.iter().collect();
-    sorted.sort_by(|a, b| {
-        a.timestamp
-            .partial_cmp(&b.timestamp)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    sorted.sort_by(|a, b| a.timestamp.total_cmp(&b.timestamp));
 
     // Extract all subsequences of valid length within max_gap constraint
     // Key: sequence of labels → list of (span_secs, gap_secs_list)
@@ -928,9 +920,7 @@ pub fn mine_temporal_motifs(events: &[LabeledEvent], config: &MotifConfig) -> Ve
     motifs.sort_by(|a, b| {
         let score_a = a.occurrences as f64 * a.confidence;
         let score_b = b.occurrences as f64 * b.confidence;
-        score_b
-            .partial_cmp(&score_a)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        score_b.total_cmp(&score_a)
     });
 
     motifs
@@ -1115,7 +1105,7 @@ pub fn topological_order(events: &[TemporalEvent]) -> TemporalOrder {
     queue.sort_by(|a, b| {
         let ta = ts_map.get(a).copied().unwrap_or(0.0);
         let tb = ts_map.get(b).copied().unwrap_or(0.0);
-        ta.partial_cmp(&tb).unwrap_or(std::cmp::Ordering::Equal)
+        ta.total_cmp(&tb)
     });
 
     let mut ordered = Vec::new();
@@ -1150,7 +1140,7 @@ pub fn topological_order(events: &[TemporalEvent]) -> TemporalOrder {
         queue.sort_by(|a, b| {
             let ta = ts_map.get(a).copied().unwrap_or(0.0);
             let tb = ts_map.get(b).copied().unwrap_or(0.0);
-            ta.partial_cmp(&tb).unwrap_or(std::cmp::Ordering::Equal)
+            ta.total_cmp(&tb)
         });
     }
 

@@ -1077,8 +1077,7 @@ impl YantrikDB {
                         (rid.clone(), rank)
                     })
                     .collect();
-                candidates
-                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
                 candidates
                     .into_iter()
                     .take(VALENCE_SCAN_MAX)
@@ -1407,11 +1406,7 @@ impl YantrikDB {
             } else if query_text.is_none() {
                 // Embedding-only search (no query text): seed from top results
                 let mut seed_sorted = scored.clone();
-                seed_sorted.sort_by(|a, b| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                seed_sorted.sort_by(|a, b| b.score.total_cmp(&a.score));
                 let seed_count = 3.min(seed_sorted.len());
                 let seed_rids: Vec<&str> = seed_sorted[..seed_count]
                     .iter()
@@ -1592,8 +1587,7 @@ impl YantrikDB {
                             Some((rid, rank))
                         })
                         .collect();
-                    candidates
-                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
                     candidates
                         .into_iter()
                         .take(preselect_pool)
@@ -1700,11 +1694,7 @@ impl YantrikDB {
         // step 4 where keyword_reserved items are exempt from MMR diversity
         // penalty, guaranteeing they survive into the final results.
         {
-            scored.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            scored.sort_by(|a, b| b.score.total_cmp(&a.score));
 
             let cutoff_idx = top_k.min(scored.len()).saturating_sub(1);
             let cutoff_score = scored.get(cutoff_idx).map(|r| r.score).unwrap_or(0.0);
@@ -1722,7 +1712,7 @@ impl YantrikDB {
                 })
                 .map(|(i, r)| (i, r.scores.similarity))
                 .collect();
-            kw_below.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            kw_below.sort_by(|a, b| b.1.total_cmp(&a.1));
 
             // Boost best keyword candidates just above the cutoff
             for (idx, _) in kw_below.into_iter().take(KEYWORD_RESERVE_SLOTS) {
@@ -1739,11 +1729,7 @@ impl YantrikDB {
         // "Arjun cooked X today" x50) dominate all K result slots. MMR ensures
         // each result adds new information by penalizing candidates too similar
         // to already-selected results.
-        scored.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_by(|a, b| b.score.total_cmp(&a.score));
 
         let min_pool_for_mmr = (top_k * 3).max(20);
         if scored.len() > top_k && scored.len() >= min_pool_for_mmr {
@@ -1843,18 +1829,10 @@ impl YantrikDB {
         match recall_order {
             RecallOrder::Relevance => {}
             RecallOrder::Certainty => {
-                scored.sort_by(|a, b| {
-                    b.certainty
-                        .partial_cmp(&a.certainty)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                scored.sort_by(|a, b| b.certainty.total_cmp(&a.certainty));
             }
             RecallOrder::Recency => {
-                scored.sort_by(|a, b| {
-                    b.created_at
-                        .partial_cmp(&a.created_at)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                scored.sort_by(|a, b| b.created_at.total_cmp(&a.created_at));
             }
         }
 
@@ -3264,8 +3242,7 @@ impl YantrikDB {
                         (rid.clone(), rank)
                     })
                     .collect();
-                candidates
-                    .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
                 candidates
                     .into_iter()
                     .take(VALENCE_SCAN_MAX)
@@ -3582,11 +3559,7 @@ impl YantrikDB {
             } else if query_text.is_none() {
                 // Embedding-only search (no query text): seed from top results
                 let mut seed_sorted = scored.clone();
-                seed_sorted.sort_by(|a, b| {
-                    b.score
-                        .partial_cmp(&a.score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+                seed_sorted.sort_by(|a, b| b.score.total_cmp(&a.score));
                 let seed_count = 3.min(seed_sorted.len());
                 let seed_rids: Vec<&str> = seed_sorted[..seed_count]
                     .iter()
@@ -3754,8 +3727,7 @@ impl YantrikDB {
                             Some((r, rank))
                         })
                         .collect();
-                    candidates
-                        .sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+                    candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
                     candidates
                         .into_iter()
                         .take(preselect_pool)
@@ -3854,11 +3826,7 @@ impl YantrikDB {
 
         // ── Phase 3.5: Keyword slot reservation (mirrors recall()) ──
         {
-            scored.sort_by(|a, b| {
-                b.score
-                    .partial_cmp(&a.score)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            scored.sort_by(|a, b| b.score.total_cmp(&a.score));
             let cutoff_idx = top_k.min(scored.len()).saturating_sub(1);
             let cutoff_score = scored.get(cutoff_idx).map(|r| r.score).unwrap_or(0.0);
 
@@ -3875,7 +3843,7 @@ impl YantrikDB {
                 })
                 .map(|(i, r)| (i, r.scores.similarity))
                 .collect();
-            kw_below.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            kw_below.sort_by(|a, b| b.1.total_cmp(&a.1));
 
             for (idx, _) in kw_below.into_iter().take(KEYWORD_RESERVE_SLOTS) {
                 scored[idx].score = cutoff_score + 0.001;
@@ -3887,11 +3855,7 @@ impl YantrikDB {
 
         // ── Phase 4: MMR diversity selection ──
         let t_sort = Instant::now();
-        scored.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scored.sort_by(|a, b| b.score.total_cmp(&a.score));
 
         let min_pool_for_mmr = (top_k * 3).max(20);
         if scored.len() > top_k && scored.len() >= min_pool_for_mmr {

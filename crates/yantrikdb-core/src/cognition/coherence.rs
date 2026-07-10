@@ -326,12 +326,7 @@ pub fn plan_enforcement(
                 }
             })
             .collect();
-        candidates.sort_by(|a, b| {
-            a.attrs
-                .salience
-                .partial_cmp(&b.attrs.salience)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        candidates.sort_by(|a, b| a.attrs.salience.total_cmp(&b.attrs.salience));
 
         for node in candidates.into_iter().take(to_prune) {
             actions.push(EnforcementAction {
@@ -368,11 +363,7 @@ pub fn plan_enforcement(
     // 4. Resolve belief contradictions (highest-severity first).
     let mut conflicts_resolved = 0usize;
     let mut sorted_contradictions = report.belief_contradictions.clone();
-    sorted_contradictions.sort_by(|a, b| {
-        b.severity
-            .partial_cmp(&a.severity)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    sorted_contradictions.sort_by(|a, b| b.severity.total_cmp(&a.severity));
 
     let max_resolutions = if emergency { 5 } else { 2 };
     for contradiction in sorted_contradictions.iter().take(max_resolutions) {

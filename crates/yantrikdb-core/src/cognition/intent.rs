@@ -658,9 +658,7 @@ pub fn generate_episode_hypotheses(
             NodePayload::Episode(ep) => ep.occurred_at,
             _ => 0.0,
         };
-        a_time
-            .partial_cmp(&b_time)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        a_time.total_cmp(&b_time)
     });
 
     match seed {
@@ -807,11 +805,7 @@ pub fn infer_intents(
     }
 
     // Sort by posterior descending
-    all_hypotheses.sort_by(|a, b| {
-        b.posterior
-            .partial_cmp(&a.posterior)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    all_hypotheses.sort_by(|a, b| b.posterior.total_cmp(&a.posterior));
 
     // Filter by min_posterior and truncate
     let filtered: Vec<ScoredIntent> = all_hypotheses

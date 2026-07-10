@@ -569,11 +569,7 @@ fn tier1_extract(text: &str, _config: &ExtractorConfig) -> Vec<CognitiveUpdate> 
     }
 
     // Sort by confidence descending
-    updates.sort_by(|a, b| {
-        b.confidence
-            .partial_cmp(&a.confidence)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    updates.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
     updates
 }
 
@@ -1348,11 +1344,7 @@ pub fn extract(
     all_updates.retain(|u| u.confidence >= config.min_confidence);
 
     // ── Sort by confidence descending ──
-    all_updates.sort_by(|a, b| {
-        b.confidence
-            .partial_cmp(&a.confidence)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    all_updates.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
 
     // ── Truncate to max updates ──
     all_updates.truncate(config.max_updates);

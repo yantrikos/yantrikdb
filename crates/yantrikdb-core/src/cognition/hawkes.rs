@@ -304,7 +304,7 @@ impl EventTypeModel {
         }
 
         let mut sorted = timestamps.to_vec();
-        sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        sorted.sort_by(|a, b| a.total_cmp(b));
 
         // Compute inter-event statistics
         let mut intervals = Vec::new();
@@ -342,7 +342,7 @@ impl EventTypeModel {
 
             // β from median inter-event time
             let mut sorted_intervals = intervals.clone();
-            sorted_intervals.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+            sorted_intervals.sort_by(|a, b| a.total_cmp(b));
             let median = sorted_intervals[sorted_intervals.len() / 2];
             let beta = if median > 0.0 {
                 1.0 / median
@@ -579,7 +579,7 @@ impl EventTypeModel {
             .hourly_multipliers
             .iter()
             .enumerate()
-            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+            .max_by(|(_, a), (_, b)| a.total_cmp(b))
             .map(|(h, &m)| (h, m))
             .unwrap_or((0, 1.0));
 
@@ -739,12 +739,7 @@ impl HawkesRegistry {
         }
 
         // Sort by confidence descending
-        anticipated.sort_by(|a, b| {
-            b.prediction
-                .confidence
-                .partial_cmp(&a.prediction.confidence)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        anticipated.sort_by(|a, b| b.prediction.confidence.total_cmp(&a.prediction.confidence));
 
         anticipated
     }
@@ -782,9 +777,7 @@ impl HawkesRegistry {
             .min_by(|(_, a), (_, b)| {
                 let last_a = a.recent_events.last().copied().unwrap_or(0.0);
                 let last_b = b.recent_events.last().copied().unwrap_or(0.0);
-                last_a
-                    .partial_cmp(&last_b)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                last_a.total_cmp(&last_b)
             })
             .map(|(k, _)| k.clone());
 

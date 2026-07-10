@@ -469,9 +469,7 @@ pub fn assign_variant(
             // Use index-based jitter for determinism
             let ja = jitter_seed * (1.0 + *i as f64 * 0.1) % 0.05;
             let jb = jitter_seed * (1.0 + *j as f64 * 0.1) % 0.05;
-            a.thompson_score(ja)
-                .partial_cmp(&b.thompson_score(jb))
-                .unwrap()
+            a.thompson_score(ja).total_cmp(&b.thompson_score(jb))
         })
         .map(|(i, _)| i)
         .unwrap_or(0);
@@ -575,7 +573,7 @@ pub fn conclude_experiment(experiment: &mut Experiment, now: f64) -> Option<(usi
         .variant_results
         .iter()
         .enumerate()
-        .max_by(|(_, a), (_, b)| a.mean().partial_cmp(&b.mean()).unwrap())
+        .max_by(|(_, a), (_, b)| a.mean().total_cmp(&b.mean()))
         .map(|(i, _)| i)?;
 
     experiment.winner = Some(winner_idx);

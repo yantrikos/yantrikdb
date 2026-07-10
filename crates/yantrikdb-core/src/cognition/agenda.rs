@@ -590,7 +590,7 @@ impl Agenda {
         active.sort_by(|a, b| {
             let ua = a.current_urgency(now);
             let ub = b.current_urgency(now);
-            ub.partial_cmp(&ua).unwrap_or(std::cmp::Ordering::Equal)
+            ub.total_cmp(&ua)
         });
 
         active.into_iter().take(limit).collect()

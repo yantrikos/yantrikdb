@@ -351,11 +351,9 @@ pub fn scan_contradictions(
     result.conflicts.extend(prefs);
 
     // Sort by severity descending, truncate
-    result.conflicts.sort_by(|a, b| {
-        b.severity
-            .partial_cmp(&a.severity)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    result
+        .conflicts
+        .sort_by(|a, b| b.severity.total_cmp(&a.severity));
     result.conflicts.truncate(config.max_conflicts);
 
     result

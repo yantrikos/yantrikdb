@@ -469,11 +469,7 @@ impl YantrikDB {
         }
 
         base.extend(added);
-        base.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        base.sort_by(|a, b| b.score.total_cmp(&a.score));
         base.truncate(top_k);
         Ok(base)
     }

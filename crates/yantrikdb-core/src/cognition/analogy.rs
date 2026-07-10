@@ -243,9 +243,7 @@ impl AnalogyStore {
             .min_by(|(_, a), (_, b)| {
                 let score_a = a.structural_similarity * (1.0 + a.use_count as f64).ln();
                 let score_b = b.structural_similarity * (1.0 + b.use_count as f64).ln();
-                score_a
-                    .partial_cmp(&score_b)
-                    .unwrap_or(std::cmp::Ordering::Equal)
+                score_a.total_cmp(&score_b)
             })
             .map(|(i, _)| i)
             .unwrap();
@@ -416,7 +414,7 @@ pub fn compute_structural_similarity(
     }
 
     // Sort by quality descending for greedy assignment.
-    pair_scores.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    pair_scores.sort_by(|a, b| b.2.total_cmp(&a.2));
 
     // ── Step 2: Greedy 1:1 assignment ──
     let mut used_source = vec![false; source_nodes.len()];
@@ -669,11 +667,7 @@ pub fn generate_candidate_inferences(
     }
 
     // Sort by confidence descending.
-    inferences.sort_by(|a, b| {
-        b.confidence
-            .partial_cmp(&a.confidence)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    inferences.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
 
     inferences
 }
@@ -786,11 +780,7 @@ pub fn find_analogies(
     }
 
     // Sort by structural similarity descending.
-    results.sort_by(|a, b| {
-        b.structural_similarity
-            .partial_cmp(&a.structural_similarity)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    results.sort_by(|a, b| b.structural_similarity.total_cmp(&a.structural_similarity));
 
     results.truncate(query.max_results);
     results
@@ -892,11 +882,7 @@ pub fn transfer_strategy(
     }
 
     // Sort by confidence descending.
-    transferred.sort_by(|a, b| {
-        b.transfer_confidence
-            .partial_cmp(&a.transfer_confidence)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    transferred.sort_by(|a, b| b.transfer_confidence.total_cmp(&a.transfer_confidence));
 
     transferred
 }
@@ -949,8 +935,7 @@ pub fn detect_analogical_opportunities(
     opportunities.sort_by(|a, b| {
         b.mapping
             .structural_similarity
-            .partial_cmp(&a.mapping.structural_similarity)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&a.mapping.structural_similarity)
     });
 
     opportunities
