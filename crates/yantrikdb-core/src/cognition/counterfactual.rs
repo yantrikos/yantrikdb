@@ -491,9 +491,7 @@ pub fn compare_outcomes(
     changed_nodes.sort_by(|a, b| {
         let mag_a = (a.counterfactual - a.actual).abs();
         let mag_b = (b.counterfactual - b.actual).abs();
-        mag_b
-            .partial_cmp(&mag_a)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        mag_b.total_cmp(&mag_a)
     });
 
     // Estimate counterfactual utility from activations.
@@ -629,8 +627,7 @@ fn explain_simulation(
         sorted.sort_by(|a, b| {
             b.propagated_strength
                 .abs()
-                .partial_cmp(&a.propagated_strength.abs())
-                .unwrap_or(std::cmp::Ordering::Equal)
+                .total_cmp(&a.propagated_strength.abs())
         });
 
         for step in sorted.iter().take(3) {
@@ -708,9 +705,7 @@ pub fn why_not(
     results.sort_by(|a, b| {
         let score_a = a.confidence * a.trajectory.len() as f64;
         let score_b = b.confidence * b.trajectory.len() as f64;
-        score_b
-            .partial_cmp(&score_a)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        score_b.total_cmp(&score_a)
     });
 
     results
@@ -759,12 +754,7 @@ pub fn detect_regret_opportunities(
     }
 
     // Sort by |regret_score| descending (worst regrets first).
-    all_results.sort_by(|a, b| {
-        b.regret_score
-            .abs()
-            .partial_cmp(&a.regret_score.abs())
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    all_results.sort_by(|a, b| b.regret_score.abs().total_cmp(&a.regret_score.abs()));
 
     // Detect patterns: most common tags in regretted decisions.
     let pattern = detect_regret_pattern(&regret_tags, decisions.len());
@@ -901,11 +891,7 @@ pub fn sensitivity_analysis(
     }
 
     // Sort by sensitivity descending.
-    entries.sort_by(|a, b| {
-        b.sensitivity
-            .partial_cmp(&a.sensitivity)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    entries.sort_by(|a, b| b.sensitivity.total_cmp(&a.sensitivity));
 
     entries
 }

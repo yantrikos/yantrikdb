@@ -349,8 +349,7 @@ fn extract_discoveries(store: &BeliefStore) -> Vec<Discovery> {
     // Sort by confidence descending, then evidence count descending
     candidates.sort_by(|a, b| {
         b.confidence
-            .partial_cmp(&a.confidence)
-            .unwrap_or(std::cmp::Ordering::Equal)
+            .total_cmp(&a.confidence)
             .then_with(|| b.evidence_count.cmp(&a.evidence_count))
     });
 
@@ -410,11 +409,11 @@ fn build_milestones(inputs: &IntrospectionInputs) -> Vec<LearningMilestone> {
     }
 
     // ── First belief milestone ──
-    if let Some(earliest) = inputs.belief_store.iter().min_by(|a, b| {
-        a.formed_at
-            .partial_cmp(&b.formed_at)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    }) {
+    if let Some(earliest) = inputs
+        .belief_store
+        .iter()
+        .min_by(|a, b| a.formed_at.total_cmp(&b.formed_at))
+    {
         milestones.push(LearningMilestone {
             timestamp: earliest.formed_at,
             kind: MilestoneKind::FirstBelief,
@@ -462,11 +461,7 @@ fn build_milestones(inputs: &IntrospectionInputs) -> Vec<LearningMilestone> {
     }
 
     // Sort chronologically and truncate
-    milestones.sort_by(|a, b| {
-        a.timestamp
-            .partial_cmp(&b.timestamp)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    milestones.sort_by(|a, b| a.timestamp.total_cmp(&b.timestamp));
     milestones.truncate(MAX_MILESTONES);
     milestones
 }

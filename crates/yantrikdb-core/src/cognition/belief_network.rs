@@ -879,11 +879,7 @@ fn compute_evidence_contributions(
     }
 
     // Sort by impact descending.
-    contributions.sort_by(|a, b| {
-        b.impact
-            .partial_cmp(&a.impact)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    contributions.sort_by(|a, b| b.impact.total_cmp(&a.impact));
 
     contributions
 }
@@ -962,7 +958,7 @@ pub fn sensitivity_to_evidence(
         }
     }
 
-    results.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    results.sort_by(|a, b| b.1.total_cmp(&a.1));
 
     results
 }

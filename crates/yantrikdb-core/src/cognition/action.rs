@@ -735,11 +735,7 @@ pub fn generate_candidates_for_intent(
     }
 
     // Sort by relevance descending, truncate
-    candidates.sort_by(|a, b| {
-        b.relevance_score
-            .partial_cmp(&a.relevance_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    candidates.sort_by(|a, b| b.relevance_score.total_cmp(&a.relevance_score));
     candidates.truncate(config.max_candidates_per_intent);
 
     candidates
@@ -767,11 +763,7 @@ pub fn generate_candidates(
     let total_before_filter = all_candidates.len();
 
     // Deduplicate: same schema_name appearing for different intents — keep highest relevance
-    all_candidates.sort_by(|a, b| {
-        b.relevance_score
-            .partial_cmp(&a.relevance_score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    all_candidates.sort_by(|a, b| b.relevance_score.total_cmp(&a.relevance_score));
 
     let mut seen = std::collections::HashSet::new();
     all_candidates.retain(|c| seen.insert(c.schema_name.clone()));

@@ -379,7 +379,7 @@ impl CausalStore {
             .enumerate()
             .map(|(i, e)| (i, e.confidence))
             .collect();
-        indexed.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        indexed.sort_by(|a, b| a.1.total_cmp(&b.1));
 
         let to_remove = self.edges.len() - self.config.max_edges;
         let remove_set: std::collections::HashSet<usize> =
@@ -430,7 +430,7 @@ pub fn discover_temporal_patterns(
 
     // Sort timestamps within each kind.
     for timestamps in by_kind.values_mut() {
-        timestamps.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+        timestamps.sort_by(|a, b| a.total_cmp(b));
     }
 
     let mut patterns = Vec::new();
@@ -973,9 +973,7 @@ pub fn predict_effects(
     results.sort_by(|a, b| {
         let score_a = a.expected_strength.abs() * a.confidence;
         let score_b = b.expected_strength.abs() * b.confidence;
-        score_b
-            .partial_cmp(&score_a)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        score_b.total_cmp(&score_a)
     });
     results
 }
@@ -1473,7 +1471,7 @@ fn median_f64(values: &[f64]) -> f64 {
         return 0.0;
     }
     let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| a.total_cmp(b));
     let n = sorted.len();
     if n % 2 == 0 {
         (sorted[n / 2 - 1] + sorted[n / 2]) / 2.0
@@ -1491,7 +1489,7 @@ fn quartiles_f64(values: &[f64]) -> (f64, f64) {
         );
     }
     let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    sorted.sort_by(|a, b| a.total_cmp(b));
     let n = sorted.len();
     let q1 = sorted[n / 4];
     let q3 = sorted[3 * n / 4];

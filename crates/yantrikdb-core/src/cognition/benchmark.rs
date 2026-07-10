@@ -3440,7 +3440,7 @@ fn run_temporal_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
             temporal::recency_relevance(last, now, &config)
         })
         .collect();
-    recency_scores.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    recency_scores.sort_by(|a, b| b.total_cmp(a));
     let all_bounded = recency_scores.iter().all(|&s| s >= 0.0 && s <= 1.0);
     run.add(BenchResult {
         category: "temporal".into(),

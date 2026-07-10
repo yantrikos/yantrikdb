@@ -635,11 +635,7 @@ fn mine_cross_domain_patterns(db: &YantrikDB, config: &PatternConfig) -> Result<
     }
 
     // Sort by score descending, keep top results
-    patterns.sort_by(|a, b| {
-        b.confidence
-            .partial_cmp(&a.confidence)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    patterns.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
     patterns.truncate(config.max_patterns);
 
     Ok(patterns)
@@ -747,11 +743,7 @@ fn mine_entity_bridges(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<Raw
     }
 
     // Sort by score descending, keep top 10
-    patterns.sort_by(|a, b| {
-        b.confidence
-            .partial_cmp(&a.confidence)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    patterns.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
     patterns.truncate(10);
 
     Ok(patterns)

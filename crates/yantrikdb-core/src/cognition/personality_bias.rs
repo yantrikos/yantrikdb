@@ -575,8 +575,7 @@ pub fn personality_impact(
         .max_by(|a, b| {
             a.bias_result
                 .total_bias
-                .partial_cmp(&b.bias_result.total_bias)
-                .unwrap()
+                .total_cmp(&b.bias_result.total_bias)
         })
         .filter(|a| a.bias_result.total_bias > 0.0)
         .map(|a| a.action_description.clone());
@@ -586,8 +585,7 @@ pub fn personality_impact(
         .min_by(|a, b| {
             a.bias_result
                 .total_bias
-                .partial_cmp(&b.bias_result.total_bias)
-                .unwrap()
+                .total_cmp(&b.bias_result.total_bias)
         })
         .filter(|a| a.bias_result.total_bias < 0.0)
         .map(|a| a.action_description.clone());

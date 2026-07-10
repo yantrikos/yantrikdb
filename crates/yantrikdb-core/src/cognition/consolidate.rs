@@ -53,12 +53,7 @@ pub fn find_clusters(
 
     // Sort by creation time (return indices)
     let mut indices: Vec<usize> = (0..memories.len()).collect();
-    indices.sort_by(|&a, &b| {
-        memories[a]
-            .created_at
-            .partial_cmp(&memories[b].created_at)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    indices.sort_by(|&a, &b| memories[a].created_at.total_cmp(&memories[b].created_at));
 
     let mut used = HashSet::new();
     let mut clusters: Vec<Vec<usize>> = Vec::new();
@@ -119,11 +114,7 @@ pub fn find_clusters(
 /// and combining key facts from the cluster.
 pub fn extractive_summary(memories: &[MemoryWithEmbedding]) -> String {
     let mut ranked: Vec<&MemoryWithEmbedding> = memories.iter().collect();
-    ranked.sort_by(|a, b| {
-        b.importance
-            .partial_cmp(&a.importance)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    ranked.sort_by(|a, b| b.importance.total_cmp(&a.importance));
 
     let lead = &ranked[0].text;
     let additional: Vec<&str> = ranked[1..]

@@ -112,11 +112,7 @@ pub fn check_decay_triggers(
         }
     }
 
-    triggers.sort_by(|a, b| {
-        b.urgency
-            .partial_cmp(&a.urgency)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    triggers.sort_by(|a, b| b.urgency.total_cmp(&a.urgency));
     triggers.truncate(max_triggers);
     Ok(triggers)
 }
@@ -696,11 +692,7 @@ pub fn check_all_triggers(
     triggers.extend(check_valence_trend(db)?);
     triggers.extend(check_entity_anomaly(db)?);
 
-    triggers.sort_by(|a, b| {
-        b.urgency
-            .partial_cmp(&a.urgency)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    triggers.sort_by(|a, b| b.urgency.total_cmp(&a.urgency));
     triggers.truncate(max_triggers);
     Ok(triggers)
 }

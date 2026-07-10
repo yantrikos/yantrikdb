@@ -501,11 +501,7 @@ pub fn detect_perspective_shift(
     }
 
     // Sort by confidence descending.
-    transitions.sort_by(|a, b| {
-        b.confidence
-            .partial_cmp(&a.confidence)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    transitions.sort_by(|a, b| b.confidence.total_cmp(&a.confidence));
 
     transitions
 }
@@ -652,11 +648,7 @@ pub fn perspective_conflict_check(
     }
 
     // Sort by severity.
-    conflicts.sort_by(|a, b| {
-        b.severity
-            .partial_cmp(&a.severity)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    conflicts.sort_by(|a, b| b.severity.total_cmp(&a.severity));
 
     conflicts
 }

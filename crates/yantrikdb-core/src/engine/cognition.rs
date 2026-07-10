@@ -346,11 +346,7 @@ impl YantrikDB {
 
         // Phase 7: Sort by urgency, truncate
         let mut final_triggers = filtered;
-        final_triggers.sort_by(|a, b| {
-            b.urgency
-                .partial_cmp(&a.urgency)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        final_triggers.sort_by(|a, b| b.urgency.total_cmp(&a.urgency));
         final_triggers.truncate(config.max_triggers);
 
         // Phase 7: Derive personality traits

@@ -409,12 +409,7 @@ pub fn instantiate_plan(goal_id: NodeId, ctx: &PlanningContext) -> PlanProposal 
     let candidates_evaluated = candidate_plans.len();
 
     // Score, sort, and take top-k.
-    candidate_plans.sort_by(|a, b| {
-        b.score
-            .composite
-            .partial_cmp(&a.score.composite)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    candidate_plans.sort_by(|a, b| b.score.composite.total_cmp(&a.score.composite));
     candidate_plans.truncate(config.top_k);
 
     // Check constraints against all remaining plans.

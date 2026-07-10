@@ -232,7 +232,7 @@ impl<'a> YantrikExecutor<'a> {
         }
 
         // Sort by score descending and assign ranks.
-        ranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap());
+        ranked.sort_by(|a, b| b.score.total_cmp(&a.score));
         for (i, r) in ranked.iter_mut().enumerate() {
             r.rank = i + 1;
         }

@@ -300,6 +300,71 @@ fn test_recall_basic() {
 }
 
 #[test]
+fn recall_survives_nan_embedding_in_candidate_pool() {
+    // Issue #60 end-to-end repro. A stored embedding with a NaN component used
+    // to yield a NaN similarity score — the old hnsw zero-norm guard missed NaN
+    // (`NaN == 0.0` is false) — which, mixed with the finite scores of normal
+    // candidates in the SAME recall sort, tripped Rust >= 1.81 driftsort's
+    // total-order panic ("comparison function does not implement a total
+    // order"). Now cosine_distance guards the NaN to a finite value AND every
+    // recall sort uses f64::total_cmp, so recall returns cleanly. This guards
+    // both fixes: a regressed hnsw guard trips the is_finite assertion below
+    // even if driftsort happens not to panic on this input size.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let add = |text: &str, emb: Vec<f32>| {
+        db.record(
+            text,
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    };
+    add("finite one", vec_seed(1.0, 8));
+    add("finite two", vec_seed(5.0, 8));
+    add("finite three", vec_seed(1.1, 8));
+    // The poison pill: a NaN component in an otherwise-normal stored embedding.
+    let mut nan_emb = vec_seed(2.0, 8);
+    nan_emb[0] = f32::NAN;
+    add("nan memory", nan_emb);
+
+    let results = db
+        .recall(
+            &vec_seed(1.0, 8),
+            10,
+            None,
+            None,
+            false,
+            false,
+            None,
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .expect("recall must not panic with a NaN embedding in the candidate pool");
+    assert!(
+        !results.is_empty(),
+        "recall returns the finite-scored candidates"
+    );
+    assert!(
+        results.iter().all(|r| r.score.is_finite()),
+        "every returned score is finite — the NaN embedding was guarded, not \
+         propagated into the sort comparator"
+    );
+}
+
+#[test]
 fn test_recall_empty() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let results = db

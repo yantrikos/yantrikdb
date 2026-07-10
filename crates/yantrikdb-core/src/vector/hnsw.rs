@@ -35,10 +35,16 @@ fn cosine_distance(a: &[f32], b: &[f32]) -> f64 {
         .map(|&x| (x as f64) * (x as f64))
         .sum::<f64>()
         .sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 {
+    // Guard zero AND NaN norms. `norm_a == 0.0` misses NaN (`NaN == 0.0` is
+    // false), and `f64::clamp` preserves a NaN `self`, so a NaN norm would let
+    // a NaN distance escape — which then poisons callers' sort comparators
+    // (issue #60). `!(norm > 0.0)` is true for NaN, 0.0, and negatives (every
+    // comparison with NaN is false), so it catches all three.
+    if !(norm_a > 0.0) || !(norm_b > 0.0) {
         return 1.0;
     }
-    // Clamp to [0.0, 2.0] to handle floating-point rounding
+    // Clamp to [0.0, 2.0] to handle floating-point rounding. With both norms
+    // > 0.0 and finite, the ratio cannot be NaN here, so clamp is NaN-safe.
     (1.0 - (dot / (norm_a * norm_b))).clamp(0.0, 2.0)
 }
 
@@ -62,10 +68,7 @@ impl Eq for Candidate {}
 impl Ord for Candidate {
     fn cmp(&self, other: &Self) -> Ordering {
         // Reverse: BinaryHeap is a max-heap, so reverse for min-heap behavior
-        other
-            .distance
-            .partial_cmp(&self.distance)
-            .unwrap_or(Ordering::Equal)
+        other.distance.total_cmp(&self.distance)
     }
 }
 impl PartialOrd for Candidate {
@@ -90,9 +93,7 @@ impl Eq for FarCandidate {}
 
 impl Ord for FarCandidate {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.distance
-            .partial_cmp(&other.distance)
-            .unwrap_or(Ordering::Equal)
+        self.distance.total_cmp(&other.distance)
     }
 }
 impl PartialOrd for FarCandidate {
@@ -303,7 +304,7 @@ impl HnswIndex {
             .filter(|&&n| !self.nodes[n].tombstoned)
             .map(|&n| (n, cosine_distance(&node_emb, &self.nodes[n].embedding)))
             .collect();
-        neighbors_with_dist.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+        neighbors_with_dist.sort_by(|a, b| a.1.total_cmp(&b.1));
         neighbors_with_dist.truncate(max_m);
         self.nodes[node_idx].neighbors[layer] =
             neighbors_with_dist.iter().map(|&(n, _)| n).collect();
@@ -490,11 +491,7 @@ impl HnswIndex {
                 distance: fc.distance,
             })
             .collect();
-        sorted.sort_by(|a, b| {
-            a.distance
-                .partial_cmp(&b.distance)
-                .unwrap_or(Ordering::Equal)
-        });
+        sorted.sort_by(|a, b| a.distance.total_cmp(&b.distance));
         sorted
     }
 }
@@ -547,7 +544,7 @@ impl BruteForceIndex {
             .filter(|(_, _, tombstoned)| !tombstoned)
             .map(|(rid, emb, _)| (rid.clone(), cosine_distance(query, emb)))
             .collect();
-        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(Ordering::Equal));
+        scored.sort_by(|a, b| a.1.total_cmp(&b.1));
         scored.truncate(k);
         scored
     }
@@ -565,6 +562,33 @@ impl BruteForceIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cosine_distance_guards_nan_and_zero_norms() {
+        // Issue #60: the zero-norm guard used `norm == 0.0`, which misses NaN
+        // (`NaN == 0.0` is false) and lets a NaN distance escape (`clamp`
+        // preserves NaN). A NaN norm arises from a NaN-valued embedding
+        // component. The distance must always come back finite so it can never
+        // poison a caller's sort comparator.
+        let nan_vec = vec![f32::NAN, 1.0, 0.0];
+        let finite = vec![1.0f32, 0.0, 0.0];
+        let zero = vec![0.0f32, 0.0, 0.0];
+
+        let d_nan = cosine_distance(&nan_vec, &finite);
+        assert!(
+            d_nan.is_finite(),
+            "NaN embedding must not yield NaN distance"
+        );
+        assert_eq!(d_nan, 1.0);
+
+        // Symmetric: NaN on the other side.
+        assert_eq!(cosine_distance(&finite, &nan_vec), 1.0);
+        // Zero norm still guarded (unchanged behavior).
+        assert_eq!(cosine_distance(&zero, &finite), 1.0);
+        // Sanity: a normal pair is finite and within the clamped range.
+        let d = cosine_distance(&finite, &finite);
+        assert!(d.is_finite() && (0.0..=2.0).contains(&d));
+    }
 
     /// Generate a deterministic unit-norm embedding.
     fn vec_seed(seed: f32, dim: usize) -> Vec<f32> {

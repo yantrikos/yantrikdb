@@ -752,7 +752,7 @@ pub fn select_action(
     }
 
     // Sort by adjusted utility descending
-    adjusted.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    adjusted.sort_by(|a, b| b.0.total_cmp(&a.0));
 
     // ── Phase 3: Threshold filter ──
 

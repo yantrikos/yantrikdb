@@ -597,11 +597,7 @@ pub fn run_surfacing_pipeline(
     }
 
     // Sort by net utility (highest first)
-    suggestions.sort_by(|a, b| {
-        b.net_utility
-            .partial_cmp(&a.net_utility)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    suggestions.sort_by(|a, b| b.net_utility.total_cmp(&a.net_utility));
 
     // Limit to max_suggestions
     suggestions.truncate(config.max_suggestions);
@@ -790,11 +786,9 @@ pub fn run_surfacing_with_preferences(
     }
 
     // Re-sort after adjustment
-    result.suggestions.sort_by(|a, b| {
-        b.net_utility
-            .partial_cmp(&a.net_utility)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    result
+        .suggestions
+        .sort_by(|a, b| b.net_utility.total_cmp(&a.net_utility));
 
     result
 }

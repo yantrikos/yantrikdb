@@ -892,7 +892,7 @@ fn enforce_max_beliefs(store: &mut BeliefStore, config: &FlywheelConfig) {
         .iter()
         .map(|(k, b)| (k.clone(), b.confidence))
         .collect();
-    entries.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap());
+    entries.sort_by(|a, b| a.1.total_cmp(&b.1));
 
     let to_remove = store.len() - config.max_beliefs;
     for (key, _) in entries.into_iter().take(to_remove) {

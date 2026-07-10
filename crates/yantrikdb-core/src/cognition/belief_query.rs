@@ -186,12 +186,7 @@ pub fn query_beliefs<'a>(
     // Sort
     match pattern.order {
         BeliefOrder::ByConfidence => {
-            results.sort_by(|a, b| {
-                b.attrs
-                    .confidence
-                    .partial_cmp(&a.attrs.confidence)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            results.sort_by(|a, b| b.attrs.confidence.total_cmp(&a.attrs.confidence));
         }
         BeliefOrder::ByRecency => {
             results.sort_by(|a, b| b.attrs.last_updated_ms.cmp(&a.attrs.last_updated_ms));
@@ -200,20 +195,10 @@ pub fn query_beliefs<'a>(
             results.sort_by(|a, b| b.attrs.evidence_count.cmp(&a.attrs.evidence_count));
         }
         BeliefOrder::BySalience => {
-            results.sort_by(|a, b| {
-                b.attrs
-                    .salience
-                    .partial_cmp(&a.attrs.salience)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            results.sort_by(|a, b| b.attrs.salience.total_cmp(&a.attrs.salience));
         }
         BeliefOrder::ByVolatility => {
-            results.sort_by(|a, b| {
-                b.attrs
-                    .volatility
-                    .partial_cmp(&a.attrs.volatility)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+            results.sort_by(|a, b| b.attrs.volatility.total_cmp(&a.attrs.volatility));
         }
     }
 
@@ -354,16 +339,14 @@ pub fn belief_inventory(nodes: &[&CognitiveNode]) -> BeliefInventory {
     }
 
     // Top-5 most volatile
-    volatile_heap.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    volatile_heap.sort_by(|a, b| b.2.total_cmp(&a.2));
     inv.most_volatile = volatile_heap.into_iter().take(5).collect();
 
     // Top-5 strongest (by distance from 0.5)
     strongest_heap.sort_by(|a, b| {
         let dist_a = (a.2 - 0.5).abs();
         let dist_b = (b.2 - 0.5).abs();
-        dist_b
-            .partial_cmp(&dist_a)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        dist_b.total_cmp(&dist_a)
     });
     inv.strongest = strongest_heap.into_iter().take(5).collect();
 
@@ -371,9 +354,7 @@ pub fn belief_inventory(nodes: &[&CognitiveNode]) -> BeliefInventory {
     contested_heap.sort_by(|a, b| {
         let uncertainty_a = (a.2 - 0.5).abs();
         let uncertainty_b = (b.2 - 0.5).abs();
-        uncertainty_a
-            .partial_cmp(&uncertainty_b)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        uncertainty_a.total_cmp(&uncertainty_b)
     });
     inv.most_contested = contested_heap.into_iter().take(5).collect();
 
@@ -391,11 +372,7 @@ fn compute_confidence_trend(evidence: &[EvidenceEntry]) -> f64 {
 
     // Split evidence into halves by time
     let mut sorted: Vec<&EvidenceEntry> = evidence.iter().collect();
-    sorted.sort_by(|a, b| {
-        a.timestamp
-            .partial_cmp(&b.timestamp)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    sorted.sort_by(|a, b| a.timestamp.total_cmp(&b.timestamp));
 
     let mid = sorted.len() / 2;
     let early_avg: f64 = sorted[..mid].iter().map(|e| e.weight).sum::<f64>() / mid as f64;

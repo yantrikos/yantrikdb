@@ -316,11 +316,7 @@ pub fn add_to_buffer(
             .entries
             .iter()
             .enumerate()
-            .min_by(|(_, a), (_, b)| {
-                a.priority
-                    .partial_cmp(&b.priority)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .min_by(|(_, a), (_, b)| a.priority.total_cmp(&b.priority))
             .map(|(i, _)| i)
         {
             if engine.buffer.entries[min_idx].priority < priority {
@@ -378,11 +374,10 @@ pub fn reprioritize_buffer(engine: &mut ReplayEngine, now_ms: u64) {
     }
 
     // Sort by priority descending.
-    engine.buffer.entries.sort_by(|a, b| {
-        b.priority
-            .partial_cmp(&a.priority)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    engine
+        .buffer
+        .entries
+        .sort_by(|a, b| b.priority.total_cmp(&a.priority));
 }
 
 /// Sample episodes from the buffer for replay.
@@ -564,7 +559,7 @@ pub fn discover_cross_associations(
     }
 
     // Deduplicate.
-    associations.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+    associations.sort_by(|a, b| b.2.total_cmp(&a.2));
     associations.dedup_by(|a, b| a.0 == b.0 && a.1 == b.1);
 
     associations

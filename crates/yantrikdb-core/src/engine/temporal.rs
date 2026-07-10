@@ -86,9 +86,7 @@ impl YantrikDB {
         results.sort_by(|a, b| {
             let best_a = a.1.detected.first().map(|d| d.correlation).unwrap_or(0.0);
             let best_b = b.1.detected.first().map(|d| d.correlation).unwrap_or(0.0);
-            best_b
-                .partial_cmp(&best_a)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            best_b.total_cmp(&best_a)
         });
 
         Ok(results)
@@ -260,7 +258,7 @@ impl YantrikDB {
             })
             .collect();
 
-        scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
 
         Ok(scored)
     }
@@ -314,7 +312,7 @@ impl YantrikDB {
         }
 
         // Sort by urgency descending
-        entries.sort_by(|a, b| b.3.partial_cmp(&a.3).unwrap_or(std::cmp::Ordering::Equal));
+        entries.sort_by(|a, b| b.3.total_cmp(&a.3));
 
         Ok(entries)
     }

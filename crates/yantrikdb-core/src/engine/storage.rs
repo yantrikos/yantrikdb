@@ -215,7 +215,7 @@ impl YantrikDB {
         }; // drop conn before archive() which re-acquires it
 
         // Sort ascending — lowest score = most evictable
-        scored.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+        scored.sort_by(|a, b| a.1.total_cmp(&b.1));
 
         let mut archived_rids = Vec::new();
         for (rid, _) in scored.into_iter().take(to_evict) {

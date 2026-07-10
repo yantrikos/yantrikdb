@@ -1268,10 +1268,7 @@ fn enforce_max_skills(registry: &mut SkillRegistry, config: &SkillConfig) {
         .collect();
 
     // Sort by priority ascending, then confidence ascending (remove lowest first)
-    ranked.sort_by(|a, b| {
-        a.2.cmp(&b.2)
-            .then(a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
-    });
+    ranked.sort_by(|a, b| a.2.cmp(&b.2).then(a.1.total_cmp(&b.1)));
 
     let to_remove = registry.skills.len() - config.max_skills;
     for (key, _, _) in ranked.into_iter().take(to_remove) {
@@ -1346,11 +1343,7 @@ pub fn find_matching_skills(
         .collect();
 
     // Sort by relevance descending
-    matches.sort_by(|a, b| {
-        b.relevance
-            .partial_cmp(&a.relevance)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    matches.sort_by(|a, b| b.relevance.total_cmp(&a.relevance));
     matches.truncate(max_results);
     matches
 }
