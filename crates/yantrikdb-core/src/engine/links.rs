@@ -807,8 +807,9 @@ mod tests {
             },
         )
         .unwrap();
-        db.correct(&a, Some("a v1"), None, None, None, "fix")
-            .unwrap();
+        // v0.9.3: importance correction (text corrections refused); the
+        // rid-stability property under test is identical.
+        db.correct(&a, None, None, Some(0.9), None, "fix").unwrap();
         let out = db
             .linked_records(&a, LinkDirection::Outbound, None)
             .unwrap();

@@ -662,12 +662,14 @@ mod tests {
 
         // Correct on A. Issue #47 (v0.7.20): correct() now mutates in
         // place, preserves rid + created_at, requires a non-empty reason.
-        // The signature dropped `new_embedding` (HNSW doesn't support
-        // in-place vector update).
+        // v0.9.3: importance correction — text corrections are refused
+        // (CorrectionRequiresReembed) until vector-coherent correct ships;
+        // the replication property under test (in-place mutation crosses
+        // the sync boundary) is identical.
         let result = a
             .correct(
                 &rid,
-                Some("color is blue"),
+                None,
                 None,             // metadata_merge
                 Some(0.9),        // new_importance
                 None,             // new_valence
@@ -681,14 +683,13 @@ mod tests {
         );
         sync_bidirectional(&a, &b).unwrap();
 
-        // B should see the in-place mutation: same rid, updated text,
+        // B should see the in-place mutation: same rid, updated importance,
         // not tombstoned.
         let on_b = b.get(&rid).unwrap().unwrap();
         assert_ne!(
             on_b.consolidation_status, "tombstoned",
             "v0.7.20 correct() does NOT tombstone the original"
         );
-        assert_eq!(on_b.text, "color is blue", "B must see the updated text");
         assert!(
             (on_b.importance - 0.9).abs() < 1e-9,
             "B must see the updated importance"

@@ -600,12 +600,27 @@ class TestNamespace:
         """Correcting a memory preserves its namespace.
 
         Issue #47 (v0.7.20): correct() is now in-place. `reason` is
-        required, `embedding` removed (HNSW limitation).
+        required, `embedding` removed (HNSW limitation). v0.9.3: text
+        corrections are refused (see test_correct_refuses_new_text), so
+        the namespace-preservation contract is exercised via importance.
         """
         rid = db.record("original", embedding=_vec(1.0), namespace="my-ns")
-        result = db.correct(rid, reason="test", new_text="corrected")
+        result = db.correct(rid, reason="test", new_importance=0.9)
         corrected = db.get(result["corrected_rid"])
         assert corrected["namespace"] == "my-ns"
+
+    def test_correct_refuses_new_text(self, db):
+        """v0.9.3 (issue #60 follow-up program): correct(new_text=...) is
+        refused with an actionable error — changing text without
+        re-embedding leaves the memory retrieved under its OLD meaning.
+        Metadata/importance/valence corrections remain available."""
+        rid = db.record("alice owns service A", embedding=_vec(1.0))
+        with pytest.raises(Exception, match="record_text"):
+            db.correct(rid, reason="handover", new_text="bob owns service B")
+        # No side effects: text unchanged, and non-text corrections still work.
+        assert db.get(rid)["text"] == "alice owns service A"
+        result = db.correct(rid, reason="handover", metadata_merge={"owner": "bob"})
+        assert result["revision_num"] == 1
 
 
 class TestQueryBuilder:

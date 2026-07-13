@@ -923,10 +923,12 @@ fn test_correct_memory() {
         )
         .unwrap();
 
+    // v0.9.3: importance correction (text corrections refused pending
+    // vector-coherent correct in v0.10).
     let result = db
         .correct(
             &rid,
-            Some("favorite color is blue"),
+            None,
             None,                                  // metadata_merge
             Some(0.9),                             // new_importance
             None,                                  // new_valence
@@ -943,7 +945,6 @@ fn test_correct_memory() {
 
     let updated = db.get(&rid).unwrap().unwrap();
     assert_ne!(updated.consolidation_status, "tombstoned");
-    assert_eq!(updated.text, "favorite color is blue");
     assert!((updated.importance - 0.9).abs() < 1e-9);
 }
 
@@ -4494,10 +4495,11 @@ fn test_encrypted_correct_memory() {
             None,
         )
         .unwrap();
+    // v0.9.3: importance-only correction (text corrections refused).
     let result = db
         .correct(
             &rid,
-            Some("color is blue"),
+            None,
             None,
             Some(0.9),
             None,
@@ -4509,7 +4511,6 @@ fn test_encrypted_correct_memory() {
     assert_eq!(result.corrected_rid, rid);
     assert!(!result.original_tombstoned);
     let updated = db.get(&rid).unwrap().unwrap();
-    assert_eq!(updated.text, "color is blue");
     assert!((updated.importance - 0.9).abs() < 1e-9);
 }
 
@@ -4998,16 +4999,16 @@ fn test_dimensions_preserved_on_correct() {
         )
         .unwrap();
 
-    // Correct the memory text. Issue #47 (v0.7.20): in-place mutation,
-    // rid preserved, reason required.
+    // Correct the memory (importance; text corrections refused in v0.9.3).
+    // Issue #47 (v0.7.20): in-place mutation, rid preserved, reason required.
     let result = db
         .correct(
             &rid,
-            Some("the sky is blue"),
+            None,
             None,
             Some(0.9),
             None,
-            "color fix", // reason
+            "importance fix", // reason
         )
         .unwrap();
     assert!(!result.original_tombstoned);
@@ -5016,7 +5017,6 @@ fn test_dimensions_preserved_on_correct() {
     // Verify the in-place mutation preserves domain, source, and emotional_state
     // (these aren't touched by correct() since they're not in the signature).
     let updated = db.get(&rid).unwrap().unwrap();
-    assert_eq!(updated.text, "the sky is blue");
     assert_eq!(
         updated.domain, "work",
         "domain should be preserved after correction"
@@ -13735,15 +13735,11 @@ fn correct_preserves_rid_and_created_at() {
     let original_created_at = original.created_at;
     std::thread::sleep(std::time::Duration::from_millis(10));
 
+    // v0.9.3: text corrections are refused (CorrectionRequiresReembed);
+    // the rid/created_at preservation contract is exercised via an
+    // importance correction instead.
     let result = db
-        .correct(
-            &rid,
-            Some("corrected text"),
-            None,
-            None,
-            None,
-            "test correction",
-        )
+        .correct(&rid, None, None, Some(0.9), None, "test correction")
         .unwrap();
     assert_eq!(result.corrected_rid, rid, "rid must be preserved");
     assert_eq!(result.original_rid, rid);
@@ -13751,13 +13747,78 @@ fn correct_preserves_rid_and_created_at() {
     assert_eq!(result.revision_num, 1);
 
     let updated = db.get(&rid).unwrap().unwrap();
-    assert_eq!(updated.text, "corrected text");
+    assert_eq!(updated.text, "original text", "text untouched");
+    assert!((updated.importance - 0.9).abs() < 1e-9);
     assert!(
         (updated.created_at - original_created_at).abs() < 1e-9,
         "created_at must be preserved (was {}, became {})",
         original_created_at,
         updated.created_at,
     );
+}
+
+#[test]
+fn correct_refuses_text_changes_with_typed_error_and_no_side_effects() {
+    // v0.9.3 (sol converged plan item 3): correct(new_text=...) would pair
+    // new text with the OLD embedding — the memory keeps being retrieved
+    // under its old meaning — so it is refused with a typed error BEFORE
+    // the revision transaction. Nothing changes: no revision row, no text
+    // mutation, no oplog entry.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid = db
+        .record(
+            "alice owns service A",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    let err = db
+        .correct(
+            &rid,
+            Some("bob owns service B"),
+            None,
+            None,
+            None,
+            "handover",
+        )
+        .unwrap_err();
+    match &err {
+        crate::error::YantrikDbError::CorrectionRequiresReembed { rid: r } => {
+            assert_eq!(r, &rid);
+        }
+        other => panic!("wrong error: {other}"),
+    }
+    // The message names the working alternative.
+    let msg = err.to_string();
+    assert!(msg.contains("forget"), "actionable message: {msg}");
+    assert!(msg.contains("record_text"), "actionable message: {msg}");
+
+    // Zero side effects.
+    let unchanged = db.get(&rid).unwrap().unwrap();
+    assert_eq!(unchanged.text, "alice owns service A");
+    assert!(db.history(&rid).unwrap().is_empty(), "no revision row");
+
+    // Metadata / importance / valence corrections remain available.
+    db.correct(
+        &rid,
+        None,
+        Some(&serde_json::json!({"owner": "bob"})),
+        Some(0.9),
+        Some(0.1),
+        "ownership metadata updated",
+    )
+    .unwrap();
+    assert_eq!(db.history(&rid).unwrap().len(), 1);
 }
 
 #[test]
@@ -13779,10 +13840,11 @@ fn correct_writes_revision_row_with_prior_state() {
             None,
         )
         .unwrap();
+    // v0.9.3: metadata/importance/valence correction (text refused).
     let _ = db
         .correct(
             &rid,
-            Some("v1"),
+            None,
             Some(&serde_json::json!({"key": "after"})),
             Some(0.7),
             Some(0.3),
@@ -13822,14 +13884,16 @@ fn correct_multiple_revisions_increment_revision_num() {
             None,
         )
         .unwrap();
+    // v0.9.3: revision-number chain exercised via importance corrections
+    // (text corrections are refused pending vector-coherent correct).
     let r1 = db
-        .correct(&rid, Some("v1"), None, None, None, "first")
+        .correct(&rid, None, None, Some(0.6), None, "first")
         .unwrap();
     let r2 = db
-        .correct(&rid, Some("v2"), None, None, None, "second")
+        .correct(&rid, None, None, Some(0.7), None, "second")
         .unwrap();
     let r3 = db
-        .correct(&rid, Some("v3"), None, None, None, "third")
+        .correct(&rid, None, None, Some(0.9), None, "third")
         .unwrap();
     assert_eq!(r1.revision_num, 1);
     assert_eq!(r2.revision_num, 2);
@@ -13837,13 +13901,14 @@ fn correct_multiple_revisions_increment_revision_num() {
 
     let history = db.history(&rid).unwrap();
     assert_eq!(history.len(), 3, "three revisions expected");
-    // history returns oldest-first
-    assert_eq!(history[0].prior_text, "v0");
-    assert_eq!(history[1].prior_text, "v1");
-    assert_eq!(history[2].prior_text, "v2");
+    // history returns oldest-first; prior importances chain through.
+    assert!((history[0].prior_importance - 0.5).abs() < 1e-9);
+    assert!((history[1].prior_importance - 0.6).abs() < 1e-9);
+    assert!((history[2].prior_importance - 0.7).abs() < 1e-9);
 
     let final_state = db.get(&rid).unwrap().unwrap();
-    assert_eq!(final_state.text, "v3");
+    assert_eq!(final_state.text, "v0", "text untouched throughout");
+    assert!((final_state.importance - 0.9).abs() < 1e-9);
 }
 
 #[test]
@@ -13945,11 +14010,13 @@ fn correct_preserves_inbound_graph_edges() {
     assert!(!edges_before.is_empty(), "edge should exist before correct");
 
     // Correct the memory.
+    // v0.9.3: importance correction (text refused); the link-integrity
+    // property under test is about rid stability, not the text.
     db.correct(
         &rid_subject,
-        Some("updated subject"),
         None,
         None,
+        Some(0.9),
         None,
         "test link integrity",
     )

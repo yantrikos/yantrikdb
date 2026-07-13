@@ -58,6 +58,23 @@ pub enum YantrikDbError {
         value: f64,
     },
 
+    /// **v0.9.3 (sol converged plan item 3).** `correct(new_text=...)` was
+    /// refused because changing a memory's text without re-embedding it
+    /// leaves the durable "current truth" and the retrieval vector
+    /// permanently disagreeing — the corrected memory keeps being retrieved
+    /// under its OLD meaning. Until the vector-coherent correction path
+    /// ships (v0.10: embed new text, tombstone old vector, reinsert same
+    /// rid), text changes must go through the workaround named in the
+    /// message. Metadata / importance / valence corrections are unaffected.
+    #[error(
+        "correct(new_text=...) on {rid} would leave the memory retrieved under its OLD \
+         meaning (text would change but its embedding cannot be updated in place). \
+         Until vector-coherent correction ships, use: forget(\"{rid}\") then \
+         record_text(new_text, ...) — note this mints a NEW rid. Metadata / importance / \
+         valence corrections remain supported without new_text."
+    )]
+    CorrectionRequiresReembed { rid: String },
+
     /// **Issue #41 / brainstorm-3.** `set_embedder*` was called with a
     /// candidate embedder whose dimensionality differs from the active
     /// index. On a populated DB this would produce silent corruption

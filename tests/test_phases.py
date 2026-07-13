@@ -210,7 +210,8 @@ class TestPhase3RicherDimensions:
             source="manager",
             certainty=0.85,
         )
-        result = db.correct(rid, reason="test", new_text="corrected text")
+        # v0.9.3: importance correction (text corrections are refused).
+        result = db.correct(rid, reason="test", new_importance=0.9)
         corrected = db.get(result["corrected_rid"])
         assert corrected["domain"] == "work"
         assert corrected["source"] == "manager"
@@ -550,7 +551,8 @@ class TestPhaseIntegration:
         assert resp["results"][0]["domain"] == "science"
 
         # Correct — Issue #47 (v0.7.20): in-place, `reason` required.
-        correction = db.correct(rid, reason="test", new_text="corrected flow test")
+        # v0.9.3: importance correction (text corrections are refused).
+        correction = db.correct(rid, reason="test", new_importance=0.9)
         corrected = db.get(correction["corrected_rid"])
         assert corrected["domain"] == "science"
         assert corrected["source"] == "experiment"

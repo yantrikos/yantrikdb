@@ -284,7 +284,10 @@ def memory_correct(
         rid: The memory ID to correct.
         reason: Required non-empty string explaining why the correction
                 was made.
-        new_text: Optional new text. Pass None to keep the existing text.
+        new_text: REFUSED since v0.9.3 (CorrectionRequiresReembed): changing
+                text without re-embedding leaves the memory retrieved under
+                its OLD meaning. Use forget(rid) + remember(new_text) until
+                vector-coherent correction ships (v0.10). Pass None.
         metadata_merge: Optional dict patch-merged into existing metadata.
         new_importance: Optional new importance score (0.0 to 1.0).
         new_valence: Optional new emotional valence (-1.0 to 1.0).

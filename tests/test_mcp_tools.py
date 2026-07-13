@@ -200,6 +200,7 @@ class TestMemoryCorrect:
         """Issue #47 (v0.7.20): correct() is now in-place. `reason` is
         required, `correction_note` removed. rid is preserved, original
         is NOT tombstoned, and the revision is recorded with revision_num=1.
+        v0.9.3: exercised via importance (text corrections are refused).
         """
         from yantrikdb.mcp.tools import memory_correct
 
@@ -207,7 +208,7 @@ class TestMemoryCorrect:
         result = json.loads(memory_correct(
             rid=rid,
             reason="fixed typo",
-            new_text="correct fact",
+            new_importance=0.9,
             ctx=ctx,
         ))
         # In-place: rid is preserved, original is NOT tombstoned.
@@ -216,10 +217,21 @@ class TestMemoryCorrect:
         assert result["original_tombstoned"] is False
         assert result["revision_num"] == 1
 
-        # Memory still exists at same rid, with updated text.
+        # Memory still exists at same rid, not tombstoned.
         updated = db.get(rid)
         assert updated["consolidation_status"] != "tombstoned"
-        assert updated["text"] == "correct fact"
+
+    def test_correct_refuses_new_text(self, db, ctx):
+        """v0.9.3: text corrections through the MCP tool surface the typed
+        engine refusal with the actionable workaround in the message."""
+        import pytest
+
+        from yantrikdb.mcp.tools import memory_correct
+
+        rid = db.record("wrong fact", embedding=_vec(1.0))
+        with pytest.raises(Exception, match="record_text"):
+            memory_correct(rid=rid, reason="fixed typo", new_text="correct fact", ctx=ctx)
+        assert db.get(rid)["text"] == "wrong fact"
 
 
 # ── entity_relate ──
