@@ -359,8 +359,10 @@ impl PyYantrikDB {
         max_decisions = 8,
         max_conflicts = 5,
         max_triggers = 5,
-        snippet_chars = 240
+        snippet_chars = 240,
+        namespace = None
     ))]
+    #[allow(clippy::too_many_arguments)]
     fn session_digest(
         &self,
         narrative_namespace: Option<String>,
@@ -368,10 +370,14 @@ impl PyYantrikDB {
         max_conflicts: usize,
         max_triggers: usize,
         snippet_chars: usize,
+        namespace: Option<String>,
     ) -> PyResult<String> {
         let db = self.get_inner()?;
         let cfg = yantrikdb_core::SessionDigestConfig {
             narrative_namespace,
+            // v0.9.3: optional content scope — decisions + conflicts filtered
+            // to this namespace so per-tenant digests never mix tenants.
+            namespace,
             max_decisions,
             max_conflicts,
             max_triggers,
@@ -456,17 +462,23 @@ impl PyYantrikDB {
     /// Surface knowledge gaps — frequently-asked, poorly-answered queries the
     /// substrate should satisfy but can't (v0.9.0). Returns a list of
     /// {query, count, avg_top_score, avg_results, last_seen} dicts.
-    #[pyo3(signature = (min_count = 3, max_avg_top_score = 0.4, limit = 20))]
+    ///
+    /// v0.9.3: scoped — `namespace=<ns>` reads that namespace's demand;
+    /// `namespace=None` reads the global bucket (recalls issued without a
+    /// namespace filter). One call never mixes scopes. Always empty on
+    /// encrypted databases (demand capture is disabled there).
+    #[pyo3(signature = (min_count = 3, max_avg_top_score = 0.4, limit = 20, namespace = None))]
     fn knowledge_gaps(
         &self,
         py: Python<'_>,
         min_count: u64,
         max_avg_top_score: f64,
         limit: usize,
+        namespace: Option<&str>,
     ) -> PyResult<Vec<PyObject>> {
         let db = self.get_inner()?;
         let gaps = db
-            .knowledge_gaps(min_count, max_avg_top_score, limit)
+            .knowledge_gaps(namespace, min_count, max_avg_top_score, limit)
             .map_err(map_err)?;
         gaps.iter()
             .map(|g| {

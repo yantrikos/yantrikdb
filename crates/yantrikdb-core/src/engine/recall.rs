@@ -1874,10 +1874,12 @@ impl YantrikDB {
         // v0.9.0: record demand (what was asked + how well it was answered) so
         // the substrate can surface its own knowledge gaps. Skipped for
         // internal / eval recalls; best-effort (never fails the recall).
+        // v0.9.3: scoped to the recall's namespace filter (None = the global
+        // bucket) and a no-op on encrypted databases — see engine/demand.rs.
         if !skip_reinforce {
             if let Some(qt) = query_text {
                 let top = scored.first().map(|r| r.score).unwrap_or(0.0);
-                let _ = self.record_recall_demand(qt, scored.len(), top);
+                let _ = self.record_recall_demand(namespace, qt, scored.len(), top);
             }
         }
 

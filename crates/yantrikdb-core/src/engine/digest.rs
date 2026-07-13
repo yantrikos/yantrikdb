@@ -25,6 +25,17 @@ use super::YantrikDB;
 pub struct SessionDigestConfig {
     /// The append-only identity/narrative chain to read the head of.
     pub narrative_namespace: Option<String>,
+    /// **v0.9.3 isolation scope (sol converged plan item 2).** When set, the
+    /// digest's CONTENT aggregates (top decisions, open conflicts + count)
+    /// are filtered to this namespace, so a multi-tenant host composing one
+    /// digest per tenant never mixes another tenant's memories in. `None`
+    /// keeps the original explicit-global behavior (single-tenant embedded
+    /// use, where the caller owns the whole database anyway). Pending
+    /// TRIGGERS remain global in both modes — `trigger_log` rows carry
+    /// engine-generated operational reasons keyed by rid, not memory text,
+    /// and namespace-scoping them requires a source_rids join deferred to
+    /// the v0.10 reliability program.
+    pub namespace: Option<String>,
     pub max_decisions: usize,
     pub max_conflicts: usize,
     pub max_triggers: usize,
@@ -36,6 +47,7 @@ impl Default for SessionDigestConfig {
     fn default() -> Self {
         Self {
             narrative_namespace: None,
+            namespace: None,
             max_decisions: 8,
             max_conflicts: 5,
             max_triggers: 5,
@@ -110,24 +122,42 @@ impl YantrikDB {
 
         // Top live decisions — highest importance, most recent first. Read
         // directly so we can rank by importance (list_records ranks by rid).
+        // v0.9.3: scoped to config.namespace when set (isolation contract).
         {
             let conn = self.conn();
-            let mut stmt = conn.prepare(
-                "SELECT rid, text, importance, created_at, namespace FROM memories \
-                 WHERE consolidation_status = 'active' AND importance >= 0.7 \
-                 ORDER BY importance DESC, created_at DESC LIMIT ?1",
-            )?;
-            let rows = stmt
-                .query_map(params![config.max_decisions as i64], |r| {
-                    Ok((
-                        r.get::<_, String>(0)?,
-                        r.get::<_, String>(1)?,
-                        r.get::<_, f64>(2)?,
-                        r.get::<_, f64>(3)?,
-                        r.get::<_, String>(4)?,
-                    ))
-                })?
-                .collect::<std::result::Result<Vec<_>, _>>()?;
+            let (sql, ns_param) = match config.namespace.as_deref() {
+                Some(ns) => (
+                    "SELECT rid, text, importance, created_at, namespace FROM memories \
+                     WHERE consolidation_status = 'active' AND importance >= 0.7 \
+                     AND namespace = ?2 \
+                     ORDER BY importance DESC, created_at DESC LIMIT ?1",
+                    Some(ns.to_string()),
+                ),
+                None => (
+                    "SELECT rid, text, importance, created_at, namespace FROM memories \
+                     WHERE consolidation_status = 'active' AND importance >= 0.7 \
+                     ORDER BY importance DESC, created_at DESC LIMIT ?1",
+                    None,
+                ),
+            };
+            let mut stmt = conn.prepare(sql)?;
+            let map_row = |r: &rusqlite::Row| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, f64>(2)?,
+                    r.get::<_, f64>(3)?,
+                    r.get::<_, String>(4)?,
+                ))
+            };
+            let rows = match &ns_param {
+                Some(ns) => stmt
+                    .query_map(params![config.max_decisions as i64, ns], map_row)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+                None => stmt
+                    .query_map(params![config.max_decisions as i64], map_row)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+            };
             drop(stmt);
             drop(conn);
             for (rid, enc_text, importance, created_at, namespace) in rows {
@@ -143,26 +173,62 @@ impl YantrikDB {
         }
 
         // Open conflicts needing attention + total count.
-        let conflicts =
-            self.get_conflicts(Some("open"), None, None, None, None, config.max_conflicts)?;
-        digest.open_conflicts = conflicts
-            .into_iter()
-            .map(|c| DigestConflict {
-                conflict_id: c.conflict_id,
-                conflict_type: c.conflict_type,
-                priority: c.priority,
-                memory_a: c.memory_a,
-                memory_b: c.memory_b,
-            })
-            .collect();
-        digest.open_conflict_count = {
-            let conn = self.conn();
-            conn.query_row(
-                "SELECT COUNT(*) FROM conflicts WHERE status = 'open'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )? as usize
-        };
+        // v0.9.3: when a namespace scope is set, conflicts are filtered via
+        // their memory_a's namespace (the conflicts table itself carries no
+        // namespace column; memory_a and memory_b share one by construction
+        // since conflict detection compares within a namespace).
+        match config.namespace.as_deref() {
+            Some(ns) => {
+                let conn = self.conn();
+                let mut stmt = conn.prepare(
+                    "SELECT c.conflict_id, c.conflict_type, c.priority, c.memory_a, c.memory_b \
+                     FROM conflicts c \
+                     WHERE c.status = 'open' AND EXISTS (\
+                       SELECT 1 FROM memories m WHERE m.rid = c.memory_a AND m.namespace = ?1) \
+                     ORDER BY c.detected_at DESC LIMIT ?2",
+                )?;
+                digest.open_conflicts = stmt
+                    .query_map(params![ns, config.max_conflicts as i64], |r| {
+                        Ok(DigestConflict {
+                            conflict_id: r.get(0)?,
+                            conflict_type: r.get(1)?,
+                            priority: r.get(2)?,
+                            memory_a: r.get(3)?,
+                            memory_b: r.get(4)?,
+                        })
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                digest.open_conflict_count = conn.query_row(
+                    "SELECT COUNT(*) FROM conflicts c \
+                     WHERE c.status = 'open' AND EXISTS (\
+                       SELECT 1 FROM memories m WHERE m.rid = c.memory_a AND m.namespace = ?1)",
+                    params![ns],
+                    |r| r.get::<_, i64>(0),
+                )? as usize;
+            }
+            None => {
+                let conflicts =
+                    self.get_conflicts(Some("open"), None, None, None, None, config.max_conflicts)?;
+                digest.open_conflicts = conflicts
+                    .into_iter()
+                    .map(|c| DigestConflict {
+                        conflict_id: c.conflict_id,
+                        conflict_type: c.conflict_type,
+                        priority: c.priority,
+                        memory_a: c.memory_a,
+                        memory_b: c.memory_b,
+                    })
+                    .collect();
+                digest.open_conflict_count = {
+                    let conn = self.conn();
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM conflicts WHERE status = 'open'",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )? as usize
+                };
+            }
+        }
 
         // Pending triggers due + total count.
         let triggers = crate::triggers::get_pending_triggers(self, config.max_triggers)?;

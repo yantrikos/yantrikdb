@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 32;
+pub const SCHEMA_VERSION: i32 = 33;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -1032,13 +1032,20 @@ CREATE INDEX IF NOT EXISTS idx_conversation_turns_ns ON conversation_turns(names
 -- substrate surface its own knowledge gaps — frequently-asked queries that
 -- return little/nothing (high count, low avg top score). Bounded by distinct
 -- query cardinality, not total recalls.
+-- v33 (v0.9.3 isolation repair): namespace-scoped demand key, so one
+-- namespace's query intent can never surface in another's gap listing.
+-- '' = the global bucket (recalls issued without a namespace filter).
+-- Raw query text is NOT captured at all on encrypted databases (the
+-- write path skips demand persistence when encryption is active).
 CREATE TABLE IF NOT EXISTS recall_demand (
-    query_norm TEXT PRIMARY KEY,        -- normalized query (cluster key)
+    namespace TEXT NOT NULL DEFAULT '', -- '' = global (unscoped recalls)
+    query_norm TEXT NOT NULL,           -- normalized query (cluster key)
     sample_text TEXT NOT NULL,          -- a recent raw form, for display
     count INTEGER NOT NULL,             -- times asked
     sum_top_score REAL NOT NULL,        -- Σ best-hit score (avg = /count)
     sum_results INTEGER NOT NULL,       -- Σ result counts (avg = /count)
-    last_seen REAL NOT NULL
+    last_seen REAL NOT NULL,
+    PRIMARY KEY (namespace, query_norm)
 );
 CREATE INDEX IF NOT EXISTS idx_recall_demand_count ON recall_demand(count);
 
@@ -2397,4 +2404,15 @@ ALTER TABLE memories ADD COLUMN drive_id TEXT GENERATED ALWAYS AS (
 ) VIRTUAL;
 CREATE INDEX IF NOT EXISTS idx_memories_kind ON memories(kind);
 CREATE INDEX IF NOT EXISTS idx_memories_drive_id ON memories(drive_id);
+";
+
+/// **v0.9.3 isolation repair (sol converged plan item 2).** The v0.9.0
+/// `recall_demand` table was keyed globally (no namespace) and stored raw
+/// query text in plaintext even on encrypted databases. Legacy rows are
+/// unscopable — we cannot guess which namespace a recorded query belonged
+/// to — so the migration PURGES them (drop; `SCHEMA_SQL` recreates the
+/// namespace-keyed shape right after the migration chain runs). Demand
+/// stats rebuild organically from post-upgrade recalls.
+pub const MIGRATE_V32_TO_V33: &str = "
+DROP TABLE IF EXISTS recall_demand;
 ";
