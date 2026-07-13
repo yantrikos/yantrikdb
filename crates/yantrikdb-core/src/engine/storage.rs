@@ -139,6 +139,11 @@ impl YantrikDB {
     /// yantrikdb-agi 2026-05-01.
     #[tracing::instrument(skip(self, embedding), fields(rid = %rid))]
     pub fn insert_vector(&self, rid: &str, embedding: &[f32]) -> Result<()> {
+        // v0.9.3 contract gate: this path feeds the index directly (HNSW
+        // insert asserts on dim — a panic, not an error — and a NaN element
+        // poisons distance math). Reject with a typed error instead, and do
+        // it BEFORE the seq counter bumps so a rejected call is a no-op.
+        crate::validate::validate_embedding("insert_vector", embedding, self.embedding_dim)?;
         let seq = self
             .vec_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)

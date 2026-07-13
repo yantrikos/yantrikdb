@@ -1399,9 +1399,15 @@ impl YantrikDB {
     pub fn embed(&self, text: &str) -> Result<Vec<f32>> {
         let state = self.search_state.load_full();
         let embedder = state.embedder.as_ref().ok_or(YantrikDbError::NoEmbedder)?;
-        embedder
+        let out = embedder
             .embed(text)
-            .map_err(|e| YantrikDbError::Inference(e.to_string()))
+            .map_err(|e| YantrikDbError::Inference(e.to_string()))?;
+        // v0.9.3 contract gate: validate the EMBEDDER'S output too — an
+        // external/BYO embedder with an unguarded 0/0 (the issue #60 org
+        // user's ONNX mean-pool bug) can emit NaN; catch it here rather
+        // than persist it. Covers every engine-side embedding consumer.
+        crate::validate::validate_embedding("embed", &out, state.dim())?;
+        Ok(out)
     }
 
     /// Record a memory with automatic embedding generation.
@@ -1454,6 +1460,18 @@ impl YantrikDB {
         source: &str,
         emotional_state: Option<&str>,
     ) -> Result<String> {
+        // v0.9.3 contract gate: scalars validated BEFORE calibration mutates
+        // the namespace's running distribution. (The embedding is engine-
+        // generated below and validated inside the embed step.)
+        crate::validate::validate_scalars(
+            "record_text",
+            &[
+                ("importance", importance),
+                ("valence", valence),
+                ("certainty", certainty),
+                ("half_life", half_life),
+            ],
+        )?;
         // Task 29 (Ingest Integrity): strip any leaked tool-call
         // serialization tail BEFORE embedding, so both the computed vector
         // and the stored text reflect the real memory rather than the
@@ -1475,6 +1493,10 @@ impl YantrikDB {
                 .as_ref()
                 .ok_or(YantrikDbError::NoEmbedder)?
                 .clone();
+            // v0.9.3: capture the snapshot's dim for output validation below
+            // (authoritative for THIS generation; the step-5 revalidation
+            // retries if a swap lands mid-embed).
+            let dim_pre = state_for_embed.dim();
             // Release the Arc<SearchState> BEFORE the slow embed —
             // brainstorm-4 §4 invariant ("no holding SearchState
             // across long ops"). The embedder Arc is the small,
@@ -1485,6 +1507,10 @@ impl YantrikDB {
             let embedding = embedder
                 .embed(text)
                 .map_err(|e| YantrikDbError::Inference(e.to_string()))?;
+            // v0.9.3 contract gate: validate the embedder's output before
+            // committing (this loop bypasses `self.embed()`, so it needs
+            // its own gate — an external embedder can emit NaN, issue #60).
+            crate::validate::validate_embedding("record_text", &embedding, dim_pre)?;
 
             // Step 3: try to enter sync path.
             let sync_guard = match self.write_router.try_enter_sync_writer() {

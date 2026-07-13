@@ -66,6 +66,18 @@ impl YantrikDB {
         source: &str,
         emotional_state: Option<&str>,
     ) -> Result<String> {
+        // v0.9.3 contract gate: validate BEFORE any side effect (importance
+        // calibration below mutates the namespace's running distribution).
+        crate::validate::validate_embedding("record", embedding, self.embedding_dim)?;
+        crate::validate::validate_scalars(
+            "record",
+            &[
+                ("importance", importance),
+                ("valence", valence),
+                ("certainty", certainty),
+                ("half_life", half_life),
+            ],
+        )?;
         // Task 29 (Ingest Integrity): strip any leaked tool-call
         // serialization tail from the stored text. On this entry point the
         // caller supplies the embedding, so the vector may still reflect the
@@ -359,6 +371,38 @@ impl YantrikDB {
     pub fn record_batch(&self, inputs: &[RecordInput]) -> Result<Vec<String>> {
         if inputs.is_empty() {
             return Ok(vec![]);
+        }
+
+        // v0.9.3 contract gate: prevalidate the ENTIRE batch before any side
+        // effect (calibration / SQL / oplog / index), so a bad element late
+        // in the batch can't leave earlier elements half-committed.
+        for (i, input) in inputs.iter().enumerate() {
+            crate::validate::validate_embedding(
+                "record_batch",
+                &input.embedding,
+                self.embedding_dim,
+            )
+            .map_err(|e| match e {
+                crate::error::YantrikDbError::InvalidEmbedding {
+                    path,
+                    index,
+                    reason,
+                } => crate::error::YantrikDbError::InvalidEmbedding {
+                    path,
+                    index,
+                    reason: format!("inputs[{i}]: {reason}"),
+                },
+                other => other,
+            })?;
+            crate::validate::validate_scalars(
+                "record_batch",
+                &[
+                    ("importance", input.importance),
+                    ("valence", input.valence),
+                    ("certainty", input.certainty),
+                    ("half_life", input.half_life),
+                ],
+            )?;
         }
 
         // Task 29 (Ingest Integrity): strip any leaked tool-call
@@ -691,12 +735,26 @@ impl YantrikDB {
         // engine boundary for all replicas.
         let namespace = normalize_namespace(namespace);
         // Determinism gate: dim must match. Diverged dim = silent corruption.
+        // (Kept as the pre-v0.9.3 EmbeddingDimensionMismatch variant so
+        // replication callers matching on it keep working.)
         if embedding.len() != self.embedding_dim {
             return Err(crate::error::YantrikDbError::EmbeddingDimensionMismatch {
                 expected: self.embedding_dim,
                 got: embedding.len(),
             });
         }
+        // v0.9.3 contract gate: finiteness for the vector + scalars (dim
+        // already checked above). Replicated writes must not persist NaN.
+        crate::validate::validate_embedding("record_with_rid", embedding, self.embedding_dim)?;
+        crate::validate::validate_scalars(
+            "record_with_rid",
+            &[
+                ("importance", importance),
+                ("valence", valence),
+                ("certainty", certainty),
+                ("half_life", half_life),
+            ],
+        )?;
 
         // **Issue #41 brainstorm-4 §1.** SearchState snapshot for the
         // determinstic-replay path. The replicated write lands on the

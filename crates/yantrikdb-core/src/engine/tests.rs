@@ -310,8 +310,15 @@ fn recall_survives_nan_embedding_in_candidate_pool() {
     // recall sort uses f64::total_cmp, so recall returns cleanly. This guards
     // both fixes: a regressed hnsw guard trips the is_finite assertion below
     // even if driftsort happens not to panic on this input size.
+    //
+    // v0.9.3 update: the write-path contract gate now REJECTS NaN embeddings
+    // at record() (see `contract_gate_rejects_invalid_writes`), so this test
+    // simulates a LEGACY database — one whose NaN embedding was persisted
+    // before the gate existed — by corrupting the stored blob under the gate
+    // via SQL, then rebuilding the index the way open() would. Consumption-
+    // side hardening must keep protecting those databases forever.
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let add = |text: &str, emb: Vec<f32>| {
+    let add = |text: &str, emb: Vec<f32>| -> String {
         db.record(
             text,
             "episodic",
@@ -326,15 +333,27 @@ fn recall_survives_nan_embedding_in_candidate_pool() {
             "user",
             None,
         )
-        .unwrap();
+        .unwrap()
     };
     add("finite one", vec_seed(1.0, 8));
     add("finite two", vec_seed(5.0, 8));
     add("finite three", vec_seed(1.1, 8));
-    // The poison pill: a NaN component in an otherwise-normal stored embedding.
+    let legacy_rid = add("nan memory", vec_seed(2.0, 8));
+
+    // The poison pill, injected BELOW the gate (legacy-data simulation):
+    // corrupt the stored blob via SQL, then rebuild the in-memory index
+    // from SQL rows exactly like open() does.
     let mut nan_emb = vec_seed(2.0, 8);
     nan_emb[0] = f32::NAN;
-    add("nan memory", nan_emb);
+    {
+        let conn = db.conn();
+        conn.execute(
+            "UPDATE memories SET embedding = ?1 WHERE rid = ?2",
+            rusqlite::params![crate::serde_helpers::serialize_f32(&nan_emb), legacy_rid],
+        )
+        .unwrap();
+    }
+    db.rebuild_vec_index().unwrap();
 
     let results = db
         .recall(
@@ -361,6 +380,199 @@ fn recall_survives_nan_embedding_in_candidate_pool() {
         results.iter().all(|r| r.score.is_finite()),
         "every returned score is finite — the NaN embedding was guarded, not \
          propagated into the sort comparator"
+    );
+}
+
+#[test]
+fn contract_gate_rejects_invalid_writes() {
+    // v0.9.3 central numeric/vector contract gate (issue #60 follow-up, sol
+    // converged plan item 1). Table-driven entry-path matrix: every invalid
+    // input is rejected with the typed error BEFORE any side effect — the
+    // engine is left byte-for-byte unchanged (memory count + index entries).
+    use crate::error::YantrikDbError;
+
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    // One valid memory so the engine has real state to leave untouched.
+    db.record(
+        "baseline memory",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+    let baseline = db.stats(None).unwrap();
+
+    let nan_emb = {
+        let mut v = vec_seed(2.0, 8);
+        v[3] = f32::NAN;
+        v
+    };
+    let wrong_dim = vec_seed(2.0, 5);
+
+    // record: non-finite element (carries the element index) + wrong dim.
+    match db
+        .record(
+            "x",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &nan_emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap_err()
+    {
+        YantrikDbError::InvalidEmbedding { path, index, .. } => {
+            assert_eq!(path, "record");
+            assert_eq!(index, Some(3));
+        }
+        other => panic!("wrong error: {other}"),
+    }
+    assert!(matches!(
+        db.record(
+            "x",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &wrong_dim,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap_err(),
+        YantrikDbError::InvalidEmbedding { index: None, .. }
+    ));
+
+    // record: each non-finite scalar is rejected by field name.
+    for (field, imp, val, cert, hl) in [
+        ("importance", f64::NAN, 0.0, 0.8, 604800.0),
+        ("valence", 0.5, f64::INFINITY, 0.8, 604800.0),
+        ("certainty", 0.5, 0.0, f64::NAN, 604800.0),
+        ("half_life", 0.5, 0.0, 0.8, f64::NEG_INFINITY),
+    ] {
+        match db
+            .record(
+                "x",
+                "episodic",
+                imp,
+                val,
+                hl,
+                &empty_meta(),
+                &vec_seed(2.0, 8),
+                "default",
+                cert,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap_err()
+        {
+            YantrikDbError::InvalidScalar { field: f, .. } => assert_eq!(f, field),
+            other => panic!("wrong error for {field}: {other}"),
+        }
+    }
+
+    // record_batch: a bad element LATE in the batch rejects the WHOLE batch
+    // (no earlier element half-committed), and the error names the position.
+    let batch = vec![
+        crate::types::RecordInput {
+            text: "good".into(),
+            memory_type: "episodic".into(),
+            importance: 0.5,
+            valence: 0.0,
+            half_life: 604800.0,
+            metadata: empty_meta(),
+            embedding: vec_seed(3.0, 8),
+            namespace: "default".into(),
+            certainty: 0.8,
+            domain: "general".into(),
+            source: "user".into(),
+            emotional_state: None,
+        },
+        crate::types::RecordInput {
+            text: "bad".into(),
+            memory_type: "episodic".into(),
+            importance: 0.5,
+            valence: 0.0,
+            half_life: 604800.0,
+            metadata: empty_meta(),
+            embedding: nan_emb.clone(),
+            namespace: "default".into(),
+            certainty: 0.8,
+            domain: "general".into(),
+            source: "user".into(),
+            emotional_state: None,
+        },
+    ];
+    match db.record_batch(&batch).unwrap_err() {
+        YantrikDbError::InvalidEmbedding { path, reason, .. } => {
+            assert_eq!(path, "record_batch");
+            assert!(reason.contains("inputs[1]"), "{reason}");
+        }
+        other => panic!("wrong error: {other}"),
+    }
+
+    // insert_vector: typed error instead of the historical dim-assert panic.
+    assert!(matches!(
+        db.insert_vector("some-rid", &nan_emb).unwrap_err(),
+        YantrikDbError::InvalidEmbedding {
+            path: "insert_vector",
+            ..
+        }
+    ));
+
+    // recall: NaN / wrong-dim QUERY vectors are rejected, not searched.
+    for bad_query in [nan_emb.clone(), wrong_dim.clone()] {
+        assert!(matches!(
+            db.recall(
+                &bad_query, 5, None, None, false, false, None, true, None, None, None, None, None,
+            )
+            .unwrap_err(),
+            YantrikDbError::InvalidEmbedding { path: "recall", .. }
+        ));
+    }
+
+    // No side effects: rejected calls left the engine exactly as it was.
+    let after = db.stats(None).unwrap();
+    assert_eq!(after.active_memories, baseline.active_memories);
+    assert_eq!(after.vec_index_entries, baseline.vec_index_entries);
+    assert_eq!(
+        db.recall(
+            &vec_seed(1.0, 8),
+            5,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .len(),
+        1,
+        "the one valid memory is still the only memory"
     );
 }
 

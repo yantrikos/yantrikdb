@@ -590,7 +590,12 @@ fn cosine_distance_f64(a: &[f32], b: &[f32]) -> f64 {
     }
     let na = na.sqrt();
     let nb = nb.sqrt();
-    if na == 0.0 || nb == 0.0 {
+    // v0.9.3: `== 0.0` misses NaN (same class as the issue #60 hnsw guard —
+    // this was the one guard the v0.9.2 sweep didn't reach). `!(n > 0.0)`
+    // catches NaN, zero, and negatives; clamp preserves NaN so the guard
+    // must run first. Matters for pre-v0.9.3 databases that may hold
+    // NaN embeddings written before the write-gate existed.
+    if !(na > 0.0) || !(nb > 0.0) {
         return 1.0;
     }
     (1.0 - (dot / (na * nb))).clamp(0.0, 2.0)

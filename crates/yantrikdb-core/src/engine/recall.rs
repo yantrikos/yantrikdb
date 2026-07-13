@@ -222,6 +222,11 @@ impl YantrikDB {
         // generation-anchored index every time it's queried within
         // this call.
         let state = self.search_state.load_full();
+        // v0.9.3 contract gate: a caller-supplied NaN/wrong-dim QUERY vector
+        // poisons every distance in the search. Typed rejection instead.
+        // (recall_with_seq / recall_with_response / recall_refine all
+        // delegate here, so this single gate covers them.)
+        crate::validate::validate_embedding("recall", query_embedding, state.dim())?;
         let vec_results = {
             let _span = tracing::debug_span!("hnsw_search", fetch_k).entered();
             state.vec_index.search(query_embedding, fetch_k)?
@@ -2471,6 +2476,8 @@ impl YantrikDB {
         // profiled-recall variant. Same generation-anchoring contract
         // as `recall_ranked`.
         let state = self.search_state.load_full();
+        // v0.9.3 contract gate — same as `recall` (profiled duplicate).
+        crate::validate::validate_embedding("recall_profiled", query_embedding, state.dim())?;
         let vec_results = state.vec_index.search(query_embedding, fetch_k)?;
         let vec_search_ms = t_vec.elapsed().as_secs_f64() * 1000.0;
         let candidate_count = vec_results.len();
