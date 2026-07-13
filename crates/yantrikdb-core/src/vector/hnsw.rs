@@ -16,14 +16,13 @@ use crate::error::Result;
 
 // ── Distance functions ──
 
-/// One-pass dot product with f64 accumulation (same summation order as the
-/// historical `cosine_distance`, so results are bit-identical).
+/// One-pass dot product with f64 accumulation. Routed through the
+/// runtime-dispatched SIMD kernels (AVX2+FMA when the CPU has them,
+/// ILP-unrolled scalar otherwise) — see `vector::kernels` for the
+/// dispatch policy and the numerical-equivalence contract.
 #[inline]
 pub(crate) fn dot_f64(a: &[f32], b: &[f32]) -> f64 {
-    a.iter()
-        .zip(b.iter())
-        .map(|(&x, &y)| x as f64 * y as f64)
-        .sum()
+    crate::vector::kernels::dot_f64(a, b)
 }
 
 /// Euclidean norm with f64 accumulation. Computed ONCE per stored vector at
