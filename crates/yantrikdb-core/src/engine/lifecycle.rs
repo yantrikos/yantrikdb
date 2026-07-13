@@ -624,6 +624,21 @@ impl YantrikDB {
             ));
         }
 
+        // **v0.9.3 (sol converged plan item 3): refuse text corrections.**
+        // Changing the text while keeping the old embedding means the
+        // durable "current truth" and the retrieval vector disagree
+        // indefinitely — "Alice owns service A" corrected to "Bob owns
+        // service B" keeps being retrieved for Alice/service-A queries.
+        // Typed refusal BEFORE the revision transaction (no state touched);
+        // the error message names the working alternative. The vector-
+        // coherent path (embed new text, tombstone old vector, reinsert
+        // same rid) ships in v0.10.
+        if new_text.is_some() {
+            return Err(YantrikDbError::CorrectionRequiresReembed {
+                rid: rid.to_string(),
+            });
+        }
+
         let original = self
             .get(rid)?
             .ok_or_else(|| YantrikDbError::NotFound(format!("memory: {}", rid)))?;
