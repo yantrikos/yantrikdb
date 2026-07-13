@@ -10352,14 +10352,16 @@ fn recall_logs_demand_and_surfaces_gaps() {
             .recall_text("how do I rotate the encryption keys", 5)
             .unwrap();
     }
+    // recall_text issues an unscoped recall, so its demand lands in the
+    // global bucket (namespace = None) per the v0.9.3 isolation contract.
     let (count, avg_top) = db
-        .recall_demand_for("how do I rotate the encryption keys")
+        .recall_demand_for(None, "how do I rotate the encryption keys")
         .unwrap()
         .expect("the query was logged as demand");
     assert_eq!(count, 4, "asked four times");
 
     // Surfaces as a gap at a threshold just above its (low) answer quality.
-    let gaps = db.knowledge_gaps(3, avg_top + 0.01, 10).unwrap();
+    let gaps = db.knowledge_gaps(None, 3, avg_top + 0.01, 10).unwrap();
     assert!(
         gaps.iter()
             .any(|g| g.query.contains("rotate the encryption keys")),
@@ -10386,11 +10388,138 @@ fn recall_logs_demand_and_surfaces_gaps() {
         )
         .unwrap();
     assert!(
-        db.recall_demand_for("a different internal probe query")
+        db.recall_demand_for(None, "a different internal probe query")
             .unwrap()
             .is_none(),
         "internal (skip_reinforce) recalls are not logged as demand"
     );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn migration_v33_purges_unscopable_demand_rows() {
+    // v0.9.3 isolation repair (sol converged plan item 2). Databases written
+    // by v0.9.0–v0.9.2 have a GLOBAL-keyed recall_demand table with raw
+    // query text; those legacy rows are unscopable (no namespace recorded),
+    // so the v32→v33 migration PURGES them and SCHEMA_SQL recreates the
+    // namespace-keyed shape. This simulates such a populated pre-fix DB.
+    use tempfile::NamedTempFile;
+    let tmp = NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap();
+
+    // Current-schema DB first (so all OTHER tables are in place)...
+    {
+        let _db = YantrikDB::new(path, 8).unwrap();
+    }
+    // ...then regress recall_demand to the v0.9.0 shape with a legacy row
+    // and rewind the version stamp to 32.
+    {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute_batch(
+            "DROP TABLE recall_demand;
+             CREATE TABLE recall_demand (
+                 query_norm TEXT PRIMARY KEY,
+                 sample_text TEXT NOT NULL,
+                 count INTEGER NOT NULL,
+                 sum_top_score REAL NOT NULL,
+                 sum_results INTEGER NOT NULL,
+                 last_seen REAL NOT NULL
+             );
+             INSERT INTO recall_demand VALUES
+                 ('legacy unscopable query', 'Legacy Unscopable Query?', 7, 0.4, 3, 1.0);
+             INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '32');",
+        )
+        .unwrap();
+    }
+
+    // Reopen: V32_TO_V33 drops the legacy table; SCHEMA_SQL recreates the
+    // namespace-keyed shape. Legacy rows are gone (purged, not guessed).
+    let db = YantrikDB::new(path, 8).expect("v33 migration must succeed on a populated v32 DB");
+    {
+        let conn = db.conn();
+        let rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM recall_demand", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "unscopable legacy demand rows are purged");
+        // The new shape is namespace-keyed (this errors if the column is absent).
+        conn.query_row("SELECT namespace FROM recall_demand LIMIT 1", [], |r| {
+            r.get::<_, String>(0)
+        })
+        .ok();
+    }
+    // Demand logging works post-migration under the new key.
+    db.record_recall_demand(Some("ns-a"), "post migration question", 0, 0.0)
+        .unwrap();
+    assert!(db
+        .recall_demand_for(Some("ns-a"), "post migration question")
+        .unwrap()
+        .is_some());
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn session_digest_scopes_decisions_and_conflicts_to_namespace() {
+    // v0.9.3: a namespace-scoped digest must not mix another tenant's
+    // high-importance memories into top_decisions.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    db.record_text(
+        "tenant A signed the enterprise contract",
+        "semantic",
+        0.95,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        "tenant-a",
+        0.9,
+        "work",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.record_text(
+        "tenant B is migrating to postgres",
+        "semantic",
+        0.95,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        "tenant-b",
+        0.9,
+        "work",
+        "user",
+        None,
+    )
+    .unwrap();
+
+    let scoped = db
+        .session_digest(&crate::SessionDigestConfig {
+            namespace: Some("tenant-a".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    assert!(
+        !scoped.top_decisions.is_empty(),
+        "tenant-a's own decision is present"
+    );
+    assert!(
+        scoped
+            .top_decisions
+            .iter()
+            .all(|d| d.namespace == "tenant-a"),
+        "no cross-tenant decisions in a scoped digest: {:?}",
+        scoped.top_decisions
+    );
+
+    // Unscoped (explicit-global) digest still sees both — unchanged behavior.
+    let global = db
+        .session_digest(&crate::SessionDigestConfig::default())
+        .unwrap();
+    let namespaces: std::collections::HashSet<_> = global
+        .top_decisions
+        .iter()
+        .map(|d| d.namespace.clone())
+        .collect();
+    assert!(namespaces.contains("tenant-a") && namespaces.contains("tenant-b"));
 }
 
 #[cfg(feature = "bundled-embedder")]
