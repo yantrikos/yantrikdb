@@ -16,36 +16,52 @@ use crate::error::Result;
 
 // ── Distance functions ──
 
-/// Cosine distance: 1.0 - cosine_similarity.
-/// For normalized vectors, this equals 1.0 - dot_product.
+/// One-pass dot product with f64 accumulation (same summation order as the
+/// historical `cosine_distance`, so results are bit-identical).
 #[inline]
-fn cosine_distance(a: &[f32], b: &[f32]) -> f64 {
-    let dot: f64 = a
-        .iter()
+pub(crate) fn dot_f64(a: &[f32], b: &[f32]) -> f64 {
+    a.iter()
         .zip(b.iter())
         .map(|(&x, &y)| x as f64 * y as f64)
-        .sum();
-    let norm_a: f64 = a
-        .iter()
+        .sum()
+}
+
+/// Euclidean norm with f64 accumulation. Computed ONCE per stored vector at
+/// insert time (v0.9.3 speed work) — recomputing it per distance call was
+/// two-thirds of every comparison's flops.
+#[inline]
+pub(crate) fn norm_f64(v: &[f32]) -> f64 {
+    v.iter()
         .map(|&x| (x as f64) * (x as f64))
         .sum::<f64>()
-        .sqrt();
-    let norm_b: f64 = b
-        .iter()
-        .map(|&x| (x as f64) * (x as f64))
-        .sum::<f64>()
-        .sqrt();
-    // Guard zero AND NaN norms. `norm_a == 0.0` misses NaN (`NaN == 0.0` is
-    // false), and `f64::clamp` preserves a NaN `self`, so a NaN norm would let
-    // a NaN distance escape — which then poisons callers' sort comparators
-    // (issue #60). `!(norm > 0.0)` is true for NaN, 0.0, and negatives (every
-    // comparison with NaN is false), so it catches all three.
+        .sqrt()
+}
+
+/// Cosine distance assembled from a precomputed dot product and norms.
+///
+/// Guards zero AND NaN norms: `norm == 0.0` misses NaN (`NaN == 0.0` is
+/// false), and `f64::clamp` preserves a NaN `self`, so a NaN norm would let
+/// a NaN distance escape — which then poisons callers' sort comparators
+/// (issue #60). `!(norm > 0.0)` is true for NaN, 0.0, and negatives (every
+/// comparison with NaN is false), so it catches all three. A NaN in the dot
+/// product with finite positive norms is impossible for finite inputs; NaN
+/// *elements* make the corresponding norm NaN, which this guard catches.
+#[inline]
+pub(crate) fn dist_from(dot: f64, norm_a: f64, norm_b: f64) -> f64 {
     if !(norm_a > 0.0) || !(norm_b > 0.0) {
         return 1.0;
     }
     // Clamp to [0.0, 2.0] to handle floating-point rounding. With both norms
     // > 0.0 and finite, the ratio cannot be NaN here, so clamp is NaN-safe.
     (1.0 - (dot / (norm_a * norm_b))).clamp(0.0, 2.0)
+}
+
+/// Cosine distance: 1.0 - cosine_similarity. Convenience form for callers
+/// without precomputed norms (the brute-force oracle + tests); the HNSW hot
+/// path uses `dist_from` with stored node norms instead.
+#[inline]
+fn cosine_distance(a: &[f32], b: &[f32]) -> f64 {
+    dist_from(dot_f64(a, b), norm_f64(a), norm_f64(b))
 }
 
 // ── Heap helpers ──
@@ -108,6 +124,11 @@ impl PartialOrd for FarCandidate {
 struct HnswNode {
     /// The embedding vector.
     embedding: Vec<f32>,
+    /// Precomputed Euclidean norm of `embedding` (v0.9.3 speed work).
+    /// Stored vectors never change without going through insert, so this is
+    /// computed exactly once instead of on every distance comparison. The
+    /// index is rebuilt from SQLite on open, so no migration is needed.
+    norm: f64,
     /// Connections per layer: neighbors[layer] = vec of neighbor indices.
     neighbors: Vec<Vec<usize>>,
     /// Whether this node has been deleted.
@@ -187,6 +208,7 @@ impl HnswIndex {
             let node = &mut self.nodes[existing_idx];
             if node.tombstoned {
                 node.embedding = embedding.to_vec();
+                node.norm = norm_f64(embedding);
                 node.tombstoned = false;
                 self.active_count += 1;
                 // Re-connect by inserting into the graph at its existing layers
@@ -196,6 +218,7 @@ impl HnswIndex {
             }
             // Already exists and active — update embedding in-place
             node.embedding = embedding.to_vec();
+            node.norm = norm_f64(embedding);
             return Ok(());
         }
 
@@ -208,6 +231,7 @@ impl HnswIndex {
             let neighbors = (0..=level).map(|_| Vec::new()).collect();
             self.nodes[free_idx] = HnswNode {
                 embedding: embedding.to_vec(),
+                norm: norm_f64(embedding),
                 neighbors,
                 tombstoned: false,
             };
@@ -218,6 +242,7 @@ impl HnswIndex {
             let neighbors = (0..=level).map(|_| Vec::new()).collect();
             self.nodes.push(HnswNode {
                 embedding: embedding.to_vec(),
+                norm: norm_f64(embedding),
                 neighbors,
                 tombstoned: false,
             });
@@ -246,6 +271,15 @@ impl HnswIndex {
         Ok(())
     }
 
+    /// Distance from a query (with its precomputed norm) to a stored node.
+    /// The node's norm comes from the insert-time cache — one pass over the
+    /// vectors instead of the historical three.
+    #[inline]
+    fn dist_to(&self, query: &[f32], qnorm: f64, idx: usize) -> f64 {
+        let node = &self.nodes[idx];
+        dist_from(dot_f64(query, &node.embedding), qnorm, node.norm)
+    }
+
     /// Connect a node into the graph at the given level.
     fn connect_node(&mut self, idx: usize, level: usize) {
         let ep = match self.entry_point {
@@ -254,11 +288,13 @@ impl HnswIndex {
         };
 
         let query = self.nodes[idx].embedding.clone();
+        // The "query" here is a stored node — its norm is already cached.
+        let qnorm = self.nodes[idx].norm;
         let mut current_ep = ep;
 
         // Phase 1: Greedy descent from top layer to level+1
         for lc in (level + 1..=self.max_layer).rev() {
-            current_ep = self.greedy_closest(&query, current_ep, lc);
+            current_ep = self.greedy_closest(&query, qnorm, current_ep, lc);
         }
 
         // Phase 2: Insert at layers min(level, max_layer) down to 0
@@ -270,7 +306,7 @@ impl HnswIndex {
             let ef = self.ef_construction;
 
             // Search for neighbors at this layer
-            let nearest = self.search_layer(&query, &ep_candidates, ef, lc, Some(idx));
+            let nearest = self.search_layer(&query, qnorm, &ep_candidates, ef, lc, Some(idx));
 
             // Select top M neighbors
             let selected: Vec<usize> = nearest.iter().take(max_m).map(|c| c.idx).collect();
@@ -299,10 +335,11 @@ impl HnswIndex {
     /// Prune a node's neighbors at a given layer to max_m connections.
     fn prune_neighbors(&mut self, node_idx: usize, layer: usize, max_m: usize) {
         let node_emb = self.nodes[node_idx].embedding.clone();
+        let node_norm = self.nodes[node_idx].norm;
         let mut neighbors_with_dist: Vec<(usize, f64)> = self.nodes[node_idx].neighbors[layer]
             .iter()
             .filter(|&&n| !self.nodes[n].tombstoned)
-            .map(|&n| (n, cosine_distance(&node_emb, &self.nodes[n].embedding)))
+            .map(|&n| (n, self.dist_to(&node_emb, node_norm, n)))
             .collect();
         neighbors_with_dist.sort_by(|a, b| a.1.total_cmp(&b.1));
         neighbors_with_dist.truncate(max_m);
@@ -319,16 +356,19 @@ impl HnswIndex {
 
         let ep = self.entry_point.unwrap();
         let mut current_ep = ep;
+        // Query norm computed ONCE per search (v0.9.3 speed work) instead of
+        // inside every distance comparison the traversal makes.
+        let qnorm = norm_f64(query);
 
         // Phase 1: Greedy descent from top layer to layer 1
         for lc in (1..=self.max_layer).rev() {
-            current_ep = self.greedy_closest(query, current_ep, lc);
+            current_ep = self.greedy_closest(query, qnorm, current_ep, lc);
         }
 
         // Phase 2: Search layer 0 with ef_search candidates
         // Ensure ef >= k so we can return enough results; also respect configured ef_search.
         let ef = self.ef_search.max(k * 2);
-        let nearest = self.search_layer(query, &[current_ep], ef, 0, None);
+        let nearest = self.search_layer(query, qnorm, &[current_ep], ef, 0, None);
 
         // Return top-k non-tombstoned results
         let mut results: Vec<(String, f64)> = Vec::with_capacity(k);
@@ -378,9 +418,10 @@ impl HnswIndex {
     }
 
     /// Greedy descent: find the closest node to query at a given layer.
-    fn greedy_closest(&self, query: &[f32], entry: usize, layer: usize) -> usize {
+    /// `qnorm` is the query's precomputed norm (one pass per public op).
+    fn greedy_closest(&self, query: &[f32], qnorm: f64, entry: usize, layer: usize) -> usize {
         let mut current = entry;
-        let mut current_dist = cosine_distance(query, &self.nodes[current].embedding);
+        let mut current_dist = self.dist_to(query, qnorm, current);
 
         loop {
             let mut changed = false;
@@ -389,7 +430,7 @@ impl HnswIndex {
                     if neighbor >= self.nodes.len() || self.nodes[neighbor].tombstoned {
                         continue;
                     }
-                    let dist = cosine_distance(query, &self.nodes[neighbor].embedding);
+                    let dist = self.dist_to(query, qnorm, neighbor);
                     if dist < current_dist {
                         current = neighbor;
                         current_dist = dist;
@@ -406,9 +447,11 @@ impl HnswIndex {
 
     /// Search a single layer starting from entry points.
     /// Returns candidates sorted by distance (ascending).
+    /// `qnorm` is the query's precomputed norm (one pass per public op).
     fn search_layer(
         &self,
         query: &[f32],
+        qnorm: f64,
         entry_points: &[usize],
         ef: usize,
         layer: usize,
@@ -425,7 +468,7 @@ impl HnswIndex {
                 continue;
             }
             visited.insert(ep);
-            let dist = cosine_distance(query, &self.nodes[ep].embedding);
+            let dist = self.dist_to(query, qnorm, ep);
 
             if exclude_idx != Some(ep) && !self.nodes[ep].tombstoned {
                 candidates.push(Candidate {
@@ -460,7 +503,7 @@ impl HnswIndex {
                         continue;
                     }
                     visited.insert(neighbor);
-                    let dist = cosine_distance(query, &self.nodes[neighbor].embedding);
+                    let dist = self.dist_to(query, qnorm, neighbor);
                     let worst_dist = results.peek().map(|r| r.distance).unwrap_or(f64::MAX);
 
                     if dist < worst_dist || results.len() < ef {

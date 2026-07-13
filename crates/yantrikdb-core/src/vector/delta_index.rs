@@ -63,6 +63,10 @@ use crate::vector::hnsw::HnswIndex;
 pub struct DeltaEntry {
     pub rid: String,
     pub embedding: Vec<f32>,
+    /// Precomputed Euclidean norm of `embedding` (v0.9.3 speed work) —
+    /// computed once at append instead of on every search's linear scan.
+    /// 0.0 for tombstone markers (whose embedding is never read).
+    pub norm: f64,
     pub seq: u64,
     pub tombstoned: bool,
 }
@@ -251,9 +255,11 @@ impl DeltaIndex {
         }
 
         let was_empty = delta.is_empty();
+        let norm = crate::vector::hnsw::norm_f64(&embedding);
         delta.push(DeltaEntry {
             rid,
             embedding,
+            norm,
             seq,
             tombstoned: false,
         });
@@ -308,6 +314,7 @@ impl DeltaIndex {
         delta.push(DeltaEntry {
             rid: rid.to_string(),
             embedding: Vec::new(), // tombstone marker; embedding never read
+            norm: 0.0,
             seq,
             tombstoned: true,
         });
@@ -344,6 +351,9 @@ impl DeltaIndex {
             )));
         }
 
+        // Query norm computed once for the whole delta scan (v0.9.3).
+        let qnorm = crate::vector::hnsw::norm_f64(query);
+
         // Snapshot cold (Arc clone, no lock) + brief delta read.
         let cold = self.cold.load();
         let delta = self.delta.read();
@@ -371,7 +381,13 @@ impl DeltaIndex {
             if entry.tombstoned {
                 tombstoned.insert(*rid);
             } else {
-                let d = cosine_distance_f64(query, &entry.embedding);
+                // v0.9.3: one-pass dot + precomputed entry norm + qnorm
+                // computed once per search (below) — was three passes.
+                let d = crate::vector::hnsw::dist_from(
+                    crate::vector::hnsw::dot_f64(query, &entry.embedding),
+                    qnorm,
+                    entry.norm,
+                );
                 delta_live.push((*entry, d));
             }
         }
@@ -570,36 +586,12 @@ impl DeltaIndex {
 }
 
 // ── Helpers ──
-
-/// Cosine distance, exposed at f64 precision for merge stability with
-/// HnswIndex's f64 distances. Embedding bytes assumed already normalized
-/// at the caller boundary; we still recompute norms to be safe.
-fn cosine_distance_f64(a: &[f32], b: &[f32]) -> f64 {
-    if a.len() != b.len() || a.is_empty() {
-        return 1.0;
-    }
-    let mut dot: f64 = 0.0;
-    let mut na: f64 = 0.0;
-    let mut nb: f64 = 0.0;
-    for (&x, &y) in a.iter().zip(b.iter()) {
-        let xf = x as f64;
-        let yf = y as f64;
-        dot += xf * yf;
-        na += xf * xf;
-        nb += yf * yf;
-    }
-    let na = na.sqrt();
-    let nb = nb.sqrt();
-    // v0.9.3: `== 0.0` misses NaN (same class as the issue #60 hnsw guard —
-    // this was the one guard the v0.9.2 sweep didn't reach). `!(n > 0.0)`
-    // catches NaN, zero, and negatives; clamp preserves NaN so the guard
-    // must run first. Matters for pre-v0.9.3 databases that may hold
-    // NaN embeddings written before the write-gate existed.
-    if !(na > 0.0) || !(nb > 0.0) {
-        return 1.0;
-    }
-    (1.0 - (dot / (na * nb))).clamp(0.0, 2.0)
-}
+//
+// v0.9.3: the local `cosine_distance_f64` (three accumulators recomputing
+// both norms per pair, NaN-guarded) was replaced by the shared
+// `hnsw::{dot_f64, norm_f64, dist_from}` decomposition — entry norms are
+// precomputed at append, the query norm once per search, and `dist_from`
+// carries the issue-#60 NaN/zero guard.
 
 #[cfg(test)]
 mod tests {
