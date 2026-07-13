@@ -35,6 +35,29 @@ pub enum YantrikDbError {
     #[error("session conflict: {0}")]
     SessionConflict(String),
 
+    /// **v0.9.3 numeric/vector contract gate.** An embedding failed
+    /// dimension or finiteness validation at an engine entry path. Raised
+    /// BEFORE any side effect — a rejected write leaves the engine
+    /// unchanged. `index` is the offending element for finiteness
+    /// failures, `None` for dimension mismatches.
+    #[error("invalid embedding at {path}(): {reason}")]
+    InvalidEmbedding {
+        path: &'static str,
+        index: Option<usize>,
+        reason: String,
+    },
+
+    /// **v0.9.3 numeric/vector contract gate.** A write-path scoring
+    /// scalar (importance / valence / certainty / half_life) was
+    /// non-finite. NaN/Inf here silently poisons decay and scoring math,
+    /// so it is rejected at the entry path before any side effect.
+    #[error("invalid scalar at {path}(): {field} = {value} (must be finite)")]
+    InvalidScalar {
+        path: &'static str,
+        field: &'static str,
+        value: f64,
+    },
+
     /// **Issue #41 / brainstorm-3.** `set_embedder*` was called with a
     /// candidate embedder whose dimensionality differs from the active
     /// index. On a populated DB this would produce silent corruption

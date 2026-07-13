@@ -7,4 +7,5 @@ pub mod schema;
 pub mod scoring;
 pub mod serde_helpers;
 pub mod types;
+pub mod validate;
 pub mod vault;
