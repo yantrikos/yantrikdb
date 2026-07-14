@@ -183,17 +183,28 @@ async def forget_memory(rid: str):
 @app.post("/memories/{rid}/correct", tags=["memories"])
 async def correct_memory(rid: str, req: CorrectRequest):
     """Correct a memory in place — preserves rid + created_at, appends
-    revision history. Issue #47 (v0.7.20)."""
+    revision history. Issue #47 (v0.7.20).
+
+    v0.9.3: text corrections (``new_text``) are refused by the engine
+    (CorrectionRequiresReembed) — changing text without re-embedding leaves
+    the memory retrieved under its OLD meaning. Surface that as a 422 with
+    the engine's actionable message instead of a bare 500.
+    """
     db, lock = _db()
-    with lock:
-        result = db.correct(
-            rid,
-            req.reason,
-            new_text=req.new_text,
-            metadata_merge=req.metadata_merge,
-            new_importance=req.new_importance,
-            new_valence=req.new_valence,
-        )
+    try:
+        with lock:
+            result = db.correct(
+                rid,
+                req.reason,
+                new_text=req.new_text,
+                metadata_merge=req.metadata_merge,
+                new_importance=req.new_importance,
+                new_valence=req.new_valence,
+            )
+    except RuntimeError as exc:
+        if "correct(new_text" in str(exc):
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise
     return result
 
 

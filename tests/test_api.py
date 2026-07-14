@@ -104,9 +104,10 @@ class TestMemoryEndpoints:
     def test_correct_memory(self, client):
         # Issue #47 (v0.7.20): correct() is now in-place; `reason` is
         # required, `correction_note` removed, `embedding` removed.
+        # v0.9.3: exercised via importance (text corrections refused).
         rid = client.post("/memories", json={"text": "wrong"}).json()["rid"]
         resp = client.post(f"/memories/{rid}/correct", json={
-            "new_text": "correct",
+            "new_importance": 0.9,
             "reason": "fixed",
         })
         assert resp.status_code == 200
@@ -116,6 +117,20 @@ class TestMemoryEndpoints:
         assert data["original_rid"] == rid
         assert data["original_tombstoned"] is False
         assert data["revision_num"] == 1
+
+    def test_correct_new_text_refused(self, client):
+        # v0.9.3: text corrections are refused by the engine
+        # (CorrectionRequiresReembed) and surface as 422 with the
+        # actionable workaround in the detail, not a bare 500.
+        rid = client.post("/memories", json={"text": "wrong"}).json()["rid"]
+        resp = client.post(f"/memories/{rid}/correct", json={
+            "new_text": "correct",
+            "reason": "fixed",
+        })
+        assert resp.status_code == 422
+        assert "record_text" in resp.json()["detail"]
+        # No side effects: text unchanged.
+        assert client.get(f"/memories/{rid}").json()["text"] == "wrong"
 
     def test_record_with_fields(self, client):
         resp = client.post("/memories", json={
