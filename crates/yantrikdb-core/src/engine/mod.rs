@@ -29,7 +29,7 @@ mod intent;
 mod introspection;
 mod learning;
 mod lifecycle;
-mod links;
+pub mod links;
 pub mod maintenance;
 pub mod materializer;
 mod metacognition;
