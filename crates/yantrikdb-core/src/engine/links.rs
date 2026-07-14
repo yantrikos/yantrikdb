@@ -1788,6 +1788,103 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[cfg(feature = "bundled-embedder")]
+    #[test]
+    fn t01_supersede_then_recall_stale_at_k1_is_hard_zero() {
+        // Trace contract T01 "supersede-then-recall" — release-blocking.
+        //
+        // Fixture: nuron's false-accusation incident, AUTHENTIC BYTES
+        // pulled from the production revision history of rid
+        // 019f5d7f-5dcd-7aa9-9b79-5eba2cd69175 (retrieved 2026-07-14 via
+        // memory(action=history); the correction was applied in-place via
+        // correct(), so revision 0 preserves the original text). Grimly
+        // apt: the false accusation was against the validity seat itself,
+        // and this test is what forever prevents its class — a stale
+        // accusation outranking its own correction at k=1.
+        let a_text = "SOL CONSULT PROTOCOL BREACH (2026-07-13): during the \
+            PATH-DEBATE r2 codex consult (danger-full-access sandbox), \
+            gpt-5.6-sol WROTE UNANNOUNCED CODE into crypto-trading — \
+            research/onchain_volume.py + bot/signals/whalevol.py (whale \
+            settlement-volume confirmation, in-sample n=33 t=3.24, \
+            status-only) and wired it into scripts/run_bot.py — without \
+            mentioning it in its answer or shared-memory verdict. Kept as \
+            shadow (no positions, fails soft) pending Pranab review, but \
+            flagged: consults should not ship code silently.";
+        let b_text = "CORRECTED (2026-07-13): the 'sol wrote unannounced \
+            code' claim was WRONG. bot/signals/whalevol.py + \
+            research/onchain_volume.py in crypto-trading were built by a \
+            PARALLEL Claude session working directly with Pranab the same \
+            day (wallet-movement pattern, validated with controls, deployed \
+            per house rules — see rid 019f5d7b-965a). gpt-5.6-sol committed \
+            no protocol breach during the path-debate consults; timestamps \
+            coincided because both happened the same afternoon. Lesson \
+            kept: diff-after-consult is still good practice, but attribute \
+            repo changes carefully when multiple sessions share a \
+            workspace.";
+
+        let db = YantrikDB::with_default(":memory:").unwrap();
+        let record = |text: &str| {
+            db.record_text(
+                text,
+                "semantic",
+                0.75,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                "default",
+                0.8,
+                "work",
+                "inference",
+                None,
+            )
+            .unwrap()
+        };
+        let a = record(a_text);
+        let b = record(b_text);
+        db.link(
+            &b,
+            &RecordLink {
+                target_rid: a.clone(),
+                link_type: LinkType::Supersedes,
+            },
+        )
+        .unwrap();
+
+        // nuron's reproducible probe — surfaced this memory at rank 1 on
+        // the same retrieval surface.
+        let query = db.embed("collaboration with GPT 5.6 Sol mechanism").unwrap();
+        let recall = |k: usize, include_superseded: bool| {
+            db.recall(
+                &query, k, None, None, false, false, None, true, None, None, None, None,
+                None, include_superseded,
+            )
+            .unwrap()
+        };
+
+        // Assertions 1 + 3 + 4: under the default policy the superseded
+        // accusation is ABSENT at every k — stale-at-k1 is a hard zero,
+        // and the correction ranks above it absolutely.
+        let top1 = recall(1, false);
+        assert_eq!(top1.len(), 1);
+        assert_eq!(top1[0].rid, b, "k=1 returns the correction, never A");
+        let top10 = recall(10, false);
+        assert!(top10.iter().any(|r| r.rid == b));
+        assert!(
+            !top10.iter().any(|r| r.rid == a),
+            "stale accusation absent at ANY k (T01 hard zero)"
+        );
+
+        // Assertion 2: the archaeology view returns A typed — status +
+        // successor rid, not prose.
+        let expanded = recall(10, true);
+        let a_hit = expanded
+            .iter()
+            .find(|r| r.rid == a)
+            .expect("A visible behind include_superseded");
+        assert_eq!(a_hit.current_status, crate::types::RecordStatus::Superseded);
+        assert_eq!(a_hit.superseded_by.as_deref(), Some(b.as_str()));
+    }
+
     #[test]
     fn verify_chains_reports_legacy_violations_and_clean_graphs() {
         // Report-only audit (v0.10 Phase 0): a clean graph is clean; legacy
