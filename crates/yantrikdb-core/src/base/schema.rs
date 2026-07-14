@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 34;
+pub const SCHEMA_VERSION: i32 = 35;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -1000,6 +1000,81 @@ CREATE TABLE IF NOT EXISTS learned_weights (
     generation INTEGER DEFAULT 0
 );
 INSERT OR IGNORE INTO learned_weights (id) VALUES (1);
+
+-- v0.10 Item 2 (schema v35): recall impressions — what was SERVED, with
+-- the feature values AT IMPRESSION TIME, persisted BEFORE reinforcement
+-- mutates last_access/access_count. Sol's validity ruling: the learner
+-- must never rebuild historical features from current mutable state
+-- (exposure-confounded), and labels must bind to a durable impression.
+-- One episode_id per recall() call; one row per served rid. Pruned by
+-- maintenance (retention-capped), never consulted on the recall read
+-- path itself.
+CREATE TABLE IF NOT EXISTS recall_impressions (
+    episode_id TEXT NOT NULL,            -- UUIDv7, one per recall() call
+    rid TEXT NOT NULL,
+    rank INTEGER NOT NULL,               -- 0-based position served
+    f_similarity REAL NOT NULL,
+    f_decay REAL NOT NULL,
+    f_recency REAL NOT NULL,
+    f_importance REAL NOT NULL,
+    f_valence REAL NOT NULL,
+    keyword_boosted INTEGER NOT NULL DEFAULT 0, -- keyword_boost unlearnable unless recorded
+    score REAL NOT NULL,                 -- composite at impression time
+    weight_generation INTEGER NOT NULL,  -- ranker generation that produced this
+    namespace TEXT,
+    query_hash TEXT,                     -- distinct-query-episode grouping key
+    created_at REAL NOT NULL,
+    PRIMARY KEY (episode_id, rid)
+);
+CREATE INDEX IF NOT EXISTS idx_impressions_rid ON recall_impressions(rid, created_at);
+CREATE INDEX IF NOT EXISTS idx_impressions_created ON recall_impressions(created_at);
+
+-- v0.10 Item 2 (schema v35): typed ranking labels, bound to impressions.
+-- Sources (sol ruling 1): 'explicit' (recall feedback, weight 1.0);
+-- 'rejected_refine' (caller explicitly rejected the rid in a refine —
+-- only reason=irrelevant becomes a label; nuron's exclusion-reason
+-- convergence); 'caller_used' (independent downstream RID-targeting
+-- action — the outcome anchor; at most one weak positive per
+-- impression/rid; mere resurfacing NEVER counts). served events are
+-- categorically ineligible — there is no 'served' source by design,
+-- and the learning loop asserts engine_resurface_positive_count == 0.
+CREATE TABLE IF NOT EXISTS ranking_labels (
+    label_id TEXT PRIMARY KEY,           -- UUIDv7
+    episode_id TEXT NOT NULL,
+    rid TEXT NOT NULL,
+    source TEXT NOT NULL
+        CHECK (source IN ('explicit', 'rejected_refine', 'caller_used')),
+    polarity INTEGER NOT NULL CHECK (polarity IN (-1, 1)),
+    weight REAL NOT NULL,
+    created_at REAL NOT NULL,
+    UNIQUE (episode_id, rid, source)     -- dedup (impression, rid, source)
+);
+CREATE INDEX IF NOT EXISTS idx_ranking_labels_created ON ranking_labels(created_at);
+
+-- v0.10 Item 2 (schema v35): fit history — one row per fitted
+-- generation, with held-out evidence and swap/rollback state, retained
+-- atomically alongside the live learned_weights row so last-good is
+-- always recoverable. status: 'active' (current champion),
+-- 'superseded' (replaced by a later accepted generation),
+-- 'rolled_back' (post-swap shadow scoring showed regression),
+-- 'rejected' (challenger never accepted).
+CREATE TABLE IF NOT EXISTS learned_weights_history (
+    generation INTEGER PRIMARY KEY,
+    weights_json TEXT NOT NULL,          -- serialized LearnedWeights
+    fitted_at REAL NOT NULL,
+    train_loss REAL,
+    validation_loss REAL,
+    champion_validation_loss REAL,
+    label_counts_json TEXT,              -- per-source counts used in the fit
+    distinct_queries INTEGER,
+    swap_reason TEXT,
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'superseded', 'rolled_back', 'rejected')),
+    -- evidence watermark: newest label created_at consumed by this fit.
+    -- The next fit requires labels beyond this point (sol: the same
+    -- cumulative evidence must not drive repeated updates every tick).
+    evidence_watermark REAL NOT NULL DEFAULT 0
+);
 
 -- Per-namespace importance distribution, for write-time importance
 -- calibration (task 31). An EWMA of the raw importance writers request,
@@ -2436,4 +2511,52 @@ pub const MIGRATE_V33_TO_V34: &str = "
 ALTER TABLE record_links ADD COLUMN selection_state TEXT NOT NULL DEFAULT 'selected';
 CREATE INDEX IF NOT EXISTS idx_record_links_target_sel
     ON record_links(target_rid, link_type, selection_state, status);
+";
+
+pub const MIGRATE_V34_TO_V35: &str = "
+CREATE TABLE IF NOT EXISTS recall_impressions (
+    episode_id TEXT NOT NULL,
+    rid TEXT NOT NULL,
+    rank INTEGER NOT NULL,
+    f_similarity REAL NOT NULL,
+    f_decay REAL NOT NULL,
+    f_recency REAL NOT NULL,
+    f_importance REAL NOT NULL,
+    f_valence REAL NOT NULL,
+    keyword_boosted INTEGER NOT NULL DEFAULT 0,
+    score REAL NOT NULL,
+    weight_generation INTEGER NOT NULL,
+    namespace TEXT,
+    query_hash TEXT,
+    created_at REAL NOT NULL,
+    PRIMARY KEY (episode_id, rid)
+);
+CREATE INDEX IF NOT EXISTS idx_impressions_rid ON recall_impressions(rid, created_at);
+CREATE INDEX IF NOT EXISTS idx_impressions_created ON recall_impressions(created_at);
+CREATE TABLE IF NOT EXISTS ranking_labels (
+    label_id TEXT PRIMARY KEY,
+    episode_id TEXT NOT NULL,
+    rid TEXT NOT NULL,
+    source TEXT NOT NULL
+        CHECK (source IN ('explicit', 'rejected_refine', 'caller_used')),
+    polarity INTEGER NOT NULL CHECK (polarity IN (-1, 1)),
+    weight REAL NOT NULL,
+    created_at REAL NOT NULL,
+    UNIQUE (episode_id, rid, source)
+);
+CREATE INDEX IF NOT EXISTS idx_ranking_labels_created ON ranking_labels(created_at);
+CREATE TABLE IF NOT EXISTS learned_weights_history (
+    generation INTEGER PRIMARY KEY,
+    weights_json TEXT NOT NULL,
+    fitted_at REAL NOT NULL,
+    train_loss REAL,
+    validation_loss REAL,
+    champion_validation_loss REAL,
+    label_counts_json TEXT,
+    distinct_queries INTEGER,
+    swap_reason TEXT,
+    status TEXT NOT NULL DEFAULT 'active'
+        CHECK (status IN ('active', 'superseded', 'rolled_back', 'rejected')),
+    evidence_watermark REAL NOT NULL DEFAULT 0
+);
 ";
