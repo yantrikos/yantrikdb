@@ -43,6 +43,19 @@ impl YantrikDB {
             "UPDATE learned_weights SET feedback_count = feedback_count + 1 WHERE id = 1",
             [],
         )?;
+        drop(conn);
+
+        // v0.10 Item 2: explicit feedback is the gold label source —
+        // bind it to the rid's most recent impression so the learner
+        // trains on the features that were actually served (no
+        // impression in the horizon → legacy row only, no label).
+        let polarity = if feedback == "irrelevant" { -1 } else { 1 };
+        let _ = self.record_ranking_label(
+            rid,
+            "explicit",
+            polarity,
+            super::impressions::WEIGHT_EXPLICIT,
+        );
 
         Ok(())
     }
