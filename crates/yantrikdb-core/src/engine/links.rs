@@ -46,6 +46,41 @@ pub(crate) struct SupersedesFold {
     pub winner: Option<(String, String)>,
     pub losers: Vec<(String, String)>,
 }
+
+/// **v0.10 Phase 0 — supersedes-chain audit report** (report-only; the
+/// engine never auto-repairs — no-auto-quarantine principle). Produced by
+/// [`YantrikDB::verify_chains`]. Item 1's `status_read_policy` enablement
+/// refuses on a non-empty report until explicit repair.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ChainAuditReport {
+    /// Predecessors with MORE than one selected active inbound successor
+    /// (legacy pre-Phase-0 data): `(target_rid, selected edge_ids)`.
+    pub multi_successor: Vec<(String, Vec<String>)>,
+    /// Rids participating in a supersedes cycle in the selected graph.
+    pub cycle_members: Vec<String>,
+    /// Selected active edges whose endpoints are in different namespaces:
+    /// edge_ids.
+    pub cross_namespace: Vec<String>,
+    /// Selected active edges with a missing endpoint row: edge_ids.
+    /// (Endpoints tombstoned AFTER linking are lifecycle history, handled
+    /// by `status`, and are NOT reported here.)
+    pub dangling: Vec<String>,
+    /// Components whose traversal exceeded the walk cap (audit could not
+    /// complete for them).
+    pub cap_exceeded: Vec<String>,
+}
+
+impl ChainAuditReport {
+    /// True when the selected supersedes graph satisfies every Phase-0
+    /// invariant.
+    pub fn is_clean(&self) -> bool {
+        self.multi_successor.is_empty()
+            && self.cycle_members.is_empty()
+            && self.cross_namespace.is_empty()
+            && self.dangling.is_empty()
+            && self.cap_exceeded.is_empty()
+    }
+}
 use crate::types::{
     LinkDirection, LinkResult, LinkType, LinkedRecord, RecallResult, RecordLink, ScoreBreakdown,
     ScoreContributions,
@@ -428,6 +463,134 @@ impl YantrikDB {
             }
         }
         Ok(WalkOutcome::NotReached)
+    }
+
+    /// **v0.10 Phase 0 — audit the selected supersedes graph** against the
+    /// chain-integrity invariants. REPORT-ONLY: legacy databases (edges
+    /// written before the write gate existed) may violate them; the engine
+    /// never repairs automatically. Explicit repair / canonicalization is a
+    /// maintenance action; Item 1's `status_read_policy` opt-in refuses on
+    /// a dirty report.
+    pub fn verify_chains(&self) -> Result<ChainAuditReport> {
+        let conn = self.conn.lock();
+        let mut report = ChainAuditReport::default();
+
+        // Multi-successor predecessors (selected active inbound > 1).
+        {
+            let mut stmt = conn.prepare(
+                "SELECT target_rid, GROUP_CONCAT(link_id) FROM record_links \
+                 WHERE link_type = 'supersedes' AND status = 'active' \
+                 AND selection_state = 'selected' \
+                 GROUP BY target_rid HAVING COUNT(*) > 1",
+            )?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for (target, ids) in rows {
+                report
+                    .multi_successor
+                    .push((target, ids.split(',').map(str::to_string).collect()));
+            }
+        }
+
+        // Cross-namespace + dangling endpoints, one pass via LEFT JOINs.
+        {
+            let mut stmt = conn.prepare(
+                "SELECT l.link_id, ms.namespace, mt.namespace \
+                 FROM record_links l \
+                 LEFT JOIN memories ms ON ms.rid = l.source_rid \
+                 LEFT JOIN memories mt ON mt.rid = l.target_rid \
+                 WHERE l.link_type = 'supersedes' AND l.status = 'active' \
+                 AND l.selection_state = 'selected'",
+            )?;
+            let rows = stmt
+                .query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                        r.get::<_, Option<String>>(2)?,
+                    ))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for (edge_id, src_ns, tgt_ns) in rows {
+                match (src_ns, tgt_ns) {
+                    (Some(a), Some(b)) if a != b => report.cross_namespace.push(edge_id),
+                    (None, _) | (_, None) => report.dangling.push(edge_id),
+                    _ => {}
+                }
+            }
+        }
+
+        // Cycles in the selected graph: iterative DFS with an in-stack set,
+        // bounded per component by the walk cap.
+        {
+            let edges: Vec<(String, String)> = {
+                let mut stmt = conn.prepare(
+                    "SELECT source_rid, target_rid FROM record_links \
+                     WHERE link_type = 'supersedes' AND status = 'active' \
+                     AND selection_state = 'selected'",
+                )?;
+                let rows = stmt
+                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                rows
+            };
+            let mut adj: std::collections::HashMap<&str, Vec<&str>> =
+                std::collections::HashMap::new();
+            for (s, t) in &edges {
+                adj.entry(s.as_str()).or_default().push(t.as_str());
+            }
+            let mut color: std::collections::HashMap<&str, u8> = std::collections::HashMap::new(); // 0 unvisited, 1 in-stack, 2 done
+            let mut cycle_members: std::collections::BTreeSet<String> =
+                std::collections::BTreeSet::new();
+            for start in adj.keys().copied().collect::<Vec<_>>() {
+                if color.get(start).copied().unwrap_or(0) != 0 {
+                    continue;
+                }
+                // Iterative DFS: stack of (node, next-child-index).
+                let mut stack: Vec<(&str, usize)> = vec![(start, 0)];
+                color.insert(start, 1);
+                let mut steps = 0usize;
+                while let Some(&mut (node, ref mut idx)) = stack.last_mut() {
+                    steps += 1;
+                    if steps > CHAIN_WALK_CAP {
+                        report.cap_exceeded.push(start.to_string());
+                        for (n, _) in &stack {
+                            color.insert(n, 2);
+                        }
+                        break;
+                    }
+                    let children = adj.get(node).map(|v| v.as_slice()).unwrap_or(&[]);
+                    if *idx < children.len() {
+                        let child = children[*idx];
+                        *idx += 1;
+                        match color.get(child).copied().unwrap_or(0) {
+                            0 => {
+                                color.insert(child, 1);
+                                stack.push((child, 0));
+                            }
+                            1 => {
+                                // Back edge: everything from `child` up the
+                                // stack is on the cycle.
+                                let pos = stack.iter().position(|(n, _)| *n == child);
+                                if let Some(p) = pos {
+                                    for (n, _) in &stack[p..] {
+                                        cycle_members.insert((*n).to_string());
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    } else {
+                        color.insert(node, 2);
+                        stack.pop();
+                    }
+                }
+            }
+            report.cycle_members = cycle_members.into_iter().collect();
+        }
+
+        Ok(report)
     }
 
     /// **v0.10 Phase 0 — deterministic supersedes projection fold** for one
@@ -1236,6 +1399,61 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state_low, "selected", "next candidate promoted");
+    }
+
+    #[test]
+    fn verify_chains_reports_legacy_violations_and_clean_graphs() {
+        // Report-only audit (v0.10 Phase 0): a clean graph is clean; legacy
+        // violations injected below the gate are each detected.
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let a = rec(&db, "a", 1.0);
+        let b = rec(&db, "b", 2.0);
+        supersede(&db, &b, &a).unwrap();
+        assert!(
+            db.verify_chains().unwrap().is_clean(),
+            "gated graph is clean"
+        );
+
+        // Legacy violations via direct SQL (pre-Phase-0 databases).
+        let c = rec(&db, "c", 3.0);
+        let d = rec(&db, "d", 4.0);
+        // multi-successor: second selected inbound edge on `a`.
+        insert_candidate(&db, "e-multi", &c, &a, 30);
+        {
+            let conn = db.conn();
+            conn.execute(
+                "UPDATE record_links SET selection_state = 'selected' WHERE link_id = 'e-multi'",
+                [],
+            )
+            .unwrap();
+            // cycle: d→c and c→d both selected.
+            conn.execute_batch(
+                &format!(
+                    "INSERT INTO record_links (link_id, source_rid, target_rid, link_type, status, selection_state, created_at, hlc, origin_actor) \
+                     VALUES ('e-cy1', '{d}', '{c}', 'supersedes', 'active', 'selected', 1.0, x'01', 'test');
+                     INSERT INTO record_links (link_id, source_rid, target_rid, link_type, status, selection_state, created_at, hlc, origin_actor) \
+                     VALUES ('e-cy2', '{c}', '{d}', 'supersedes', 'active', 'selected', 1.0, x'02', 'test');
+                     INSERT INTO record_links (link_id, source_rid, target_rid, link_type, status, selection_state, created_at, hlc, origin_actor) \
+                     VALUES ('e-dangle', '{c}', 'ghost-rid', 'supersedes', 'active', 'selected', 1.0, x'03', 'test');"
+                ),
+            )
+            .unwrap();
+        }
+
+        let report = db.verify_chains().unwrap();
+        assert!(!report.is_clean());
+        assert!(
+            report.multi_successor.iter().any(|(t, _)| t == &a),
+            "multi-successor on {a} detected: {report:?}"
+        );
+        assert!(
+            report.cycle_members.contains(&c) && report.cycle_members.contains(&d),
+            "cycle members detected: {report:?}"
+        );
+        assert!(
+            report.dangling.contains(&"e-dangle".to_string()),
+            "dangling endpoint detected: {report:?}"
+        );
     }
 
     #[test]

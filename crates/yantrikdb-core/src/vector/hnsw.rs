@@ -164,7 +164,25 @@ impl HnswIndex {
     }
 
     /// Create a new HNSW index with custom parameters.
+    ///
+    /// **v0.10 Phase 0 determinism seam:** under the NON-DEFAULT `testing`
+    /// cargo feature, the `YANTRIKDB_HNSW_SEED` env var (if set) seeds the
+    /// level RNG so graph construction is reproducible for trace tests.
+    /// This check lives HERE — the single constructor every construction
+    /// path funnels through (open rebuild, compaction, reembed) — so seeds
+    /// reach all of them (sol Q6). Production builds always use
+    /// `from_entropy`.
     pub fn with_params(dim: usize, m: usize, ef_construction: usize, ef_search: usize) -> Self {
+        #[cfg(feature = "testing")]
+        let rng = match std::env::var("YANTRIKDB_HNSW_SEED")
+            .ok()
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            Some(seed) => SmallRng::seed_from_u64(seed),
+            None => SmallRng::from_entropy(),
+        };
+        #[cfg(not(feature = "testing"))]
+        let rng = SmallRng::from_entropy();
         Self {
             dim,
             m,
@@ -179,8 +197,25 @@ impl HnswIndex {
             idx_to_rid: Vec::new(),
             free_list: Vec::new(),
             active_count: 0,
-            rng: SmallRng::from_entropy(),
+            rng,
         }
+    }
+
+    /// Explicitly-seeded constructor (deterministic level assignment) for
+    /// trace fixtures and reproducibility tests. Always available; the
+    /// env-var path above is the way SEEDS reach the engine's internal
+    /// construction sites without threading a parameter through every
+    /// caller.
+    pub fn with_params_seeded(
+        dim: usize,
+        m: usize,
+        ef_construction: usize,
+        ef_search: usize,
+        seed: u64,
+    ) -> Self {
+        let mut idx = Self::with_params(dim, m, ef_construction, ef_search);
+        idx.rng = SmallRng::seed_from_u64(seed);
+        idx
     }
 
     /// Number of active (non-tombstoned) entries.
@@ -604,6 +639,23 @@ impl BruteForceIndex {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seeded_construction_is_deterministic() {
+        // v0.10 Phase 0 determinism seam: same seed + same insertion order
+        // => identical graphs => identical approximate result sets.
+        let build = |seed: u64| {
+            let mut idx = HnswIndex::with_params_seeded(16, 16, 200, 200, seed);
+            for i in 0..200 {
+                idx.insert(&format!("rid-{i}"), &vec_seed(i as f32, 16))
+                    .unwrap();
+            }
+            idx.search(&vec_seed(7.0, 16), 10).unwrap()
+        };
+        let a = build(42);
+        let b = build(42);
+        assert_eq!(a, b, "same seed must reproduce identical results");
+    }
 
     #[test]
     fn cosine_distance_guards_nan_and_zero_norms() {

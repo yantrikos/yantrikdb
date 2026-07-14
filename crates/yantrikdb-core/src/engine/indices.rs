@@ -14,10 +14,15 @@ impl YantrikDB {
     ) -> Result<HnswIndex> {
         let mut index = HnswIndex::new(embedding_dim);
         let mut stmt = conn.prepare(
+            // v0.10 Phase 0 determinism seam: ORDER BY rid so the rebuild
+            // inserts rows in a stable order — without it, reopening the
+            // same DB could produce a different HNSW graph (and therefore
+            // different approximate result sets) from unordered scans.
             "SELECT rid, embedding FROM memories \
              WHERE consolidation_status IN ('active', 'consolidated') \
              AND storage_tier = 'hot' \
-             AND embedding IS NOT NULL",
+             AND embedding IS NOT NULL \
+             ORDER BY rid",
         )?;
         let rows = stmt.query_map([], |row| {
             let rid: String = row.get(0)?;

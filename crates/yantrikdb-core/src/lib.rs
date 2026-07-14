@@ -40,6 +40,7 @@ pub use engine::demand::KnowledgeGap;
 pub use engine::digest::{SessionDigest, SessionDigestConfig};
 pub use engine::graph_ops::AutoRelateReport;
 pub use engine::importance::ImportanceRecalibrationReport;
+pub use engine::links::ChainAuditReport;
 pub use engine::maintenance::{MaintenanceCycleConfig, MaintenanceCycleReport};
 pub use engine::repair::{RepairError, RepairReport};
 pub use engine::split::SplitReport;
