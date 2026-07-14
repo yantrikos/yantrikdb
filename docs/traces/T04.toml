@@ -6,18 +6,21 @@ id = "T04"
 title = "same-session-correction-visibility"
 item = "3"           # v0.10 plan item that must make this passable
 owner = "yantrikdb-core"
-status = "pending"
-# implemented_since = ""    # set on implementation (version string)
-# test_path = ""            # set on implementation (module::test_fn)
+status = "implemented"
+implemented_since = "0.10.0"
+test_path = "engine::tests::correct_reembed_updates_retrieval_vector_delta_and_cold"
 seeds = "YANTRIKDB_HNSW_SEED via testing feature; fixtures declare exact vectors"
 clock = "injectable via testing feature (set_test_clock); no wall-clock asserts"
 
 fixture = '''
-Correction written mid-session; kill-mid-txn variant via failpoints.
+Text-changing correction written mid-session on both a delta-resident and a
+cold-tier record; kill-mid-protocol variant via the
+correct.between_commit_and_delta failpoint handshake.
 '''
 
 assertions = [
-  "next recall in the SAME session reflects the correction (no stale scoring cache)",
-  "kill+reopen: state is wholly old or wholly new",
-  "uses injectable clock + failpoint handshake",
+  "next recall in the SAME session reflects the correction: the re-embedded record is retrieved under its NEW meaning, not its old one (delta AND cold tier)",
+  "rid + created_at + revision chain preserved; revision row records prior embedding hash",
+  "kill AFTER commit / BEFORE delta update: SQL wholly-new (text + embedding + revision + correct-op all durable) and the index rebuilds from SQL on reopen (tests/kill_correct_boundary.rs)",
+  "correct op written INSIDE the mutation transaction (boundary #6) so a kill cannot lose the replication event",
 ]

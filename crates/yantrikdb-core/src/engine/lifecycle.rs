@@ -641,24 +641,32 @@ impl YantrikDB {
             ));
         }
 
-        // **v0.9.3 (sol converged plan item 3): refuse text corrections.**
-        // Changing the text while keeping the old embedding means the
-        // durable "current truth" and the retrieval vector disagree
-        // indefinitely — "Alice owns service A" corrected to "Bob owns
-        // service B" keeps being retrieved for Alice/service-A queries.
-        // Typed refusal BEFORE the revision transaction (no state touched);
-        // the error message names the working alternative. The vector-
-        // coherent path (embed new text, tombstone old vector, reinsert
-        // same rid) ships in v0.10.
-        if new_text.is_some() {
-            return Err(YantrikDbError::CorrectionRequiresReembed {
-                rid: rid.to_string(),
-            });
-        }
-
+        // Load without minting an outcome-anchor label — a correction that
+        // hasn't happened yet is not evidence. The single note_caller_used
+        // fires at the end of a SUCCESSFUL correction (both paths).
         let original = self
-            .get(rid)?
+            .get_untracked(rid)?
             .ok_or_else(|| YantrikDbError::NotFound(format!("memory: {}", rid)))?;
+
+        // **v0.10 Item 3: vector-coherent correction.** When the text
+        // actually changes, the retrieval vector must change with it —
+        // otherwise the durable "current truth" and the embedding disagree
+        // forever ("Alice owns service A" corrected to "Bob owns service B"
+        // keeps being retrieved for Alice/service-A queries). Route to the
+        // staged re-embed protocol. A no-op text change (same bytes) and
+        // metadata/scalar-only corrections skip re-embedding entirely.
+        let text_changes = new_text.is_some_and(|t| t != original.text);
+        if text_changes {
+            return self.correct_with_reembed(
+                rid,
+                &original,
+                new_text.expect("text_changes implies Some"),
+                metadata_merge,
+                new_importance,
+                new_valence,
+                reason_trimmed,
+            );
+        }
 
         let ts = now();
         let hlc_bytes = self.tick_hlc().to_bytes().to_vec();
@@ -746,7 +754,8 @@ impl YantrikDB {
         )?;
 
         // UPDATE the memory in place. rid + created_at + embedding are
-        // not touched. last_access is bumped (this is a write).
+        // not touched (metadata/scalar-only path — the text is unchanged,
+        // so the vector stays coherent). last_access is bumped.
         tx.execute(
             "UPDATE memories \
              SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
@@ -762,27 +771,15 @@ impl YantrikDB {
             ],
         )?;
 
-        tx.commit()?;
-        drop(conn);
-
-        // Refresh the scoring_cache so subsequent recall() calls see the
-        // new text + metadata + importance + valence. The cache is keyed
-        // by rid; we update in place.
-        {
-            let mut cache = self.scoring_cache.write();
-            if let Some(row) = cache.get_mut(rid) {
-                row.importance = new_importance_val;
-                // Note: cache doesn't hold raw text; recall hydrates that
-                // from SQLite. The importance update is what affects
-                // ranking; text + metadata get re-hydrated on next read.
-            }
-        }
-
-        // Log the correction for replication. Payload mirrors the
-        // mutation so followers can apply the same revision.
-        self.log_op(
-            "correct",
-            Some(rid),
+        // **v0.10 Item 3 (sol boundary #6):** the replication op is written
+        // INSIDE this transaction. A kill between the memories mutation and
+        // the oplog append can no longer lose the correction's replication
+        // event (the old path called log_op post-commit in its own conn).
+        // No embedding bytes here — this path leaves the vector untouched.
+        let applied_generation = self.search_state.load().generation as i64;
+        self.insert_correct_op_in_tx(
+            &tx,
+            rid,
             &serde_json::json!({
                 "rid": rid,
                 "revision_num": next_revision_num,
@@ -794,7 +791,25 @@ impl YantrikDB {
                 "applied_at": ts,
             }),
             None,
+            None,
+            applied_generation,
         )?;
+
+        tx.commit()?;
+        drop(conn);
+
+        // Refresh the scoring_cache so subsequent recall() calls see the
+        // new metadata + importance + valence. The cache is keyed by rid;
+        // we update in place.
+        {
+            let mut cache = self.scoring_cache.write();
+            if let Some(row) = cache.get_mut(rid) {
+                row.importance = new_importance_val;
+                // Note: cache doesn't hold raw text; recall hydrates that
+                // from SQLite. The importance update is what affects
+                // ranking; text + metadata get re-hydrated on next read.
+            }
+        }
 
         // v0.10 Item 2 outcome anchor: a correction is an independent
         // caller action targeting the rid — the ranker surfaced a memory
@@ -809,6 +824,344 @@ impl YantrikDB {
             original_tombstoned: false,
             revision_num: next_revision_num,
         })
+    }
+
+    /// **v0.10 Item 3 (sol boundary #6).** Insert the `correct` replication
+    /// op INSIDE the caller's correction transaction. `log_op` runs in its
+    /// own connection AFTER commit, so a kill in the gap loses the
+    /// replication event; writing the op in the same transaction makes the
+    /// mutation and its intent atomic. `embedding` carries the EXACT
+    /// re-embedded bytes (encrypted like `memories.embedding`) for a text
+    /// correction so a follower applies them verbatim rather than
+    /// re-embedding — follower re-embedding diverges by model
+    /// version/quantization. `None` for metadata/scalar corrections.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_correct_op_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        rid: &str,
+        payload: &serde_json::Value,
+        emb_hash: Option<&[u8]>,
+        embedding: Option<&[u8]>,
+        applied_generation: i64,
+    ) -> Result<()> {
+        let op_id = crate::id::new_id();
+        let hlc_bytes = self.tick_hlc().to_bytes().to_vec();
+        let payload_str = serde_json::to_string(payload)?;
+        tx.execute(
+            "INSERT INTO oplog \
+             (op_id, op_type, timestamp, target_rid, payload, actor_id, hlc, \
+              embedding_hash, origin_actor, applied, applied_generation, embedding) \
+             VALUES (?1, 'correct', ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?10)",
+            params![
+                op_id,
+                now(),
+                rid,
+                payload_str,
+                self.actor_id,
+                hlc_bytes,
+                emb_hash,
+                self.actor_id,
+                applied_generation,
+                embedding,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// **v0.10 Item 3 — RID-stable, vector-coherent correction.**
+    ///
+    /// The staged protocol for a text-changing correction (design: sol's
+    /// 8-boundary audit, docs/V0.10_PLAN.md Item 3). The rid, created_at,
+    /// and revision chain are preserved; only the content and its retrieval
+    /// vector change.
+    ///
+    /// Ordering and why:
+    /// 1. **Embed OUTSIDE the write-router guard** (slow step), mirroring
+    ///    `record_text`'s revalidation loop — reembed throughput stays
+    ///    bounded by the index rebuild, not by in-flight corrections.
+    /// 2. **Guard + revalidate**: if a `reembed()` swap landed between the
+    ///    embed and the guard, the vector is in the wrong space — retry.
+    ///    If the router is mid-cutover (Queueing), return the typed
+    ///    `CorrectionDeferredDuringReembed` (retryable; no state touched).
+    /// 3. **Backpressure BEFORE any visible mutation**: under the guard the
+    ///    delta can only shrink (compactor) — never grow (other sync
+    ///    writers and reembed are excluded) — so a capacity check here
+    ///    makes the later tombstone+append infallible. If the delta is
+    ///    full, return `Backpressure` having changed nothing.
+    /// 4. **One SQL transaction**: revision row (with prior embedding
+    ///    model+hash) + memories UPDATE (text, metadata, scalars,
+    ///    embedding, embedding_generation) + the `correct` oplog op with
+    ///    exact new bytes (boundary #6). Kill before commit → nothing
+    ///    changed; kill after → SQL is fully consistent and the index
+    ///    rebuilds from it on reopen.
+    /// 5. **Delta tombstone+append as one sealed op** after commit, then
+    ///    scoring-cache + visible_seq in the same critical section.
+    #[allow(clippy::too_many_arguments)]
+    fn correct_with_reembed(
+        &self,
+        rid: &str,
+        original: &Memory,
+        new_text: &str,
+        metadata_merge: Option<&serde_json::Value>,
+        new_importance: Option<f64>,
+        new_valence: Option<f64>,
+        reason_trimmed: &str,
+    ) -> Result<CorrectionResult> {
+        use crate::serde_helpers::{deserialize_f32, serialize_f32};
+
+        // Prior embedding provenance for the revision audit row: the old
+        // model name and a hash of the old vector, so history() can explain
+        // WHY the retrieval vector changed and a replica can verify it.
+        let (old_emb_stored, prior_embedding_model): (Option<Vec<u8>>, Option<String>) = {
+            let conn = self.conn();
+            conn.query_row(
+                "SELECT embedding, embedding_model FROM memories WHERE rid = ?1",
+                params![rid],
+                |r| {
+                    Ok((
+                        r.get::<_, Option<Vec<u8>>>(0)?,
+                        r.get::<_, Option<String>>(1)?,
+                    ))
+                },
+            )?
+        };
+        let prior_embedding_hash: Option<Vec<u8>> = match &old_emb_stored {
+            Some(blob) => {
+                let plain = self.decrypt_embedding(blob)?;
+                Some(embedding_hash(&deserialize_f32(&plain)).to_vec())
+            }
+            None => None,
+        };
+
+        // Resolve the new field values (same merge semantics as the
+        // metadata/scalar path).
+        let new_importance_val = new_importance.unwrap_or(original.importance);
+        let new_valence_val = new_valence.unwrap_or(original.valence);
+        let prior_metadata_str = serde_json::to_string(&original.metadata)?;
+        let new_metadata_val: serde_json::Value = match metadata_merge {
+            Some(patch) => {
+                let mut merged = original.metadata.clone();
+                if let (Some(obj), Some(patch_obj)) = (merged.as_object_mut(), patch.as_object()) {
+                    for (k, v) in patch_obj {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                    merged
+                } else {
+                    patch.clone()
+                }
+            }
+            None => original.metadata.clone(),
+        };
+        let new_metadata_str = serde_json::to_string(&new_metadata_val)?;
+
+        // Storage representation (encrypted-or-plain), mirroring the
+        // metadata path so history() + memories decrypt uniformly.
+        let stored_new_text = self.encrypt_text(new_text)?;
+        let stored_new_metadata = self.encrypt_text(&new_metadata_str)?;
+        let stored_prior_text = self.encrypt_text(&original.text)?;
+        let stored_prior_metadata = self.encrypt_text(&prior_metadata_str)?;
+
+        // Revalidation loop — mirrors record_text (mod.rs). Bounded in
+        // expectation: reembed advances the generation monotonically and
+        // completes at most once per call.
+        loop {
+            // Step 1: snapshot for the embed.
+            let state_for_embed = self.search_state.load_full();
+            let gen_pre = state_for_embed.generation;
+            let digest_pre = state_for_embed.runtime_embedder_digest.clone();
+            let embedder = state_for_embed
+                .embedder
+                .as_ref()
+                .ok_or(YantrikDbError::NoEmbedder)?
+                .clone();
+            let dim_pre = state_for_embed.dim();
+            drop(state_for_embed);
+
+            // Step 2: embed the new text OUTSIDE any guard (slow).
+            let new_embedding = embedder
+                .embed(new_text)
+                .map_err(|e| YantrikDbError::Inference(e.to_string()))?;
+            crate::validate::validate_embedding("correct", &new_embedding, dim_pre)?;
+
+            // Step 3: enter the sync path. A reembed cutover in flight →
+            // typed, retryable, nothing touched.
+            let sync_guard = match self.write_router.try_enter_sync_writer() {
+                Some(g) => g,
+                None => {
+                    return Err(YantrikDbError::CorrectionDeferredDuringReembed {
+                        rid: rid.to_string(),
+                    });
+                }
+            };
+
+            // Step 4: re-snapshot under the guard. From here reembed cannot
+            // complete its swap until the guard drops.
+            let state_for_commit = self.search_state.load_full();
+
+            // Step 5: revalidate — a swap between step 1 and step 4 means
+            // the embedding is in the wrong vector space; retry.
+            if state_for_commit.generation != gen_pre
+                || state_for_commit.runtime_embedder_digest != digest_pre
+            {
+                drop(sync_guard);
+                tracing::info!(
+                    gen_pre,
+                    gen_post = state_for_commit.generation,
+                    "correct_with_reembed: SearchState advanced mid-embed, retrying",
+                );
+                continue;
+            }
+            let generation = state_for_commit.generation as i64;
+
+            // Step 6: backpressure BEFORE any visible mutation. Under the
+            // guard the delta only shrinks; a tombstone(cold) + append is at
+            // most +2 entries, so this check makes the later mutation
+            // infallible.
+            let delta_len = state_for_commit.vec_index.delta_len();
+            let delta_max = state_for_commit.vec_index.delta_max();
+            if delta_len + 2 > delta_max {
+                drop(sync_guard);
+                return Err(YantrikDbError::Backpressure {
+                    pending: delta_len as i64,
+                    max: delta_max as i64,
+                    retry_after_ms: 50,
+                });
+            }
+
+            // Step 7: one transaction — revision + memories UPDATE + oplog
+            // intent (exact bytes). runtime name recorded as the new
+            // embedding's model for the audit trail.
+            let ts = now();
+            let hlc_bytes = self.tick_hlc().to_bytes().to_vec();
+            let revision_id = crate::id::new_id();
+            let stored_new_emb = self.encrypt_embedding(&serialize_f32(&new_embedding))?;
+            let new_emb_hash = embedding_hash(&new_embedding).to_vec();
+
+            let next_revision_num: i64 = {
+                let conn = self.conn.lock();
+                let tx = conn.unchecked_transaction()?;
+                let n: i64 = tx
+                    .query_row(
+                        "SELECT COALESCE(MAX(revision_num), 0) + 1 \
+                         FROM record_revisions WHERE rid = ?1",
+                        params![rid],
+                        |row| row.get(0),
+                    )
+                    .unwrap_or(1);
+                tx.execute(
+                    "INSERT INTO record_revisions \
+                     (revision_id, rid, revision_num, prior_text, prior_metadata, \
+                      prior_importance, prior_valence, reason, applied_at, hlc, \
+                      origin_actor, prior_embedding_model, prior_embedding_hash) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    params![
+                        revision_id,
+                        rid,
+                        n,
+                        stored_prior_text,
+                        stored_prior_metadata,
+                        original.importance,
+                        original.valence,
+                        reason_trimmed,
+                        ts,
+                        hlc_bytes,
+                        self.actor_id,
+                        prior_embedding_model,
+                        prior_embedding_hash,
+                    ],
+                )?;
+                // rid + created_at preserved; text, metadata, scalars, AND
+                // the embedding (+ its generation stamp) change together.
+                tx.execute(
+                    "UPDATE memories \
+                     SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
+                         embedding = ?5, embedding_generation = ?6, updated_at = ?7, \
+                         last_access = ?7 \
+                     WHERE rid = ?8",
+                    params![
+                        stored_new_text,
+                        stored_new_metadata,
+                        new_importance_val,
+                        new_valence_val,
+                        stored_new_emb,
+                        generation,
+                        ts,
+                        rid,
+                    ],
+                )?;
+                self.insert_correct_op_in_tx(
+                    &tx,
+                    rid,
+                    &serde_json::json!({
+                        "rid": rid,
+                        "revision_num": n,
+                        "new_text": new_text,
+                        "metadata_merge": metadata_merge,
+                        "new_importance": new_importance,
+                        "new_valence": new_valence,
+                        "reason": reason_trimmed,
+                        "applied_at": ts,
+                        "reembedded": true,
+                    }),
+                    Some(&new_emb_hash),
+                    Some(&stored_new_emb),
+                    generation,
+                )?;
+                tx.commit()?;
+                n
+            };
+
+            // Step 8: kill boundary. A crash HERE leaves SQL fully
+            // consistent (new text + new embedding + oplog intent all
+            // committed) and only the in-memory delta stale — the index
+            // rebuilds from SQL on reopen. The kill-proof test parks here.
+            crate::testing::fail_point("correct.between_commit_and_delta");
+
+            // Step 9: delta tombstone + append as one sealed operation
+            // (capacity guaranteed by step 6). Old vector shadowed, new
+            // vector visible.
+            let seq_tomb = self
+                .vec_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            state_for_commit.vec_index.tombstone(rid, seq_tomb);
+            let seq_new = self
+                .vec_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            // Infallible in practice (capacity checked under the guard); on
+            // the theoretical dim-mismatch path this errors after commit,
+            // but SQL is already correct and a rebuild recovers the index.
+            state_for_commit
+                .vec_index
+                .append(rid.to_string(), new_embedding.clone(), seq_new)?;
+            self.bump_visible_seq(&original.namespace, seq_new);
+
+            // Step 10: scoring cache — importance is the ranking-relevant
+            // field the cache holds; text/metadata re-hydrate from SQL.
+            {
+                let mut cache = self.scoring_cache.write();
+                if let Some(row) = cache.get_mut(rid) {
+                    row.importance = new_importance_val;
+                    row.valence = new_valence_val;
+                    row.last_access = ts;
+                }
+            }
+
+            drop(sync_guard);
+
+            // Outcome anchor (Item 2): a successful correction is an
+            // independent caller action targeting the rid.
+            self.note_caller_used(rid);
+
+            return Ok(CorrectionResult {
+                original_rid: rid.to_string(),
+                corrected_rid: rid.to_string(),
+                original_tombstoned: false,
+                revision_num: next_revision_num,
+            });
+        }
     }
 
     /// Query the revision history for a single record (Issue #47).
