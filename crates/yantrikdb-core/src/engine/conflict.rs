@@ -558,6 +558,23 @@ impl YantrikDB {
             )));
         }
 
+        // v0.10 Phase 0: structural supersede_merge conflicts (concurrent
+        // successors of one record, surfaced by the replication fold) must
+        // NOT go through the generic keep_a/keep_b/merge resolver — it can
+        // tombstone a memory, and both candidate edges are durable
+        // structural state that a re-selection must be able to recompute.
+        // The dedicated structural resolver (atomically re-select one
+        // candidate, reject the other, emit one replayable resolution op)
+        // ships with v0.10 Item 1.
+        if conflict.conflict_type == "supersede_merge" {
+            return Err(YantrikDbError::InvalidInput(format!(
+                "conflict {conflict_id} is structural (supersede_merge: concurrent \
+                 successors of one record) and cannot be resolved with generic \
+                 keep_a/keep_b/merge strategies; use the structural supersedes \
+                 resolver (v0.10)"
+            )));
+        }
+
         let ts = now();
         let actor_id = self.actor_id.clone();
         let mut loser_tombstoned = false;
