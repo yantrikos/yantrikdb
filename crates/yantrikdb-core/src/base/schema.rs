@@ -1076,6 +1076,18 @@ CREATE TABLE IF NOT EXISTS learned_weights_history (
     evidence_watermark REAL NOT NULL DEFAULT 0
 );
 
+-- v0.10 Item 2 (schema v35): piggyback label-request dedup. The
+-- coverage rider may ask a consumer to grade at most 2 served rids per
+-- response; a (query_hash, rid) pair is proposed AT MOST ONCE EVER —
+-- skipping is free precisely because a skip is never re-asked (nuron's
+-- labeling-economics conditions).
+CREATE TABLE IF NOT EXISTS label_requests (
+    query_hash TEXT NOT NULL,
+    rid TEXT NOT NULL,
+    requested_at REAL NOT NULL,
+    PRIMARY KEY (query_hash, rid)
+);
+
 -- Per-namespace importance distribution, for write-time importance
 -- calibration (task 31). An EWMA of the raw importance writers request,
 -- used to detect saturation (everything-marked-critical) and deflate
@@ -2558,5 +2570,11 @@ CREATE TABLE IF NOT EXISTS learned_weights_history (
     status TEXT NOT NULL DEFAULT 'active'
         CHECK (status IN ('active', 'superseded', 'rolled_back', 'rejected')),
     evidence_watermark REAL NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS label_requests (
+    query_hash TEXT NOT NULL,
+    rid TEXT NOT NULL,
+    requested_at REAL NOT NULL,
+    PRIMARY KEY (query_hash, rid)
 );
 ";

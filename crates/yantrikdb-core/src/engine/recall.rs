@@ -2304,6 +2304,14 @@ impl YantrikDB {
         } else {
             crate::types::CoverageOutcome::Matched
         };
+        // v0.10 Item 2: the piggyback label request — up to 2 served rids
+        // nearest the relevance gate (most informative to grade), never
+        // re-asked for the same query. Best-effort: the read path never
+        // fails on the rider.
+        let label_request = self
+            .propose_label_requests(&results, query_embedding, threshold_tau)
+            .unwrap_or_default();
+
         let coverage = crate::types::SearchCoverage {
             namespace: namespace.map(str::to_string),
             memory_type: memory_type.map(str::to_string),
@@ -2311,6 +2319,7 @@ impl YantrikDB {
             threshold_tau,
             top_similarity,
             outcome,
+            label_request,
         };
 
         Ok(RecallResponse {

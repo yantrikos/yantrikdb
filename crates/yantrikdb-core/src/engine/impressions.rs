@@ -178,6 +178,62 @@ impl YantrikDB {
         Ok(recorded)
     }
 
+    /// v0.10 Item 2 — pick up to 2 served rids worth asking the
+    /// consumer to grade: nearest the relevance gate (most informative
+    /// for the fit), excluding any (query, rid) ever proposed before
+    /// and any rid already labeled for this query. Proposals are
+    /// recorded so a skip is never re-asked. Best-effort at the call
+    /// site (the read path never fails on the rider).
+    pub(crate) fn propose_label_requests(
+        &self,
+        results: &[RecallResult],
+        query_embedding: &[f32],
+        threshold_tau: f64,
+    ) -> Result<Vec<String>> {
+        if results.is_empty() {
+            return Ok(Vec::new());
+        }
+        let qhash = query_hash(query_embedding);
+        let mut ranked: Vec<(&str, f64)> = results
+            .iter()
+            .map(|r| (r.rid.as_str(), (r.scores.similarity - threshold_tau).abs()))
+            .collect();
+        ranked.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(b.0)));
+
+        let ts = crate::time::now_secs();
+        let conn = self.conn();
+        let mut asked_stmt = conn.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM label_requests WHERE query_hash = ?1 AND rid = ?2)",
+        )?;
+        let mut labeled_stmt = conn.prepare_cached(
+            "SELECT EXISTS(SELECT 1 FROM ranking_labels l \
+             JOIN recall_impressions i \
+               ON i.episode_id = l.episode_id AND i.rid = l.rid \
+             WHERE i.query_hash = ?1 AND l.rid = ?2)",
+        )?;
+        let mut insert_stmt = conn.prepare_cached(
+            "INSERT OR IGNORE INTO label_requests (query_hash, rid, requested_at) \
+             VALUES (?1, ?2, ?3)",
+        )?;
+        let mut picked = Vec::with_capacity(2);
+        for (rid, _) in ranked {
+            if picked.len() == 2 {
+                break;
+            }
+            let asked: bool = asked_stmt.query_row(params![qhash, rid], |r| r.get(0))?;
+            if asked {
+                continue;
+            }
+            let labeled: bool = labeled_stmt.query_row(params![qhash, rid], |r| r.get(0))?;
+            if labeled {
+                continue;
+            }
+            insert_stmt.execute(params![qhash, rid, ts])?;
+            picked.push(rid.to_string());
+        }
+        Ok(picked)
+    }
+
     /// The outcome anchor: an INDEPENDENT caller-initiated action
     /// targeted this rid (get-by-rid, link creation, correction).
     /// At most one weak positive per (impression, rid) via the UNIQUE
@@ -346,6 +402,51 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM ranking_labels", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn label_request_rider_asks_once_per_query_rid() {
+        // nuron's labeling economics: ≤2 rids per response, nearest the
+        // relevance gate, and a (query, rid) pair is proposed at most
+        // once EVER — skipping is free because a skip is never re-asked.
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        for i in 0..4 {
+            rec(&db, &format!("fact {i}"), 1.0 + i as f32 * 0.02);
+        }
+        let respond = || {
+            db.recall_with_response(
+                &vec_seed(1.0, 8),
+                5,
+                None,
+                None,
+                false,
+                false,
+                None,
+                false,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+        };
+        let first = respond().coverage.label_request;
+        assert!(!first.is_empty() && first.len() <= 2, "{first:?}");
+
+        let second = respond().coverage.label_request;
+        for rid in &first {
+            assert!(
+                !second.contains(rid),
+                "same (query, rid) must never be re-asked: {second:?}"
+            );
+        }
+        // Two more calls exhaust the 4-record pool; a further identical
+        // query has nothing left to ask.
+        let _ = respond();
+        let exhausted = respond().coverage.label_request;
+        assert!(
+            exhausted.is_empty(),
+            "pool exhausted — no repeat requests: {exhausted:?}"
+        );
     }
 
     #[test]

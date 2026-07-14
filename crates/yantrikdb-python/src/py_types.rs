@@ -147,6 +147,15 @@ pub fn recall_response_to_dict(
             _ => "unknown",
         },
     )?;
+    // v0.10 Item 2: piggyback label request (<= 2 rids worth grading,
+    // never re-asked; skip by ignoring).
+    let label_req: Vec<&str> = r
+        .coverage
+        .label_request
+        .iter()
+        .map(|s| s.as_str())
+        .collect();
+    coverage.set_item("label_request", label_req)?;
     dict.set_item("coverage", coverage)?;
 
     Ok(dict.into())
