@@ -2278,12 +2278,37 @@ impl YantrikDB {
             vec![]
         };
 
+        // v0.10 Item 1b (trace T08): typed coverage. The relevance gate is
+        // the per-database learned gate_tau — the same threshold the scorer
+        // uses to decide when a hit is similar enough for importance
+        // boosting to engage. Outcome classification:
+        //   scope empty                       -> NoMatchingRecord
+        //   results empty, or best under gate -> BelowThreshold
+        //   otherwise                         -> Matched
+        let threshold_tau = self.load_learned_weights()?.gate_tau;
+        let outcome = if candidate_count == 0 {
+            crate::types::CoverageOutcome::NoMatchingRecord
+        } else if results.is_empty() || top_similarity < threshold_tau {
+            crate::types::CoverageOutcome::BelowThreshold
+        } else {
+            crate::types::CoverageOutcome::Matched
+        };
+        let coverage = crate::types::SearchCoverage {
+            namespace: namespace.map(str::to_string),
+            memory_type: memory_type.map(str::to_string),
+            candidate_count,
+            threshold_tau,
+            top_similarity,
+            outcome,
+        };
+
         Ok(RecallResponse {
             results,
             confidence,
             certainty_reasons,
             retrieval_summary: summary,
             hints,
+            coverage,
         })
     }
 

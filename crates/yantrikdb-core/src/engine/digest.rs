@@ -41,6 +41,13 @@ pub struct SessionDigestConfig {
     pub max_triggers: usize,
     /// Max characters of each memory's text to include as a snippet.
     pub snippet_chars: usize,
+    /// v0.10 Item 1c (trace T10): expansion switch. The digest main view
+    /// follows the status read policy — superseded records are excluded
+    /// from `top_decisions` on policy-active databases. Setting this to
+    /// `true` re-admits them, stamped with `current_status` +
+    /// `superseded_by`, for history/archaeology packets. No-op on
+    /// legacy-policy databases (everything already included).
+    pub include_superseded: bool,
 }
 
 impl Default for SessionDigestConfig {
@@ -52,6 +59,7 @@ impl Default for SessionDigestConfig {
             max_conflicts: 5,
             max_triggers: 5,
             snippet_chars: 240,
+            include_superseded: false,
         }
     }
 }
@@ -64,6 +72,17 @@ pub struct DigestEntry {
     pub importance: f64,
     pub created_at: f64,
     pub namespace: String,
+    /// v0.10 Item 1c: chain-derived status (Active unless the record has
+    /// a selected inbound supersedes edge — only visible when the packet
+    /// was built with `include_superseded`).
+    pub current_status: crate::types::RecordStatus,
+    /// Successor rid when `current_status` is Superseded.
+    pub superseded_by: Option<String>,
+    /// v0.10 Item 1c (T10 "D-with-flag"): the record participates in an
+    /// OPEN conflict. Disputed records stay in the main view — a dispute
+    /// is a flag, not a demotion; the engine never silently picks a
+    /// winner.
+    pub disputed: bool,
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -81,6 +100,31 @@ pub struct DigestTrigger {
     pub trigger_type: String,
     pub urgency: f64,
     pub reason: String,
+}
+
+/// v0.10 Item 1c — one status transition visible to a resuming session.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StatusTransition {
+    /// The record whose status changed.
+    pub rid: String,
+    pub from: crate::types::RecordStatus,
+    pub to: crate::types::RecordStatus,
+    /// The successor that caused the transition (supersession).
+    pub by_rid: Option<String>,
+    /// When the transition was committed (link `created_at`; injectable
+    /// clock under the testing feature).
+    pub at: f64,
+}
+
+/// v0.10 Item 1c — "what changed since T" for resuming sessions
+/// (trace T10 assertion 3).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct ChangesSince {
+    pub since: f64,
+    /// Active records created after `since`, oldest first.
+    pub new_records: Vec<DigestEntry>,
+    /// Status transitions committed after `since`, oldest first.
+    pub status_transitions: Vec<StatusTransition>,
 }
 
 /// The session-start briefing.
@@ -116,6 +160,11 @@ impl YantrikDB {
                     importance: head.importance,
                     created_at: head.created_at,
                     namespace: head.namespace,
+                    // The narrative chain is append-only by convention;
+                    // chain_head already resolves to its tip.
+                    current_status: Default::default(),
+                    superseded_by: None,
+                    disputed: false,
                 });
             }
         }
@@ -123,24 +172,42 @@ impl YantrikDB {
         // Top live decisions — highest importance, most recent first. Read
         // directly so we can rank by importance (list_records ranks by rid).
         // v0.9.3: scoped to config.namespace when set (isolation contract).
+        //
+        // v0.10 Item 1c (trace T10): the main view is status-led — on
+        // policy-active databases, superseded records don't spend the
+        // packet's token budget re-teaching stale decisions. They come
+        // back (stamped) only behind config.include_superseded.
+        let exclude_superseded = self.status_read_policy() && !config.include_superseded;
         {
+            let not_superseded = if exclude_superseded {
+                " AND NOT EXISTS (SELECT 1 FROM record_links l \
+                   WHERE l.target_rid = memories.rid AND l.link_type = 'supersedes' \
+                   AND l.status = 'active' AND l.selection_state = 'selected')"
+            } else {
+                ""
+            };
             let conn = self.conn();
             let (sql, ns_param) = match config.namespace.as_deref() {
                 Some(ns) => (
-                    "SELECT rid, text, importance, created_at, namespace FROM memories \
-                     WHERE consolidation_status = 'active' AND importance >= 0.7 \
-                     AND namespace = ?2 \
-                     ORDER BY importance DESC, created_at DESC LIMIT ?1",
+                    format!(
+                        "SELECT rid, text, importance, created_at, namespace FROM memories \
+                         WHERE consolidation_status = 'active' AND importance >= 0.7 \
+                         AND namespace = ?2{not_superseded} \
+                         ORDER BY importance DESC, created_at DESC LIMIT ?1"
+                    ),
                     Some(ns.to_string()),
                 ),
                 None => (
-                    "SELECT rid, text, importance, created_at, namespace FROM memories \
-                     WHERE consolidation_status = 'active' AND importance >= 0.7 \
-                     ORDER BY importance DESC, created_at DESC LIMIT ?1",
+                    format!(
+                        "SELECT rid, text, importance, created_at, namespace FROM memories \
+                         WHERE consolidation_status = 'active' AND importance >= 0.7\
+                         {not_superseded} \
+                         ORDER BY importance DESC, created_at DESC LIMIT ?1"
+                    ),
                     None,
                 ),
             };
-            let mut stmt = conn.prepare(sql)?;
+            let mut stmt = conn.prepare(&sql)?;
             let map_row = |r: &rusqlite::Row| {
                 Ok((
                     r.get::<_, String>(0)?,
@@ -159,8 +226,41 @@ impl YantrikDB {
                     .collect::<std::result::Result<Vec<_>, _>>()?,
             };
             drop(stmt);
+
+            // v0.10 Item 1c stamps. Disputed (T10 "D-with-flag"): the
+            // record participates in an open conflict — flagged, never
+            // dropped. Superseded stamping only matters on expansion
+            // packets (the main view already excluded those rows).
+            let mut disputed_stmt = conn.prepare(
+                "SELECT EXISTS(SELECT 1 FROM conflicts \
+                 WHERE status = 'open' AND (memory_a = ?1 OR memory_b = ?1))",
+            )?;
+            let mut successor_stmt = conn.prepare(
+                "SELECT source_rid FROM record_links WHERE target_rid = ?1 \
+                 AND link_type = 'supersedes' \
+                 AND status = 'active' AND selection_state = 'selected' \
+                 LIMIT 1",
+            )?;
+            let mut stamped: Vec<(bool, Option<String>)> = Vec::with_capacity(rows.len());
+            for (rid, _, _, _, _) in &rows {
+                let disputed: bool = disputed_stmt.query_row(params![rid], |r| r.get(0))?;
+                let successor: Option<String> = if exclude_superseded {
+                    None // main view: superseded rows are already gone
+                } else {
+                    use rusqlite::OptionalExtension;
+                    successor_stmt
+                        .query_row(params![rid], |r| r.get(0))
+                        .optional()?
+                };
+                stamped.push((disputed, successor));
+            }
+            drop(disputed_stmt);
+            drop(successor_stmt);
             drop(conn);
-            for (rid, enc_text, importance, created_at, namespace) in rows {
+
+            for ((rid, enc_text, importance, created_at, namespace), (disputed, successor)) in
+                rows.into_iter().zip(stamped)
+            {
                 let text = self.decrypt_text(&enc_text).unwrap_or(enc_text);
                 digest.top_decisions.push(DigestEntry {
                     snippet: snip(&text, config.snippet_chars),
@@ -168,6 +268,13 @@ impl YantrikDB {
                     importance,
                     created_at,
                     namespace,
+                    current_status: if successor.is_some() {
+                        crate::types::RecordStatus::Superseded
+                    } else {
+                        Default::default()
+                    },
+                    superseded_by: successor,
+                    disputed,
                 });
             }
         }
@@ -254,6 +361,122 @@ impl YantrikDB {
         digest.last_maintenance = self.last_maintenance_cycle()?;
 
         Ok(digest)
+    }
+
+    /// v0.10 Item 1c — trace T10 assertion 3: "what changed since T".
+    ///
+    /// Returns exactly the records created and the status transitions
+    /// committed after `since` (epoch seconds), optionally scoped to a
+    /// namespace. Built for the resuming-session case: instead of
+    /// re-reading the whole packet, a host asks "what moved while I was
+    /// away". Timestamps come from `time::now_secs` at write time, so
+    /// the testing feature's injectable clock makes this deterministic.
+    ///
+    /// Status transitions currently cover supersession (Active →
+    /// Superseded, with the successor rid). A retraction re-promotes the
+    /// record on the read path immediately, but `record_links` keeps no
+    /// retraction timestamp, so retractions are not (yet) reported here.
+    pub fn what_changed_since(
+        &self,
+        since: f64,
+        namespace: Option<&str>,
+        snippet_chars: usize,
+    ) -> Result<ChangesSince> {
+        let snip = |s: &str, n: usize| -> String { s.chars().take(n).collect::<String>() };
+        let mut changes = ChangesSince {
+            since,
+            ..Default::default()
+        };
+
+        let conn = self.conn();
+
+        // New records after T (active only; tombstoned/consolidated rows
+        // are lifecycle, not content the resuming session must learn).
+        let (rec_sql, transitions_sql) = match namespace {
+            Some(_) => (
+                "SELECT rid, text, importance, created_at, namespace FROM memories \
+                 WHERE created_at > ?1 AND consolidation_status = 'active' \
+                 AND namespace = ?2 ORDER BY created_at ASC",
+                "SELECT l.target_rid, l.source_rid, l.created_at \
+                 FROM record_links l JOIN memories m ON m.rid = l.target_rid \
+                 WHERE l.link_type = 'supersedes' AND l.status = 'active' \
+                 AND l.selection_state = 'selected' AND l.created_at > ?1 \
+                 AND m.namespace = ?2 ORDER BY l.created_at ASC",
+            ),
+            None => (
+                "SELECT rid, text, importance, created_at, namespace FROM memories \
+                 WHERE created_at > ?1 AND consolidation_status = 'active' \
+                 ORDER BY created_at ASC",
+                "SELECT l.target_rid, l.source_rid, l.created_at \
+                 FROM record_links l \
+                 WHERE l.link_type = 'supersedes' AND l.status = 'active' \
+                 AND l.selection_state = 'selected' AND l.created_at > ?1 \
+                 ORDER BY l.created_at ASC",
+            ),
+        };
+
+        let mut rec_stmt = conn.prepare(rec_sql)?;
+        let map_rec = |r: &rusqlite::Row| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, f64>(2)?,
+                r.get::<_, f64>(3)?,
+                r.get::<_, String>(4)?,
+            ))
+        };
+        let rec_rows = match namespace {
+            Some(ns) => rec_stmt
+                .query_map(params![since, ns], map_rec)?
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+            None => rec_stmt
+                .query_map(params![since], map_rec)?
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+        };
+        drop(rec_stmt);
+
+        let mut tr_stmt = conn.prepare(transitions_sql)?;
+        let map_tr = |r: &rusqlite::Row| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, f64>(2)?,
+            ))
+        };
+        let tr_rows = match namespace {
+            Some(ns) => tr_stmt
+                .query_map(params![since, ns], map_tr)?
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+            None => tr_stmt
+                .query_map(params![since], map_tr)?
+                .collect::<std::result::Result<Vec<_>, _>>()?,
+        };
+        drop(tr_stmt);
+        drop(conn);
+
+        for (rid, enc_text, importance, created_at, ns) in rec_rows {
+            let text = self.decrypt_text(&enc_text).unwrap_or(enc_text);
+            changes.new_records.push(DigestEntry {
+                snippet: snip(&text, snippet_chars),
+                rid,
+                importance,
+                created_at,
+                namespace: ns,
+                current_status: Default::default(),
+                superseded_by: None,
+                disputed: false,
+            });
+        }
+        for (target, source, at) in tr_rows {
+            changes.status_transitions.push(StatusTransition {
+                rid: target,
+                from: crate::types::RecordStatus::Active,
+                to: crate::types::RecordStatus::Superseded,
+                by_rid: Some(source),
+                at,
+            });
+        }
+        Ok(changes)
     }
 
     /// Task 40 — end-of-session auto-capture. Takes an agent-provided session
