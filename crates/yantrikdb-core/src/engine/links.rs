@@ -1541,7 +1541,10 @@ mod tests {
             .iter()
             .find(|r| r.rid == old)
             .expect("old record still in results (no exclusion policy yet)");
-        assert_eq!(old_hit.current_status, crate::types::RecordStatus::Superseded);
+        assert_eq!(
+            old_hit.current_status,
+            crate::types::RecordStatus::Superseded
+        );
         assert_eq!(old_hit.superseded_by.as_deref(), Some(new.as_str()));
         let new_hit = results.iter().find(|r| r.rid == new).expect("head present");
         assert_eq!(new_hit.current_status, crate::types::RecordStatus::Active);
