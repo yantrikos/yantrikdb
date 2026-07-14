@@ -189,6 +189,17 @@ pub struct YantrikDB {
     /// would have excluded before opting in. In-memory by design — a
     /// durable counter would put a write on the recall hot path.
     pub(crate) superseded_served_since_boot: std::sync::atomic::AtomicU64,
+    /// **v0.10 Item 3 — correction seqlock (sol r4).** A DB-wide epoch that
+    /// makes a text-changing correction's (SQL commit + vector publish +
+    /// scoring-cache update) atomic FROM A READER'S PERSPECTIVE, without
+    /// versioning cold entries. A correction bumps this ODD before its
+    /// mutation and back EVEN (via RAII, on every error/panic path) after.
+    /// `recall` reads an even value before candidate generation and rechecks
+    /// the identical value after hydration; a change (or odd) means a
+    /// correction interleaved — the ranking vector and the hydrated text
+    /// could be different content versions — so the recall discards and
+    /// retries. Even at boot (0). See [`Self::enter_correction_epoch`].
+    pub(crate) correction_epoch: std::sync::atomic::AtomicU64,
     /// **Phase 6 RYW**: per-namespace high-water mark of applied seqs.
     /// Updated by record/record_with_rid (and siblings) after the write
     /// has materialized into the in-memory delta. `recall_with_seq` waits
@@ -908,6 +919,7 @@ impl YantrikDB {
             pending_op_count: std::sync::atomic::AtomicI64::new(initial_pending),
             exclude_superseded_reads: std::sync::atomic::AtomicBool::new(exclude_superseded_reads),
             superseded_served_since_boot: std::sync::atomic::AtomicU64::new(0),
+            correction_epoch: std::sync::atomic::AtomicU64::new(0),
             visible_seq: dashmap::DashMap::new(),
             visible_seq_cv: parking_lot::Condvar::new(),
             visible_seq_wait_mu: parking_lot::Mutex::new(()),

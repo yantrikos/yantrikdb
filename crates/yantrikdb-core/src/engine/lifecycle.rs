@@ -6,7 +6,66 @@ use crate::types::*;
 
 use super::{embedding_hash, now, YantrikDB};
 
+/// **v0.10 Item 3 — correction seqlock guard (sol r4).** Bumps the DB-wide
+/// `correction_epoch` ODD on construction and back EVEN on Drop (every
+/// error/panic path), so a reader can detect a correction that interleaved
+/// with its candidate-generation → hydration span. Constructed only under
+/// the serialized connection lock, so the even↔odd toggle has a single
+/// holder at a time.
+pub(crate) struct CorrectionEpochGuard<'a> {
+    epoch: &'a std::sync::atomic::AtomicU64,
+}
+
+impl<'a> CorrectionEpochGuard<'a> {
+    fn new(epoch: &'a std::sync::atomic::AtomicU64) -> Self {
+        epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel); // even -> odd
+        Self { epoch }
+    }
+}
+
+impl Drop for CorrectionEpochGuard<'_> {
+    fn drop(&mut self) {
+        self.epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel); // odd -> even
+    }
+}
+
 impl YantrikDB {
+    /// Enter the correction seqlock (v0.10 Item 3). Call AFTER acquiring
+    /// the serialized conn lock and BEFORE the reservation/SQL mutation;
+    /// hold the returned guard across SQL commit + vector publish + cache
+    /// update. The guard restores an even epoch on drop (all paths).
+    pub(crate) fn enter_correction_epoch(&self) -> CorrectionEpochGuard<'_> {
+        CorrectionEpochGuard::new(&self.correction_epoch)
+    }
+
+    /// Read a stable EVEN correction epoch for a recall's before-search
+    /// snapshot. Spins while a correction is mid-flight (odd) — that window
+    /// is only the commit + publish + cache critical section (microseconds),
+    /// never the slow embed. Yields periodically to avoid pathological
+    /// busy-wait under a stuck writer.
+    pub(crate) fn correction_epoch_even(&self) -> u64 {
+        let mut spins = 0u32;
+        loop {
+            let e = self
+                .correction_epoch
+                .load(std::sync::atomic::Ordering::Acquire);
+            if e & 1 == 0 {
+                return e;
+            }
+            spins += 1;
+            if spins % 1024 == 0 {
+                std::thread::yield_now();
+            } else {
+                std::hint::spin_loop();
+            }
+        }
+    }
+
+    /// Current correction epoch (for the post-hydration recheck).
+    pub(crate) fn correction_epoch_now(&self) -> u64 {
+        self.correction_epoch
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
     /// Get a single memory by RID.
     ///
     /// v0.10 Item 2: a successful consumer `get` is an outcome anchor —
@@ -678,6 +737,9 @@ impl YantrikDB {
         // a second correction records the FIRST's committed state, not a
         // stale pre-loop snapshot (sol finding 7: correct/correct).
         let conn = self.conn.lock();
+        // Correction seqlock (r4 finding 3): held across commit + cache so a
+        // concurrent recall retries rather than mixing pre/post scalar state.
+        let _epoch = self.enter_correction_epoch();
         let tx = conn.unchecked_transaction()?;
 
         // Current stored (encrypted-or-plain) state = this correction's
@@ -1016,6 +1078,14 @@ impl YantrikDB {
             // SyncWriteGuard is a counter, NOT a writer lock, so it cannot
             // provide this ordering on its own).
             let conn = self.conn.lock();
+
+            // **Correction seqlock (r4 finding 3).** Enter the epoch NOW,
+            // under the conn lock and before any mutation: the SQL commit +
+            // vector publish + cache update below are odd-epoch; a concurrent
+            // recall whose candidate generation straddles this span detects
+            // the change and retries, so a result can never mix this
+            // correction's new text with its old ranking vector.
+            let _epoch = self.enter_correction_epoch();
 
             // **Allocate seq UNDER the conn lock** (v2-review finding 1):
             // search picks the HIGHEST seq, not the most recently appended.
@@ -1365,6 +1435,11 @@ impl YantrikDB {
             }
             let generation = state.generation as i64;
             let conn = self.conn.lock();
+            // Correction seqlock (r4 finding 3): a follower-applied correction
+            // is odd-epoch across its commit + publish + cache, so a
+            // concurrent local recall retries rather than pairing new text
+            // with an old ranking vector.
+            let _epoch = self.enter_correction_epoch();
 
             // Prior state = the follower's current ACTIVE row.
             #[allow(clippy::type_complexity)]

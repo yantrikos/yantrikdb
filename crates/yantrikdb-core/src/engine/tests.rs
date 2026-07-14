@@ -14313,6 +14313,22 @@ fn correct_reembed_updates_retrieval_vector_delta_and_cold() {
     );
 }
 
+#[test]
+fn correction_epoch_toggles_odd_even_and_even_wait() {
+    // v0.10 Item 3 seqlock (sol r4): the epoch guard bumps ODD on enter,
+    // EVEN on drop; correction_epoch_even() returns the stable even value.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let e_start = db.correction_epoch_even();
+    assert_eq!(e_start % 2, 0, "boot epoch is even");
+    {
+        let _g = db.enter_correction_epoch();
+        assert_eq!(db.correction_epoch_now() % 2, 1, "odd while held");
+    }
+    let e_end = db.correction_epoch_even();
+    assert_eq!(e_end % 2, 0, "even after drop");
+    assert_eq!(e_end, e_start + 2, "one correction advances the epoch by 2");
+}
+
 #[cfg(feature = "bundled-embedder")]
 #[test]
 fn correct_correct_revision_chain_records_true_prior_state() {

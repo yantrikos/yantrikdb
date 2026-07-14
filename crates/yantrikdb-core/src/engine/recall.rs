@@ -174,9 +174,68 @@ impl YantrikDB {
     /// Retrieve memories using multi-signal fusion scoring.
     /// When `expand_entities` is true, graph edges are followed to pull in
     /// entity-connected memories that pure vector search would miss.
+    ///
+    /// **v0.10 Item 3 — correction seqlock (sol r4).** Thin retry wrapper
+    /// around [`Self::recall_inner`]: reads an EVEN correction epoch before
+    /// candidate generation and rechecks it after hydration. If a
+    /// text-changing correction interleaved (epoch changed / odd), the
+    /// result could pair a stale ranking vector with corrected text, so it
+    /// is discarded and retried. Corrections are rare, so a retry is rare;
+    /// after a few attempts the last one is accepted (anti-starvation).
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(skip(self, query_embedding), fields(top_k, expand_entities, namespace))]
     pub fn recall(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        time_window: Option<(f64, f64)>,
+        memory_type: Option<&str>,
+        include_consolidated: bool,
+        expand_entities: bool,
+        query_text: Option<&str>,
+        skip_reinforce: bool,
+        namespace: Option<&str>,
+        domain: Option<&str>,
+        source: Option<&str>,
+        certainty_min: Option<f64>,
+        order: Option<&str>,
+        include_superseded: bool,
+    ) -> Result<Vec<RecallResult>> {
+        const MAX_ATTEMPTS: u32 = 4;
+        for attempt in 0..MAX_ATTEMPTS {
+            let epoch0 = self.correction_epoch_even();
+            // The final attempt passes None (skip the recheck) so a
+            // pathological correction storm can never starve the reader.
+            let epoch_arg = if attempt + 1 < MAX_ATTEMPTS {
+                Some(epoch0)
+            } else {
+                None
+            };
+            if let Some(results) = self.recall_inner(
+                query_embedding,
+                top_k,
+                time_window,
+                memory_type,
+                include_consolidated,
+                expand_entities,
+                query_text,
+                skip_reinforce,
+                namespace,
+                domain,
+                source,
+                certainty_min,
+                order,
+                include_superseded,
+                epoch_arg,
+            )? {
+                return Ok(results);
+            }
+        }
+        unreachable!("final attempt passes epoch_arg=None, which always yields Some")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn recall_inner(
         &self,
         query_embedding: &[f32],
         top_k: usize,
@@ -209,7 +268,11 @@ impl YantrikDB {
         // On legacy-policy databases this flag is a no-op (everything is
         // already included).
         include_superseded: bool,
-    ) -> Result<Vec<RecallResult>> {
+        // v0.10 Item 3 seqlock: the even correction epoch snapshotted by the
+        // wrapper before candidate generation, rechecked after hydration.
+        // `None` on the wrapper's final anti-starvation attempt (skip check).
+        epoch0: Option<u64>,
+    ) -> Result<Option<Vec<RecallResult>>> {
         // Validate `order` upfront so callers get a clear error rather
         // than silently falling back to relevance when they typo a value.
         let recall_order = parse_recall_order(order)?;
@@ -242,7 +305,9 @@ impl YantrikDB {
         };
 
         if vec_results.is_empty() {
-            return Ok(vec![]);
+            // No candidates → no vector/text pairing to protect; return an
+            // empty (coherent) result without a seqlock recheck.
+            return Ok(Some(vec![]));
         }
 
         // Step 2: Score from in-memory cache (replaces fetch_memories_by_rids)
@@ -1916,6 +1981,20 @@ impl YantrikDB {
             }
         }
 
+        // **v0.10 Item 3 seqlock recheck (sol r4).** Vector candidate
+        // generation (above) and text hydration (just now) read different
+        // subsystems at different instants. If a text-changing correction
+        // committed+published in between, `scored` pairs a stale ranking
+        // vector with corrected text — violating "wholly old or wholly
+        // new". Detect via the epoch and discard; the wrapper retries. The
+        // check is BEFORE impressions/reinforcement so a discarded result
+        // leaves no ledger/spaced-repetition side effects.
+        if let Some(e0) = epoch0 {
+            if self.correction_epoch_now() != e0 {
+                return Ok(None);
+            }
+        }
+
         // v0.10 Item 2: persist the impression ledger BEFORE reinforcement
         // mutates last_access/access_count — the learner reads features
         // from here, never from mutable memory state. skip_reinforce
@@ -1955,7 +2034,7 @@ impl YantrikDB {
             }
         }
 
-        Ok(scored)
+        Ok(Some(scored))
     }
 
     /// Task 41 — annotate recall hits with trust signals so staleness is
@@ -2577,8 +2656,11 @@ impl YantrikDB {
 
     /// Profiled version of recall() that returns per-phase timing breakdown.
     ///
-    /// Mirrors `recall()` exactly but wraps each phase in timing instrumentation.
+    /// Mirrors `recall()` exactly but wraps each phase in timing
+    /// instrumentation — including the v0.10 Item 3 correction seqlock
+    /// (sol r4): a thin retry wrapper around `recall_profiled_inner`.
     #[cfg(feature = "profiling")]
+    #[allow(clippy::too_many_arguments)]
     pub fn recall_profiled(
         &self,
         query_embedding: &[f32],
@@ -2593,6 +2675,51 @@ impl YantrikDB {
         domain: Option<&str>,
         source: Option<&str>,
     ) -> Result<RecallProfiledResult> {
+        const MAX_ATTEMPTS: u32 = 4;
+        for attempt in 0..MAX_ATTEMPTS {
+            let epoch0 = self.correction_epoch_even();
+            let epoch_arg = if attempt + 1 < MAX_ATTEMPTS {
+                Some(epoch0)
+            } else {
+                None
+            };
+            if let Some(r) = self.recall_profiled_inner(
+                query_embedding,
+                top_k,
+                time_window,
+                memory_type,
+                include_consolidated,
+                expand_entities,
+                query_text,
+                skip_reinforce,
+                namespace,
+                domain,
+                source,
+                epoch_arg,
+            )? {
+                return Ok(r);
+            }
+        }
+        unreachable!("final attempt passes epoch_arg=None, which always yields Some")
+    }
+
+    #[cfg(feature = "profiling")]
+    #[allow(clippy::too_many_arguments)]
+    fn recall_profiled_inner(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        time_window: Option<(f64, f64)>,
+        memory_type: Option<&str>,
+        include_consolidated: bool,
+        expand_entities: bool,
+        query_text: Option<&str>,
+        skip_reinforce: bool,
+        namespace: Option<&str>,
+        domain: Option<&str>,
+        source: Option<&str>,
+        epoch0: Option<u64>,
+    ) -> Result<Option<RecallProfiledResult>> {
         use std::time::Instant;
         let t_start = Instant::now();
 
@@ -2617,7 +2744,7 @@ impl YantrikDB {
         let candidate_count = vec_results.len();
 
         if vec_results.is_empty() {
-            return Ok(RecallProfiledResult {
+            return Ok(Some(RecallProfiledResult {
                 results: vec![],
                 timings: RecallTimings {
                     vec_search_ms,
@@ -2631,7 +2758,7 @@ impl YantrikDB {
                     candidate_count: 0,
                     graph_expansion_count: 0,
                 },
-            });
+            }));
         }
 
         // ── Phase 2: Score from in-memory cache ──
@@ -4141,6 +4268,14 @@ impl YantrikDB {
         }
         let fetch_ms = t_fetch.elapsed().as_secs_f64() * 1000.0;
 
+        // v0.10 Item 3 seqlock recheck (sol r4) — before reinforcement, so a
+        // discarded (incoherent) result leaves no spaced-repetition effect.
+        if let Some(e0) = epoch0 {
+            if self.correction_epoch_now() != e0 {
+                return Ok(None);
+            }
+        }
+
         // ── Phase 6: Reinforce ──
         let t_reinforce = Instant::now();
         if !skip_reinforce {
@@ -4152,7 +4287,7 @@ impl YantrikDB {
 
         let total_ms = t_start.elapsed().as_secs_f64() * 1000.0;
 
-        Ok(RecallProfiledResult {
+        Ok(Some(RecallProfiledResult {
             results: scored,
             timings: RecallTimings {
                 vec_search_ms,
@@ -4166,7 +4301,7 @@ impl YantrikDB {
                 candidate_count,
                 graph_expansion_count,
             },
-        })
+        }))
     }
 
     /// Fetch only text and metadata for a set of RIDs (post-scoring hydration).
