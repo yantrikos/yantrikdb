@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 33;
+pub const SCHEMA_VERSION: i32 = 34;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -751,6 +751,14 @@ CREATE TABLE IF NOT EXISTS record_links (
     target_rid     TEXT NOT NULL,
     link_type      TEXT NOT NULL,
     status         TEXT NOT NULL DEFAULT 'active',
+    -- v34 (Phase 0 chain integrity): candidate selection state, SEPARATE
+    -- from the endpoint lifecycle `status`. Every concurrent Supersedes
+    -- edge is stored durably as a candidate; exactly one per target is
+    -- 'selected' into the active projection. Losing merge candidates are
+    -- 'rejected_conflict' (kept for audit + deterministic recomputation);
+    -- user retractions are 'retracted' (replayable, never hard-deleted
+    -- for supersedes edges).
+    selection_state TEXT NOT NULL DEFAULT 'selected',
     created_at     REAL NOT NULL,
     hlc            BLOB NOT NULL,
     origin_actor   TEXT NOT NULL,
@@ -760,6 +768,8 @@ CREATE INDEX IF NOT EXISTS idx_record_links_source
     ON record_links(source_rid, link_type, status);
 CREATE INDEX IF NOT EXISTS idx_record_links_target
     ON record_links(target_rid, link_type, status);
+CREATE INDEX IF NOT EXISTS idx_record_links_target_sel
+    ON record_links(target_rid, link_type, selection_state, status);
 
 -- Peer tracking for delta sync
 CREATE TABLE IF NOT EXISTS sync_peers (
@@ -2415,4 +2425,15 @@ CREATE INDEX IF NOT EXISTS idx_memories_drive_id ON memories(drive_id);
 /// stats rebuild organically from post-upgrade recalls.
 pub const MIGRATE_V32_TO_V33: &str = "
 DROP TABLE IF EXISTS recall_demand;
+";
+
+/// **v0.10 Phase 0 (chain integrity).** Adds the candidate `selection_state`
+/// to record_links (see the SCHEMA_SQL column comment) and its projection
+/// index. Existing edges default to 'selected' — verify_chains() reports any
+/// legacy multi-successor/cycle violations for explicit repair; the migration
+/// itself never arbitrates (report-only principle).
+pub const MIGRATE_V33_TO_V34: &str = "
+ALTER TABLE record_links ADD COLUMN selection_state TEXT NOT NULL DEFAULT 'selected';
+CREATE INDEX IF NOT EXISTS idx_record_links_target_sel
+    ON record_links(target_rid, link_type, selection_state, status);
 ";

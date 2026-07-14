@@ -23,9 +23,10 @@
 //! idempotently via `INSERT OR IGNORE`. This is simpler than threading a
 //! links-array through the `record` op payload and is equally correct.
 
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use crate::error::{Result, YantrikDbError};
+use crate::serde_helpers::hex_lower;
 use crate::types::{
     LinkDirection, LinkResult, LinkType, LinkedRecord, RecallResult, RecordLink, ScoreBreakdown,
     ScoreContributions,
@@ -159,11 +160,27 @@ impl YantrikDB {
     }
 
     /// Core link insert shared by [`Self::link`] and
-    /// [`Self::record_with_links_partial`]. Returns `(link_id, inserted)`
-    /// where `inserted` is `true` if a new row was written and `false` if
-    /// the UNIQUE constraint made the INSERT OR IGNORE a no-op (the link
-    /// already existed). Always logs a `link` oplog op (idempotent on the
-    /// follower via the same UNIQUE constraint).
+    /// [`Self::record_with_links_partial`]. Returns `(link_id, inserted)`.
+    ///
+    /// **v0.10 Phase 0 reshape (sol-converged, rid 019f5e7e):**
+    /// - **Idempotency with ORIGINAL identity**: an exact
+    ///   (source, target, type) duplicate returns the EXISTING edge id and
+    ///   emits NO new oplog op — a retry must not mint a newer identity or
+    ///   a newer replication order (T7 discipline applied to links).
+    /// - **Canonical identity**: ONE id and ONE HLC are minted for the edge,
+    ///   shared verbatim by the record_links row AND the oplog op
+    ///   (`op_id == link_id`, `op.hlc == row.hlc`), and carried in the
+    ///   payload so followers persist the exact same identity. This is what
+    ///   makes `max(hlc, id)` a replayable total order for merge arbitration.
+    /// - **Atomicity**: row + oplog op commit in one SAVEPOINT — a crash
+    ///   can no longer leave a local edge with no replication event.
+    /// - **Supersedes integrity gate**: endpoints must exist, be
+    ///   non-tombstoned, and share a namespace; the target (predecessor) must
+    ///   not already have a selected active successor (single-INBOUND-edge
+    ///   invariant — the edge direction is new→old); the insertion must not
+    ///   create a cycle in the predecessor closure. All checks and the
+    ///   insert happen under ONE connection lock, so two concurrent callers
+    ///   cannot both pass the gate.
     fn link_core(&self, source_rid: &str, link: &RecordLink) -> Result<(String, bool)> {
         if source_rid.is_empty() {
             return Err(YantrikDbError::InvalidInput(
@@ -181,20 +198,54 @@ impl YantrikDB {
             ));
         }
 
-        let link_id = crate::id::new_id();
         let link_type_str = link.link_type.as_str();
+        let is_supersedes = matches!(link.link_type, crate::types::LinkType::Supersedes);
         let ts = now();
+        // Mint the canonical identity BEFORE the transaction (one id, one HLC).
+        let edge_id = crate::id::new_id();
         let hlc_bytes = self.tick_hlc().to_bytes().to_vec();
+        let applied_generation: i64 = self.search_state.load().generation as i64;
 
-        let inserted = {
-            let conn = self.conn.lock();
+        let conn = self.conn.lock();
+
+        // Idempotent duplicate: return the ORIGINAL identity, no new op.
+        if let Some(existing_id) = conn
+            .query_row(
+                "SELECT link_id FROM record_links \
+                 WHERE source_rid = ?1 AND target_rid = ?2 AND link_type = ?3",
+                params![source_rid, link.target_rid, link_type_str],
+                |r| r.get::<_, String>(0),
+            )
+            .optional()?
+        {
+            return Ok((existing_id, false));
+        }
+
+        if is_supersedes {
+            Self::gate_supersedes(&conn, source_rid, &link.target_rid)?;
+        }
+
+        let payload = serde_json::json!({
+            "source_rid": source_rid,
+            "target_rid": link.target_rid,
+            "link_type": link_type_str,
+            "created_at": ts,
+            // Canonical identity for follower persistence (v0.10 Phase 0).
+            "edge_id": edge_id,
+            "edge_hlc_hex": hex_lower(&hlc_bytes),
+            "selection_state": "selected",
+        });
+        let payload_str = serde_json::to_string(&payload)?;
+
+        conn.execute_batch("SAVEPOINT link_core_txn")?;
+        let txn: Result<()> = (|| {
             conn.execute(
-                "INSERT OR IGNORE INTO record_links \
-                 (link_id, source_rid, target_rid, link_type, status, \
+                "INSERT INTO record_links \
+                 (link_id, source_rid, target_rid, link_type, status, selection_state, \
                   created_at, hlc, origin_actor) \
-                 VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?6, ?7)",
+                 VALUES (?1, ?2, ?3, ?4, 'active', 'selected', ?5, ?6, ?7)",
                 params![
-                    link_id,
+                    edge_id,
                     source_rid,
                     link.target_rid,
                     link_type_str,
@@ -203,22 +254,144 @@ impl YantrikDB {
                     self.actor_id,
                 ],
             )?;
-            conn.changes() > 0
+            // (Phase 0 failpoint "link.between_row_and_oplog" lands here with
+            // the `testing`-gated registry — the kill proof asserts NEITHER
+            // row survives a kill inside this savepoint.)
+            crate::testing::fail_point("link.between_row_and_oplog");
+            conn.execute(
+                "INSERT INTO oplog (op_id, op_type, timestamp, target_rid, payload, \
+                 actor_id, hlc, embedding_hash, origin_actor, applied, applied_generation) \
+                 VALUES (?1, 'link', ?2, ?3, ?4, ?5, ?6, NULL, ?7, 1, ?8)",
+                params![
+                    edge_id,
+                    ts,
+                    source_rid,
+                    payload_str,
+                    self.actor_id,
+                    hlc_bytes,
+                    self.actor_id,
+                    applied_generation,
+                ],
+            )?;
+            Ok(())
+        })();
+        match txn {
+            Ok(()) => {
+                conn.execute_batch("RELEASE link_core_txn")?;
+                Ok((edge_id, true))
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK TO link_core_txn; RELEASE link_core_txn");
+                Err(e)
+            }
+        }
+    }
+
+    /// **v0.10 Phase 0 — the Supersedes integrity gate.** Caller holds the
+    /// connection lock; all checks run against that same connection so the
+    /// gate + insert are atomic with respect to concurrent writers.
+    ///
+    /// Edge direction is NEW→OLD (`source` supersedes `target`): the
+    /// invariant is one selected active INBOUND edge per target
+    /// (predecessor), and the cycle check walks the TARGET's outgoing
+    /// predecessor closure looking for the source.
+    fn gate_supersedes(
+        conn: &rusqlite::Connection,
+        source_rid: &str,
+        target_rid: &str,
+    ) -> Result<()> {
+        // Endpoints: exist, non-tombstoned, same namespace.
+        let fetch = |rid: &str| -> Result<Option<(String, String)>> {
+            Ok(conn
+                .query_row(
+                    "SELECT namespace, consolidation_status FROM memories WHERE rid = ?1",
+                    params![rid],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                )
+                .optional()?)
         };
+        let Some((src_ns, src_status)) = fetch(source_rid)? else {
+            return Err(YantrikDbError::InvalidLinkEndpoints {
+                reason: format!("supersedes source {source_rid} not found"),
+            });
+        };
+        let Some((tgt_ns, tgt_status)) = fetch(target_rid)? else {
+            return Err(YantrikDbError::InvalidLinkEndpoints {
+                reason: format!("supersedes target {target_rid} not found"),
+            });
+        };
+        if src_status == "tombstoned" || tgt_status == "tombstoned" {
+            return Err(YantrikDbError::InvalidLinkEndpoints {
+                reason: format!(
+                    "supersedes endpoints must be live (source {src_status}, target {tgt_status})"
+                ),
+            });
+        }
+        if src_ns != tgt_ns {
+            return Err(YantrikDbError::InvalidLinkEndpoints {
+                reason: format!(
+                    "supersedes endpoints must share a namespace ({src_ns} vs {tgt_ns})"
+                ),
+            });
+        }
 
-        self.log_op(
-            "link",
-            Some(source_rid),
-            &serde_json::json!({
-                "source_rid": source_rid,
-                "target_rid": link.target_rid,
-                "link_type": link_type_str,
-                "created_at": ts,
-            }),
-            None,
-        )?;
+        // Single-successor: at most one selected active inbound edge per
+        // predecessor.
+        if let Some((edge_id, successor)) = conn
+            .query_row(
+                "SELECT link_id, source_rid FROM record_links \
+                 WHERE target_rid = ?1 AND link_type = 'supersedes' \
+                 AND selection_state = 'selected' AND status = 'active' \
+                 LIMIT 1",
+                params![target_rid],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .optional()?
+        {
+            return Err(YantrikDbError::SupersedeConflict {
+                predecessor_rid: target_rid.to_string(),
+                existing_successor_rid: successor,
+                existing_edge_id: edge_id,
+            });
+        }
 
-        Ok((link_id, inserted))
+        // Cycle check: walk the target's outgoing predecessor closure
+        // (bounded graph walk — multi-predecessor merges are legal, so this
+        // is a queue + visited set, not a linked-list walk). Reaching the
+        // source means the new edge closes a loop.
+        const CHAIN_WALK_CAP: usize = 1_000;
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
+        queue.push_back(target_rid.to_string());
+        while let Some(current) = queue.pop_front() {
+            if visited.len() > CHAIN_WALK_CAP {
+                return Err(YantrikDbError::ChainTraversalLimit {
+                    start_rid: target_rid.to_string(),
+                    limit: CHAIN_WALK_CAP,
+                });
+            }
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+            let mut stmt = conn.prepare(
+                "SELECT target_rid FROM record_links \
+                 WHERE source_rid = ?1 AND link_type = 'supersedes' \
+                 AND selection_state = 'selected' AND status = 'active'",
+            )?;
+            let preds = stmt
+                .query_map(params![current], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            for p in preds {
+                if p == source_rid {
+                    return Err(YantrikDbError::SupersedeCycle {
+                        source_rid: source_rid.to_string(),
+                        target_rid: target_rid.to_string(),
+                    });
+                }
+                queue.push_back(p);
+            }
+        }
+        Ok(())
     }
 
     /// Remove a single link. Returns `true` if a row was deleted.
@@ -732,6 +905,153 @@ mod tests {
             .linked_records(&b, LinkDirection::Inbound, Some(&LinkType::Supports))
             .unwrap();
         assert!(none.is_empty());
+    }
+
+    // ── v0.10 Phase 0: chain-integrity gate ──
+
+    fn supersede(db: &YantrikDB, newer: &str, older: &str) -> Result<String> {
+        db.link(
+            newer,
+            &RecordLink {
+                target_rid: older.to_string(),
+                link_type: LinkType::Supersedes,
+            },
+        )
+    }
+
+    #[test]
+    fn supersede_gate_enforces_single_inbound_successor() {
+        // Edge direction is NEW→OLD: "one successor per record" means one
+        // selected active INBOUND edge per target (sol correction — an
+        // outgoing-edge gate would enforce the wrong invariant).
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let old = rec(&db, "v1 of the fact", 1.0);
+        let b = rec(&db, "v2 of the fact", 2.0);
+        let c = rec(&db, "rival v2 of the fact", 3.0);
+
+        supersede(&db, &b, &old).unwrap();
+        let err = supersede(&db, &c, &old).unwrap_err();
+        match err {
+            YantrikDbError::SupersedeConflict {
+                predecessor_rid,
+                existing_successor_rid,
+                ..
+            } => {
+                assert_eq!(predecessor_rid, old);
+                assert_eq!(existing_successor_rid, b);
+            }
+            other => panic!("wrong error: {other}"),
+        }
+
+        // Multiple OUTGOING edges stay legal: one new record may merge
+        // several predecessors (each predecessor still has one successor).
+        let old2 = rec(&db, "parallel old fact", 4.0);
+        supersede(&db, &b, &old2).unwrap();
+    }
+
+    #[test]
+    fn supersede_gate_rejects_cycles_and_bad_endpoints() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let a = rec(&db, "a", 1.0);
+        let b = rec(&db, "b", 2.0);
+        let c = rec(&db, "c", 3.0);
+
+        // Chain c→b→a, then closing a→c must be refused (multi-hop cycle).
+        supersede(&db, &b, &a).unwrap();
+        supersede(&db, &c, &b).unwrap();
+        assert!(matches!(
+            supersede(&db, &a, &c).unwrap_err(),
+            YantrikDbError::SupersedeCycle { .. }
+        ));
+
+        // Missing endpoint.
+        assert!(matches!(
+            supersede(&db, &a, "no-such-rid").unwrap_err(),
+            YantrikDbError::InvalidLinkEndpoints { .. }
+        ));
+
+        // Cross-namespace refusal.
+        let other_ns = db
+            .record(
+                "other namespace fact",
+                "semantic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &vec_seed(9.0, 8),
+                "tenant-b",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+        assert!(matches!(
+            supersede(&db, &other_ns, &a).unwrap_err(),
+            YantrikDbError::InvalidLinkEndpoints { .. }
+        ));
+
+        // Tombstoned endpoint refusal.
+        let dead = rec(&db, "doomed", 5.0);
+        db.forget(&dead).unwrap();
+        let live = rec(&db, "live", 6.0);
+        assert!(matches!(
+            supersede(&db, &live, &dead).unwrap_err(),
+            YantrikDbError::InvalidLinkEndpoints { .. }
+        ));
+    }
+
+    #[test]
+    fn link_retry_returns_original_identity_and_mints_no_new_op() {
+        // v0.10 Phase 0 canonical identity: a duplicate link returns the
+        // ORIGINAL edge id and does not append another oplog op (a retry
+        // must not get a newer replication order — T7 applied to links).
+        // Also: the edge row and its oplog op share ONE id and ONE HLC.
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let a = rec(&db, "a", 1.0);
+        let b = rec(&db, "b", 2.0);
+
+        let first = supersede(&db, &a, &b).unwrap();
+        let ops_after_first: i64 = {
+            let conn = db.conn();
+            conn.query_row(
+                "SELECT COUNT(*) FROM oplog WHERE op_type = 'link'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+
+        let second = supersede(&db, &a, &b).unwrap();
+        assert_eq!(first, second, "retry returns the original edge id");
+
+        let conn = db.conn();
+        let ops_after_second: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM oplog WHERE op_type = 'link'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(ops_after_first, ops_after_second, "no second op minted");
+
+        // Canonical identity: op_id == link_id and the HLC bytes match.
+        let (row_hlc,): (Vec<u8>,) = conn
+            .query_row(
+                "SELECT hlc FROM record_links WHERE link_id = ?1",
+                params![first],
+                |r| Ok((r.get(0)?,)),
+            )
+            .unwrap();
+        let (op_hlc,): (Vec<u8>,) = conn
+            .query_row(
+                "SELECT hlc FROM oplog WHERE op_id = ?1 AND op_type = 'link'",
+                params![first],
+                |r| Ok((r.get(0)?,)),
+            )
+            .unwrap();
+        assert_eq!(row_hlc, op_hlc, "edge row and oplog op share one HLC");
     }
 
     #[test]

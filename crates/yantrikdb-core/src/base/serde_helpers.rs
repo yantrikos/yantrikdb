@@ -14,6 +14,29 @@ pub fn deserialize_f32(blob: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+/// Lowercase hex encoding (v0.10 Phase 0: HLC bytes carried in JSON
+/// replication payloads so followers persist the leader's exact edge
+/// identity/order).
+pub fn hex_lower(bytes: &[u8]) -> String {
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        use std::fmt::Write;
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
+
+/// Decode lowercase/uppercase hex back to bytes; None on malformed input.
+pub fn hex_decode(s: &str) -> Option<Vec<u8>> {
+    if s.len() % 2 != 0 {
+        return None;
+    }
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

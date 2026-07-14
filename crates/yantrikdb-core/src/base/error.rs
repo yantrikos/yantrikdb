@@ -58,6 +58,43 @@ pub enum YantrikDbError {
         value: f64,
     },
 
+    /// **v0.10 Phase 0 (chain integrity).** A Supersedes link would give the
+    /// predecessor (old record) a SECOND active successor. Exactly one
+    /// selected inbound Supersedes edge per record is the invariant that
+    /// `resolve_current` / `superseded_by` / the continuity packet stand on.
+    /// The caller can dispute, or supersede the existing successor instead.
+    #[error(
+        "supersede conflict: {predecessor_rid} already has an active successor \
+         {existing_successor_rid} (edge {existing_edge_id}); dispute it or supersede \
+         the successor instead"
+    )]
+    SupersedeConflict {
+        predecessor_rid: String,
+        existing_successor_rid: String,
+        existing_edge_id: String,
+    },
+
+    /// **v0.10 Phase 0.** Inserting this Supersedes edge would create a cycle
+    /// in the supersedes graph (the target's successor closure reaches back
+    /// to the source).
+    #[error("supersede cycle: linking {source_rid} -> {target_rid} would create a cycle")]
+    SupersedeCycle {
+        source_rid: String,
+        target_rid: String,
+    },
+
+    /// **v0.10 Phase 0.** A supersedes-chain walk exceeded the traversal cap.
+    /// Foreground requests are rejected with this (replication never discards
+    /// a durable candidate at the cap — it persists it unselected instead).
+    #[error("chain traversal limit ({limit}) exceeded walking from {start_rid}")]
+    ChainTraversalLimit { start_rid: String, limit: usize },
+
+    /// **v0.10 Phase 0.** A link endpoint does not exist (or, for a new
+    /// active Supersedes edge, is tombstoned) or the endpoints are in
+    /// different namespaces.
+    #[error("invalid link endpoints: {reason}")]
+    InvalidLinkEndpoints { reason: String },
+
     /// **v0.9.3 (sol converged plan item 3).** `correct(new_text=...)` was
     /// refused because changing a memory's text without re-embedding it
     /// leaves the durable "current truth" and the retrieval vector
