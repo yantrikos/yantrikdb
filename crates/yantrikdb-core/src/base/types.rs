@@ -221,6 +221,16 @@ pub struct SearchCoverage {
     pub top_similarity: f64,
     /// The typed T08 distinction.
     pub outcome: CoverageOutcome,
+    /// v0.10 Item 2 — the piggyback label request (nuron's labeling
+    /// economics): at most 2 served rids the learner would most like
+    /// graded (nearest the relevance gate, never previously asked for
+    /// this query). Rides on a response the consumer already requested;
+    /// grading is one token each (relevant/irrelevant via
+    /// recall_feedback / reject_recalled), skipping is free and the
+    /// same (query, rid) is never re-asked. Empty when there is nothing
+    /// informative to ask.
+    #[serde(default)]
+    pub label_request: Vec<String>,
 }
 
 impl Default for SearchCoverage {
@@ -232,6 +242,7 @@ impl Default for SearchCoverage {
             threshold_tau: 0.0,
             top_similarity: 0.0,
             outcome: CoverageOutcome::NoMatchingRecord,
+            label_request: Vec::new(),
         }
     }
 }

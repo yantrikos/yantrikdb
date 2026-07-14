@@ -1015,6 +1015,39 @@ impl PyYantrikDB {
         .map_err(map_err)
     }
 
+    /// v0.10 Item 2 — explicitly reject served results as IRRELEVANT to
+    /// the query they were served for. Only genuine irrelevance belongs
+    /// here (redundant / already-known / wrong-granularity exclusions
+    /// must be filtered out by the caller — they are not negatives).
+    /// Rid-addressed: the engine binds each rejection to the rid's most
+    /// recent impression within the horizon; rids the ranker never
+    /// served bind nothing. Returns how many labels were recorded.
+    fn reject_recalled(&self, rids: Vec<String>) -> PyResult<usize> {
+        let db = self.get_inner()?;
+        let refs: Vec<&str> = rids.iter().map(|s| s.as_str()).collect();
+        db.reject_recalled(&refs).map_err(map_err)
+    }
+
+    /// v0.10 Item 2 — run the self-sufficient learning loop once and
+    /// return its typed report as JSON (outcome, gates, losses,
+    /// label_counts, semantic_anchor_drop_rate,
+    /// engine_resurface_positive_count, expired_unlabeled_impressions).
+    /// Also runs automatically inside think(); this surface is for
+    /// hosts that schedule learning themselves.
+    fn run_learning(&self) -> PyResult<String> {
+        let db = self.get_inner()?;
+        let report = db.run_learning().map_err(map_err)?;
+        Ok(serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string()))
+    }
+
+    /// v0.10 Item 2 — the most recent learning report (JSON), or None
+    /// if the loop has never run. Interim surface until Item 5's typed
+    /// diagnostics().
+    fn last_learning_report(&self) -> PyResult<Option<String>> {
+        let db = self.get_inner()?;
+        db.last_learning_report().map_err(map_err)
+    }
+
     /// Get the current learned scoring weights.
     fn learned_weights(&self, py: Python<'_>) -> PyResult<PyObject> {
         let db = self.get_inner()?;

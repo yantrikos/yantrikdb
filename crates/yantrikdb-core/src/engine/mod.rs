@@ -1148,6 +1148,14 @@ impl YantrikDB {
         Ok(())
     }
 
+    /// v0.10 Item 2 — the last learning-loop report (JSON), if any run
+    /// has happened. Interim surface: lifts to typed diagnostics()
+    /// fields with Item 5 (commitment recorded in nuron's consumer
+    /// review of the Item-2 branch).
+    pub fn last_learning_report(&self) -> Result<Option<String>> {
+        Self::get_meta(&self.conn(), "last_learning_report")
+    }
+
     /// Get a new HLC timestamp (ticks the clock forward).
     pub fn tick_hlc(&self) -> HLCTimestamp {
         self.hlc.lock().now()

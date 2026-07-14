@@ -144,6 +144,11 @@ pub struct LearningReport {
     /// mint a positive. Always 0 by construction; exposed so consumer
     /// seats can assert it.
     pub engine_resurface_positive_count: i64,
+    /// How much potential signal the label-binding horizon discarded:
+    /// impressions older than the horizon that never received a label
+    /// (nuron's review — lets the 7-day value be tuned from data
+    /// instead of argued).
+    pub expired_unlabeled_impressions: i64,
 }
 
 /// Score an impression's frozen features under candidate weights,
@@ -357,6 +362,17 @@ impl YantrikDB {
             "SELECT COUNT(*) FROM ranking_labels \
              WHERE source NOT IN ('explicit', 'rejected_refine', 'caller_used')",
             [],
+            |r| r.get(0),
+        )?;
+
+        // Horizon-discard observable: impressions past the label-binding
+        // horizon that never got a label (tunes the horizon from data).
+        report.expired_unlabeled_impressions = self.conn().query_row(
+            "SELECT COUNT(*) FROM recall_impressions i \
+             WHERE i.created_at < ?1 AND NOT EXISTS \
+               (SELECT 1 FROM ranking_labels l \
+                WHERE l.episode_id = i.episode_id AND l.rid = i.rid)",
+            params![crate::time::now_secs() - 7.0 * 86_400.0],
             |r| r.get(0),
         )?;
 
