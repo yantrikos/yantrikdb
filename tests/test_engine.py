@@ -679,27 +679,48 @@ class TestNamespace:
         """Correcting a memory preserves its namespace.
 
         Issue #47 (v0.7.20): correct() is now in-place. `reason` is
-        required, `embedding` removed (HNSW limitation). v0.9.3: text
-        corrections are refused (see test_correct_refuses_new_text), so
-        the namespace-preservation contract is exercised via importance.
+        required, `embedding` removed (HNSW limitation). The
+        namespace-preservation contract is exercised via importance.
         """
         rid = db.record("original", embedding=_vec(1.0), namespace="my-ns")
         result = db.correct(rid, reason="test", new_importance=0.9)
         corrected = db.get(result["corrected_rid"])
         assert corrected["namespace"] == "my-ns"
 
-    def test_correct_refuses_new_text(self, db):
-        """v0.9.3 (issue #60 follow-up program): correct(new_text=...) is
-        refused with an actionable error — changing text without
-        re-embedding leaves the memory retrieved under its OLD meaning.
-        Metadata/importance/valence corrections remain available."""
+    def test_correct_new_text_requires_embedder(self, db):
+        """v0.10 Item 3: a text-changing correction re-embeds. With NO
+        embedder configured (this fixture records explicit vectors), the
+        re-embed cannot run, so it is rejected cleanly — no side effects,
+        and metadata/importance/valence corrections still work. (The
+        message names the embedder, not the old forget+record_text
+        workaround, which v0.10 removed.)"""
         rid = db.record("alice owns service A", embedding=_vec(1.0))
-        with pytest.raises(Exception, match="record_text"):
+        with pytest.raises(Exception, match="[Ee]mbedder"):
             db.correct(rid, reason="handover", new_text="bob owns service B")
         # No side effects: text unchanged, and non-text corrections still work.
         assert db.get(rid)["text"] == "alice owns service A"
         result = db.correct(rid, reason="handover", metadata_merge={"owner": "bob"})
         assert result["revision_num"] == 1
+
+    def test_correct_new_text_reembeds_with_embedder(self, tmp_path):
+        """v0.10 Item 3: with an embedder attached, correct(new_text=...)
+        re-embeds and updates the record in place at the SAME rid — the
+        durable text and the retrieval vector stay coherent (the whole
+        point of Item 3). No new rid is minted."""
+
+        class _MockEmbedder:
+            def encode(self, text: str) -> list[float]:
+                return _vec(float(hash(text) % 1000) / 100.0)
+
+        db = YantrikDB(str(tmp_path / "reembed.db"), embedding_dim=DIM)
+        db.set_embedder(_MockEmbedder())
+        rid = db.record("alice owns service A", embedding=_vec(1.0))
+        result = db.correct(rid, reason="handover", new_text="bob owns service B")
+        # In-place: same rid, revision advances, text is the corrected text.
+        assert result["corrected_rid"] == rid
+        assert result["original_tombstoned"] is False
+        assert result["revision_num"] == 1
+        assert db.get(rid)["text"] == "bob owns service B"
 
 
 class TestQueryBuilder:

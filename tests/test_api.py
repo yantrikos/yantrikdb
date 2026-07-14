@@ -118,19 +118,22 @@ class TestMemoryEndpoints:
         assert data["original_tombstoned"] is False
         assert data["revision_num"] == 1
 
-    def test_correct_new_text_refused(self, client):
-        # v0.9.3: text corrections are refused by the engine
-        # (CorrectionRequiresReembed) and surface as 422 with the
-        # actionable workaround in the detail, not a bare 500.
+    def test_correct_new_text_reembeds(self, client):
+        # v0.10 Item 3: text corrections re-embed in place (the client
+        # fixture attaches a mock embedder). The record is updated at the
+        # same rid and its text/vector stay coherent — no longer a 422
+        # refusal.
         rid = client.post("/memories", json={"text": "wrong"}).json()["rid"]
         resp = client.post(f"/memories/{rid}/correct", json={
             "new_text": "correct",
             "reason": "fixed",
         })
-        assert resp.status_code == 422
-        assert "record_text" in resp.json()["detail"]
-        # No side effects: text unchanged.
-        assert client.get(f"/memories/{rid}").json()["text"] == "wrong"
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["corrected_rid"] == rid
+        assert data["original_tombstoned"] is False
+        # Text is now the corrected text.
+        assert client.get(f"/memories/{rid}").json()["text"] == "correct"
 
     def test_record_with_fields(self, client):
         resp = client.post("/memories", json={

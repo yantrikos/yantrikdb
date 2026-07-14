@@ -700,6 +700,59 @@ impl YantrikDB {
         new_valence: Option<f64>,
         reason: &str,
     ) -> Result<CorrectionResult> {
+        self.correct_impl(
+            rid,
+            new_text,
+            None,
+            metadata_merge,
+            new_importance,
+            new_valence,
+            reason,
+        )
+    }
+
+    /// **v0.10 Item 3 (Python-binding embedder parity).** As [`Self::correct`],
+    /// but the caller supplies the embedding for `new_text` instead of the
+    /// engine embedding it internally. Used by the Python binding when the
+    /// user attached a Python-callable embedder via `set_embedder(obj)`: the
+    /// re-embed runs pure-Rust and cannot call back into Python, so the
+    /// binding pre-embeds on the Python thread (mirroring `record_text`) and
+    /// hands the vector here. `new_embedding` is validated for dim/finiteness
+    /// on the text-changing path; it is ignored for metadata/scalar-only
+    /// corrections (no re-embed needed). Coherence machinery is identical to
+    /// `correct` — only the source of the vector differs.
+    pub fn correct_with_embedding(
+        &self,
+        rid: &str,
+        new_text: Option<&str>,
+        new_embedding: &[f32],
+        metadata_merge: Option<&serde_json::Value>,
+        new_importance: Option<f64>,
+        new_valence: Option<f64>,
+        reason: &str,
+    ) -> Result<CorrectionResult> {
+        self.correct_impl(
+            rid,
+            new_text,
+            Some(new_embedding),
+            metadata_merge,
+            new_importance,
+            new_valence,
+            reason,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn correct_impl(
+        &self,
+        rid: &str,
+        new_text: Option<&str>,
+        caller_embedding: Option<&[f32]>,
+        metadata_merge: Option<&serde_json::Value>,
+        new_importance: Option<f64>,
+        new_valence: Option<f64>,
+        reason: &str,
+    ) -> Result<CorrectionResult> {
         // Validate reason non-empty (load-bearing audit field).
         let reason_trimmed = reason.trim();
         if reason_trimmed.is_empty() {
@@ -744,6 +797,7 @@ impl YantrikDB {
                 rid,
                 &original,
                 new_text.expect("text_changes implies Some"),
+                caller_embedding,
                 metadata_merge,
                 new_importance,
                 new_valence,
@@ -807,6 +861,7 @@ impl YantrikDB {
                     rid,
                     &original,
                     t,
+                    caller_embedding,
                     metadata_merge,
                     new_importance,
                     new_valence,
@@ -1027,6 +1082,12 @@ impl YantrikDB {
         rid: &str,
         original: &Memory,
         new_text: &str,
+        // Item 3 (Python-binding parity): when `Some`, the caller already
+        // embedded `new_text` (it holds a Python-callable embedder the pure-
+        // Rust re-embed cannot reach). When `None`, the engine embeds using
+        // its native `search_state.embedder`. Coherence is identical either
+        // way — only the vector's source differs.
+        caller_embedding: Option<&[f32]>,
         metadata_merge: Option<&serde_json::Value>,
         new_importance: Option<f64>,
         new_valence: Option<f64>,
@@ -1045,24 +1106,36 @@ impl YantrikDB {
         // expectation: reembed advances the generation monotonically and
         // completes at most once per call.
         loop {
-            // Step 1: snapshot for the embed.
+            // Step 1: snapshot for the embed. Only require a native embedder
+            // when the caller did NOT supply one (Item 3 Python parity).
             let state_for_embed = self.search_state.load_full();
             let gen_pre = state_for_embed.generation;
             let digest_pre = state_for_embed.runtime_embedder_digest.clone();
-            let embedder = state_for_embed
-                .embedder
-                .as_ref()
-                .ok_or(YantrikDbError::NoEmbedder)?
-                .clone();
+            let embedder = match caller_embedding {
+                Some(_) => None,
+                None => Some(
+                    state_for_embed
+                        .embedder
+                        .as_ref()
+                        .ok_or(YantrikDbError::NoEmbedder)?
+                        .clone(),
+                ),
+            };
             let dim_pre = state_for_embed.dim();
             drop(state_for_embed);
 
-            // Step 2: embed the new text OUTSIDE any guard (slow). The
-            // embedding depends only on new_text, so it needs no prior
-            // state and is safe to compute before the critical section.
-            let new_embedding = embedder
-                .embed(new_text)
-                .map_err(|e| YantrikDbError::Inference(e.to_string()))?;
+            // Step 2: obtain the new embedding OUTSIDE any guard (slow). It
+            // depends only on new_text, so it needs no prior state and is safe
+            // to compute before the critical section. Either the caller
+            // supplied it (Python embedder) or the engine embeds natively.
+            let new_embedding = match caller_embedding {
+                Some(e) => e.to_vec(),
+                None => embedder
+                    .as_ref()
+                    .expect("embedder present when caller_embedding is None")
+                    .embed(new_text)
+                    .map_err(|e| YantrikDbError::Inference(e.to_string()))?,
+            };
             crate::validate::validate_embedding("correct", &new_embedding, dim_pre)?;
 
             // Step 3: enter the sync path. A reembed SWAP is in flight
@@ -1084,11 +1157,23 @@ impl YantrikDB {
             let state_for_commit = self.search_state.load_full();
 
             // Step 5: revalidate — a swap between step 1 and step 4 means
-            // the embedding is in the wrong vector space; retry.
+            // the embedding is in the wrong vector space.
             if state_for_commit.generation != gen_pre
                 || state_for_commit.runtime_embedder_digest != digest_pre
             {
                 drop(sync_guard);
+                // A caller-supplied embedding (Python embedder) cannot be
+                // re-embedded here into the new space — the engine has no
+                // native embedder for this text. Surface the retryable
+                // deferred error; the caller re-embeds and reissues. Nothing
+                // was mutated. (Unreachable in practice for a pure-Python-
+                // embedder DB: db.reembed() needs a native embedder, so the
+                // generation cannot advance from a cutover here.)
+                if caller_embedding.is_some() {
+                    return Err(YantrikDbError::CorrectionDeferredDuringReembed {
+                        rid: rid.to_string(),
+                    });
+                }
                 tracing::info!(
                     gen_pre,
                     gen_post = state_for_commit.generation,
