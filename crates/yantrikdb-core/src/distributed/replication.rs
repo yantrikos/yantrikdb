@@ -207,8 +207,10 @@ pub fn apply_ops(db: &YantrikDB, ops: &[OplogEntry]) -> Result<SyncStats> {
             db.merge_hlc(remote_ts);
         }
 
-        // Track if we need to backfill memory_entities after
-        if op.op_type == "relate" || op.op_type == "record" {
+        // Track if we need to backfill memory_entities after. Includes
+        // "record_with_rid" (now materialized, same as "record") so its
+        // entity join rows are backfilled too.
+        if op.op_type == "relate" || op.op_type == "record" || op.op_type == "record_with_rid" {
             has_relate_or_record = true;
         }
 
@@ -254,23 +256,37 @@ pub fn apply_ops(db: &YantrikDB, ops: &[OplogEntry]) -> Result<SyncStats> {
 /// Materialize a single op — replay its side effects on the local DB.
 fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
     match op.op_type.as_str() {
-        "record" => {
+        // "record_with_rid" (cluster/replica apply path) logs a full-payload
+        // op whose op_type differs from "record"; without this arm it fell
+        // through to the silent unknown-op branch, so records created via the
+        // cluster path never peer-replicated (sol Item 4 design review). Its
+        // payload is materialize_record-compatible (created_at handled in
+        // materialize_record), and INSERT OR IGNORE keeps re-apply idempotent.
+        "record" | "record_with_rid" => {
             materialize_record(
                 &*db.conn(),
                 &op.payload,
                 db.embedding_dim(),
                 &op.origin_actor,
             )?;
-            // Update scoring cache with new record
+            // Update scoring cache with new record. created_at is carried as
+            // `created_at` (record) or `created_at_unix_micros`
+            // (record_with_rid) — accept either so the cache matches the
+            // durable row.
+            let created_at = op.payload["created_at"].as_f64().or_else(|| {
+                op.payload["created_at_unix_micros"]
+                    .as_f64()
+                    .map(|micros| micros / 1_000_000.0)
+            });
             let rid = op.payload["rid"].as_str().unwrap_or_default();
             if !rid.is_empty() {
                 db.cache_insert(
                     rid.to_string(),
                     ScoringRow {
-                        created_at: op.payload["created_at"].as_f64().unwrap_or(0.0),
+                        created_at: created_at.unwrap_or(0.0),
                         importance: op.payload["importance"].as_f64().unwrap_or(0.5),
                         half_life: op.payload["half_life"].as_f64().unwrap_or(604800.0),
-                        last_access: op.payload["created_at"].as_f64().unwrap_or(0.0),
+                        last_access: created_at.unwrap_or(0.0),
                         access_count: 0,
                         valence: op.payload["valence"].as_f64().unwrap_or(0.0),
                         consolidation_status: "active".to_string(),
@@ -442,7 +458,17 @@ fn materialize_record(
     let importance = payload["importance"].as_f64().unwrap_or(0.5);
     let valence = payload["valence"].as_f64().unwrap_or(0.0);
     let half_life = payload["half_life"].as_f64().unwrap_or(604800.0);
-    let created_at = payload["created_at"].as_f64().unwrap_or(0.0);
+    // The "record" op carries `created_at` (secs); the "record_with_rid" op
+    // carries `created_at_unix_micros`. Accept either so both op types
+    // materialize with the correct timestamp instead of falling to epoch 0.
+    let created_at = payload["created_at"]
+        .as_f64()
+        .or_else(|| {
+            payload["created_at_unix_micros"]
+                .as_f64()
+                .map(|micros| micros / 1_000_000.0)
+        })
+        .unwrap_or(0.0);
     let updated_at = payload["updated_at"].as_f64().unwrap_or(created_at);
     let metadata = payload
         .get("metadata")
@@ -454,16 +480,44 @@ fn materialize_record(
     }
 
     let namespace = payload["namespace"].as_str().unwrap_or("default");
+    // **Replication provenance-integrity fix (sol Item 4 design review,
+    // 2026-07-14).** These four fields were previously dropped here, so a
+    // replicated record's DURABLE row fell to the schema defaults —
+    // critically `source='user'` — even when the origin recorded
+    // `source='inference'`. Meanwhile the scoring-cache insert below reads
+    // them from the payload, so the durable row and the cache disagreed and
+    // `get()` returned a laundered `source='user'`. The oplog "record"
+    // payload carries all four (engine/record.rs log_op), so read them here
+    // with the SAME defaults the cache uses and persist them verbatim. This
+    // is the T06 anti-laundering contract at the replication boundary.
+    let certainty = payload["certainty"].as_f64().unwrap_or(0.8);
+    let domain = payload["domain"].as_str().unwrap_or("general");
+    let source = payload["source"].as_str().unwrap_or("user");
+    let emotional_state = payload["emotional_state"].as_str();
 
     // Add-Wins Set: INSERT OR IGNORE means first writer wins (UUIDv7 = no collisions)
     conn.execute(
         "INSERT OR IGNORE INTO memories \
          (rid, type, text, created_at, updated_at, importance, \
-          half_life, last_access, valence, metadata, namespace) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+          half_life, last_access, valence, metadata, namespace, \
+          certainty, domain, source, emotional_state) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
         params![
-            rid, mem_type, text, created_at, updated_at, importance, half_life, created_at,
-            valence, metadata, namespace,
+            rid,
+            mem_type,
+            text,
+            created_at,
+            updated_at,
+            importance,
+            half_life,
+            created_at,
+            valence,
+            metadata,
+            namespace,
+            certainty,
+            domain,
+            source,
+            emotional_state,
         ],
     )?;
 
@@ -1201,6 +1255,110 @@ mod tests {
         assert_eq!(mem.text, "test mem");
         assert_eq!(mem.memory_type, "semantic");
         assert_eq!(mem.importance, 0.8);
+    }
+
+    #[test]
+    fn test_replicated_record_preserves_provenance() {
+        // **T06 anti-laundering at the replication boundary (sol Item 4 design
+        // review, 2026-07-14).** materialize_record used to drop source,
+        // certainty, domain, and emotional_state, so a replicated
+        // source="inference" record silently became source="user" (the schema
+        // default) on the follower's durable row. Prove all four survive the
+        // hop verbatim.
+        let a = YantrikDB::new_with_actor(":memory:", 8, "A").unwrap();
+        let rid = a
+            .record(
+                "the sky is green",
+                "semantic",
+                0.7,
+                0.1,
+                1000.0,
+                &serde_json::json!({"kind": "inference"}),
+                &vec_seed(1.0, 8),
+                "work",
+                0.42,        // non-default certainty
+                "science",   // non-default domain
+                "inference", // the field that was being laundered to "user"
+                Some("concern"),
+            )
+            .unwrap();
+
+        let ops = extract_ops_since(&*a.conn(), None, None, None, 100).unwrap();
+        let record_op = ops.iter().find(|o| o.op_type == "record").unwrap();
+
+        let b = YantrikDB::new_with_actor(":memory:", 8, "B").unwrap();
+        apply_ops(&b, &[record_op.clone()]).unwrap();
+
+        let mem = b
+            .get(&rid)
+            .unwrap()
+            .expect("record materialized on follower");
+        assert_eq!(
+            mem.source, "inference",
+            "source must NOT be laundered to 'user'"
+        );
+        assert_eq!(mem.certainty, 0.42, "certainty must survive replication");
+        assert_eq!(mem.domain, "science", "domain must survive replication");
+        assert_eq!(
+            mem.emotional_state.as_deref(),
+            Some("concern"),
+            "emotional_state must survive replication"
+        );
+        assert_eq!(mem.namespace, "work");
+    }
+
+    #[test]
+    fn test_replicated_record_with_rid_materializes_with_provenance() {
+        // **sol Item 4 design review, 2026-07-14.** "record_with_rid" ops had
+        // no materialize_op arm, so records created via the cluster path
+        // silently hit the unknown-op branch and never peer-replicated. Prove
+        // the op now materializes with provenance intact AND that its
+        // `created_at_unix_micros` field is converted to seconds (not dropped
+        // to epoch 0 like the "record" op's `created_at` reader would).
+        let a = YantrikDB::new_with_actor(":memory:", 8, "A").unwrap();
+        let created_micros: i64 = 1_700_000_000_000_000; // = 1_700_000_000 s
+        a.record_with_rid(
+            "01900000-0000-7000-8000-0000000000aa",
+            "cluster-path fact",
+            "semantic",
+            0.6,
+            0.0,
+            1000.0,
+            &serde_json::json!({"kind": "inference"}),
+            &vec_seed(1.0, 8),
+            "work",
+            0.33,
+            "science",
+            "inference",
+            Some("concern"),
+            created_micros,
+            &[],
+            "test-model",
+            None,
+        )
+        .unwrap();
+
+        let ops = extract_ops_since(&*a.conn(), None, None, None, 100).unwrap();
+        let op = ops
+            .iter()
+            .find(|o| o.op_type == "record_with_rid")
+            .expect("record_with_rid op present in oplog");
+
+        let b = YantrikDB::new_with_actor(":memory:", 8, "B").unwrap();
+        apply_ops(&b, &[op.clone()]).unwrap();
+
+        let mem = b
+            .get("01900000-0000-7000-8000-0000000000aa")
+            .unwrap()
+            .expect("record_with_rid op materialized on follower (was silently dropped before)");
+        assert_eq!(mem.text, "cluster-path fact");
+        assert_eq!(mem.source, "inference");
+        assert_eq!(mem.certainty, 0.33);
+        assert_eq!(mem.domain, "science");
+        assert_eq!(
+            mem.created_at, 1_700_000_000.0,
+            "created_at_unix_micros must be converted to seconds"
+        );
     }
 
     #[test]
