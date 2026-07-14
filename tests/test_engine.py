@@ -260,8 +260,15 @@ class TestStats:
             "pending_triggers", "active_patterns",
             "scoring_cache_entries", "vec_index_entries",
             "graph_index_entities", "graph_index_edges",
+            # v0.10 Item 1: status-led read path adoption surface.
+            "status_read_policy", "superseded_records",
+            "superseded_served_since_boot",
         }
         assert set(s.keys()) == expected_keys
+        # Fresh databases default to the status-led read path.
+        assert s["status_read_policy"] == "exclude_superseded"
+        assert s["superseded_records"] == 0
+        assert s["superseded_served_since_boot"] == 0
 
     def test_stats_tracks_operations(self, db):
         db.record("op1", embedding=_vec(1.0))
@@ -273,6 +280,78 @@ class TestStats:
         # exact equality so the contract is "ops tracked" not "exactly
         # this many."
         assert s["operations"] >= 2, f"expected >= 2 ops, got {s['operations']}"
+
+
+# ── v0.10 Item 1: status-led read path ───────────────────
+
+class TestStatusReadPath:
+    def _seed_chain(self, db):
+        """Old fact superseded by a near-identical new fact."""
+        old = db.record("standup is at 9am", embedding=_vec(1.0))
+        new = db.record("standup is at 10am", embedding=_vec(1.0))
+        db.link(new, old, "supersedes")
+        return old, new
+
+    def test_fresh_db_excludes_superseded_by_default(self, db):
+        old, new = self._seed_chain(db)
+        assert db.status_read_policy() is True
+        rids = [r["rid"] for r in db.recall(query_embedding=_vec(1.0), top_k=10)]
+        assert new in rids
+        assert old not in rids, "superseded record must be excluded (T01 hard zero)"
+
+    def test_include_superseded_readmits_with_typed_fields(self, db):
+        old, new = self._seed_chain(db)
+        hits = db.recall(query_embedding=_vec(1.0), top_k=10, include_superseded=True)
+        by_rid = {r["rid"]: r for r in hits}
+        assert by_rid[old]["current_status"] == "superseded"
+        assert by_rid[old]["superseded_by"] == new
+        assert by_rid[new]["current_status"] == "active"
+        assert by_rid[new]["superseded_by"] is None
+
+    def test_legacy_policy_serves_stamped_and_counts_nudge(self, db):
+        old, new = self._seed_chain(db)
+        db.set_status_read_policy(False)  # simulate migrated pre-v0.10 DB
+        rids = [r["rid"] for r in db.recall(query_embedding=_vec(1.0), top_k=10)]
+        assert old in rids and new in rids
+        s = db.stats()
+        assert s["status_read_policy"] == "legacy"
+        assert s["superseded_records"] == 1
+        assert s["superseded_served_since_boot"] >= 1
+        db.set_status_read_policy(True)
+        rids = [r["rid"] for r in db.recall(query_embedding=_vec(1.0), top_k=10)]
+        assert old not in rids
+
+    def test_recall_with_response_typed_coverage(self, db):
+        # T08: empty scope vs below-threshold vs matched, typed.
+        resp = db.recall_with_response(
+            query_embedding=_vec(1.0), top_k=5, namespace="empty_ns"
+        )
+        cov = resp["coverage"]
+        assert cov["outcome"] == "no_matching_record"
+        assert cov["candidate_count"] == 0
+        assert cov["namespace"] == "empty_ns"
+
+        db.record("a stored fact", embedding=_vec(1.0))
+        resp = db.recall_with_response(query_embedding=_vec(1.0), top_k=5)
+        cov = resp["coverage"]
+        assert cov["outcome"] == "matched"
+        assert cov["top_similarity"] >= cov["threshold_tau"] > 0.0
+
+    def test_what_changed_since(self, db):
+        import json
+        old, new = self._seed_chain(db)
+        changes = json.loads(db.what_changed_since(0.0))
+        new_rids = [r["rid"] for r in changes["new_records"]]
+        assert old in new_rids and new in new_rids
+        transitions = changes["status_transitions"]
+        assert len(transitions) == 1
+        assert transitions[0]["rid"] == old
+        assert transitions[0]["to"] == "superseded"
+        assert transitions[0]["by_rid"] == new
+        # Nothing after the far future.
+        quiet = json.loads(db.what_changed_since(time.time() + 60.0))
+        assert quiet["new_records"] == []
+        assert quiet["status_transitions"] == []
 
 
 # ── Integration ──────────────────────────────────────────
