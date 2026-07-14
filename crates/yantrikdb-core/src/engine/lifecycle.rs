@@ -1287,7 +1287,7 @@ impl YantrikDB {
         embedding: Option<&[u8]>,
         source_actor: &str,
     ) -> Result<()> {
-        use crate::serde_helpers::deserialize_f32;
+        use crate::serde_helpers::{deserialize_f32, serialize_f32};
 
         let rid = payload["rid"].as_str().unwrap_or_default();
         if rid.is_empty() {
@@ -1300,174 +1300,241 @@ impl YantrikDB {
             .as_f64()
             .unwrap_or_else(crate::time::now_secs);
         let op_model = payload["embedding_model"].as_str();
+        let new_text = payload["new_text"].as_str();
 
-        let conn = self.conn.lock();
-        let state = self.search_state.load_full();
-        let generation = state.generation as i64;
-        let runtime_model = state.runtime_embedder_name.clone();
+        // Revalidation loop, mirroring the leader: any local embed happens
+        // OUTSIDE the guard, then the guarded critical section revalidates
+        // the generation (retry on a reembed swap that landed mid-embed).
+        loop {
+            let state0 = self.search_state.load_full();
+            let gen0 = state0.generation;
+            let digest0 = state0.runtime_embedder_digest.clone();
+            let runtime_model = state0.runtime_embedder_name.clone();
+            let embedder = state0.embedder.clone();
+            let dim0 = state0.dim();
+            drop(state0);
 
-        // Prior state = the follower's current ACTIVE row. Absent/inactive →
-        // skip; oplog replay order (or a forget) handles it.
-        #[allow(clippy::type_complexity)]
-        let existing: Option<(String, String, f64, f64, Option<Vec<u8>>, Option<String>)> = conn
-            .query_row(
-                "SELECT text, metadata, importance, valence, embedding, embedding_model \
-                 FROM memories WHERE rid = ?1 AND consolidation_status = 'active'",
-                params![rid],
-                |r| {
-                    Ok((
-                        r.get(0)?,
-                        r.get(1)?,
-                        r.get(2)?,
-                        r.get(3)?,
-                        r.get::<_, Option<Vec<u8>>>(4)?,
-                        r.get::<_, Option<String>>(5)?,
-                    ))
-                },
-            )
-            .optional()?;
-        let Some((ex_text, ex_meta, ex_imp, ex_val, ex_emb, ex_model)) = existing else {
-            return Ok(());
-        };
+            // Decide the vector to apply (finding 5 / r3 #2). Exact bytes
+            // ONLY when the leader model is present AND matches this
+            // follower's active model AND the bytes decrypt. Otherwise, for
+            // a re-embedding correction, RE-EMBED the new text locally under
+            // the follower's active embedder (the correct follower-space
+            // vector) — a plain rebuild would keep the stale vector, so
+            // "defer to rebuild" is NOT a valid fallback.
+            let model_matches =
+                reembedded && op_model.is_some() && op_model == runtime_model.as_deref();
+            let exact: Option<Vec<f32>> = if model_matches {
+                embedding
+                    .and_then(|enc| self.decrypt_embedding(enc).ok())
+                    .map(|p| deserialize_f32(&p))
+            } else {
+                None
+            };
+            let new_vec: Option<Vec<f32>> = if !reembedded {
+                None // metadata/scalar correction — vector unchanged
+            } else if let Some(v) = exact {
+                Some(v)
+            } else if let (Some(emb), Some(t)) = (embedder.as_ref(), new_text) {
+                let v = emb
+                    .embed(t)
+                    .map_err(|e| YantrikDbError::Inference(e.to_string()))?;
+                crate::validate::validate_embedding("apply_replicated_correct", &v, dim0)?;
+                Some(v)
+            } else {
+                // Re-embedding correction, but the exact bytes are unusable
+                // AND this follower has no embedder to re-encode. Refuse so
+                // the op is RETRIED (never leave text/vector incoherent).
+                return Err(YantrikDbError::NoEmbedder);
+            };
 
-        let new_importance = payload["new_importance"].as_f64().unwrap_or(ex_imp);
-        let new_valence = payload["new_valence"].as_f64().unwrap_or(ex_val);
-        let stored_new_text = match payload["new_text"].as_str() {
-            Some(t) => self.encrypt_text(t)?,
-            None => ex_text.clone(),
-        };
-        let ex_meta_plain = self.decrypt_text(&ex_meta)?;
-        let ex_meta_val: serde_json::Value =
-            serde_json::from_str(&ex_meta_plain).unwrap_or(serde_json::json!({}));
-        let new_meta_val: serde_json::Value = match payload.get("metadata_merge") {
-            Some(patch) if !patch.is_null() => {
-                let mut merged = ex_meta_val.clone();
-                if let (Some(obj), Some(patch_obj)) = (merged.as_object_mut(), patch.as_object()) {
-                    for (k, v) in patch_obj {
-                        obj.insert(k.clone(), v.clone());
+            // Enter the write router BEFORE loading state / conn (r3 #1):
+            // otherwise a reembed cutover can swap SearchState between our
+            // state load and our commit, detaching our delta append.
+            let _guard = match self.write_router.try_enter_sync_writer() {
+                Some(g) => g,
+                None => {
+                    return Err(YantrikDbError::CorrectionDeferredDuringReembed {
+                        rid: rid.to_string(),
+                    });
+                }
+            };
+            let state = self.search_state.load_full();
+            if state.generation != gen0 || state.runtime_embedder_digest != digest0 {
+                drop(_guard);
+                continue; // swap landed mid-embed; retry (re-embed under new)
+            }
+            let generation = state.generation as i64;
+            let conn = self.conn.lock();
+
+            // Prior state = the follower's current ACTIVE row.
+            #[allow(clippy::type_complexity)]
+            let existing: Option<(
+                String,
+                String,
+                f64,
+                f64,
+                Option<Vec<u8>>,
+                Option<String>,
+            )> = conn
+                .query_row(
+                    "SELECT text, metadata, importance, valence, embedding, embedding_model \
+                     FROM memories WHERE rid = ?1 AND consolidation_status = 'active'",
+                    params![rid],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get::<_, Option<Vec<u8>>>(4)?,
+                            r.get::<_, Option<String>>(5)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((ex_text, ex_meta, ex_imp, ex_val, ex_emb, ex_model)) = existing else {
+                return Ok(()); // absent/forgotten — replay order handles it
+            };
+
+            let new_importance = payload["new_importance"].as_f64().unwrap_or(ex_imp);
+            let new_valence = payload["new_valence"].as_f64().unwrap_or(ex_val);
+            let stored_new_text = match new_text {
+                Some(t) => self.encrypt_text(t)?,
+                None => ex_text.clone(),
+            };
+            let ex_meta_plain = self.decrypt_text(&ex_meta)?;
+            let ex_meta_val: serde_json::Value =
+                serde_json::from_str(&ex_meta_plain).unwrap_or(serde_json::json!({}));
+            let new_meta_val: serde_json::Value = match payload.get("metadata_merge") {
+                Some(patch) if !patch.is_null() => {
+                    let mut merged = ex_meta_val.clone();
+                    if let (Some(obj), Some(patch_obj)) =
+                        (merged.as_object_mut(), patch.as_object())
+                    {
+                        for (k, v) in patch_obj {
+                            obj.insert(k.clone(), v.clone());
+                        }
+                        merged
+                    } else {
+                        patch.clone()
                     }
-                    merged
+                }
+                _ => ex_meta_val,
+            };
+            let stored_new_meta = self.encrypt_text(&serde_json::to_string(&new_meta_val)?)?;
+
+            // Store the follower-local encrypted bytes (exact or re-embedded).
+            let stored_emb: Option<Vec<u8>> = match &new_vec {
+                Some(v) => Some(self.encrypt_embedding(&serialize_f32(v))?),
+                None => None,
+            };
+            let prior_hash: Option<Vec<u8>> = ex_emb.as_ref().and_then(|b| {
+                self.decrypt_embedding(b)
+                    .ok()
+                    .map(|p| embedding_hash(&deserialize_f32(&p)).to_vec())
+            });
+
+            // Reserve-append BEFORE commit; propagate failure (op retried).
+            let seq_new = if let Some(v) = &new_vec {
+                let s = self
+                    .vec_seq
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                    + 1;
+                state
+                    .vec_index
+                    .append_reserved(rid.to_string(), v.clone(), s)?;
+                Some(s)
+            } else {
+                None
+            };
+
+            let commit: Result<()> = (|| {
+                let tx = conn.unchecked_transaction()?;
+                tx.execute(
+                    "INSERT OR IGNORE INTO record_revisions \
+                     (revision_id, rid, revision_num, prior_text, prior_metadata, \
+                      prior_importance, prior_valence, reason, applied_at, hlc, \
+                      origin_actor, prior_embedding_model, prior_embedding_hash) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                    params![
+                        crate::id::new_id(),
+                        rid,
+                        revision_num,
+                        ex_text,
+                        ex_meta,
+                        ex_imp,
+                        ex_val,
+                        reason,
+                        applied_at,
+                        Vec::<u8>::new(),
+                        source_actor,
+                        ex_model,
+                        prior_hash,
+                    ],
+                )?;
+                if let Some(enc) = &stored_emb {
+                    tx.execute(
+                        "UPDATE memories \
+                         SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
+                             embedding = ?5, embedding_model = ?6, embedding_generation = ?7, \
+                             embedding_new = NULL, embedding_new_model = NULL, last_access = ?8 \
+                         WHERE rid = ?9",
+                        params![
+                            stored_new_text,
+                            stored_new_meta,
+                            new_importance,
+                            new_valence,
+                            enc,
+                            runtime_model,
+                            generation,
+                            applied_at,
+                            rid,
+                        ],
+                    )?;
                 } else {
-                    patch.clone()
+                    tx.execute(
+                        "UPDATE memories \
+                         SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
+                             last_access = ?5 \
+                         WHERE rid = ?6",
+                        params![
+                            stored_new_text,
+                            stored_new_meta,
+                            new_importance,
+                            new_valence,
+                            applied_at,
+                            rid,
+                        ],
+                    )?;
+                }
+                // Provenance stamp (minor r3): every replication-apply site
+                // records into replication_apply_log (schema contract).
+                tx.execute(
+                    "INSERT OR IGNORE INTO replication_apply_log \
+                     (rid, op_type, source_actor, applied_at) VALUES (?1, 'correct', ?2, ?3)",
+                    params![rid, source_actor, applied_at],
+                )?;
+                tx.commit()?;
+                Ok(())
+            })();
+            if let Err(e) = commit {
+                if let Some(s) = seq_new {
+                    state.vec_index.remove_appended(rid, s);
+                }
+                return Err(e);
+            }
+            if let Some(s) = seq_new {
+                state.vec_index.publish(rid, s);
+            }
+            {
+                let mut cache = self.scoring_cache.write();
+                if let Some(row) = cache.get_mut(rid) {
+                    row.importance = new_importance;
+                    row.valence = new_valence;
                 }
             }
-            _ => ex_meta_val,
-        };
-        let stored_new_meta = self.encrypt_text(&serde_json::to_string(&new_meta_val)?)?;
-
-        // Apply the exact bytes only if the vector space matches and the
-        // bytes decrypt; otherwise defer the vector to rebuild.
-        let model_matches = op_model.is_none() || op_model == runtime_model.as_deref();
-        let plain_emb: Option<Vec<f32>> = if reembedded && model_matches {
-            embedding
-                .and_then(|enc| self.decrypt_embedding(enc).ok())
-                .map(|p| deserialize_f32(&p))
-        } else {
-            None
-        };
-        let apply_vector = plain_emb.is_some();
-
-        // Reserve-append BEFORE commit; propagate failure (op retried).
-        let seq_new = if let Some(ref emb) = plain_emb {
-            let s = self
-                .vec_seq
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                + 1;
-            state
-                .vec_index
-                .append_reserved(rid.to_string(), emb.clone(), s)?;
-            Some(s)
-        } else {
-            None
-        };
-
-        // Prior embedding hash from the follower's CURRENT vector.
-        let prior_hash: Option<Vec<u8>> = ex_emb.as_ref().and_then(|b| {
-            self.decrypt_embedding(b)
-                .ok()
-                .map(|p| embedding_hash(&deserialize_f32(&p)).to_vec())
-        });
-
-        let commit: Result<()> = (|| {
-            let tx = conn.unchecked_transaction()?;
-            tx.execute(
-                "INSERT OR IGNORE INTO record_revisions \
-                 (revision_id, rid, revision_num, prior_text, prior_metadata, \
-                  prior_importance, prior_valence, reason, applied_at, hlc, \
-                  origin_actor, prior_embedding_model, prior_embedding_hash) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
-                params![
-                    crate::id::new_id(),
-                    rid,
-                    revision_num,
-                    ex_text,
-                    ex_meta,
-                    ex_imp,
-                    ex_val,
-                    reason,
-                    applied_at,
-                    Vec::<u8>::new(),
-                    source_actor,
-                    ex_model,
-                    prior_hash,
-                ],
-            )?;
-            if apply_vector {
-                let enc = embedding.expect("apply_vector implies bytes present");
-                tx.execute(
-                    "UPDATE memories \
-                     SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
-                         embedding = ?5, embedding_model = ?6, embedding_generation = ?7, \
-                         embedding_new = NULL, embedding_new_model = NULL, last_access = ?8 \
-                     WHERE rid = ?9",
-                    params![
-                        stored_new_text,
-                        stored_new_meta,
-                        new_importance,
-                        new_valence,
-                        enc,
-                        runtime_model,
-                        generation,
-                        applied_at,
-                        rid,
-                    ],
-                )?;
-            } else {
-                tx.execute(
-                    "UPDATE memories \
-                     SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
-                         last_access = ?5 \
-                     WHERE rid = ?6",
-                    params![
-                        stored_new_text,
-                        stored_new_meta,
-                        new_importance,
-                        new_valence,
-                        applied_at,
-                        rid,
-                    ],
-                )?;
-            }
-            tx.commit()?;
-            Ok(())
-        })();
-        if let Err(e) = commit {
-            if let Some(s) = seq_new {
-                state.vec_index.remove_appended(rid, s);
-            }
-            return Err(e);
+            return Ok(());
         }
-        if let Some(s) = seq_new {
-            state.vec_index.publish(rid, s);
-        }
-        {
-            let mut cache = self.scoring_cache.write();
-            if let Some(row) = cache.get_mut(rid) {
-                row.importance = new_importance;
-                row.valence = new_valence;
-            }
-        }
-        Ok(())
     }
 
     /// Query the revision history for a single record (Issue #47).

@@ -407,6 +407,16 @@ impl DeltaIndex {
         for entry in delta.iter_mut() {
             if entry.rid == rid && entry.seq == seq && !entry.published {
                 entry.published = true;
+                drop(delta);
+                // **v0.10 Item 3 review r3 #4.** Ensure the age-based
+                // compaction trigger tracks this now-visible entry: if the
+                // dirty-age clock was cleared by a seal that ran while this
+                // entry was still reserved, restamp it so the published
+                // entry ages into cold rather than sitting in the delta.
+                let mut clock = self.oldest_dirty_at.lock();
+                if clock.is_none() {
+                    *clock = Some(std::time::Instant::now());
+                }
                 return true;
             }
         }
@@ -560,12 +570,20 @@ impl DeltaIndex {
                 retained.push(entry);
             }
         }
+        let retained_any = !retained.is_empty();
         *delta = retained;
         // Reset the dirty-age clock under the same write lock so the
         // age-trigger calculation can never observe a stale stamp paired
-        // with an empty delta. (Retained reserved entries re-stamp on their
-        // publish or the next append.)
-        *self.oldest_dirty_at.lock() = None;
+        // with an empty delta. **v0.10 Item 3 review r3 #4:** if RESERVED
+        // entries were retained, re-stamp the clock now so those entries
+        // (and any that publish into this non-empty delta) still age into
+        // compaction — otherwise a low-volume published correction could
+        // sit in the linear-scan delta forever, defeating the age trigger.
+        *self.oldest_dirty_at.lock() = if retained_any {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
         sealed
     }
 
