@@ -193,6 +193,7 @@ fn run_one(n: usize) -> Row {
         let results = db
             .recall(
                 &query, TOP_K, None, None, false, false, None, true, None, None, None, None, None,
+                false,
             )
             .expect("recall failed");
         let lat_us = q_start.elapsed().as_secs_f64() * 1_000_000.0;

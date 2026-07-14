@@ -238,6 +238,24 @@ pub struct Stats {
     pub vec_index_entries: usize,
     pub graph_index_entities: usize,
     pub graph_index_edges: usize,
+    // v0.10 Item 1: status-led read path adoption surface. All
+    // serde(default) so pre-v0.10 serialized stats still deserialize.
+    /// `"exclude_superseded"` (status-led read path active) or
+    /// `"legacy"` (include-everything; pre-v0.10 DB that hasn't opted in).
+    #[serde(default)]
+    pub status_read_policy: String,
+    /// Records currently superseded (selected active inbound
+    /// `supersedes` edge). Global — link identity is namespace-checked
+    /// at creation, so no per-namespace filter applies here.
+    #[serde(default)]
+    pub superseded_records: i64,
+    /// Adoption nudge: superseded results actually served since engine
+    /// boot (only possible on legacy policy or `include_superseded`
+    /// calls). Non-zero on a legacy DB means the status read policy
+    /// would have excluded stale facts — consider
+    /// `set_status_read_policy(true)`.
+    #[serde(default)]
+    pub superseded_served_since_boot: u64,
 }
 
 /// A proactive trigger.
@@ -893,6 +911,9 @@ pub struct RecallQuery {
     // Issue #46: confidence first-class on recall.
     pub certainty_min: Option<f64>,
     pub order: Option<String>,
+    // v0.10 Item 1: re-admit superseded records (stamped) for
+    // history/archaeology queries. No-op on legacy-policy databases.
+    pub include_superseded: bool,
 }
 
 impl RecallQuery {
@@ -912,7 +933,17 @@ impl RecallQuery {
             source: None,
             certainty_min: None,
             order: None,
+            include_superseded: false,
         }
+    }
+
+    /// v0.10 Item 1: include superseded records in results (stamped
+    /// with `current_status = Superseded` + `superseded_by`) instead of
+    /// excluding them under the status read policy. For "show me what I
+    /// used to believe" archaeology queries.
+    pub fn include_superseded(mut self) -> Self {
+        self.include_superseded = true;
+        self
     }
 
     /// Issue #46: drop results whose certainty falls below `min`.

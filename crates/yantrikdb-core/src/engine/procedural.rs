@@ -45,9 +45,10 @@ impl YantrikDB {
             true, // skip_reinforce — we'll reinforce manually below
             namespace,
             domain,
-            None, // no source filter
-            None, // no certainty_min (#46)
-            None, // default relevance order (#46)
+            None,  // no source filter
+            None,  // no certainty_min (#46)
+            None,  // default relevance order (#46)
+            false, // include_superseded (v0.10 Item 1) — policy default
         )
     }
 

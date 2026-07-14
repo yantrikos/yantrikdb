@@ -58,7 +58,7 @@ impl PyYantrikDB {
         .map_err(map_err)
     }
 
-    #[pyo3(signature = (query=None, query_embedding=None, top_k=10, time_window=None, memory_type=None, include_consolidated=false, expand_entities=true, skip_reinforce=false, namespace=None, domain=None, source=None, certainty_min=None, order=None))]
+    #[pyo3(signature = (query=None, query_embedding=None, top_k=10, time_window=None, memory_type=None, include_consolidated=false, expand_entities=true, skip_reinforce=false, namespace=None, domain=None, source=None, certainty_min=None, order=None, include_superseded=false))]
     #[allow(clippy::too_many_arguments)]
     fn recall(
         &self,
@@ -79,6 +79,10 @@ impl PyYantrikDB {
         // the final top_k: "relevance" (default) | "certainty" | "recency".
         certainty_min: Option<f64>,
         order: Option<&str>,
+        // v0.10 Item 1: re-admit superseded records (stamped with
+        // current_status="superseded" + superseded_by) for history /
+        // archaeology queries. No-op on legacy-policy databases.
+        include_superseded: bool,
     ) -> PyResult<Vec<PyObject>> {
         let db = self
             .inner
@@ -112,6 +116,7 @@ impl PyYantrikDB {
                 source,
                 certainty_min,
                 order,
+                include_superseded,
             )
             .map_err(map_err)?;
 
@@ -253,8 +258,9 @@ impl PyYantrikDB {
                 namespace,
                 domain,
                 source,
-                None, // certainty_min (#46)
-                None, // order (#46) — relevance default
+                None,  // certainty_min (#46)
+                None,  // order (#46) — relevance default
+                false, // include_superseded (v0.10 Item 1) — policy default
             )
             .map_err(map_err)?;
 

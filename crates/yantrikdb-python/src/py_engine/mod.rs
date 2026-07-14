@@ -478,6 +478,25 @@ impl PyYantrikDB {
         stats_to_dict(py, &s)
     }
 
+    /// v0.10 Item 1 — whether the status-led read path is active
+    /// (superseded records excluded from recall eligibility). True by
+    /// default on fresh databases; False on migrated pre-v0.10
+    /// databases until opted in via `set_status_read_policy(True)`.
+    fn status_read_policy(&self) -> PyResult<bool> {
+        Ok(self.get_inner()?.status_read_policy())
+    }
+
+    /// v0.10 Item 1 — durably set the status read policy
+    /// (`meta.status_read_policy`). Legacy-database opt-in: review
+    /// `stats()["superseded_served_since_boot"]`, then call
+    /// `set_status_read_policy(True)` to exclude superseded records
+    /// from recall. `False` returns to legacy include-everything.
+    fn set_status_read_policy(&self, exclude_superseded: bool) -> PyResult<()> {
+        self.get_inner()?
+            .set_status_read_policy(exclude_superseded)
+            .map_err(map_err)
+    }
+
     /// Exposed for Python consolidate.py compatibility.
     #[pyo3(signature = (op_type, target_rid, payload))]
     fn _log_op(
