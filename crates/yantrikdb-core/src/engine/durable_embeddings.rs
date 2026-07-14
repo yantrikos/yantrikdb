@@ -46,6 +46,21 @@ use std::collections::HashMap;
 
 use super::YantrikDB;
 
+/// **Issue #62.** `archive()` stores cold-tier embeddings zstd-compressed
+/// in the SAME column hot rows use for raw f32 bytes. Every durable read
+/// must therefore check the zstd magic and decompress (mirroring
+/// `hydrate()`) — otherwise scoring paths reinterpret compressed bytes as
+/// f32 garbage: wrong similarities always, and a chance NaN that poisons
+/// the whole response's confidence. Cheap: a 4-byte magic comparison on
+/// the hot path; decompression only ever runs for genuinely cold rows.
+fn decompress_if_cold(bytes: Vec<u8>) -> Vec<u8> {
+    if crate::compression::is_compressed(&bytes) {
+        crate::serde_helpers::serialize_f32(&crate::compression::decompress_embedding(&bytes))
+    } else {
+        bytes
+    }
+}
+
 /// One row's embedding bytes plus the generation stamp.
 ///
 /// `generation` is the v28 `memories.embedding_generation` column.
@@ -89,9 +104,17 @@ impl<'a> DurableEmbeddingStore<'a> {
     /// Batch-read embeddings for an explicit set of rids.
     ///
     /// Returns `(rid, EmbeddingWithGeneration)` for each rid that
-    /// has a non-NULL embedding column. Rids without an embedding
-    /// (storage_tier='cold' before hydration, tombstoned rows, or
-    /// rids that don't exist) are omitted from the result map.
+    /// has a non-NULL embedding column; rids without one (tombstoned
+    /// rows, or rids that don't exist) are omitted from the result map.
+    ///
+    /// **Issue #62:** cold-tier rows DO have an embedding — `archive()`
+    /// rewrites the column with a zstd-COMPRESSED blob (an earlier version
+    /// of this doc claimed cold rows were omitted; they never were). This
+    /// reader therefore decompresses after decrypting, exactly mirroring
+    /// `hydrate()` — before this fix, every recall scoring path that
+    /// touched a cold record reinterpreted compressed bytes as raw f32,
+    /// producing garbage similarity scores (and, ~50-70% of the time per
+    /// record, a NaN that poisoned the response's confidence field).
     ///
     /// Caller policy on generation:
     /// - `entry.generation == active_search_state.generation`:
@@ -153,6 +176,7 @@ impl<'a> DurableEmbeddingStore<'a> {
             // decrypt_embedding for durable rows on read paths
             // (record/storage are write paths and stay separate).
             let bytes = self.db.decrypt_embedding(&stored_emb)?;
+            let bytes = decompress_if_cold(bytes);
             map.insert(
                 rid,
                 EmbeddingWithGeneration {
@@ -213,6 +237,9 @@ impl<'a> DurableEmbeddingStore<'a> {
         let mut out = Vec::with_capacity(rows.len());
         for (rid, stored_emb, generation) in rows {
             let bytes = self.db.decrypt_embedding(&stored_emb)?;
+            // Issue #62: see read_embeddings_for_rids — cold rows are
+            // compressed at rest and must be decompressed on read.
+            let bytes = decompress_if_cold(bytes);
             out.push((
                 rid,
                 EmbeddingWithGeneration {
