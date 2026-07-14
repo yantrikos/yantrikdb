@@ -175,13 +175,16 @@ impl YantrikDB {
     /// When `expand_entities` is true, graph edges are followed to pull in
     /// entity-connected memories that pure vector search would miss.
     ///
-    /// **v0.10 Item 3 — correction seqlock (sol r4).** Thin retry wrapper
-    /// around [`Self::recall_inner`]: reads an EVEN correction epoch before
-    /// candidate generation and rechecks it after hydration. If a
-    /// text-changing correction interleaved (epoch changed / odd), the
-    /// result could pair a stale ranking vector with corrected text, so it
-    /// is discarded and retried. Corrections are rare, so a retry is rare;
-    /// after a few attempts the last one is accepted (anti-starvation).
+    /// **v0.10 Item 3 — correction seqlock (sol r4/r5/r6).** Thin retry
+    /// wrapper around [`Self::recall_inner`]: reads an EVEN correction epoch
+    /// before candidate generation and rechecks it (Acquire-fenced) after
+    /// hydration. If a text-changing correction interleaved (epoch changed /
+    /// odd), the result could pair a stale ranking vector with corrected
+    /// text, so it is discarded and retried. EVERY attempt validates — a
+    /// result (even an empty one) is never returned without a passing
+    /// recheck. Corrections are rare, so a retry is rare; after the budget
+    /// (`MAX_ATTEMPTS`) the wrapper returns the retryable `RecallContended`
+    /// rather than ever accepting an unvalidated read.
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(skip(self, query_embedding), fields(top_k, expand_entities, namespace))]
     pub fn recall(
