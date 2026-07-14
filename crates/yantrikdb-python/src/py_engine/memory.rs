@@ -572,8 +572,37 @@ impl PyYantrikDB {
             Some(d) => Some(py_to_json(&d.as_any())?),
             None => None,
         };
-        let result = db
-            .correct(
+        // v0.10 Item 3 embedder parity: a text-changing correction re-embeds
+        // inside the pure-Rust engine, which can only reach a NATIVE embedder
+        // (`search_state.embedder`). If the user attached a Python-callable
+        // embedder via `set_embedder(obj)` instead, the engine would raise
+        // NoEmbedder. Mirror `record_text`: pre-embed `new_text` here on the
+        // Python thread (embed_text tries native first, then the Python
+        // embedder) and hand the vector to `correct_with_embedding`. When a
+        // native embedder exists we let the engine embed (it also handles the
+        // reembed-cutover revalidation loop natively).
+        let use_caller_embed = new_text.is_some() && !db.has_embedder() && self.embedder.is_some();
+        let result = if use_caller_embed {
+            // sol r8: snapshot the search generation BEFORE embedding so the
+            // vector is pinned to the space it is computed in. If a reembed
+            // cutover advances the generation before the correction commits,
+            // the engine rejects it retryably rather than committing a
+            // wrong-space vector.
+            let gen = db.search_generation();
+            let emb = self.embed_text(py, new_text.expect("checked is_some"))?;
+            db.correct_with_embedding(
+                rid,
+                new_text,
+                &emb,
+                gen,
+                metadata_json.as_ref(),
+                new_importance,
+                new_valence,
+                reason,
+            )
+            .map_err(map_err)?
+        } else {
+            db.correct(
                 rid,
                 new_text,
                 metadata_json.as_ref(),
@@ -581,7 +610,8 @@ impl PyYantrikDB {
                 new_valence,
                 reason,
             )
-            .map_err(map_err)?;
+            .map_err(map_err)?
+        };
         let dict = PyDict::new(py);
         dict.set_item("original_rid", &result.original_rid)?;
         dict.set_item("corrected_rid", &result.corrected_rid)?;
@@ -609,6 +639,10 @@ impl PyYantrikDB {
                 d.set_item("reason", &r.reason)?;
                 d.set_item("applied_at", r.applied_at)?;
                 d.set_item("origin_actor", &r.origin_actor)?;
+                // v0.10 Item 3: prior embedding provenance (present only on
+                // text-changing re-embed corrections).
+                d.set_item("prior_embedding_model", &r.prior_embedding_model)?;
+                d.set_item("prior_embedding_hash", &r.prior_embedding_hash)?;
                 Ok::<PyObject, pyo3::PyErr>(d.into())
             })
             .collect()

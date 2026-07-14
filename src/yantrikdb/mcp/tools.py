@@ -277,17 +277,18 @@ def memory_correct(
     references to this rid continue to resolve. `reason` is REQUIRED and
     must be non-empty — the audit trail is load-bearing.
 
-    Embedding changes are NOT supported by `correct()` (HNSW limitation).
-    To change the embedding, use forget+record.
+    v0.10 Item 3: changing `new_text` re-embeds the record in place — the
+    durable text and its retrieval vector stay coherent, at the SAME rid
+    (no new rid is minted). Requires an embedder to be configured.
 
     Args:
         rid: The memory ID to correct.
         reason: Required non-empty string explaining why the correction
                 was made.
-        new_text: REFUSED since v0.9.3 (CorrectionRequiresReembed): changing
-                text without re-embedding leaves the memory retrieved under
-                its OLD meaning. Use forget(rid) + remember(new_text) until
-                vector-coherent correction ships (v0.10). Pass None.
+        new_text: Optional corrected text. When it differs from the current
+                text the record is re-embedded in place (v0.10 Item 3), so
+                the memory is retrieved under its NEW meaning. Requires an
+                embedder; pass None to leave the text unchanged.
         metadata_merge: Optional dict patch-merged into existing metadata.
         new_importance: Optional new importance score (0.0 to 1.0).
         new_valence: Optional new emotional valence (-1.0 to 1.0).

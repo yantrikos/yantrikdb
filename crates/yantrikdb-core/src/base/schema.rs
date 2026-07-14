@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 35;
+pub const SCHEMA_VERSION: i32 = 36;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -733,6 +733,13 @@ CREATE TABLE IF NOT EXISTS record_revisions (
     applied_at        REAL NOT NULL,
     hlc               BLOB NOT NULL,
     origin_actor      TEXT NOT NULL,
+    -- v36 (v0.10 Item 3): the prior embedding's provenance, captured when
+    -- a text-changing correction re-embeds. Lets history() explain WHY the
+    -- retrieval vector changed and lets a replica verify it applied the
+    -- same bytes. NULL on metadata/scalar-only corrections (embedding
+    -- untouched) and on pre-v36 rows.
+    prior_embedding_model TEXT,
+    prior_embedding_hash  BLOB,
     UNIQUE(rid, revision_num)
 );
 CREATE INDEX IF NOT EXISTS idx_record_revisions_rid
@@ -2577,4 +2584,14 @@ CREATE TABLE IF NOT EXISTS label_requests (
     requested_at REAL NOT NULL,
     PRIMARY KEY (query_hash, rid)
 );
+";
+
+/// **v0.10 Item 3 (RID-stable correction with re-embed).** Records the
+/// prior embedding's provenance on the revision row so a text-changing
+/// correction's vector change is auditable and replica-verifiable.
+/// ALTER ADD COLUMN is nullable; `run_migration_idempotent` swallows the
+/// duplicate-column error on forward-upgrade replays.
+pub const MIGRATE_V35_TO_V36: &str = "
+ALTER TABLE record_revisions ADD COLUMN prior_embedding_model TEXT;
+ALTER TABLE record_revisions ADD COLUMN prior_embedding_hash BLOB;
 ";

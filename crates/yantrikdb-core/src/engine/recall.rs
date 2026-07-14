@@ -174,9 +174,74 @@ impl YantrikDB {
     /// Retrieve memories using multi-signal fusion scoring.
     /// When `expand_entities` is true, graph edges are followed to pull in
     /// entity-connected memories that pure vector search would miss.
+    ///
+    /// **v0.10 Item 3 — correction seqlock (sol r4/r5/r6).** Thin retry
+    /// wrapper around [`Self::recall_inner`]: reads an EVEN correction epoch
+    /// before candidate generation and rechecks it (Acquire-fenced) after
+    /// hydration. If a text-changing correction interleaved (epoch changed /
+    /// odd), the result could pair a stale ranking vector with corrected
+    /// text, so it is discarded and retried. EVERY attempt validates — a
+    /// result (even an empty one) is never returned without a passing
+    /// recheck. Corrections are rare, so a retry is rare; after the budget
+    /// (`MAX_ATTEMPTS`) the wrapper returns the retryable `RecallContended`
+    /// rather than ever accepting an unvalidated read.
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(skip(self, query_embedding), fields(top_k, expand_entities, namespace))]
     pub fn recall(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        time_window: Option<(f64, f64)>,
+        memory_type: Option<&str>,
+        include_consolidated: bool,
+        expand_entities: bool,
+        query_text: Option<&str>,
+        skip_reinforce: bool,
+        namespace: Option<&str>,
+        domain: Option<&str>,
+        source: Option<&str>,
+        certainty_min: Option<f64>,
+        order: Option<&str>,
+        include_superseded: bool,
+    ) -> Result<Vec<RecallResult>> {
+        // v0.10 Item 3 seqlock (sol r5): EVERY attempt validates — a result
+        // is never returned without a passing epoch recheck (coherence is
+        // never traded for a result). After the budget, surface a retryable
+        // busy error rather than an unvalidated read.
+        const MAX_ATTEMPTS: u32 = 8;
+        for attempt in 0..MAX_ATTEMPTS {
+            let Some(epoch0) = self.correction_epoch_even() else {
+                // Even-wait timed out under a sustained correction storm.
+                // Report attempts completed so far (sol r6: accurate count).
+                return Err(YantrikDbError::RecallContended { attempts: attempt });
+            };
+            if let Some(results) = self.recall_inner(
+                query_embedding,
+                top_k,
+                time_window,
+                memory_type,
+                include_consolidated,
+                expand_entities,
+                query_text,
+                skip_reinforce,
+                namespace,
+                domain,
+                source,
+                certainty_min,
+                order,
+                include_superseded,
+                epoch0,
+            )? {
+                return Ok(results);
+            }
+        }
+        Err(YantrikDbError::RecallContended {
+            attempts: MAX_ATTEMPTS,
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn recall_inner(
         &self,
         query_embedding: &[f32],
         top_k: usize,
@@ -209,7 +274,12 @@ impl YantrikDB {
         // On legacy-policy databases this flag is a no-op (everything is
         // already included).
         include_superseded: bool,
-    ) -> Result<Vec<RecallResult>> {
+        // v0.10 Item 3 seqlock: the even correction epoch snapshotted by the
+        // wrapper before candidate generation, rechecked (with an Acquire
+        // fence) after hydration. Returns Ok(None) on mismatch → wrapper
+        // retries; a result is never returned without a passing recheck.
+        epoch0: u64,
+    ) -> Result<Option<Vec<RecallResult>>> {
         // Validate `order` upfront so callers get a clear error rather
         // than silently falling back to relevance when they typo a value.
         let recall_order = parse_recall_order(order)?;
@@ -242,7 +312,16 @@ impl YantrikDB {
         };
 
         if vec_results.is_empty() {
-            return Ok(vec![]);
+            // No candidates → no vector/text pairing to protect. Still
+            // validate the epoch (sol r6): a successful recall must never be
+            // returned during an unvalidated correction interval, even when
+            // empty. On mismatch return None so the wrapper retries against a
+            // stable epoch; a genuinely empty index re-searches empty and
+            // validates once corrections quiesce.
+            if !self.correction_epoch_validate(epoch0) {
+                return Ok(None);
+            }
+            return Ok(Some(vec![]));
         }
 
         // Step 2: Score from in-memory cache (replaces fetch_memories_by_rids)
@@ -1916,6 +1995,20 @@ impl YantrikDB {
             }
         }
 
+        // **v0.10 Item 3 seqlock recheck (sol r4).** Vector candidate
+        // generation (above) and text hydration (just now) read different
+        // subsystems at different instants. If a text-changing correction
+        // committed+published in between, `scored` pairs a stale ranking
+        // vector with corrected text — violating "wholly old or wholly
+        // new". Detect via the epoch and discard; the wrapper retries. The
+        // check is BEFORE impressions/reinforcement so a discarded result
+        // leaves no ledger/spaced-repetition side effects. The Acquire fence
+        // inside `correction_epoch_validate` orders the search + hydration
+        // reads above BEFORE this version check (sol r5 finding 3).
+        if !self.correction_epoch_validate(epoch0) {
+            return Ok(None);
+        }
+
         // v0.10 Item 2: persist the impression ledger BEFORE reinforcement
         // mutates last_access/access_count — the learner reads features
         // from here, never from mutable memory state. skip_reinforce
@@ -1955,7 +2048,7 @@ impl YantrikDB {
             }
         }
 
-        Ok(scored)
+        Ok(Some(scored))
     }
 
     /// Task 41 — annotate recall hits with trust signals so staleness is
@@ -2577,8 +2670,11 @@ impl YantrikDB {
 
     /// Profiled version of recall() that returns per-phase timing breakdown.
     ///
-    /// Mirrors `recall()` exactly but wraps each phase in timing instrumentation.
+    /// Mirrors `recall()` exactly but wraps each phase in timing
+    /// instrumentation — including the v0.10 Item 3 correction seqlock
+    /// (sol r4): a thin retry wrapper around `recall_profiled_inner`.
     #[cfg(feature = "profiling")]
+    #[allow(clippy::too_many_arguments)]
     pub fn recall_profiled(
         &self,
         query_embedding: &[f32],
@@ -2593,6 +2689,51 @@ impl YantrikDB {
         domain: Option<&str>,
         source: Option<&str>,
     ) -> Result<RecallProfiledResult> {
+        const MAX_ATTEMPTS: u32 = 8;
+        for attempt in 0..MAX_ATTEMPTS {
+            let Some(epoch0) = self.correction_epoch_even() else {
+                // Report attempts completed so far (sol r6: accurate count).
+                return Err(YantrikDbError::RecallContended { attempts: attempt });
+            };
+            if let Some(r) = self.recall_profiled_inner(
+                query_embedding,
+                top_k,
+                time_window,
+                memory_type,
+                include_consolidated,
+                expand_entities,
+                query_text,
+                skip_reinforce,
+                namespace,
+                domain,
+                source,
+                epoch0,
+            )? {
+                return Ok(r);
+            }
+        }
+        Err(YantrikDbError::RecallContended {
+            attempts: MAX_ATTEMPTS,
+        })
+    }
+
+    #[cfg(feature = "profiling")]
+    #[allow(clippy::too_many_arguments)]
+    fn recall_profiled_inner(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        time_window: Option<(f64, f64)>,
+        memory_type: Option<&str>,
+        include_consolidated: bool,
+        expand_entities: bool,
+        query_text: Option<&str>,
+        skip_reinforce: bool,
+        namespace: Option<&str>,
+        domain: Option<&str>,
+        source: Option<&str>,
+        epoch0: u64,
+    ) -> Result<Option<RecallProfiledResult>> {
         use std::time::Instant;
         let t_start = Instant::now();
 
@@ -2617,7 +2758,13 @@ impl YantrikDB {
         let candidate_count = vec_results.len();
 
         if vec_results.is_empty() {
-            return Ok(RecallProfiledResult {
+            // Validate the epoch even for an empty result (sol r6) — a
+            // successful recall is never returned during an unvalidated
+            // correction interval. On mismatch the wrapper retries.
+            if !self.correction_epoch_validate(epoch0) {
+                return Ok(None);
+            }
+            return Ok(Some(RecallProfiledResult {
                 results: vec![],
                 timings: RecallTimings {
                     vec_search_ms,
@@ -2631,7 +2778,7 @@ impl YantrikDB {
                     candidate_count: 0,
                     graph_expansion_count: 0,
                 },
-            });
+            }));
         }
 
         // ── Phase 2: Score from in-memory cache ──
@@ -4141,6 +4288,13 @@ impl YantrikDB {
         }
         let fetch_ms = t_fetch.elapsed().as_secs_f64() * 1000.0;
 
+        // v0.10 Item 3 seqlock recheck (sol r4/r5) — Acquire-fenced validate
+        // before reinforcement, so a discarded (incoherent) result leaves no
+        // spaced-repetition effect.
+        if !self.correction_epoch_validate(epoch0) {
+            return Ok(None);
+        }
+
         // ── Phase 6: Reinforce ──
         let t_reinforce = Instant::now();
         if !skip_reinforce {
@@ -4152,7 +4306,7 @@ impl YantrikDB {
 
         let total_ms = t_start.elapsed().as_secs_f64() * 1000.0;
 
-        Ok(RecallProfiledResult {
+        Ok(Some(RecallProfiledResult {
             results: scored,
             timings: RecallTimings {
                 vec_search_ms,
@@ -4166,7 +4320,7 @@ impl YantrikDB {
                 candidate_count,
                 graph_expansion_count,
             },
-        })
+        }))
     }
 
     /// Fetch only text and metadata for a set of RIDs (post-scoring hydration).

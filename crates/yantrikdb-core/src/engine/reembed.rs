@@ -916,7 +916,9 @@ impl YantrikDB {
             // Re-encode each row's text under the new embedder.
             // Done OUTSIDE the conn lock — embedder.embed() can be
             // slow (model inference) and must not bottleneck SQL.
-            let mut encoded_pairs: Vec<(String, Vec<u8>)> = Vec::with_capacity(batch.len());
+            // Carry the exact stored_text that was read, so the staging
+            // write below can guard on it (v0.10 Item 3 review finding 3).
+            let mut encoded_pairs: Vec<(String, Vec<u8>, String)> = Vec::with_capacity(batch.len());
             for (rid, stored_text) in &batch {
                 let plain = self.decrypt_text(stored_text)?;
                 let new_emb = new_embedder.embed(&plain).map_err(|e| {
@@ -934,7 +936,7 @@ impl YantrikDB {
                 }
                 let blob = serialize_f32(&new_emb);
                 let encrypted = self.encrypt_embedding(&blob)?;
-                encoded_pairs.push((rid.clone(), encrypted));
+                encoded_pairs.push((rid.clone(), encrypted, stored_text.clone()));
             }
 
             // Write the batch under one SAVEPOINT so a mid-batch
@@ -946,11 +948,24 @@ impl YantrikDB {
                 let conn = self.conn();
                 conn.execute_batch("SAVEPOINT reembed_encoding_batch")?;
                 let write_result: Result<()> = (|| {
-                    for (rid, encrypted) in &encoded_pairs {
+                    for (rid, encrypted, read_text) in &encoded_pairs {
+                        // **v0.10 Item 3 review finding 3.** Guard the staging
+                        // write on the text we ACTUALLY encoded. If a text
+                        // correction changed the row between our read and this
+                        // write, `text` no longer matches → zero rows updated,
+                        // leaving `embedding_new` NULL (the correction cleared
+                        // it) so the reembed tail catch-up re-encodes the row
+                        // from the NEW text instead of promoting our stale
+                        // OLD-text vector at swap.
                         conn.execute(
                             "UPDATE memories SET embedding_new = ?1, embedding_new_model = ?2 \
-                             WHERE rid = ?3",
-                            params![encrypted, new_embedder_name_resolved.as_str(), rid],
+                             WHERE rid = ?3 AND text = ?4",
+                            params![
+                                encrypted,
+                                new_embedder_name_resolved.as_str(),
+                                rid,
+                                read_text
+                            ],
                         )?;
                     }
                     Ok(())

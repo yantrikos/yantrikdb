@@ -221,17 +221,16 @@ class TestMemoryCorrect:
         updated = db.get(rid)
         assert updated["consolidation_status"] != "tombstoned"
 
-    def test_correct_refuses_new_text(self, db, ctx):
-        """v0.9.3: text corrections through the MCP tool surface the typed
-        engine refusal with the actionable workaround in the message."""
-        import pytest
-
+    def test_correct_reembeds_new_text(self, db, ctx):
+        """v0.10 Item 3: text corrections through the MCP tool re-embed in
+        place (the db fixture attaches a mock embedder) and update the
+        record at the same rid — the durable text and retrieval vector stay
+        coherent."""
         from yantrikdb.mcp.tools import memory_correct
 
         rid = db.record("wrong fact", embedding=_vec(1.0))
-        with pytest.raises(Exception, match="record_text"):
-            memory_correct(rid=rid, reason="fixed typo", new_text="correct fact", ctx=ctx)
-        assert db.get(rid)["text"] == "wrong fact"
+        memory_correct(rid=rid, reason="fixed typo", new_text="correct fact", ctx=ctx)
+        assert db.get(rid)["text"] == "correct fact"
 
 
 # ── entity_relate ──

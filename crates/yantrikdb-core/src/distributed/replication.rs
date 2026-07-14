@@ -27,6 +27,15 @@ pub struct OplogEntry {
     pub hlc: Vec<u8>,
     pub embedding_hash: Option<Vec<u8>>,
     pub origin_actor: String,
+    /// v0.10 Item 3: exact embedding bytes for a re-embedding `correct`
+    /// op, so a follower applies the same vector rather than re-embedding
+    /// (which diverges by model version/quantization). Present only on
+    /// text-changing corrections; `None` for every other op. Encrypted
+    /// under the origin DEK — usable on a same-DEK follower, which is the
+    /// same assumption the whole encrypted-replication path already makes
+    /// for text/metadata.
+    #[serde(default)]
+    pub embedding: Option<Vec<u8>>,
 }
 
 /// Result of a sync operation.
@@ -67,7 +76,7 @@ pub fn extract_ops_since(
     // never the cluster sync contract. The `materialize_` prefix is a
     // soft namespace for future siblings (saga task 3 follow-ons).
     let select_cols = "SELECT op_id, op_type, timestamp, target_rid, payload, \
-                       actor_id, hlc, embedding_hash, origin_actor \
+                       actor_id, hlc, embedding_hash, origin_actor, embedding \
                        FROM oplog \
                        WHERE hlc IS NOT NULL \
                          AND op_type NOT LIKE 'materialize\\_%' ESCAPE '\\'";
@@ -165,6 +174,7 @@ pub fn extract_ops_since(
                 hlc: row.get("hlc")?,
                 embedding_hash: row.get("embedding_hash")?,
                 origin_actor: row.get("origin_actor")?,
+                embedding: row.get("embedding")?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -210,8 +220,8 @@ pub fn apply_ops(db: &YantrikDB, ops: &[OplogEntry]) -> Result<SyncStats> {
         db.conn().execute(
             "INSERT OR IGNORE INTO oplog \
              (op_id, op_type, timestamp, target_rid, payload, \
-              actor_id, hlc, embedding_hash, origin_actor, applied) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1)",
+              actor_id, hlc, embedding_hash, origin_actor, applied, embedding) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10)",
             params![
                 op.op_id,
                 op.op_type,
@@ -222,6 +232,7 @@ pub fn apply_ops(db: &YantrikDB, ops: &[OplogEntry]) -> Result<SyncStats> {
                 op.hlc,
                 op.embedding_hash,
                 op.origin_actor,
+                op.embedding,
             ],
         )?;
 
@@ -383,54 +394,13 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             }
         }
         "correct" => {
-            materialize_correct(&*db.conn(), &op.payload, &op.origin_actor)?;
-            // Cache: insert new corrected memory, remove original
-            let new_rid = op.payload["new_rid"].as_str().unwrap_or_default();
-            if !new_rid.is_empty() {
-                db.cache_insert(
-                    new_rid.to_string(),
-                    ScoringRow {
-                        created_at: op.payload["created_at"].as_f64().unwrap_or(0.0),
-                        importance: op.payload["importance"].as_f64().unwrap_or(0.5),
-                        half_life: op.payload["half_life"].as_f64().unwrap_or(604800.0),
-                        last_access: op.payload["created_at"].as_f64().unwrap_or(0.0),
-                        access_count: 0,
-                        valence: op.payload["valence"].as_f64().unwrap_or(0.0),
-                        consolidation_status: "active".to_string(),
-                        memory_type: op.payload["type"]
-                            .as_str()
-                            .unwrap_or("episodic")
-                            .to_string(),
-                        namespace: op.payload["namespace"]
-                            .as_str()
-                            .unwrap_or("default")
-                            .to_string(),
-                        certainty: op.payload["certainty"].as_f64().unwrap_or(0.8),
-                        domain: op.payload["domain"]
-                            .as_str()
-                            .unwrap_or("general")
-                            .to_string(),
-                        source: op.payload["source"].as_str().unwrap_or("user").to_string(),
-                        emotional_state: op.payload["emotional_state"]
-                            .as_str()
-                            .map(|s| s.to_string()),
-                    },
-                );
-            }
-            let original_rid = op.payload["original_rid"].as_str().unwrap_or_default();
-            if !original_rid.is_empty() {
-                db.cache_remove(original_rid);
-                let _seq = db
-                    .vec_seq
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                    + 1;
-                // **Issue #41 brainstorm-4 §1.** Active-generation
-                // SearchState tombstone for correct's "original_rid".
-                db.search_state
-                    .load()
-                    .vec_index
-                    .tombstone(original_rid, _seq);
-            }
+            // v0.10 Item 3 finding 5: RID-stable correction applied
+            // coherently on the follower — SQL + reserve-append + publish +
+            // cache under one conn-lock critical section, exact bytes when
+            // the vector space matches, append failures PROPAGATED so the op
+            // is retried rather than leaving SQL applied against a stale
+            // index. Replaces the old materialize_correct + inline apply.
+            db.apply_replicated_correct(&op.payload, op.embedding.as_deref(), &op.origin_actor)?;
         }
         "trigger_fire" => {
             materialize_trigger_fire(&*db.conn(), &op.payload, &op.hlc, &op.origin_actor)?
@@ -758,158 +728,6 @@ fn materialize_conflict_resolve(conn: &Connection, payload: &serde_json::Value) 
             // HNSW vec index removal is handled by the materialize_op dispatcher
         }
     }
-
-    Ok(())
-}
-
-/// Materialize a "correct" op on a replica (Issue #47, v0.7.20).
-///
-/// New payload shape (v0.7.20+):
-/// ```json
-/// {
-///   "rid": "...",
-///   "revision_num": N,
-///   "new_text": "..." or null,
-///   "metadata_merge": {...} or null,
-///   "new_importance": 0.7 or null,
-///   "new_valence": 0.0 or null,
-///   "reason": "...",
-///   "applied_at": ts
-/// }
-/// ```
-///
-/// Applies the same in-place UPDATE the leader did + writes the
-/// corresponding `record_revisions` row so the follower's history
-/// stays in lockstep with the leader's. If the rid does not exist on
-/// the follower (replication apply on a cold node, or the prior `record`
-/// op hasn't materialised yet), silently skip — the regular oplog
-/// reorder + replay path will catch this on the next pass.
-///
-/// Cross-version note: a v0.7.19 leader's `correct` op had a different
-/// payload (new_rid + original_rid + full text/type/etc.). If a
-/// v0.7.20 follower sees the old shape, payload["rid"] is missing and
-/// this function no-ops cleanly. Operators must roll forward
-/// in-order; rolling back v0.7.20 -> v0.7.19 after correct() calls
-/// have landed is unsupported (the in-place mutation cannot be
-/// reversed automatically).
-fn materialize_correct(
-    conn: &Connection,
-    payload: &serde_json::Value,
-    source_actor: &str,
-) -> Result<()> {
-    let rid = payload["rid"].as_str().unwrap_or_default();
-    if rid.is_empty() {
-        return Ok(());
-    }
-
-    // Read existing row to compute merged metadata + carry-forward
-    // unchanged fields. If the rid doesn't exist on this follower yet,
-    // skip; the oplog replay order will get to it.
-    let existing: Option<(String, String, f64, f64)> = conn
-        .query_row(
-            "SELECT text, metadata, importance, valence FROM memories WHERE rid = ?1",
-            params![rid],
-            |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, f64>(2)?,
-                    row.get::<_, f64>(3)?,
-                ))
-            },
-        )
-        .ok();
-
-    let Some((existing_text, existing_metadata_str, existing_importance, existing_valence)) =
-        existing
-    else {
-        return Ok(());
-    };
-
-    let new_text = payload["new_text"]
-        .as_str()
-        .map(|s| s.to_string())
-        .unwrap_or(existing_text.clone());
-    let new_importance = payload["new_importance"]
-        .as_f64()
-        .unwrap_or(existing_importance);
-    let new_valence = payload["new_valence"].as_f64().unwrap_or(existing_valence);
-
-    // Metadata merge: parse existing, apply patch, re-serialise.
-    let existing_metadata: serde_json::Value =
-        serde_json::from_str(&existing_metadata_str).unwrap_or(serde_json::json!({}));
-    let new_metadata_val: serde_json::Value = match payload.get("metadata_merge") {
-        Some(patch) if !patch.is_null() => {
-            let mut merged = existing_metadata.clone();
-            if let (Some(obj), Some(patch_obj)) = (merged.as_object_mut(), patch.as_object()) {
-                for (k, v) in patch_obj {
-                    obj.insert(k.clone(), v.clone());
-                }
-                merged
-            } else {
-                patch.clone()
-            }
-        }
-        _ => existing_metadata,
-    };
-    let new_metadata_str =
-        serde_json::to_string(&new_metadata_val).unwrap_or_else(|_| "{}".to_string());
-
-    let revision_num = payload["revision_num"].as_i64().unwrap_or(1);
-    let reason = payload["reason"].as_str().unwrap_or("");
-    let applied_at_payload = payload["applied_at"]
-        .as_f64()
-        .unwrap_or_else(crate::time::now_secs);
-
-    // Insert the revision row mirroring the leader's. revision_id is
-    // freshly minted on the follower (the leader's revision_id is not
-    // in the payload — only revision_num is, and that's what the
-    // UNIQUE(rid, revision_num) constraint cares about).
-    let revision_id = crate::id::new_id();
-    let hlc_bytes = Vec::<u8>::new(); // followers don't have the leader's HLC for this revision
-    let _ = conn.execute(
-        "INSERT OR IGNORE INTO record_revisions \
-         (revision_id, rid, revision_num, prior_text, prior_metadata, \
-          prior_importance, prior_valence, reason, applied_at, hlc, origin_actor) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
-        params![
-            revision_id,
-            rid,
-            revision_num,
-            existing_text,
-            existing_metadata_str,
-            existing_importance,
-            existing_valence,
-            reason,
-            applied_at_payload,
-            hlc_bytes,
-            source_actor,
-        ],
-    );
-
-    // UPDATE the memory in place.
-    conn.execute(
-        "UPDATE memories \
-         SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
-             last_access = ?5 \
-         WHERE rid = ?6",
-        params![
-            new_text,
-            new_metadata_str,
-            new_importance,
-            new_valence,
-            applied_at_payload,
-            rid,
-        ],
-    )?;
-
-    // **v0.7.19 replication audit (postmortem 2026-05-20).**
-    let applied_at = crate::time::now_secs();
-    let _ = conn.execute(
-        "INSERT OR IGNORE INTO replication_apply_log (rid, op_type, source_actor, applied_at) \
-         VALUES (?1, 'correct', ?2, ?3)",
-        params![rid, source_actor, applied_at],
-    );
 
     Ok(())
 }

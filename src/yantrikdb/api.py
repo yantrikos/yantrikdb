@@ -185,10 +185,11 @@ async def correct_memory(rid: str, req: CorrectRequest):
     """Correct a memory in place — preserves rid + created_at, appends
     revision history. Issue #47 (v0.7.20).
 
-    v0.9.3: text corrections (``new_text``) are refused by the engine
-    (CorrectionRequiresReembed) — changing text without re-embedding leaves
-    the memory retrieved under its OLD meaning. Surface that as a 422 with
-    the engine's actionable message instead of a bare 500.
+    v0.10 Item 3: text corrections (``new_text``) re-embed the record in
+    place — the durable text and its retrieval vector stay coherent, at the
+    same rid. If a ``db.reembed()`` cutover is mid-flight the engine defers
+    the correction (nothing mutated); surface that as a retryable 409 rather
+    than a bare 500.
     """
     db, lock = _db()
     try:
@@ -202,8 +203,8 @@ async def correct_memory(rid: str, req: CorrectRequest):
                 new_valence=req.new_valence,
             )
     except RuntimeError as exc:
-        if "correct(new_text" in str(exc):
-            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if "deferred" in str(exc) and "reembed" in str(exc):
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         raise
     return result
 

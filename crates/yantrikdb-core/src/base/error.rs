@@ -176,6 +176,34 @@ pub enum YantrikDbError {
         retry_after_ms: u64,
     },
 
+    /// **v0.10 Item 3.** A text-changing `correct()` needs to re-embed and
+    /// tombstone+append the vector, but a `db.reembed()` cutover is in
+    /// flight (the write-router is in Queueing state), so the vector-index
+    /// mutation cannot be applied against a stable generation. Retryable:
+    /// the correction touched NO state and can be reissued once the reembed
+    /// completes. Metadata / importance / valence corrections (no `new_text`)
+    /// are unaffected and proceed during reembed.
+    #[error(
+        "correct(new_text=...) on {rid} deferred: a db.reembed() cutover is in progress, \
+         so the vector index cannot be updated against a stable generation. \
+         No state was changed; retry after the reembed completes. \
+         (Metadata / importance / valence corrections are not blocked by reembed.)"
+    )]
+    CorrectionDeferredDuringReembed { rid: String },
+
+    /// **v0.10 Item 3 (correction seqlock, sol r5).** A recall could not
+    /// obtain a coherent snapshot within its retry budget because
+    /// text-changing corrections kept interleaving with its candidate
+    /// generation → hydration span. Retryable: the read touched no state
+    /// and never returns a result that pairs a stale ranking vector with
+    /// corrected text (coherence is never traded for a result). Practically
+    /// unreachable outside a sustained correction storm on the same records.
+    #[error(
+        "recall could not obtain a coherent snapshot after {attempts} attempts \
+         (concurrent corrections kept interleaving); retry"
+    )]
+    RecallContended { attempts: u32 },
+
     /// **Phase 6 RYW**: caller-requested visible_seq was not reached within
     /// the timeout window. Either the write that should have bumped the seq
     /// has not yet materialized (legitimate timeout — caller should retry or

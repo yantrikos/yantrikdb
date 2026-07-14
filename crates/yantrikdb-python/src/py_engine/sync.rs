@@ -74,6 +74,8 @@ impl PyYantrikDB {
             dict.set_item("hlc", &op.hlc)?;
             dict.set_item("embedding_hash", &op.embedding_hash)?;
             dict.set_item("origin_actor", &op.origin_actor)?;
+            // v0.10 Item 3: exact embedding bytes for re-embedding corrections.
+            dict.set_item("embedding", &op.embedding)?;
             result.push(dict.into());
         }
         Ok(result)
@@ -123,6 +125,13 @@ impl PyYantrikDB {
                 .get_item("origin_actor")?
                 .ok_or_else(|| PyValueError::new_err("Each op must have 'origin_actor'"))?
                 .extract()?;
+            // v0.10 Item 3: optional exact embedding bytes for re-embedding
+            // corrections. Absent on every other op and on pre-v0.10 peers.
+            let embedding: Option<Vec<u8>> = d
+                .get_item("embedding")?
+                .and_then(|v| if v.is_none() { None } else { Some(v) })
+                .map(|v| v.extract())
+                .transpose()?;
 
             entries.push(yantrikdb_core::replication::OplogEntry {
                 op_id,
@@ -134,6 +143,7 @@ impl PyYantrikDB {
                 hlc,
                 embedding_hash,
                 origin_actor,
+                embedding,
             });
         }
 

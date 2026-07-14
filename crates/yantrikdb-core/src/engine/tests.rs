@@ -14122,12 +14122,12 @@ fn correct_preserves_rid_and_created_at() {
 }
 
 #[test]
-fn correct_refuses_text_changes_with_typed_error_and_no_side_effects() {
-    // v0.9.3 (sol converged plan item 3): correct(new_text=...) would pair
-    // new text with the OLD embedding — the memory keeps being retrieved
-    // under its old meaning — so it is refused with a typed error BEFORE
-    // the revision transaction. Nothing changes: no revision row, no text
-    // mutation, no oplog entry.
+fn correct_text_change_without_embedder_returns_no_embedder_and_no_side_effects() {
+    // v0.10 Item 3: a text-changing correction must re-embed to keep the
+    // retrieval vector coherent. On a raw-embedding DB with no embedder
+    // attached there is nothing to embed with, so it returns NoEmbedder
+    // BEFORE touching any state — no revision row, no text mutation.
+    // (Metadata/scalar corrections don't re-embed and are unaffected.)
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let rid = db
         .record(
@@ -14156,21 +14156,28 @@ fn correct_refuses_text_changes_with_typed_error_and_no_side_effects() {
             "handover",
         )
         .unwrap_err();
-    match &err {
-        crate::error::YantrikDbError::CorrectionRequiresReembed { rid: r } => {
-            assert_eq!(r, &rid);
-        }
-        other => panic!("wrong error: {other}"),
-    }
-    // The message names the working alternative.
-    let msg = err.to_string();
-    assert!(msg.contains("forget"), "actionable message: {msg}");
-    assert!(msg.contains("record_text"), "actionable message: {msg}");
+    assert!(
+        matches!(err, crate::error::YantrikDbError::NoEmbedder),
+        "wrong error: {err}"
+    );
 
     // Zero side effects.
     let unchanged = db.get(&rid).unwrap().unwrap();
     assert_eq!(unchanged.text, "alice owns service A");
     assert!(db.history(&rid).unwrap().is_empty(), "no revision row");
+
+    // A no-op text change (same bytes) is NOT a re-embed — it takes the
+    // metadata path and succeeds even without an embedder.
+    db.correct(
+        &rid,
+        Some("alice owns service A"),
+        None,
+        Some(0.9),
+        None,
+        "touch",
+    )
+    .unwrap();
+    assert_eq!(db.history(&rid).unwrap().len(), 1);
 
     // Metadata / importance / valence corrections remain available.
     db.correct(
@@ -14182,7 +14189,484 @@ fn correct_refuses_text_changes_with_typed_error_and_no_side_effects() {
         "ownership metadata updated",
     )
     .unwrap();
-    assert_eq!(db.history(&rid).unwrap().len(), 1);
+    assert_eq!(db.history(&rid).unwrap().len(), 2);
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn correct_reembed_updates_retrieval_vector_delta_and_cold() {
+    // v0.10 Item 3 / trace T4: a text-changing correction re-embeds so the
+    // record is retrieved under its NEW meaning, not its old one. rid,
+    // created_at, and the revision chain are preserved; the revision row
+    // records the prior embedding's provenance. Verified on BOTH a
+    // delta-resident record and one compacted to the cold tier.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let record = |text: &str| {
+        db.record_text(
+            text,
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap()
+    };
+
+    // Similarity of `rid` to a free-text query, via the real recall path.
+    let sim_to = |rid: &str, q: &str| -> f64 {
+        let emb = db.embed(q).unwrap();
+        db.recall(
+            &emb, 10, None, None, false, false, None, true, None, None, None, None, None, false,
+        )
+        .unwrap()
+        .into_iter()
+        .find(|r| r.rid == rid)
+        .map(|r| r.scores.similarity)
+        .unwrap_or(0.0)
+    };
+
+    // A distractor on the NEW topic so ranking is contested, not trivial.
+    let _distractor = record("annual financial revenue and profit projections");
+
+    // ── Case A: delta-resident record ──
+    let rid = record("I love hiking in the mountains at dawn");
+    let created_before = db.get(&rid).unwrap().unwrap().created_at;
+    let old_topic_before = sim_to(&rid, "hiking trails and mountain trekking");
+    assert!(
+        old_topic_before > 0.3,
+        "record embeds as its old topic: {old_topic_before}"
+    );
+
+    db.correct(
+        &rid,
+        Some("the quarterly financial revenue grew twenty percent"),
+        None,
+        None,
+        None,
+        "topic corrected",
+    )
+    .unwrap();
+
+    // rid + created_at preserved; text updated.
+    let after = db.get(&rid).unwrap().unwrap();
+    assert_eq!(after.created_at, created_before, "created_at preserved");
+    assert!(after.text.contains("financial revenue"));
+
+    // New-topic query retrieves it more strongly than the old topic now,
+    // and its old-topic similarity fell — the vector followed the text.
+    let new_topic_after = sim_to(&rid, "financial revenue report");
+    let old_topic_after = sim_to(&rid, "hiking trails and mountain trekking");
+    assert!(
+        new_topic_after > old_topic_after,
+        "re-embedded to new topic: new={new_topic_after} old={old_topic_after}"
+    );
+    assert!(
+        old_topic_after < old_topic_before,
+        "moved away from old topic: {old_topic_after} < {old_topic_before}"
+    );
+
+    // Revision row captured the prior embedding provenance.
+    let revs = db.history(&rid).unwrap();
+    assert_eq!(revs.len(), 1);
+    // The prior VECTOR always existed, so its hash is captured. The model
+    // name is only present when the original write stamped one (reembed
+    // does; plain record_text leaves it NULL) — so we assert the hash,
+    // which is the load-bearing "the vector changed, here's its fingerprint"
+    // provenance a replica verifies against.
+    let has_hash: bool = db
+        .conn()
+        .query_row(
+            "SELECT prior_embedding_hash IS NOT NULL \
+             FROM record_revisions WHERE rid = ?1",
+            rusqlite::params![rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(has_hash, "prior embedding hash captured");
+
+    // ── Case B: cold-tier record (correction tombstones a cold vector) ──
+    let cold_rid = record("the weather today is sunny and warm");
+    db.search_state.load().vec_index.compact().unwrap();
+    assert!(sim_to(&cold_rid, "sunny warm weather forecast") > 0.3);
+
+    db.correct(
+        &cold_rid,
+        Some("the stock market closed sharply higher today"),
+        None,
+        None,
+        None,
+        "cold topic corrected",
+    )
+    .unwrap();
+
+    let cold_new = sim_to(&cold_rid, "stock market closing prices");
+    let cold_old = sim_to(&cold_rid, "sunny warm weather forecast");
+    assert!(
+        cold_new > cold_old,
+        "cold-tier re-embed works: new={cold_new} old={cold_old}"
+    );
+}
+
+#[test]
+fn correction_epoch_toggles_and_validates() {
+    // v0.10 Item 3 seqlock (sol r4/r5): the guard bumps ODD on enter, EVEN
+    // on drop; correction_epoch_even() returns a stable even snapshot;
+    // correction_epoch_validate() (Acquire-fenced) passes only if unchanged
+    // and even. The guard borrows conn, so drop order is compiler-enforced.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let e_start = db.correction_epoch_even().unwrap();
+    assert_eq!(e_start % 2, 0, "boot epoch is even");
+    assert!(
+        db.correction_epoch_validate(e_start),
+        "even + unchanged validates"
+    );
+    {
+        let conn = db.conn();
+        let _g = db.enter_correction_epoch(&conn);
+        assert!(
+            !db.correction_epoch_validate(e_start),
+            "odd (correction in flight) fails the reader's validation"
+        );
+    }
+    let e_end = db.correction_epoch_even().unwrap();
+    assert_eq!(e_end, e_start + 2, "one correction advances the epoch by 2");
+    assert!(
+        db.correction_epoch_validate(e_end),
+        "post-correction even validates"
+    );
+    assert!(
+        !db.correction_epoch_validate(e_start),
+        "a stale pre-correction snapshot never re-validates"
+    );
+}
+
+#[test]
+fn correct_with_embedding_rejects_stale_generation() {
+    // sol r8: a caller-supplied vector is pinned to the generation it was
+    // embedded against. If that generation no longer matches the index's
+    // (a reembed cutover raced the correction), the vector is stale-space
+    // and MUST be rejected retryably — never committed — else the corrected
+    // text would rank under the old vector space. Here we simulate the race
+    // by passing a generation that does not match the current one.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid = db
+        .record(
+            "alice owns service A",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let gen = db.search_generation();
+    let new_emb = vec_seed(9.0, 8);
+
+    // Stale generation → retryable rejection, NO mutation.
+    let err = db
+        .correct_with_embedding(
+            &rid,
+            Some("bob owns service B"),
+            &new_emb,
+            gen + 1,
+            None,
+            None,
+            None,
+            "handover",
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::CorrectionDeferredDuringReembed { .. }
+        ),
+        "stale-generation caller embedding must be deferred, got {err:?}"
+    );
+    assert_eq!(
+        db.get_untracked(&rid).unwrap().unwrap().text,
+        "alice owns service A",
+        "rejected correction must leave the text unchanged"
+    );
+    assert_eq!(
+        db.history(&rid).unwrap().len(),
+        0,
+        "rejected correction must record no revision"
+    );
+
+    // Current generation → succeeds and updates the text in place.
+    db.correct_with_embedding(
+        &rid,
+        Some("bob owns service B"),
+        &new_emb,
+        gen,
+        None,
+        None,
+        None,
+        "handover",
+    )
+    .unwrap();
+    assert_eq!(
+        db.get_untracked(&rid).unwrap().unwrap().text,
+        "bob owns service B",
+        "generation-matched caller embedding must apply in place at the same rid"
+    );
+    assert_eq!(
+        db.history(&rid).unwrap().len(),
+        1,
+        "applied correction records exactly one revision"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn correct_correct_revision_chain_records_true_prior_state() {
+    // sol finding 7: two successive text corrections must chain — the
+    // second revision records the FIRST correction's state as its prior,
+    // not the original (which would happen if both snapshotted the same
+    // pre-loop `original`). Sequential here; the fix (re-read prior INSIDE
+    // the serialized tx) is what makes the concurrent case correct too.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let rid = db
+        .record_text(
+            "the capital is Paris",
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    db.correct(
+        &rid,
+        Some("the capital is Lyon"),
+        None,
+        Some(0.7),
+        None,
+        "first fix",
+    )
+    .unwrap();
+    db.correct(
+        &rid,
+        Some("the capital is Marseille"),
+        None,
+        Some(0.8),
+        None,
+        "second fix",
+    )
+    .unwrap();
+
+    let hist = db.history(&rid).unwrap();
+    assert_eq!(hist.len(), 2);
+    // Revision 1's prior is the ORIGINAL.
+    assert_eq!(hist[0].prior_text, "the capital is Paris");
+    assert!((hist[0].prior_importance - 0.6).abs() < 1e-9);
+    // Revision 2's prior is the FIRST correction's state — the chain fix.
+    assert_eq!(hist[1].prior_text, "the capital is Lyon");
+    assert!((hist[1].prior_importance - 0.7).abs() < 1e-9);
+    // Both text corrections captured prior embedding provenance.
+    assert!(hist[0].prior_embedding_hash.is_some());
+    assert!(hist[1].prior_embedding_hash.is_some());
+    // The two prior vectors differ (Paris vs Lyon embed differently).
+    assert_ne!(hist[0].prior_embedding_hash, hist[1].prior_embedding_hash);
+
+    // Current state is the last correction.
+    assert_eq!(
+        db.get(&rid).unwrap().unwrap().text,
+        "the capital is Marseille"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn correct_then_forget_leaves_no_resurrected_vector() {
+    // sol finding 3 (correct/forget shape): after a re-embedding correction
+    // then a forget, the record must be GONE from recall — the correction's
+    // superseding delta append must not resurface a tombstoned SQL row.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let rid = db
+        .record_text(
+            "hiking in the alps",
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    db.correct(
+        &rid,
+        Some("quarterly revenue growth"),
+        None,
+        None,
+        None,
+        "topic",
+    )
+    .unwrap();
+    db.forget(&rid).unwrap();
+
+    let q = db.embed("quarterly revenue report").unwrap();
+    let hits = db
+        .recall(
+            &q, 10, None, None, false, false, None, true, None, None, None, None, None, false,
+        )
+        .unwrap();
+    assert!(
+        !hits.iter().any(|h| h.rid == rid),
+        "forgotten record must not resurface via the correction's append"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn correction_clears_reembed_staging_columns() {
+    // sol finding 4: a text correction must clear embedding_new so a
+    // reembed mid-Encoding re-encodes this row (from the new text) instead
+    // of promoting the stale staged vector at swap. We simulate staging
+    // directly, then correct, and assert the staging is cleared.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let rid = db
+        .record_text(
+            "old topic text",
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    // Simulate a reembed having staged an embedding for the OLD text.
+    db.conn()
+        .execute(
+            "UPDATE memories SET embedding_new = X'0011', embedding_new_model = 'stale-model' \
+             WHERE rid = ?1",
+            rusqlite::params![rid],
+        )
+        .unwrap();
+
+    db.correct(
+        &rid,
+        Some("completely different new topic"),
+        None,
+        None,
+        None,
+        "fix",
+    )
+    .unwrap();
+
+    let (en, enm): (Option<Vec<u8>>, Option<String>) = db
+        .conn()
+        .query_row(
+            "SELECT embedding_new, embedding_new_model FROM memories WHERE rid = ?1",
+            rusqlite::params![rid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(en.is_none(), "embedding_new cleared by correction");
+    assert!(enm.is_none(), "embedding_new_model cleared by correction");
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn follower_replay_applies_corrected_embedding() {
+    // sol finding 6: a re-embedding correction replicates its EXACT bytes,
+    // so a same-DEK follower's stored vector + recall track the new meaning
+    // (not a re-embed, not the stale old vector).
+    use crate::replication::{apply_ops, extract_ops_since};
+    let leader = YantrikDB::with_default(":memory:").unwrap();
+    let follower = YantrikDB::with_default(":memory:").unwrap();
+
+    let rid = leader
+        .record_text(
+            "sunny beach vacation",
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    // Replicate the record first.
+    let ops = extract_ops_since(&leader.conn(), None, None, None, 100).unwrap();
+    apply_ops(&follower, &ops).unwrap();
+
+    // Correct on the leader (re-embed), then replicate the correct op.
+    leader
+        .correct(
+            &rid,
+            Some("corporate tax filing deadline"),
+            None,
+            None,
+            None,
+            "topic",
+        )
+        .unwrap();
+    let correct_ops: Vec<_> = extract_ops_since(&leader.conn(), None, None, None, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|o| o.op_type == "correct")
+        .collect();
+    assert_eq!(correct_ops.len(), 1);
+    assert!(
+        correct_ops[0].embedding.is_some(),
+        "correct op carries exact embedding bytes"
+    );
+    apply_ops(&follower, &correct_ops).unwrap();
+
+    // Follower's SQL text updated.
+    let ftext: String = follower
+        .conn()
+        .query_row(
+            "SELECT text FROM memories WHERE rid = ?1",
+            rusqlite::params![rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ftext, "corporate tax filing deadline");
+
+    // Follower recall reflects the NEW meaning (vector applied, not stale).
+    let q = follower.embed("corporate tax deadline").unwrap();
+    let hits = follower
+        .recall(
+            &q, 5, None, None, false, false, None, true, None, None, None, None, None, false,
+        )
+        .unwrap();
+    assert!(
+        hits.iter().any(|h| h.rid == rid),
+        "follower retrieves the record under its corrected meaning"
+    );
 }
 
 #[test]

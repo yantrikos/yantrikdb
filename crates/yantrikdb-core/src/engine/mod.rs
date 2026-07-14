@@ -96,9 +96,9 @@ use crate::schema::{
     MIGRATE_V21_TO_V22, MIGRATE_V22_TO_V23, MIGRATE_V23_TO_V24, MIGRATE_V24_TO_V25,
     MIGRATE_V25_TO_V26, MIGRATE_V26_TO_V27, MIGRATE_V27_TO_V28, MIGRATE_V28_TO_V29,
     MIGRATE_V29_TO_V30, MIGRATE_V2_TO_V3, MIGRATE_V30_TO_V31, MIGRATE_V31_TO_V32,
-    MIGRATE_V32_TO_V33, MIGRATE_V33_TO_V34, MIGRATE_V34_TO_V35, MIGRATE_V3_TO_V4, MIGRATE_V4_TO_V5,
-    MIGRATE_V5_TO_V6, MIGRATE_V6_TO_V7, MIGRATE_V7_TO_V8, MIGRATE_V8_TO_V9, MIGRATE_V9_TO_V10,
-    SCHEMA_SQL, SCHEMA_VERSION,
+    MIGRATE_V32_TO_V33, MIGRATE_V33_TO_V34, MIGRATE_V34_TO_V35, MIGRATE_V35_TO_V36,
+    MIGRATE_V3_TO_V4, MIGRATE_V4_TO_V5, MIGRATE_V5_TO_V6, MIGRATE_V6_TO_V7, MIGRATE_V7_TO_V8,
+    MIGRATE_V8_TO_V9, MIGRATE_V9_TO_V10, SCHEMA_SQL, SCHEMA_VERSION,
 };
 use crate::types::*;
 
@@ -189,6 +189,17 @@ pub struct YantrikDB {
     /// would have excluded before opting in. In-memory by design — a
     /// durable counter would put a write on the recall hot path.
     pub(crate) superseded_served_since_boot: std::sync::atomic::AtomicU64,
+    /// **v0.10 Item 3 — correction seqlock (sol r4).** A DB-wide epoch that
+    /// makes a text-changing correction's (SQL commit + vector publish +
+    /// scoring-cache update) atomic FROM A READER'S PERSPECTIVE, without
+    /// versioning cold entries. A correction bumps this ODD before its
+    /// mutation and back EVEN (via RAII, on every error/panic path) after.
+    /// `recall` reads an even value before candidate generation and rechecks
+    /// the identical value after hydration; a change (or odd) means a
+    /// correction interleaved — the ranking vector and the hydrated text
+    /// could be different content versions — so the recall discards and
+    /// retries. Even at boot (0). See [`Self::enter_correction_epoch`].
+    pub(crate) correction_epoch: std::sync::atomic::AtomicU64,
     /// **Phase 6 RYW**: per-namespace high-water mark of applied seqs.
     /// Updated by record/record_with_rid (and siblings) after the write
     /// has materialized into the in-memory delta. `recall_with_seq` waits
@@ -517,6 +528,7 @@ impl YantrikDB {
             (32, MIGRATE_V32_TO_V33),
             (33, MIGRATE_V33_TO_V34),
             (34, MIGRATE_V34_TO_V35),
+            (35, MIGRATE_V35_TO_V36),
         ];
         if let Some(v) = existing_version {
             for &(from_v, sql) in migrations {
@@ -907,6 +919,7 @@ impl YantrikDB {
             pending_op_count: std::sync::atomic::AtomicI64::new(initial_pending),
             exclude_superseded_reads: std::sync::atomic::AtomicBool::new(exclude_superseded_reads),
             superseded_served_since_boot: std::sync::atomic::AtomicU64::new(0),
+            correction_epoch: std::sync::atomic::AtomicU64::new(0),
             visible_seq: dashmap::DashMap::new(),
             visible_seq_cv: parking_lot::Condvar::new(),
             visible_seq_wait_mu: parking_lot::Mutex::new(()),
