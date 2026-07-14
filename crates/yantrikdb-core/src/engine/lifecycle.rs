@@ -1029,17 +1029,21 @@ impl YantrikDB {
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                 + 1;
 
-            // **Reserve the vector slot via a single superseding append**.
-            // A live delta entry shadows the old delta entry (highest seq
-            // wins) AND the cold copy (delta wins in the merge), so no
-            // separate tombstone is needed. `append` is capacity-checked
-            // under ONE delta write lock: Backpressure here returns cleanly
-            // with NOTHING committed — the correction never partially lands.
-            if let Err(e) =
-                state_for_commit
-                    .vec_index
-                    .append(rid.to_string(), new_embedding.clone(), seq_new)
-            {
+            // **RESERVE the vector slot via an unpublished superseding
+            // append** (review finding 2). The reserved entry holds delta
+            // capacity (so Backpressure is reported here, before any SQL
+            // change) but is INVISIBLE to search and SKIPPED by compaction
+            // until we publish it post-commit. This closes two races the
+            // plain-append version had: (a) compaction could seal the
+            // uncommitted vector into cold before a commit-failure could
+            // remove it; (b) a reader on a separate connection could see the
+            // new vector paired with the not-yet-committed old text. While
+            // reserved, search still returns the old durable vector.
+            if let Err(e) = state_for_commit.vec_index.append_reserved(
+                rid.to_string(),
+                new_embedding.clone(),
+                seq_new,
+            ) {
                 drop(conn);
                 drop(sync_guard);
                 return Err(e);
@@ -1185,6 +1189,15 @@ impl YantrikDB {
                             "reason": reason_trimmed,
                             "applied_at": ts,
                             "reembedded": true,
+                            // v0.10 Item 3 finding 5: the embedding's model,
+                            // so a follower validates its vector space matches
+                            // before applying the exact bytes (else it falls
+                            // back to re-embedding on rebuild).
+                            "embedding_model": runtime_model,
+                            "prior_embedding_model": cur_model,
+                            "prior_embedding_hash": prior_embedding_hash
+                                .as_ref()
+                                .map(|b| b.iter().map(|x| format!("{x:02x}")).collect::<String>()),
                         }),
                         Some(&new_emb_hash),
                         Some(&stored_new_emb),
@@ -1198,17 +1211,25 @@ impl YantrikDB {
             let next_revision_num = match commit_result {
                 Ok(n) => n,
                 Err(e) => {
-                    // Commit failed (rare IO error) AFTER our superseding
-                    // append. Undo the append so the delta returns to its
-                    // pre-correction visibility (old vector shows), matching
-                    // the unchanged SQL row. NOT a tombstone — removal
-                    // restores the prior vector rather than hiding the rid.
+                    // Commit failed (rare IO error) OR the row was forgotten
+                    // mid-correction (NotFound from the active-status guard).
+                    // Remove the RESERVED append so the delta returns to its
+                    // pre-correction visibility (old vector shows / rid stays
+                    // forgotten), matching the unchanged SQL. Compaction
+                    // could not have sealed it — reserved entries are skipped
+                    // by the seal — so this removal always succeeds.
                     state_for_commit.vec_index.remove_appended(rid, seq_new);
                     drop(conn);
                     drop(sync_guard);
                     return Err(e);
                 }
             };
+
+            // **Publish** the reserved append now that the correction is
+            // durable: it becomes the visible, compaction-eligible live
+            // vector, atomically superseding the old one. Still under the
+            // conn lock, so the publish order matches the commit order.
+            state_for_commit.vec_index.publish(rid, seq_new);
 
             // Kill boundary. A crash HERE (after the durable commit) leaves
             // SQL wholly-new — new text + embedding + revision + correct op
@@ -1245,6 +1266,208 @@ impl YantrikDB {
                 revision_num: next_revision_num,
             });
         }
+    }
+
+    /// **v0.10 Item 3 finding 5 — apply a replicated `correct` op
+    /// coherently on a follower.** Mirrors the leader's serialization: the
+    /// conn lock is held across the reserve-append + SQL commit + publish,
+    /// the memories row is stamped with the follower's active embedding
+    /// model + generation, the revision records prior provenance, and
+    /// append failures are PROPAGATED (so the op is retried rather than
+    /// leaving SQL applied against a stale index).
+    ///
+    /// The exact leader bytes are applied to the vector index ONLY when the
+    /// correction re-embedded AND the leader's embedding model matches this
+    /// follower's active model (same vector space) AND the bytes decrypt
+    /// (same DEK). Otherwise the SQL row is updated and the vector is left
+    /// for `rebuild_vec_index` — the same fallback record replication uses.
+    pub(crate) fn apply_replicated_correct(
+        &self,
+        payload: &serde_json::Value,
+        embedding: Option<&[u8]>,
+        source_actor: &str,
+    ) -> Result<()> {
+        use crate::serde_helpers::deserialize_f32;
+
+        let rid = payload["rid"].as_str().unwrap_or_default();
+        if rid.is_empty() {
+            return Ok(());
+        }
+        let reembedded = payload["reembedded"].as_bool().unwrap_or(false);
+        let revision_num = payload["revision_num"].as_i64().unwrap_or(1);
+        let reason = payload["reason"].as_str().unwrap_or("");
+        let applied_at = payload["applied_at"]
+            .as_f64()
+            .unwrap_or_else(crate::time::now_secs);
+        let op_model = payload["embedding_model"].as_str();
+
+        let conn = self.conn.lock();
+        let state = self.search_state.load_full();
+        let generation = state.generation as i64;
+        let runtime_model = state.runtime_embedder_name.clone();
+
+        // Prior state = the follower's current ACTIVE row. Absent/inactive →
+        // skip; oplog replay order (or a forget) handles it.
+        #[allow(clippy::type_complexity)]
+        let existing: Option<(String, String, f64, f64, Option<Vec<u8>>, Option<String>)> = conn
+            .query_row(
+                "SELECT text, metadata, importance, valence, embedding, embedding_model \
+                 FROM memories WHERE rid = ?1 AND consolidation_status = 'active'",
+                params![rid],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get::<_, Option<Vec<u8>>>(4)?,
+                        r.get::<_, Option<String>>(5)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((ex_text, ex_meta, ex_imp, ex_val, ex_emb, ex_model)) = existing else {
+            return Ok(());
+        };
+
+        let new_importance = payload["new_importance"].as_f64().unwrap_or(ex_imp);
+        let new_valence = payload["new_valence"].as_f64().unwrap_or(ex_val);
+        let stored_new_text = match payload["new_text"].as_str() {
+            Some(t) => self.encrypt_text(t)?,
+            None => ex_text.clone(),
+        };
+        let ex_meta_plain = self.decrypt_text(&ex_meta)?;
+        let ex_meta_val: serde_json::Value =
+            serde_json::from_str(&ex_meta_plain).unwrap_or(serde_json::json!({}));
+        let new_meta_val: serde_json::Value = match payload.get("metadata_merge") {
+            Some(patch) if !patch.is_null() => {
+                let mut merged = ex_meta_val.clone();
+                if let (Some(obj), Some(patch_obj)) = (merged.as_object_mut(), patch.as_object()) {
+                    for (k, v) in patch_obj {
+                        obj.insert(k.clone(), v.clone());
+                    }
+                    merged
+                } else {
+                    patch.clone()
+                }
+            }
+            _ => ex_meta_val,
+        };
+        let stored_new_meta = self.encrypt_text(&serde_json::to_string(&new_meta_val)?)?;
+
+        // Apply the exact bytes only if the vector space matches and the
+        // bytes decrypt; otherwise defer the vector to rebuild.
+        let model_matches = op_model.is_none() || op_model == runtime_model.as_deref();
+        let plain_emb: Option<Vec<f32>> = if reembedded && model_matches {
+            embedding
+                .and_then(|enc| self.decrypt_embedding(enc).ok())
+                .map(|p| deserialize_f32(&p))
+        } else {
+            None
+        };
+        let apply_vector = plain_emb.is_some();
+
+        // Reserve-append BEFORE commit; propagate failure (op retried).
+        let seq_new = if let Some(ref emb) = plain_emb {
+            let s = self
+                .vec_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
+            state
+                .vec_index
+                .append_reserved(rid.to_string(), emb.clone(), s)?;
+            Some(s)
+        } else {
+            None
+        };
+
+        // Prior embedding hash from the follower's CURRENT vector.
+        let prior_hash: Option<Vec<u8>> = ex_emb.as_ref().and_then(|b| {
+            self.decrypt_embedding(b)
+                .ok()
+                .map(|p| embedding_hash(&deserialize_f32(&p)).to_vec())
+        });
+
+        let commit: Result<()> = (|| {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
+                "INSERT OR IGNORE INTO record_revisions \
+                 (revision_id, rid, revision_num, prior_text, prior_metadata, \
+                  prior_importance, prior_valence, reason, applied_at, hlc, \
+                  origin_actor, prior_embedding_model, prior_embedding_hash) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+                params![
+                    crate::id::new_id(),
+                    rid,
+                    revision_num,
+                    ex_text,
+                    ex_meta,
+                    ex_imp,
+                    ex_val,
+                    reason,
+                    applied_at,
+                    Vec::<u8>::new(),
+                    source_actor,
+                    ex_model,
+                    prior_hash,
+                ],
+            )?;
+            if apply_vector {
+                let enc = embedding.expect("apply_vector implies bytes present");
+                tx.execute(
+                    "UPDATE memories \
+                     SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
+                         embedding = ?5, embedding_model = ?6, embedding_generation = ?7, \
+                         embedding_new = NULL, embedding_new_model = NULL, last_access = ?8 \
+                     WHERE rid = ?9",
+                    params![
+                        stored_new_text,
+                        stored_new_meta,
+                        new_importance,
+                        new_valence,
+                        enc,
+                        runtime_model,
+                        generation,
+                        applied_at,
+                        rid,
+                    ],
+                )?;
+            } else {
+                tx.execute(
+                    "UPDATE memories \
+                     SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
+                         last_access = ?5 \
+                     WHERE rid = ?6",
+                    params![
+                        stored_new_text,
+                        stored_new_meta,
+                        new_importance,
+                        new_valence,
+                        applied_at,
+                        rid,
+                    ],
+                )?;
+            }
+            tx.commit()?;
+            Ok(())
+        })();
+        if let Err(e) = commit {
+            if let Some(s) = seq_new {
+                state.vec_index.remove_appended(rid, s);
+            }
+            return Err(e);
+        }
+        if let Some(s) = seq_new {
+            state.vec_index.publish(rid, s);
+        }
+        {
+            let mut cache = self.scoring_cache.write();
+            if let Some(row) = cache.get_mut(rid) {
+                row.importance = new_importance;
+                row.valence = new_valence;
+            }
+        }
+        Ok(())
     }
 
     /// Query the revision history for a single record (Issue #47).

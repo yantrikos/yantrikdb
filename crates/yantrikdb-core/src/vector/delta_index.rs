@@ -69,6 +69,16 @@ pub struct DeltaEntry {
     pub norm: f64,
     pub seq: u64,
     pub tombstoned: bool,
+    /// **v0.10 Item 3 — reservation.** `false` means this entry is
+    /// RESERVED but not yet visible: a correction has appended its new
+    /// vector to hold the slot, but its SQL transaction has not committed.
+    /// An unpublished entry is INVISIBLE to search (so during the commit
+    /// window the record is still retrieved under its old, still-durable
+    /// vector — no new-vector/old-text mismatch) and is SKIPPED by
+    /// compaction (so it cannot be sealed into cold before the commit
+    /// decision). On commit it is published (made visible); on commit
+    /// failure it is removed. `true` for every normal append.
+    pub published: bool,
 }
 
 /// Default soft cap on delta size. Hitting this triggers backpressure on
@@ -231,6 +241,28 @@ impl DeltaIndex {
     /// the second append is silently a no-op (recovery may replay the
     /// same op multiple times).
     pub fn append(&self, rid: String, embedding: Vec<f32>, seq: u64) -> Result<()> {
+        self.append_inner(rid, embedding, seq, true)
+    }
+
+    /// **v0.10 Item 3 — reserved append.** Append the new vector as an
+    /// UNPUBLISHED entry: it holds the delta slot (counts toward capacity,
+    /// so Backpressure is reported before a correction commits) but is
+    /// invisible to search and skipped by compaction until
+    /// [`Self::publish`]. A correction reserves here BEFORE its SQL commit,
+    /// then publishes on commit / [`Self::remove_appended`]s on failure —
+    /// so a correction's vector never becomes visible (or gets sealed into
+    /// cold) unless its text change is durable.
+    pub fn append_reserved(&self, rid: String, embedding: Vec<f32>, seq: u64) -> Result<()> {
+        self.append_inner(rid, embedding, seq, false)
+    }
+
+    fn append_inner(
+        &self,
+        rid: String,
+        embedding: Vec<f32>,
+        seq: u64,
+        published: bool,
+    ) -> Result<()> {
         if embedding.len() != self.dim {
             return Err(YantrikDbError::InvalidInput(format!(
                 "embedding dimension mismatch: expected {}, got {}",
@@ -262,6 +294,7 @@ impl DeltaIndex {
             norm,
             seq,
             tombstoned: false,
+            published,
         });
         let new_len = delta.len();
         drop(delta); // release write lock before signaling
@@ -301,7 +334,11 @@ impl DeltaIndex {
         let mut delta = self.delta.write();
         let was_empty = delta.is_empty();
         for entry in delta.iter_mut() {
-            if entry.rid == rid && !entry.tombstoned {
+            // Only tombstone a PUBLISHED live entry in place. An unpublished
+            // (reserved-uncommitted) entry is not the live vector and must
+            // not be turned into the tombstone — leave it for its own
+            // correction to publish/remove; append a marker below instead.
+            if entry.rid == rid && !entry.tombstoned && entry.published {
                 entry.tombstoned = true;
                 entry.seq = seq;
                 // In-place mutation — delta was non-empty already, so the
@@ -310,13 +347,14 @@ impl DeltaIndex {
                 return true;
             }
         }
-        // Not in delta — append a deletion marker.
+        // Not in delta (as a published live entry) — append a deletion marker.
         delta.push(DeltaEntry {
             rid: rid.to_string(),
             embedding: Vec::new(), // tombstone marker; embedding never read
             norm: 0.0,
             seq,
             tombstoned: true,
+            published: true,
         });
         let new_len = delta.len();
         drop(delta); // release write lock before signaling
@@ -357,6 +395,24 @@ impl DeltaIndex {
         }
     }
 
+    /// **v0.10 Item 3 — publish a reserved append.** Flip the `(rid, seq)`
+    /// entry appended by [`Self::append_reserved`] from reserved to
+    /// visible, once the correction's SQL transaction has committed. From
+    /// this point the entry participates in search (shadowing the old
+    /// vector) and is eligible for compaction. Returns whether an entry was
+    /// published (false if it was already sealed away by compaction — which
+    /// cannot happen, since compaction skips unpublished entries).
+    pub fn publish(&self, rid: &str, seq: u64) -> bool {
+        let mut delta = self.delta.write();
+        for entry in delta.iter_mut() {
+            if entry.rid == rid && entry.seq == seq && !entry.published {
+                entry.published = true;
+                return true;
+            }
+        }
+        false
+    }
+
     /// Search for the top-k nearest neighbors of `query`.
     ///
     /// Searches both cold and delta, merges by distance, drops tombstoned
@@ -390,6 +446,15 @@ impl DeltaIndex {
         let mut winner_per_rid: std::collections::HashMap<&str, &DeltaEntry> =
             std::collections::HashMap::new();
         for entry in delta.iter() {
+            // **v0.10 Item 3.** Skip RESERVED (unpublished) entries entirely:
+            // they are corrections whose SQL is not yet committed, so they
+            // are neither a live winner nor a tombstone. Ignoring them means
+            // the record is still retrieved under its old, durable vector
+            // during the commit window (and is not shadowed away from its
+            // cold copy by an entry that may yet be rolled back).
+            if !entry.published {
+                continue;
+            }
             match winner_per_rid.get(entry.rid.as_str()) {
                 Some(existing) if existing.seq >= entry.seq => {}
                 _ => {
@@ -481,10 +546,25 @@ impl DeltaIndex {
     /// next append against the now-empty delta restarts the age window.
     pub fn seal_delta_for_compaction(&self) -> Vec<DeltaEntry> {
         let mut delta = self.delta.write();
-        let sealed = std::mem::replace(&mut *delta, Vec::with_capacity(self.delta_max.min(4096)));
+        // **v0.10 Item 3.** RESERVED (unpublished) entries are corrections
+        // whose SQL has not yet committed — they must NOT be sealed into
+        // cold (a later commit-failure must be able to remove them, and a
+        // commit must be able to publish them into the live delta). Retain
+        // them in the new delta; seal only the published/committed entries.
+        let mut sealed = Vec::with_capacity(delta.len());
+        let mut retained = Vec::with_capacity(self.delta_max.min(4096));
+        for entry in delta.drain(..) {
+            if entry.published {
+                sealed.push(entry);
+            } else {
+                retained.push(entry);
+            }
+        }
+        *delta = retained;
         // Reset the dirty-age clock under the same write lock so the
         // age-trigger calculation can never observe a stale stamp paired
-        // with an empty delta.
+        // with an empty delta. (Retained reserved entries re-stamp on their
+        // publish or the next append.)
         *self.oldest_dirty_at.lock() = None;
         sealed
     }
@@ -647,6 +727,80 @@ mod tests {
         assert_eq!(r.len(), 1);
         assert_eq!(r[0].0, "rid_1");
         assert!(r[0].1 < 0.001, "exact-match distance ~0, got {}", r[0].1);
+    }
+
+    #[test]
+    fn reserved_append_is_invisible_until_published() {
+        // v0.10 Item 3 finding 2: a reserved (unpublished) append holds the
+        // slot but is invisible to search; the OLD vector still wins. On
+        // publish it supersedes; on remove it vanishes with the old vector
+        // restored.
+        let idx = DeltaIndex::new(8);
+        // Orthogonal basis vectors so old/new are unambiguously far apart.
+        let mut old = vec![0.0f32; 8];
+        old[0] = 1.0;
+        let mut new = vec![0.0f32; 8];
+        new[4] = 1.0;
+        idx.append("rid".to_string(), old.clone(), 1).unwrap();
+
+        // Reserve the new vector at a higher seq — still invisible.
+        idx.append_reserved("rid".to_string(), new.clone(), 2)
+            .unwrap();
+        let hit_old = idx.search(&old, 1).unwrap();
+        assert_eq!(hit_old[0].0, "rid");
+        assert!(
+            hit_old[0].1 < 1e-6,
+            "reserved entry invisible: old vector wins"
+        );
+        let hit_new = idx.search(&new, 1).unwrap();
+        // Query at the NEW vector still resolves to the rid via its OLD
+        // (orthogonal) vector — distance ~1, never the reserved new one.
+        assert!(hit_new[0].1 > 0.5, "reserved new vector not searchable yet");
+
+        // Publish → the new vector now wins (exact match to `new`).
+        assert!(idx.publish("rid", 2));
+        let hit_new2 = idx.search(&new, 1).unwrap();
+        assert_eq!(hit_new2[0].0, "rid");
+        assert!(hit_new2[0].1 < 1e-6, "published: new vector wins");
+    }
+
+    #[test]
+    fn compaction_skips_reserved_and_remove_still_works() {
+        // v0.10 Item 3 finding 2: compaction must NOT seal a reserved entry
+        // (so a commit-failure can still remove it, and a commit can still
+        // publish it). After compaction the reserved entry remains in the
+        // delta; removing it restores the compacted old vector.
+        let idx = DeltaIndex::new(8);
+        let mut old = vec![0.0f32; 8];
+        old[0] = 1.0;
+        let mut new = vec![0.0f32; 8];
+        new[4] = 1.0;
+        idx.append("rid".to_string(), old.clone(), 1).unwrap();
+        idx.append_reserved("rid".to_string(), new.clone(), 2)
+            .unwrap();
+
+        // Compact: the published old entry seals into cold; the reserved
+        // entry is retained in the delta.
+        idx.compact().unwrap();
+        assert_eq!(
+            idx.delta_len(),
+            1,
+            "reserved entry retained past compaction"
+        );
+        // Old vector is now in cold and is still the search winner (reserved
+        // is invisible).
+        let hit = idx.search(&new, 1).unwrap();
+        assert!(hit[0].1 > 0.5, "reserved still invisible after compaction");
+
+        // Commit-failure path: remove the reserved entry → old (cold) wins.
+        assert!(idx.remove_appended("rid", 2));
+        assert_eq!(idx.delta_len(), 0);
+        let hit_old = idx.search(&old, 1).unwrap();
+        assert_eq!(hit_old[0].0, "rid");
+        assert!(
+            hit_old[0].1 < 1e-6,
+            "old cold vector intact after reserved removal"
+        );
     }
 
     #[test]
