@@ -1852,11 +1852,25 @@ mod tests {
 
         // nuron's reproducible probe — surfaced this memory at rank 1 on
         // the same retrieval surface.
-        let query = db.embed("collaboration with GPT 5.6 Sol mechanism").unwrap();
+        let query = db
+            .embed("collaboration with GPT 5.6 Sol mechanism")
+            .unwrap();
         let recall = |k: usize, include_superseded: bool| {
             db.recall(
-                &query, k, None, None, false, false, None, true, None, None, None, None,
-                None, include_superseded,
+                &query,
+                k,
+                None,
+                None,
+                false,
+                false,
+                None,
+                true,
+                None,
+                None,
+                None,
+                None,
+                None,
+                include_superseded,
             )
             .unwrap()
         };
