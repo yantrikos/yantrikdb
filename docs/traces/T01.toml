@@ -1,0 +1,24 @@
+# Trace contract T01 — versioned, release-blocking once implemented.
+# Transitions: pending -> implemented (with implemented_since + test_path).
+# implemented -> pending is ILLEGAL (registry test + CI base-diff enforce).
+contract_version = 1
+id = "T01"
+title = "supersede-then-recall"
+item = "1"           # v0.10 plan item that must make this passable
+owner = "yantrikdb-core"
+status = "pending"
+# implemented_since = ""    # set on implementation (version string)
+# test_path = ""            # set on implementation (module::test_fn)
+seeds = "YANTRIKDB_HNSW_SEED via testing feature; fixtures declare exact vectors"
+clock = "injectable via testing feature (set_test_clock); no wall-clock asserts"
+
+fixture = '''
+Write A (false-accusation fixture, verbatim from nuron incident); write B correcting it with a Supersedes link. Query matching A's content.
+'''
+
+assertions = [
+  "B ranks above A",
+  "A carries typed status=superseded + superseded_by=B.rid",
+  "with include_superseded=false (default policy), A absent from recall",
+  "stale-at-k1 = HARD ZERO, release-blocking from day one",
+]

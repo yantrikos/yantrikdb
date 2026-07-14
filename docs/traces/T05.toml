@@ -1,0 +1,23 @@
+# Trace contract T05 — versioned, release-blocking once implemented.
+# Transitions: pending -> implemented (with implemented_since + test_path).
+# implemented -> pending is ILLEGAL (registry test + CI base-diff enforce).
+contract_version = 1
+id = "T05"
+title = "disputed-not-dropped"
+item = "1"           # v0.10 plan item that must make this passable
+owner = "yantrikdb-core"
+status = "pending"
+# implemented_since = ""    # set on implementation (version string)
+# test_path = ""            # set on implementation (module::test_fn)
+seeds = "YANTRIKDB_HNSW_SEED via testing feature; fixtures declare exact vectors"
+clock = "injectable via testing feature (set_test_clock); no wall-clock asserts"
+
+fixture = '''
+A contradicts B; neither superseded.
+'''
+
+assertions = [
+  "both returned",
+  "both carry typed disputed_with cross-link rids",
+  "engine never silently picks a winner",
+]

@@ -1,0 +1,23 @@
+# Trace contract T06 — versioned, release-blocking once implemented.
+# Transitions: pending -> implemented (with implemented_since + test_path).
+# implemented -> pending is ILLEGAL (registry test + CI base-diff enforce).
+contract_version = 1
+id = "T06"
+title = "anti-laundering-chokepoint"
+item = "4"           # v0.10 plan item that must make this passable
+owner = "yantrikdb-core"
+status = "pending"
+# implemented_since = ""    # set on implementation (version string)
+# test_path = ""            # set on implementation (module::test_fn)
+seeds = "YANTRIKDB_HNSW_SEED via testing feature; fixtures declare exact vectors"
+clock = "injectable via testing feature (set_test_clock); no wall-clock asserts"
+
+fixture = '''
+source=inference record; derived write attempts kind=fact/observation; also the consistency matrix (source=inference AND basis=observation).
+'''
+
+assertions = [
+  "typed refusal at WRITE time via the central mutation gate",
+  "recall returns source verbatim",
+  "bypass paths covered: correct(metadata_merge), record_with_rid, batch, links-after-record, replication",
+]

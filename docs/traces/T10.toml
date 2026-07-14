@@ -1,0 +1,23 @@
+# Trace contract T10 — versioned, release-blocking once implemented.
+# Transitions: pending -> implemented (with implemented_since + test_path).
+# implemented -> pending is ILLEGAL (registry test + CI base-diff enforce).
+contract_version = 1
+id = "T10"
+title = "packet-correctness"
+item = "1c"           # v0.10 plan item that must make this passable
+owner = "yantrikdb-core"
+status = "pending"
+# implemented_since = ""    # set on implementation (version string)
+# test_path = ""            # set on implementation (module::test_fn)
+seeds = "YANTRIKDB_HNSW_SEED via testing feature; fixtures declare exact vectors"
+clock = "injectable via testing feature (set_test_clock); no wall-clock asserts"
+
+fixture = '''
+Decisions A(superseded), B(head), C(open question), D(disputed) in one namespace.
+'''
+
+assertions = [
+  "packet main view contains B, C, D-with-flag",
+  "A only behind expansion (include_superseded)",
+  "what-changed-since-T returns exactly the records/status-transitions after T (injectable clock)",
+]
