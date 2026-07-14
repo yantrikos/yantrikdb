@@ -1084,6 +1084,39 @@ impl YantrikDB {
         Ok(())
     }
 
+    /// **Entity-graph coherence — in-memory index eviction (nuron live-verify
+    /// finding, v0.10 Item-3 follow-up).** `drop_stale_memory_entity_links_in_tx`
+    /// deletes the DURABLE `memory_entities` rows, but recall's `expand_entities`
+    /// reads the in-memory `graph_index`, which the correction transaction never
+    /// touches (graph_ops.rs documents "graph_index retains the edge until the
+    /// next engine reload"). So durable-only dropping left the corrected record
+    /// still served under its OLD association through graph expansion — a
+    /// green-unit-test/red-live-recall index-staleness bug the durable-table
+    /// assertion could not catch.
+    ///
+    /// Re-derive this memory's in-memory links from the now-committed,
+    /// authoritative durable rows: clear its links and re-link the survivors.
+    /// Cheap (O(links for this one memory)) and atomic to recall readers under
+    /// the graph_index write lock. Call AFTER the correction commits and its
+    /// conn lock is released — the brief re-lock here keeps `conn` and
+    /// `graph_index` from being held simultaneously (record's graph path also
+    /// releases conn before taking graph_index, so the lock order is preserved).
+    fn resync_memory_graph_links_after_correction(&self, rid: &str) -> Result<()> {
+        let survivors: Vec<String> = {
+            let conn = self.conn.lock();
+            let mut stmt =
+                conn.prepare("SELECT entity_name FROM memory_entities WHERE memory_rid = ?1")?;
+            let rows = stmt.query_map(params![rid], |r| r.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        let mut gi = self.graph_index.write();
+        gi.unlink_memory(rid);
+        for e in &survivors {
+            gi.link_memory(rid, e);
+        }
+        Ok(())
+    }
+
     fn insert_correct_op_in_tx(
         &self,
         tx: &rusqlite::Transaction<'_>,
@@ -1546,6 +1579,19 @@ impl YantrikDB {
             drop(conn);
             drop(sync_guard);
 
+            // Entity-graph coherence: propagate the durable stale-link drop to
+            // the in-memory graph_index recall reads (nuron). Done AFTER conn is
+            // released so conn + graph_index are never held together. A failure
+            // here degrades to the pre-fix "stale until reload" behavior rather
+            // than failing an already-committed correction.
+            if let Err(e) = self.resync_memory_graph_links_after_correction(rid) {
+                tracing::warn!(
+                    rid,
+                    error = %e,
+                    "graph-index resync after correction failed; stale entity links until reload"
+                );
+            }
+
             // Outcome anchor (Item 2): a successful correction is an
             // independent caller action targeting the rid.
             self.note_caller_used(rid);
@@ -1836,6 +1882,20 @@ impl YantrikDB {
                     row.importance = new_importance;
                     row.valence = new_valence;
                 }
+            }
+            // Release the epoch (restores even) then conn — both held across
+            // commit + publish + cache like the leader — BEFORE the graph
+            // resync re-locks conn. Then propagate the durable stale-link drop
+            // to the in-memory graph_index on the follower too (nuron), so a
+            // follower's graph expansion stays coherent with the corrected text.
+            drop(_epoch);
+            drop(conn);
+            if let Err(e) = self.resync_memory_graph_links_after_correction(rid) {
+                tracing::warn!(
+                    rid,
+                    error = %e,
+                    "graph-index resync after replicated correction failed; stale links until reload"
+                );
             }
             return Ok(());
         }
