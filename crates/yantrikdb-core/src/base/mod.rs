@@ -2,6 +2,7 @@ pub mod bench_utils;
 pub mod compression;
 pub mod encryption;
 pub mod error;
+pub mod fitting;
 pub mod hlc;
 pub mod schema;
 pub mod scoring;
