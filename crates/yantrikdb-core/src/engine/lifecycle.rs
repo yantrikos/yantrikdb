@@ -691,6 +691,17 @@ impl YantrikDB {
     /// **Atomic.** The revision insert + memories UPDATE happen in a
     /// single SQL transaction. Either both succeed or neither does.
     #[tracing::instrument(skip(self))]
+    /// Current search-state generation. The generation bumps monotonically on
+    /// every reembed / embedder swap and defines the vector space the HNSW
+    /// index lives in. A caller that pre-embeds text (Python-embedder path)
+    /// snapshots this BEFORE embedding and passes it to
+    /// [`Self::correct_with_embedding`] so a reembed cutover that races the
+    /// correction is detected (sol r8): the supplied vector is only accepted
+    /// if the index is still at the same generation at commit.
+    pub fn search_generation(&self) -> u64 {
+        self.search_state.load_full().generation
+    }
+
     pub fn correct(
         &self,
         rid: &str,
@@ -717,15 +728,23 @@ impl YantrikDB {
     /// user attached a Python-callable embedder via `set_embedder(obj)`: the
     /// re-embed runs pure-Rust and cannot call back into Python, so the
     /// binding pre-embeds on the Python thread (mirroring `record_text`) and
-    /// hands the vector here. `new_embedding` is validated for dim/finiteness
-    /// on the text-changing path; it is ignored for metadata/scalar-only
-    /// corrections (no re-embed needed). Coherence machinery is identical to
-    /// `correct` — only the source of the vector differs.
+    /// hands the vector here.
+    ///
+    /// `embedding_generation` is the [`Self::search_generation`] value the
+    /// caller snapshotted BEFORE embedding. It pins the vector to the space it
+    /// was computed in: if a reembed cutover advanced the generation between
+    /// that snapshot and commit, the vector is stale-space and the correction
+    /// is rejected with the retryable `CorrectionDeferredDuringReembed` rather
+    /// than durably committing a wrong-space vector (sol r8). `new_embedding`
+    /// is validated for dim/finiteness on the text-changing path; it is
+    /// ignored for metadata/scalar-only corrections. Coherence machinery is
+    /// identical to `correct` — only the source of the vector differs.
     pub fn correct_with_embedding(
         &self,
         rid: &str,
         new_text: Option<&str>,
         new_embedding: &[f32],
+        embedding_generation: u64,
         metadata_merge: Option<&serde_json::Value>,
         new_importance: Option<f64>,
         new_valence: Option<f64>,
@@ -734,7 +753,7 @@ impl YantrikDB {
         self.correct_impl(
             rid,
             new_text,
-            Some(new_embedding),
+            Some((new_embedding, embedding_generation)),
             metadata_merge,
             new_importance,
             new_valence,
@@ -747,7 +766,10 @@ impl YantrikDB {
         &self,
         rid: &str,
         new_text: Option<&str>,
-        caller_embedding: Option<&[f32]>,
+        // Item 3 (sol r8): (vector, generation-it-was-embedded-against). The
+        // generation pins the vector to its space so a racing reembed cutover
+        // is caught before the wrong-space vector is committed.
+        caller_embedding: Option<(&[f32], u64)>,
         metadata_merge: Option<&serde_json::Value>,
         new_importance: Option<f64>,
         new_valence: Option<f64>,
@@ -1082,12 +1104,14 @@ impl YantrikDB {
         rid: &str,
         original: &Memory,
         new_text: &str,
-        // Item 3 (Python-binding parity): when `Some`, the caller already
-        // embedded `new_text` (it holds a Python-callable embedder the pure-
-        // Rust re-embed cannot reach). When `None`, the engine embeds using
-        // its native `search_state.embedder`. Coherence is identical either
-        // way — only the vector's source differs.
-        caller_embedding: Option<&[f32]>,
+        // Item 3 (Python-binding parity): when `Some((vec, gen))`, the caller
+        // already embedded `new_text` (it holds a Python-callable embedder the
+        // pure-Rust re-embed cannot reach) and `gen` is the search generation
+        // it embedded against. When `None`, the engine embeds using its native
+        // `search_state.embedder`. Coherence is identical either way — only the
+        // vector's source differs, and `gen` pins the caller's vector to its
+        // space (sol r8).
+        caller_embedding: Option<(&[f32], u64)>,
         metadata_merge: Option<&serde_json::Value>,
         new_importance: Option<f64>,
         new_valence: Option<f64>,
@@ -1111,6 +1135,23 @@ impl YantrikDB {
             let state_for_embed = self.search_state.load_full();
             let gen_pre = state_for_embed.generation;
             let digest_pre = state_for_embed.runtime_embedder_digest.clone();
+
+            // sol r8: a caller-supplied vector was embedded against a specific
+            // generation. If a reembed cutover advanced the generation between
+            // that snapshot and now, the vector is in the OLD space and must
+            // NOT be committed against the new index. Reject retryably BEFORE
+            // any side effect; the caller re-embeds against the new generation
+            // and reissues. (The engine-embedded `None` path re-embeds every
+            // iteration, so it is covered by the Step-5 generation recheck
+            // instead.)
+            if let Some((_, caller_gen)) = caller_embedding {
+                if caller_gen != gen_pre {
+                    return Err(YantrikDbError::CorrectionDeferredDuringReembed {
+                        rid: rid.to_string(),
+                    });
+                }
+            }
+
             let embedder = match caller_embedding {
                 Some(_) => None,
                 None => Some(
@@ -1129,7 +1170,7 @@ impl YantrikDB {
             // to compute before the critical section. Either the caller
             // supplied it (Python embedder) or the engine embeds natively.
             let new_embedding = match caller_embedding {
-                Some(e) => e.to_vec(),
+                Some((e, _)) => e.to_vec(),
                 None => embedder
                     .as_ref()
                     .expect("embedder present when caller_embedding is None")

@@ -583,11 +583,18 @@ impl PyYantrikDB {
         // reembed-cutover revalidation loop natively).
         let use_caller_embed = new_text.is_some() && !db.has_embedder() && self.embedder.is_some();
         let result = if use_caller_embed {
+            // sol r8: snapshot the search generation BEFORE embedding so the
+            // vector is pinned to the space it is computed in. If a reembed
+            // cutover advances the generation before the correction commits,
+            // the engine rejects it retryably rather than committing a
+            // wrong-space vector.
+            let gen = db.search_generation();
             let emb = self.embed_text(py, new_text.expect("checked is_some"))?;
             db.correct_with_embedding(
                 rid,
                 new_text,
                 &emb,
+                gen,
                 metadata_json.as_ref(),
                 new_importance,
                 new_valence,

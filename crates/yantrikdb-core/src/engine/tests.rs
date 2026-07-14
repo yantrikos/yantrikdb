@@ -14346,6 +14346,79 @@ fn correction_epoch_toggles_and_validates() {
     );
 }
 
+#[test]
+fn correct_with_embedding_rejects_stale_generation() {
+    // sol r8: a caller-supplied vector is pinned to the generation it was
+    // embedded against. If that generation no longer matches the index's
+    // (a reembed cutover raced the correction), the vector is stale-space
+    // and MUST be rejected retryably — never committed — else the corrected
+    // text would rank under the old vector space. Here we simulate the race
+    // by passing a generation that does not match the current one.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid = db
+        .record(
+            "alice owns service A",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let gen = db.search_generation();
+    let new_emb = vec_seed(9.0, 8);
+
+    // Stale generation → retryable rejection, NO mutation.
+    let err = db
+        .correct_with_embedding(
+            &rid,
+            Some("bob owns service B"),
+            &new_emb,
+            gen + 1,
+            None,
+            None,
+            None,
+            "handover",
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::CorrectionDeferredDuringReembed { .. }
+        ),
+        "stale-generation caller embedding must be deferred, got {err:?}"
+    );
+    assert_eq!(
+        db.get_untracked(&rid).unwrap().unwrap().text,
+        "alice owns service A",
+        "rejected correction must leave the text unchanged"
+    );
+
+    // Current generation → succeeds and updates the text in place.
+    db.correct_with_embedding(
+        &rid,
+        Some("bob owns service B"),
+        &new_emb,
+        gen,
+        None,
+        None,
+        None,
+        "handover",
+    )
+    .unwrap();
+    assert_eq!(
+        db.get_untracked(&rid).unwrap().unwrap().text,
+        "bob owns service B",
+        "generation-matched caller embedding must apply in place at the same rid"
+    );
+}
+
 #[cfg(feature = "bundled-embedder")]
 #[test]
 fn correct_correct_revision_chain_records_true_prior_state() {
