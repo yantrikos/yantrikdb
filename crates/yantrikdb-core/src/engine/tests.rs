@@ -14399,6 +14399,11 @@ fn correct_with_embedding_rejects_stale_generation() {
         "alice owns service A",
         "rejected correction must leave the text unchanged"
     );
+    assert_eq!(
+        db.history(&rid).unwrap().len(),
+        0,
+        "rejected correction must record no revision"
+    );
 
     // Current generation → succeeds and updates the text in place.
     db.correct_with_embedding(
@@ -14416,6 +14421,11 @@ fn correct_with_embedding_rejects_stale_generation() {
         db.get_untracked(&rid).unwrap().unwrap().text,
         "bob owns service B",
         "generation-matched caller embedding must apply in place at the same rid"
+    );
+    assert_eq!(
+        db.history(&rid).unwrap().len(),
+        1,
+        "applied correction records exactly one revision"
     );
 }
 

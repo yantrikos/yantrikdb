@@ -658,6 +658,18 @@ impl YantrikDB {
         self.tombstone_inner(rid, None, None, ts_micros, None)
     }
 
+    /// Current search-state generation. The generation bumps monotonically on
+    /// every reembed cutover (a `set_embedder` that keeps the same digest
+    /// deliberately does NOT bump it), and it defines the vector space the
+    /// HNSW index lives in. A caller that pre-embeds text (Python-embedder
+    /// path) snapshots this BEFORE embedding and passes it to
+    /// [`Self::correct_with_embedding`] so a reembed cutover that races the
+    /// correction is detected (sol r8): the supplied vector is only accepted
+    /// if the index is still at the same generation at commit.
+    pub fn search_generation(&self) -> u64 {
+        self.search_state.load_full().generation
+    }
+
     /// User-initiated memory correction (Issue #47, v0.7.20).
     ///
     /// **In-place mutation with audit trail.** Updates the memory at
@@ -691,17 +703,6 @@ impl YantrikDB {
     /// **Atomic.** The revision insert + memories UPDATE happen in a
     /// single SQL transaction. Either both succeed or neither does.
     #[tracing::instrument(skip(self))]
-    /// Current search-state generation. The generation bumps monotonically on
-    /// every reembed / embedder swap and defines the vector space the HNSW
-    /// index lives in. A caller that pre-embeds text (Python-embedder path)
-    /// snapshots this BEFORE embedding and passes it to
-    /// [`Self::correct_with_embedding`] so a reembed cutover that races the
-    /// correction is detected (sol r8): the supplied vector is only accepted
-    /// if the index is still at the same generation at commit.
-    pub fn search_generation(&self) -> u64 {
-        self.search_state.load_full().generation
-    }
-
     pub fn correct(
         &self,
         rid: &str,
