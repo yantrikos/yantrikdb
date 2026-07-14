@@ -130,6 +130,25 @@ pub fn recall_response_to_dict(
     }
     dict.set_item("hints", hints_list)?;
 
+    // v0.10 Item 1b (trace T08): typed search coverage.
+    let coverage = PyDict::new(py);
+    coverage.set_item("namespace", &r.coverage.namespace)?;
+    coverage.set_item("memory_type", &r.coverage.memory_type)?;
+    coverage.set_item("candidate_count", r.coverage.candidate_count)?;
+    coverage.set_item("threshold_tau", r.coverage.threshold_tau)?;
+    coverage.set_item("top_similarity", r.coverage.top_similarity)?;
+    coverage.set_item(
+        "outcome",
+        match r.coverage.outcome {
+            yantrikdb_core::types::CoverageOutcome::Matched => "matched",
+            yantrikdb_core::types::CoverageOutcome::BelowThreshold => "below_threshold",
+            yantrikdb_core::types::CoverageOutcome::NoMatchingRecord => "no_matching_record",
+            // #[non_exhaustive] upstream; surface rather than crash.
+            _ => "unknown",
+        },
+    )?;
+    dict.set_item("coverage", coverage)?;
+
     Ok(dict.into())
 }
 

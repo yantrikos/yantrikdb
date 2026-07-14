@@ -360,7 +360,8 @@ impl PyYantrikDB {
         max_conflicts = 5,
         max_triggers = 5,
         snippet_chars = 240,
-        namespace = None
+        namespace = None,
+        include_superseded = false
     ))]
     #[allow(clippy::too_many_arguments)]
     fn session_digest(
@@ -371,6 +372,7 @@ impl PyYantrikDB {
         max_triggers: usize,
         snippet_chars: usize,
         namespace: Option<String>,
+        include_superseded: bool,
     ) -> PyResult<String> {
         let db = self.get_inner()?;
         let cfg = yantrikdb_core::SessionDigestConfig {
@@ -382,9 +384,30 @@ impl PyYantrikDB {
             max_conflicts,
             max_triggers,
             snippet_chars,
+            // v0.10 Item 1c: history packets re-admit superseded records,
+            // stamped with current_status + superseded_by.
+            include_superseded,
         };
         let digest = db.session_digest(&cfg).map_err(map_err)?;
         Ok(serde_json::to_string(&digest).unwrap_or_else(|_| "{}".to_string()))
+    }
+
+    /// v0.10 Item 1c (trace T10) — what changed since `since` (epoch
+    /// seconds): records created and status transitions (supersessions)
+    /// committed after that instant, optionally scoped to a namespace.
+    /// Returns a JSON string with `new_records` and `status_transitions`.
+    #[pyo3(signature = (since, namespace = None, snippet_chars = 240))]
+    fn what_changed_since(
+        &self,
+        since: f64,
+        namespace: Option<&str>,
+        snippet_chars: usize,
+    ) -> PyResult<String> {
+        let db = self.get_inner()?;
+        let changes = db
+            .what_changed_since(since, namespace, snippet_chars)
+            .map_err(map_err)?;
+        Ok(serde_json::to_string(&changes).unwrap_or_else(|_| "{}".to_string()))
     }
 
     /// End-of-session auto-capture (task 40): atomize an agent-provided

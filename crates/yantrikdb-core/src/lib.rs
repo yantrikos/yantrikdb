@@ -37,7 +37,7 @@ pub use consolidate::{consolidate, find_consolidation_candidates};
 pub use engine::conflict::ConflictBurndownReport;
 pub use engine::conversation::{Turn, DEFAULT_TURN_WINDOW};
 pub use engine::demand::KnowledgeGap;
-pub use engine::digest::{SessionDigest, SessionDigestConfig};
+pub use engine::digest::{ChangesSince, SessionDigest, SessionDigestConfig, StatusTransition};
 pub use engine::graph_ops::AutoRelateReport;
 pub use engine::importance::ImportanceRecalibrationReport;
 pub use engine::links::ChainAuditReport;

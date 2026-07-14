@@ -1681,6 +1681,69 @@ mod tests {
     }
 
     #[test]
+    fn disputed_records_both_returned_with_typed_cross_links() {
+        // v0.10 Item 1 / trace T05 "disputed-not-dropped": A contradicts
+        // B, neither superseded. Both must be returned, each carrying the
+        // other's rid in typed disputed_with — the engine NEVER silently
+        // picks a winner on an open dispute.
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let a = rec(&db, "the standup is at 9am", 1.0);
+        let b = rec(&db, "the standup is at 10am", 1.05);
+        crate::create_conflict(
+            &db,
+            &crate::types::ConflictType::Temporal,
+            &a,
+            &b,
+            None,
+            None,
+            "test fixture: contradictory standup times",
+        )
+        .unwrap();
+
+        let results = db
+            .recall(
+                &vec_seed(1.0, 8),
+                10,
+                None,
+                None,
+                false,
+                false,
+                None,
+                true,
+                None,
+                None,
+                None,
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+
+        let hit_a = results
+            .iter()
+            .find(|r| r.rid == a)
+            .expect("disputed A still returned (not dropped)");
+        let hit_b = results
+            .iter()
+            .find(|r| r.rid == b)
+            .expect("disputed B still returned (not dropped)");
+        assert!(
+            hit_a.disputed_with.contains(&b),
+            "A carries B in disputed_with: {:?}",
+            hit_a.disputed_with
+        );
+        assert!(
+            hit_b.disputed_with.contains(&a),
+            "B carries A in disputed_with: {:?}",
+            hit_b.disputed_with
+        );
+        // No winner picked: both stay Active (dispute is orthogonal to
+        // the supersedes-derived status).
+        assert_eq!(hit_a.current_status, crate::types::RecordStatus::Active);
+        assert_eq!(hit_b.current_status, crate::types::RecordStatus::Active);
+    }
+
+    #[test]
     fn status_read_policy_persists_across_reopen() {
         // The policy is durable meta, not a per-process flag: an opt-out
         // written by one process must be honored by the next open.

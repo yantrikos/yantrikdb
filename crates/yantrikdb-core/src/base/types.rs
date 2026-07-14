@@ -181,6 +181,11 @@ pub struct RecallResponse {
     pub certainty_reasons: Vec<String>,
     pub retrieval_summary: RetrievalSummary,
     pub hints: Vec<RefinementHint>,
+    /// v0.10 Item 1b (trace T08): typed coverage of what was searched
+    /// and why the result set looks the way it does. serde(default) so
+    /// pre-v0.10 serialized responses still deserialize.
+    #[serde(default)]
+    pub coverage: SearchCoverage,
 }
 
 /// Summary of how retrieval was performed.
@@ -190,6 +195,61 @@ pub struct RetrievalSummary {
     pub score_spread: f64,
     pub sources_used: Vec<String>,
     pub candidate_count: usize,
+}
+
+/// v0.10 Item 1b — trace T08 "absence-with-coverage". Typed statement
+/// of the search scope and outcome, so a consumer can distinguish "the
+/// substrate has nothing in this scope" from "candidates exist but none
+/// cleared the relevance gate" WITHOUT parsing certainty_reasons prose.
+/// nuron's false-retry loop (T08 fixture) came from exactly that
+/// ambiguity: an empty result read as a transient failure, so the agent
+/// retried a query that could never succeed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SearchCoverage {
+    /// Namespace scope searched (`None` = all namespaces).
+    pub namespace: Option<String>,
+    /// Memory-type scope searched (`None` = all types).
+    pub memory_type: Option<String>,
+    /// Records in scope after filters — the candidate universe, not the
+    /// HNSW pool.
+    pub candidate_count: usize,
+    /// The relevance gate consulted for the outcome: the per-database
+    /// learned `gate_tau` (similarity level where importance boosting
+    /// engages — the engine's own notion of "relevant enough").
+    pub threshold_tau: f64,
+    /// Top similarity among returned results (0.0 when empty).
+    pub top_similarity: f64,
+    /// The typed T08 distinction.
+    pub outcome: CoverageOutcome,
+}
+
+impl Default for SearchCoverage {
+    fn default() -> Self {
+        Self {
+            namespace: None,
+            memory_type: None,
+            candidate_count: 0,
+            threshold_tau: 0.0,
+            top_similarity: 0.0,
+            outcome: CoverageOutcome::NoMatchingRecord,
+        }
+    }
+}
+
+/// v0.10 Item 1b — why a recall's result set looks the way it does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CoverageOutcome {
+    /// Results returned and the best of them clears the relevance gate.
+    Matched,
+    /// Candidates exist in scope, but nothing returned clears the gate
+    /// (or nothing was returned at all). These are guesses, not
+    /// knowledge — retrying the same query will not improve them.
+    BelowThreshold,
+    /// The searched scope contains no records. There is nothing to
+    /// find; do not retry.
+    NoMatchingRecord,
 }
 
 /// A hint for refining a query when confidence is low.

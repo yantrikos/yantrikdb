@@ -5313,6 +5313,64 @@ fn test_recall_with_response_structure() {
 }
 
 #[test]
+fn recall_with_response_reports_typed_search_coverage() {
+    // v0.10 Item 1b / trace T08 "absence-with-coverage": a consumer must
+    // be able to distinguish, from TYPED fields, (a) "this scope has no
+    // records" from (b) "candidates exist but none clears the relevance
+    // gate" from (c) a real match — nuron's false-retry loop came from
+    // reading an empty result as a transient failure.
+    use crate::types::CoverageOutcome;
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+
+    // One record along basis e0, in the default namespace.
+    let mut e0 = vec![0.0f32; 8];
+    e0[0] = 1.0;
+    let mut e1 = vec![0.0f32; 8];
+    e1[1] = 1.0;
+    db.record(
+        "the only fact in the store",
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &e0,
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+
+    let respond = |query: &[f32], ns: Option<&str>| {
+        db.recall_with_response(
+            query, 5, None, None, false, false, None, true, ns, None, None,
+        )
+        .unwrap()
+    };
+
+    // (a) Scope with zero records: typed NoMatchingRecord, scope echoed.
+    let resp = respond(&e0, Some("empty_ns"));
+    assert_eq!(resp.coverage.outcome, CoverageOutcome::NoMatchingRecord);
+    assert_eq!(resp.coverage.candidate_count, 0);
+    assert_eq!(resp.coverage.namespace.as_deref(), Some("empty_ns"));
+
+    // (b) Candidates exist but the best hit is orthogonal to the query —
+    // similarity 0 sits under the gate (default gate_tau = 0.25).
+    let resp = respond(&e1, None);
+    assert_eq!(resp.coverage.outcome, CoverageOutcome::BelowThreshold);
+    assert!(resp.coverage.candidate_count > 0);
+    assert!(resp.coverage.top_similarity < resp.coverage.threshold_tau);
+
+    // (c) Query on the record's own axis: matched, gate cleared.
+    let resp = respond(&e0, None);
+    assert_eq!(resp.coverage.outcome, CoverageOutcome::Matched);
+    assert!(resp.coverage.top_similarity >= resp.coverage.threshold_tau);
+    assert!(resp.coverage.threshold_tau > 0.0, "tau reported");
+}
+
+#[test]
 fn test_high_confidence_no_hints() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let emb = vec_seed(5.0, 8);
@@ -10681,6 +10739,148 @@ fn session_digest_scopes_decisions_and_conflicts_to_namespace() {
         .map(|d| d.namespace.clone())
         .collect();
     assert!(namespaces.contains("tenant-a") && namespaces.contains("tenant-b"));
+}
+
+#[test]
+fn digest_packet_is_status_led_and_reports_changes_since() {
+    // v0.10 Item 1c / trace T10 "packet-correctness". Fixture: decisions
+    // A (superseded), B (head), C (open question), D (disputed, vs E) in
+    // one namespace. The packet main view carries B, C, D-with-flag; A
+    // exists only behind include_superseded; what_changed_since(T)
+    // returns exactly the records and status transitions after T.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rec = |text: &str, seed: f32| {
+        db.record(
+            text,
+            "semantic",
+            0.9,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(seed, 8),
+            "t10",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap()
+    };
+    let a = rec("decision A: deploy to staging", 1.0);
+    let b = rec("decision B: deploy to production (corrects A)", 1.05);
+    let c = rec("open question C: which region", 2.0);
+    let d = rec("decision D: use postgres", 3.0);
+    let e = rec("decision E: use sqlite (rival of D)", 3.05);
+
+    db.link(
+        &b,
+        &crate::types::RecordLink {
+            target_rid: a.clone(),
+            link_type: crate::types::LinkType::Supersedes,
+        },
+    )
+    .unwrap();
+    crate::create_conflict(
+        &db,
+        &crate::types::ConflictType::Preference,
+        &d,
+        &e,
+        None,
+        None,
+        "T10 fixture: D vs E",
+    )
+    .unwrap();
+
+    // Deterministic timeline (no wall-clock asserts): A predates T=1500,
+    // everything else follows it. The supersedes link keeps its real
+    // (post-T) commit time.
+    {
+        let conn = db.conn();
+        conn.execute(
+            "UPDATE memories SET created_at = 1000.0 WHERE rid = ?1",
+            rusqlite::params![a],
+        )
+        .unwrap();
+        conn.execute(
+            "UPDATE memories SET created_at = 2000.0 WHERE rid IN (?1, ?2, ?3, ?4)",
+            rusqlite::params![b, c, d, e],
+        )
+        .unwrap();
+    }
+
+    // Main view: status-led (fresh DB → policy active).
+    let digest = db
+        .session_digest(&crate::SessionDigestConfig {
+            namespace: Some("t10".into()),
+            ..Default::default()
+        })
+        .unwrap();
+    let rids: Vec<&str> = digest
+        .top_decisions
+        .iter()
+        .map(|x| x.rid.as_str())
+        .collect();
+    assert!(rids.contains(&b.as_str()), "head B in main view");
+    assert!(rids.contains(&c.as_str()), "open question C in main view");
+    assert!(
+        rids.contains(&d.as_str()),
+        "disputed D in main view (not dropped)"
+    );
+    assert!(
+        !rids.contains(&a.as_str()),
+        "superseded A absent from main view"
+    );
+    let d_entry = digest.top_decisions.iter().find(|x| x.rid == d).unwrap();
+    assert!(d_entry.disputed, "D carries the typed disputed flag");
+    let b_entry = digest.top_decisions.iter().find(|x| x.rid == b).unwrap();
+    assert!(!b_entry.disputed);
+    assert_eq!(b_entry.current_status, crate::types::RecordStatus::Active);
+
+    // Expansion: A re-admitted, stamped.
+    let expanded = db
+        .session_digest(&crate::SessionDigestConfig {
+            namespace: Some("t10".into()),
+            include_superseded: true,
+            ..Default::default()
+        })
+        .unwrap();
+    let a_entry = expanded
+        .top_decisions
+        .iter()
+        .find(|x| x.rid == a)
+        .expect("A only behind include_superseded");
+    assert_eq!(
+        a_entry.current_status,
+        crate::types::RecordStatus::Superseded
+    );
+    assert_eq!(a_entry.superseded_by.as_deref(), Some(b.as_str()));
+
+    // what_changed_since(T=1500): B/C/D/E are new, A is not; exactly one
+    // status transition (A → Superseded by B, committed after T).
+    let changes = db.what_changed_since(1500.0, Some("t10"), 240).unwrap();
+    let new_rids: Vec<&str> = changes.new_records.iter().map(|x| x.rid.as_str()).collect();
+    for rid in [&b, &c, &d, &e] {
+        assert!(new_rids.contains(&rid.as_str()), "{rid} is new since T");
+    }
+    assert!(!new_rids.contains(&a.as_str()), "A predates T");
+    assert_eq!(
+        changes.status_transitions.len(),
+        1,
+        "exactly one transition"
+    );
+    let tr = &changes.status_transitions[0];
+    assert_eq!(tr.rid, a);
+    assert_eq!(tr.from, crate::types::RecordStatus::Active);
+    assert_eq!(tr.to, crate::types::RecordStatus::Superseded);
+    assert_eq!(tr.by_rid.as_deref(), Some(b.as_str()));
+    assert!(tr.at > 1500.0, "transition committed after T");
+
+    // Nothing changed since a T after everything.
+    let quiet = db
+        .what_changed_since(crate::time::now_secs() + 10.0, Some("t10"), 240)
+        .unwrap();
+    assert!(quiet.new_records.is_empty());
+    assert!(quiet.status_transitions.is_empty());
 }
 
 #[cfg(feature = "bundled-embedder")]
