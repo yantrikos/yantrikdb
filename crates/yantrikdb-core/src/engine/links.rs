@@ -209,7 +209,16 @@ impl YantrikDB {
     /// `INSERT OR IGNORE`. Returns the `link_id` (freshly minted even if
     /// the row already existed and the insert was ignored).
     pub fn link(&self, source_rid: &str, link: &RecordLink) -> Result<String> {
-        let (link_id, _inserted) = self.link_core(source_rid, link)?;
+        let (link_id, inserted) = self.link_core(source_rid, link)?;
+        // v0.10 Item 2 outcome anchor: creating a link is an independent
+        // caller action targeting BOTH endpoints (weak positive for each
+        // rid's most recent impression; no-op for never-served rids and
+        // for idempotent retries). Engine-internal paths (replication
+        // materializer, reify sweep) do not route through here.
+        if inserted {
+            self.note_caller_used(source_rid);
+            self.note_caller_used(&link.target_rid);
+        }
         Ok(link_id)
     }
 
@@ -805,11 +814,14 @@ impl YantrikDB {
             if target.is_empty() || target == rid {
                 continue;
             }
-            // link() is idempotent on UNIQUE(source,target,type); a
+            // link_core is idempotent on UNIQUE(source,target,type); a
             // re-run simply INSERT OR IGNOREs. Count only fresh inserts by
             // checking row presence before/after would be racy under the
             // lock churn; instead we count attempts that didn't error.
-            self.link(
+            // v0.10 Item 2: deliberately NOT self.link() — this is a
+            // maintenance sweep, not a caller action, and must not mint
+            // caller_used ranking labels.
+            self.link_core(
                 &rid,
                 &RecordLink {
                     target_rid: target.to_string(),
@@ -934,7 +946,7 @@ impl YantrikDB {
                 if pol.neighbor_factor <= 0.0 {
                     continue;
                 }
-                let Some(mem) = self.get(&l.rid)? else {
+                let Some(mem) = self.get_untracked(&l.rid)? else {
                     continue;
                 };
                 if mem.consolidation_status != "active" {

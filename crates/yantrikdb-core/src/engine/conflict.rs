@@ -489,8 +489,8 @@ impl YantrikDB {
 
             // Newer fact supersedes. If either memory is missing (already
             // gone), don't guess — route to operator.
-            let created_a = self.get(&c.memory_a)?.map(|m| m.created_at);
-            let created_b = self.get(&c.memory_b)?.map(|m| m.created_at);
+            let created_a = self.get_untracked(&c.memory_a)?.map(|m| m.created_at);
+            let created_b = self.get_untracked(&c.memory_b)?.map(|m| m.created_at);
             let (strategy, winner) = match (created_a, created_b) {
                 (Some(ca), Some(cb)) if ca >= cb => ("keep_a", c.memory_a.clone()),
                 (Some(_), Some(_)) => ("keep_b", c.memory_b.clone()),
@@ -613,8 +613,8 @@ impl YantrikDB {
                 let text = new_text.ok_or_else(|| {
                     YantrikDbError::SyncError("merge strategy requires new_text".to_string())
                 })?;
-                let mem_a = self.get(&conflict.memory_a)?;
-                let mem_b = self.get(&conflict.memory_b)?;
+                let mem_a = self.get_untracked(&conflict.memory_a)?;
+                let mem_b = self.get_untracked(&conflict.memory_b)?;
                 let imp_a = mem_a.as_ref().map(|m| m.importance).unwrap_or(0.5);
                 let imp_b = mem_b.as_ref().map(|m| m.importance).unwrap_or(0.5);
                 let merged_importance = imp_a.max(imp_b);
@@ -724,8 +724,8 @@ impl YantrikDB {
         let old_type = conflict.conflict_type.clone();
 
         // Get memory texts
-        let mem_a = self.get(&conflict.memory_a)?;
-        let mem_b = self.get(&conflict.memory_b)?;
+        let mem_a = self.get_untracked(&conflict.memory_a)?;
+        let mem_b = self.get_untracked(&conflict.memory_b)?;
         let text_a = mem_a.map(|m| m.text).unwrap_or_default();
         let text_b = mem_b.map(|m| m.text).unwrap_or_default();
 

@@ -8,8 +8,25 @@ use super::{embedding_hash, now, YantrikDB};
 
 impl YantrikDB {
     /// Get a single memory by RID.
+    ///
+    /// v0.10 Item 2: a successful consumer `get` is an outcome anchor —
+    /// an independent, caller-initiated action targeting the rid — and
+    /// records a weak-positive ranking label bound to the rid's most
+    /// recent impression (no-op if the ranker never served it). Engine-
+    /// internal reads must use [`Self::get_untracked`] instead so the
+    /// learner never labels its own traversals.
     #[tracing::instrument(skip(self))]
     pub fn get(&self, rid: &str) -> Result<Option<Memory>> {
+        let found = self.get_untracked(rid)?;
+        if found.is_some() {
+            self.note_caller_used(rid);
+        }
+        Ok(found)
+    }
+
+    /// `get` without the caller_used label — for engine-internal reads
+    /// (conflict resolution, link hydration, maintenance).
+    pub(crate) fn get_untracked(&self, rid: &str) -> Result<Option<Memory>> {
         let conn = self.conn();
         let mut stmt = conn.prepare("SELECT * FROM memories WHERE rid = ?1")?;
 
@@ -778,6 +795,13 @@ impl YantrikDB {
             }),
             None,
         )?;
+
+        // v0.10 Item 2 outcome anchor: a correction is an independent
+        // caller action targeting the rid — the ranker surfaced a memory
+        // the caller cared enough to fix. The label measures RETRIEVAL
+        // utility, not content truth (a wrong-but-found memory was still
+        // the right retrieval).
+        self.note_caller_used(rid);
 
         Ok(CorrectionResult {
             original_rid: rid.to_string(),

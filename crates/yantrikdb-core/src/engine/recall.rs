@@ -1916,6 +1916,17 @@ impl YantrikDB {
             }
         }
 
+        // v0.10 Item 2: persist the impression ledger BEFORE reinforcement
+        // mutates last_access/access_count — the learner reads features
+        // from here, never from mutable memory state. skip_reinforce
+        // recalls are engine-internal and leave no impressions (the
+        // ranker's own traversals are not consumer evidence). Best-effort:
+        // the read path must not fail because the ledger hiccuped.
+        if !skip_reinforce {
+            let generation = learned_weights.generation;
+            let _ = self.log_recall_impressions(&scored, query_embedding, namespace, generation);
+        }
+
         // Reinforce accessed memories (spaced repetition)
         if !skip_reinforce {
             for r in &scored {
