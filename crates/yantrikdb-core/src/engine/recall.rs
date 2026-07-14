@@ -453,10 +453,10 @@ impl YantrikDB {
                         domain: row.domain.clone(),
                         source: row.source.clone(),
                         emotional_state: row.emotional_state.clone(),
-                    current_status: Default::default(),
-                    superseded_by: None,
-                    disputed_with: Vec::new(),
-                    aged_last_verified: None,
+                        current_status: Default::default(),
+                        superseded_by: None,
+                        disputed_with: Vec::new(),
+                        aged_last_verified: None,
                     });
                 }
             }
@@ -1053,10 +1053,10 @@ impl YantrikDB {
                                     domain: row.domain.clone(),
                                     source: row.source.clone(),
                                     emotional_state: row.emotional_state.clone(),
-                    current_status: Default::default(),
-                    superseded_by: None,
-                    disputed_with: Vec::new(),
-                    aged_last_verified: None,
+                                    current_status: Default::default(),
+                                    superseded_by: None,
+                                    disputed_with: Vec::new(),
+                                    aged_last_verified: None,
                                 });
                             }
                         }
@@ -1181,10 +1181,10 @@ impl YantrikDB {
                         domain: row.domain.clone(),
                         source: row.source.clone(),
                         emotional_state: row.emotional_state.clone(),
-                    current_status: Default::default(),
-                    superseded_by: None,
-                    disputed_with: Vec::new(),
-                    aged_last_verified: None,
+                        current_status: Default::default(),
+                        superseded_by: None,
+                        disputed_with: Vec::new(),
+                        aged_last_verified: None,
                     });
                 }
             }
@@ -1392,10 +1392,10 @@ impl YantrikDB {
                                     domain: row.domain.clone(),
                                     source: row.source.clone(),
                                     emotional_state: row.emotional_state.clone(),
-                    current_status: Default::default(),
-                    superseded_by: None,
-                    disputed_with: Vec::new(),
-                    aged_last_verified: None,
+                                    current_status: Default::default(),
+                                    superseded_by: None,
+                                    disputed_with: Vec::new(),
+                                    aged_last_verified: None,
                                 });
                             }
                         }
@@ -1710,10 +1710,10 @@ impl YantrikDB {
                             domain: row.domain.clone(),
                             source: row.source.clone(),
                             emotional_state: row.emotional_state.clone(),
-                    current_status: Default::default(),
-                    superseded_by: None,
-                    disputed_with: Vec::new(),
-                    aged_last_verified: None,
+                            current_status: Default::default(),
+                            superseded_by: None,
+                            disputed_with: Vec::new(),
+                            aged_last_verified: None,
                         });
                     }
                     drop(cache);
@@ -2742,10 +2742,10 @@ impl YantrikDB {
                         domain: row.domain.clone(),
                         source: row.source.clone(),
                         emotional_state: row.emotional_state.clone(),
-                    current_status: Default::default(),
-                    superseded_by: None,
-                    disputed_with: Vec::new(),
-                    aged_last_verified: None,
+                        current_status: Default::default(),
+                        superseded_by: None,
+                        disputed_with: Vec::new(),
+                        aged_last_verified: None,
                     });
                 }
             }
@@ -3277,10 +3277,10 @@ impl YantrikDB {
                                     domain: row.domain.clone(),
                                     source: row.source.clone(),
                                     emotional_state: row.emotional_state.clone(),
-                    current_status: Default::default(),
-                    superseded_by: None,
-                    disputed_with: Vec::new(),
-                    aged_last_verified: None,
+                                    current_status: Default::default(),
+                                    superseded_by: None,
+                                    disputed_with: Vec::new(),
+                                    aged_last_verified: None,
                                 });
                             }
                         }
@@ -3396,10 +3396,10 @@ impl YantrikDB {
                         domain: row.domain.clone(),
                         source: row.source.clone(),
                         emotional_state: row.emotional_state.clone(),
-                    current_status: Default::default(),
-                    superseded_by: None,
-                    disputed_with: Vec::new(),
-                    aged_last_verified: None,
+                        current_status: Default::default(),
+                        superseded_by: None,
+                        disputed_with: Vec::new(),
+                        aged_last_verified: None,
                     });
                 }
             }
@@ -3597,10 +3597,10 @@ impl YantrikDB {
                                     domain: row.domain.clone(),
                                     source: row.source.clone(),
                                     emotional_state: row.emotional_state.clone(),
-                    current_status: Default::default(),
-                    superseded_by: None,
-                    disputed_with: Vec::new(),
-                    aged_last_verified: None,
+                                    current_status: Default::default(),
+                                    superseded_by: None,
+                                    disputed_with: Vec::new(),
+                                    aged_last_verified: None,
                                 });
                             }
                         }
@@ -3903,10 +3903,10 @@ impl YantrikDB {
                                 domain: row.domain.clone(),
                                 source: row.source.clone(),
                                 emotional_state: row.emotional_state.clone(),
-                    current_status: Default::default(),
-                    superseded_by: None,
-                    disputed_with: Vec::new(),
-                    aged_last_verified: None,
+                                current_status: Default::default(),
+                                superseded_by: None,
+                                disputed_with: Vec::new(),
+                                aged_last_verified: None,
                             });
                         }
                     }
