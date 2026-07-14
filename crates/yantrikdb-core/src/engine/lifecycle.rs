@@ -1038,6 +1038,52 @@ impl YantrikDB {
     /// re-embedding — follower re-embedding diverges by model
     /// version/quantization. `None` for metadata/scalar corrections.
     #[allow(clippy::too_many_arguments)]
+    /// **Entity-graph coherence — the correction "safety half" (nuron, v0.10
+    /// Item-3 follow-up).** A text-changing `correct()` re-embeds the vector
+    /// but the `memory_entities` links were extracted from the OLD text. A link
+    /// whose entity surface string no longer appears in the corrected text is
+    /// STALE and keeps serving this record under its old association through
+    /// graph expansion (`why_retrieved = ["graph-connected via <old-entity>"]`)
+    /// — the reembed-independent, always-on face of the same "old meaning still
+    /// served" problem the vector path already closes. Drop those links.
+    ///
+    /// Matching reuses the SAME tokenizer/matcher entity EXTRACTION uses
+    /// (`graph::entity_matches_text` over `graph::tokenize`) so the two agree —
+    /// crucially, that is WORD-BOUNDARY (token-equality, not substring), so a
+    /// short entity can't false-KEEP by colliding inside a larger word
+    /// (`"Volkan"` tokens ≠ `"Volkanic"` tokens). A false-KEEP would silently
+    /// preserve the harm while the code looks like it ran; a false-DROP (entity
+    /// referred to by an alias) is benign under-retrieval. Err toward dropping.
+    ///
+    /// Runs in the correction's transaction so the removal is atomic with the
+    /// text change. Adding links for NEW entities (re-extraction) is the
+    /// deferrable "completeness half" and is intentionally NOT done here.
+    fn drop_stale_memory_entity_links_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        rid: &str,
+        new_text_plain: &str,
+    ) -> Result<()> {
+        let linked: Vec<String> = {
+            let mut stmt =
+                tx.prepare("SELECT entity_name FROM memory_entities WHERE memory_rid = ?1")?;
+            let rows = stmt.query_map(params![rid], |r| r.get::<_, String>(0))?;
+            rows.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        if linked.is_empty() {
+            return Ok(());
+        }
+        let tokens = crate::graph::tokenize(new_text_plain);
+        for entity in &linked {
+            if !crate::graph::entity_matches_text(entity, &tokens) {
+                tx.execute(
+                    "DELETE FROM memory_entities WHERE memory_rid = ?1 AND entity_name = ?2",
+                    params![rid, entity],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
     fn insert_correct_op_in_tx(
         &self,
         tx: &rusqlite::Transaction<'_>,
@@ -1408,6 +1454,15 @@ impl YantrikDB {
                             rid,
                         ],
                     )?;
+                    // **Entity-graph coherence — safety half (nuron finding).**
+                    // The vector is re-embedded above, but the memory→entity
+                    // links were extracted from the OLD text; a link whose
+                    // entity no longer appears in the corrected text keeps
+                    // serving this record under its old association via graph
+                    // expansion. Drop those stale links IN this tx (atomic with
+                    // the text change). Adding links for NEW entities is the
+                    // deferrable completeness half, not done here.
+                    Self::drop_stale_memory_entity_links_in_tx(&tx, rid, new_text)?;
                     self.insert_correct_op_in_tx(
                         &tx,
                         rid,
@@ -1747,6 +1802,14 @@ impl YantrikDB {
                             rid,
                         ],
                     )?;
+                }
+                // Entity-graph coherence safety half (nuron) — mirror the
+                // leader: on a text-changing correction, drop memory→entity
+                // links whose entity no longer appears in the corrected text,
+                // so a follower's graph expansion stays coherent with the
+                // corrected text just like the leader's.
+                if let Some(t) = new_text {
+                    Self::drop_stale_memory_entity_links_in_tx(&tx, rid, t)?;
                 }
                 // Provenance stamp (minor r3): every replication-apply site
                 // records into replication_apply_log (schema contract).

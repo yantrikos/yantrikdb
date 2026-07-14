@@ -185,9 +185,13 @@ pub enum YantrikDbError {
     /// are unaffected and proceed during reembed.
     #[error(
         "correct(new_text=...) on {rid} deferred: a db.reembed() cutover is in progress, \
-         so the vector index cannot be updated against a stable generation. \
-         No state was changed; retry after the reembed completes. \
-         (Metadata / importance / valence corrections are not blocked by reembed.)"
+         so the vector index cannot be updated against a stable generation. No durable \
+         state was changed — BUT the OLD text remains ACTIVE and is still served as the \
+         record's CURRENT value until a retry succeeds; this is a not-yet-applied \
+         correction, not a harmless no-op. Retry after the reembed completes. To stop \
+         serving the old text in the meantime, issue a metadata/status correction (NOT \
+         blocked by reembed) marking the record correction_pending. (Metadata / \
+         importance / valence corrections are never blocked by reembed.)"
     )]
     CorrectionDeferredDuringReembed { rid: String },
 
