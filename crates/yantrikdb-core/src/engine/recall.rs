@@ -1912,7 +1912,9 @@ impl YantrikDB {
         let mut access_stmt =
             conn.prepare("SELECT created_at, access_count FROM memories WHERE rid = ?1")?;
         let mut superseded_stmt = conn.prepare(
-            "SELECT COUNT(*) FROM record_links WHERE target_rid = ?1 AND link_type = 'supersedes'",
+            "SELECT COUNT(*) FROM record_links WHERE target_rid = ?1 \
+             AND link_type = 'supersedes' \
+             AND status = 'active' AND selection_state = 'selected'",
         )?;
         for r in results.iter_mut() {
             let (created_at, access_count): (f64, i64) = access_stmt

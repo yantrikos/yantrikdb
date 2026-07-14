@@ -916,9 +916,23 @@ fn materialize_correct(
 
 /// Materialize a "link" op (Issue #48) on a replica. Idempotent via the
 /// UNIQUE(source_rid, target_rid, link_type) constraint + INSERT OR
-/// IGNORE — re-applying the same link op across re-syncs is a no-op. The
-/// leader's HLC is carried on the op and stored verbatim so the
-/// follower's link row sorts identically in any HLC-ordered scan.
+/// IGNORE — re-applying the same link op across re-syncs is a no-op.
+///
+/// **v0.10 Phase 0 (deterministic projection):**
+/// - The leader's canonical edge identity (`edge_id`, `edge_hlc_hex` in
+///   the payload since Phase 0) is persisted VERBATIM, so every replica's
+///   row sorts identically under the `max(hlc, id)` total order. Legacy
+///   payloads (pre-Phase-0 leaders) fall back to the op envelope's HLC
+///   plus a minted id.
+/// - Supersedes edges are durably accepted as CANDIDATES and the selected
+///   projection is then recomputed by the canonical descending-total-key
+///   fold — the result is independent of arrival order, and a losing
+///   concurrent edge is retained as `rejected_conflict` (never discarded,
+///   never re-typed).
+/// - A multi-candidate fold surfaces a `supersede_merge` structural
+///   conflict row with a DERIVED deterministic conflict_id (no follower-
+///   minted randomness, no oplog echo) — excluded from auto-resolution;
+///   Item 1 derives `disputed_with` from the open row.
 fn materialize_link(
     conn: &Connection,
     payload: &serde_json::Value,
@@ -934,22 +948,71 @@ fn materialize_link(
     let created_at = payload["created_at"]
         .as_f64()
         .unwrap_or_else(crate::time::now_secs);
-    let link_id = crate::id::new_id();
+    // Canonical identity: prefer the leader's carried values.
+    let link_id = payload["edge_id"]
+        .as_str()
+        .map(str::to_string)
+        .unwrap_or_else(crate::id::new_id);
+    let edge_hlc: Vec<u8> = payload["edge_hlc_hex"]
+        .as_str()
+        .and_then(crate::serde_helpers::hex_decode)
+        .unwrap_or_else(|| hlc.to_vec());
+
+    let is_supersedes = link_type == "supersedes";
+    // Supersedes candidates enter unselected; the fold below decides.
+    let initial_state = if is_supersedes {
+        "rejected_conflict"
+    } else {
+        "selected"
+    };
 
     conn.execute(
         "INSERT OR IGNORE INTO record_links \
-         (link_id, source_rid, target_rid, link_type, status, created_at, hlc, origin_actor) \
-         VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?6, ?7)",
+         (link_id, source_rid, target_rid, link_type, status, selection_state, \
+          created_at, hlc, origin_actor) \
+         VALUES (?1, ?2, ?3, ?4, 'active', ?5, ?6, ?7, ?8)",
         params![
             link_id,
             source_rid,
             target_rid,
             link_type,
+            initial_state,
             created_at,
-            hlc,
+            edge_hlc,
             source_actor
         ],
     )?;
+
+    if is_supersedes {
+        let fold = crate::engine::YantrikDB::refold_supersedes_target(conn, target_rid)?;
+        if let (Some((winner_edge, winner_src)), false) = (&fold.winner, fold.losers.is_empty()) {
+            // Deterministic structural conflict: same id derived on every
+            // replica from the contested predecessor + sorted edge ids.
+            let mut edge_ids: Vec<&str> = fold
+                .losers
+                .iter()
+                .map(|(e, _)| e.as_str())
+                .chain(std::iter::once(winner_edge.as_str()))
+                .collect();
+            edge_ids.sort_unstable();
+            let conflict_id = format!("supersede_merge:{}:{}", target_rid, edge_ids.join("+"));
+            let loser_src = &fold.losers[0].1;
+            let reason = serde_json::json!({
+                "kind": "supersede_merge",
+                "predecessor": target_rid,
+                "edges": edge_ids,
+                "selected_edge": winner_edge,
+            })
+            .to_string();
+            let _ = conn.execute(
+                "INSERT OR IGNORE INTO conflicts \
+                 (conflict_id, conflict_type, priority, status, memory_a, memory_b, \
+                  detected_at, detected_by, detection_reason) \
+                 VALUES (?1, 'supersede_merge', 'high', 'open', ?2, ?3, ?4, 'structural', ?5)",
+                params![conflict_id, winner_src, loser_src, created_at, reason],
+            );
+        }
+    }
 
     let applied_at = crate::time::now_secs();
     let _ = conn.execute(
@@ -961,8 +1024,12 @@ fn materialize_link(
     Ok(())
 }
 
-/// Materialize an "unlink" op (Issue #48) on a replica. A user
-/// retraction — hard-deletes the matching active/broken row.
+/// Materialize an "unlink" op (Issue #48) on a replica. A user retraction.
+///
+/// **v0.10 Phase 0:** supersedes edges are retracted (replayable
+/// `selection_state='retracted'`) and the target's projection re-folded —
+/// hard-deleting them made concurrent link/unlink arrival-order-dependent
+/// across replicas. Other link types keep hard-delete semantics.
 fn materialize_unlink(conn: &Connection, payload: &serde_json::Value) -> Result<()> {
     let source_rid = payload["source_rid"].as_str().unwrap_or_default();
     let target_rid = payload["target_rid"].as_str().unwrap_or_default();
@@ -970,11 +1037,23 @@ fn materialize_unlink(conn: &Connection, payload: &serde_json::Value) -> Result<
     if source_rid.is_empty() || target_rid.is_empty() || link_type.is_empty() {
         return Ok(());
     }
-    conn.execute(
-        "DELETE FROM record_links \
-         WHERE source_rid = ?1 AND target_rid = ?2 AND link_type = ?3",
-        params![source_rid, target_rid, link_type],
-    )?;
+    if link_type == "supersedes" {
+        let n = conn.execute(
+            "UPDATE record_links SET selection_state = 'retracted' \
+             WHERE source_rid = ?1 AND target_rid = ?2 AND link_type = ?3 \
+             AND selection_state != 'retracted'",
+            params![source_rid, target_rid, link_type],
+        )?;
+        if n > 0 {
+            crate::engine::YantrikDB::refold_supersedes_target(conn, target_rid)?;
+        }
+    } else {
+        conn.execute(
+            "DELETE FROM record_links \
+             WHERE source_rid = ?1 AND target_rid = ?2 AND link_type = ?3",
+            params![source_rid, target_rid, link_type],
+        )?;
+    }
     Ok(())
 }
 

@@ -27,6 +27,25 @@ use rusqlite::{params, OptionalExtension};
 
 use crate::error::{Result, YantrikDbError};
 use crate::serde_helpers::hex_lower;
+
+/// Bounded-walk cap for supersedes-chain traversals (v0.10 Phase 0).
+pub(crate) const CHAIN_WALK_CAP: usize = 1_000;
+
+/// Outcome of a bounded supersedes-graph walk (v0.10 Phase 0).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum WalkOutcome {
+    Reached,
+    NotReached,
+    CapHit,
+}
+
+/// Result of the deterministic supersedes projection fold (v0.10 Phase 0):
+/// `(edge_id, source_rid)` of the selected winner (None when every
+/// candidate would close a cycle) plus the retained rejected candidates.
+pub(crate) struct SupersedesFold {
+    pub winner: Option<(String, String)>,
+    pub losers: Vec<(String, String)>,
+}
 use crate::types::{
     LinkDirection, LinkResult, LinkType, LinkedRecord, RecallResult, RecordLink, ScoreBreakdown,
     ScoreContributions,
@@ -359,16 +378,36 @@ impl YantrikDB {
         // (bounded graph walk — multi-predecessor merges are legal, so this
         // is a queue + visited set, not a linked-list walk). Reaching the
         // source means the new edge closes a loop.
-        const CHAIN_WALK_CAP: usize = 1_000;
+        match Self::supersedes_walk_reaches(conn, target_rid, source_rid)? {
+            WalkOutcome::Reached => Err(YantrikDbError::SupersedeCycle {
+                source_rid: source_rid.to_string(),
+                target_rid: target_rid.to_string(),
+            }),
+            WalkOutcome::CapHit => Err(YantrikDbError::ChainTraversalLimit {
+                start_rid: target_rid.to_string(),
+                limit: CHAIN_WALK_CAP,
+            }),
+            WalkOutcome::NotReached => Ok(()),
+        }
+    }
+
+    /// Bounded walk over the SELECTED supersedes graph: starting from
+    /// `from_rid`'s outgoing predecessor closure, does it reach `needle`?
+    /// Shared by the local write gate (which converts outcomes to typed
+    /// errors) and the replication fold (which treats Reached/CapHit as
+    /// "candidate not selectable" — a durable remote candidate is never
+    /// discarded at the cap, per the Phase-0 converged design).
+    pub(crate) fn supersedes_walk_reaches(
+        conn: &rusqlite::Connection,
+        from_rid: &str,
+        needle: &str,
+    ) -> Result<WalkOutcome> {
         let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut queue: std::collections::VecDeque<String> = std::collections::VecDeque::new();
-        queue.push_back(target_rid.to_string());
+        queue.push_back(from_rid.to_string());
         while let Some(current) = queue.pop_front() {
             if visited.len() > CHAIN_WALK_CAP {
-                return Err(YantrikDbError::ChainTraversalLimit {
-                    start_rid: target_rid.to_string(),
-                    limit: CHAIN_WALK_CAP,
-                });
+                return Ok(WalkOutcome::CapHit);
             }
             if !visited.insert(current.clone()) {
                 continue;
@@ -382,34 +421,120 @@ impl YantrikDB {
                 .query_map(params![current], |r| r.get::<_, String>(0))?
                 .collect::<std::result::Result<Vec<_>, _>>()?;
             for p in preds {
-                if p == source_rid {
-                    return Err(YantrikDbError::SupersedeCycle {
-                        source_rid: source_rid.to_string(),
-                        target_rid: target_rid.to_string(),
-                    });
+                if p == needle {
+                    return Ok(WalkOutcome::Reached);
                 }
                 queue.push_back(p);
             }
         }
-        Ok(())
+        Ok(WalkOutcome::NotReached)
     }
 
-    /// Remove a single link. Returns `true` if a row was deleted.
+    /// **v0.10 Phase 0 — deterministic supersedes projection fold** for one
+    /// predecessor. Used on the REPLICATION apply path (the local write
+    /// gate refuses conflicting edges up front; replication must instead
+    /// durably accept every remote candidate and then derive the selected
+    /// projection from the candidate set, so the result is independent of
+    /// arrival order).
     ///
-    /// Unlike `forget()` (which marks links broken for audit), explicit
-    /// `unlink()` is a user retraction and hard-deletes the row.
-    pub fn unlink(&self, source_rid: &str, target_rid: &str, link_type: &LinkType) -> Result<bool> {
-        let link_type_str = link_type.as_str();
-        let deleted = {
-            let conn = self.conn.lock();
-            conn.execute(
-                "DELETE FROM record_links \
-                 WHERE source_rid = ?1 AND target_rid = ?2 AND link_type = ?3",
-                params![source_rid, target_rid, link_type_str],
-            )?
+    /// Canonical rule (sol-converged): consider the target's active,
+    /// non-retracted candidates in DESCENDING total-key order
+    /// (`hlc DESC, link_id DESC` — HLC bytes are memcmp-sortable and the
+    /// leader's exact values are persisted verbatim on followers, so every
+    /// replica computes the same order). The first candidate whose
+    /// selection keeps the selected graph acyclic wins; all others are
+    /// retained as `rejected_conflict`. Equivalent, for a cycle, to
+    /// dropping the lowest-key edge under the fold — never "whichever
+    /// arrived last".
+    pub(crate) fn refold_supersedes_target(
+        conn: &rusqlite::Connection,
+        target_rid: &str,
+    ) -> Result<SupersedesFold> {
+        // Demote all of this target's candidates first so the cycle checks
+        // below run against the rest of the selected graph only (no
+        // self-interference from a previously-selected edge we may unseat).
+        conn.execute(
+            "UPDATE record_links SET selection_state = 'rejected_conflict' \
+             WHERE target_rid = ?1 AND link_type = 'supersedes' \
+             AND status = 'active' AND selection_state IN ('selected', 'rejected_conflict')",
+            params![target_rid],
+        )?;
+
+        let candidates: Vec<(String, String)> = {
+            let mut stmt = conn.prepare(
+                "SELECT link_id, source_rid FROM record_links \
+                 WHERE target_rid = ?1 AND link_type = 'supersedes' \
+                 AND status = 'active' AND selection_state = 'rejected_conflict' \
+                 ORDER BY hlc DESC, link_id DESC",
+            )?;
+            let rows = stmt
+                .query_map(params![target_rid], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })?
+                .collect::<std::result::Result<Vec<_>, _>>()?;
+            rows
         };
 
-        if deleted > 0 {
+        let mut winner: Option<(String, String)> = None;
+        let mut losers: Vec<(String, String)> = Vec::new();
+        for (edge_id, source_rid) in candidates {
+            if winner.is_none()
+                && matches!(
+                    Self::supersedes_walk_reaches(conn, target_rid, &source_rid)?,
+                    WalkOutcome::NotReached
+                )
+            {
+                conn.execute(
+                    "UPDATE record_links SET selection_state = 'selected' WHERE link_id = ?1",
+                    params![edge_id],
+                )?;
+                winner = Some((edge_id, source_rid));
+            } else {
+                losers.push((edge_id, source_rid));
+            }
+        }
+        Ok(SupersedesFold { winner, losers })
+    }
+
+    /// Remove a single link. Returns `true` if a row was affected.
+    ///
+    /// Unlike `forget()` (which marks links broken for audit), explicit
+    /// `unlink()` is a user retraction.
+    ///
+    /// **v0.10 Phase 0:** for SUPERSEDES edges, retraction is replayable —
+    /// the row flips to `selection_state='retracted'` (never hard-deleted;
+    /// a hard delete would be arrival-order-dependent under concurrent
+    /// link/unlink replication) and the target's projection is re-folded
+    /// so the next-best durable candidate is promoted deterministically.
+    /// Other link types keep their historical hard-delete semantics.
+    pub fn unlink(&self, source_rid: &str, target_rid: &str, link_type: &LinkType) -> Result<bool> {
+        let link_type_str = link_type.as_str();
+        let is_supersedes = matches!(link_type, LinkType::Supersedes);
+        let affected = {
+            let conn = self.conn.lock();
+            if is_supersedes {
+                let n = conn.execute(
+                    "UPDATE record_links SET selection_state = 'retracted' \
+                     WHERE source_rid = ?1 AND target_rid = ?2 AND link_type = ?3 \
+                     AND selection_state != 'retracted'",
+                    params![source_rid, target_rid, link_type_str],
+                )?;
+                if n > 0 {
+                    // Promote the next-best candidate (if any) for this
+                    // predecessor — same canonical fold replication uses.
+                    Self::refold_supersedes_target(&conn, target_rid)?;
+                }
+                n
+            } else {
+                conn.execute(
+                    "DELETE FROM record_links \
+                     WHERE source_rid = ?1 AND target_rid = ?2 AND link_type = ?3",
+                    params![source_rid, target_rid, link_type_str],
+                )?
+            }
+        };
+
+        if affected > 0 {
             self.log_op(
                 "unlink",
                 Some(source_rid),
@@ -422,7 +547,7 @@ impl YantrikDB {
             )?;
         }
 
-        Ok(deleted > 0)
+        Ok(affected > 0)
     }
 
     /// Issue #48 — one-shot reification of the legacy
@@ -667,6 +792,7 @@ impl YantrikDB {
             let mut stmt = conn.prepare(
                 "SELECT target_rid, link_type, created_at FROM record_links \
                  WHERE source_rid = ?1 AND status = 'active' \
+                 AND selection_state = 'selected' \
                  AND (?2 IS NULL OR link_type = ?2) \
                  ORDER BY created_at ASC",
             )?;
@@ -688,6 +814,7 @@ impl YantrikDB {
             let mut stmt = conn.prepare(
                 "SELECT source_rid, link_type, created_at FROM record_links \
                  WHERE target_rid = ?1 AND status = 'active' \
+                 AND selection_state = 'selected' \
                  AND (?2 IS NULL OR link_type = ?2) \
                  ORDER BY created_at ASC",
             )?;
@@ -723,6 +850,7 @@ impl YantrikDB {
                 let sql = format!(
                     "SELECT {col_return}, link_type, created_at FROM record_links \
                      WHERE {col_match} = ?1 AND status = 'active' \
+                     AND selection_state = 'selected' \
                      AND link_type = 'contradicts' \
                      AND (?2 IS NULL OR link_type = ?2) \
                      ORDER BY created_at ASC"
@@ -1000,6 +1128,114 @@ mod tests {
             supersede(&db, &live, &dead).unwrap_err(),
             YantrikDbError::InvalidLinkEndpoints { .. }
         ));
+    }
+
+    /// Insert a supersedes CANDIDATE row directly (simulating the
+    /// replication accept step) with a controlled HLC byte value.
+    fn insert_candidate(db: &YantrikDB, edge_id: &str, src: &str, tgt: &str, hlc_byte: u8) {
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO record_links \
+             (link_id, source_rid, target_rid, link_type, status, selection_state, \
+              created_at, hlc, origin_actor) \
+             VALUES (?1, ?2, ?3, 'supersedes', 'active', 'rejected_conflict', 1.0, ?4, 'test')",
+            params![edge_id, src, tgt, vec![hlc_byte]],
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn supersedes_fold_is_deterministic_regardless_of_arrival_order() {
+        // v0.10 Phase 0: two concurrent successors for one predecessor.
+        // Whatever order the candidates arrive in, the fold must select the
+        // SAME winner (highest total key = hlc DESC, link_id DESC) and
+        // retain the loser as rejected_conflict.
+        for arrival in [&["e-low", "e-high"][..], &["e-high", "e-low"][..]] {
+            let db = YantrikDB::new(":memory:", 8).unwrap();
+            let old = rec(&db, "predecessor", 1.0);
+            let a = rec(&db, "successor a", 2.0);
+            let b = rec(&db, "successor b", 3.0);
+            for edge in arrival {
+                match *edge {
+                    "e-low" => insert_candidate(&db, "e-low", &a, &old, 10),
+                    "e-high" => insert_candidate(&db, "e-high", &b, &old, 20),
+                    _ => unreachable!(),
+                }
+            }
+            let fold = {
+                let conn = db.conn();
+                YantrikDB::refold_supersedes_target(&conn, &old).unwrap()
+            };
+            let (winner_edge, winner_src) = fold.winner.expect("a winner is selected");
+            assert_eq!(
+                winner_edge, "e-high",
+                "higher HLC wins (arrival {arrival:?})"
+            );
+            assert_eq!(winner_src, b);
+            assert_eq!(fold.losers.len(), 1);
+            assert_eq!(fold.losers[0].0, "e-low");
+
+            // The projection: only the winner is a selected active edge.
+            let conn = db.conn();
+            let selected: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM record_links WHERE target_rid = ?1 \
+                     AND link_type = 'supersedes' AND selection_state = 'selected'",
+                    params![old],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(selected, 1);
+            // The loser is retained (audit), not deleted.
+            let total: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM record_links WHERE target_rid = ?1",
+                    params![old],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(total, 2, "losing candidate retained durably");
+        }
+    }
+
+    #[test]
+    fn retracting_selected_supersedes_promotes_next_candidate() {
+        // v0.10 Phase 0: unlink on a supersedes edge is a replayable
+        // retraction; the fold then promotes the next-best durable
+        // candidate deterministically.
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let old = rec(&db, "predecessor", 1.0);
+        let a = rec(&db, "successor a", 2.0);
+        let b = rec(&db, "successor b", 3.0);
+        insert_candidate(&db, "e-low", &a, &old, 10);
+        insert_candidate(&db, "e-high", &b, &old, 20);
+        {
+            let conn = db.conn();
+            YantrikDB::refold_supersedes_target(&conn, &old).unwrap();
+        }
+
+        // Retract the winner (b -> old). The loser (a -> old) is promoted.
+        assert!(db.unlink(&b, &old, &LinkType::Supersedes).unwrap());
+        let conn = db.conn();
+        let (state_high,): (String,) = conn
+            .query_row(
+                "SELECT selection_state FROM record_links WHERE link_id = 'e-high'",
+                [],
+                |r| Ok((r.get(0)?,)),
+            )
+            .unwrap();
+        assert_eq!(
+            state_high, "retracted",
+            "retraction is durable, not a delete"
+        );
+        let (state_low,): (String,) = conn
+            .query_row(
+                "SELECT selection_state FROM record_links WHERE link_id = 'e-low'",
+                [],
+                |r| Ok((r.get(0)?,)),
+            )
+            .unwrap();
+        assert_eq!(state_low, "selected", "next candidate promoted");
     }
 
     #[test]
