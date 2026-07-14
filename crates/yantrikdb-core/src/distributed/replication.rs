@@ -200,23 +200,36 @@ impl YantrikDB {
     /// admits as authoritative, or `None` when the guard is inactive (legacy
     /// multi-origin behavior — the default). A single-writer deployment sets
     /// this to its own `actor_id` to reject foreign-origin provenance writes.
-    pub fn authoritative_origin(&self) -> Option<String> {
+    ///
+    /// **Fail-CLOSED (sol 4a.1 finding 1):** returns `Result` and distinguishes
+    /// "no authority configured" (`Ok(None)`) from a real read failure (`Err`).
+    /// A security guard must never be disabled by a malformed value or a query
+    /// error, so `apply_ops` propagates the `Err` and applies nothing rather
+    /// than silently falling open.
+    pub fn authoritative_origin(&self) -> Result<Option<String>> {
         use rusqlite::OptionalExtension;
-        self.conn()
+        Ok(self
+            .conn()
             .query_row(
                 "SELECT value FROM meta WHERE key = 'authoritative_origin_actor'",
                 [],
                 |r| r.get::<_, String>(0),
             )
-            .optional()
-            .ok()
-            .flatten()
+            .optional()?)
     }
 
     /// Designate the authoritative origin actor (Item 4a). Pass this database's
     /// own `actor_id` on a single-writer deployment to activate the ingress
     /// guard so foreign-origin `record` / `record_with_rid` / `correct` /
     /// `consolidate` ops are rejected by [`apply_ops`].
+    ///
+    /// **Configuration is init/quiescent-time only (sol 4a.1 finding 2).** The
+    /// authoritative origin is a deployment identity; set it before sync begins
+    /// (the v37 migration sets it to `self.actor_id` at open, before any
+    /// `apply_ops`). Changing it concurrently with an in-flight `apply_ops` is
+    /// not linearizable (the preflight read and the apply are separate conn
+    /// acquisitions) and is unsupported — a mid-flight change could let one
+    /// batch straddle the old/new authority.
     pub fn set_authoritative_origin(&self, actor_id: &str) -> Result<()> {
         self.conn().execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('authoritative_origin_actor', ?1)",
@@ -234,7 +247,7 @@ pub fn apply_ops(db: &YantrikDB, ops: &[OplogEntry]) -> Result<SyncStats> {
     // materialization: a single foreign-origin protected write rejects the
     // ENTIRE batch, leaving the engine byte-for-byte unchanged. Guard is
     // inactive (no-op) when no authority is set.
-    if let Some(authority) = db.authoritative_origin() {
+    if let Some(authority) = db.authoritative_origin()? {
         for op in ops {
             if is_protected_write(&op.op_type) && op.origin_actor != authority {
                 return Err(crate::error::YantrikDbError::ForeignOriginRejected {
@@ -1453,15 +1466,15 @@ mod tests {
     }
 
     #[test]
-    fn origin_guard_batch_atomic_c_relayed_through_b() {
-        // A C-origin op relayed in a batch that also carries an authority (A)
-        // op: the whole batch is rejected and NEITHER op applies.
+    fn origin_guard_batch_atomic_rejects_whole_mixed_batch() {
+        // A C-origin op in a batch that also carries an authority (A) op: the
+        // whole batch is rejected and NEITHER op applies (batch-atomicity).
         let a = YantrikDB::new_with_actor(":memory:", 8, "actor-A").unwrap();
         let a_rid = rec(&a, "from A");
         let mut batch = ops_of(&a);
         let c = YantrikDB::new_with_actor(":memory:", 8, "actor-C").unwrap();
         let c_rid = rec(&c, "from C");
-        batch.extend(ops_of(&c)); // B receives A's op + a relayed C op
+        batch.extend(ops_of(&c));
 
         let b = YantrikDB::new_with_actor(":memory:", 8, "actor-B").unwrap();
         b.set_authoritative_origin("actor-A").unwrap();
@@ -1477,6 +1490,41 @@ mod tests {
         assert!(
             b.get(&c_rid).unwrap().is_none(),
             "the foreign op must not apply"
+        );
+    }
+
+    #[test]
+    fn origin_guard_rejects_c_relayed_through_b() {
+        // TRUE relay (sol 4a.1 finding 3): C originates, B (unguarded) applies
+        // then re-exports it, and the guarded node G receives B's RELAYED
+        // batch. G must reject by the op's ORIGIN (C), not the deliverer (B) —
+        // which requires origin_actor to survive the relay hop.
+        let c = YantrikDB::new_with_actor(":memory:", 8, "actor-C").unwrap();
+        let c_rid = rec(&c, "from C");
+        let b = YantrikDB::new_with_actor(":memory:", 8, "actor-B").unwrap();
+        apply_ops(&b, &ops_of(&c)).unwrap(); // B relays (no authority set)
+        let relayed = ops_of(&b); // extracted FROM B
+        assert!(
+            relayed
+                .iter()
+                .any(|o| o.op_type == "record" && o.origin_actor == "actor-C"),
+            "relay must preserve origin_actor=C, got {:?}",
+            relayed.iter().map(|o| &o.origin_actor).collect::<Vec<_>>()
+        );
+
+        let g = YantrikDB::new_with_actor(":memory:", 8, "actor-G").unwrap();
+        g.set_authoritative_origin("actor-A").unwrap(); // G trusts only A
+        let err = apply_ops(&g, &relayed).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                crate::error::YantrikDbError::ForeignOriginRejected { .. }
+            ),
+            "a C-origin op relayed through B must be rejected by G, got {err:?}"
+        );
+        assert!(
+            g.get(&c_rid).unwrap().is_none(),
+            "relayed foreign-origin op must not apply on the guarded node"
         );
     }
 
