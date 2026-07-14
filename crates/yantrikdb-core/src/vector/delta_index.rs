@@ -335,6 +335,28 @@ impl DeltaIndex {
         false
     }
 
+    /// **v0.10 Item 3 — atomic-append compensation.** Remove the exact
+    /// `(rid, seq)` entry appended by a prior `append()`, restoring the
+    /// tier's prior visibility. Used ONLY to undo a correction's
+    /// superseding append when the correction's SQL transaction fails to
+    /// commit: without this the delta would keep the new vector shadowing
+    /// the (unchanged) old SQL row. `seq` is monotonic and unique, so it
+    /// identifies exactly one entry. Returns whether an entry was removed.
+    ///
+    /// This is NOT a tombstone: a tombstone would suppress the rid
+    /// entirely (hiding the still-valid old vector). Removal simply undoes
+    /// the append, so the older delta entry or the cold copy becomes
+    /// visible again — the correct state when the correction did not land.
+    pub fn remove_appended(&self, rid: &str, seq: u64) -> bool {
+        let mut delta = self.delta.write();
+        if let Some(pos) = delta.iter().position(|e| e.rid == rid && e.seq == seq) {
+            delta.remove(pos);
+            true
+        } else {
+            false
+        }
+    }
+
     /// Search for the top-k nearest neighbors of `query`.
     ///
     /// Searches both cold and delta, merges by distance, drops tombstoned

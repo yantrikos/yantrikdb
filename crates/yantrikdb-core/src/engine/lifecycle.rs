@@ -671,57 +671,56 @@ impl YantrikDB {
         let ts = now();
         let hlc_bytes = self.tick_hlc().to_bytes().to_vec();
         let revision_id = crate::id::new_id();
+        let _ = &original; // prior state is re-read inside the tx (below)
 
-        // Compute the new field values. For metadata, merge the supplied
-        // patch into the existing metadata (existing keys overwritten by
-        // the patch; un-mentioned keys retained).
-        let new_importance_val = new_importance.unwrap_or(original.importance);
-        let new_valence_val = new_valence.unwrap_or(original.valence);
+        // The tx holds the conn lock, which serialises concurrent
+        // correct() calls on the same rid. Prior state is re-read HERE so
+        // a second correction records the FIRST's committed state, not a
+        // stale pre-loop snapshot (sol finding 7: correct/correct).
+        let conn = self.conn.lock();
+        let tx = conn.unchecked_transaction()?;
+
+        // Current stored (encrypted-or-plain) state = this correction's
+        // prior state. Stored representation is reused directly for the
+        // revision row — no decrypt/re-encrypt round trip.
+        let (cur_stored_text, cur_stored_metadata, cur_importance, cur_valence): (
+            String,
+            String,
+            f64,
+            f64,
+        ) = tx.query_row(
+            "SELECT text, metadata, importance, valence FROM memories WHERE rid = ?1",
+            params![rid],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )?;
+
+        // Resolve new values by merging onto the CURRENT state.
+        let new_importance_val = new_importance.unwrap_or(cur_importance);
+        let new_valence_val = new_valence.unwrap_or(cur_valence);
         let new_text_val: String = match new_text {
+            // text_changes==false reached here, so any Some equals current.
             Some(t) => t.to_string(),
-            None => original.text.clone(),
+            None => self.decrypt_text(&cur_stored_text)?,
         };
-        let prior_metadata_str = serde_json::to_string(&original.metadata)?;
+        let cur_metadata_plain = self.decrypt_text(&cur_stored_metadata)?;
+        let cur_metadata_val: serde_json::Value =
+            serde_json::from_str(&cur_metadata_plain).unwrap_or(serde_json::Value::Null);
         let new_metadata_val: serde_json::Value = match metadata_merge {
             Some(patch) => {
-                let mut merged = original.metadata.clone();
+                let mut merged = cur_metadata_val.clone();
                 if let (Some(obj), Some(patch_obj)) = (merged.as_object_mut(), patch.as_object()) {
                     for (k, v) in patch_obj {
                         obj.insert(k.clone(), v.clone());
                     }
                     merged
                 } else {
-                    // Either original metadata isn't an object or patch
-                    // isn't an object — fall back to "patch replaces".
                     patch.clone()
                 }
             }
-            None => original.metadata.clone(),
+            None => cur_metadata_val.clone(),
         };
-        let new_metadata_str = serde_json::to_string(&new_metadata_val)?;
-
-        // Encryption pass-through. The `memories` table stores text +
-        // metadata in encrypted form when an encryption provider is
-        // attached; bypassing this leaves the table with mixed plaintext
-        // + ciphertext rows that later decrypt() calls fail on.
-        // `prior_text` and `prior_metadata` in `record_revisions` are
-        // stored in the SAME representation (encrypted-or-plain) so
-        // history() returns rows that the same decrypt path can handle.
         let stored_new_text = self.encrypt_text(&new_text_val)?;
-        let stored_new_metadata = self.encrypt_text(&new_metadata_str)?;
-        // The original row read above returned decrypted text + metadata
-        // (db.get() decrypts on the way out); re-encrypt for storage in
-        // the revision row so it sits next to memories.text in the same
-        // representation.
-        let stored_prior_text = self.encrypt_text(&original.text)?;
-        let stored_prior_metadata = self.encrypt_text(&prior_metadata_str)?;
-
-        // The revision_num is the next sequential number for this rid.
-        // Use SQL MAX + 1 inside the same transaction we'll UPDATE in,
-        // so concurrent correct() calls on the same rid serialise on
-        // the connection lock and each gets a distinct revision_num.
-        let conn = self.conn.lock();
-        let tx = conn.unchecked_transaction()?;
+        let stored_new_metadata = self.encrypt_text(&serde_json::to_string(&new_metadata_val)?)?;
 
         let next_revision_num: i64 = tx
             .query_row(
@@ -732,7 +731,7 @@ impl YantrikDB {
             )
             .unwrap_or(1);
 
-        // Insert the revision row capturing the prior state.
+        // Insert the revision row capturing the re-read prior state.
         tx.execute(
             "INSERT INTO record_revisions \
              (revision_id, rid, revision_num, prior_text, prior_metadata, \
@@ -742,10 +741,10 @@ impl YantrikDB {
                 revision_id,
                 rid,
                 next_revision_num,
-                stored_prior_text,
-                stored_prior_metadata,
-                original.importance,
-                original.valence,
+                cur_stored_text,
+                cur_stored_metadata,
+                cur_importance,
+                cur_valence,
                 reason_trimmed,
                 ts,
                 hlc_bytes,
@@ -910,57 +909,12 @@ impl YantrikDB {
     ) -> Result<CorrectionResult> {
         use crate::serde_helpers::{deserialize_f32, serialize_f32};
 
-        // Prior embedding provenance for the revision audit row: the old
-        // model name and a hash of the old vector, so history() can explain
-        // WHY the retrieval vector changed and a replica can verify it.
-        let (old_emb_stored, prior_embedding_model): (Option<Vec<u8>>, Option<String>) = {
-            let conn = self.conn();
-            conn.query_row(
-                "SELECT embedding, embedding_model FROM memories WHERE rid = ?1",
-                params![rid],
-                |r| {
-                    Ok((
-                        r.get::<_, Option<Vec<u8>>>(0)?,
-                        r.get::<_, Option<String>>(1)?,
-                    ))
-                },
-            )?
-        };
-        let prior_embedding_hash: Option<Vec<u8>> = match &old_emb_stored {
-            Some(blob) => {
-                let plain = self.decrypt_embedding(blob)?;
-                Some(embedding_hash(&deserialize_f32(&plain)).to_vec())
-            }
-            None => None,
-        };
-
-        // Resolve the new field values (same merge semantics as the
-        // metadata/scalar path).
-        let new_importance_val = new_importance.unwrap_or(original.importance);
-        let new_valence_val = new_valence.unwrap_or(original.valence);
-        let prior_metadata_str = serde_json::to_string(&original.metadata)?;
-        let new_metadata_val: serde_json::Value = match metadata_merge {
-            Some(patch) => {
-                let mut merged = original.metadata.clone();
-                if let (Some(obj), Some(patch_obj)) = (merged.as_object_mut(), patch.as_object()) {
-                    for (k, v) in patch_obj {
-                        obj.insert(k.clone(), v.clone());
-                    }
-                    merged
-                } else {
-                    patch.clone()
-                }
-            }
-            None => original.metadata.clone(),
-        };
-        let new_metadata_str = serde_json::to_string(&new_metadata_val)?;
-
-        // Storage representation (encrypted-or-plain), mirroring the
-        // metadata path so history() + memories decrypt uniformly.
-        let stored_new_text = self.encrypt_text(new_text)?;
-        let stored_new_metadata = self.encrypt_text(&new_metadata_str)?;
-        let stored_prior_text = self.encrypt_text(&original.text)?;
-        let stored_prior_metadata = self.encrypt_text(&prior_metadata_str)?;
+        // Namespace is immutable across a correction; everything else
+        // (text, metadata, scalars, embedding, model) is re-read from SQL
+        // INSIDE the serialized critical section below so two concurrent
+        // corrections record each other's true prior state (sol finding 7:
+        // correct/correct must not both snapshot the same original).
+        let namespace = original.namespace.clone();
 
         // Revalidation loop — mirrors record_text (mod.rs). Bounded in
         // expectation: reembed advances the generation monotonically and
@@ -978,14 +932,19 @@ impl YantrikDB {
             let dim_pre = state_for_embed.dim();
             drop(state_for_embed);
 
-            // Step 2: embed the new text OUTSIDE any guard (slow).
+            // Step 2: embed the new text OUTSIDE any guard (slow). The
+            // embedding depends only on new_text, so it needs no prior
+            // state and is safe to compute before the critical section.
             let new_embedding = embedder
                 .embed(new_text)
                 .map_err(|e| YantrikDbError::Inference(e.to_string()))?;
             crate::validate::validate_embedding("correct", &new_embedding, dim_pre)?;
 
-            // Step 3: enter the sync path. A reembed cutover in flight →
-            // typed, retryable, nothing touched.
+            // Step 3: enter the sync path. A reembed SWAP is in flight
+            // (router Queueing) → typed, retryable, nothing touched. The
+            // Encoding/Rebuilding window does NOT set Queueing; that window
+            // is handled by clearing the staging columns in the UPDATE
+            // below (sol finding 4).
             let sync_guard = match self.write_router.try_enter_sync_writer() {
                 Some(g) => g,
                 None => {
@@ -1013,34 +972,107 @@ impl YantrikDB {
                 continue;
             }
             let generation = state_for_commit.generation as i64;
+            let runtime_model = state_for_commit.runtime_embedder_name.clone();
 
-            // Step 6: backpressure BEFORE any visible mutation. Under the
-            // guard the delta only shrinks; a tombstone(cold) + append is at
-            // most +2 entries, so this check makes the later mutation
-            // infallible.
-            let delta_len = state_for_commit.vec_index.delta_len();
-            let delta_max = state_for_commit.vec_index.delta_max();
-            if delta_len + 2 > delta_max {
-                drop(sync_guard);
-                return Err(YantrikDbError::Backpressure {
-                    pending: delta_len as i64,
-                    max: delta_max as i64,
-                    retry_after_ms: 50,
-                });
-            }
-
-            // Step 7: one transaction — revision + memories UPDATE + oplog
-            // intent (exact bytes). runtime name recorded as the new
-            // embedding's model for the audit trail.
             let ts = now();
             let hlc_bytes = self.tick_hlc().to_bytes().to_vec();
             let revision_id = crate::id::new_id();
             let stored_new_emb = self.encrypt_embedding(&serialize_f32(&new_embedding))?;
             let new_emb_hash = embedding_hash(&new_embedding).to_vec();
+            let seq_new = self
+                .vec_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1;
 
-            let next_revision_num: i64 = {
-                let conn = self.conn.lock();
+            // The conn lock is held across the delta append AND the SQL
+            // commit, so corrections to the SAME rid serialize: the append
+            // order equals the commit order, and no other correction can
+            // interleave its append between our append and our commit (sol
+            // findings 1 & 3 — the SyncWriteGuard is a counter, NOT a
+            // writer lock, so it cannot provide this ordering on its own).
+            let conn = self.conn.lock();
+
+            // **Reserve the vector slot FIRST via a single atomic
+            // superseding append** (sol finding 2). A live delta entry
+            // shadows the old delta entry (highest seq wins) AND the cold
+            // copy (delta wins in the merge), so no separate tombstone is
+            // needed. `append` is capacity-checked under ONE delta write
+            // lock: Backpressure here returns cleanly with NOTHING
+            // committed — the correction never partially lands.
+            if let Err(e) =
+                state_for_commit
+                    .vec_index
+                    .append(rid.to_string(), new_embedding.clone(), seq_new)
+            {
+                drop(conn);
+                drop(sync_guard);
+                return Err(e);
+            }
+
+            // SQL transaction. Prior state is re-read HERE (under the
+            // serialized conn lock) so it reflects any correction that
+            // committed just before us.
+            let commit_result: Result<i64> = (|| {
                 let tx = conn.unchecked_transaction()?;
+
+                // True current state = this correction's prior state.
+                let (cur_text, cur_meta_str, cur_importance, cur_valence, cur_emb, cur_model): (
+                    String,
+                    String,
+                    f64,
+                    f64,
+                    Option<Vec<u8>>,
+                    Option<String>,
+                ) = tx.query_row(
+                    "SELECT text, metadata, importance, valence, embedding, embedding_model \
+                     FROM memories WHERE rid = ?1",
+                    params![rid],
+                    |r| {
+                        Ok((
+                            r.get(0)?,
+                            r.get(1)?,
+                            r.get(2)?,
+                            r.get(3)?,
+                            r.get::<_, Option<Vec<u8>>>(4)?,
+                            r.get::<_, Option<String>>(5)?,
+                        ))
+                    },
+                )?;
+                let prior_text_plain = self.decrypt_text(&cur_text)?;
+                let prior_meta_plain = self.decrypt_text(&cur_meta_str)?;
+                let prior_meta_val: serde_json::Value =
+                    serde_json::from_str(&prior_meta_plain).unwrap_or(serde_json::Value::Null);
+                let prior_embedding_hash: Option<Vec<u8>> = match &cur_emb {
+                    Some(blob) => {
+                        let plain = self.decrypt_embedding(blob)?;
+                        Some(embedding_hash(&deserialize_f32(&plain)).to_vec())
+                    }
+                    None => None,
+                };
+
+                // Merge onto CURRENT metadata; resolve scalars from current.
+                let new_importance_val = new_importance.unwrap_or(cur_importance);
+                let new_valence_val = new_valence.unwrap_or(cur_valence);
+                let new_metadata_val: serde_json::Value = match metadata_merge {
+                    Some(patch) => {
+                        let mut merged = prior_meta_val.clone();
+                        if let (Some(obj), Some(patch_obj)) =
+                            (merged.as_object_mut(), patch.as_object())
+                        {
+                            for (k, v) in patch_obj {
+                                obj.insert(k.clone(), v.clone());
+                            }
+                            merged
+                        } else {
+                            patch.clone()
+                        }
+                    }
+                    None => prior_meta_val.clone(),
+                };
+                let stored_new_text = self.encrypt_text(new_text)?;
+                let stored_new_metadata =
+                    self.encrypt_text(&serde_json::to_string(&new_metadata_val)?)?;
+
                 let n: i64 = tx
                     .query_row(
                         "SELECT COALESCE(MAX(revision_num), 0) + 1 \
@@ -1059,26 +1091,32 @@ impl YantrikDB {
                         revision_id,
                         rid,
                         n,
-                        stored_prior_text,
-                        stored_prior_metadata,
-                        original.importance,
-                        original.valence,
+                        cur_text,
+                        cur_meta_str,
+                        cur_importance,
+                        cur_valence,
                         reason_trimmed,
                         ts,
                         hlc_bytes,
                         self.actor_id,
-                        prior_embedding_model,
+                        cur_model,
                         prior_embedding_hash,
                     ],
                 )?;
                 // rid + created_at preserved; text, metadata, scalars, AND
-                // the embedding (+ its generation stamp) change together.
+                // the embedding change together. embedding_model is stamped
+                // with the runtime model. The reembed STAGING columns are
+                // CLEARED (sol finding 4): if a reembed is mid-Encoding, its
+                // swap must not promote a stale staged vector for the OLD
+                // text over this correction — a NULL embedding_new makes the
+                // reembed re-encode this row from the new text instead.
                 tx.execute(
                     "UPDATE memories \
                      SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
-                         embedding = ?5, embedding_generation = ?6, updated_at = ?7, \
-                         last_access = ?7 \
-                     WHERE rid = ?8",
+                         embedding = ?5, embedding_generation = ?6, embedding_model = ?7, \
+                         embedding_new = NULL, embedding_new_model = NULL, \
+                         updated_at = ?8, last_access = ?8 \
+                     WHERE rid = ?9",
                     params![
                         stored_new_text,
                         stored_new_metadata,
@@ -1086,6 +1124,7 @@ impl YantrikDB {
                         new_valence_val,
                         stored_new_emb,
                         generation,
+                        runtime_model,
                         ts,
                         rid,
                     ],
@@ -1109,46 +1148,47 @@ impl YantrikDB {
                     generation,
                 )?;
                 tx.commit()?;
-                n
+                let _ = (new_importance_val, new_valence_val); // used in the UPDATE above
+                Ok(n)
+            })();
+
+            let next_revision_num = match commit_result {
+                Ok(n) => n,
+                Err(e) => {
+                    // Commit failed (rare IO error) AFTER our superseding
+                    // append. Undo the append so the delta returns to its
+                    // pre-correction visibility (old vector shows), matching
+                    // the unchanged SQL row. NOT a tombstone — removal
+                    // restores the prior vector rather than hiding the rid.
+                    state_for_commit.vec_index.remove_appended(rid, seq_new);
+                    drop(conn);
+                    drop(sync_guard);
+                    return Err(e);
+                }
             };
 
-            // Step 8: kill boundary. A crash HERE leaves SQL fully
-            // consistent (new text + new embedding + oplog intent all
-            // committed) and only the in-memory delta stale — the index
-            // rebuilds from SQL on reopen. The kill-proof test parks here.
+            // Kill boundary. A crash HERE (after the durable commit) leaves
+            // SQL wholly-new — new text + embedding + revision + correct op
+            // all committed — and the index rebuilds from SQL on reopen.
             crate::testing::fail_point("correct.between_commit_and_delta");
 
-            // Step 9: delta tombstone + append as one sealed operation
-            // (capacity guaranteed by step 6). Old vector shadowed, new
-            // vector visible.
-            let seq_tomb = self
-                .vec_seq
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                + 1;
-            state_for_commit.vec_index.tombstone(rid, seq_tomb);
-            let seq_new = self
-                .vec_seq
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                + 1;
-            // Infallible in practice (capacity checked under the guard); on
-            // the theoretical dim-mismatch path this errors after commit,
-            // but SQL is already correct and a rebuild recovers the index.
-            state_for_commit
-                .vec_index
-                .append(rid.to_string(), new_embedding.clone(), seq_new)?;
-            self.bump_visible_seq(&original.namespace, seq_new);
-
-            // Step 10: scoring cache — importance is the ranking-relevant
-            // field the cache holds; text/metadata re-hydrate from SQL.
+            // Scoring cache — importance/valence are the ranking-relevant
+            // fields the cache holds; text/metadata re-hydrate from SQL.
             {
                 let mut cache = self.scoring_cache.write();
                 if let Some(row) = cache.get_mut(rid) {
-                    row.importance = new_importance_val;
-                    row.valence = new_valence_val;
+                    row.importance = new_importance.unwrap_or(row.importance);
+                    row.valence = new_valence.unwrap_or(row.valence);
                     row.last_access = ts;
                 }
             }
 
+            // visible_seq is published LAST (sol finding 7): a
+            // recall_with_seq waiter must not wake and rank against a
+            // half-applied correction (stale scoring cache).
+            self.bump_visible_seq(&namespace, seq_new);
+
+            drop(conn);
             drop(sync_guard);
 
             // Outcome anchor (Item 2): a successful correction is an
@@ -1174,7 +1214,8 @@ impl YantrikDB {
         let conn = self.conn();
         let mut stmt = conn.prepare(
             "SELECT revision_id, rid, revision_num, prior_text, prior_metadata, \
-                    prior_importance, prior_valence, reason, applied_at, origin_actor \
+                    prior_importance, prior_valence, reason, applied_at, origin_actor, \
+                    prior_embedding_model, prior_embedding_hash \
              FROM record_revisions \
              WHERE rid = ?1 \
              ORDER BY revision_num ASC",
@@ -1191,6 +1232,8 @@ impl YantrikDB {
                 row.get::<_, String>(7)?,
                 row.get::<_, f64>(8)?,
                 row.get::<_, String>(9)?,
+                row.get::<_, Option<String>>(10)?,
+                row.get::<_, Option<Vec<u8>>>(11)?,
             ))
         })?;
         let mut out = Vec::new();
@@ -1206,11 +1249,18 @@ impl YantrikDB {
                 reason,
                 applied_at,
                 origin_actor,
+                prior_embedding_model,
+                prior_embedding_hash_bytes,
             ) = r?;
             let prior_text = self.decrypt_text(&stored_text)?;
             let prior_metadata_str = self.decrypt_text(&stored_metadata)?;
             let prior_metadata: serde_json::Value = serde_json::from_str(&prior_metadata_str)
                 .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+            let prior_embedding_hash = prior_embedding_hash_bytes.map(|b| {
+                b.iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>()
+            });
             out.push(RecordRevision {
                 revision_id,
                 rid,
@@ -1222,6 +1272,8 @@ impl YantrikDB {
                 reason,
                 applied_at,
                 origin_actor,
+                prior_embedding_model,
+                prior_embedding_hash,
             });
         }
         Ok(out)

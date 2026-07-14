@@ -531,6 +531,17 @@ pub struct RecordRevision {
     pub reason: String,
     pub applied_at: f64,
     pub origin_actor: String,
+    /// v0.10 Item 3: the prior embedding's provenance, present only when
+    /// this revision came from a text-changing (re-embedding) correction.
+    /// `prior_embedding_model` is the model that produced the prior vector
+    /// (may be `None` if the original write didn't stamp one);
+    /// `prior_embedding_hash` is a lowercase-hex fingerprint of the prior
+    /// vector, so a consumer can see the retrieval vector changed and a
+    /// replica can verify it applied the same bytes.
+    #[serde(default)]
+    pub prior_embedding_model: Option<String>,
+    #[serde(default)]
+    pub prior_embedding_hash: Option<String>,
 }
 
 // ── Issue #48 — record-to-record link model (schema v31) ──

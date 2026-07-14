@@ -27,6 +27,15 @@ pub struct OplogEntry {
     pub hlc: Vec<u8>,
     pub embedding_hash: Option<Vec<u8>>,
     pub origin_actor: String,
+    /// v0.10 Item 3: exact embedding bytes for a re-embedding `correct`
+    /// op, so a follower applies the same vector rather than re-embedding
+    /// (which diverges by model version/quantization). Present only on
+    /// text-changing corrections; `None` for every other op. Encrypted
+    /// under the origin DEK — usable on a same-DEK follower, which is the
+    /// same assumption the whole encrypted-replication path already makes
+    /// for text/metadata.
+    #[serde(default)]
+    pub embedding: Option<Vec<u8>>,
 }
 
 /// Result of a sync operation.
@@ -67,7 +76,7 @@ pub fn extract_ops_since(
     // never the cluster sync contract. The `materialize_` prefix is a
     // soft namespace for future siblings (saga task 3 follow-ons).
     let select_cols = "SELECT op_id, op_type, timestamp, target_rid, payload, \
-                       actor_id, hlc, embedding_hash, origin_actor \
+                       actor_id, hlc, embedding_hash, origin_actor, embedding \
                        FROM oplog \
                        WHERE hlc IS NOT NULL \
                          AND op_type NOT LIKE 'materialize\\_%' ESCAPE '\\'";
@@ -165,6 +174,7 @@ pub fn extract_ops_since(
                 hlc: row.get("hlc")?,
                 embedding_hash: row.get("embedding_hash")?,
                 origin_actor: row.get("origin_actor")?,
+                embedding: row.get("embedding")?,
             })
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -210,8 +220,8 @@ pub fn apply_ops(db: &YantrikDB, ops: &[OplogEntry]) -> Result<SyncStats> {
         db.conn().execute(
             "INSERT OR IGNORE INTO oplog \
              (op_id, op_type, timestamp, target_rid, payload, \
-              actor_id, hlc, embedding_hash, origin_actor, applied) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1)",
+              actor_id, hlc, embedding_hash, origin_actor, applied, embedding) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10)",
             params![
                 op.op_id,
                 op.op_type,
@@ -222,6 +232,7 @@ pub fn apply_ops(db: &YantrikDB, ops: &[OplogEntry]) -> Result<SyncStats> {
                 op.hlc,
                 op.embedding_hash,
                 op.origin_actor,
+                op.embedding,
             ],
         )?;
 
@@ -383,53 +394,54 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             }
         }
         "correct" => {
-            materialize_correct(&*db.conn(), &op.payload, &op.origin_actor)?;
-            // Cache: insert new corrected memory, remove original
-            let new_rid = op.payload["new_rid"].as_str().unwrap_or_default();
-            if !new_rid.is_empty() {
-                db.cache_insert(
-                    new_rid.to_string(),
-                    ScoringRow {
-                        created_at: op.payload["created_at"].as_f64().unwrap_or(0.0),
-                        importance: op.payload["importance"].as_f64().unwrap_or(0.5),
-                        half_life: op.payload["half_life"].as_f64().unwrap_or(604800.0),
-                        last_access: op.payload["created_at"].as_f64().unwrap_or(0.0),
-                        access_count: 0,
-                        valence: op.payload["valence"].as_f64().unwrap_or(0.0),
-                        consolidation_status: "active".to_string(),
-                        memory_type: op.payload["type"]
-                            .as_str()
-                            .unwrap_or("episodic")
-                            .to_string(),
-                        namespace: op.payload["namespace"]
-                            .as_str()
-                            .unwrap_or("default")
-                            .to_string(),
-                        certainty: op.payload["certainty"].as_f64().unwrap_or(0.8),
-                        domain: op.payload["domain"]
-                            .as_str()
-                            .unwrap_or("general")
-                            .to_string(),
-                        source: op.payload["source"].as_str().unwrap_or("user").to_string(),
-                        emotional_state: op.payload["emotional_state"]
-                            .as_str()
-                            .map(|s| s.to_string()),
-                    },
-                );
-            }
-            let original_rid = op.payload["original_rid"].as_str().unwrap_or_default();
-            if !original_rid.is_empty() {
-                db.cache_remove(original_rid);
-                let _seq = db
-                    .vec_seq
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                    + 1;
-                // **Issue #41 brainstorm-4 §1.** Active-generation
-                // SearchState tombstone for correct's "original_rid".
-                db.search_state
-                    .load()
-                    .vec_index
-                    .tombstone(original_rid, _seq);
+            // v0.10 Item 3: RID-stable correction. materialize_correct
+            // applies text/metadata/scalars AND — for a text-changing
+            // (re-embedding) correction — the exact embedding bytes to
+            // memories, keeping the follower's stored vector coherent.
+            materialize_correct(
+                &*db.conn(),
+                &op.payload,
+                op.embedding.as_deref(),
+                &op.origin_actor,
+            )?;
+            let rid = op.payload["rid"].as_str().unwrap_or_default();
+            if !rid.is_empty() {
+                // Scoring cache: update the SAME rid's ranking-relevant
+                // fields in place (the follower already has the row from
+                // the original record replication).
+                {
+                    let mut cache = db.scoring_cache.write();
+                    if let Some(row) = cache.get_mut(rid) {
+                        if let Some(imp) = op.payload["new_importance"].as_f64() {
+                            row.importance = imp;
+                        }
+                        if let Some(val) = op.payload["new_valence"].as_f64() {
+                            row.valence = val;
+                        }
+                    }
+                }
+                // Vector index: a re-embedding correction supersedes the
+                // old vector with the exact bytes (same-DEK follower). A
+                // live delta entry shadows both the old delta entry and the
+                // cold copy. If the bytes can't be decrypted (no/other DEK)
+                // the SQL embedding is still updated and rebuild_vec_index
+                // recovers the index — the same fallback records rely on.
+                if op.payload["reembedded"].as_bool().unwrap_or(false) {
+                    if let Some(enc) = op.embedding.as_deref() {
+                        if let Ok(plain) = db.decrypt_embedding(enc) {
+                            let emb = crate::serde_helpers::deserialize_f32(&plain);
+                            let seq = db
+                                .vec_seq
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                                + 1;
+                            let _ =
+                                db.search_state
+                                    .load()
+                                    .vec_index
+                                    .append(rid.to_string(), emb, seq);
+                        }
+                    }
+                }
             }
         }
         "trigger_fire" => {
@@ -795,6 +807,7 @@ fn materialize_conflict_resolve(conn: &Connection, payload: &serde_json::Value) 
 fn materialize_correct(
     conn: &Connection,
     payload: &serde_json::Value,
+    embedding: Option<&[u8]>,
     source_actor: &str,
 ) -> Result<()> {
     let rid = payload["rid"].as_str().unwrap_or_default();
@@ -887,21 +900,66 @@ fn materialize_correct(
         ],
     );
 
-    // UPDATE the memory in place.
-    conn.execute(
-        "UPDATE memories \
-         SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
-             last_access = ?5 \
-         WHERE rid = ?6",
-        params![
-            new_text,
-            new_metadata_str,
-            new_importance,
-            new_valence,
-            applied_at_payload,
-            rid,
-        ],
-    )?;
+    // UPDATE the memory in place. v0.10 Item 3: a re-embedding correction
+    // also carries the exact embedding bytes — apply them so the follower's
+    // stored vector tracks the new text (encrypted under the origin DEK,
+    // usable on a same-DEK follower; the SQL embedding is authoritative for
+    // rebuild_vec_index otherwise). Metadata/scalar corrections carry no
+    // bytes and leave the vector untouched.
+    let reembedded = payload["reembedded"].as_bool().unwrap_or(false);
+    if reembedded {
+        if let Some(emb_bytes) = embedding {
+            conn.execute(
+                "UPDATE memories \
+                 SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
+                     embedding = ?5, embedding_new = NULL, embedding_new_model = NULL, \
+                     last_access = ?6 \
+                 WHERE rid = ?7",
+                params![
+                    new_text,
+                    new_metadata_str,
+                    new_importance,
+                    new_valence,
+                    emb_bytes,
+                    applied_at_payload,
+                    rid,
+                ],
+            )?;
+        } else {
+            // reembedded op without bytes (shouldn't happen from a v0.10
+            // leader): update SQL text/scalars; the follower's next
+            // rebuild_vec_index re-embeds from text if it has an embedder.
+            conn.execute(
+                "UPDATE memories \
+                 SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
+                     last_access = ?5 \
+                 WHERE rid = ?6",
+                params![
+                    new_text,
+                    new_metadata_str,
+                    new_importance,
+                    new_valence,
+                    applied_at_payload,
+                    rid,
+                ],
+            )?;
+        }
+    } else {
+        conn.execute(
+            "UPDATE memories \
+             SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
+                 last_access = ?5 \
+             WHERE rid = ?6",
+            params![
+                new_text,
+                new_metadata_str,
+                new_importance,
+                new_valence,
+                applied_at_payload,
+                rid,
+            ],
+        )?;
+    }
 
     // **v0.7.19 replication audit (postmortem 2026-05-20).**
     let applied_at = crate::time::now_secs();

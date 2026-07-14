@@ -609,6 +609,10 @@ impl PyYantrikDB {
                 d.set_item("reason", &r.reason)?;
                 d.set_item("applied_at", r.applied_at)?;
                 d.set_item("origin_actor", &r.origin_actor)?;
+                // v0.10 Item 3: prior embedding provenance (present only on
+                // text-changing re-embed corrections).
+                d.set_item("prior_embedding_model", &r.prior_embedding_model)?;
+                d.set_item("prior_embedding_hash", &r.prior_embedding_hash)?;
                 Ok::<PyObject, pyo3::PyErr>(d.into())
             })
             .collect()

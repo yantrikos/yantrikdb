@@ -14313,6 +14313,246 @@ fn correct_reembed_updates_retrieval_vector_delta_and_cold() {
     );
 }
 
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn correct_correct_revision_chain_records_true_prior_state() {
+    // sol finding 7: two successive text corrections must chain — the
+    // second revision records the FIRST correction's state as its prior,
+    // not the original (which would happen if both snapshotted the same
+    // pre-loop `original`). Sequential here; the fix (re-read prior INSIDE
+    // the serialized tx) is what makes the concurrent case correct too.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let rid = db
+        .record_text(
+            "the capital is Paris",
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    db.correct(
+        &rid,
+        Some("the capital is Lyon"),
+        None,
+        Some(0.7),
+        None,
+        "first fix",
+    )
+    .unwrap();
+    db.correct(
+        &rid,
+        Some("the capital is Marseille"),
+        None,
+        Some(0.8),
+        None,
+        "second fix",
+    )
+    .unwrap();
+
+    let hist = db.history(&rid).unwrap();
+    assert_eq!(hist.len(), 2);
+    // Revision 1's prior is the ORIGINAL.
+    assert_eq!(hist[0].prior_text, "the capital is Paris");
+    assert!((hist[0].prior_importance - 0.6).abs() < 1e-9);
+    // Revision 2's prior is the FIRST correction's state — the chain fix.
+    assert_eq!(hist[1].prior_text, "the capital is Lyon");
+    assert!((hist[1].prior_importance - 0.7).abs() < 1e-9);
+    // Both text corrections captured prior embedding provenance.
+    assert!(hist[0].prior_embedding_hash.is_some());
+    assert!(hist[1].prior_embedding_hash.is_some());
+    // The two prior vectors differ (Paris vs Lyon embed differently).
+    assert_ne!(hist[0].prior_embedding_hash, hist[1].prior_embedding_hash);
+
+    // Current state is the last correction.
+    assert_eq!(
+        db.get(&rid).unwrap().unwrap().text,
+        "the capital is Marseille"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn correct_then_forget_leaves_no_resurrected_vector() {
+    // sol finding 3 (correct/forget shape): after a re-embedding correction
+    // then a forget, the record must be GONE from recall — the correction's
+    // superseding delta append must not resurface a tombstoned SQL row.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let rid = db
+        .record_text(
+            "hiking in the alps",
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    db.correct(
+        &rid,
+        Some("quarterly revenue growth"),
+        None,
+        None,
+        None,
+        "topic",
+    )
+    .unwrap();
+    db.forget(&rid).unwrap();
+
+    let q = db.embed("quarterly revenue report").unwrap();
+    let hits = db
+        .recall(
+            &q, 10, None, None, false, false, None, true, None, None, None, None, None, false,
+        )
+        .unwrap();
+    assert!(
+        !hits.iter().any(|h| h.rid == rid),
+        "forgotten record must not resurface via the correction's append"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn correction_clears_reembed_staging_columns() {
+    // sol finding 4: a text correction must clear embedding_new so a
+    // reembed mid-Encoding re-encodes this row (from the new text) instead
+    // of promoting the stale staged vector at swap. We simulate staging
+    // directly, then correct, and assert the staging is cleared.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let rid = db
+        .record_text(
+            "old topic text",
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    // Simulate a reembed having staged an embedding for the OLD text.
+    db.conn()
+        .execute(
+            "UPDATE memories SET embedding_new = X'0011', embedding_new_model = 'stale-model' \
+             WHERE rid = ?1",
+            rusqlite::params![rid],
+        )
+        .unwrap();
+
+    db.correct(
+        &rid,
+        Some("completely different new topic"),
+        None,
+        None,
+        None,
+        "fix",
+    )
+    .unwrap();
+
+    let (en, enm): (Option<Vec<u8>>, Option<String>) = db
+        .conn()
+        .query_row(
+            "SELECT embedding_new, embedding_new_model FROM memories WHERE rid = ?1",
+            rusqlite::params![rid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(en.is_none(), "embedding_new cleared by correction");
+    assert!(enm.is_none(), "embedding_new_model cleared by correction");
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn follower_replay_applies_corrected_embedding() {
+    // sol finding 6: a re-embedding correction replicates its EXACT bytes,
+    // so a same-DEK follower's stored vector + recall track the new meaning
+    // (not a re-embed, not the stale old vector).
+    use crate::replication::{apply_ops, extract_ops_since};
+    let leader = YantrikDB::with_default(":memory:").unwrap();
+    let follower = YantrikDB::with_default(":memory:").unwrap();
+
+    let rid = leader
+        .record_text(
+            "sunny beach vacation",
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    // Replicate the record first.
+    let ops = extract_ops_since(&leader.conn(), None, None, None, 100).unwrap();
+    apply_ops(&follower, &ops).unwrap();
+
+    // Correct on the leader (re-embed), then replicate the correct op.
+    leader
+        .correct(
+            &rid,
+            Some("corporate tax filing deadline"),
+            None,
+            None,
+            None,
+            "topic",
+        )
+        .unwrap();
+    let correct_ops: Vec<_> = extract_ops_since(&leader.conn(), None, None, None, 100)
+        .unwrap()
+        .into_iter()
+        .filter(|o| o.op_type == "correct")
+        .collect();
+    assert_eq!(correct_ops.len(), 1);
+    assert!(
+        correct_ops[0].embedding.is_some(),
+        "correct op carries exact embedding bytes"
+    );
+    apply_ops(&follower, &correct_ops).unwrap();
+
+    // Follower's SQL text updated.
+    let ftext: String = follower
+        .conn()
+        .query_row(
+            "SELECT text FROM memories WHERE rid = ?1",
+            rusqlite::params![rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ftext, "corporate tax filing deadline");
+
+    // Follower recall reflects the NEW meaning (vector applied, not stale).
+    let q = follower.embed("corporate tax deadline").unwrap();
+    let hits = follower
+        .recall(
+            &q, 5, None, None, false, false, None, true, None, None, None, None, None, false,
+        )
+        .unwrap();
+    assert!(
+        hits.iter().any(|h| h.rid == rid),
+        "follower retrieves the record under its corrected meaning"
+    );
+}
+
 #[test]
 fn correct_writes_revision_row_with_prior_state() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
