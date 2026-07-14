@@ -31,7 +31,16 @@ impl YantrikDB {
             } else {
                 emb_blob
             };
-            let embedding = deserialize_f32(&raw_blob);
+            // Issue #62 defense: this scan is hot-tier-only, but if a
+            // compressed (cold-format) blob ever appears here — tier-column
+            // drift, partial hydrate, manual SQL — decompress instead of
+            // building the index from reinterpreted zstd bytes. One 4-byte
+            // magic check per row.
+            let embedding = if crate::compression::is_compressed(&raw_blob) {
+                crate::compression::decompress_embedding(&raw_blob)
+            } else {
+                deserialize_f32(&raw_blob)
+            };
             if embedding.len() == embedding_dim {
                 index.insert(&rid, &embedding)?;
             }

@@ -22,7 +22,13 @@ pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
         .map(|&x| (x as f64) * (x as f64))
         .sum::<f64>()
         .sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 {
+    // Issue #62 (defense-in-depth port of the #60 hnsw fix): `== 0.0`
+    // misses NaN (`NaN == 0.0` is false), so a NaN norm sailed through and
+    // this function returned NaN — poisoning recall scores AND the
+    // response-level confidence. `!(n > 0.0)` catches NaN, zero, and
+    // negatives; a degenerate vector now degrades to 0.0 similarity
+    // instead of propagating NaN.
+    if !(norm_a > 0.0) || !(norm_b > 0.0) {
         return 0.0;
     }
     dot / (norm_a * norm_b)
@@ -481,6 +487,23 @@ pub fn consolidate(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cosine_similarity_guards_nan_and_zero_norms() {
+        // Issue #62 defect B: the pre-#60 `== 0.0` guard let NaN norms
+        // through and returned NaN. Degenerate vectors must degrade to a
+        // finite 0.0 similarity instead.
+        let nan_vec = vec![f32::NAN, 1.0, 0.0];
+        let finite = vec![1.0f32, 0.0, 0.0];
+        let zero = vec![0.0f32, 0.0, 0.0];
+
+        let s = cosine_similarity(&nan_vec, &finite);
+        assert!(s.is_finite(), "NaN vector must not yield NaN similarity");
+        assert_eq!(s, 0.0);
+        assert_eq!(cosine_similarity(&finite, &nan_vec), 0.0);
+        assert_eq!(cosine_similarity(&zero, &finite), 0.0);
+        assert!((cosine_similarity(&finite, &finite) - 1.0).abs() < 1e-9);
+    }
 
     fn make_mem(
         rid: &str,

@@ -384,6 +384,141 @@ fn recall_survives_nan_embedding_in_candidate_pool() {
 }
 
 #[test]
+fn cold_tier_embeddings_decompress_on_read() {
+    // Issue #62 defect A. archive() rewrites the embedding column with a
+    // zstd-COMPRESSED blob; before the fix, every recall scoring path that
+    // fetched a cold record's embedding reinterpreted those compressed
+    // bytes as raw f32 — garbage similarities always, and (empirically
+    // ~50-70% per record) a NaN that poisoned the response confidence.
+    // The durable read path must hand back the ORIGINAL vector,
+    // bit-identical (zstd is lossless), exactly as hydrate() would.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let original = vec_seed(3.0, 8);
+    let rid = db
+        .record(
+            "a fact destined for cold storage",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &original,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    assert!(db.archive(&rid).unwrap(), "archived to cold");
+
+    // Sanity: the stored blob really is compressed at rest.
+    {
+        let conn = db.conn();
+        let stored: Vec<u8> = conn
+            .query_row(
+                "SELECT embedding FROM memories WHERE rid = ?1",
+                rusqlite::params![rid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            crate::compression::is_compressed(&stored),
+            "archive() stores zstd bytes in the embedding column"
+        );
+    }
+
+    // The sanctioned durable reader must decompress.
+    let store = super::durable_embeddings::DurableEmbeddingStore::new(&db);
+    let map = store.read_embeddings_for_rids(&[rid.as_str()]).unwrap();
+    let entry = map.get(&rid).expect("cold rid present in read map");
+    let decoded = crate::serde_helpers::deserialize_f32(&entry.bytes);
+    assert_eq!(
+        decoded, original,
+        "cold read must return the original vector, not reinterpreted zstd bytes"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn recall_scores_stay_finite_and_sane_with_cold_candidates() {
+    // Issue #62 end-to-end (the reporter's minimal repro): a cold record
+    // surfaced through the keyword lane must score from its REAL vector —
+    // finite score, finite response-level confidence.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let cold = db
+        .record_text(
+            "the zanzibar deployment uses the falcon cache",
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    db.record_text(
+        "an unrelated hot memory about lunch",
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+
+    assert!(db.archive(&cold).unwrap());
+
+    // Keyword-lane query pulls the cold record into the candidate pool
+    // (it is tombstoned in the ANN index, so FTS is its route in).
+    let resp = db
+        .recall_with_response(
+            &db.embed("zanzibar falcon cache deployment").unwrap(),
+            5,
+            None,
+            None,
+            false,
+            true,
+            Some("zanzibar falcon cache deployment"),
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap();
+    assert!(
+        resp.confidence.is_finite(),
+        "response confidence must be finite, got {}",
+        resp.confidence
+    );
+    for r in &resp.results {
+        assert!(
+            r.score.is_finite(),
+            "every score finite; {} scored {}",
+            r.rid,
+            r.score
+        );
+    }
+    let cold_hit = resp.results.iter().find(|r| r.rid == cold);
+    let hit = cold_hit.expect("cold record surfaces via the keyword lane");
+    assert!(
+        hit.score.is_finite() && hit.score > 0.0,
+        "cold record scores from its real (decompressed) vector, got {}",
+        hit.score
+    );
+}
+
+#[test]
 fn contract_gate_rejects_invalid_writes() {
     // v0.9.3 central numeric/vector contract gate (issue #60 follow-up, sol
     // converged plan item 1). Table-driven entry-path matrix: every invalid
