@@ -14431,6 +14431,75 @@ fn correct_with_embedding_rejects_stale_generation() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
+fn correct_new_text_drops_stale_entity_links() {
+    // nuron finding (v0.10 Item-3 follow-up): correct(new_text) must drop
+    // memory->entity links whose entity no longer appears (WORD-BOUNDARY) in
+    // the corrected text — else graph expansion keeps serving the record under
+    // its OLD association (why_retrieved=["graph-connected via <old-entity>"]).
+    // Reproduces the Volkan/Aurelian case AND the substring-collision false-keep
+    // guard: "Volkan" must drop even when the new text contains "Volkanic".
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let rid = db
+        .record_text(
+            "The Volkan salt marshes are cold",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    // Seed links deterministically (extraction is async + heuristic; we test the
+    // DROP, not extraction): an entity present in the NEW text ("Aurelian") must
+    // be kept; one absent must drop; and "Volkan" is a substring of the new
+    // text's "Volkanic" — naive substring would false-KEEP it, word-boundary
+    // must drop it.
+    {
+        let conn = db.conn();
+        for e in ["Volkan", "Aurelian"] {
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) VALUES (?1, ?2)",
+                params![rid, e],
+            )
+            .unwrap();
+        }
+    }
+    db.correct(
+        &rid,
+        Some("The Aurelian highland lakes near Volkanic rock"),
+        None,
+        None,
+        None,
+        "winter grounds moved",
+    )
+    .unwrap();
+    let links: Vec<String> = {
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare("SELECT entity_name FROM memory_entities WHERE memory_rid = ?1")
+            .unwrap();
+        stmt.query_map(params![rid], |r| r.get::<_, String>(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert!(
+        links.contains(&"Aurelian".to_string()),
+        "entity present in corrected text must be kept: {links:?}"
+    );
+    assert!(
+        !links.contains(&"Volkan".to_string()),
+        "stale entity absent from corrected text must be dropped (and NOT false-kept by 'Volkanic'): {links:?}"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
 fn correct_correct_revision_chain_records_true_prior_state() {
     // sol finding 7: two successive text corrections must chain — the
     // second revision records the FIRST correction's state as its prior,
