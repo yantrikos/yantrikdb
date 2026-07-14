@@ -1,0 +1,23 @@
+# Trace contract T07 — versioned, release-blocking once implemented.
+# Transitions: pending -> implemented (with implemented_since + test_path).
+# implemented -> pending is ILLEGAL (registry test + CI base-diff enforce).
+contract_version = 1
+id = "T07"
+title = "repetition-not-corroboration"
+item = "4"           # v0.10 plan item that must make this passable
+owner = "yantrikdb-core"
+status = "pending"
+# implemented_since = ""    # set on implementation (version string)
+# test_path = ""            # set on implementation (module::test_fn)
+seeds = "YANTRIKDB_HNSW_SEED via testing feature; fixtures declare exact vectors"
+clock = "injectable via testing feature (set_test_clock); no wall-clock asserts"
+
+fixture = '''
+Same content written 3x with the same idempotency key; and without a key.
+'''
+
+assertions = [
+  "one record, certainty UNCHANGED (retries must not inflate confidence)",
+  "same key + different payload = typed conflict error",
+  "no silent near-dup merge without a key",
+]

@@ -80,6 +80,7 @@ testing = []
 
 [dev-dependencies]
 criterion = "0.5"
+toml = "0.8"
 tempfile = "3"
 
 [[bench]]
