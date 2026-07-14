@@ -200,6 +200,15 @@ impl YantrikDB {
         // `confidence` order if it wants the user-facing rename.
         certainty_min: Option<f64>,
         order: Option<&str>,
+        // v0.10 Item 1: positive-named re-admission switch (per nuron's
+        // consumer review). When the status read policy is active,
+        // superseded records are EXCLUDED from result eligibility by
+        // default; `include_superseded = true` re-admits them — stamped
+        // with `current_status = Superseded` + `superseded_by` — for
+        // history/archaeology queries ("show me what I used to believe").
+        // On legacy-policy databases this flag is a no-op (everything is
+        // already included).
+        include_superseded: bool,
     ) -> Result<Vec<RecallResult>> {
         // Validate `order` upfront so callers get a clear error rather
         // than silently falling back to relevance when they typo a value.
@@ -1721,6 +1730,25 @@ impl YantrikDB {
             }
         }
 
+        // Step 3.4 (v0.10 Item 1): status-led eligibility filter.
+        //
+        // Eligibility, not demotion: when the status read policy is
+        // active and the caller didn't ask for history, superseded
+        // records leave the candidate pool HERE — before keyword slot
+        // reservation computes its cutoff and before MMR competes for
+        // top_k slots — so a stale fact can never outrank or crowd out
+        // its own successor (trace contract T01's hard-zero at k=1).
+        // Batched against the pool in one IN-clause query; databases
+        // with no supersedes edges pay one indexed probe per candidate
+        // and filter nothing.
+        if self.status_read_policy() && !include_superseded && !scored.is_empty() {
+            let pool_rids: Vec<&str> = scored.iter().map(|r| r.rid.as_str()).collect();
+            let superseded = self.superseded_rids_among(&pool_rids)?;
+            if !superseded.is_empty() {
+                scored.retain(|r| !superseded.contains(&r.rid));
+            }
+        }
+
         // Step 3.5: Keyword slot reservation
         //
         // Topic-relevant keyword matches (e.g., "yoga", "reading") often have
@@ -1970,6 +1998,13 @@ impl YantrikDB {
                 r.superseded_by = Some(successor_rid);
                 r.why_retrieved
                     .push("⚠ superseded by a newer record — likely outdated".to_string());
+                // v0.10 Item 1 adoption nudge: a superseded result was
+                // actually SERVED (legacy policy, or include_superseded).
+                // Counted here — the single point every returned result
+                // passes through — and surfaced in stats() so migrated
+                // DBs can see what the status read policy would exclude.
+                self.superseded_served_since_boot
+                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
         Ok(())
@@ -2026,8 +2061,9 @@ impl YantrikDB {
             namespace,
             domain,
             source,
-            None, // certainty_min (#46) — recall_with_seq path defers to caller-side filtering
-            None, // order (#46) — default relevance
+            None,  // certainty_min (#46) — recall_with_seq path defers to caller-side filtering
+            None,  // order (#46) — default relevance
+            false, // include_superseded (v0.10 Item 1) — policy default; use query() builder for history
         )
     }
 
@@ -2055,6 +2091,7 @@ impl YantrikDB {
             q.source.as_deref(),
             q.certainty_min,
             q.order.as_deref(),
+            q.include_superseded,
         )
     }
 
@@ -2088,8 +2125,9 @@ impl YantrikDB {
             namespace,
             domain,
             source,
-            None, // certainty_min (#46) — recall_with_response defers to caller-side filtering
-            None, // order (#46) — default relevance
+            None,  // certainty_min (#46) — recall_with_response defers to caller-side filtering
+            None,  // order (#46) — default relevance
+            false, // include_superseded (v0.10 Item 1) — policy default; use query() builder for history
         )?;
 
         // Determine which retrieval sources were used
@@ -3915,6 +3953,18 @@ impl YantrikDB {
         }
         let graph_ms = t_graph.elapsed().as_secs_f64() * 1000.0;
 
+        // ── Phase 3.4: status-led eligibility filter (mirrors recall()) ──
+        // Profiled variant applies the policy default (no per-call
+        // include_superseded override) so timings stay representative
+        // of the real read path.
+        if self.status_read_policy() && !scored.is_empty() {
+            let pool_rids: Vec<&str> = scored.iter().map(|r| r.rid.as_str()).collect();
+            let superseded = self.superseded_rids_among(&pool_rids)?;
+            if !superseded.is_empty() {
+                scored.retain(|r| !superseded.contains(&r.rid));
+            }
+        }
+
         // ── Phase 3.5: Keyword slot reservation (mirrors recall()) ──
         {
             scored.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -4075,6 +4125,42 @@ impl YantrikDB {
     }
 
     /// Fetch only text and metadata for a set of RIDs (post-scoring hydration).
+    /// v0.10 Item 1 — which of `rids` are currently superseded, i.e.
+    /// have a SELECTED active inbound `supersedes` edge (edges are
+    /// stored NEW→OLD, so `target_rid` is the superseded record).
+    /// One batched IN-clause query against `idx_record_links_target_sel`.
+    pub(crate) fn superseded_rids_among(
+        &self,
+        rids: &[&str],
+    ) -> Result<std::collections::HashSet<String>> {
+        if rids.is_empty() {
+            return Ok(std::collections::HashSet::new());
+        }
+        let placeholders: String = (0..rids.len())
+            .map(|i| format!("?{}", i + 1))
+            .collect::<Vec<_>>()
+            .join(",");
+        let sql = format!(
+            "SELECT DISTINCT target_rid FROM record_links \
+             WHERE link_type = 'supersedes' \
+             AND status = 'active' AND selection_state = 'selected' \
+             AND target_rid IN ({placeholders})"
+        );
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+        for r in rids {
+            param_values.push(Box::new(r.to_string()));
+        }
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(|p| p.as_ref()).collect();
+
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt
+            .query_map(params_ref.as_slice(), |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
+        Ok(rows)
+    }
+
     pub(crate) fn fetch_text_metadata_by_rids(
         &self,
         rids: &[&str],

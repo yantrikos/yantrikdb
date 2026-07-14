@@ -890,6 +890,7 @@ impl YantrikDB {
             source,
             certainty_min,
             order,
+            false,
         )?;
 
         if expand_links == 0 {
@@ -1520,6 +1521,9 @@ mod tests {
         )
         .unwrap();
 
+        // Fresh DBs exclude superseded records by default (status read
+        // policy), so the stamped-archaeology path is exercised via
+        // include_superseded = true.
         let results = db
             .recall(
                 &db.embed("what is the deploy target").unwrap(),
@@ -1535,12 +1539,13 @@ mod tests {
                 None,
                 None,
                 None,
+                true, // include_superseded — history query
             )
             .unwrap();
         let old_hit = results
             .iter()
             .find(|r| r.rid == old)
-            .expect("old record still in results (no exclusion policy yet)");
+            .expect("include_superseded re-admits the old record");
         assert_eq!(
             old_hit.current_status,
             crate::types::RecordStatus::Superseded
@@ -1549,6 +1554,163 @@ mod tests {
         let new_hit = results.iter().find(|r| r.rid == new).expect("head present");
         assert_eq!(new_hit.current_status, crate::types::RecordStatus::Active);
         assert!(new_hit.superseded_by.is_none());
+    }
+
+    /// Shared recall shim for the policy tests below: query with `seed`,
+    /// top_k 10, no filters, skip_reinforce, with the given
+    /// include_superseded flag.
+    fn recall_ids(db: &YantrikDB, seed: f32, include_superseded: bool) -> Vec<String> {
+        db.recall(
+            &vec_seed(seed, 8),
+            10,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            include_superseded,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|r| r.rid)
+        .collect()
+    }
+
+    #[test]
+    fn fresh_db_excludes_superseded_from_recall_by_default() {
+        // v0.10 Item 1 / trace T01: eligibility-not-demotion. On a fresh
+        // database the status read policy is on by default, and a
+        // superseded record never competes for top_k slots — its
+        // successor is returned, it is not.
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        assert!(
+            db.status_read_policy(),
+            "fresh install defaults to the status-led read path"
+        );
+
+        let old = rec(&db, "old version of the fact", 1.0);
+        let new = rec(&db, "new version of the fact", 1.05);
+        supersede(&db, &new, &old).unwrap();
+
+        let ids = recall_ids(&db, 1.0, false);
+        assert!(ids.contains(&new), "successor is eligible");
+        assert!(
+            !ids.contains(&old),
+            "superseded record must be excluded from eligibility (T01 hard zero)"
+        );
+
+        // include_superseded re-admits it, stamped, for history queries.
+        let results = db
+            .recall(
+                &vec_seed(1.0, 8),
+                10,
+                None,
+                None,
+                false,
+                false,
+                None,
+                true,
+                None,
+                None,
+                None,
+                None,
+                None,
+                true,
+            )
+            .unwrap();
+        let old_hit = results
+            .iter()
+            .find(|r| r.rid == old)
+            .expect("include_superseded re-admits the superseded record");
+        assert_eq!(
+            old_hit.current_status,
+            crate::types::RecordStatus::Superseded
+        );
+        assert_eq!(old_hit.superseded_by.as_deref(), Some(new.as_str()));
+
+        // The builder exposes the same switch.
+        let via_builder = db
+            .query(crate::types::RecallQuery::new(vec_seed(1.0, 8)).include_superseded())
+            .unwrap();
+        assert!(via_builder.iter().any(|r| r.rid == old));
+
+        // Stats adoption surface.
+        let stats = db.stats(None).unwrap();
+        assert_eq!(stats.status_read_policy, "exclude_superseded");
+        assert_eq!(stats.superseded_records, 1);
+    }
+
+    #[test]
+    fn legacy_policy_serves_superseded_and_counts_nudge_until_opt_in() {
+        // v0.10 Item 1: a migrated (legacy) database keeps
+        // include-everything behavior — superseded results arrive
+        // stamped, the adoption-nudge counter ticks — until the
+        // operator opts in via set_status_read_policy(true).
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        db.set_status_read_policy(false).unwrap(); // simulate legacy DB
+        assert!(!db.status_read_policy());
+
+        let old = rec(&db, "old version of the fact", 1.0);
+        let new = rec(&db, "new version of the fact", 1.05);
+        supersede(&db, &new, &old).unwrap();
+
+        let ids = recall_ids(&db, 1.0, false);
+        assert!(
+            ids.contains(&old) && ids.contains(&new),
+            "legacy policy serves both, stamped"
+        );
+
+        let stats = db.stats(None).unwrap();
+        assert_eq!(stats.status_read_policy, "legacy");
+        assert!(
+            stats.superseded_served_since_boot >= 1,
+            "nudge counter ticks when a superseded result is served"
+        );
+
+        // Opt in: the same recall now excludes the superseded record.
+        db.set_status_read_policy(true).unwrap();
+        let ids = recall_ids(&db, 1.0, false);
+        assert!(ids.contains(&new));
+        assert!(!ids.contains(&old), "opt-in switches to exclusion");
+    }
+
+    #[test]
+    fn status_read_policy_persists_across_reopen() {
+        // The policy is durable meta, not a per-process flag: an opt-out
+        // written by one process must be honored by the next open.
+        let dir = std::env::temp_dir().join(format!(
+            "yantrik_policy_test_{}_{}",
+            std::process::id(),
+            std::thread::current().name().unwrap_or("t").len()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("policy.db");
+        let path_str = path.to_str().unwrap();
+
+        {
+            let db = YantrikDB::new(path_str, 8).unwrap();
+            assert!(db.status_read_policy(), "fresh file DB defaults on");
+            db.set_status_read_policy(false).unwrap();
+        }
+        {
+            let db = YantrikDB::new(path_str, 8).unwrap();
+            assert!(
+                !db.status_read_policy(),
+                "explicit legacy opt-out survives reopen (not clobbered by the fresh-install seed)"
+            );
+            db.set_status_read_policy(true).unwrap();
+        }
+        {
+            let db = YantrikDB::new(path_str, 8).unwrap();
+            assert!(db.status_read_policy(), "opt-in survives reopen");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1788,7 +1950,14 @@ mod tests {
         // The redteam's motivating correctness scenario. A supersedes B.
         // A query close to B should, with expand_links, demote B and
         // surface A above it.
+        //
+        // v0.10 Item 1: score demotion is the LEGACY-policy mechanism —
+        // under the status read policy (fresh-DB default) B is excluded
+        // from eligibility entirely, which is strictly stronger (covered
+        // by fresh_db_excludes_superseded_from_recall_by_default). This
+        // test pins the demotion contract for pre-v0.10 databases.
         let db = YantrikDB::new(":memory:", 8).unwrap();
+        db.set_status_read_policy(false).unwrap();
         // B and the query are near-identical; A is also near but we rely
         // on the link, not similarity, to rank it.
         let b = rec(&db, "old fact about widgets", 5.0);
@@ -1853,6 +2022,7 @@ mod tests {
         let direct = db
             .recall(
                 &query, 5, None, None, false, false, None, true, None, None, None, None, None,
+                false,
             )
             .unwrap();
         assert_eq!(

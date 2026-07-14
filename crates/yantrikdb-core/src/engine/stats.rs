@@ -71,6 +71,15 @@ impl YantrikDB {
             [],
             |row| row.get(0),
         )?;
+        // v0.10 Item 1: how many records are currently superseded
+        // (selected active inbound supersedes edge).
+        let superseded_records = conn.query_row(
+            "SELECT COUNT(DISTINCT target_rid) FROM record_links \
+             WHERE link_type = 'supersedes' \
+             AND status = 'active' AND selection_state = 'selected'",
+            [],
+            |row| row.get(0),
+        )?;
         drop(conn);
 
         Ok(Stats {
@@ -89,6 +98,15 @@ impl YantrikDB {
             vec_index_entries: self.search_state.load().vec_index.len(),
             graph_index_entities: self.graph_index.read().entity_count(),
             graph_index_edges: self.graph_index.read().edge_count(),
+            status_read_policy: if self.status_read_policy() {
+                "exclude_superseded".to_string()
+            } else {
+                "legacy".to_string()
+            },
+            superseded_records,
+            superseded_served_since_boot: self
+                .superseded_served_since_boot
+                .load(std::sync::atomic::Ordering::Relaxed),
         })
     }
 

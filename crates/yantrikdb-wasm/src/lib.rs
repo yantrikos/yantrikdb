@@ -216,7 +216,10 @@ impl WasmYantrikDB {
         top_k: usize,
     ) -> Result<JsValue, JsError> {
         let results = self.inner
-            .recall(&embedding, top_k, None, None, false, false, None, false, None, None, None)
+            .recall(
+                &embedding, top_k, None, None, false, false, None, false, None, None, None,
+                None, None, false,
+            )
             .map_err(|e| JsError::new(&e.to_string()))?;
 
         serde_wasm_bindgen::to_value(&results)

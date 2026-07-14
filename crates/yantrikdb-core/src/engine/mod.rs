@@ -170,6 +170,24 @@ pub struct YantrikDB {
     /// `Relaxed` atomic load instead of a Mutex<Connection> acquire +
     /// index scan + drop.
     pub(crate) pending_op_count: std::sync::atomic::AtomicI64,
+    /// **v0.10 Item 1 — status-led read path.** Cached
+    /// `meta.status_read_policy`: `true` means recall EXCLUDES superseded
+    /// records from result eligibility (the fresh-install default);
+    /// `false` is the legacy include-everything behavior for pre-v0.10
+    /// databases until the operator opts in via
+    /// [`YantrikDB::set_status_read_policy`]. Exclusion is
+    /// eligibility-not-demotion: superseded rows never compete for
+    /// top_k slots, rather than being score-penalized. Per-call
+    /// `include_superseded = true` re-admits them (stamped) for
+    /// history/archaeology queries.
+    pub(crate) exclude_superseded_reads: std::sync::atomic::AtomicBool,
+    /// **v0.10 Item 1 — adoption nudge.** Since-boot count of recall
+    /// results served while superseded (only possible on legacy-policy
+    /// databases or `include_superseded` calls). Surfaced in `stats()`
+    /// so operators of migrated DBs can see what the status read policy
+    /// would have excluded before opting in. In-memory by design — a
+    /// durable counter would put a write on the recall hot path.
+    pub(crate) superseded_served_since_boot: std::sync::atomic::AtomicU64,
     /// **Phase 6 RYW**: per-namespace high-water mark of applied seqs.
     /// Updated by record/record_with_rid (and siblings) after the write
     /// has materialized into the in-memory delta. `recall_with_seq` waits
@@ -537,6 +555,22 @@ impl YantrikDB {
             params![stamp.to_string()],
         )?;
 
+        // **v0.10 Item 1.** Fresh installs default to the status-led read
+        // path: superseded records are excluded from recall eligibility.
+        // `existing_version` is None only when the meta table didn't exist
+        // before this open — i.e. a brand-new database. Migrated/legacy
+        // DBs keep include-everything behavior until the operator opts in
+        // (set_status_read_policy); the stats() adoption-nudge counter
+        // shows them what the policy would have excluded. INSERT OR
+        // IGNORE keeps any operator-set value authoritative.
+        if existing_version.is_none() {
+            conn.execute(
+                "INSERT OR IGNORE INTO meta (key, value) \
+                 VALUES ('status_read_policy', 'exclude_superseded')",
+                [],
+            )?;
+        }
+
         // **v28 (issue #41 brainstorm-4 §6).** Seed meta.active_generation
         // on first install. INSERT OR IGNORE preserves the durable
         // value on subsequent opens — reembed Phase-2's swap
@@ -850,6 +884,15 @@ impl YantrikDB {
             ))
         };
 
+        // v0.10 Item 1: hydrate the cached status read policy from meta.
+        // Any value other than the exact 'exclude_superseded' opt-in reads
+        // as legacy (missing key on migrated DBs, or an operator writing
+        // e.g. 'legacy' to switch the policy back off).
+        let exclude_superseded_reads = matches!(
+            Self::get_meta(&conn, "status_read_policy")?.as_deref(),
+            Some("exclude_superseded")
+        );
+
         Ok(Self {
             conn: Mutex::new(conn),
             read_conns,
@@ -860,6 +903,8 @@ impl YantrikDB {
             scoring_cache: RwLock::new(scoring_cache),
             vec_seq: std::sync::atomic::AtomicU64::new(0),
             pending_op_count: std::sync::atomic::AtomicI64::new(initial_pending),
+            exclude_superseded_reads: std::sync::atomic::AtomicBool::new(exclude_superseded_reads),
+            superseded_served_since_boot: std::sync::atomic::AtomicU64::new(0),
             visible_seq: dashmap::DashMap::new(),
             visible_seq_cv: parking_lot::Condvar::new(),
             visible_seq_wait_mu: parking_lot::Mutex::new(()),
@@ -1068,6 +1113,37 @@ impl YantrikDB {
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
             Err(e) => Err(e.into()),
         }
+    }
+
+    /// **v0.10 Item 1.** Whether the status-led read path is active:
+    /// `true` = recall excludes superseded records from eligibility
+    /// (fresh-install default), `false` = legacy include-everything
+    /// (migrated DBs that haven't opted in yet). Mirrors
+    /// `meta.status_read_policy`, cached at open.
+    pub fn status_read_policy(&self) -> bool {
+        self.exclude_superseded_reads
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// **v0.10 Item 1.** Set the status read policy durably (writes
+    /// `meta.status_read_policy`) and update the cached flag. This is
+    /// the legacy-database opt-in: after migrating a pre-v0.10 DB,
+    /// review `stats().superseded_served_since_boot`, then call
+    /// `set_status_read_policy(true)` to switch recall to the
+    /// status-led read path. `false` returns to legacy behavior.
+    pub fn set_status_read_policy(&self, exclude_superseded: bool) -> Result<()> {
+        let value = if exclude_superseded {
+            "exclude_superseded"
+        } else {
+            "legacy"
+        };
+        self.conn().execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('status_read_policy', ?1)",
+            params![value],
+        )?;
+        self.exclude_superseded_reads
+            .store(exclude_superseded, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 
     /// Get a new HLC timestamp (ticks the clock forward).
@@ -1605,6 +1681,7 @@ impl YantrikDB {
             None,  // source
             None,  // certainty_min (#46)
             None,  // order (#46) — relevance
+            false, // include_superseded (v0.10 Item 1) — policy default
         )
     }
 
@@ -1633,8 +1710,9 @@ impl YantrikDB {
             None,  // namespace
             domain,
             source,
-            None, // certainty_min (#46)
-            None, // order (#46) — relevance
+            None,  // certainty_min (#46)
+            None,  // order (#46) — relevance
+            false, // include_superseded (v0.10 Item 1) — policy default
         )
     }
 }

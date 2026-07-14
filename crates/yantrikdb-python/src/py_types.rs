@@ -68,6 +68,24 @@ pub fn recall_result_to_dict(
     dict.set_item("source", &r.source)?;
     dict.set_item("emotional_state", &r.emotional_state)?;
 
+    // v0.10 Item 1: typed status + orthogonal flags. Consumers branch on
+    // these fields instead of parsing why_retrieved prose (nuron's
+    // "prose-first stamps is how the stale verdict survived" incident).
+    dict.set_item(
+        "current_status",
+        match r.current_status {
+            yantrikdb_core::types::RecordStatus::Active => "active",
+            yantrikdb_core::types::RecordStatus::Superseded => "superseded",
+            // #[non_exhaustive] on the Rust side; future statuses must
+            // surface rather than crash an older binding.
+            _ => "unknown",
+        },
+    )?;
+    dict.set_item("superseded_by", &r.superseded_by)?;
+    let disputed: Vec<&str> = r.disputed_with.iter().map(|s| s.as_str()).collect();
+    dict.set_item("disputed_with", disputed)?;
+    dict.set_item("aged_last_verified", r.aged_last_verified)?;
+
     Ok(dict.into())
 }
 
@@ -167,6 +185,13 @@ pub fn stats_to_dict(py: Python<'_>, s: &yantrikdb_core::Stats) -> PyResult<PyOb
     dict.set_item("vec_index_entries", s.vec_index_entries)?;
     dict.set_item("graph_index_entities", s.graph_index_entities)?;
     dict.set_item("graph_index_edges", s.graph_index_edges)?;
+    // v0.10 Item 1: status-led read path adoption surface.
+    dict.set_item("status_read_policy", &s.status_read_policy)?;
+    dict.set_item("superseded_records", s.superseded_records)?;
+    dict.set_item(
+        "superseded_served_since_boot",
+        s.superseded_served_since_boot,
+    )?;
     Ok(dict.into())
 }
 

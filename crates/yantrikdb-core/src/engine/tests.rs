@@ -294,6 +294,7 @@ fn test_recall_basic() {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
     assert_eq!(results.len(), 2);
@@ -370,6 +371,7 @@ fn recall_survives_nan_embedding_in_candidate_pool() {
             None,
             None,
             None,
+            false,
         )
         .expect("recall must not panic with a NaN embedding in the candidate pool");
     assert!(
@@ -678,6 +680,7 @@ fn contract_gate_rejects_invalid_writes() {
         assert!(matches!(
             db.recall(
                 &bad_query, 5, None, None, false, false, None, true, None, None, None, None, None,
+                false,
             )
             .unwrap_err(),
             YantrikDbError::InvalidEmbedding { path: "recall", .. }
@@ -703,6 +706,7 @@ fn contract_gate_rejects_invalid_writes() {
             None,
             None,
             None,
+            false,
         )
         .unwrap()
         .len(),
@@ -729,6 +733,7 @@ fn test_recall_empty() {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
     assert!(results.is_empty());
@@ -3386,17 +3391,17 @@ fn test_recall_deterministic_with_skip_reinforce() {
 
     let r1 = db
         .recall(
-            &query, 5, None, None, false, false, None, true, None, None, None, None, None,
+            &query, 5, None, None, false, false, None, true, None, None, None, None, None, false,
         )
         .unwrap();
     let r2 = db
         .recall(
-            &query, 5, None, None, false, false, None, true, None, None, None, None, None,
+            &query, 5, None, None, false, false, None, true, None, None, None, None, None, false,
         )
         .unwrap();
     let r3 = db
         .recall(
-            &query, 5, None, None, false, false, None, true, None, None, None, None, None,
+            &query, 5, None, None, false, false, None, true, None, None, None, None, None, false,
         )
         .unwrap();
 
@@ -3454,6 +3459,7 @@ fn test_reinforce_mutates_but_skip_does_not() {
         None,
         None,
         None,
+        false,
     )
     .unwrap();
     let after_skip = db.get(&rid).unwrap().unwrap().half_life;
@@ -3474,6 +3480,7 @@ fn test_reinforce_mutates_but_skip_does_not() {
         None,
         None,
         None,
+        false,
     )
     .unwrap();
     let after_reinforce = db.get(&rid).unwrap().unwrap().half_life;
@@ -3535,6 +3542,7 @@ fn test_graph_expansion_off_no_graph_results() {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
     for r in &results {
@@ -3600,6 +3608,7 @@ fn test_graph_expansion_on_boosts_connected_memory() {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
 
@@ -3710,6 +3719,7 @@ fn test_recall_scores_bounded() {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
     for r in &results {
@@ -3826,6 +3836,7 @@ fn test_recall_top_k_respected_with_graph_expansion() {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
 
@@ -4052,6 +4063,7 @@ fn test_archive_memory() {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
     assert!(
@@ -4093,7 +4105,7 @@ fn test_hydrate_memory() {
     // Should be back in recall
     let results = db
         .recall(
-            &emb, 10, None, None, false, false, None, true, None, None, None, None, None,
+            &emb, 10, None, None, false, false, None, true, None, None, None, None, None, false,
         )
         .unwrap();
     assert!(
@@ -4212,6 +4224,7 @@ fn test_evict() {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
     for r in &results {
@@ -4527,6 +4540,7 @@ fn test_encrypted_recall_roundtrip() {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
     assert_eq!(results.len(), 2);
@@ -4603,7 +4617,7 @@ fn test_encrypted_archive_hydrate() {
     // Should be findable in recall after hydration
     let results = db
         .recall(
-            &emb, 10, None, None, false, false, None, true, None, None, None, None, None,
+            &emb, 10, None, None, false, false, None, true, None, None, None, None, None, false,
         )
         .unwrap();
     assert!(results.iter().any(|r| r.rid == rid));
@@ -4900,6 +4914,7 @@ fn test_domain_filter() {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
     assert_eq!(
@@ -4980,6 +4995,7 @@ fn test_source_filter() {
             Some("user"),
             None,
             None,
+            false,
         )
         .unwrap();
     assert_eq!(
@@ -5075,6 +5091,7 @@ fn test_domain_and_source_combined_filter() {
             Some("user"),
             None,
             None,
+            false,
         )
         .unwrap();
     assert_eq!(
@@ -5102,6 +5119,7 @@ fn test_domain_and_source_combined_filter() {
             Some("system"),
             None,
             None,
+            false,
         )
         .unwrap();
     assert_eq!(
@@ -5437,6 +5455,7 @@ fn test_recall_refine_excludes_originals() {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
     assert_eq!(first_results.len(), 2);
@@ -7859,6 +7878,7 @@ fn test_insert_vector_makes_recall_find_it() {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
 
@@ -8186,7 +8206,7 @@ fn record_with_rid_makes_recall_find_it() {
 
     let results = db
         .recall(
-            &emb, 5, None, None, false, false, None, true, None, None, None, None, None,
+            &emb, 5, None, None, false, false, None, true, None, None, None, None, None, false,
         )
         .unwrap();
     assert!(
@@ -8440,7 +8460,7 @@ fn tombstone_with_rid_hides_from_recall() {
     // Sanity: visible before tombstone.
     let r = db
         .recall(
-            &emb, 5, None, None, false, false, None, true, None, None, None, None, None,
+            &emb, 5, None, None, false, false, None, true, None, None, None, None, None, false,
         )
         .unwrap();
     assert!(r.iter().any(|x| x.rid == rid), "visible before tombstone");
@@ -8451,7 +8471,7 @@ fn tombstone_with_rid_hides_from_recall() {
     // Hidden after.
     let r2 = db
         .recall(
-            &emb, 5, None, None, false, false, None, true, None, None, None, None, None,
+            &emb, 5, None, None, false, false, None, true, None, None, None, None, None, false,
         )
         .unwrap();
     assert!(!r2.iter().any(|x| x.rid == rid), "hidden after tombstone");
@@ -8845,7 +8865,7 @@ fn issue_8_tombstoned_memories_excluded_from_recall() {
     // Sanity: visible before forget.
     let before = db
         .recall(
-            &emb, 5, None, None, false, false, None, true, None, None, None, None, None,
+            &emb, 5, None, None, false, false, None, true, None, None, None, None, None, false,
         )
         .unwrap();
     assert!(
@@ -8858,7 +8878,7 @@ fn issue_8_tombstoned_memories_excluded_from_recall() {
     // After forget, should NOT appear in recall.
     let after = db
         .recall(
-            &emb, 5, None, None, false, false, None, true, None, None, None, None, None,
+            &emb, 5, None, None, false, false, None, true, None, None, None, None, None, false,
         )
         .unwrap();
     assert!(
@@ -8902,7 +8922,7 @@ fn issue_8_tombstoned_persists_across_engine_reopen() {
         let db2 = YantrikDB::new(path_str, 64).unwrap();
         let after = db2
             .recall(
-                &emb, 5, None, None, false, false, None, true, None, None, None, None, None,
+                &emb, 5, None, None, false, false, None, true, None, None, None, None, None, false,
             )
             .unwrap();
         assert!(
@@ -10077,7 +10097,12 @@ fn draft_memories_from_summary_atomizes_and_flags_provisional() {
 fn recall_stamps_trust_metadata() {
     // Task 41. An aged, rarely-confirmed memory and a superseded memory each
     // arrive on recall with a trust hedge in why_retrieved.
+    //
+    // v0.10 Item 1: serving a superseded result at all is LEGACY-policy
+    // behavior (fresh DBs exclude it from eligibility), so this test pins
+    // the stamped-hedge contract for pre-v0.10 databases.
     let db = YantrikDB::with_default(":memory:").unwrap();
+    db.set_status_read_policy(false).unwrap();
 
     let aged = db
         .record_text(
@@ -10520,6 +10545,7 @@ fn recall_logs_demand_and_surfaces_gaps() {
             None,
             None,
             None,
+            false,
         )
         .unwrap();
     assert!(
@@ -14318,6 +14344,7 @@ fn recall_certainty_min_filters_low_certainty() {
             None,
             Some(0.5), // certainty_min
             None,
+            false,
         )
         .unwrap();
 
@@ -14359,6 +14386,7 @@ fn recall_order_certainty_returns_results_in_certainty_desc() {
             None,
             None,
             Some("certainty"),
+            false,
         )
         .unwrap();
 
@@ -14400,6 +14428,7 @@ fn recall_order_recency_returns_results_in_created_at_desc() {
             None,
             None,
             Some("recency"),
+            false,
         )
         .unwrap();
 
@@ -14440,6 +14469,7 @@ fn recall_order_invalid_string_returns_invalid_input_error() {
             None,
             None,
             Some("most_relevant"), // typo / not a valid order
+            false,
         )
         .expect_err("invalid order string must return error");
 
@@ -14477,6 +14507,7 @@ fn recall_default_order_is_relevance_unchanged() {
             None,
             None,
             None, // default order = relevance
+            false,
         )
         .unwrap();
 
