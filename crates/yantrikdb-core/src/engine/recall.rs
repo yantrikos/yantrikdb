@@ -206,12 +206,11 @@ impl YantrikDB {
         // never traded for a result). After the budget, surface a retryable
         // busy error rather than an unvalidated read.
         const MAX_ATTEMPTS: u32 = 8;
-        for _ in 0..MAX_ATTEMPTS {
+        for attempt in 0..MAX_ATTEMPTS {
             let Some(epoch0) = self.correction_epoch_even() else {
                 // Even-wait timed out under a sustained correction storm.
-                return Err(YantrikDbError::RecallContended {
-                    attempts: MAX_ATTEMPTS,
-                });
+                // Report attempts completed so far (sol r6: accurate count).
+                return Err(YantrikDbError::RecallContended { attempts: attempt });
             };
             if let Some(results) = self.recall_inner(
                 query_embedding,
@@ -310,8 +309,15 @@ impl YantrikDB {
         };
 
         if vec_results.is_empty() {
-            // No candidates → no vector/text pairing to protect; return an
-            // empty (coherent) result without a seqlock recheck.
+            // No candidates → no vector/text pairing to protect. Still
+            // validate the epoch (sol r6): a successful recall must never be
+            // returned during an unvalidated correction interval, even when
+            // empty. On mismatch return None so the wrapper retries against a
+            // stable epoch; a genuinely empty index re-searches empty and
+            // validates once corrections quiesce.
+            if !self.correction_epoch_validate(epoch0) {
+                return Ok(None);
+            }
             return Ok(Some(vec![]));
         }
 
@@ -2681,11 +2687,10 @@ impl YantrikDB {
         source: Option<&str>,
     ) -> Result<RecallProfiledResult> {
         const MAX_ATTEMPTS: u32 = 8;
-        for _ in 0..MAX_ATTEMPTS {
+        for attempt in 0..MAX_ATTEMPTS {
             let Some(epoch0) = self.correction_epoch_even() else {
-                return Err(YantrikDbError::RecallContended {
-                    attempts: MAX_ATTEMPTS,
-                });
+                // Report attempts completed so far (sol r6: accurate count).
+                return Err(YantrikDbError::RecallContended { attempts: attempt });
             };
             if let Some(r) = self.recall_profiled_inner(
                 query_embedding,
@@ -2750,6 +2755,12 @@ impl YantrikDB {
         let candidate_count = vec_results.len();
 
         if vec_results.is_empty() {
+            // Validate the epoch even for an empty result (sol r6) — a
+            // successful recall is never returned during an unvalidated
+            // correction interval. On mismatch the wrapper retries.
+            if !self.correction_epoch_validate(epoch0) {
+                return Ok(None);
+            }
             return Ok(Some(RecallProfiledResult {
                 results: vec![],
                 timings: RecallTimings {
