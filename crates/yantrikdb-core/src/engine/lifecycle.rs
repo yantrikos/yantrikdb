@@ -773,6 +773,11 @@ impl YantrikDB {
             if t != cur_text_plain {
                 drop(tx);
                 drop(conn);
+                // Release THIS path's correction epoch before delegating:
+                // correct_with_reembed enters its own, and two live guards
+                // would double-toggle the epoch (odd→even) mid-correction,
+                // breaking the reader's recheck. Nothing was mutated here.
+                drop(_epoch);
                 return self.correct_with_reembed(
                     rid,
                     &original,
