@@ -201,15 +201,17 @@ impl YantrikDB {
         order: Option<&str>,
         include_superseded: bool,
     ) -> Result<Vec<RecallResult>> {
-        const MAX_ATTEMPTS: u32 = 4;
-        for attempt in 0..MAX_ATTEMPTS {
-            let epoch0 = self.correction_epoch_even();
-            // The final attempt passes None (skip the recheck) so a
-            // pathological correction storm can never starve the reader.
-            let epoch_arg = if attempt + 1 < MAX_ATTEMPTS {
-                Some(epoch0)
-            } else {
-                None
+        // v0.10 Item 3 seqlock (sol r5): EVERY attempt validates — a result
+        // is never returned without a passing epoch recheck (coherence is
+        // never traded for a result). After the budget, surface a retryable
+        // busy error rather than an unvalidated read.
+        const MAX_ATTEMPTS: u32 = 8;
+        for _ in 0..MAX_ATTEMPTS {
+            let Some(epoch0) = self.correction_epoch_even() else {
+                // Even-wait timed out under a sustained correction storm.
+                return Err(YantrikDbError::RecallContended {
+                    attempts: MAX_ATTEMPTS,
+                });
             };
             if let Some(results) = self.recall_inner(
                 query_embedding,
@@ -226,12 +228,14 @@ impl YantrikDB {
                 certainty_min,
                 order,
                 include_superseded,
-                epoch_arg,
+                epoch0,
             )? {
                 return Ok(results);
             }
         }
-        unreachable!("final attempt passes epoch_arg=None, which always yields Some")
+        Err(YantrikDbError::RecallContended {
+            attempts: MAX_ATTEMPTS,
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -269,9 +273,10 @@ impl YantrikDB {
         // already included).
         include_superseded: bool,
         // v0.10 Item 3 seqlock: the even correction epoch snapshotted by the
-        // wrapper before candidate generation, rechecked after hydration.
-        // `None` on the wrapper's final anti-starvation attempt (skip check).
-        epoch0: Option<u64>,
+        // wrapper before candidate generation, rechecked (with an Acquire
+        // fence) after hydration. Returns Ok(None) on mismatch → wrapper
+        // retries; a result is never returned without a passing recheck.
+        epoch0: u64,
     ) -> Result<Option<Vec<RecallResult>>> {
         // Validate `order` upfront so callers get a clear error rather
         // than silently falling back to relevance when they typo a value.
@@ -1988,11 +1993,11 @@ impl YantrikDB {
         // vector with corrected text — violating "wholly old or wholly
         // new". Detect via the epoch and discard; the wrapper retries. The
         // check is BEFORE impressions/reinforcement so a discarded result
-        // leaves no ledger/spaced-repetition side effects.
-        if let Some(e0) = epoch0 {
-            if self.correction_epoch_now() != e0 {
-                return Ok(None);
-            }
+        // leaves no ledger/spaced-repetition side effects. The Acquire fence
+        // inside `correction_epoch_validate` orders the search + hydration
+        // reads above BEFORE this version check (sol r5 finding 3).
+        if !self.correction_epoch_validate(epoch0) {
+            return Ok(None);
         }
 
         // v0.10 Item 2: persist the impression ledger BEFORE reinforcement
@@ -2675,13 +2680,12 @@ impl YantrikDB {
         domain: Option<&str>,
         source: Option<&str>,
     ) -> Result<RecallProfiledResult> {
-        const MAX_ATTEMPTS: u32 = 4;
-        for attempt in 0..MAX_ATTEMPTS {
-            let epoch0 = self.correction_epoch_even();
-            let epoch_arg = if attempt + 1 < MAX_ATTEMPTS {
-                Some(epoch0)
-            } else {
-                None
+        const MAX_ATTEMPTS: u32 = 8;
+        for _ in 0..MAX_ATTEMPTS {
+            let Some(epoch0) = self.correction_epoch_even() else {
+                return Err(YantrikDbError::RecallContended {
+                    attempts: MAX_ATTEMPTS,
+                });
             };
             if let Some(r) = self.recall_profiled_inner(
                 query_embedding,
@@ -2695,12 +2699,14 @@ impl YantrikDB {
                 namespace,
                 domain,
                 source,
-                epoch_arg,
+                epoch0,
             )? {
                 return Ok(r);
             }
         }
-        unreachable!("final attempt passes epoch_arg=None, which always yields Some")
+        Err(YantrikDbError::RecallContended {
+            attempts: MAX_ATTEMPTS,
+        })
     }
 
     #[cfg(feature = "profiling")]
@@ -2718,7 +2724,7 @@ impl YantrikDB {
         namespace: Option<&str>,
         domain: Option<&str>,
         source: Option<&str>,
-        epoch0: Option<u64>,
+        epoch0: u64,
     ) -> Result<Option<RecallProfiledResult>> {
         use std::time::Instant;
         let t_start = Instant::now();
@@ -4268,12 +4274,11 @@ impl YantrikDB {
         }
         let fetch_ms = t_fetch.elapsed().as_secs_f64() * 1000.0;
 
-        // v0.10 Item 3 seqlock recheck (sol r4) — before reinforcement, so a
-        // discarded (incoherent) result leaves no spaced-repetition effect.
-        if let Some(e0) = epoch0 {
-            if self.correction_epoch_now() != e0 {
-                return Ok(None);
-            }
+        // v0.10 Item 3 seqlock recheck (sol r4/r5) — Acquire-fenced validate
+        // before reinforcement, so a discarded (incoherent) result leaves no
+        // spaced-repetition effect.
+        if !self.correction_epoch_validate(epoch0) {
+            return Ok(None);
         }
 
         // ── Phase 6: Reinforce ──

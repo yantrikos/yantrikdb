@@ -191,6 +191,19 @@ pub enum YantrikDbError {
     )]
     CorrectionDeferredDuringReembed { rid: String },
 
+    /// **v0.10 Item 3 (correction seqlock, sol r5).** A recall could not
+    /// obtain a coherent snapshot within its retry budget because
+    /// text-changing corrections kept interleaving with its candidate
+    /// generation → hydration span. Retryable: the read touched no state
+    /// and never returns a result that pairs a stale ranking vector with
+    /// corrected text (coherence is never traded for a result). Practically
+    /// unreachable outside a sustained correction storm on the same records.
+    #[error(
+        "recall could not obtain a coherent snapshot after {attempts} attempts \
+         (concurrent corrections kept interleaving); retry"
+    )]
+    RecallContended { attempts: u32 },
+
     /// **Phase 6 RYW**: caller-requested visible_seq was not reached within
     /// the timeout window. Either the write that should have bumped the seq
     /// has not yet materialized (legitimate timeout — caller should retry or

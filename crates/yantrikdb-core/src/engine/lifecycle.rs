@@ -34,25 +34,41 @@ impl YantrikDB {
     /// the serialized conn lock and BEFORE the reservation/SQL mutation;
     /// hold the returned guard across SQL commit + vector publish + cache
     /// update. The guard restores an even epoch on drop (all paths).
-    pub(crate) fn enter_correction_epoch(&self) -> CorrectionEpochGuard<'_> {
+    ///
+    /// **The returned guard BORROWS `conn_guard`** (sol r5 finding 1), so
+    /// the connection cannot be released while the epoch guard is live —
+    /// the compiler forces `drop(_epoch)` before `drop(conn)`. That keeps
+    /// the single-holder invariant real: the epoch returns to even only
+    /// after the current correction has both finished mutating AND is still
+    /// holding conn, so no second correction can overlap into a "falsely
+    /// even" window.
+    pub(crate) fn enter_correction_epoch<'a, G>(
+        &'a self,
+        _conn_guard: &'a G,
+    ) -> CorrectionEpochGuard<'a> {
         CorrectionEpochGuard::new(&self.correction_epoch)
     }
 
     /// Read a stable EVEN correction epoch for a recall's before-search
     /// snapshot. Spins while a correction is mid-flight (odd) — that window
     /// is only the commit + publish + cache critical section (microseconds),
-    /// never the slow embed. Yields periodically to avoid pathological
-    /// busy-wait under a stuck writer.
-    pub(crate) fn correction_epoch_even(&self) -> u64 {
+    /// never the slow embed. Bounded (sol r5 finding 2): after the spin
+    /// budget, returns `None` so the caller surfaces a retryable busy error
+    /// rather than busy-waiting forever under a correction storm.
+    pub(crate) fn correction_epoch_even(&self) -> Option<u64> {
+        const MAX_SPINS: u32 = 1 << 20; // ~1M spins with periodic yields
         let mut spins = 0u32;
         loop {
             let e = self
                 .correction_epoch
                 .load(std::sync::atomic::Ordering::Acquire);
             if e & 1 == 0 {
-                return e;
+                return Some(e);
             }
             spins += 1;
+            if spins >= MAX_SPINS {
+                return None;
+            }
             if spins % 1024 == 0 {
                 std::thread::yield_now();
             } else {
@@ -61,10 +77,18 @@ impl YantrikDB {
         }
     }
 
-    /// Current correction epoch (for the post-hydration recheck).
-    pub(crate) fn correction_epoch_now(&self) -> u64 {
+    /// Validate a recall's before-search epoch snapshot AFTER its reads
+    /// (candidate generation + hydration). Uses an **Acquire fence then a
+    /// Relaxed load** (sol r5 finding 3 / the crossbeam seqlock pattern):
+    /// the fence orders the PRECEDING reads before the version check, which
+    /// a plain `load(Acquire)` does not (Acquire orders operations AFTER the
+    /// load). Returns true iff no correction started or completed since `e0`
+    /// (still even and unchanged).
+    pub(crate) fn correction_epoch_validate(&self, e0: u64) -> bool {
+        std::sync::atomic::fence(std::sync::atomic::Ordering::Acquire);
         self.correction_epoch
-            .load(std::sync::atomic::Ordering::Acquire)
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == e0
     }
     /// Get a single memory by RID.
     ///
@@ -739,7 +763,7 @@ impl YantrikDB {
         let conn = self.conn.lock();
         // Correction seqlock (r4 finding 3): held across commit + cache so a
         // concurrent recall retries rather than mixing pre/post scalar state.
-        let _epoch = self.enter_correction_epoch();
+        let _epoch = self.enter_correction_epoch(&conn);
         let tx = conn.unchecked_transaction()?;
 
         // Current stored (encrypted-or-plain) state = this correction's
@@ -772,12 +796,13 @@ impl YantrikDB {
             let cur_text_plain = self.decrypt_text(&cur_stored_text)?;
             if t != cur_text_plain {
                 drop(tx);
-                drop(conn);
-                // Release THIS path's correction epoch before delegating:
-                // correct_with_reembed enters its own, and two live guards
-                // would double-toggle the epoch (odd→even) mid-correction,
-                // breaking the reader's recheck. Nothing was mutated here.
+                // Release THIS path's correction epoch BEFORE conn (the guard
+                // borrows conn, so the compiler enforces this order):
+                // correct_with_reembed enters its own guard, and two live
+                // guards would double-toggle the epoch (odd→even)
+                // mid-correction. Nothing was mutated here.
                 drop(_epoch);
+                drop(conn);
                 return self.correct_with_reembed(
                     rid,
                     &original,
@@ -904,6 +929,10 @@ impl YantrikDB {
                 row.last_access = ts;
             }
         }
+        // Epoch guard (borrows conn) drops BEFORE conn — restores an even
+        // epoch while this correction still holds conn, so no second
+        // correction can overlap into a falsely-even window (sol r5 #1).
+        drop(_epoch);
         drop(conn);
 
         // v0.10 Item 2 outcome anchor: a correction is an independent
@@ -1090,7 +1119,7 @@ impl YantrikDB {
             // recall whose candidate generation straddles this span detects
             // the change and retries, so a result can never mix this
             // correction's new text with its old ranking vector.
-            let _epoch = self.enter_correction_epoch();
+            let _epoch = self.enter_correction_epoch(&conn);
 
             // **Allocate seq UNDER the conn lock** (v2-review finding 1):
             // search picks the HIGHEST seq, not the most recently appended.
@@ -1119,6 +1148,7 @@ impl YantrikDB {
                 new_embedding.clone(),
                 seq_new,
             ) {
+                drop(_epoch);
                 drop(conn);
                 drop(sync_guard);
                 return Err(e);
@@ -1294,6 +1324,7 @@ impl YantrikDB {
                     // could not have sealed it — reserved entries are skipped
                     // by the seal — so this removal always succeeds.
                     state_for_commit.vec_index.remove_appended(rid, seq_new);
+                    drop(_epoch);
                     drop(conn);
                     drop(sync_guard);
                     return Err(e);
@@ -1327,6 +1358,9 @@ impl YantrikDB {
             // half-applied correction (stale scoring cache).
             self.bump_visible_seq(&namespace, seq_new);
 
+            // Epoch guard (borrows conn) drops BEFORE conn — even epoch is
+            // restored while this correction still holds conn (sol r5 #1).
+            drop(_epoch);
             drop(conn);
             drop(sync_guard);
 
@@ -1444,7 +1478,7 @@ impl YantrikDB {
             // is odd-epoch across its commit + publish + cache, so a
             // concurrent local recall retries rather than pairing new text
             // with an old ranking vector.
-            let _epoch = self.enter_correction_epoch();
+            let _epoch = self.enter_correction_epoch(&conn);
 
             // Prior state = the follower's current ACTIVE row.
             #[allow(clippy::type_complexity)]

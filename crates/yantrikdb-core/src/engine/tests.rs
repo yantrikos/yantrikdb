@@ -14314,19 +14314,36 @@ fn correct_reembed_updates_retrieval_vector_delta_and_cold() {
 }
 
 #[test]
-fn correction_epoch_toggles_odd_even_and_even_wait() {
-    // v0.10 Item 3 seqlock (sol r4): the epoch guard bumps ODD on enter,
-    // EVEN on drop; correction_epoch_even() returns the stable even value.
+fn correction_epoch_toggles_and_validates() {
+    // v0.10 Item 3 seqlock (sol r4/r5): the guard bumps ODD on enter, EVEN
+    // on drop; correction_epoch_even() returns a stable even snapshot;
+    // correction_epoch_validate() (Acquire-fenced) passes only if unchanged
+    // and even. The guard borrows conn, so drop order is compiler-enforced.
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let e_start = db.correction_epoch_even();
+    let e_start = db.correction_epoch_even().unwrap();
     assert_eq!(e_start % 2, 0, "boot epoch is even");
+    assert!(
+        db.correction_epoch_validate(e_start),
+        "even + unchanged validates"
+    );
     {
-        let _g = db.enter_correction_epoch();
-        assert_eq!(db.correction_epoch_now() % 2, 1, "odd while held");
+        let conn = db.conn();
+        let _g = db.enter_correction_epoch(&conn);
+        assert!(
+            !db.correction_epoch_validate(e_start),
+            "odd (correction in flight) fails the reader's validation"
+        );
     }
-    let e_end = db.correction_epoch_even();
-    assert_eq!(e_end % 2, 0, "even after drop");
+    let e_end = db.correction_epoch_even().unwrap();
     assert_eq!(e_end, e_start + 2, "one correction advances the epoch by 2");
+    assert!(
+        db.correction_epoch_validate(e_end),
+        "post-correction even validates"
+    );
+    assert!(
+        !db.correction_epoch_validate(e_start),
+        "a stale pre-correction snapshot never re-validates"
+    );
 }
 
 #[cfg(feature = "bundled-embedder")]
