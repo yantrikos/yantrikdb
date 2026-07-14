@@ -144,6 +144,79 @@ mod tests {
         }
     }
 
+    /// Ignored-by-default timing probe for the distance-path speedup
+    /// (v0.9.3): historical 3-pass scalar cosine vs precomputed norms +
+    /// dispatched kernel. Run manually:
+    /// `cargo test --release -p yantrikdb --lib kernel_timing -- --nocapture --ignored`
+    #[test]
+    #[ignore]
+    fn kernel_timing_before_after() {
+        use std::time::Instant;
+
+        const DIM: usize = 384;
+        const N: usize = 20_000;
+        const REPS: usize = 5;
+
+        let vecs: Vec<Vec<f32>> = (0..N)
+            .map(|i| {
+                (0..DIM)
+                    .map(|j| ((i * 31 + j * 7) as f32 * 0.001).sin())
+                    .collect()
+            })
+            .collect();
+        let query: Vec<f32> = (0..DIM).map(|j| ((j * 13) as f32 * 0.002).cos()).collect();
+
+        // BEFORE: 3-pass strictly-scalar cosine (the historical shape).
+        let hist = |a: &[f32], b: &[f32]| -> f64 {
+            let dot: f64 = a.iter().zip(b).map(|(&x, &y)| x as f64 * y as f64).sum();
+            let na: f64 = a
+                .iter()
+                .map(|&x| (x as f64) * (x as f64))
+                .sum::<f64>()
+                .sqrt();
+            let nb: f64 = b
+                .iter()
+                .map(|&x| (x as f64) * (x as f64))
+                .sum::<f64>()
+                .sqrt();
+            if !(na > 0.0) || !(nb > 0.0) {
+                return 1.0;
+            }
+            (1.0 - (dot / (na * nb))).clamp(0.0, 2.0)
+        };
+        let mut best_before = f64::MAX;
+        let mut sink = 0.0f64;
+        for _ in 0..REPS {
+            let t = Instant::now();
+            for v in &vecs {
+                sink += hist(&query, v);
+            }
+            best_before = best_before.min(t.elapsed().as_secs_f64());
+        }
+
+        // AFTER: precomputed norms + dispatched kernel dot.
+        let norms: Vec<f64> = vecs
+            .iter()
+            .map(|v| crate::vector::hnsw::norm_f64(v))
+            .collect();
+        let qnorm = crate::vector::hnsw::norm_f64(&query);
+        let mut best_after = f64::MAX;
+        for _ in 0..REPS {
+            let t = Instant::now();
+            for (v, &n) in vecs.iter().zip(&norms) {
+                sink += crate::vector::hnsw::dist_from(dot_f64(&query, v), qnorm, n);
+            }
+            best_after = best_after.min(t.elapsed().as_secs_f64());
+        }
+
+        let per_before = best_before / N as f64 * 1e9;
+        let per_after = best_after / N as f64 * 1e9;
+        println!("=== distance-path timing (dim={DIM}, N={N}, best of {REPS}) ===");
+        println!("BEFORE (3-pass scalar):         {per_before:8.1} ns/comparison");
+        println!("AFTER  (norms + SIMD dispatch): {per_after:8.1} ns/comparison");
+        println!("SPEEDUP: {:.2}x   (sink={sink:.3})", per_before / per_after);
+    }
+
     #[cfg(target_arch = "x86_64")]
     #[test]
     fn avx2_kernel_matches_reference_when_available() {
