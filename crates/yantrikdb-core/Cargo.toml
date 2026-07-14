@@ -69,6 +69,14 @@ bundled-embedder = ["dep:model2vec-rs"]
 # reuses the model2vec-rs loader.
 embedder-download = ["bundled-embedder", "dep:ureq", "dep:sha2", "dep:dirs", "dep:tar", "dep:flate2"]
 profiling = []
+# **v0.10 Phase 0 — test seams.** NON-DEFAULT. Enables the injectable
+# semantic wall-clock (crate::testing::set_test_clock, consulted by
+# time::now_secs) and the failpoint registry (crate::testing::fail_point
+# park-and-handshake for kill-mid-transaction tests). Production builds
+# compile both hooks to no-ops. Never enable in published wheels; CI
+# builds a separate non-published test wheel with it for python-side
+# trace tests.
+testing = []
 
 [dev-dependencies]
 criterion = "0.5"
