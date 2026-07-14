@@ -474,6 +474,15 @@ impl YantrikDB {
                 "it", "its", "that", "this", "there", "s", "she", "her", "he", "his", "they",
                 "them", "most", "each", "any", "all", "every", "been", "being", "up", "out", "so",
                 "if", "than", "very", "just", "also",
+                // v0.9.3 accuracy work: function words that were slipping
+                // through and anchoring keyword_match boosts on unrelated
+                // memories (eval diagnosis: "during" in "what did we learn
+                // DURING the project?" boosted a memory-leak memory to rank 1
+                // while the actual lesson memories missed top-10 entirely).
+                "during", "while", "after", "before", "between", "into", "over", "under", "through",
+                "against", "within", "without", "us", "as", "then", "some", "more", "other",
+                "these", "those", "will", "would", "could", "should", "can", "may", "might",
+                "must", "shall", "get", "got", "make", "made", "let",
             ];
 
             {
@@ -2709,6 +2718,15 @@ impl YantrikDB {
                 "it", "its", "that", "this", "there", "s", "she", "her", "he", "his", "they",
                 "them", "most", "each", "any", "all", "every", "been", "being", "up", "out", "so",
                 "if", "than", "very", "just", "also",
+                // v0.9.3 accuracy work: function words that were slipping
+                // through and anchoring keyword_match boosts on unrelated
+                // memories (eval diagnosis: "during" in "what did we learn
+                // DURING the project?" boosted a memory-leak memory to rank 1
+                // while the actual lesson memories missed top-10 entirely).
+                "during", "while", "after", "before", "between", "into", "over", "under", "through",
+                "against", "within", "without", "us", "as", "then", "some", "more", "other",
+                "these", "those", "will", "would", "could", "should", "can", "may", "might",
+                "must", "shall", "get", "got", "make", "made", "let",
             ];
 
             {
