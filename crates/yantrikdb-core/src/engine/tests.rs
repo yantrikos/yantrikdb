@@ -14469,6 +14469,16 @@ fn correct_new_text_drops_stale_entity_links() {
             .unwrap();
         }
     }
+    // Also seed the IN-MEMORY graph_index — this is what recall's
+    // expand_entities actually reads. nuron's live verification showed a
+    // durable-only drop leaves this index stale, so the corrected record keeps
+    // being served under its old association. The durable-table assertion alone
+    // gave a false green; this test now covers the live path.
+    {
+        let mut gi = db.graph_index.write();
+        gi.link_memory(&rid, "Volkan");
+        gi.link_memory(&rid, "Aurelian");
+    }
     db.correct(
         &rid,
         Some("The Aurelian highland lakes near Volkanic rock"),
@@ -14490,11 +14500,29 @@ fn correct_new_text_drops_stale_entity_links() {
     };
     assert!(
         links.contains(&"Aurelian".to_string()),
-        "entity present in corrected text must be kept: {links:?}"
+        "durable entity present in corrected text must be kept: {links:?}"
     );
     assert!(
         !links.contains(&"Volkan".to_string()),
-        "stale entity absent from corrected text must be dropped (and NOT false-kept by 'Volkanic'): {links:?}"
+        "durable stale entity absent from corrected text must be dropped (and NOT false-kept by 'Volkanic'): {links:?}"
+    );
+    // The in-memory graph_index (what recall's expand_entities reads) must ALSO
+    // reflect the drop — the assertion that would have caught nuron's live
+    // finding.
+    let gi_entities: Vec<String> = db
+        .graph_index
+        .read()
+        .entities_for_memory(&rid)
+        .iter()
+        .map(|s| s.to_lowercase())
+        .collect();
+    assert!(
+        gi_entities.iter().any(|e| e == "aurelian"),
+        "in-memory graph_index must keep the surviving entity: {gi_entities:?}"
+    );
+    assert!(
+        !gi_entities.iter().any(|e| e == "volkan"),
+        "in-memory graph_index must EVICT the stale entity (recall's expand_entities reads it): {gi_entities:?}"
     );
 }
 
