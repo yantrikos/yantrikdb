@@ -168,17 +168,28 @@ impl YantrikDB {
             }
         };
 
-        // Phase 4.5: Adaptive learning — optimize scoring weights from feedback
-        let weights_updated = self.run_learning().unwrap_or(false);
-        if weights_updated {
-            all_triggers.push(Trigger {
-                trigger_type: "weights_updated".to_string(),
-                reason: "Scoring weights optimized from recall feedback".to_string(),
-                urgency: 0.3,
-                source_rids: vec![],
-                suggested_action: "acknowledge".to_string(),
-                context: std::collections::HashMap::new(),
-            });
+        // Phase 4.5: Adaptive learning — the v0.10 Item 2 self-sufficient
+        // loop. Typed report (persisted to meta.last_learning_report by
+        // run_learning itself) so a learner FAILURE is observable rather
+        // than silently identical to "not enough evidence".
+        match self.run_learning() {
+            Ok(report) if report.outcome == "swapped" || report.outcome == "rolled_back" => {
+                all_triggers.push(Trigger {
+                    trigger_type: "weights_updated".to_string(),
+                    reason: format!(
+                        "Ranking weights {} (generation {}): {}",
+                        report.outcome, report.generation, report.detail
+                    ),
+                    urgency: 0.3,
+                    source_rids: vec![],
+                    suggested_action: "acknowledge".to_string(),
+                    context: std::collections::HashMap::new(),
+                });
+            }
+            Ok(_) => {} // abstained (insufficient/no-new evidence) or rejected
+            Err(e) => {
+                tracing::warn!(error = %e, "learning loop failed");
+            }
         }
 
         // Phase 5: Generate pattern_discovered triggers for new patterns
