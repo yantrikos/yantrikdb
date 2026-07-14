@@ -5790,18 +5790,21 @@ fn test_learning_skipped_under_threshold() {
         )
         .unwrap();
 
-    // Submit fewer than 20 feedback items (the MIN_FEEDBACK threshold)
+    // Submit fewer than the episode gate's worth of evidence.
     for i in 0..10 {
         db.recall_feedback(Some("q"), Some(&emb), &rid, "relevant", Some(0.5), Some(i))
             .unwrap();
     }
 
-    // run_learning should return false (skipped due to insufficient feedback)
-    let result = db.run_learning().unwrap();
-    assert!(
-        !result,
-        "run_learning should return false with < 20 feedback items"
+    // v0.10 Item 2: the loop must ABSTAIN with a typed reason — not
+    // learn — when preference evidence is insufficient.
+    let report = db.run_learning().unwrap();
+    assert_eq!(
+        report.outcome, "insufficient_evidence",
+        "loop abstains below the episode gate: {report:?}"
     );
+    assert_eq!(report.generation, 0, "no generation minted");
+    assert_eq!(report.engine_resurface_positive_count, 0);
 }
 
 #[test]
