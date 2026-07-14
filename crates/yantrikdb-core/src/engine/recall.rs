@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use crate::error::{Result, YantrikDbError};
 use crate::scoring;
@@ -347,6 +347,10 @@ impl YantrikDB {
                     domain: row.domain.clone(),
                     source: row.source.clone(),
                     emotional_state: row.emotional_state.clone(),
+                    current_status: Default::default(),
+                    superseded_by: None,
+                    disputed_with: Vec::new(),
+                    aged_last_verified: None,
                 });
             }
         } // drop cache borrow
@@ -449,6 +453,10 @@ impl YantrikDB {
                         domain: row.domain.clone(),
                         source: row.source.clone(),
                         emotional_state: row.emotional_state.clone(),
+                    current_status: Default::default(),
+                    superseded_by: None,
+                    disputed_with: Vec::new(),
+                    aged_last_verified: None,
                     });
                 }
             }
@@ -1045,6 +1053,10 @@ impl YantrikDB {
                                     domain: row.domain.clone(),
                                     source: row.source.clone(),
                                     emotional_state: row.emotional_state.clone(),
+                    current_status: Default::default(),
+                    superseded_by: None,
+                    disputed_with: Vec::new(),
+                    aged_last_verified: None,
                                 });
                             }
                         }
@@ -1169,6 +1181,10 @@ impl YantrikDB {
                         domain: row.domain.clone(),
                         source: row.source.clone(),
                         emotional_state: row.emotional_state.clone(),
+                    current_status: Default::default(),
+                    superseded_by: None,
+                    disputed_with: Vec::new(),
+                    aged_last_verified: None,
                     });
                 }
             }
@@ -1376,6 +1392,10 @@ impl YantrikDB {
                                     domain: row.domain.clone(),
                                     source: row.source.clone(),
                                     emotional_state: row.emotional_state.clone(),
+                    current_status: Default::default(),
+                    superseded_by: None,
+                    disputed_with: Vec::new(),
+                    aged_last_verified: None,
                                 });
                             }
                         }
@@ -1690,6 +1710,10 @@ impl YantrikDB {
                             domain: row.domain.clone(),
                             source: row.source.clone(),
                             emotional_state: row.emotional_state.clone(),
+                    current_status: Default::default(),
+                    superseded_by: None,
+                    disputed_with: Vec::new(),
+                    aged_last_verified: None,
                         });
                     }
                     drop(cache);
@@ -1907,29 +1931,43 @@ impl YantrikDB {
         const LOW_CONFIRMATION: i64 = 1;
         let now_ts = crate::time::now_secs();
         let conn = self.conn();
-        // Read created_at + access_count from the table (the source of truth),
-        // not the RecallResult, whose created_at comes from the scoring cache.
-        let mut access_stmt =
-            conn.prepare("SELECT created_at, access_count FROM memories WHERE rid = ?1")?;
+        // Read created_at/updated_at/access_count from the table (the source
+        // of truth), not the RecallResult, whose created_at comes from the
+        // scoring cache.
+        let mut access_stmt = conn
+            .prepare("SELECT created_at, updated_at, access_count FROM memories WHERE rid = ?1")?;
+        // v0.10 Item 1: fetch the SUCCESSOR rid (not just a count) so the
+        // typed status can name it.
         let mut superseded_stmt = conn.prepare(
-            "SELECT COUNT(*) FROM record_links WHERE target_rid = ?1 \
+            "SELECT source_rid FROM record_links WHERE target_rid = ?1 \
              AND link_type = 'supersedes' \
-             AND status = 'active' AND selection_state = 'selected'",
+             AND status = 'active' AND selection_state = 'selected' \
+             LIMIT 1",
         )?;
         for r in results.iter_mut() {
-            let (created_at, access_count): (f64, i64) = access_stmt
-                .query_row(params![r.rid], |row| Ok((row.get(0)?, row.get(1)?)))
-                .unwrap_or((now_ts, 0));
+            let (created_at, updated_at, access_count): (f64, f64, i64) = access_stmt
+                .query_row(params![r.rid], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })
+                .unwrap_or((now_ts, now_ts, 0));
             let age_days = (now_ts - created_at).max(0.0) / 86_400.0;
             if age_days > STALE_AGE_DAYS && access_count <= LOW_CONFIRMATION {
+                // v0.10 Item 1: typed aged flag (orthogonal to status —
+                // aged is a retrieval-age signal, not a truth status).
+                r.aged_last_verified = Some(updated_at);
                 r.why_retrieved.push(format!(
                     "⚠ {age_days:.0}d old, rarely confirmed — verify it is still current"
                 ));
             }
-            let superseded: i64 = superseded_stmt
+            let successor: Option<String> = superseded_stmt
                 .query_row(params![r.rid], |row| row.get(0))
-                .unwrap_or(0);
-            if superseded > 0 {
+                .optional()
+                .unwrap_or(None);
+            if let Some(successor_rid) = successor {
+                // v0.10 Item 1: exclusive chain-derived status, typed. The
+                // prose stamp stays for one release.
+                r.current_status = crate::types::RecordStatus::Superseded;
+                r.superseded_by = Some(successor_rid);
                 r.why_retrieved
                     .push("⚠ superseded by a newer record — likely outdated".to_string());
             }
@@ -2604,6 +2642,10 @@ impl YantrikDB {
                     domain: row.domain.clone(),
                     source: row.source.clone(),
                     emotional_state: row.emotional_state.clone(),
+                    current_status: Default::default(),
+                    superseded_by: None,
+                    disputed_with: Vec::new(),
+                    aged_last_verified: None,
                 });
             }
         }
@@ -2700,6 +2742,10 @@ impl YantrikDB {
                         domain: row.domain.clone(),
                         source: row.source.clone(),
                         emotional_state: row.emotional_state.clone(),
+                    current_status: Default::default(),
+                    superseded_by: None,
+                    disputed_with: Vec::new(),
+                    aged_last_verified: None,
                     });
                 }
             }
@@ -3231,6 +3277,10 @@ impl YantrikDB {
                                     domain: row.domain.clone(),
                                     source: row.source.clone(),
                                     emotional_state: row.emotional_state.clone(),
+                    current_status: Default::default(),
+                    superseded_by: None,
+                    disputed_with: Vec::new(),
+                    aged_last_verified: None,
                                 });
                             }
                         }
@@ -3346,6 +3396,10 @@ impl YantrikDB {
                         domain: row.domain.clone(),
                         source: row.source.clone(),
                         emotional_state: row.emotional_state.clone(),
+                    current_status: Default::default(),
+                    superseded_by: None,
+                    disputed_with: Vec::new(),
+                    aged_last_verified: None,
                     });
                 }
             }
@@ -3543,6 +3597,10 @@ impl YantrikDB {
                                     domain: row.domain.clone(),
                                     source: row.source.clone(),
                                     emotional_state: row.emotional_state.clone(),
+                    current_status: Default::default(),
+                    superseded_by: None,
+                    disputed_with: Vec::new(),
+                    aged_last_verified: None,
                                 });
                             }
                         }
@@ -3845,6 +3903,10 @@ impl YantrikDB {
                                 domain: row.domain.clone(),
                                 source: row.source.clone(),
                                 emotional_state: row.emotional_state.clone(),
+                    current_status: Default::default(),
+                    superseded_by: None,
+                    disputed_with: Vec::new(),
+                    aged_last_verified: None,
                             });
                         }
                     }

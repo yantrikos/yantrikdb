@@ -109,6 +109,33 @@ pub struct ScoreContributions {
     pub graph_proximity: f64,
 }
 
+/// **v0.10 Item 1 — typed temporal status (the status+flags algebra).**
+///
+/// `current_status` is EXCLUSIVE and chain-derived: a record either has a
+/// selected active inbound Supersedes successor (`Superseded`) or it does
+/// not (`Active`). Everything else — disputed, aged — is an ORTHOGONAL
+/// flag, because those states co-occur with either status ("superseded AND
+/// the successor is disputed" is exactly the situation an agent most needs
+/// rendered honestly — consumer review). `#[non_exhaustive]` so
+/// retracted/expired can join in v0.11+ without a breaking change.
+#[non_exhaustive]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum RecordStatus {
+    #[default]
+    Active,
+    Superseded,
+}
+
+impl RecordStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            RecordStatus::Active => "active",
+            RecordStatus::Superseded => "superseded",
+        }
+    }
+}
+
 /// A recall result with scoring information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecallResult {
@@ -128,6 +155,21 @@ pub struct RecallResult {
     pub domain: String,
     pub source: String,
     pub emotional_state: Option<String>,
+    // ── v0.10 Item 1: typed temporal status (status leads, prose follows;
+    //    the why_retrieved prose stamps are retained for one release) ──
+    /// Exclusive chain-derived status.
+    #[serde(default)]
+    pub current_status: RecordStatus,
+    /// The rid of the selected successor when `current_status == Superseded`.
+    #[serde(default)]
+    pub superseded_by: Option<String>,
+    /// Open-conflict counterpart rids (many-to-many; cleared on resolution).
+    #[serde(default)]
+    pub disputed_with: Vec<String>,
+    /// Set when the record is aged-unconfirmed: the last time it was
+    /// verified/updated. None = not aged.
+    #[serde(default)]
+    pub aged_last_verified: Option<f64>,
 }
 
 /// Response from recall with confidence and hints for interactive retrieval.

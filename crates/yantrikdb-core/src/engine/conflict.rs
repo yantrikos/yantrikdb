@@ -444,6 +444,11 @@ impl YantrikDB {
                 } else {
                     memory_a
                 };
+                // v0.10 Item 1: typed disputed flag (many-to-many; the prose
+                // stamp below is retained for one release).
+                if !r.disputed_with.contains(&other) {
+                    r.disputed_with.push(other.clone());
+                }
                 r.why_retrieved.push(format!(
                     "⚠ unresolved {priority} conflict ({ctype}) with {other} — verify before relying"
                 ));
