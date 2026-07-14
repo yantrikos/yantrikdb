@@ -208,6 +208,28 @@ pub enum YantrikDbError {
     )]
     RecallContended { attempts: u32 },
 
+    /// **v0.10 Item 4a — single-origin ingress guard.** A protected write op
+    /// (`record` / `record_with_rid` / `correct` / `consolidate`) arrived via
+    /// replication from an origin actor that is not this database's configured
+    /// `authoritative_origin_actor`. In the single-writer Item 4a model,
+    /// provenance is admitted at ONE authority; applying a foreign origin's
+    /// record verbatim would let an ungated or malicious peer launder
+    /// provenance past the local gate. The ENTIRE incoming batch is rejected
+    /// before any HLC merge / oplog / memories / cache / vector change, so a
+    /// rejected apply leaves the engine byte-for-byte unchanged. Multi-origin
+    /// ingress is an Item 4b (multi-master) capability. The guard is inactive
+    /// unless `authoritative_origin_actor` is configured.
+    #[error(
+        "replicated `{op_type}` op rejected: origin '{origin_actor}' is not the \
+         authoritative origin '{authority}' (single-writer Item 4a; multi-origin \
+         is v0.11 Item 4b)"
+    )]
+    ForeignOriginRejected {
+        op_type: String,
+        origin_actor: String,
+        authority: String,
+    },
+
     /// **Phase 6 RYW**: caller-requested visible_seq was not reached within
     /// the timeout window. Either the write that should have bumped the seq
     /// has not yet materialized (legitimate timeout — caller should retry or
