@@ -465,6 +465,54 @@ impl YantrikDB {
         Ok(WalkOutcome::NotReached)
     }
 
+    /// **v0.10 Item 1 — resolve the CURRENT head of a record's supersedes
+    /// chain.** Walks selected active inbound successors from `rid` until a
+    /// record with no successor is found. Returns `(head_rid, status)` —
+    /// the status is that of the HEAD itself (consumer review R3: a chain
+    /// head that is itself Active is the normal case; the tuple shape
+    /// leaves room for richer head-status reporting as the status
+    /// vocabulary grows). `rid == head` when the record is not superseded.
+    ///
+    /// Under Phase-0 integrity each record has at most one selected
+    /// successor, so the walk is a straight line; the visited set + cap
+    /// guard against pre-Phase-0 legacy graphs (a corrupt component
+    /// returns [`YantrikDbError::ChainTraversalLimit`] rather than
+    /// silently picking a row — run [`Self::verify_chains`] and repair).
+    pub fn resolve_current(&self, rid: &str) -> Result<(String, crate::types::RecordStatus)> {
+        let conn = self.conn.lock();
+        let mut current = rid.to_string();
+        let mut visited: std::collections::HashSet<String> = std::collections::HashSet::new();
+        loop {
+            if visited.len() > CHAIN_WALK_CAP {
+                return Err(YantrikDbError::ChainTraversalLimit {
+                    start_rid: rid.to_string(),
+                    limit: CHAIN_WALK_CAP,
+                });
+            }
+            if !visited.insert(current.clone()) {
+                // Legacy cycle (pre-Phase-0 data): refuse to pick silently.
+                return Err(YantrikDbError::ChainTraversalLimit {
+                    start_rid: rid.to_string(),
+                    limit: visited.len(),
+                });
+            }
+            let successor: Option<String> = conn
+                .query_row(
+                    "SELECT source_rid FROM record_links WHERE target_rid = ?1 \
+                     AND link_type = 'supersedes' \
+                     AND status = 'active' AND selection_state = 'selected' \
+                     LIMIT 1",
+                    params![current],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            match successor {
+                Some(s) => current = s,
+                None => return Ok((current, crate::types::RecordStatus::Active)),
+            }
+        }
+    }
+
     /// **v0.10 Phase 0 — audit the selected supersedes graph** against the
     /// chain-integrity invariants. REPORT-ONLY: legacy databases (edges
     /// written before the write gate existed) may violate them; the engine
@@ -925,6 +973,10 @@ impl YantrikDB {
                     domain: mem.domain,
                     source: mem.source,
                     emotional_state: mem.emotional_state,
+                    current_status: Default::default(),
+                    superseded_by: None,
+                    disputed_with: Vec::new(),
+                    aged_last_verified: None,
                 });
             }
         }
@@ -1399,6 +1451,101 @@ mod tests {
             )
             .unwrap();
         assert_eq!(state_low, "selected", "next candidate promoted");
+    }
+
+    #[test]
+    fn resolve_current_walks_to_chain_head() {
+        // v0.10 Item 1 / trace T2: A→B→C chain resolves to C from any member.
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let a = rec(&db, "v1", 1.0);
+        let b = rec(&db, "v2", 2.0);
+        let c = rec(&db, "v3", 3.0);
+        supersede(&db, &b, &a).unwrap();
+        supersede(&db, &c, &b).unwrap();
+
+        for start in [&a, &b, &c] {
+            let (head, status) = db.resolve_current(start).unwrap();
+            assert_eq!(head, c, "from {start}, head is c");
+            assert_eq!(status, crate::types::RecordStatus::Active);
+        }
+        // A record with no chain resolves to itself.
+        let lone = rec(&db, "standalone", 9.0);
+        assert_eq!(db.resolve_current(&lone).unwrap().0, lone);
+    }
+
+    #[cfg(feature = "bundled-embedder")]
+    #[test]
+    fn recall_stamps_typed_status_superseded_and_disputed() {
+        // v0.10 Item 1 / trace T1 (typed half) + T5: a superseded record
+        // returned by recall carries current_status=superseded +
+        // superseded_by; a disputed record carries disputed_with. Typed
+        // fields, not prose parsing.
+        let db = YantrikDB::with_default(":memory:").unwrap();
+        let old = db
+            .record_text(
+                "the deploy target is the staging cluster",
+                "semantic",
+                0.7,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                "default",
+                0.8,
+                "work",
+                "user",
+                None,
+            )
+            .unwrap();
+        let new = db
+            .record_text(
+                "the deploy target is the production cluster",
+                "semantic",
+                0.7,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                "default",
+                0.8,
+                "work",
+                "user",
+                None,
+            )
+            .unwrap();
+        db.link(
+            &new,
+            &RecordLink {
+                target_rid: old.clone(),
+                link_type: LinkType::Supersedes,
+            },
+        )
+        .unwrap();
+
+        let results = db
+            .recall(
+                &db.embed("what is the deploy target").unwrap(),
+                10,
+                None,
+                None,
+                false,
+                false,
+                None,
+                true,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        let old_hit = results
+            .iter()
+            .find(|r| r.rid == old)
+            .expect("old record still in results (no exclusion policy yet)");
+        assert_eq!(old_hit.current_status, crate::types::RecordStatus::Superseded);
+        assert_eq!(old_hit.superseded_by.as_deref(), Some(new.as_str()));
+        let new_hit = results.iter().find(|r| r.rid == new).expect("head present");
+        assert_eq!(new_hit.current_status, crate::types::RecordStatus::Active);
+        assert!(new_hit.superseded_by.is_none());
     }
 
     #[test]
