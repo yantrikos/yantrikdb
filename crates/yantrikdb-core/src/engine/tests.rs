@@ -6524,6 +6524,49 @@ fn reclassify_reuses_existing_category_when_name_already_taken() {
         "no members stranded under a non-existent category"
     );
 
+    // The user_confirmed reclassify must PROMOTE the pre-existing pending/
+    // llm_suggested rows, not silently skip them (sol #83 r2). Before this, the
+    // UNIQUE(category_id, token_normalized) ignore left both members 'pending' —
+    // and find_member_category reads only 'active', so the pair stayed invisible
+    // to every later classification. The user's confirmation was thrown away with
+    // no error: the same silent-loss class as the rest of this item.
+    let promoted: Vec<(String, String, String)> = db
+        .conn()
+        .prepare(
+            "SELECT token_normalized, source, status FROM substitution_members \
+             WHERE category_id = ?1 ORDER BY token_normalized",
+        )
+        .unwrap()
+        .query_map(rusqlite::params![pre_id], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    for (tok, source, status) in &promoted {
+        assert_eq!(
+            (source.as_str(), status.as_str()),
+            ("user_confirmed", "active"),
+            "{tok} must be promoted to user_confirmed/active, got {source}/{status}"
+        );
+    }
+
+    // The POINT of promoting: the learned pair is now visible to later
+    // classification, which is what reclassify claimed to have achieved.
+    let visible: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM substitution_members \
+             WHERE token_normalized IN ('zorblat', 'quibnix') AND status = 'active'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        visible, 2,
+        "both learned tokens are findable as active members"
+    );
+
     // ...and both tokens still hang off the SURVIVING category.
     let members: Vec<String> = db
         .conn()
@@ -6593,6 +6636,64 @@ fn learn_category_members_creates_new_category_without_deadlocking() {
              self.conn() re-locked inside a match arm whose scrutinee still holds the guard"
         ),
     }
+}
+
+/// The other half of "promote, never demote" (sol #83 r2). Promoting is the
+/// obvious direction; the silent loss runs both ways. A later `llm_suggested`
+/// gossip must NOT knock a `user_confirmed` member back to `'pending'`, which
+/// would make an already-learned substitution vanish from
+/// `find_member_category` — the same invisibility, arrived at from the other
+/// side. `seed` outranks everything and is never overwritten.
+#[test]
+fn learn_category_members_promotes_but_never_demotes() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+
+    // Weak evidence first: lands 'pending'.
+    db.learn_category_members("promo_cat", &[("tok".to_string(), 0.4)], "llm_suggested")
+        .unwrap();
+    let row = |db: &YantrikDB| -> (String, String, f64) {
+        db.conn()
+            .query_row(
+                "SELECT source, status, confidence FROM substitution_members \
+                 WHERE token_normalized = 'tok'",
+                [],
+                |r| Ok((r.get(0).unwrap(), r.get(1).unwrap(), r.get(2).unwrap())),
+            )
+            .unwrap()
+    };
+    assert_eq!(
+        (row(&db).0.as_str(), row(&db).1.as_str()),
+        ("llm_suggested", "pending"),
+        "llm_suggested starts pending"
+    );
+
+    // Stronger evidence: PROMOTES.
+    db.learn_category_members("promo_cat", &[("tok".to_string(), 0.9)], "user_confirmed")
+        .unwrap();
+    let (source, status, conf) = row(&db);
+    assert_eq!(
+        (source.as_str(), status.as_str()),
+        ("user_confirmed", "active"),
+        "user_confirmed promotes the pending row"
+    );
+    assert!(
+        (conf - 0.9).abs() < 1e-9,
+        "confidence promoted too, got {conf}"
+    );
+
+    // Weak evidence again: must NOT demote.
+    db.learn_category_members("promo_cat", &[("tok".to_string(), 0.1)], "llm_suggested")
+        .unwrap();
+    let (source, status, conf) = row(&db);
+    assert_eq!(
+        (source.as_str(), status.as_str()),
+        ("user_confirmed", "active"),
+        "a later llm_suggested must not demote a user_confirmed member"
+    );
+    assert!(
+        (conf - 0.9).abs() < 1e-9,
+        "confidence must not be clobbered by weaker evidence, got {conf}"
+    );
 }
 
 // ── Relationship-Based Entity Type Tests ──

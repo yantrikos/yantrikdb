@@ -239,19 +239,22 @@ impl YantrikDB {
     /// Uses a plain `INSERT`, NOT `INSERT OR IGNORE` — and that difference is
     /// deliberate (sol, 4a.6a review finding 4).
     ///
-    /// [`Self::log_op_pending`] uses `OR IGNORE` because it has cluster-replay
-    /// callers that re-use an existing `op_id`, where a silent no-op is the
-    /// correct outcome. This function mints a FRESH `op_id` and has no such
-    /// caller, so "ignored" could only mean an id collision or some other
-    /// constraint — and swallowing it would let the record transaction commit and
-    /// `record()` return `Ok` while the post-materialization enqueue silently did
-    /// not happen. That write's entity materialization would then be owed to
-    /// nobody, forever, which is the exact failure moving the enqueue into the
-    /// transaction was meant to prevent. A plain INSERT turns that into the error
-    /// it is, rolling the whole write back.
+    /// This function mints a FRESH `op_id`, so "ignored" could only ever mean an
+    /// id collision or some other constraint — and swallowing it would let the
+    /// record transaction commit and `record()` return `Ok` while the
+    /// post-materialization enqueue silently did not happen. That write's entity
+    /// materialization would then be owed to nobody, forever, which is the exact
+    /// failure moving the enqueue into the transaction was meant to prevent. A
+    /// plain INSERT turns that into the error it is, rolling the whole write back.
     ///
-    /// (I originally copied `OR IGNORE` from `log_op_pending` without checking
-    /// whether its rationale applied here. It did not.)
+    /// (I originally copied `OR IGNORE` from [`Self::log_op_pending`] without
+    /// checking whether its rationale applied here. It did not — and this doc
+    /// then spent a release asserting that `log_op_pending` needed `OR IGNORE`
+    /// "because it has cluster-replay callers that re-use an existing `op_id`".
+    /// That was false: it mints its own id and no caller can supply one, so the
+    /// ignore there could never fire for the stated reason and only ever hid real
+    /// violations. #83 made it a plain INSERT too. The rationale I copied was
+    /// never real anywhere — sol #83 r2 caught this paragraph still teaching it.)
     ///
     /// Returns the op_id. Deliberately does NOT touch `pending_op_count`: the
     /// counter may only move AFTER the enclosing transaction commits — increment
