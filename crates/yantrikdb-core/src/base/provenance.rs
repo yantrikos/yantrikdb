@@ -174,19 +174,63 @@ impl ClaimKind {
     }
 }
 
+/// Enforcement mode for the anti-laundering gate (Item 4a.4). Fresh installs
+/// default to `Enforce`; migrated/legacy installs default to `Warn` (run the
+/// check + nudge counter, never refuse) so upgrades don't break existing
+/// callers. `Off` skips the check entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateMode {
+    Off,
+    Warn,
+    Enforce,
+}
+
+impl GateMode {
+    pub fn parse(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "enforce" => Self::Enforce,
+            "warn" => Self::Warn,
+            _ => Self::Off,
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enforce => "enforce",
+            Self::Warn => "warn",
+            Self::Off => "off",
+        }
+    }
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Warn => 1,
+            Self::Enforce => 2,
+        }
+    }
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            2 => Self::Enforce,
+            1 => Self::Warn,
+            _ => Self::Off,
+        }
+    }
+}
+
 /// The anti-laundering consistency matrix (pure). Given already-parsed declared
 /// fields, decide whether the record may be admitted. `override_kind` is the
 /// deliberate, traced+stamped escape hatch (the DOCUMENTED escape is instead to
-/// raise `confidence_basis` to confirmation/verification).
-pub fn check_provenance_consistency(
+/// raise `confidence_basis` to confirmation/verification). `basis = None` means
+/// the caller declared no basis — which does NOT satisfy the confirmation/
+/// verification allowance, so an inference still cannot claim fact/observation.
+pub fn check_provenance_consistency_opt(
     source: Source,
-    basis: &ConfidenceBasis,
+    basis: Option<&ConfidenceBasis>,
     kind: &ClaimKind,
     override_kind: bool,
 ) -> Result<()> {
     if source == Source::Inference {
         // You cannot have OBSERVED an inference.
-        if *basis == ConfidenceBasis::Observation {
+        if basis == Some(&ConfidenceBasis::Observation) {
             return Err(YantrikDbError::ProvenanceInconsistent {
                 path: "source/confidence_basis",
                 reason: "source=inference cannot have confidence_basis=observation \
@@ -201,7 +245,7 @@ pub fn check_provenance_consistency(
             && !override_kind
             && !matches!(
                 basis,
-                ConfidenceBasis::Confirmation | ConfidenceBasis::Verification
+                Some(ConfidenceBasis::Confirmation | ConfidenceBasis::Verification)
             )
         {
             let kind_str = match kind {
@@ -218,6 +262,17 @@ pub fn check_provenance_consistency(
         }
     }
     Ok(())
+}
+
+/// Convenience wrapper of [`check_provenance_consistency_opt`] for a present
+/// basis (used by the exhaustive unit tests).
+pub fn check_provenance_consistency(
+    source: Source,
+    basis: &ConfidenceBasis,
+    kind: &ClaimKind,
+    override_kind: bool,
+) -> Result<()> {
+    check_provenance_consistency_opt(source, Some(basis), kind, override_kind)
 }
 
 #[cfg(test)]

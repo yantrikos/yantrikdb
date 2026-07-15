@@ -78,6 +78,11 @@ impl YantrikDB {
                 ("half_life", half_life),
             ],
         )?;
+        // v0.10 Item 4a.4 anti-laundering gate: refuse (enforce) / count (warn)
+        // a record whose declared provenance is internally inconsistent (e.g.
+        // source=inference claiming metadata.kind=fact), BEFORE any side effect.
+        // For a fresh insert `metadata` IS the final merged metadata.
+        self.gate_provenance(source, metadata)?;
         // Task 29 (Ingest Integrity): strip any leaked tool-call
         // serialization tail from the stored text. On this entry point the
         // caller supplies the embedding, so the vector may still reflect the

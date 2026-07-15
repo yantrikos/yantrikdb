@@ -1434,6 +1434,116 @@ fn test_schema_v37_item4a_columns_table_and_index() {
     assert_eq!(version, 37, "schema version must be stamped 37");
 }
 
+// ── Item 4a.4: anti-laundering gate wiring + backward-compat modes ──
+
+#[cfg(feature = "bundled-embedder")]
+fn gate_rec(db: &YantrikDB, source: &str, meta: serde_json::Value) -> crate::error::Result<String> {
+    db.record(
+        "some memory text",
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &meta,
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "general",
+        source,
+        None,
+    )
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn gate_fresh_db_defaults_enforce_and_refuses_inference_claiming_fact() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    assert_eq!(
+        db.provenance_gate_mode(),
+        crate::provenance::GateMode::Enforce,
+        "fresh DB defaults to enforce"
+    );
+    assert_eq!(db.stats(None).unwrap().provenance_gate_mode, "enforce");
+    // source=inference claiming kind=fact -> refused at write time
+    let err = gate_rec(&db, "inference", serde_json::json!({"kind": "fact"})).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::ProvenanceInconsistent { .. }
+        ),
+        "got {err:?}"
+    );
+    // a consistent inference record (kind=inference) is fine
+    gate_rec(&db, "inference", serde_json::json!({"kind": "inference"})).unwrap();
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn gate_confirmation_allowance_and_override_escape() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    // raise-your-basis: confirmation lets an inference claim a fact
+    gate_rec(
+        &db,
+        "inference",
+        serde_json::json!({"kind": "fact", "confidence_basis": "confirmation"}),
+    )
+    .unwrap();
+    // explicit override_kind escape
+    gate_rec(
+        &db,
+        "inference",
+        serde_json::json!({"kind": "fact", "override_kind": true}),
+    )
+    .unwrap();
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn gate_warn_mode_counts_but_allows() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    db.set_provenance_gate_mode(crate::provenance::GateMode::Warn)
+        .unwrap();
+    let rid = gate_rec(&db, "inference", serde_json::json!({"kind": "fact"})).unwrap();
+    assert!(
+        db.get(&rid).unwrap().is_some(),
+        "warn mode allows the write"
+    );
+    assert_eq!(
+        db.stats(None).unwrap().provenance_flagged_since_boot,
+        1,
+        "warn mode increments the nudge counter"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn gate_off_mode_skips_entirely() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    db.set_provenance_gate_mode(crate::provenance::GateMode::Off)
+        .unwrap();
+    gate_rec(&db, "inference", serde_json::json!({"kind": "fact"})).unwrap();
+    assert_eq!(
+        db.stats(None).unwrap().provenance_flagged_since_boot,
+        0,
+        "off mode does not even count"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn gate_lenient_on_nonstandard_source() {
+    // A non-standard source (production uses e.g. session_auto_capture) is not
+    // a laundering vector, so the matrix does not apply — allowed even claiming
+    // kind=fact — which is why the enforce default breaks no existing caller.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    gate_rec(
+        &db,
+        "session_auto_capture",
+        serde_json::json!({"kind": "fact"}),
+    )
+    .unwrap();
+}
+
 #[test]
 fn test_schema_v37_idempotency_claims_actor_scoped_pk() {
     // The claims PK (origin_actor, namespace, idempotency_key) is the
