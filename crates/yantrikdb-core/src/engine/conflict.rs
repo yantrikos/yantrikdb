@@ -916,14 +916,21 @@ impl YantrikDB {
                 let recurrence = self.count_reclassify_pair_occurrences(ta, tb);
                 if recurrence >= 1 {
                     let prov_name = format!("learned_{}_{}", ta, tb);
-                    let cat_id = crate::id::new_id();
-                    self.conn().execute(
-                        "INSERT OR IGNORE INTO substitution_categories
-                         (id, name, conflict_mode, status, created_at, updated_at, hlc, origin_actor)
-                         VALUES (?1, ?2, 'exclusive', 'provisional', ?3, ?3, ?4, ?5)",
-                        params![cat_id, prov_name, ts, hlc_bytes, actor],
+                    // `learned_{a}_{b}` can already exist while NEITHER token is
+                    // a known member: find_member_category (which fed known_a /
+                    // known_b above) matches only `m.status = 'active'`, so a
+                    // category ingested via learn_category_members with
+                    // source="llm_suggested" — whose members are 'pending' — is
+                    // invisible here and lands us in this branch on a name that
+                    // is already taken.
+                    let (cat_id, created) = self.ensure_substitution_category(
+                        &prov_name,
+                        "provisional",
+                        ts,
+                        &hlc_bytes,
+                        &actor,
                     )?;
-                    self.add_member_to_category(
+                    let ta_added = self.add_member_to_category(
                         &cat_id,
                         ta,
                         ta,
@@ -933,7 +940,7 @@ impl YantrikDB {
                         &hlc_bytes,
                         &actor,
                     )?;
-                    self.add_member_to_category(
+                    let tb_added = self.add_member_to_category(
                         &cat_id,
                         tb,
                         tb,
@@ -943,16 +950,25 @@ impl YantrikDB {
                         &hlc_bytes,
                         &actor,
                     )?;
-                    category_created = Some(prov_name.clone());
+                    // Report what actually happened, not what this branch
+                    // intended: on a pre-existing name we created no category,
+                    // and add_member_to_category returns whether the member was
+                    // really added (its UNIQUE(category_id, token_normalized)
+                    // ignore is a legitimate semantic no-op). Hardcoding
+                    // `Some(name)` / `is_new: true` published that fiction to the
+                    // oplog and to the Python caller.
+                    if created {
+                        category_created = Some(prov_name.clone());
+                    }
                     learned_members.push(LearnedMember {
                         token: ta.to_string(),
                         category_name: prov_name.clone(),
-                        is_new: true,
+                        is_new: ta_added,
                     });
                     learned_members.push(LearnedMember {
                         token: tb.to_string(),
                         category_name: prov_name,
-                        is_new: true,
+                        is_new: tb_added,
                     });
                 }
             }
@@ -1062,35 +1078,25 @@ impl YantrikDB {
         let hlc_bytes = hlc_ts.to_bytes().to_vec();
         let actor = self.actor_id.clone();
 
-        // Find or create category
-        let cat_id = match self.conn().query_row(
-            "SELECT id FROM substitution_categories WHERE name = ?1",
-            params![category_name],
-            |row| row.get::<_, String>(0),
-        ) {
-            Ok(id) => id,
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                let id = crate::id::new_id();
-                self.conn().execute(
-                    "INSERT INTO substitution_categories
-                     (id, name, conflict_mode, status, created_at, updated_at, hlc, origin_actor)
-                     VALUES (?1, ?2, 'exclusive', 'active', ?3, ?3, ?4, ?5)",
-                    params![id, category_name, ts, hlc_bytes, actor],
-                )?;
-                self.log_op(
-                    "category_create",
-                    None,
-                    &serde_json::json!({
-                        "category_id": id,
-                        "name": category_name,
-                        "source": source,
-                    }),
-                    None,
-                )?;
-                id
-            }
-            Err(e) => return Err(e.into()),
-        };
+        // Find or create category. This site was already correct in shape — it
+        // re-read by name instead of trusting a fresh id — but SELECT-then-INSERT
+        // is a TOCTOU: two concurrent ingests both see "absent" and one takes a
+        // UNIQUE(name) violation. The shared helper closes that by letting the
+        // INSERT arbitrate and reading back the winner.
+        let (cat_id, created) =
+            self.ensure_substitution_category(category_name, "active", ts, &hlc_bytes, &actor)?;
+        if created {
+            self.log_op(
+                "category_create",
+                None,
+                &serde_json::json!({
+                    "category_id": cat_id,
+                    "name": category_name,
+                    "source": source,
+                }),
+                None,
+            )?;
+        }
 
         let status = if source == "llm_suggested" {
             "pending"
@@ -1180,6 +1186,51 @@ impl YantrikDB {
                 |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )
             .ok()
+    }
+
+    /// Find-or-create a substitution category by its UNIQUE `name`. Returns the
+    /// id the table actually holds, and whether THIS call created it.
+    ///
+    /// **Why the id must be re-read, never assumed (sol #83 finding 2).**
+    /// `substitution_categories.name` is UNIQUE while `id` is a freshly-minted
+    /// surrogate. A fresh-id + `INSERT OR IGNORE` therefore skips the row on a
+    /// name collision and leaves the fresh id naming NOTHING — and every caller
+    /// here goes on to attach members with it, hitting the
+    /// `substitution_members.category_id` REFERENCES FK (enforced:
+    /// `PRAGMA foreign_keys=ON`). The surviving row's id is the only usable one,
+    /// so the winner is re-read rather than presumed to be ours.
+    ///
+    /// **Why `ON CONFLICT DO NOTHING` + re-read and not `SELECT`-then-`INSERT`.**
+    /// The latter is a TOCTOU: two callers both read "absent", both insert, and
+    /// one takes a UNIQUE violation. Letting the INSERT arbitrate and then
+    /// reading whoever won serializes against a concurrent creator — the
+    /// `graph_ops::ensure_proposition` shape, whose rationale (recover the
+    /// winner from the conflict rather than assume it) applies here for the same
+    /// reason: the name, not the id, is the real key.
+    fn ensure_substitution_category(
+        &self,
+        name: &str,
+        status: &str,
+        ts: f64,
+        hlc_bytes: &[u8],
+        actor: &str,
+    ) -> Result<(String, bool)> {
+        let fresh_id = crate::id::new_id();
+        let inserted = self.conn().execute(
+            "INSERT INTO substitution_categories
+             (id, name, conflict_mode, status, created_at, updated_at, hlc, origin_actor)
+             VALUES (?1, ?2, 'exclusive', ?3, ?4, ?4, ?5, ?6)
+             ON CONFLICT(name) DO NOTHING",
+            params![fresh_id, name, status, ts, hlc_bytes, actor],
+        )?;
+        // The INSERT may have been a no-op — re-read to get whichever id won,
+        // ours or an existing/racing creator's.
+        let id: String = self.conn().query_row(
+            "SELECT id FROM substitution_categories WHERE name = ?1",
+            params![name],
+            |row| row.get(0),
+        )?;
+        Ok((id, inserted > 0))
     }
 
     fn add_member_to_category(

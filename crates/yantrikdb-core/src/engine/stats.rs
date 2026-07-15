@@ -469,11 +469,20 @@ impl YantrikDB {
             ],
         )?;
         // **v0.7.1**: maintain the cached counter.
-        // Unconditional: with a plain INSERT, reaching here means exactly one row
-        // landed — anything else returned Err above. The old `changes() > 0` guard
+        // Unconditional: a plain INSERT that returned Ok inserted exactly one
+        // row — anything else is an Err above. The old `changes() > 0` guard
         // existed to cope with `OR IGNORE` no-ops that could not happen for the
         // documented reason (no caller can supply an op_id), and it turned a
         // swallowed constraint violation into a silently-correct-looking count.
+        //
+        // Scope of that claim (sol #83 finding 3): it is about THIS statement,
+        // not about durability. `conn()` is public, so a caller that opens its
+        // own SAVEPOINT around this and rolls back leaves the row gone and this
+        // counter high — pre-existing, and not something `changes()` ever
+        // caught either. The counter is a cache over `applied = 0` and re-seeds
+        // on restart; the in-transaction sibling (`log_op_pending_in_tx`)
+        // deliberately leaves it alone precisely because only its committer
+        // knows the outcome.
         self.pending_op_count.fetch_add(1, Ordering::Relaxed);
         Ok(op_id)
     }
@@ -1373,8 +1382,12 @@ mod pending_ops_tests {
         assert_eq!(db.count_pending_ops().unwrap(), 0, "no pending after mark");
     }
 
+    /// NOT a typo: this asserts the OPPOSITE of idempotency, which is the real
+    /// contract. It was named `pending_op_idempotent_on_double_append` — a lie
+    /// that agreed with the rustdoc `log_op_pending` used to carry, and which
+    /// justified the `INSERT OR IGNORE` this test's own body disproves.
     #[test]
-    fn pending_op_idempotent_on_double_append() {
+    fn pending_op_double_append_writes_two_distinct_rows() {
         let db = open_test_db();
         let payload = serde_json::json!({"rid": "rid_idem"});
         let emb_bytes = fake_embedding(2.0, 64);

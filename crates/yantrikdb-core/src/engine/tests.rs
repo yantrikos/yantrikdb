@@ -6384,6 +6384,217 @@ fn test_conflict_entity_substitution_tech() {
     assert!(conflicts.len() >= 0);
 }
 
+/// sol #83 finding 2: reclassify's provisional-category branch minted a FRESH
+/// `cat_id`, `INSERT OR IGNORE`d it, then attached members with that id — so on a
+/// `UNIQUE(name)` collision the id named NO row and the members hit the
+/// `substitution_members.category_id` FK (`IGNORE` resolves as `ABORT` for FK
+/// errors), failing a legitimate reclassify.
+///
+/// The collision is reachable because `find_member_category` — which decides
+/// "unknown token", routing us into this branch — matches only
+/// `m.status = 'active'`, while `learn_category_members(source="llm_suggested")`
+/// (public, via the Python binding) creates members as `'pending'`. So the
+/// category name is taken while both its tokens still look unknown.
+///
+/// Fails on the unfixed code with a FOREIGN KEY constraint error.
+#[test]
+fn reclassify_reuses_existing_category_when_name_already_taken() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+
+    // A category whose name is exactly what strategy 3 will mint, with 'pending'
+    // members so both tokens still read as unknown to find_member_category.
+    //
+    // Set up via raw SQL rather than learn_category_members ON PURPOSE: that API
+    // deadlocks while creating a new category (see
+    // learn_category_members_creates_new_category_without_deadlocking), and
+    // routing this test through it would make it hang before it ever reached the
+    // behavior under test. One test, one claim.
+    // Invented tokens ON PURPOSE: the schema seeds real categories (redis, for
+    // instance, ships as an active member of "databases"), and any seeded token
+    // makes find_member_category return Some → known_a non-empty → strategy 2
+    // handles it and strategy 3 never runs. An earlier draft of this test used
+    // redis/memcached and passed against the UNFIXED code for exactly that
+    // reason — it never reached the branch it was written to cover.
+    let pre_id = "cat_pre_existing";
+    {
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO substitution_categories \
+             (id, name, conflict_mode, status, created_at, updated_at, hlc, origin_actor) \
+             VALUES (?1, 'learned_zorblat_quibnix', 'exclusive', 'active', 1.0, 1.0, X'00', 'test')",
+            rusqlite::params![pre_id],
+        )
+        .unwrap();
+        for (i, tok) in ["zorblat", "quibnix"].iter().enumerate() {
+            conn.execute(
+                "INSERT INTO substitution_members \
+                 (id, category_id, token_normalized, token_display, confidence, source, \
+                  status, created_at, updated_at, hlc, origin_actor) \
+                 VALUES (?1, ?2, ?3, ?3, 1.0, 'llm_suggested', 'pending', 1.0, 1.0, X'00', 'test')",
+                rusqlite::params![format!("m{i}"), pre_id, tok],
+            )
+            .unwrap();
+        }
+    }
+
+    // Two memories differing by exactly one meaningful token per side.
+    let mk = |text: &str, emb: &[f32]| {
+        db.record(
+            text,
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            emb,
+            "default",
+            0.8,
+            "work",
+            "user",
+            None,
+        )
+        .unwrap()
+    };
+    let a = mk("the config sets zorblat for caching", &vec_seed(1.0, 8));
+    let b = mk("the config sets quibnix for caching", &vec_seed(1.1, 8));
+
+    let mk_conflict = |id: &str| {
+        db.conn()
+            .execute(
+                "INSERT INTO conflicts \
+                 (conflict_id, conflict_type, priority, status, memory_a, memory_b, \
+                  detected_at, detected_by, detection_reason, hlc, origin_actor) \
+                 VALUES (?1, 'redundancy', 'medium', 'open', ?2, ?3, 2000.0, 'test', \
+                         'same attribute, different value', X'00', 'test')",
+                rusqlite::params![id, a, b],
+            )
+            .unwrap();
+    };
+    mk_conflict("cf1");
+    mk_conflict("cf2");
+
+    // First pass seeds the recurrence (strategy 3 requires a PRIOR
+    // conflict_reclassify carrying this token pair).
+    db.reclassify_conflict("cf1", "semantic").unwrap();
+
+    // Second pass: recurrence >= 1, both tokens unknown → strategy 3 mints
+    // "learned_zorblat_quibnix", which already exists. This is the call that
+    // failed before the fix (FOREIGN KEY constraint).
+    let res = db
+        .reclassify_conflict("cf2", "semantic")
+        .expect("reclassify must reuse the existing category, not die on its FK");
+
+    // Guard against a vacuous pass: prove strategy 3 ACTUALLY RAN. Without this,
+    // the assertions below hold trivially on any code path that never reaches
+    // the branch under test — which is exactly how the first draft of this test
+    // passed against the unfixed code.
+    assert!(
+        res.learned_members
+            .iter()
+            .any(|m| m.category_name == "learned_zorblat_quibnix"),
+        "strategy 3 must have run and targeted the colliding name, got {:?}",
+        res.learned_members
+    );
+
+    // The name still resolves to ONE category — the pre-existing one.
+    let n: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM substitution_categories WHERE name = 'learned_zorblat_quibnix'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1, "no duplicate category row");
+
+    // No member may reference a category id that doesn't exist. This is the
+    // invariant the fresh-id + OR IGNORE shape broke; asserting it directly
+    // catches the bug whether or not the FK happens to be enforced.
+    let orphans: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM substitution_members m \
+             WHERE NOT EXISTS (SELECT 1 FROM substitution_categories c WHERE c.id = m.category_id)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        orphans, 0,
+        "no members stranded under a non-existent category"
+    );
+
+    // ...and both tokens still hang off the SURVIVING category.
+    let members: Vec<String> = db
+        .conn()
+        .prepare(
+            "SELECT token_normalized FROM substitution_members \
+             WHERE category_id = ?1 ORDER BY token_normalized",
+        )
+        .unwrap()
+        .query_map(rusqlite::params![pre_id], |r| r.get(0))
+        .unwrap()
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .unwrap();
+    assert!(
+        members.contains(&"zorblat".to_string()) && members.contains(&"quibnix".to_string()),
+        "members belong to the surviving category, got {members:?}"
+    );
+}
+
+/// `learn_category_members` deadlocked outright on the branch that CREATES a
+/// category — i.e. the half its own doc comment advertises ("Creates the category
+/// if it doesn't exist"). Found while proving the #83 finding-2 regression test:
+/// that test hung here during setup instead of reaching the bug it targeted.
+///
+/// Cause: the `MutexGuard` from `self.conn()` sat in a `match` SCRUTINEE. Rust
+/// keeps scrutinee temporaries alive until the end of the whole `match`, so the
+/// guard was still held inside the `QueryReturnedNoRows` arm when that arm called
+/// `self.conn()` again — a re-lock of a non-reentrant `parking_lot::Mutex` on the
+/// same thread. It wedges the entire DB, not just the caller: every other writer
+/// then blocks on `conn` forever.
+///
+/// Reachable from the public Python binding (`learn_category_members(...,
+/// source="llm_suggested")`). The fix (`ensure_substitution_category`) removes the
+/// nesting: the INSERT and the read-back are separate statements, each releasing
+/// the guard.
+///
+/// Runs on a worker with a deadline so the deadlock FAILS this test instead of
+/// hanging the whole suite.
+#[test]
+fn learn_category_members_creates_new_category_without_deadlocking() {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let r = db.learn_category_members(
+            "brand_new_category",
+            &[("alpha".to_string(), 1.0), ("beta".to_string(), 1.0)],
+            "user_confirmed",
+        );
+        let n: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM substitution_categories WHERE name = 'brand_new_category'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(-1);
+        let _ = tx.send((r.map_err(|e| e.to_string()), n));
+    });
+
+    match rx.recv_timeout(std::time::Duration::from_secs(30)) {
+        Ok((res, n)) => {
+            let added = res.expect("learn_category_members must create the category");
+            assert_eq!(added, 2, "both members ingested");
+            assert_eq!(n, 1, "the new category row exists");
+        }
+        Err(_) => panic!(
+            "learn_category_members deadlocked creating a new category: \
+             self.conn() re-locked inside a match arm whose scrutinee still holds the guard"
+        ),
+    }
+}
+
 // ── Relationship-Based Entity Type Tests ──
 
 #[test]

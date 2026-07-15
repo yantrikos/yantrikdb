@@ -1400,7 +1400,11 @@ impl YantrikDB {
                 embedding_model,
             ],
         )?;
-        // Unconditional: a plain INSERT that returned Ok wrote exactly one row.
+        // Unconditional: a plain INSERT that returned Ok inserted exactly one
+        // row. That is a claim about this statement, not about durability — a
+        // caller wrapping its own rolled-back SAVEPOINT around this (via the
+        // public `conn()`) still leaves the counter high. See the fuller note in
+        // `log_op_pending` (sol #83 finding 3).
         self.pending_op_count.fetch_add(1, Ordering::Relaxed);
         Ok(op_id)
     }
