@@ -183,8 +183,19 @@ class TestConsolidate:
         assert len(edges) > 0
 
     def test_importance_boosted(self, db):
-        db.record("Important fact A", importance=0.8, embedding=_vec(1.0))
-        db.record("Related fact B", importance=0.6, embedding=_vec(1.02))
+        # Entity-free text ON PURPOSE. consolidate()'s entity-overlap guard
+        # (require_entity_overlap, default True since v0.6.0) refuses to merge two
+        # memories whose entity sets are non-empty and DISJOINT. Capitalized text
+        # like "Important fact A" / "Related fact B" extracts distinct entities, so
+        # this test used to pass only when it outran the materializer that
+        # populates memory_entities — a race, proven by
+        # `diagnostic_consolidate_entity_overlap_guard_is_materializer_race`
+        # (no-drain: 0 entities -> 1 cluster; drained: 2 entities -> 0 clusters).
+        # Similarity here comes from the EXPLICIT embeddings below, so the text
+        # affects nothing except entity extraction: lowercasing it makes the test
+        # deterministic without weakening what it checks.
+        db.record("the fact that was written", importance=0.8, embedding=_vec(1.0))
+        db.record("the related fact nearby", importance=0.6, embedding=_vec(1.02))
 
         results = consolidate(db, sim_threshold=0.9)
         consolidated = db.get(results[0]["consolidated_rid"])
@@ -205,9 +216,12 @@ class TestConsolidate:
         assert mem2["importance"] < 0.2
 
     def test_stats_after_consolidation(self, db):
-        db.record("A1", importance=0.7, embedding=_vec(1.0))
-        db.record("A2", importance=0.6, embedding=_vec(1.02))
-        db.record("B1", importance=0.5, embedding=_vec(10.0))
+        # Entity-free text — see test_importance_boosted. "A1"/"A2" extracted as
+        # DISTINCT entities, so the entity-overlap guard blocked the merge
+        # whenever the materializer won the race, flaking this test ~50%.
+        db.record("the first note", importance=0.7, embedding=_vec(1.0))
+        db.record("the second note", importance=0.6, embedding=_vec(1.02))
+        db.record("an unrelated note", importance=0.5, embedding=_vec(10.0))
 
         assert db.stats()["active_memories"] == 3
         assert db.stats()["consolidated_memories"] == 0

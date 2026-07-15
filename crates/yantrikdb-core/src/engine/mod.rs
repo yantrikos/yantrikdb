@@ -926,11 +926,19 @@ impl YantrikDB {
         // The partial idx_oplog_pending makes this single boot read O(N_pending)
         // — a fixed cost we pay once, in exchange for never paying it again
         // on the foreground hot path.
-        let initial_pending: i64 = conn
-            .query_row("SELECT COUNT(*) FROM oplog WHERE applied = 0", [], |row| {
+        //
+        // **Fail-CLOSED (v0.10 Item 4a.6a, sol review).** This used to
+        // `.unwrap_or(0)`, which is the wrong direction for a queue ceiling: a
+        // failed count would seed the counter at zero, so the engine would believe
+        // the ingest queue was empty no matter how many pending ops were really in
+        // SQL, and `MAX_PENDING_OPS` would never fire — unbounded ingest, silently.
+        // A boot read that cannot be trusted must fail the open, not invent a
+        // permissive answer. (Same class as the fail-open defaults in 4a.1 and
+        // 4a.4.)
+        let initial_pending: i64 =
+            conn.query_row("SELECT COUNT(*) FROM oplog WHERE applied = 0", [], |row| {
                 row.get(0)
-            })
-            .unwrap_or(0);
+            })?;
 
         // Build the DeltaIndex once, wrap in Arc, and move it into the
         // initial `SearchState`. After issue #41 brainstorm-4 §1, the

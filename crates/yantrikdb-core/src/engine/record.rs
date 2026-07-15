@@ -9,6 +9,89 @@ use super::reembed::SearchState;
 use super::write_router::SyncWriteGuard;
 use super::{embedding_hash, now, sanitize, YantrikDB};
 
+/// Which obligation the write currently owes (v0.10 Item 4a.6a).
+enum ResPhase {
+    /// Reserved, nothing durable. Owe: remove the reservation.
+    Reserved,
+    /// Durable. Owe: publish the vector AND count the pending op.
+    Committed,
+    /// All obligations discharged.
+    Done,
+}
+
+/// PHASE-AWARE RAII for the reserve → commit → publish protocol (sol 4a.6a
+/// findings 3 and r2-2).
+///
+/// The obligation this guard carries INVERTS at commit, and both halves must
+/// survive an unwinding panic:
+///
+/// - **Before commit** — nothing durable exists, so the reservation must be
+///   REMOVED. `append_reserved` consumes delta capacity with an entry search
+///   skips and compaction deliberately RETAINS rather than seals (the property
+///   that makes rollback safe). So a leaked reservation is permanent: nobody
+///   else will ever remove it, it holds capacity until restart, and enough of
+///   them wedge every writer into Backpressure.
+/// - **After commit** — the row is durable, so the reservation must be
+///   PUBLISHED and the pending op COUNTED. A panic here previously left a
+///   durable row whose vector was invisible until an index rebuild, plus a
+///   pending row missing from `pending_op_count`. The first version defused the
+///   guard AT commit, before both — and the `debug_assert!` added to be careful
+///   was itself a panic point in that window.
+///
+/// Restart repairs both (the index rebuilds from `memories`; the counter
+/// re-seeds), but the engine deliberately uses non-poisoning locks so a
+/// `catch_unwind` process CONTINUES — and that process is the exposure.
+struct ReservationGuard<'a> {
+    state: &'a SearchState,
+    pending_op_count: &'a std::sync::atomic::AtomicI64,
+    rid: &'a str,
+    seq: u64,
+    phase: ResPhase,
+}
+
+impl ReservationGuard<'_> {
+    /// The transaction committed: from here the obligation is publish+count.
+    fn mark_committed(&mut self) {
+        self.phase = ResPhase::Committed;
+    }
+
+    /// Discharge the post-commit obligations exactly once. Returns whether
+    /// `publish` found the reservation.
+    fn complete(&mut self) -> bool {
+        let published = self.discharge_committed();
+        self.phase = ResPhase::Done;
+        published
+    }
+
+    /// publish + count. Idempotent-by-phase: only ever run once, either from
+    /// `complete()` or from `Drop` on a post-commit unwind.
+    fn discharge_committed(&self) -> bool {
+        let published = self.state.vec_index.publish(self.rid, self.seq);
+        self.pending_op_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        published
+    }
+}
+
+impl Drop for ReservationGuard<'_> {
+    fn drop(&mut self) {
+        match self.phase {
+            // Always succeeds: reserved entries are never sealed. A removal, NOT
+            // a tombstone — a tombstone would suppress the rid and hide a
+            // still-valid older vector.
+            ResPhase::Reserved => {
+                self.state.vec_index.remove_appended(self.rid, self.seq);
+            }
+            // Unwound after commit. The write IS durable, so finish the job
+            // rather than strand it.
+            ResPhase::Committed => {
+                self.discharge_committed();
+            }
+            ResPhase::Done => {}
+        }
+    }
+}
+
 /// Coerce a blank namespace to the canonical default (v0.7.23).
 ///
 /// The schema column default and the Python/MCP bindings all use
@@ -212,10 +295,122 @@ impl YantrikDB {
         // search_state cannot advance under us until the guard drops.
         let embedding_generation: i64 = state.generation as i64;
 
-        // Acquire conn, do all SQL, then drop before other locks
-        {
-            let conn = self.conn();
-            conn.execute(
+        // **v0.10 Item 4a.6a — durable sync acceptance.**
+        //
+        // This path used to be four independent autocommit windows: the memories
+        // row, the session updates, `log_op("record")`, and the
+        // `log_op_pending(materialize_record_post)` enqueue, with a plain
+        // `vec_index.append` in the middle. A crash or an error between them left
+        // a committed row with NO oplog provenance — the leak the old comment
+        // here recorded as "23k rows over 39 days on trader's `default` DB" — and
+        // the fix was a best-effort compensating DELETE (plus a second patch to
+        // reverse the session `memory_count` the DELETE left behind).
+        //
+        // It now follows the reserve → commit → publish protocol `correct()` has
+        // used since Item 3 (lifecycle.rs): reserve vector capacity BEFORE any
+        // durable mutation, commit every durable effect in ONE transaction, then
+        // publish (infallible). Backpressure and dim errors now surface having
+        // touched nothing, so the orphan-on-Backpressure class is structurally
+        // impossible rather than compensated — the DELETE and the memory_count
+        // reversal are both deleted below, not relocated.
+        //
+        // Lock order is CONCURRENCY.md Rule 1 (`conn → … → vec_index`): conn is
+        // held across the reservation, the transaction, and the publish. That is
+        // load-bearing, exactly as in `correct()` — the conn lock is the only
+        // thing serializing append order with commit order (the SyncWriteGuard is
+        // a counter, not a mutex). It does not offend Rule 4, whose concern is
+        // holding conn across non-O(1) work; a delta reserve/publish is an O(1)
+        // Vec push / flag flip.
+
+        // Advisory early reject: cheap, unlocked, and NOT authoritative — the
+        // binding check happens under the conn lock below. Doing it here too just
+        // avoids the embed/serialize work on an obviously-full queue.
+        //
+        // KNOWN GAP, deliberately not closed here (sol 4a.6a finding 2): this is
+        // not "before any side effect". `calibrate_importance` (record.rs:101)
+        // already ran and autocommitted an update to `namespace_importance_stats`
+        // (importance.rs:88) BEFORE routing, so a write rejected below — by
+        // backpressure, by delta capacity, or by a transaction failure — has
+        // already advanced this namespace's calibration distribution permanently.
+        // That is a real defect and it predates 4a.6a; sol's own increment plan
+        // puts the fix in 4a.6b ("winner-only, transactional calibration"), where
+        // the claim decides who is allowed to advance it. It is called out here so
+        // nobody reads this path as fully side-effect-free before then.
+        self.check_pending_backpressure_fast()?;
+
+        let emb_hash = embedding_hash(embedding);
+        let record_payload = serde_json::json!({
+            "rid": rid,
+            "type": memory_type,
+            "text": text,
+            "importance": importance,
+            "valence": valence,
+            "half_life": half_life,
+            "metadata": metadata,
+            "created_at": ts,
+            "updated_at": ts,
+            "namespace": namespace,
+            "certainty": certainty,
+            "domain": domain,
+            "source": source,
+            "emotional_state": emotional_state,
+        });
+        // **Phase 4.3 Commit B (saga task 3, 2026-05-08).** The unbounded entity
+        // / memory_entities / claims loops that used to run inline are enqueued
+        // for the materializer thread instead. See docs/phase_4_3_design.md.
+        // 4a.6a moves this enqueue INSIDE the transaction: it was previously its
+        // own failure boundary, so a crash after the row committed but before the
+        // enqueue landed meant that record's entity materialization was skipped
+        // FOREVER, with nothing left to indicate it was owed.
+        let post_payload = serde_json::json!({
+            "rid": rid,
+            "text": stored_text,
+            "namespace": namespace,
+            "ts_secs": ts,
+            "domain": domain,
+            "source": source,
+        });
+
+        let conn = self.conn();
+
+        // THE authoritative admission check: under the lock, before the
+        // reservation and before any durable write. The pre-lock check above is a
+        // TOCTOU on its own (sol 4a.6a finding 1) — at MAX_PENDING_OPS-1, N
+        // writers can all read "under the limit", then serialize here and each
+        // commit an enqueue, overshooting the ceiling. Re-reading under the lock
+        // serializes the read with the commit that acts on it, so the bound holds.
+        self.check_pending_backpressure_locked()?;
+
+        // Mint the seq UNDER the conn lock. Search resolves a rid to its HIGHEST
+        // seq, not the most recently appended one, so minting outside the
+        // serialized region would let a stalled writer holding seq N append after
+        // a writer with seq N+1 committed — serving one writer's vector with
+        // another's text. Same reasoning as lifecycle.rs's correction path.
+        let seq = self.assign_seq(None);
+
+        // RESERVE: consumes delta capacity and validates dim, but stays invisible
+        // to search until published. This is where Backpressure surfaces — before
+        // a single durable byte has been written.
+        state
+            .vec_index
+            .append_reserved(rid.clone(), embedding.to_vec(), seq)?;
+
+        // From here until commit, ANY exit — including an unwinding panic —
+        // must drop the reservation, or its capacity is held forever
+        // (compaction retains unpublished entries by design).
+        let mut reservation = ReservationGuard {
+            state: &state,
+            pending_op_count: &self.pending_op_count,
+            rid: &rid,
+            seq,
+            phase: ResPhase::Reserved,
+        };
+
+        // ONE transaction: row + session links + the record op + the
+        // post-materialization enqueue. Either all of it is durable or none is.
+        let committed = (|| -> Result<()> {
+            let tx = conn.unchecked_transaction()?;
+            tx.execute(
                 "INSERT INTO memories \
                  (rid, type, text, embedding, created_at, updated_at, importance, \
                   half_life, last_access, valence, metadata, namespace, \
@@ -242,59 +437,111 @@ impl YantrikDB {
                 ],
             )?;
 
-            // Auto-link to active session for this namespace
+            // Auto-link to active session for this namespace.
             if let Some(session_id) = &session_id {
-                conn.execute(
+                tx.execute(
                     "UPDATE memories SET session_id = ?1 WHERE rid = ?2",
                     params![session_id, rid],
                 )?;
-                conn.execute(
+                tx.execute(
                     "UPDATE sessions SET memory_count = memory_count + 1 WHERE session_id = ?1",
                     params![session_id],
                 )?;
             }
-        }
-        // conn dropped here
 
-        // Insert into vector index (lock ordering: conn already dropped)
-        let seq = self
-            .vec_seq
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1;
-        // **Issue surfaced in CT 132 bench post-v0.7.18 (2026-05-20):
-        // orphan-on-Backpressure pattern.** If the vec_index.append
-        // returns Err (Backpressure when delta is full, dim mismatch,
-        // etc.), the memories row inserted above is already committed
-        // but the rest of the critical section (vec_index, oplog,
-        // visible_seq, materializer enqueue) is skipped. The caller
-        // sees an Err and assumes the write failed — but the row
-        // exists in SQL with no oplog provenance. Over 39 days on
-        // trader's `default` DB, this leaked 23k rows.
-        //
-        // The compensating DELETE here runs only on the rare failure
-        // path. On Backpressure (the common error), the DELETE
-        // immediately reclaims the row so SQL state matches what the
-        // caller observes (write rejected, no row created).
-        if let Err(e) = state.vec_index.append(rid.clone(), embedding.to_vec(), seq) {
-            let conn = self.conn();
-            let _ = conn.execute("DELETE FROM memories WHERE rid = ?1", params![rid]);
-            // **v0.7.23 residual fix.** The compensating DELETE above
-            // reclaims the orphaned memories row, but the session
-            // `memory_count` bumped in the conn block above survives the
-            // delete and over-counts by 1 per backpressure-rejected
-            // record. Reverse it so the session stat matches the rows
-            // that actually exist.
-            if let Some(session_id) = &session_id {
-                let _ = conn.execute(
-                    "UPDATE sessions SET memory_count = memory_count - 1 WHERE session_id = ?1",
-                    params![session_id],
-                );
+            // Kill boundary. Before 4a.6a the row above was already committed by
+            // its own autocommit at this point, while the oplog op below had not
+            // been written — a process death here left exactly the orphan the
+            // "23k rows over 39 days" comment described. Inside the transaction,
+            // dying here rolls back BOTH. `kill_record_boundary.rs` proves it.
+            crate::testing::fail_point("record.between_row_and_oplog");
+
+            // The user-facing "record" op goes in FIRST so external consumers
+            // (replication extract_ops_since, oplog inspectors) see the natural
+            // causal order: the record precedes any materialization queued in its
+            // wake. `applied_generation` is the guard-pinned snapshot generation,
+            // which is the generation the reserved delta entry was written
+            // against.
+            self.log_op_in_tx(
+                &tx,
+                "record",
+                Some(&rid),
+                &record_payload,
+                Some(&emb_hash),
+                None,
+                embedding_generation,
+            )?;
+
+            // Plain INSERT: if this cannot land, the whole write must fail
+            // rather than commit a record whose entity materialization is owed
+            // to nobody. See log_op_pending_in_tx.
+            self.log_op_pending_in_tx(
+                &tx,
+                crate::engine::op_types::OP_MATERIALIZE_RECORD_POST,
+                Some(&rid),
+                &post_payload,
+                None,
+                None,
+            )?;
+
+            tx.commit()?;
+            Ok(())
+        })();
+
+        match committed {
+            // Durable. The guard's obligation INVERTS here: from "remove the
+            // reservation" to "publish it and count the pending op". It is not
+            // defused — an unwind between here and complete() must still finish
+            // the job, because the row is already committed.
+            Ok(()) => reservation.mark_committed(),
+            Err(e) => {
+                // Nothing durable exists. `reservation` drops here and removes the
+                // entry — a removal, NOT a tombstone (a tombstone would suppress
+                // the rid and hide a still-valid older vector).
+                drop(conn);
+                return Err(e);
             }
-            return Err(e);
         }
-        self.bump_visible_seq(namespace, seq);
 
-        // Insert into scoring cache (conn and vec_index dropped)
+        // Durable. PUBLISH makes the vector visible; it is infallible, so there
+        // is no failure window between "committed" and "visible". A crash here
+        // rebuilds the index from `memories` on next open — the row is
+        // authoritative.
+        // Discharge both post-commit obligations — publish the vector and count
+        // the pending op — in one place the guard also performs on an unwind, so
+        // a caught panic cannot strand a durable write with an invisible vector
+        // or an uncounted pending row.
+        let published = reservation.complete();
+
+        // The counter moved inside complete() above — only after the tx
+        // committed. Incrementing inside the tx would leak it upward on rollback
+        // with no row for `mark_op_applied` to decrement; that drift is monotonic
+        // and at MAX_PENDING_OPS wedges every write into Backpressure with an
+        // empty queue in SQL. It is unconditional because the enqueue is a plain
+        // INSERT in the committed tx, so reaching here means exactly one pending
+        // row landed.
+        //
+        // The assert comes AFTER the counter is discharged: as a post-commit panic
+        // point it would otherwise be exactly the hazard the guard exists to
+        // close (sol 4a.6a r2 finding 2).
+        debug_assert!(
+            published,
+            "reservation for {rid} seq {seq} vanished before publish"
+        );
+        if !published {
+            tracing::error!(
+                rid = %rid,
+                seq,
+                "reserved vector entry missing at publish — row is durable but \
+                 unsearchable until the index is rebuilt from SQL"
+            );
+        }
+        // All obligations are discharged (phase == Done), so this Drop is a no-op.
+        // It is explicit only to release the guard's borrow of `rid` before we
+        // return it — and it must stay AFTER complete(), which is what makes the
+        // drop inert.
+        drop(reservation);
+
         self.cache_insert(
             rid.clone(),
             ScoringRow {
@@ -314,59 +561,11 @@ impl YantrikDB {
             },
         );
 
-        // Log the user-facing "record" op FIRST so external consumers
-        // (replication extract_ops_since, oplog inspectors) see records
-        // in their natural causal order: the record came before any
-        // post-record materialization queued in its wake.
-        let emb_hash = embedding_hash(embedding);
-        self.log_op(
-            "record",
-            Some(&rid),
-            &serde_json::json!({
-                "rid": rid,
-                "type": memory_type,
-                "text": text,
-                "importance": importance,
-                "valence": valence,
-                "half_life": half_life,
-                "metadata": metadata,
-                "created_at": ts,
-                "updated_at": ts,
-                "namespace": namespace,
-                "certainty": certainty,
-                "domain": domain,
-                "source": source,
-                "emotional_state": emotional_state,
-            }),
-            Some(&emb_hash),
-        )?;
+        // LAST: a read-your-write waiter must not wake against a half-applied
+        // record (CONCURRENCY.md: bump visible_seq AFTER the delta append).
+        self.bump_visible_seq(namespace, seq);
 
-        // **Phase 4.3 Commit B (saga task 3, 2026-05-08).** The
-        // unbounded entity / memory_entities / claims loops that used
-        // to live here are now enqueued for the materializer thread to
-        // run off the request path. See docs/phase_4_3_design.md for
-        // the contract change (synchronous read-after-write of
-        // entity-graph queries shifts from immediate to ms-scale; the
-        // delta-recall path is unaffected since DeltaIndex.append
-        // happened above on the foreground thread).
-        {
-            let post_payload = serde_json::json!({
-                "rid": rid,
-                "text": stored_text,
-                "namespace": namespace,
-                "ts_secs": ts,
-                "domain": domain,
-                "source": source,
-            });
-            self.log_op_pending(
-                crate::engine::op_types::OP_MATERIALIZE_RECORD_POST,
-                Some(&rid),
-                &post_payload,
-                None,
-                None,
-            )?;
-        }
-
+        drop(conn);
         Ok(rid)
     }
 
@@ -1168,18 +1367,14 @@ impl YantrikDB {
         let hlc_bytes = hlc_ts.to_bytes().to_vec();
         let payload_str = serde_json::to_string(payload)?;
 
-        // Backpressure check (mirrors log_op_pending's contract).
-        const MAX_PENDING_OPS: i64 = 10_000;
-        let pending_now = self.pending_op_count.load(Ordering::Relaxed);
-        if pending_now >= MAX_PENDING_OPS {
-            return Err(crate::error::YantrikDbError::Backpressure {
-                pending: pending_now,
-                max: MAX_PENDING_OPS,
-                retry_after_ms: 50,
-            });
-        }
+        // Advisory fast reject (unlocked); the AUTHORITATIVE check is under the
+        // lock below. Same TOCTOU, same fix as log_op_pending (sol 4a.6a r2
+        // finding 1): two queued writers at MAX_PENDING_OPS-1 could both pass an
+        // unlocked load and then serialize their inserts past the ceiling.
+        self.check_pending_backpressure_fast()?;
 
         let conn = self.conn.lock();
+        self.check_pending_backpressure_locked()?;
         conn.execute(
             "INSERT OR IGNORE INTO oplog \
              (op_id, op_type, timestamp, target_rid, payload, \

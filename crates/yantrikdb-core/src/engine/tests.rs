@@ -13855,6 +13855,292 @@ fn boundary_audit_pattern_detects_synthetic_violation() {
 // DELETE + replication_apply_log audit table.
 // ─────────────────────────────────────────────────────────────────
 
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn record_backpressure_writes_no_row_op_or_session_state() {
+    // **v0.10 Item 4a.6a.** The v0.7.19 sibling below asserts the OLD contract:
+    // the row was written, then a compensating DELETE reclaimed it. record() no
+    // longer needs compensating — it RESERVES delta capacity before touching SQL,
+    // so Backpressure surfaces without a row, an op, or session state.
+    //
+    // NAMED PRECISELY, because "writes nothing at all" would be a LIE (sol 4a.6a
+    // finding 2): `calibrate_importance` already autocommitted an update to
+    // `namespace_importance_stats` before routing, so a rejected write HAS moved
+    // this namespace's calibration. That defect predates 4a.6a and is fixed in
+    // 4a.6b (winner-only transactional calibration). What this test does assert:
+    //
+    //   1. no memories row              (the old design also achieved this, by
+    //                                    writing one and deleting it)
+    //   2. no oplog op of ANY kind      (row + ops are now one transaction)
+    //   3. session memory_count UNCHANGED — the sharp one. The old path bumped
+    //      the count and needed a SECOND patch (v0.7.23) to reverse it. The bump
+    //      now never happens, so there is nothing to reverse.
+    //   4. pending_op_count UNCHANGED — the materialize enqueue is in the same
+    //      transaction, and the counter only moves after commit.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let dim = db.embedding_dim();
+
+    let session_id = db.session_start("default", "bp-client", &empty_meta()).ok();
+    let count_for = |sid: &str| -> i64 {
+        db.conn()
+            .query_row(
+                "SELECT memory_count FROM sessions WHERE session_id = ?1",
+                rusqlite::params![sid],
+                |r| r.get(0),
+            )
+            .unwrap_or(-1)
+    };
+
+    // Pump until the delta tier saturates (no compactor is running, so it never
+    // drains). Record the state at the moment Backpressure first appears.
+    let mut hit: Option<(i64, i64, i64, String)> = None;
+    for i in 0..400 {
+        let embedding: Vec<f32> = (0..dim).map(|j| ((i + j) as f32) * 0.001).collect();
+        let rows_before: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+            .unwrap();
+        let ops_before: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM oplog", [], |r| r.get(0))
+            .unwrap();
+        let sess_before = session_id.as_deref().map(count_for).unwrap_or(-1);
+        let pend_before = db.count_pending_ops().unwrap();
+
+        let text = format!("bp-probe-{i}");
+        match db.record(
+            &text,
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &embedding,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        ) {
+            Ok(_) => continue,
+            Err(crate::error::YantrikDbError::Backpressure { .. }) => {
+                let rows_after: i64 = db
+                    .conn()
+                    .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+                    .unwrap();
+                let ops_after: i64 = db
+                    .conn()
+                    .query_row("SELECT COUNT(*) FROM oplog", [], |r| r.get(0))
+                    .unwrap();
+                let sess_after = session_id.as_deref().map(count_for).unwrap_or(-1);
+                let pend_after = db.count_pending_ops().unwrap();
+
+                assert_eq!(rows_after, rows_before, "Backpressure wrote a memories row");
+                assert_eq!(ops_after, ops_before, "Backpressure wrote an oplog op");
+                assert_eq!(
+                    sess_after, sess_before,
+                    "Backpressure bumped sessions.memory_count (the v0.7.23 residual)"
+                );
+                assert_eq!(
+                    pend_after, pend_before,
+                    "Backpressure moved pending_op_count"
+                );
+                // The rejected text must not be findable at all.
+                let found: i64 = db
+                    .conn()
+                    .query_row(
+                        "SELECT COUNT(*) FROM memories WHERE text = ?1",
+                        rusqlite::params![text],
+                        |r| r.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(found, 0, "rejected record's text is present in memories");
+                hit = Some((rows_after, ops_after, sess_after, text));
+                break;
+            }
+            Err(e) => panic!("unexpected error while pumping the delta: {e:?}"),
+        }
+    }
+    assert!(
+        hit.is_some(),
+        "delta never saturated — test did not exercise Backpressure"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn consolidate_entity_overlap_guard_depends_on_materializer_progress() {
+    // Pins a genuine, load-bearing behaviour of consolidate(): its result depends
+    // on whether the materializer has populated `memory_entities` yet.
+    //
+    // The entity-overlap guard (require_entity_overlap, default true since v0.6.0)
+    // refuses to merge two memories whose entity sets are non-empty and DISJOINT —
+    // it exists to stop cosine-only false merges across distinct named subjects
+    // ("Alice is CEO" vs "Sarah is CTO"). Entities are extracted ASYNCHRONOUSLY by
+    // the materializer, so the SAME pair of memories clusters before extraction
+    // and refuses to cluster after it.
+    //
+    // This was found the hard way: v0.10 Item 4a.6a shifted record()'s commit
+    // timing and two python consolidation tests began flaking ~50%. They recorded
+    // "A1"/"A2" — distinct entities — and had only ever passed by outrunning the
+    // materializer. The engine was right both times; the tests encoded pre-guard
+    // behaviour. They now use entity-free text so they test consolidation
+    // mechanics rather than a race.
+    //
+    // Keep this test: it is the executable statement of that asymmetry, and it
+    // fails loudly if the guard's semantics ever drift.
+    let mk = |db: &YantrikDB, text: &str, seed: f32| {
+        db.record(
+            text,
+            "episodic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(seed, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap()
+    };
+
+    // --- WITHOUT draining: entities not yet extracted ---
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let r1 = mk(&db, "A1", 1.0);
+    let r2 = mk(&db, "A2", 1.02);
+    let ents_before: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM memory_entities", [], |r| r.get(0))
+        .unwrap();
+    let clusters_nodrain =
+        crate::cognition::consolidate::find_consolidation_candidates(&db, 0.9, 30.0, 2, 100, true)
+            .unwrap()
+            .len();
+
+    // --- WITH draining: materializer has populated memory_entities ---
+    let db2 = YantrikDB::new(":memory:", 8).unwrap();
+    let _r3 = mk(&db2, "A1", 1.0);
+    let _r4 = mk(&db2, "A2", 1.02);
+    db2.apply_pending_ops_once(100).unwrap();
+    let ents_after: i64 = db2
+        .conn()
+        .query_row("SELECT COUNT(*) FROM memory_entities", [], |r| r.get(0))
+        .unwrap();
+    let clusters_drained =
+        crate::cognition::consolidate::find_consolidation_candidates(&db2, 0.9, 30.0, 2, 100, true)
+            .unwrap()
+            .len();
+
+    // Report the mechanism plainly; the assertion is on the DIFFERENCE.
+    println!(
+        "no-drain: memory_entities={ents_before} clusters={clusters_nodrain}  |  \
+         drained: memory_entities={ents_after} clusters={clusters_drained}  (rids {r1} {r2})"
+    );
+
+    assert_ne!(
+        clusters_nodrain, clusters_drained,
+        "if these match, the entity-overlap guard is NOT the mechanism — hypothesis refuted"
+    );
+    assert_eq!(
+        clusters_drained, 0,
+        "once entities exist, the disjoint-entity guard must block the merge"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn record_commits_row_and_both_oplog_ops_atomically() {
+    // **v0.10 Item 4a.6a.** The row, the user-facing "record" op, and the
+    // materialize_record_post enqueue were three independent autocommit windows;
+    // a crash between them left a row with no provenance (the 23k-row leak) or a
+    // record whose entity materialization was owed to nobody. They now commit in
+    // ONE transaction, so all three exist together or not at all.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let pend_before = db.count_pending_ops().unwrap();
+
+    let rid = db
+        .record(
+            "atomic commit probe",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    let conn = db.conn();
+    let row: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE rid = ?1",
+            rusqlite::params![rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let rec_op: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM oplog WHERE op_type = 'record' AND target_rid = ?1 AND applied = 1",
+            rusqlite::params![rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let post_op: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM oplog WHERE op_type = ?1 AND target_rid = ?2 AND applied = 0",
+            rusqlite::params![crate::engine::op_types::OP_MATERIALIZE_RECORD_POST, rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    drop(conn);
+
+    assert_eq!(row, 1, "memories row missing");
+    assert_eq!(rec_op, 1, "the record op did not commit with the row");
+    assert_eq!(
+        post_op, 1,
+        "the materialize enqueue did not commit with the row"
+    );
+
+    // The counter moves only after commit, and exactly once.
+    assert_eq!(
+        db.count_pending_ops().unwrap(),
+        pend_before + 1,
+        "pending_op_count did not track the committed enqueue"
+    );
+
+    // Published, therefore visible to search.
+    let hits = db
+        .recall(
+            &vec_seed(1.0, 8),
+            5,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+    assert!(
+        hits.iter().any(|h| h.rid == rid),
+        "committed record was not published to the index"
+    );
+}
+
 #[test]
 fn record_with_rid_backpressure_does_not_leak_orphan_memories_row() {
     // **v0.7.19 fix verification.** Reproduces the trader's
