@@ -230,6 +230,17 @@ pub enum YantrikDbError {
         authority: String,
     },
 
+    /// **v0.10 Item 4a — anti-laundering provenance gate.** A write declared an
+    /// internally inconsistent provenance — e.g. `source=inference` claiming
+    /// `kind=fact` without confirmation/verification basis or an explicit
+    /// override, `source=inference` with `confidence_basis=observation`, or an
+    /// unparseable protected `source`/`confidence_basis`. Rejected at write time
+    /// BEFORE any side effect (mirrors the v0.9.3 validation contract). The gate
+    /// prevents DECLARED contradictions only; it does not (and cannot) verify
+    /// truthful provenance.
+    #[error("provenance rejected at {path}: {reason}")]
+    ProvenanceInconsistent { path: &'static str, reason: String },
+
     /// **Phase 6 RYW**: caller-requested visible_seq was not reached within
     /// the timeout window. Either the write that should have bumped the seq
     /// has not yet materialized (legitimate timeout — caller should retry or
