@@ -342,10 +342,22 @@ impl YantrikDB {
     /// **Returns** `Ok(true)` iff this caller transitioned the row from
     /// `applied=0` to `applied=1`. `Ok(false)` means another worker
     /// already applied it (race on shared oplog, normal under N workers).
-    /// The race-safety filter `WHERE applied = 0` is what makes
-    /// `apply_pending_ops_once` exactly-once across N concurrent workers
-    /// — the work is idempotent so double-execution is safe; this filter
-    /// just decides which worker gets to claim the apply count.
+    ///
+    /// **This is a completion ACKNOWLEDGEMENT, not a pre-work claim.** The
+    /// distinction is load-bearing and was previously documented backwards
+    /// ("the work is idempotent so double-execution is safe; this filter just
+    /// decides which worker gets to claim the apply count"). Callers do the work
+    /// FIRST and only then race on `WHERE applied = 0`, so the filter does not
+    /// prevent duplicate execution — N workers draining the same pending op all
+    /// perform the work, and it merely picks which one gets to record it.
+    /// Retries after an error re-execute it too.
+    ///
+    /// So `apply_pending_ops_once` is exactly-once in its BOOKKEEPING and
+    /// at-least-once in its EFFECTS. Every op handler must therefore be
+    /// genuinely idempotent on its own; that is a real obligation, not a
+    /// property this function confers. It was violated by the mention-count
+    /// bump in `apply_materialize_record_post` (see the note there).
+    /// Making this a true pre-work lease is v0.10 Item 4a.6.
     pub fn mark_op_applied(&self, op_id: &str) -> Result<bool> {
         use std::sync::atomic::Ordering;
         let conn = self.conn.lock();
@@ -767,21 +779,53 @@ impl YantrikDB {
         let text_tokens = crate::graph::tokenize(text);
         let heuristic_entities = crate::graph::extract_heuristic_entities(text);
 
-        // Loop A: seed heuristic entities (idempotent INSERT ... ON CONFLICT).
+        // Loop A: seed heuristic entities.
+        //
+        // The mention bump is gated on `memory_entities` so replaying this op is
+        // a no-op for the counter. It previously ran unconditionally under a
+        // comment calling the statement "idempotent" — the INSERT does not FAIL
+        // on conflict, but `mention_count = mention_count + 1` is not idempotent
+        // at all, and this op is genuinely executed more than once:
+        //
+        //   - `mark_op_applied` is a completion ACKNOWLEDGEMENT, not a pre-work
+        //     claim. Workers do the work and only THEN race on
+        //     `UPDATE ... WHERE applied = 0`, so N workers draining the same
+        //     pending op all run this loop; the filter merely picks who counts it.
+        //   - on error the op stays pending and is retried, re-running the loop.
+        //
+        // Each duplicate inflated every heuristic entity's mention_count, which
+        // feeds the IDF term in `patterns.rs` (`total_entities / (1 + mention_count)`),
+        // so the drift silently skewed salience scoring.
+        //
+        // `memory_entities` is PK'd on (memory_rid, entity_name) and carries no
+        // FK, so `INSERT OR IGNORE` + `changes()` is an exact, durable answer to
+        // "is this the first time this memory's mention of this entity has been
+        // recorded?" — which is precisely what the counter is supposed to count.
+        // It is per-entity, so a run that died midway through the loop still
+        // replays correctly: entities already counted are skipped, the rest are
+        // counted once.
         if !heuristic_entities.is_empty() {
             let conn = self.conn();
             for entity in &heuristic_entities {
                 let entity_type = crate::graph::classify_entity_type(entity);
+                // Claim the mention first; Loop B's INSERT OR IGNORE below is a
+                // no-op for anything already claimed here.
+                let first_mention = conn.execute(
+                    "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) \
+                     VALUES (?1, ?2)",
+                    params![rid, entity],
+                )? > 0;
+                let inc: i64 = if first_mention { 1 } else { 0 };
                 conn.execute(
                     "INSERT INTO entities (name, entity_type, first_seen, last_seen, mention_count) \
-                     VALUES (?1, ?2, ?3, ?3, 1) \
+                     VALUES (?1, ?2, ?3, ?3, ?4) \
                      ON CONFLICT(name) DO UPDATE SET \
                         last_seen = ?3, \
-                        mention_count = mention_count + 1, \
+                        mention_count = mention_count + ?4, \
                         entity_type = CASE \
                             WHEN entity_type = 'unknown' AND ?2 != 'unknown' THEN ?2 \
                             ELSE entity_type END",
-                    params![entity, entity_type, ts_secs],
+                    params![entity, entity_type, ts_secs, inc],
                 )?;
             }
         }
