@@ -4,6 +4,7 @@ pub mod encryption;
 pub mod error;
 pub mod fitting;
 pub mod hlc;
+pub mod payload_digest;
 pub mod provenance;
 pub mod schema;
 pub mod scoring;
