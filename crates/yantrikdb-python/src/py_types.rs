@@ -220,6 +220,15 @@ pub fn stats_to_dict(py: Python<'_>, s: &yantrikdb_core::Stats) -> PyResult<PyOb
         "superseded_served_since_boot",
         s.superseded_served_since_boot,
     )?;
+    // v0.10 Item 4a.4: anti-laundering gate adoption surface. `mode` is
+    // off|warn|enforce; `flagged` counts writes the gate would refuse under
+    // enforce but allowed under warn — the migration nudge a legacy DB's
+    // operator reviews before calling set_provenance_gate_mode(enforce).
+    dict.set_item("provenance_gate_mode", &s.provenance_gate_mode)?;
+    dict.set_item(
+        "provenance_flagged_since_boot",
+        s.provenance_flagged_since_boot,
+    )?;
     Ok(dict.into())
 }
 

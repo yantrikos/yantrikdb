@@ -501,6 +501,25 @@ impl YantrikDB {
         // Check existing schema version for migration
         let existing_version = Self::get_schema_version(&conn);
 
+        // **v0.10 Item 4a.4 (sol) — an unambiguous "brand new database" signal.**
+        // `get_schema_version` collapses a query FAILURE or a missing key into
+        // `None`, so an EXISTING database whose `schema_version` row is missing
+        // or unreadable would be misclassified as fresh and handed the strict
+        // fresh defaults — exactly the upgrade break the migration model exists
+        // to prevent. Ask the real question instead ("did this database have any
+        // user tables before we initialized it?"), evaluated BEFORE SCHEMA_SQL
+        // runs below. On any error, assume NOT empty: an unreadable database is
+        // treated as pre-existing, so we fail toward the LENIENT/back-compatible
+        // default rather than toward breaking a live caller.
+        let db_was_empty: bool = conn
+            .query_row(
+                "SELECT COUNT(*) = 0 FROM sqlite_master \
+                 WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+
         // Sequential migration chain — each version cascades.
         let migrations: &[(i32, &str)] = &[
             (1, MIGRATE_V1_TO_V2),
@@ -603,11 +622,11 @@ impl YantrikDB {
         // stats() nudge, but NEVER refuses — so existing callers are not broken
         // on upgrade. `set_provenance_gate_mode` is the durable opt-in. INSERT
         // OR IGNORE keeps any operator-set value authoritative across opens.
-        let default_gate_mode = if existing_version.is_none() {
-            "enforce"
-        } else {
-            "warn"
-        };
+        // Uses `db_was_empty` (a real emptiness check), NOT
+        // `existing_version.is_none()` — the latter misclassifies an existing DB
+        // with an unreadable/missing schema_version as fresh and would hand it
+        // `enforce` (sol 4a.4).
+        let default_gate_mode = if db_was_empty { "enforce" } else { "warn" };
         conn.execute(
             "INSERT OR IGNORE INTO meta (key, value) VALUES ('provenance_gate_mode', ?1)",
             params![default_gate_mode],
@@ -948,11 +967,13 @@ impl YantrikDB {
         // Item 4a.4: cache the gate mode. The open-time seed above wrote
         // 'enforce' (fresh) or 'warn' (migrated); a missing key defaults to
         // 'warn' (lenient) defensively.
+        // Fail-CLOSED: a malformed persisted mode is a typed error (propagated),
+        // never a silent `Off` (sol 4a.4).
         let provenance_gate_mode = crate::provenance::GateMode::parse(
             Self::get_meta(&conn, "provenance_gate_mode")?
                 .as_deref()
                 .unwrap_or("warn"),
-        )
+        )?
         .as_u8();
 
         Ok(Self {
@@ -1223,13 +1244,21 @@ impl YantrikDB {
     /// Durable opt-in to a gate mode (the migration path for a legacy DB that
     /// has reviewed `stats().provenance_flagged_since_boot` and is ready to
     /// enforce). Updates both the meta key and the cached atomic.
+    /// Note: a write already PAST the gate may still commit after this returns —
+    /// the transition is linearized at gate-time, not against in-flight writes.
+    /// Treat a mode change as a quiescent-ish configuration action.
     pub fn set_provenance_gate_mode(&self, mode: crate::provenance::GateMode) -> Result<()> {
-        self.conn().execute(
+        // Hold the conn guard ACROSS the meta write AND the cached store (sol
+        // 4a.4): releasing it between lets two concurrent setters interleave and
+        // leave meta and the cache disagreeing (e.g. meta=warn, cache=enforce).
+        let conn = self.conn();
+        conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('provenance_gate_mode', ?1)",
             params![mode.as_str()],
         )?;
         self.provenance_gate_mode
             .store(mode.as_u8(), std::sync::atomic::Ordering::Relaxed);
+        drop(conn);
         Ok(())
     }
 
@@ -1250,16 +1279,14 @@ impl YantrikDB {
             return Ok(());
         }
         let verdict = (|| -> Result<()> {
-            // A NON-STANDARD source (e.g. an engine-internal "session_auto_capture"
-            // label) is NOT a laundering vector: laundering requires CLAIMING a
-            // recognized authoritative source, so an unrecognized source simply
-            // means the inference-matrix does not apply. Treating it as a refusal
-            // would break existing callers that use custom source labels; skip
-            // the matrix instead (deviation from sol r3's "reject unparseable
-            // source", forced by backward-compat — flagged for re-review).
-            let Ok(src) = Source::parse(source) else {
-                return Ok(());
-            };
+            // `source` is a CLOSED vocabulary and an unparseable one is a real
+            // bypass, not a harmless label (sol 4a.4): `source="inference_v2"`
+            // + `kind="fact"` would otherwise sail through — the authoritative
+            // claim being laundered is `kind=fact`, and an unrecognized source
+            // merely dodges the matrix. Parse strictly; WARN mode is what keeps
+            // a migrated DB's custom-label callers working (it counts + allows),
+            // which is precisely the purpose of the migration mode.
+            let src = Source::parse(source)?;
             let basis = match metadata.get("confidence_basis").and_then(|v| v.as_str()) {
                 Some(b) => Some(ConfidenceBasis::parse(b)?),
                 None => None,

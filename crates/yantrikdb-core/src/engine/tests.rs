@@ -1531,17 +1531,46 @@ fn gate_off_mode_skips_entirely() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
-fn gate_lenient_on_nonstandard_source() {
-    // A non-standard source (production uses e.g. session_auto_capture) is not
-    // a laundering vector, so the matrix does not apply — allowed even claiming
-    // kind=fact — which is why the enforce default breaks no existing caller.
+fn gate_enforce_refuses_unknown_source_warn_is_the_escape() {
+    // sol 4a.4: an UNKNOWN source is a real BYPASS, not a harmless label —
+    // source="inference_v2" + kind="fact" would otherwise sail through, because
+    // the authoritative claim being laundered is kind=fact and the source alias
+    // merely dodges the matrix. So `source` is parsed strictly under enforce...
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    gate_rec(
-        &db,
-        "session_auto_capture",
-        serde_json::json!({"kind": "fact"}),
-    )
-    .unwrap();
+    let err = gate_rec(&db, "inference_v2", serde_json::json!({"kind": "fact"})).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::ProvenanceInconsistent { .. }
+        ),
+        "enforce must refuse an unknown source (closed vocabulary), got {err:?}"
+    );
+    // ...and WARN is what keeps a migrated DB's custom-label callers working:
+    // it counts the violation and allows the write. That is the migration
+    // mode's whole purpose — the RULE itself is never weakened.
+    db.set_provenance_gate_mode(crate::provenance::GateMode::Warn)
+        .unwrap();
+    let rid = gate_rec(&db, "inference_v2", serde_json::json!({"kind": "fact"})).unwrap();
+    assert!(
+        db.get(&rid).unwrap().is_some(),
+        "warn allows the legacy caller"
+    );
+    assert_eq!(db.stats(None).unwrap().provenance_flagged_since_boot, 1);
+}
+
+#[test]
+fn gate_mode_parse_is_fail_closed() {
+    // A malformed persisted mode must NOT silently disable the gate (the
+    // fail-open class): only an exact "off" yields Off.
+    use crate::provenance::GateMode;
+    assert_eq!(GateMode::parse("off").unwrap(), GateMode::Off);
+    assert_eq!(GateMode::parse("  Enforce ").unwrap(), GateMode::Enforce);
+    assert_eq!(GateMode::parse("warn").unwrap(), GateMode::Warn);
+    assert!(
+        GateMode::parse("enforc").is_err(),
+        "a typo must be a loud error, never a silent Off"
+    );
+    assert!(GateMode::parse("").is_err());
 }
 
 #[test]

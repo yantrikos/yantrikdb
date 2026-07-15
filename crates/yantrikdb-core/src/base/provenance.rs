@@ -186,11 +186,23 @@ pub enum GateMode {
 }
 
 impl GateMode {
-    pub fn parse(s: &str) -> Self {
+    /// Parse a persisted mode. **Fail-CLOSED (sol 4a.4):** only an exact `off`
+    /// yields `Off`. A malformed value (e.g. the typo `enforc`) must NOT
+    /// silently disable the gate — that is the same fail-open class as a
+    /// security check that quietly never fires — so it is a typed error the
+    /// caller surfaces loudly.
+    pub fn parse(s: &str) -> Result<Self> {
         match s.trim().to_ascii_lowercase().as_str() {
-            "enforce" => Self::Enforce,
-            "warn" => Self::Warn,
-            _ => Self::Off,
+            "enforce" => Ok(Self::Enforce),
+            "warn" => Ok(Self::Warn),
+            "off" => Ok(Self::Off),
+            other => Err(YantrikDbError::ProvenanceInconsistent {
+                path: "provenance_gate_mode",
+                reason: format!(
+                    "malformed gate mode '{other}' (expected off|warn|enforce); refusing to \
+                     silently disable the provenance gate"
+                ),
+            }),
         }
     }
     pub fn as_str(self) -> &'static str {
@@ -217,11 +229,19 @@ impl GateMode {
 }
 
 /// The anti-laundering consistency matrix (pure). Given already-parsed declared
-/// fields, decide whether the record may be admitted. `override_kind` is the
-/// deliberate, traced+stamped escape hatch (the DOCUMENTED escape is instead to
-/// raise `confidence_basis` to confirmation/verification). `basis = None` means
-/// the caller declared no basis — which does NOT satisfy the confirmation/
+/// fields, decide whether the record may be admitted. `basis = None` means the
+/// caller declared no basis — which does NOT satisfy the confirmation/
 /// verification allowance, so an inference still cannot claim fact/observation.
+///
+/// `override_kind` is the deliberate escape hatch; the DOCUMENTED escape is
+/// instead to raise `confidence_basis` to confirmation/verification. **Scope of
+/// the override's guarantee (sol 4a.4):** it is durably VISIBLE — it rides in
+/// `metadata`, which is serialized onto the row and into the replicated oplog —
+/// but it is NOT yet an engine-owned stamp carrying a reason/identity. Treat it
+/// as an INTERIM AUDIT MARKER, not a privileged authorization mechanism: any
+/// caller can set it, so it only carries weight where every writer is trusted
+/// to invoke it honestly. A first-class stamp (engine-written, with reason and
+/// actor) is follow-up work.
 pub fn check_provenance_consistency_opt(
     source: Source,
     basis: Option<&ConfidenceBasis>,

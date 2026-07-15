@@ -263,12 +263,18 @@ class TestStats:
             # v0.10 Item 1: status-led read path adoption surface.
             "status_read_policy", "superseded_records",
             "superseded_served_since_boot",
+            # v0.10 Item 4a.4: anti-laundering gate adoption surface.
+            "provenance_gate_mode", "provenance_flagged_since_boot",
         }
         assert set(s.keys()) == expected_keys
         # Fresh databases default to the status-led read path.
         assert s["status_read_policy"] == "exclude_superseded"
         assert s["superseded_records"] == 0
         assert s["superseded_served_since_boot"] == 0
+        # Fresh databases default to enforcing the provenance gate; migrated
+        # ones default to "warn" (count + nudge, never refuse).
+        assert s["provenance_gate_mode"] == "enforce"
+        assert s["provenance_flagged_since_boot"] == 0
 
     def test_stats_tracks_operations(self, db):
         db.record("op1", embedding=_vec(1.0))

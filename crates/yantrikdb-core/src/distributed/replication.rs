@@ -223,13 +223,19 @@ impl YantrikDB {
     /// guard so foreign-origin `record` / `record_with_rid` / `correct` /
     /// `consolidate` ops are rejected by [`apply_ops`].
     ///
+    /// **Set this to the AUTHORITATIVE WRITER's actor id — not blindly to
+    /// `self.actor_id()`.** On the writer itself those coincide, but a FOLLOWER
+    /// must configure the *writer's* id (configuring its own would reject every
+    /// op the writer sends). (sol 4a.4.)
+    ///
     /// **Configuration is init/quiescent-time only (sol 4a.1 finding 2).** The
-    /// authoritative origin is a deployment identity; set it before sync begins
-    /// (the v37 migration sets it to `self.actor_id` at open, before any
-    /// `apply_ops`). Changing it concurrently with an in-flight `apply_ops` is
-    /// not linearizable (the preflight read and the apply are separate conn
-    /// acquisitions) and is unsupported — a mid-flight change could let one
-    /// batch straddle the old/new authority.
+    /// authoritative origin is a deployment identity; set it before sync begins.
+    /// Nothing sets it automatically — v37 does NOT seed it, because a fresh DB
+    /// may legitimately be joining a multi-writer cluster. Changing it
+    /// concurrently with an in-flight `apply_ops` is not linearizable (the
+    /// preflight read and the apply are separate conn acquisitions) and is
+    /// unsupported — a mid-flight change could let one batch straddle the
+    /// old/new authority.
     pub fn set_authoritative_origin(&self, actor_id: &str) -> Result<()> {
         self.conn().execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES ('authoritative_origin_actor', ?1)",
