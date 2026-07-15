@@ -224,17 +224,17 @@ impl YantrikDB {
     ///
     /// Writes an `applied=0` oplog row in the caller's transaction.
     ///
-    /// **Returns `(really_inserted, op_id)` and deliberately does NOT touch
-    /// `pending_op_count`.** That split is load-bearing, not laziness. The
-    /// counter may only be incremented AFTER the enclosing transaction commits:
-    /// increment it here and a later rollback leaves the row gone but the
-    /// counter raised, with nothing to bring it back down —
-    /// [`Self::mark_op_applied`] only decrements rows it actually transitions,
-    /// and there is no row. The drift is monotonic, and at `MAX_PENDING_OPS` of
-    /// net drift [`Self::log_op_pending`]'s admission check wedges EVERY
-    /// foreground write into `Backpressure` forever, with zero pending ops in
-    /// SQL. That is the v0.7.1 counter-leak class, and it is why this returns
-    /// the flag instead of acting on it.
+    /// **Deliberately does NOT touch `pending_op_count`.** That split is
+    /// load-bearing, not laziness. The counter may only be incremented AFTER the
+    /// enclosing transaction commits: increment it here and a later rollback
+    /// leaves the row gone but the counter raised, with nothing to bring it back
+    /// down — [`Self::mark_op_applied`] only decrements rows it actually
+    /// transitions, and there is no row. The drift is monotonic, and at
+    /// `MAX_PENDING_OPS` of net drift the admission check wedges EVERY foreground
+    /// write into `Backpressure` forever, with zero pending ops in SQL. That is
+    /// the v0.7.1 counter-leak class. The caller owns the increment, and must run
+    /// it only on the committed path (in `record()` the `ReservationGuard` owns
+    /// it, so a post-commit unwind cannot skip it).
     ///
     /// Uses a plain `INSERT`, NOT `INSERT OR IGNORE` — and that difference is
     /// deliberate (sol, 4a.6a review finding 4).
@@ -429,16 +429,18 @@ impl YantrikDB {
         // + index scan + drop just to check the bound. Cached counter
         // is maintained by `log_op_pending` (fetch_add on insert) and
         // `mark_op_applied` (fetch_sub on apply-win).
-        let pending_now = self.pending_op_count.load(Ordering::Relaxed);
-        if pending_now >= MAX_PENDING_OPS {
-            return Err(crate::error::YantrikDbError::Backpressure {
-                pending: pending_now,
-                max: MAX_PENDING_OPS,
-                retry_after_ms: 50,
-            });
-        }
+        // Advisory fast reject (unlocked). NOT authoritative on its own.
+        self.check_pending_backpressure_fast()?;
 
         let conn = self.conn.lock();
+        // THE authoritative check (sol 4a.6a r2 finding 1). The unlocked load
+        // above is a TOCTOU: at MAX_PENDING_OPS-1, N producers all read "under the
+        // limit", then serialize here and each insert, overshooting the ceiling.
+        // Re-reading under the SAME lock that guards the INSERT serializes the
+        // read with the write it authorizes, so the bound actually holds. 4a.6a
+        // first fixed only record()'s copy of this race and left this one — the
+        // instance, not the class.
+        self.check_pending_backpressure_locked()?;
         conn.execute(
             "INSERT OR IGNORE INTO oplog \
              (op_id, op_type, timestamp, target_rid, payload, \

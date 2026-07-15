@@ -9,40 +9,85 @@ use super::reembed::SearchState;
 use super::write_router::SyncWriteGuard;
 use super::{embedding_hash, now, sanitize, YantrikDB};
 
-/// RAII cleanup for an unpublished delta reservation (v0.10 Item 4a.6a,
-/// sol review finding 3).
+/// Which obligation the write currently owes (v0.10 Item 4a.6a).
+enum ResPhase {
+    /// Reserved, nothing durable. Owe: remove the reservation.
+    Reserved,
+    /// Durable. Owe: publish the vector AND count the pending op.
+    Committed,
+    /// All obligations discharged.
+    Done,
+}
+
+/// PHASE-AWARE RAII for the reserve → commit → publish protocol (sol 4a.6a
+/// findings 3 and r2-2).
 ///
-/// `append_reserved` consumes delta capacity with an entry that search skips and
-/// — critically — that compaction deliberately RETAINS rather than seals
-/// (`delta_index.rs`, so the removal path can never lose a race). That retention
-/// is what makes the reservation safe to roll back, and also what makes a LEAKED
-/// reservation permanent: an unpublished entry nobody removes holds capacity
-/// until the process restarts, and enough of them wedge every writer into
-/// Backpressure.
+/// The obligation this guard carries INVERTS at commit, and both halves must
+/// survive an unwinding panic:
 ///
-/// Manual cleanup on the `Err` path is therefore not sufficient — an unwinding
-/// panic between the reservation and the commit would skip it. This guard removes
-/// the reservation on ANY unwind, and is defused by `commit()` once the write is
-/// durable (after which the entry must be published, not removed).
+/// - **Before commit** — nothing durable exists, so the reservation must be
+///   REMOVED. `append_reserved` consumes delta capacity with an entry search
+///   skips and compaction deliberately RETAINS rather than seals (the property
+///   that makes rollback safe). So a leaked reservation is permanent: nobody
+///   else will ever remove it, it holds capacity until restart, and enough of
+///   them wedge every writer into Backpressure.
+/// - **After commit** — the row is durable, so the reservation must be
+///   PUBLISHED and the pending op COUNTED. A panic here previously left a
+///   durable row whose vector was invisible until an index rebuild, plus a
+///   pending row missing from `pending_op_count`. The first version defused the
+///   guard AT commit, before both — and the `debug_assert!` added to be careful
+///   was itself a panic point in that window.
+///
+/// Restart repairs both (the index rebuilds from `memories`; the counter
+/// re-seeds), but the engine deliberately uses non-poisoning locks so a
+/// `catch_unwind` process CONTINUES — and that process is the exposure.
 struct ReservationGuard<'a> {
     state: &'a SearchState,
+    pending_op_count: &'a std::sync::atomic::AtomicI64,
     rid: &'a str,
     seq: u64,
-    live: bool,
+    phase: ResPhase,
 }
 
 impl ReservationGuard<'_> {
-    /// The write is durable; the reservation must survive to be published.
-    fn commit(mut self) {
-        self.live = false;
+    /// The transaction committed: from here the obligation is publish+count.
+    fn mark_committed(&mut self) {
+        self.phase = ResPhase::Committed;
+    }
+
+    /// Discharge the post-commit obligations exactly once. Returns whether
+    /// `publish` found the reservation.
+    fn complete(&mut self) -> bool {
+        let published = self.discharge_committed();
+        self.phase = ResPhase::Done;
+        published
+    }
+
+    /// publish + count. Idempotent-by-phase: only ever run once, either from
+    /// `complete()` or from `Drop` on a post-commit unwind.
+    fn discharge_committed(&self) -> bool {
+        let published = self.state.vec_index.publish(self.rid, self.seq);
+        self.pending_op_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        published
     }
 }
 
 impl Drop for ReservationGuard<'_> {
     fn drop(&mut self) {
-        if self.live {
-            // Always succeeds: reserved entries are never sealed.
-            self.state.vec_index.remove_appended(self.rid, self.seq);
+        match self.phase {
+            // Always succeeds: reserved entries are never sealed. A removal, NOT
+            // a tombstone — a tombstone would suppress the rid and hide a
+            // still-valid older vector.
+            ResPhase::Reserved => {
+                self.state.vec_index.remove_appended(self.rid, self.seq);
+            }
+            // Unwound after commit. The write IS durable, so finish the job
+            // rather than strand it.
+            ResPhase::Committed => {
+                self.discharge_committed();
+            }
+            ResPhase::Done => {}
         }
     }
 }
@@ -353,11 +398,12 @@ impl YantrikDB {
         // From here until commit, ANY exit — including an unwinding panic —
         // must drop the reservation, or its capacity is held forever
         // (compaction retains unpublished entries by design).
-        let reservation = ReservationGuard {
+        let mut reservation = ReservationGuard {
             state: &state,
+            pending_op_count: &self.pending_op_count,
             rid: &rid,
             seq,
-            live: true,
+            phase: ResPhase::Reserved,
         };
 
         // ONE transaction: row + session links + the record op + the
@@ -443,9 +489,11 @@ impl YantrikDB {
         })();
 
         match committed {
-            // Durable. Defuse the guard: the reservation must now be PUBLISHED,
-            // not removed.
-            Ok(()) => reservation.commit(),
+            // Durable. The guard's obligation INVERTS here: from "remove the
+            // reservation" to "publish it and count the pending op". It is not
+            // defused — an unwind between here and complete() must still finish
+            // the job, because the row is already committed.
+            Ok(()) => reservation.mark_committed(),
             Err(e) => {
                 // Nothing durable exists. `reservation` drops here and removes the
                 // entry — a removal, NOT a tombstone (a tombstone would suppress
@@ -459,10 +507,23 @@ impl YantrikDB {
         // is no failure window between "committed" and "visible". A crash here
         // rebuilds the index from `memories` on next open — the row is
         // authoritative.
-        // publish() is infallible but returns whether it found the reservation.
-        // Discarding that would silently hide a protocol violation (a reservation
-        // removed or never made), leaving a durable row whose vector is invisible.
-        let published = state.vec_index.publish(&rid, seq);
+        // Discharge both post-commit obligations — publish the vector and count
+        // the pending op — in one place the guard also performs on an unwind, so
+        // a caught panic cannot strand a durable write with an invisible vector
+        // or an uncounted pending row.
+        let published = reservation.complete();
+
+        // The counter moved inside complete() above — only after the tx
+        // committed. Incrementing inside the tx would leak it upward on rollback
+        // with no row for `mark_op_applied` to decrement; that drift is monotonic
+        // and at MAX_PENDING_OPS wedges every write into Backpressure with an
+        // empty queue in SQL. It is unconditional because the enqueue is a plain
+        // INSERT in the committed tx, so reaching here means exactly one pending
+        // row landed.
+        //
+        // The assert comes AFTER the counter is discharged: as a post-commit panic
+        // point it would otherwise be exactly the hazard the guard exists to
+        // close (sol 4a.6a r2 finding 2).
         debug_assert!(
             published,
             "reservation for {rid} seq {seq} vanished before publish"
@@ -471,21 +532,15 @@ impl YantrikDB {
             tracing::error!(
                 rid = %rid,
                 seq,
-                "reserved vector entry missing at publish — row is durable but                  unsearchable until the index is rebuilt from SQL"
+                "reserved vector entry missing at publish — row is durable but \
+                 unsearchable until the index is rebuilt from SQL"
             );
         }
-
-        // Only NOW may the pending counter move. Incrementing inside the tx would
-        // leak it upward on rollback with no row for `mark_op_applied` to
-        // decrement, and that drift is monotonic — at MAX_PENDING_OPS it wedges
-        // every foreground write into Backpressure with an empty queue in SQL.
-        //
-        // Unconditional: the enqueue is a plain INSERT inside the committed tx, so
-        // reaching here means exactly one pending row landed. (It was conditional
-        // on an `OR IGNORE` no-op until sol's finding 4 established that an
-        // ignored insert here is a bug, not an outcome to account for.)
-        self.pending_op_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // All obligations are discharged (phase == Done), so this Drop is a no-op.
+        // It is explicit only to release the guard's borrow of `rid` before we
+        // return it — and it must stay AFTER complete(), which is what makes the
+        // drop inert.
+        drop(reservation);
 
         self.cache_insert(
             rid.clone(),
@@ -1312,18 +1367,14 @@ impl YantrikDB {
         let hlc_bytes = hlc_ts.to_bytes().to_vec();
         let payload_str = serde_json::to_string(payload)?;
 
-        // Backpressure check (mirrors log_op_pending's contract).
-        use crate::engine::stats::MAX_PENDING_OPS;
-        let pending_now = self.pending_op_count.load(Ordering::Relaxed);
-        if pending_now >= MAX_PENDING_OPS {
-            return Err(crate::error::YantrikDbError::Backpressure {
-                pending: pending_now,
-                max: MAX_PENDING_OPS,
-                retry_after_ms: 50,
-            });
-        }
+        // Advisory fast reject (unlocked); the AUTHORITATIVE check is under the
+        // lock below. Same TOCTOU, same fix as log_op_pending (sol 4a.6a r2
+        // finding 1): two queued writers at MAX_PENDING_OPS-1 could both pass an
+        // unlocked load and then serialize their inserts past the ceiling.
+        self.check_pending_backpressure_fast()?;
 
         let conn = self.conn.lock();
+        self.check_pending_backpressure_locked()?;
         conn.execute(
             "INSERT OR IGNORE INTO oplog \
              (op_id, op_type, timestamp, target_rid, payload, \
