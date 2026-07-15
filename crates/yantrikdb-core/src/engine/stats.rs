@@ -468,7 +468,7 @@ impl YantrikDB {
                 embedding,
             ],
         )?;
-        // **v0.7.1**: maintain the cached counter. INSERT OR IGNORE on
+        // **v0.7.1**: maintain the cached counter.
         // Unconditional: with a plain INSERT, reaching here means exactly one row
         // landed — anything else returned Err above. The old `changes() > 0` guard
         // existed to cope with `OR IGNORE` no-ops that could not happen for the
