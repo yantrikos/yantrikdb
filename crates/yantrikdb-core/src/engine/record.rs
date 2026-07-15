@@ -445,9 +445,36 @@ impl YantrikDB {
             .map(|i| self.calibrate_importance(&i.namespace, i.importance))
             .collect::<Result<Vec<_>>>()?;
 
+        // **Issue #41 layer 3.** Enter the write-router BEFORE snapshotting
+        // SearchState, exactly as `record()` does (record.rs:105/138).
+        //
+        // record_batch used to skip the router entirely and load the snapshot
+        // below unguarded. Nothing then stopped a `db.reembed()` cutover from
+        // completing its swap mid-batch, so the batch could commit rows and
+        // appends stamped with `embedding_generation` from a generation that was
+        // being discarded — the exact corruption the guard exists to prevent.
+        // The comment below claimed "every append lands on the same
+        // generation-anchored DeltaIndex" while nothing enforced it.
+        //
+        // Unlike `record()`, there is no queued fallback: no queued-batch
+        // primitive exists yet (v0.10 Item 4a.6c), and routing items
+        // independently would break the batch's all-or-nothing contract. So the
+        // whole batch defers with a typed retryable error, following the Item 3
+        // precedent (`CorrectionDeferredDuringReembed`) — nothing durable has
+        // happened at this point, so the caller can reissue verbatim.
+        let Some(_sync_guard) = self.write_router.try_enter_sync_writer() else {
+            return Err(crate::error::YantrikDbError::BatchDeferredDuringReembed {
+                count: inputs.len(),
+            });
+        };
+
         // **Issue #41 brainstorm-4 §1.** SearchState snapshot for the
         // batch — every append in this batch lands on the same
-        // generation-anchored DeltaIndex.
+        // generation-anchored DeltaIndex. Loaded AFTER the guard above, which is
+        // what actually makes that true: with the guard held, reembed cannot
+        // complete its swap for the rest of this call. `_sync_guard` drops via
+        // RAII at function exit (panic-safe), covering the SQL work AND the
+        // vector appends.
         let state = self.search_state.load_full();
 
         // Clone active sessions map before acquiring conn
