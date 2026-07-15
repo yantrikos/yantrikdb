@@ -327,6 +327,16 @@ pub struct Stats {
     /// `set_status_read_policy(true)`.
     #[serde(default)]
     pub superseded_served_since_boot: u64,
+    /// **v0.10 Item 4a.4** — active anti-laundering gate mode
+    /// (`off` | `warn` | `enforce`).
+    #[serde(default)]
+    pub provenance_gate_mode: String,
+    /// **v0.10 Item 4a.4 — adoption nudge.** Writes the gate FLAGGED as
+    /// internally inconsistent but did not refuse (warn mode) since boot.
+    /// Non-zero on a migrated DB means `enforce` would reject those writes —
+    /// consider `set_provenance_gate_mode(Enforce)` once callers are fixed.
+    #[serde(default)]
+    pub provenance_flagged_since_boot: u64,
 }
 
 /// A proactive trigger.

@@ -107,6 +107,10 @@ impl YantrikDB {
             superseded_served_since_boot: self
                 .superseded_served_since_boot
                 .load(std::sync::atomic::Ordering::Relaxed),
+            provenance_gate_mode: self.provenance_gate_mode().as_str().to_string(),
+            provenance_flagged_since_boot: self
+                .provenance_flagged_since_boot
+                .load(std::sync::atomic::Ordering::Relaxed),
         })
     }
 

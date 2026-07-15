@@ -497,6 +497,31 @@ impl PyYantrikDB {
             .map_err(map_err)
     }
 
+    /// **v0.10 Item 4a.4** — the active anti-laundering gate mode:
+    /// `"off"` | `"warn"` | `"enforce"`. Fresh databases default to `enforce`;
+    /// MIGRATED databases default to `warn` (the gate counts violations into
+    /// `stats()["provenance_flagged_since_boot"]` but never refuses), so an
+    /// upgrade cannot break existing callers.
+    fn provenance_gate_mode(&self) -> PyResult<String> {
+        Ok(self
+            .get_inner()?
+            .provenance_gate_mode()
+            .as_str()
+            .to_string())
+    }
+
+    /// Durably opt in to a gate mode — the migration path. Review
+    /// `stats()["provenance_flagged_since_boot"]` on a migrated database, fix
+    /// the flagged callers, then `set_provenance_gate_mode("enforce")`.
+    /// Accepts `"off"` | `"warn"` | `"enforce"`; a malformed value is a loud
+    /// error (never a silent disable).
+    fn set_provenance_gate_mode(&self, mode: &str) -> PyResult<()> {
+        let parsed = yantrikdb_core::provenance::GateMode::parse(mode).map_err(map_err)?;
+        self.get_inner()?
+            .set_provenance_gate_mode(parsed)
+            .map_err(map_err)
+    }
+
     /// Exposed for Python consolidate.py compatibility.
     #[pyo3(signature = (op_type, target_rid, payload))]
     fn _log_op(

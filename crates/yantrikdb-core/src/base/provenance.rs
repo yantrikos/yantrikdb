@@ -174,19 +174,83 @@ impl ClaimKind {
     }
 }
 
+/// Enforcement mode for the anti-laundering gate (Item 4a.4). Fresh installs
+/// default to `Enforce`; migrated/legacy installs default to `Warn` (run the
+/// check + nudge counter, never refuse) so upgrades don't break existing
+/// callers. `Off` skips the check entirely.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateMode {
+    Off,
+    Warn,
+    Enforce,
+}
+
+impl GateMode {
+    /// Parse a persisted mode. **Fail-CLOSED (sol 4a.4):** only an exact `off`
+    /// yields `Off`. A malformed value (e.g. the typo `enforc`) must NOT
+    /// silently disable the gate — that is the same fail-open class as a
+    /// security check that quietly never fires — so it is a typed error the
+    /// caller surfaces loudly.
+    pub fn parse(s: &str) -> Result<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "enforce" => Ok(Self::Enforce),
+            "warn" => Ok(Self::Warn),
+            "off" => Ok(Self::Off),
+            other => Err(YantrikDbError::ProvenanceInconsistent {
+                path: "provenance_gate_mode",
+                reason: format!(
+                    "malformed gate mode '{other}' (expected off|warn|enforce); refusing to \
+                     silently disable the provenance gate"
+                ),
+            }),
+        }
+    }
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Enforce => "enforce",
+            Self::Warn => "warn",
+            Self::Off => "off",
+        }
+    }
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Warn => 1,
+            Self::Enforce => 2,
+        }
+    }
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            2 => Self::Enforce,
+            1 => Self::Warn,
+            _ => Self::Off,
+        }
+    }
+}
+
 /// The anti-laundering consistency matrix (pure). Given already-parsed declared
-/// fields, decide whether the record may be admitted. `override_kind` is the
-/// deliberate, traced+stamped escape hatch (the DOCUMENTED escape is instead to
-/// raise `confidence_basis` to confirmation/verification).
-pub fn check_provenance_consistency(
+/// fields, decide whether the record may be admitted. `basis = None` means the
+/// caller declared no basis — which does NOT satisfy the confirmation/
+/// verification allowance, so an inference still cannot claim fact/observation.
+///
+/// `override_kind` is the deliberate escape hatch; the DOCUMENTED escape is
+/// instead to raise `confidence_basis` to confirmation/verification. **Scope of
+/// the override's guarantee (sol 4a.4):** it is durably VISIBLE — it rides in
+/// `metadata`, which is serialized onto the row and into the replicated oplog —
+/// but it is NOT yet an engine-owned stamp carrying a reason/identity. Treat it
+/// as an INTERIM AUDIT MARKER, not a privileged authorization mechanism: any
+/// caller can set it, so it only carries weight where every writer is trusted
+/// to invoke it honestly. A first-class stamp (engine-written, with reason and
+/// actor) is follow-up work.
+pub fn check_provenance_consistency_opt(
     source: Source,
-    basis: &ConfidenceBasis,
+    basis: Option<&ConfidenceBasis>,
     kind: &ClaimKind,
     override_kind: bool,
 ) -> Result<()> {
     if source == Source::Inference {
         // You cannot have OBSERVED an inference.
-        if *basis == ConfidenceBasis::Observation {
+        if basis == Some(&ConfidenceBasis::Observation) {
             return Err(YantrikDbError::ProvenanceInconsistent {
                 path: "source/confidence_basis",
                 reason: "source=inference cannot have confidence_basis=observation \
@@ -201,7 +265,7 @@ pub fn check_provenance_consistency(
             && !override_kind
             && !matches!(
                 basis,
-                ConfidenceBasis::Confirmation | ConfidenceBasis::Verification
+                Some(ConfidenceBasis::Confirmation | ConfidenceBasis::Verification)
             )
         {
             let kind_str = match kind {
@@ -218,6 +282,17 @@ pub fn check_provenance_consistency(
         }
     }
     Ok(())
+}
+
+/// Convenience wrapper of [`check_provenance_consistency_opt`] for a present
+/// basis (used by the exhaustive unit tests).
+pub fn check_provenance_consistency(
+    source: Source,
+    basis: &ConfidenceBasis,
+    kind: &ClaimKind,
+    override_kind: bool,
+) -> Result<()> {
+    check_provenance_consistency_opt(source, Some(basis), kind, override_kind)
 }
 
 #[cfg(test)]

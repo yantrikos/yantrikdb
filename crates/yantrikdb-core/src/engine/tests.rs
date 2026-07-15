@@ -1434,6 +1434,157 @@ fn test_schema_v37_item4a_columns_table_and_index() {
     assert_eq!(version, 37, "schema version must be stamped 37");
 }
 
+// ── Item 4a.4: anti-laundering gate wiring + backward-compat modes ──
+
+#[cfg(feature = "bundled-embedder")]
+fn gate_rec(db: &YantrikDB, source: &str, meta: serde_json::Value) -> crate::error::Result<String> {
+    db.record(
+        "some memory text",
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &meta,
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "general",
+        source,
+        None,
+    )
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn gate_fresh_db_defaults_enforce_and_refuses_inference_claiming_fact() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    assert_eq!(
+        db.provenance_gate_mode(),
+        crate::provenance::GateMode::Enforce,
+        "fresh DB defaults to enforce"
+    );
+    assert_eq!(db.stats(None).unwrap().provenance_gate_mode, "enforce");
+    // source=inference claiming kind=fact -> refused at write time
+    let err = gate_rec(&db, "inference", serde_json::json!({"kind": "fact"})).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::ProvenanceInconsistent { .. }
+        ),
+        "got {err:?}"
+    );
+    // a consistent inference record (kind=inference) is fine
+    gate_rec(&db, "inference", serde_json::json!({"kind": "inference"})).unwrap();
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn gate_confirmation_allowance_and_override_escape() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    // raise-your-basis: confirmation lets an inference claim a fact
+    gate_rec(
+        &db,
+        "inference",
+        serde_json::json!({"kind": "fact", "confidence_basis": "confirmation"}),
+    )
+    .unwrap();
+    // explicit override_kind escape
+    gate_rec(
+        &db,
+        "inference",
+        serde_json::json!({"kind": "fact", "override_kind": true}),
+    )
+    .unwrap();
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn gate_warn_mode_counts_but_allows() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    db.set_provenance_gate_mode(crate::provenance::GateMode::Warn)
+        .unwrap();
+    let rid = gate_rec(&db, "inference", serde_json::json!({"kind": "fact"})).unwrap();
+    assert!(
+        db.get(&rid).unwrap().is_some(),
+        "warn mode allows the write"
+    );
+    assert_eq!(
+        db.stats(None).unwrap().provenance_flagged_since_boot,
+        1,
+        "warn mode increments the nudge counter"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn gate_off_mode_skips_entirely() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    db.set_provenance_gate_mode(crate::provenance::GateMode::Off)
+        .unwrap();
+    gate_rec(&db, "inference", serde_json::json!({"kind": "fact"})).unwrap();
+    assert_eq!(
+        db.stats(None).unwrap().provenance_flagged_since_boot,
+        0,
+        "off mode does not even count"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn gate_source_is_free_form_matrix_binds_only_recognized_inference() {
+    // `source` is a FREE-FORM public dimension — tests/test_phases.py records
+    // source="manager" and asserts it round-trips verbatim, alongside domain /
+    // emotional_state. So an UNRECOGNIZED source is a label the engine takes no
+    // position on: the matrix does not bind it, even under enforce.
+    //
+    // sol 4a.4 wanted strict parsing (to block a source="inference_v2" alias).
+    // We decline: (1) it breaks that documented contract for every caller
+    // labelling records manager/slack/paper, and (2) it buys nothing — sol's own
+    // analysis concedes the internally-consistent lie source="user"+kind="fact"
+    // is undetectable, so a caller willing to alias is equally willing to write
+    // "user". The gate catches DECLARED CONTRADICTIONS, never lies.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    assert_eq!(
+        db.provenance_gate_mode(),
+        crate::provenance::GateMode::Enforce
+    );
+    // Free-form sources are accepted verbatim, even claiming kind=fact.
+    for src in ["manager", "paper", "experiment", "inference_v2"] {
+        let rid = gate_rec(&db, src, serde_json::json!({"kind": "fact"})).unwrap();
+        assert_eq!(
+            db.get(&rid).unwrap().unwrap().source,
+            src,
+            "free-form source must round-trip verbatim"
+        );
+    }
+    // The matrix binds the RECOGNIZED inference source, and still refuses.
+    let err = gate_rec(&db, "inference", serde_json::json!({"kind": "fact"})).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::ProvenanceInconsistent { .. }
+        ),
+        "recognized source=inference claiming kind=fact must still be refused, got {err:?}"
+    );
+    // Nothing was flagged: free-form sources are not violations.
+    assert_eq!(db.stats(None).unwrap().provenance_flagged_since_boot, 0);
+}
+
+#[test]
+fn gate_mode_parse_is_fail_closed() {
+    // A malformed persisted mode must NOT silently disable the gate (the
+    // fail-open class): only an exact "off" yields Off.
+    use crate::provenance::GateMode;
+    assert_eq!(GateMode::parse("off").unwrap(), GateMode::Off);
+    assert_eq!(GateMode::parse("  Enforce ").unwrap(), GateMode::Enforce);
+    assert_eq!(GateMode::parse("warn").unwrap(), GateMode::Warn);
+    assert!(
+        GateMode::parse("enforc").is_err(),
+        "a typo must be a loud error, never a silent Off"
+    );
+    assert!(GateMode::parse("").is_err());
+}
+
 #[test]
 fn test_schema_v37_idempotency_claims_actor_scoped_pk() {
     // The claims PK (origin_actor, namespace, idempotency_key) is the

@@ -189,6 +189,15 @@ pub struct YantrikDB {
     /// would have excluded before opting in. In-memory by design — a
     /// durable counter would put a write on the recall hot path.
     pub(crate) superseded_served_since_boot: std::sync::atomic::AtomicU64,
+    /// **v0.10 Item 4a.4 — anti-laundering gate mode**, cached from
+    /// `meta.provenance_gate_mode` (0=off, 1=warn, 2=enforce). Fresh installs
+    /// default to enforce; migrated/legacy installs to warn (see open()).
+    pub(crate) provenance_gate_mode: std::sync::atomic::AtomicU8,
+    /// **v0.10 Item 4a.4 — adoption nudge.** Since-boot count of writes the
+    /// provenance gate FLAGGED as internally inconsistent but did NOT refuse
+    /// (warn mode). Surfaced in `stats()` so a migrated DB's operator sees what
+    /// `enforce` would reject before opting in. In-memory by design.
+    pub(crate) provenance_flagged_since_boot: std::sync::atomic::AtomicU64,
     /// **v0.10 Item 3 — correction seqlock (sol r4).** A DB-wide epoch that
     /// makes a text-changing correction's (SQL commit + vector publish +
     /// scoring-cache update) atomic FROM A READER'S PERSPECTIVE, without
@@ -492,6 +501,25 @@ impl YantrikDB {
         // Check existing schema version for migration
         let existing_version = Self::get_schema_version(&conn);
 
+        // **v0.10 Item 4a.4 (sol) — an unambiguous "brand new database" signal.**
+        // `get_schema_version` collapses a query FAILURE or a missing key into
+        // `None`, so an EXISTING database whose `schema_version` row is missing
+        // or unreadable would be misclassified as fresh and handed the strict
+        // fresh defaults — exactly the upgrade break the migration model exists
+        // to prevent. Ask the real question instead ("did this database have any
+        // user tables before we initialized it?"), evaluated BEFORE SCHEMA_SQL
+        // runs below. On any error, assume NOT empty: an unreadable database is
+        // treated as pre-existing, so we fail toward the LENIENT/back-compatible
+        // default rather than toward breaking a live caller.
+        let db_was_empty: bool = conn
+            .query_row(
+                "SELECT COUNT(*) = 0 FROM sqlite_master \
+                 WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+
         // Sequential migration chain — each version cascades.
         let migrations: &[(i32, &str)] = &[
             (1, MIGRATE_V1_TO_V2),
@@ -586,6 +614,24 @@ impl YantrikDB {
             )?;
         }
 
+        // **v0.10 Item 4a.4 — anti-laundering gate mode, backward-compat by
+        // migration path (same shape as Item 1).** FRESH installs default to
+        // `enforce` (new users protected: a write with internally inconsistent
+        // provenance is refused). MIGRATED/legacy installs default to `warn`:
+        // the gate runs and increments the `provenance_flagged_since_boot`
+        // stats() nudge, but NEVER refuses — so existing callers are not broken
+        // on upgrade. `set_provenance_gate_mode` is the durable opt-in. INSERT
+        // OR IGNORE keeps any operator-set value authoritative across opens.
+        // Uses `db_was_empty` (a real emptiness check), NOT
+        // `existing_version.is_none()` — the latter misclassifies an existing DB
+        // with an unreadable/missing schema_version as fresh and would hand it
+        // `enforce` (sol 4a.4).
+        let default_gate_mode = if db_was_empty { "enforce" } else { "warn" };
+        conn.execute(
+            "INSERT OR IGNORE INTO meta (key, value) VALUES ('provenance_gate_mode', ?1)",
+            params![default_gate_mode],
+        )?;
+
         // **v28 (issue #41 brainstorm-4 §6).** Seed meta.active_generation
         // on first install. INSERT OR IGNORE preserves the durable
         // value on subsequent opens — reembed Phase-2's swap
@@ -619,6 +665,16 @@ impl YantrikDB {
                 }
             }
         };
+
+        // **v0.10 Item 4a.4 — origin guard stays OPT-IN.** Unlike the local
+        // provenance gate (which defaults to enforce for fresh installs), the
+        // replication ingress guard is a deployment-topology declaration: a
+        // fresh DB may legitimately be joining a multi-writer cluster, and
+        // auto-claiming self-authority would break bidirectional sync. A
+        // deployment that has DECLARED itself single-writer calls
+        // `set_authoritative_origin(self.actor_id())` to activate the guard
+        // (recommended in the single-writer deploy docs; multi-origin is Item
+        // 4b). This keeps existing AND new multi-master deployments working.
 
         // **v28 (issue #41 brainstorm-4 §6).** Read the durable
         // active SearchState generation. Defaults to 0 if missing —
@@ -908,6 +964,18 @@ impl YantrikDB {
             Some("exclude_superseded")
         );
 
+        // Item 4a.4: cache the gate mode. The open-time seed above wrote
+        // 'enforce' (fresh) or 'warn' (migrated); a missing key defaults to
+        // 'warn' (lenient) defensively.
+        // Fail-CLOSED: a malformed persisted mode is a typed error (propagated),
+        // never a silent `Off` (sol 4a.4).
+        let provenance_gate_mode = crate::provenance::GateMode::parse(
+            Self::get_meta(&conn, "provenance_gate_mode")?
+                .as_deref()
+                .unwrap_or("warn"),
+        )?
+        .as_u8();
+
         Ok(Self {
             conn: Mutex::new(conn),
             read_conns,
@@ -920,6 +988,8 @@ impl YantrikDB {
             pending_op_count: std::sync::atomic::AtomicI64::new(initial_pending),
             exclude_superseded_reads: std::sync::atomic::AtomicBool::new(exclude_superseded_reads),
             superseded_served_since_boot: std::sync::atomic::AtomicU64::new(0),
+            provenance_gate_mode: std::sync::atomic::AtomicU8::new(provenance_gate_mode),
+            provenance_flagged_since_boot: std::sync::atomic::AtomicU64::new(0),
             correction_epoch: std::sync::atomic::AtomicU64::new(0),
             visible_seq: dashmap::DashMap::new(),
             visible_seq_cv: parking_lot::Condvar::new(),
@@ -1160,6 +1230,109 @@ impl YantrikDB {
         self.exclude_superseded_reads
             .store(exclude_superseded, std::sync::atomic::Ordering::Relaxed);
         Ok(())
+    }
+
+    /// **v0.10 Item 4a.4.** The active anti-laundering gate mode. Fresh installs
+    /// default to `Enforce`, migrated/legacy installs to `Warn` (see open()).
+    pub fn provenance_gate_mode(&self) -> crate::provenance::GateMode {
+        crate::provenance::GateMode::from_u8(
+            self.provenance_gate_mode
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// Durable opt-in to a gate mode (the migration path for a legacy DB that
+    /// has reviewed `stats().provenance_flagged_since_boot` and is ready to
+    /// enforce). Updates both the meta key and the cached atomic.
+    /// Note: a write already PAST the gate may still commit after this returns —
+    /// the transition is linearized at gate-time, not against in-flight writes.
+    /// Treat a mode change as a quiescent-ish configuration action.
+    pub fn set_provenance_gate_mode(&self, mode: crate::provenance::GateMode) -> Result<()> {
+        // Hold the conn guard ACROSS the meta write AND the cached store (sol
+        // 4a.4): releasing it between lets two concurrent setters interleave and
+        // leave meta and the cache disagreeing (e.g. meta=warn, cache=enforce).
+        let conn = self.conn();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('provenance_gate_mode', ?1)",
+            params![mode.as_str()],
+        )?;
+        self.provenance_gate_mode
+            .store(mode.as_u8(), std::sync::atomic::Ordering::Relaxed);
+        drop(conn);
+        Ok(())
+    }
+
+    /// **v0.10 Item 4a.4 — the anti-laundering gate.** Parse the record's
+    /// DECLARED provenance and enforce internal consistency per the current
+    /// mode. `source` is the caller's source string; `metadata` is the FINAL
+    /// merged plaintext metadata — `confidence_basis`, `kind`, and
+    /// `override_kind` live there (so the engine `record*` signatures are
+    /// unchanged). Runs BEFORE any side effect. In `Enforce` a violation is a
+    /// typed `ProvenanceInconsistent` refusal; in `Warn` it is counted
+    /// (`provenance_flagged_since_boot`) and allowed; `Off` skips entirely.
+    pub(crate) fn gate_provenance(&self, source: &str, metadata: &serde_json::Value) -> Result<()> {
+        use crate::provenance::{
+            check_provenance_consistency_opt, ClaimKind, ConfidenceBasis, GateMode, Source,
+        };
+        let mode = self.provenance_gate_mode();
+        if mode == GateMode::Off {
+            return Ok(());
+        }
+        let verdict = (|| -> Result<()> {
+            // **`source` is a FREE-FORM public dimension — an unrecognized one
+            // is NOT refused; the matrix simply does not bind it.**
+            //
+            // sol 4a.4 asked for strict parsing (reject `source="inference_v2"`
+            // + `kind="fact"` as an alias-bypass). We deliberately do not, for
+            // two reasons it could not see from the engine source alone:
+            //
+            // 1. `source` is a documented FREE-FORM dimension of the public API,
+            //    not a closed vocabulary: `tests/test_phases.py` records
+            //    `source="manager"` and asserts it round-trips verbatim, right
+            //    alongside `domain` / `emotional_state`. The four values in the
+            //    schema comment are EXAMPLES; only the one-time v26 backfill
+            //    ever coerced legacy junk. Rejecting unknown sources is a
+            //    BREAKING change to that contract for every existing caller
+            //    labelling records `manager` / `slack` / `paper`.
+            // 2. It would buy no protection anyway. sol's own r3/4a.4 analysis
+            //    concedes that an internally-consistent LIE (`source="user"` +
+            //    `kind="fact"`) is undetectable. A caller willing to alias to
+            //    `inference_v2` is equally willing to write `user`, so strict
+            //    parsing closes only one variant of a hole that stays wide open
+            //    — while breaking honest callers. The gate's documented scope is
+            //    DECLARED CONTRADICTIONS, never lies.
+            //
+            // So: the matrix binds the RECOGNIZED `inference` source; anything
+            // else is a label the engine takes no position on.
+            let Ok(src) = Source::parse(source) else {
+                return Ok(());
+            };
+            let basis = match metadata.get("confidence_basis").and_then(|v| v.as_str()) {
+                Some(b) => Some(ConfidenceBasis::parse(b)?),
+                None => None,
+            };
+            let kind = ClaimKind::parse(metadata.get("kind").and_then(|v| v.as_str()));
+            let override_kind = metadata
+                .get("override_kind")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            check_provenance_consistency_opt(src, basis.as_ref(), &kind, override_kind)
+        })();
+        match verdict {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                if mode == GateMode::Enforce {
+                    Err(e)
+                } else {
+                    // Warn: count the nudge and allow the write (never break a
+                    // migrated caller).
+                    self.provenance_flagged_since_boot
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    tracing::warn!(reason = %e, "provenance gate (warn): flagged an inconsistent write");
+                    Ok(())
+                }
+            }
+        }
     }
 
     /// v0.10 Item 2 — the last learning-loop report (JSON), if any run
@@ -1575,6 +1748,10 @@ impl YantrikDB {
                 ("half_life", half_life),
             ],
         )?;
+        // v0.10 Item 4a.4 anti-laundering gate — before the (slow) embed and
+        // any side effect. `record_text` bypasses `record()`, so it gates here
+        // too (T06 coverage).
+        self.gate_provenance(source, metadata)?;
         // Task 29 (Ingest Integrity): strip any leaked tool-call
         // serialization tail BEFORE embedding, so both the computed vector
         // and the stored text reflect the real memory rather than the
