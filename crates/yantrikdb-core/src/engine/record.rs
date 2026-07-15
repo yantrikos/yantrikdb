@@ -408,6 +408,21 @@ impl YantrikDB {
                     ("half_life", input.half_life),
                 ],
             )?;
+            // v0.10 Item 4a.4b — anti-laundering gate (T06 fan-out). Runs in
+            // the batch PREVALIDATION loop, so an inconsistent element late in
+            // the batch rejects the whole batch before any side effect rather
+            // than half-committing the earlier ones — the same contract the
+            // embedding/scalar gates above rely on.
+            self.gate_provenance(&input.source, &input.metadata)
+                .map_err(|e| match e {
+                    crate::error::YantrikDbError::ProvenanceInconsistent { path, reason } => {
+                        crate::error::YantrikDbError::ProvenanceInconsistent {
+                            path,
+                            reason: format!("inputs[{i}]: {reason}"),
+                        }
+                    }
+                    other => other,
+                })?;
         }
 
         // Task 29 (Ingest Integrity): strip any leaked tool-call

@@ -918,6 +918,14 @@ impl YantrikDB {
             }
             None => cur_metadata_val.clone(),
         };
+        // **v0.10 Item 4a.4b — anti-laundering gate on the correction path
+        // (T06 fan-out).** A `metadata_merge` can flip `kind` to fact/observation
+        // on an inference-sourced record, so the gate must see the FINAL MERGED
+        // plaintext metadata (not the caller's patch) paired with the record's
+        // existing `source` — `correct()` cannot change `source` itself. Runs
+        // before the revision insert / UPDATE below, inside the tx, so a refusal
+        // rolls back leaving the row untouched.
+        self.gate_provenance(&original.source, &new_metadata_val)?;
         let stored_new_text = self.encrypt_text(&new_text_val)?;
         let stored_new_metadata = self.encrypt_text(&serde_json::to_string(&new_metadata_val)?)?;
 
