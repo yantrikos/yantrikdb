@@ -5,6 +5,15 @@ use crate::types::Stats;
 
 use super::{now, YantrikDB};
 
+/// Ceiling on the bounded global ingest queue (`oplog` rows with `applied=0`).
+///
+/// Single source of truth as of v0.10 Item 4a.6a. This was previously declared
+/// three times as a function-local `const` (`log_op_pending`,
+/// `log_op_pending_for_reembed_queue`, and now the shared admission check) — a
+/// value that gates every foreground write should not be able to drift between
+/// its copies.
+pub(crate) const MAX_PENDING_OPS: i64 = 10_000;
+
 impl YantrikDB {
     /// Get engine statistics. Optionally filter memory counts by namespace.
     pub fn stats(&self, namespace: Option<&str>) -> Result<Stats> {
@@ -160,6 +169,133 @@ impl YantrikDB {
         )?;
         Ok(op_id)
     }
+    /// In-transaction sibling of [`Self::log_op`] (v0.10 Item 4a.6a).
+    ///
+    /// Writes an `applied=1` oplog row using the CALLER'S transaction instead of
+    /// re-locking `self.conn`. This is the primitive that lets a write path
+    /// commit its row and its oplog provenance ATOMICALLY. `log_op` cannot do
+    /// that: it re-acquires `self.conn` (see [`Self::log_op`]), and
+    /// `parking_lot::Mutex` is not reentrant, so calling it while holding a conn
+    /// guard deadlocks.
+    ///
+    /// Generalized from `insert_correct_op_in_tx`, which `correct()` has used
+    /// since Item 3 — the shape is proven, this just parameterizes `op_type`.
+    ///
+    /// `applied_generation` is passed IN rather than read from `search_state`
+    /// here: the caller holds a `SyncWriteGuard` pinning the generation for its
+    /// whole critical section, and must stamp the same generation its vector
+    /// entry was written against.
+    pub(crate) fn log_op_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        op_type: &str,
+        target_rid: Option<&str>,
+        payload: &serde_json::Value,
+        emb_hash: Option<&[u8]>,
+        embedding: Option<&[u8]>,
+        applied_generation: i64,
+    ) -> Result<String> {
+        let op_id = crate::id::new_id();
+        let hlc_bytes = self.tick_hlc().to_bytes().to_vec();
+        let payload_str = serde_json::to_string(payload)?;
+        tx.execute(
+            "INSERT INTO oplog \
+             (op_id, op_type, timestamp, target_rid, payload, actor_id, hlc, \
+              embedding_hash, origin_actor, applied, applied_generation, embedding) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 1, ?10, ?11)",
+            params![
+                op_id,
+                op_type,
+                now(),
+                target_rid,
+                payload_str,
+                self.actor_id,
+                hlc_bytes,
+                emb_hash,
+                self.actor_id,
+                applied_generation,
+                embedding,
+            ],
+        )?;
+        Ok(op_id)
+    }
+
+    /// In-transaction sibling of [`Self::log_op_pending`] (v0.10 Item 4a.6a).
+    ///
+    /// Writes an `applied=0` oplog row in the caller's transaction.
+    ///
+    /// **Returns `(really_inserted, op_id)` and deliberately does NOT touch
+    /// `pending_op_count`.** That split is load-bearing, not laziness. The
+    /// counter may only be incremented AFTER the enclosing transaction commits:
+    /// increment it here and a later rollback leaves the row gone but the
+    /// counter raised, with nothing to bring it back down —
+    /// [`Self::mark_op_applied`] only decrements rows it actually transitions,
+    /// and there is no row. The drift is monotonic, and at `MAX_PENDING_OPS` of
+    /// net drift [`Self::log_op_pending`]'s admission check wedges EVERY
+    /// foreground write into `Backpressure` forever, with zero pending ops in
+    /// SQL. That is the v0.7.1 counter-leak class, and it is why this returns
+    /// the flag instead of acting on it.
+    ///
+    /// `really_inserted` is `tx.changes() > 0` because the INSERT is
+    /// `OR IGNORE` on the `op_id` PK — a cluster-replay caller re-using an op_id
+    /// inserts nothing and must not be counted.
+    ///
+    /// The `MAX_PENDING_OPS` admission check is likewise NOT here: it is a
+    /// pre-mutation gate and belongs before the caller's first side effect,
+    /// beside the vector reservation. Inside the transaction it would fire after
+    /// the row already exists.
+    pub(crate) fn log_op_pending_in_tx(
+        &self,
+        tx: &rusqlite::Transaction<'_>,
+        op_type: &str,
+        target_rid: Option<&str>,
+        payload: &serde_json::Value,
+        emb_hash: Option<&[u8]>,
+        embedding: Option<&[u8]>,
+    ) -> Result<(bool, String)> {
+        let op_id = crate::id::new_id();
+        let hlc_bytes = self.tick_hlc().to_bytes().to_vec();
+        let payload_str = serde_json::to_string(payload)?;
+        tx.execute(
+            "INSERT OR IGNORE INTO oplog \
+             (op_id, op_type, timestamp, target_rid, payload, actor_id, hlc, \
+              embedding_hash, origin_actor, applied, embedding) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10)",
+            params![
+                op_id,
+                op_type,
+                now(),
+                target_rid,
+                payload_str,
+                self.actor_id,
+                hlc_bytes,
+                emb_hash,
+                self.actor_id,
+                embedding,
+            ],
+        )?;
+        Ok((tx.changes() > 0, op_id))
+    }
+
+    /// The `MAX_PENDING_OPS` admission check, split out of
+    /// [`Self::log_op_pending`] so a reserve-then-commit write path can run it
+    /// BEFORE its first side effect (v0.10 Item 4a.6a).
+    ///
+    /// Backpressure must surface before anything visible has happened, so the
+    /// caller can bail having touched nothing.
+    pub(crate) fn check_pending_backpressure(&self) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let pending = self.pending_op_count.load(Ordering::Relaxed);
+        if pending >= MAX_PENDING_OPS {
+            return Err(crate::error::YantrikDbError::Backpressure {
+                pending,
+                max: MAX_PENDING_OPS,
+                retry_after_ms: 100,
+            });
+        }
+        Ok(())
+    }
+
     /// Batched sibling of [`Self::log_op`] that writes one canonical `"record"`
     /// op per entry under a SINGLE connection lock.
     ///
@@ -265,7 +401,6 @@ impl YantrikDB {
         // + index scan + drop just to check the bound. Cached counter
         // is maintained by `log_op_pending` (fetch_add on insert) and
         // `mark_op_applied` (fetch_sub on apply-win).
-        const MAX_PENDING_OPS: i64 = 10_000;
         let pending_now = self.pending_op_count.load(Ordering::Relaxed);
         if pending_now >= MAX_PENDING_OPS {
             return Err(crate::error::YantrikDbError::Backpressure {

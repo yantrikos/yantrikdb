@@ -1125,6 +1125,12 @@ impl YantrikDB {
         Ok(())
     }
 
+    /// Thin wrapper over the generalized [`YantrikDB::log_op_in_tx`] (Item 4a.6a).
+    ///
+    /// This function WAS the only in-transaction oplog writer in the tree; 4a.6a
+    /// generalized its body so `record()` could adopt the same protocol. Kept as
+    /// a named wrapper because `correct()`'s call site reads better for it, and
+    /// because it pins `op_type` to `'correct'` at one place.
     fn insert_correct_op_in_tx(
         &self,
         tx: &rusqlite::Transaction<'_>,
@@ -1134,26 +1140,14 @@ impl YantrikDB {
         embedding: Option<&[u8]>,
         applied_generation: i64,
     ) -> Result<()> {
-        let op_id = crate::id::new_id();
-        let hlc_bytes = self.tick_hlc().to_bytes().to_vec();
-        let payload_str = serde_json::to_string(payload)?;
-        tx.execute(
-            "INSERT INTO oplog \
-             (op_id, op_type, timestamp, target_rid, payload, actor_id, hlc, \
-              embedding_hash, origin_actor, applied, applied_generation, embedding) \
-             VALUES (?1, 'correct', ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9, ?10)",
-            params![
-                op_id,
-                now(),
-                rid,
-                payload_str,
-                self.actor_id,
-                hlc_bytes,
-                emb_hash,
-                self.actor_id,
-                applied_generation,
-                embedding,
-            ],
+        self.log_op_in_tx(
+            tx,
+            "correct",
+            Some(rid),
+            payload,
+            emb_hash,
+            embedding,
+            applied_generation,
         )?;
         Ok(())
     }
