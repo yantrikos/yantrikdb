@@ -14958,6 +14958,82 @@ fn record_batch_defers_during_reembed_instead_of_writing_a_doomed_generation() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
+fn replaying_materialize_record_post_does_not_inflate_mention_count() {
+    // REGRESSION: apply_materialize_record_post bumped entities.mention_count
+    // unconditionally, under a comment calling the statement "idempotent". The
+    // INSERT does not FAIL on conflict, but `mention_count = mention_count + 1`
+    // is not idempotent — and this op really is executed more than once:
+    // mark_op_applied is a completion ACK, not a pre-work claim, so N workers
+    // draining the same op all do the work and only then race on
+    // `WHERE applied = 0`; and an op that errors stays pending and is retried.
+    // Each duplicate inflated the count, which feeds the IDF term in patterns.rs
+    // and silently skewed salience.
+    //
+    // Resetting applied=0 and draining again is exactly the retry/duplicate-worker
+    // shape, and is the only way to reach the private handler from here.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    db.record_text(
+        "Alice and Bob shipped the Acme project",
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+
+    db.apply_pending_ops_once(100).unwrap();
+    let counts_after_first: Vec<(String, i64)> = {
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare("SELECT name, mention_count FROM entities ORDER BY name")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    };
+    assert!(
+        !counts_after_first.is_empty(),
+        "test needs at least one extracted entity to be meaningful"
+    );
+
+    // Simulate the duplicate execution: put the op back to pending and drain again.
+    db.conn()
+        .execute(
+            "UPDATE oplog SET applied = 0 WHERE op_type = ?1",
+            rusqlite::params![crate::engine::op_types::OP_MATERIALIZE_RECORD_POST],
+        )
+        .unwrap();
+    db.apply_pending_ops_once(100).unwrap();
+
+    let counts_after_replay: Vec<(String, i64)> = {
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare("SELECT name, mention_count FROM entities ORDER BY name")
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        rows
+    };
+    assert_eq!(
+        counts_after_first, counts_after_replay,
+        "replaying materialize_record_post must not re-count mentions"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
 fn record_batch_replicates_to_a_peer() {
     // REGRESSION: record_batch logged ONE opaque op — log_op("record_batch",
     // {count, rids}) — and replication has no "record_batch" arm, so peers hit
