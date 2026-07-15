@@ -14909,6 +14909,68 @@ fn correction_clears_reembed_staging_columns() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
+fn record_batch_replicates_to_a_peer() {
+    // REGRESSION: record_batch logged ONE opaque op — log_op("record_batch",
+    // {count, rids}) — and replication has no "record_batch" arm, so peers hit
+    // the `_ =>` forward-compat catch-all and silently dropped it. The payload
+    // carried no text/embedding/scalars, so it could not have rebuilt the rows
+    // even with an arm. Every memory written via the public record_batch() API
+    // therefore never reached any peer, with no error anywhere.
+    use crate::replication::{apply_ops, extract_ops_since};
+    let leader = YantrikDB::new(":memory:", 8).unwrap();
+    let follower = YantrikDB::new(":memory:", 8).unwrap();
+
+    let mk = |text: &str, seed: f32| RecordInput {
+        text: text.to_string(),
+        memory_type: "semantic".to_string(),
+        importance: 0.6,
+        valence: 0.25,
+        half_life: 604800.0,
+        metadata: serde_json::json!({"tag": text}),
+        embedding: vec_seed(seed, 8),
+        namespace: "default".to_string(),
+        certainty: 0.7,
+        domain: "general".to_string(),
+        source: "user".to_string(),
+        emotional_state: None,
+    };
+    let inputs = vec![mk("first batch item", 1.0), mk("second batch item", 2.0)];
+    let rids = leader.record_batch(&inputs).unwrap();
+    assert_eq!(rids.len(), 2);
+
+    let ops = extract_ops_since(&leader.conn(), None, None, None, 100).unwrap();
+    // One canonical "record" op per item — not one opaque batch op.
+    let record_ops: Vec<_> = ops.iter().filter(|o| o.op_type == "record").collect();
+    assert_eq!(
+        record_ops.len(),
+        2,
+        "expected one canonical record op per batch item, got {:?}",
+        ops.iter().map(|o| &o.op_type).collect::<Vec<_>>()
+    );
+    assert!(
+        !ops.iter().any(|o| o.op_type == "record_batch"),
+        "the unreplicable record_batch op must be gone"
+    );
+
+    apply_ops(&follower, &ops).unwrap();
+
+    // The follower actually has the memories, with content intact.
+    for (rid, input) in rids.iter().zip(inputs.iter()) {
+        let got = follower
+            .get(rid)
+            .unwrap()
+            .unwrap_or_else(|| panic!("batch item {rid} did not replicate"));
+        assert_eq!(got.text, input.text);
+        assert_eq!(got.source, "user");
+        assert_eq!(got.namespace, "default");
+        assert_eq!(got.certainty, input.certainty);
+        assert_eq!(got.valence, input.valence);
+        assert_eq!(got.metadata["tag"], input.text.as_str());
+    }
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
 fn follower_replay_applies_corrected_embedding() {
     // sol finding 6: a re-embedding correction replicates its EXACT bytes,
     // so a same-DEK follower's stored vector + recall track the new meaning
