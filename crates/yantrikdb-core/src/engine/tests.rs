@@ -1618,6 +1618,71 @@ fn gate_batch_rejects_inconsistent_element_atomically() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
+fn gate_covers_links_after_record() {
+    // T06 names "links-after-record" as a bypass path that must be covered.
+    // record_with_links (links.rs:118) delegates to record() with `?`, so the
+    // gate refusal propagates BEFORE the link loop at :132 and no edge is
+    // applied. That is the right behavior, but it is a TRANSITIVE guarantee —
+    // it holds only as long as the wrapper keeps going through record(). If
+    // someone later inlines the insert here, the gate silently stops covering
+    // this path, so pin it.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let target = db
+        .record(
+            "an existing target",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let links = [RecordLink {
+        target_rid: target.clone(),
+        link_type: LinkType::Supports,
+    }];
+    let err = db
+        .record_with_links(
+            "laundered via the wrapper",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({"kind": "fact"}),
+            &vec_seed(2.0, 8),
+            "default",
+            0.8,
+            "general",
+            "inference",
+            None,
+            &links,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::ProvenanceInconsistent { .. }
+        ),
+        "record_with_links must refuse an inference claiming kind=fact, got {err:?}"
+    );
+    // Refused before ANY link effect: the target gained no inbound edge.
+    let inbound = db
+        .linked_records(&target, LinkDirection::Inbound, None)
+        .unwrap();
+    assert!(
+        inbound.is_empty(),
+        "a refused record_with_links must apply no links, found {inbound:?}"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
 fn gate_correct_metadata_merge_cannot_flip_kind_to_fact() {
     // Item 4a.4b: a metadata_merge can flip `kind` on an existing record, so
     // correct() gates the FINAL MERGED metadata against the record's source —
