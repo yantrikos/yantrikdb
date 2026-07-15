@@ -477,6 +477,11 @@ impl YantrikDB {
                 .collect();
 
         let mut rids = Vec::with_capacity(inputs.len());
+        // One canonical "record" op per item, emitted after the savepoint
+        // releases. See `log_record_ops_batch`: the old single "record_batch" op
+        // was silently dropped by every peer, so batch writes never replicated.
+        let mut record_op_entries: Vec<(String, serde_json::Value, Vec<u8>)> =
+            Vec::with_capacity(inputs.len());
 
         // Lock conn once for the entire batch SQL work
         {
@@ -514,6 +519,32 @@ impl YantrikDB {
                     conn.execute_batch("ROLLBACK TO batch_record")?;
                     return Err(e.into());
                 }
+
+                // Byte-for-byte the payload `record()` emits (record.rs:325-340)
+                // so peers materialize batch items through the existing, tested
+                // "record" arm. Plaintext text/metadata, matching record() — the
+                // encrypted forms above are the at-rest representation, not the
+                // replication one.
+                record_op_entries.push((
+                    rid.clone(),
+                    serde_json::json!({
+                        "rid": rid,
+                        "type": input.memory_type,
+                        "text": sanitized_texts[idx].as_ref(),
+                        "importance": calibrated_importances[idx],
+                        "valence": input.valence,
+                        "half_life": input.half_life,
+                        "metadata": input.metadata,
+                        "created_at": ts,
+                        "updated_at": ts,
+                        "namespace": input.namespace,
+                        "certainty": input.certainty,
+                        "domain": input.domain,
+                        "source": input.source,
+                        "emotional_state": input.emotional_state,
+                    }),
+                    embedding_hash(&input.embedding),
+                ));
 
                 rids.push(rid);
             }
@@ -669,16 +700,15 @@ impl YantrikDB {
             }
         }
 
-        // Log a single batch op (log_op locks conn internally)
-        self.log_op(
-            "record_batch",
-            None,
-            &serde_json::json!({
-                "count": rids.len(),
-                "rids": rids,
-            }),
-            None,
-        )?;
+        // One canonical "record" op per item, under a single conn lock.
+        //
+        // This REPLACES a single `log_op("record_batch", {count, rids})`. That op
+        // was unreplicable twice over: replication has no "record_batch" arm, so
+        // peers hit the `_ =>` forward-compat catch-all and silently dropped it;
+        // and the payload carried no text/embedding/scalars, so it could not have
+        // rebuilt the memories even with an arm. Batch-written memories simply
+        // never reached peers. Nothing consumes the old op type locally.
+        self.log_record_ops_batch(&record_op_entries)?;
 
         Ok(rids)
     }
