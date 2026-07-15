@@ -195,6 +195,26 @@ pub enum YantrikDbError {
     )]
     CorrectionDeferredDuringReembed { rid: String },
 
+    /// **v0.10 Item 4a.** `record_batch` could not acquire a `SyncWriteGuard`
+    /// because a `db.reembed()` cutover is in flight (the write-router is in
+    /// Queueing state), so its `SearchState` snapshot could be swapped out from
+    /// under the batch mid-write. Retryable: the batch touched NO durable state
+    /// and can be reissued verbatim once the reembed completes.
+    ///
+    /// `record()` handles this by falling back to its queued path; there is no
+    /// queued-batch primitive yet (v0.10 Item 4a.6c), and routing items
+    /// independently would break the batch's all-or-nothing contract. Failing
+    /// the whole batch with a typed retryable error is the honest option in the
+    /// meantime — the alternative is what this replaced: silently committing
+    /// rows stamped with a generation that is being discarded.
+    #[error(
+        "record_batch({count} inputs) deferred: a db.reembed() cutover is in progress, \
+         so the batch cannot be committed against a stable generation. No durable state \
+         was changed — retry the batch verbatim once the reembed completes. (Single \
+         record() writes are not blocked; they route through the queued path.)"
+    )]
+    BatchDeferredDuringReembed { count: usize },
+
     /// **v0.10 Item 3 (correction seqlock, sol r5).** A recall could not
     /// obtain a coherent snapshot within its retry budget because
     /// text-changing corrections kept interleaving with its candidate

@@ -14909,6 +14909,55 @@ fn correction_clears_reembed_staging_columns() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
+fn record_batch_defers_during_reembed_instead_of_writing_a_doomed_generation() {
+    // REGRESSION: record_batch never consulted the write_router. It loaded its
+    // SearchState snapshot unguarded, so a reembed cutover could complete its
+    // swap mid-batch and the batch would commit rows + appends stamped with an
+    // `embedding_generation` that was being discarded. record() has always
+    // guarded this (record.rs:105 before :138); batch silently did not, while
+    // its own comment claimed every append lands on one anchored generation.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let inputs = vec![RecordInput {
+        text: "written during a cutover".to_string(),
+        memory_type: "semantic".to_string(),
+        importance: 0.5,
+        valence: 0.0,
+        half_life: 604800.0,
+        metadata: empty_meta(),
+        embedding: vec_seed(1.0, 8),
+        namespace: "default".to_string(),
+        certainty: 0.8,
+        domain: "general".to_string(),
+        source: "user".to_string(),
+        emotional_state: None,
+    }];
+
+    // Simulate a reembed cutover in flight.
+    db.write_router.switch_to_queueing();
+
+    let err = db.record_batch(&inputs).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::BatchDeferredDuringReembed { count: 1 }
+        ),
+        "batch must defer rather than write against a doomed generation, got {err:?}"
+    );
+    // Retryable means exactly that: NO durable state was touched.
+    let count: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0, "a deferred batch must write nothing");
+
+    // Once the cutover finishes the same batch succeeds verbatim.
+    db.write_router.switch_to_normal();
+    let rids = db.record_batch(&inputs).unwrap();
+    assert_eq!(rids.len(), 1);
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
 fn record_batch_replicates_to_a_peer() {
     // REGRESSION: record_batch logged ONE opaque op — log_op("record_batch",
     // {count, rids}) — and replication has no "record_batch" arm, so peers hit
