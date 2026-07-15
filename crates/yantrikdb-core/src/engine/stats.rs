@@ -405,8 +405,17 @@ impl YantrikDB {
     /// Phase 1 (this version), the API is exposed for tests and for Phase 3
     /// worker scaffolding.
     ///
-    /// Idempotent on op_id: if the same op_id is appended twice (e.g., via
-    /// crash-restart replay), the second INSERT is silently skipped.
+    /// **NOT idempotent on op_id, and cannot be.** This rustdoc used to claim
+    /// "if the same op_id is appended twice (e.g. via crash-restart replay), the
+    /// second INSERT is silently skipped" — describing a capability the signature
+    /// does not offer: there is no `op_id` parameter, so a caller CANNOT supply
+    /// one. Every call mints a fresh id (below), so the `OR IGNORE` that claim
+    /// justified could never fire for the reason given, and instead silently
+    /// swallowed real constraint violations — returning `Ok(op_id)` for a row
+    /// that was never written. This now uses a plain INSERT so a failure to
+    /// enqueue is an error, not a fiction. (The genuine replay case is
+    /// replication apply, which really does receive a remote op_id and inserts it
+    /// itself.)
     pub fn log_op_pending(
         &self,
         op_type: &str,
@@ -442,7 +451,7 @@ impl YantrikDB {
         // instance, not the class.
         self.check_pending_backpressure_locked()?;
         conn.execute(
-            "INSERT OR IGNORE INTO oplog \
+            "INSERT INTO oplog \
              (op_id, op_type, timestamp, target_rid, payload, \
               actor_id, hlc, embedding_hash, origin_actor, applied, embedding) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10)",
@@ -460,12 +469,12 @@ impl YantrikDB {
             ],
         )?;
         // **v0.7.1**: maintain the cached counter. INSERT OR IGNORE on
-        // op_id PK means the row may not actually have been added (caller
-        // re-using an op_id is the cluster-replay shape). Check the
-        // changes count to only increment on a real insert.
-        if conn.changes() > 0 {
-            self.pending_op_count.fetch_add(1, Ordering::Relaxed);
-        }
+        // Unconditional: with a plain INSERT, reaching here means exactly one row
+        // landed — anything else returned Err above. The old `changes() > 0` guard
+        // existed to cope with `OR IGNORE` no-ops that could not happen for the
+        // documented reason (no caller can supply an op_id), and it turned a
+        // swallowed constraint violation into a silently-correct-looking count.
+        self.pending_op_count.fetch_add(1, Ordering::Relaxed);
         Ok(op_id)
     }
 

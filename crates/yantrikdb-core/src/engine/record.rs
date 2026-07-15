@@ -1375,8 +1375,14 @@ impl YantrikDB {
 
         let conn = self.conn.lock();
         self.check_pending_backpressure_locked()?;
+        // Plain INSERT, not OR IGNORE. This is the QUEUED write's only durable
+        // record — record_queued() writes no memories row (by design), so this op
+        // IS the write. `OR IGNORE` here meant any swallowed constraint violation
+        // made record_queued() return a rid and Ok while persisting NOTHING: the
+        // caller's write vanished silently. The op_id is minted fresh two lines
+        // up, so no caller could ever have needed the ignore.
         conn.execute(
-            "INSERT OR IGNORE INTO oplog \
+            "INSERT INTO oplog \
              (op_id, op_type, timestamp, target_rid, payload, \
               actor_id, hlc, embedding_hash, origin_actor, applied, \
               embedding, embedding_model, applied_generation) \
@@ -1394,9 +1400,8 @@ impl YantrikDB {
                 embedding_model,
             ],
         )?;
-        if conn.changes() > 0 {
-            self.pending_op_count.fetch_add(1, Ordering::Relaxed);
-        }
+        // Unconditional: a plain INSERT that returned Ok wrote exactly one row.
+        self.pending_op_count.fetch_add(1, Ordering::Relaxed);
         Ok(op_id)
     }
 }
