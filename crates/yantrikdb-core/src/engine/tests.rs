@@ -1570,6 +1570,171 @@ fn gate_source_is_free_form_matrix_binds_only_recognized_inference() {
     assert_eq!(db.stats(None).unwrap().provenance_flagged_since_boot, 0);
 }
 
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn gate_batch_rejects_inconsistent_element_atomically() {
+    // Item 4a.4b: the gate runs in record_batch's PREVALIDATION loop, so an
+    // inconsistent element LATE in the batch rejects the whole batch before any
+    // side effect — earlier elements must not be half-committed.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let mk = |text: &str, source: &str, meta: serde_json::Value| RecordInput {
+        text: text.to_string(),
+        memory_type: "semantic".to_string(),
+        importance: 0.5,
+        valence: 0.0,
+        half_life: 604800.0,
+        metadata: meta,
+        embedding: vec_seed(1.0, 8),
+        namespace: "default".to_string(),
+        certainty: 0.8,
+        domain: "general".to_string(),
+        source: source.to_string(),
+        emotional_state: None,
+    };
+    let batch = vec![
+        mk("good one", "user", empty_meta()),
+        // late bad element: inference claiming fact
+        mk(
+            "laundered",
+            "inference",
+            serde_json::json!({"kind": "fact"}),
+        ),
+    ];
+    let err = db.record_batch(&batch).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::ProvenanceInconsistent { .. }
+        ),
+        "batch with an inconsistent element must be refused, got {err:?}"
+    );
+    // Atomic: the GOOD element must not have been written either.
+    let count: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 0, "a rejected batch must write nothing");
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn gate_covers_links_after_record() {
+    // T06 names "links-after-record" as a bypass path that must be covered.
+    // record_with_links (links.rs:118) delegates to record() with `?`, so the
+    // gate refusal propagates BEFORE the link loop at :132 and no edge is
+    // applied. That is the right behavior, but it is a TRANSITIVE guarantee —
+    // it holds only as long as the wrapper keeps going through record(). If
+    // someone later inlines the insert here, the gate silently stops covering
+    // this path, so pin it.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let target = db
+        .record(
+            "an existing target",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let links = [RecordLink {
+        target_rid: target.clone(),
+        link_type: LinkType::Supports,
+    }];
+    let err = db
+        .record_with_links(
+            "laundered via the wrapper",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({"kind": "fact"}),
+            &vec_seed(2.0, 8),
+            "default",
+            0.8,
+            "general",
+            "inference",
+            None,
+            &links,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::ProvenanceInconsistent { .. }
+        ),
+        "record_with_links must refuse an inference claiming kind=fact, got {err:?}"
+    );
+    // Refused before ANY link effect: the target gained no inbound edge.
+    let inbound = db
+        .linked_records(&target, LinkDirection::Inbound, None)
+        .unwrap();
+    assert!(
+        inbound.is_empty(),
+        "a refused record_with_links must apply no links, found {inbound:?}"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn gate_correct_metadata_merge_cannot_flip_kind_to_fact() {
+    // Item 4a.4b: a metadata_merge can flip `kind` on an existing record, so
+    // correct() gates the FINAL MERGED metadata against the record's source —
+    // otherwise correct() is a trivial laundering bypass of record()'s gate.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let rid = db
+        .record_text(
+            "an inferred conclusion",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({"kind": "inference"}),
+            "default",
+            0.8,
+            "general",
+            "inference",
+            None,
+        )
+        .unwrap();
+    // Laundering attempt: promote the inference to a fact via metadata_merge.
+    let err = db
+        .correct(
+            &rid,
+            None,
+            Some(&serde_json::json!({"kind": "fact"})),
+            None,
+            None,
+            "promote",
+        )
+        .unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::ProvenanceInconsistent { .. }
+        ),
+        "correct(metadata_merge) must not flip an inference to kind=fact, got {err:?}"
+    );
+    // Refused before any side effect: no revision, kind unchanged.
+    assert_eq!(db.history(&rid).unwrap().len(), 0, "no revision recorded");
+    // Raising the basis is the documented escape and IS allowed.
+    db.correct(
+        &rid,
+        None,
+        Some(&serde_json::json!({"kind": "fact", "confidence_basis": "verification"})),
+        None,
+        None,
+        "verified independently",
+    )
+    .unwrap();
+}
+
 #[test]
 fn gate_mode_parse_is_fail_closed() {
     // A malformed persisted mode must NOT silently disable the gate (the
