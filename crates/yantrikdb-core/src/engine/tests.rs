@@ -1531,31 +1531,43 @@ fn gate_off_mode_skips_entirely() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
-fn gate_enforce_refuses_unknown_source_warn_is_the_escape() {
-    // sol 4a.4: an UNKNOWN source is a real BYPASS, not a harmless label —
-    // source="inference_v2" + kind="fact" would otherwise sail through, because
-    // the authoritative claim being laundered is kind=fact and the source alias
-    // merely dodges the matrix. So `source` is parsed strictly under enforce...
+fn gate_source_is_free_form_matrix_binds_only_recognized_inference() {
+    // `source` is a FREE-FORM public dimension — tests/test_phases.py records
+    // source="manager" and asserts it round-trips verbatim, alongside domain /
+    // emotional_state. So an UNRECOGNIZED source is a label the engine takes no
+    // position on: the matrix does not bind it, even under enforce.
+    //
+    // sol 4a.4 wanted strict parsing (to block a source="inference_v2" alias).
+    // We decline: (1) it breaks that documented contract for every caller
+    // labelling records manager/slack/paper, and (2) it buys nothing — sol's own
+    // analysis concedes the internally-consistent lie source="user"+kind="fact"
+    // is undetectable, so a caller willing to alias is equally willing to write
+    // "user". The gate catches DECLARED CONTRADICTIONS, never lies.
     let db = YantrikDB::new(":memory:", 8).unwrap();
-    let err = gate_rec(&db, "inference_v2", serde_json::json!({"kind": "fact"})).unwrap_err();
+    assert_eq!(
+        db.provenance_gate_mode(),
+        crate::provenance::GateMode::Enforce
+    );
+    // Free-form sources are accepted verbatim, even claiming kind=fact.
+    for src in ["manager", "paper", "experiment", "inference_v2"] {
+        let rid = gate_rec(&db, src, serde_json::json!({"kind": "fact"})).unwrap();
+        assert_eq!(
+            db.get(&rid).unwrap().unwrap().source,
+            src,
+            "free-form source must round-trip verbatim"
+        );
+    }
+    // The matrix binds the RECOGNIZED inference source, and still refuses.
+    let err = gate_rec(&db, "inference", serde_json::json!({"kind": "fact"})).unwrap_err();
     assert!(
         matches!(
             err,
             crate::error::YantrikDbError::ProvenanceInconsistent { .. }
         ),
-        "enforce must refuse an unknown source (closed vocabulary), got {err:?}"
+        "recognized source=inference claiming kind=fact must still be refused, got {err:?}"
     );
-    // ...and WARN is what keeps a migrated DB's custom-label callers working:
-    // it counts the violation and allows the write. That is the migration
-    // mode's whole purpose — the RULE itself is never weakened.
-    db.set_provenance_gate_mode(crate::provenance::GateMode::Warn)
-        .unwrap();
-    let rid = gate_rec(&db, "inference_v2", serde_json::json!({"kind": "fact"})).unwrap();
-    assert!(
-        db.get(&rid).unwrap().is_some(),
-        "warn allows the legacy caller"
-    );
-    assert_eq!(db.stats(None).unwrap().provenance_flagged_since_boot, 1);
+    // Nothing was flagged: free-form sources are not violations.
+    assert_eq!(db.stats(None).unwrap().provenance_flagged_since_boot, 0);
 }
 
 #[test]

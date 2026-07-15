@@ -483,15 +483,8 @@ impl YantrikDB {
     /// summary and drafts candidate memories from it: atomized into facts
     /// (the same segmenter as the mega-blob split), stored as low-importance
     /// PROVISIONAL semantic memories (`metadata.provisional = true`,
-    /// `metadata.kind = "session_auto_capture"`, `source = "system"`) for cheap
-    /// later review / the sleep cycle to consolidate. Returns the new rids.
-    ///
-    /// **v0.10 Item 4a.4:** `source` is `"system"` (the engine generated these,
-    /// not a user/document/inference) — it previously duplicated the KIND into
-    /// the source field. `source` is a closed vocabulary
-    /// (user|inference|document|system) that the provenance gate parses;
-    /// `session_auto_capture` is a `kind`, which is open-vocabulary and already
-    /// carried in metadata below.
+    /// `source = "session_auto_capture"`) for cheap later review / the sleep
+    /// cycle to consolidate. Returns the new rids.
     ///
     /// This moves the structuring work off the agent's hot path — a session
     /// that never paused to call `remember` still yields well-formed memories
@@ -513,7 +506,16 @@ impl YantrikDB {
         let mut rids = Vec::with_capacity(facts.len());
         for fact in facts {
             let rid = self.record_text(
-                &fact, "semantic", 0.5, 0.0, 604_800.0, &meta, namespace, 0.7, domain, "system",
+                &fact,
+                "semantic",
+                0.5,
+                0.0,
+                604_800.0,
+                &meta,
+                namespace,
+                0.7,
+                domain,
+                "session_auto_capture",
                 None,
             )?;
             rids.push(rid);

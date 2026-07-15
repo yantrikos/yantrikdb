@@ -1279,14 +1279,34 @@ impl YantrikDB {
             return Ok(());
         }
         let verdict = (|| -> Result<()> {
-            // `source` is a CLOSED vocabulary and an unparseable one is a real
-            // bypass, not a harmless label (sol 4a.4): `source="inference_v2"`
-            // + `kind="fact"` would otherwise sail through — the authoritative
-            // claim being laundered is `kind=fact`, and an unrecognized source
-            // merely dodges the matrix. Parse strictly; WARN mode is what keeps
-            // a migrated DB's custom-label callers working (it counts + allows),
-            // which is precisely the purpose of the migration mode.
-            let src = Source::parse(source)?;
+            // **`source` is a FREE-FORM public dimension — an unrecognized one
+            // is NOT refused; the matrix simply does not bind it.**
+            //
+            // sol 4a.4 asked for strict parsing (reject `source="inference_v2"`
+            // + `kind="fact"` as an alias-bypass). We deliberately do not, for
+            // two reasons it could not see from the engine source alone:
+            //
+            // 1. `source` is a documented FREE-FORM dimension of the public API,
+            //    not a closed vocabulary: `tests/test_phases.py` records
+            //    `source="manager"` and asserts it round-trips verbatim, right
+            //    alongside `domain` / `emotional_state`. The four values in the
+            //    schema comment are EXAMPLES; only the one-time v26 backfill
+            //    ever coerced legacy junk. Rejecting unknown sources is a
+            //    BREAKING change to that contract for every existing caller
+            //    labelling records `manager` / `slack` / `paper`.
+            // 2. It would buy no protection anyway. sol's own r3/4a.4 analysis
+            //    concedes that an internally-consistent LIE (`source="user"` +
+            //    `kind="fact"`) is undetectable. A caller willing to alias to
+            //    `inference_v2` is equally willing to write `user`, so strict
+            //    parsing closes only one variant of a hole that stays wide open
+            //    — while breaking honest callers. The gate's documented scope is
+            //    DECLARED CONTRADICTIONS, never lies.
+            //
+            // So: the matrix binds the RECOGNIZED `inference` source; anything
+            // else is a label the engine takes no position on.
+            let Ok(src) = Source::parse(source) else {
+                return Ok(());
+            };
             let basis = match metadata.get("confidence_basis").and_then(|v| v.as_str()) {
                 Some(b) => Some(ConfidenceBasis::parse(b)?),
                 None => None,

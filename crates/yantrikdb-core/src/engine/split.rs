@@ -207,12 +207,7 @@ impl YantrikDB {
                     &namespace,
                     0.8,
                     &domain,
-                    // v0.10 Item 4a.4: the ENGINE derived these children, so the
-                    // source is "system" (the closed provenance vocabulary that
-                    // the gate parses). "consolidation" was overloading `source`
-                    // with what is really a kind — the child's kind is already
-                    // "atomic_fact" (+ derived_from) in child_meta above.
-                    "system",
+                    "consolidation",
                     None,
                 ) {
                     Ok(child_rid) => {
