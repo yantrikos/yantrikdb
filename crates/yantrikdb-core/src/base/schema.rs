@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 36;
+pub const SCHEMA_VERSION: i32 = 37;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -80,6 +80,18 @@ CREATE TABLE IF NOT EXISTS memories (
     -- a stale generation uses idx_memories_embedding_generation.
     embedding_generation INTEGER,
 
+    -- v37 (Item 4a — anti-laundering write gate + idempotency). `confidence_basis`
+    -- is the typed justification tier (observation|asserted|confirmation|
+    -- verification|inference|assumption|learned(model-vX); NULL = unspecified)
+    -- that participates in the write-gate consistency matrix. `idempotency_key`
+    -- (scoped by origin_actor + namespace) dedups caller retries. `origin_actor`
+    -- is the actor that admitted this record; it scopes idempotency keys so two
+    -- writers can't collide (forward-compat with multi-master Item 4b). All
+    -- nullable; existing rows migrate to NULL.
+    confidence_basis TEXT,
+    idempotency_key TEXT,
+    origin_actor TEXT,
+
     -- v32 (structural query / list_records): indexed generated columns that
     -- extract JSON metadata fields for typed enumeration without scanning the
     -- opaque metadata blob. VIRTUAL = computed on read; the secondary index
@@ -101,6 +113,33 @@ CREATE INDEX IF NOT EXISTS idx_memories_embedding_generation
 -- (initially) overwhelming majority of rows that are append-with-no-conflict.
 CREATE INDEX IF NOT EXISTS idx_memories_prior_rid ON memories(prior_rid) WHERE prior_rid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_memories_resolution_kind ON memories(resolution_kind) WHERE resolution_kind IS NOT NULL;
+
+-- v37 (Item 4a): actor-scoped durable idempotency claims. The
+-- `INSERT ... ON CONFLICT` on the PK is the serialization point for same-key
+-- retries; `state` pending->committed keeps a losing retry from observing a
+-- not-yet-committed rid, and `op_id`/`route`/`generation` are the recovery
+-- evidence used to complete-or-roll-back a crashed claim (never row-existence).
+-- `origin_actor` in the PK makes keys actor-scoped (forward-compat with
+-- multi-master Item 4b, which reconciles cross-actor keys without a migration).
+CREATE TABLE IF NOT EXISTS idempotency_claims (
+    origin_actor    TEXT NOT NULL,
+    namespace       TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    rid             TEXT NOT NULL,
+    payload_digest  BLOB NOT NULL,
+    op_id           TEXT NOT NULL,
+    route           TEXT NOT NULL,            -- 'sync' | 'queued'
+    generation      INTEGER NOT NULL,
+    state           TEXT NOT NULL,            -- 'pending' | 'committed'
+    created_at      REAL NOT NULL,
+    PRIMARY KEY (origin_actor, namespace, idempotency_key)
+);
+-- Defense-in-depth: an actor-scoped partial unique index on memories mirrors
+-- the claims PK. Partial (keyed rows only) so it costs nothing on the
+-- overwhelming majority of records that carry no idempotency key.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_idempotency
+    ON memories(origin_actor, namespace, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
 
 -- Session tracking (V13)
 CREATE TABLE IF NOT EXISTS sessions (
@@ -2594,4 +2633,32 @@ CREATE TABLE IF NOT EXISTS label_requests (
 pub const MIGRATE_V35_TO_V36: &str = "
 ALTER TABLE record_revisions ADD COLUMN prior_embedding_model TEXT;
 ALTER TABLE record_revisions ADD COLUMN prior_embedding_hash BLOB;
+";
+
+/// **v37 (Item 4a — anti-laundering write gate + idempotency).** Additive:
+/// three nullable columns on `memories` (existing rows → NULL), the durable
+/// `idempotency_claims` table, and an actor-scoped partial unique index. The
+/// partial index covers zero existing rows (all have NULL `idempotency_key`),
+/// so the migration cannot conflict. `run_migration_idempotent` swallows the
+/// duplicate-column error on replay; `IF NOT EXISTS` guards the table/index.
+pub const MIGRATE_V36_TO_V37: &str = "
+ALTER TABLE memories ADD COLUMN confidence_basis TEXT;
+ALTER TABLE memories ADD COLUMN idempotency_key TEXT;
+ALTER TABLE memories ADD COLUMN origin_actor TEXT;
+CREATE TABLE IF NOT EXISTS idempotency_claims (
+    origin_actor    TEXT NOT NULL,
+    namespace       TEXT NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    rid             TEXT NOT NULL,
+    payload_digest  BLOB NOT NULL,
+    op_id           TEXT NOT NULL,
+    route           TEXT NOT NULL,
+    generation      INTEGER NOT NULL,
+    state           TEXT NOT NULL,
+    created_at      REAL NOT NULL,
+    PRIMARY KEY (origin_actor, namespace, idempotency_key)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_idempotency
+    ON memories(origin_actor, namespace, idempotency_key)
+    WHERE idempotency_key IS NOT NULL;
 ";

@@ -1392,6 +1392,72 @@ fn test_schema_v20_has_rfc008_phase1_tables() {
 }
 
 #[test]
+fn test_schema_v37_item4a_columns_table_and_index() {
+    // v0.10 Item 4a.2: memories gains confidence_basis / idempotency_key /
+    // origin_actor; the idempotency_claims table + actor-scoped partial unique
+    // index exist; schema version is stamped 37.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let conn = db.conn();
+    for col in ["confidence_basis", "idempotency_key", "origin_actor"] {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('memories') WHERE name = ?1",
+                params![col],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "memories.{col} must exist at v37");
+    }
+    let has_table: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='idempotency_claims'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(has_table, 1, "idempotency_claims table must exist");
+    let has_index: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name='idx_memories_idempotency'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(has_index, 1, "actor-scoped idempotency index must exist");
+    let version: i64 = conn
+        .query_row(
+            "SELECT CAST(value AS INTEGER) FROM meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(version, 37, "schema version must be stamped 37");
+}
+
+#[test]
+fn test_schema_v37_idempotency_claims_actor_scoped_pk() {
+    // The claims PK (origin_actor, namespace, idempotency_key) is the
+    // serialization point: same (actor, ns, key) conflicts; a DIFFERENT actor
+    // with the same ns+key is allowed (actor-scoped, forward-compat for 4b).
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let conn = db.conn();
+    let ins = |actor: &str, rid: &str, op: &str| {
+        conn.execute(
+            "INSERT INTO idempotency_claims \
+             (origin_actor, namespace, idempotency_key, rid, payload_digest, op_id, route, generation, state, created_at) \
+             VALUES (?1, 'ns', 'k', ?2, X'00', ?3, 'sync', 0, 'pending', 1.0)",
+            params![actor, rid, op],
+        )
+    };
+    ins("actor-A", "rid1", "op1").unwrap();
+    assert!(
+        ins("actor-A", "rid2", "op2").is_err(),
+        "same (actor, ns, key) must conflict"
+    );
+    ins("actor-B", "rid3", "op3").unwrap(); // different actor: allowed
+}
+
+#[test]
 fn test_schema_v20_claims_has_mobility_signals() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let conn = db.conn();
