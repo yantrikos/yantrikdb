@@ -236,14 +236,31 @@ impl YantrikDB {
     /// SQL. That is the v0.7.1 counter-leak class, and it is why this returns
     /// the flag instead of acting on it.
     ///
-    /// `really_inserted` is `tx.changes() > 0` because the INSERT is
-    /// `OR IGNORE` on the `op_id` PK — a cluster-replay caller re-using an op_id
-    /// inserts nothing and must not be counted.
+    /// Uses a plain `INSERT`, NOT `INSERT OR IGNORE` — and that difference is
+    /// deliberate (sol, 4a.6a review finding 4).
     ///
-    /// The `MAX_PENDING_OPS` admission check is likewise NOT here: it is a
-    /// pre-mutation gate and belongs before the caller's first side effect,
-    /// beside the vector reservation. Inside the transaction it would fire after
-    /// the row already exists.
+    /// [`Self::log_op_pending`] uses `OR IGNORE` because it has cluster-replay
+    /// callers that re-use an existing `op_id`, where a silent no-op is the
+    /// correct outcome. This function mints a FRESH `op_id` and has no such
+    /// caller, so "ignored" could only mean an id collision or some other
+    /// constraint — and swallowing it would let the record transaction commit and
+    /// `record()` return `Ok` while the post-materialization enqueue silently did
+    /// not happen. That write's entity materialization would then be owed to
+    /// nobody, forever, which is the exact failure moving the enqueue into the
+    /// transaction was meant to prevent. A plain INSERT turns that into the error
+    /// it is, rolling the whole write back.
+    ///
+    /// (I originally copied `OR IGNORE` from `log_op_pending` without checking
+    /// whether its rationale applied here. It did not.)
+    ///
+    /// Returns the op_id. Deliberately does NOT touch `pending_op_count`: the
+    /// counter may only move AFTER the enclosing transaction commits — increment
+    /// it here and a rollback leaves the row gone but the counter raised, with
+    /// nothing to bring it back down ([`Self::mark_op_applied`] only decrements
+    /// rows it actually transitions, and there is no row). The drift is
+    /// monotonic, and at `MAX_PENDING_OPS` of net drift the admission check wedges
+    /// EVERY foreground write into `Backpressure` forever with zero pending ops in
+    /// SQL. That is the v0.7.1 counter-leak class.
     pub(crate) fn log_op_pending_in_tx(
         &self,
         tx: &rusqlite::Transaction<'_>,
@@ -252,12 +269,12 @@ impl YantrikDB {
         payload: &serde_json::Value,
         emb_hash: Option<&[u8]>,
         embedding: Option<&[u8]>,
-    ) -> Result<(bool, String)> {
+    ) -> Result<String> {
         let op_id = crate::id::new_id();
         let hlc_bytes = self.tick_hlc().to_bytes().to_vec();
         let payload_str = serde_json::to_string(payload)?;
         tx.execute(
-            "INSERT OR IGNORE INTO oplog \
+            "INSERT INTO oplog \
              (op_id, op_type, timestamp, target_rid, payload, actor_id, hlc, \
               embedding_hash, origin_actor, applied, embedding) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10)",
@@ -274,16 +291,27 @@ impl YantrikDB {
                 embedding,
             ],
         )?;
-        Ok((tx.changes() > 0, op_id))
+        Ok(op_id)
     }
 
-    /// The `MAX_PENDING_OPS` admission check, split out of
-    /// [`Self::log_op_pending`] so a reserve-then-commit write path can run it
-    /// BEFORE its first side effect (v0.10 Item 4a.6a).
+    /// The `MAX_PENDING_OPS` admission check (v0.10 Item 4a.6a).
     ///
-    /// Backpressure must surface before anything visible has happened, so the
-    /// caller can bail having touched nothing.
-    pub(crate) fn check_pending_backpressure(&self) -> Result<()> {
+    /// **Must be called while holding the conn lock** to be authoritative. It was
+    /// originally an unlocked pre-lock read, which sol's 4a.6a review finding 1
+    /// showed is a TOCTOU: at 9,999 pending, N writers all read "under the limit",
+    /// then serialize under `conn` and each commit an enqueue, pushing the queue
+    /// past the ceiling. Under the lock the read and the commit that acts on it
+    /// are serialized, so the bound actually holds.
+    ///
+    /// [`Self::check_pending_backpressure_fast`] is the unlocked variant, useful
+    /// only as an early reject before doing expensive work.
+    pub(crate) fn check_pending_backpressure_locked(&self) -> Result<()> {
+        self.check_pending_backpressure_fast()
+    }
+
+    /// Unlocked, advisory admission check — an early reject only. NOT
+    /// authoritative: see [`Self::check_pending_backpressure_locked`].
+    pub(crate) fn check_pending_backpressure_fast(&self) -> Result<()> {
         use std::sync::atomic::Ordering;
         let pending = self.pending_op_count.load(Ordering::Relaxed);
         if pending >= MAX_PENDING_OPS {

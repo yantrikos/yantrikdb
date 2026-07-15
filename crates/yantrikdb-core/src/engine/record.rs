@@ -9,6 +9,44 @@ use super::reembed::SearchState;
 use super::write_router::SyncWriteGuard;
 use super::{embedding_hash, now, sanitize, YantrikDB};
 
+/// RAII cleanup for an unpublished delta reservation (v0.10 Item 4a.6a,
+/// sol review finding 3).
+///
+/// `append_reserved` consumes delta capacity with an entry that search skips and
+/// — critically — that compaction deliberately RETAINS rather than seals
+/// (`delta_index.rs`, so the removal path can never lose a race). That retention
+/// is what makes the reservation safe to roll back, and also what makes a LEAKED
+/// reservation permanent: an unpublished entry nobody removes holds capacity
+/// until the process restarts, and enough of them wedge every writer into
+/// Backpressure.
+///
+/// Manual cleanup on the `Err` path is therefore not sufficient — an unwinding
+/// panic between the reservation and the commit would skip it. This guard removes
+/// the reservation on ANY unwind, and is defused by `commit()` once the write is
+/// durable (after which the entry must be published, not removed).
+struct ReservationGuard<'a> {
+    state: &'a SearchState,
+    rid: &'a str,
+    seq: u64,
+    live: bool,
+}
+
+impl ReservationGuard<'_> {
+    /// The write is durable; the reservation must survive to be published.
+    fn commit(mut self) {
+        self.live = false;
+    }
+}
+
+impl Drop for ReservationGuard<'_> {
+    fn drop(&mut self) {
+        if self.live {
+            // Always succeeds: reserved entries are never sealed.
+            self.state.vec_index.remove_appended(self.rid, self.seq);
+        }
+    }
+}
+
 /// Coerce a blank namespace to the canonical default (v0.7.23).
 ///
 /// The schema column default and the Python/MCP bindings all use
@@ -239,9 +277,21 @@ impl YantrikDB {
         // holding conn across non-O(1) work; a delta reserve/publish is an O(1)
         // Vec push / flag flip.
 
-        // Admission check BEFORE any side effect. `log_op_pending_in_tx` cannot
-        // do this itself — inside the tx it would fire after the row exists.
-        self.check_pending_backpressure()?;
+        // Advisory early reject: cheap, unlocked, and NOT authoritative — the
+        // binding check happens under the conn lock below. Doing it here too just
+        // avoids the embed/serialize work on an obviously-full queue.
+        //
+        // KNOWN GAP, deliberately not closed here (sol 4a.6a finding 2): this is
+        // not "before any side effect". `calibrate_importance` (record.rs:101)
+        // already ran and autocommitted an update to `namespace_importance_stats`
+        // (importance.rs:88) BEFORE routing, so a write rejected below — by
+        // backpressure, by delta capacity, or by a transaction failure — has
+        // already advanced this namespace's calibration distribution permanently.
+        // That is a real defect and it predates 4a.6a; sol's own increment plan
+        // puts the fix in 4a.6b ("winner-only, transactional calibration"), where
+        // the claim decides who is allowed to advance it. It is called out here so
+        // nobody reads this path as fully side-effect-free before then.
+        self.check_pending_backpressure_fast()?;
 
         let emb_hash = embedding_hash(embedding);
         let record_payload = serde_json::json!({
@@ -278,6 +328,14 @@ impl YantrikDB {
 
         let conn = self.conn();
 
+        // THE authoritative admission check: under the lock, before the
+        // reservation and before any durable write. The pre-lock check above is a
+        // TOCTOU on its own (sol 4a.6a finding 1) — at MAX_PENDING_OPS-1, N
+        // writers can all read "under the limit", then serialize here and each
+        // commit an enqueue, overshooting the ceiling. Re-reading under the lock
+        // serializes the read with the commit that acts on it, so the bound holds.
+        self.check_pending_backpressure_locked()?;
+
         // Mint the seq UNDER the conn lock. Search resolves a rid to its HIGHEST
         // seq, not the most recently appended one, so minting outside the
         // serialized region would let a stalled writer holding seq N append after
@@ -292,9 +350,19 @@ impl YantrikDB {
             .vec_index
             .append_reserved(rid.clone(), embedding.to_vec(), seq)?;
 
+        // From here until commit, ANY exit — including an unwinding panic —
+        // must drop the reservation, or its capacity is held forever
+        // (compaction retains unpublished entries by design).
+        let reservation = ReservationGuard {
+            state: &state,
+            rid: &rid,
+            seq,
+            live: true,
+        };
+
         // ONE transaction: row + session links + the record op + the
         // post-materialization enqueue. Either all of it is durable or none is.
-        let committed = (|| -> Result<bool> {
+        let committed = (|| -> Result<()> {
             let tx = conn.unchecked_transaction()?;
             tx.execute(
                 "INSERT INTO memories \
@@ -358,7 +426,10 @@ impl YantrikDB {
                 embedding_generation,
             )?;
 
-            let (pending_inserted, _op_id) = self.log_op_pending_in_tx(
+            // Plain INSERT: if this cannot land, the whole write must fail
+            // rather than commit a record whose entity materialization is owed
+            // to nobody. See log_op_pending_in_tx.
+            self.log_op_pending_in_tx(
                 &tx,
                 crate::engine::op_types::OP_MATERIALIZE_RECORD_POST,
                 Some(&rid),
@@ -368,37 +439,53 @@ impl YantrikDB {
             )?;
 
             tx.commit()?;
-            Ok(pending_inserted)
+            Ok(())
         })();
 
-        let pending_inserted = match committed {
-            Ok(v) => v,
+        match committed {
+            // Durable. Defuse the guard: the reservation must now be PUBLISHED,
+            // not removed.
+            Ok(()) => reservation.commit(),
             Err(e) => {
-                // Nothing durable exists. Drop the reservation and leave. Removal
-                // always succeeds: reserved entries are skipped by seal/compaction
-                // precisely so this path cannot lose the race. Note this is a
-                // removal, NOT a tombstone — a tombstone would suppress the rid
-                // and hide a still-valid older vector.
-                state.vec_index.remove_appended(&rid, seq);
+                // Nothing durable exists. `reservation` drops here and removes the
+                // entry — a removal, NOT a tombstone (a tombstone would suppress
+                // the rid and hide a still-valid older vector).
                 drop(conn);
                 return Err(e);
             }
-        };
+        }
 
         // Durable. PUBLISH makes the vector visible; it is infallible, so there
         // is no failure window between "committed" and "visible". A crash here
         // rebuilds the index from `memories` on next open — the row is
         // authoritative.
-        state.vec_index.publish(&rid, seq);
+        // publish() is infallible but returns whether it found the reservation.
+        // Discarding that would silently hide a protocol violation (a reservation
+        // removed or never made), leaving a durable row whose vector is invisible.
+        let published = state.vec_index.publish(&rid, seq);
+        debug_assert!(
+            published,
+            "reservation for {rid} seq {seq} vanished before publish"
+        );
+        if !published {
+            tracing::error!(
+                rid = %rid,
+                seq,
+                "reserved vector entry missing at publish — row is durable but                  unsearchable until the index is rebuilt from SQL"
+            );
+        }
 
         // Only NOW may the pending counter move. Incrementing inside the tx would
         // leak it upward on rollback with no row for `mark_op_applied` to
         // decrement, and that drift is monotonic — at MAX_PENDING_OPS it wedges
         // every foreground write into Backpressure with an empty queue in SQL.
-        if pending_inserted {
-            self.pending_op_count
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        }
+        //
+        // Unconditional: the enqueue is a plain INSERT inside the committed tx, so
+        // reaching here means exactly one pending row landed. (It was conditional
+        // on an `OR IGNORE` no-op until sol's finding 4 established that an
+        // ignored insert here is a bug, not an outcome to account for.)
+        self.pending_op_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 
         self.cache_insert(
             rid.clone(),

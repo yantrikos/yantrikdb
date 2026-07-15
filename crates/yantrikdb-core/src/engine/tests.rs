@@ -13857,12 +13857,17 @@ fn boundary_audit_pattern_detects_synthetic_violation() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
-fn record_backpressure_writes_nothing_at_all() {
+fn record_backpressure_writes_no_row_op_or_session_state() {
     // **v0.10 Item 4a.6a.** The v0.7.19 sibling below asserts the OLD contract:
     // the row was written, then a compensating DELETE reclaimed it. record() no
     // longer needs compensating — it RESERVES delta capacity before touching SQL,
-    // so Backpressure surfaces having written nothing. This asserts the stronger
-    // properties the compensating design could not give:
+    // so Backpressure surfaces without a row, an op, or session state.
+    //
+    // NAMED PRECISELY, because "writes nothing at all" would be a LIE (sol 4a.6a
+    // finding 2): `calibrate_importance` already autocommitted an update to
+    // `namespace_importance_stats` before routing, so a rejected write HAS moved
+    // this namespace's calibration. That defect predates 4a.6a and is fixed in
+    // 4a.6b (winner-only transactional calibration). What this test does assert:
     //
     //   1. no memories row              (the old design also achieved this, by
     //                                    writing one and deleting it)
