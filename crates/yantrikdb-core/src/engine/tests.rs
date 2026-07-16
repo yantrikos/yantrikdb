@@ -7925,6 +7925,74 @@ fn keyed_duplicate_resolves_even_under_backpressure() {
     db.write_router.switch_to_normal();
 }
 
+/// 4a.6c sol r3: the FAST (pre-lock) backpressure check ran before the locked
+/// probe, so a race-window duplicate under PENDING-queue saturation (a
+/// different resource from the delta saturation the sibling test exercises)
+/// still died with Backpressure before it could resolve. Keyed writes now skip
+/// the fast check — the authoritative locked check still gates keyed WINNERS,
+/// proven by the second half.
+#[test]
+fn keyed_duplicate_resolves_under_pending_queue_saturation() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let write = |db: &YantrikDB, key: &str| {
+        db.record_with_idempotency(
+            "pending-saturation probe",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "pq_ns",
+            0.8,
+            "work",
+            "user",
+            None,
+            Some(key),
+        )
+    };
+    // The keyed write lands while there is capacity.
+    let rid = write(&db, "pq-key").unwrap();
+
+    // Force the PENDING queue to read as saturated — the exact resource in
+    // sol's scenario. The cached counter is what both backpressure checks
+    // consult, so storing past the ceiling makes every admission check reject
+    // deterministically, with no timing dependence.
+    let real = db
+        .pending_op_count
+        .swap(1_000_000, std::sync::atomic::Ordering::SeqCst);
+
+    // The duplicate must resolve despite full-pending admission rejecting
+    // everything: keyed writes skip the fast check and the locked probe runs
+    // before the locked check.
+    let rid2 = write(&db, "pq-key").expect("keyed dup must resolve under pending-queue saturation");
+    assert_eq!(rid2, rid, "dup returns the original rid");
+
+    // A keyed NEW write must still hear Backpressure — from the AUTHORITATIVE
+    // locked check, which keyed writes do not skip.
+    let err = write(&db, "pq-key-new")
+        .expect_err("a NEW keyed write under pending saturation must backpressure");
+    assert!(
+        matches!(err, crate::error::YantrikDbError::Backpressure { .. }),
+        "expected Backpressure from the locked check, got {err:?}"
+    );
+
+    // And the queued route, same resource: dup resolves, new key rejects.
+    db.write_router.switch_to_queueing();
+    let rid3 = write(&db, "pq-key").expect("queued dup must resolve under pending saturation");
+    assert_eq!(rid3, rid);
+    let err = write(&db, "pq-key-new-q")
+        .expect_err("a NEW keyed queued write under pending saturation must backpressure");
+    assert!(
+        matches!(err, crate::error::YantrikDbError::Backpressure { .. }),
+        "expected Backpressure on the queued route, got {err:?}"
+    );
+    db.write_router.switch_to_normal();
+
+    db.pending_op_count
+        .store(real, std::sync::atomic::Ordering::SeqCst);
+}
+
 // ── Relationship-Based Entity Type Tests ──
 
 #[test]

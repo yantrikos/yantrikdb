@@ -399,7 +399,18 @@ impl YantrikDB {
         // so a rejection here (or anywhere later) leaves no trace anywhere.
         // `record_backpressure_writes_nothing_at_all` is the enforcing test,
         // and its name is the contract.
-        self.check_pending_backpressure_fast()?;
+        //
+        // KEYED writes skip the fast check (sol 4a.6c r3): it is a
+        // work-avoidance optimization, and for a keyed write the priority
+        // inverts — a race-window duplicate must REACH the locked probe below
+        // even when the pending queue is full, or saturation can permanently
+        // fail a retry that would write nothing. The AUTHORITATIVE locked
+        // check still gates every keyed write that wins its claim, so the
+        // ceiling holds; the only cost is that a keyed loser does slightly
+        // more work before hearing Backpressure.
+        if idem.is_none() {
+            self.check_pending_backpressure_fast()?;
+        }
 
         let emb_hash = embedding_hash(embedding);
         let record_payload = serde_json::json!({
@@ -1691,7 +1702,12 @@ impl YantrikDB {
         // lock below. Same TOCTOU, same fix as log_op_pending (sol 4a.6a r2
         // finding 1): two queued writers at MAX_PENDING_OPS-1 could both pass an
         // unlocked load and then serialize their inserts past the ceiling.
-        self.check_pending_backpressure_fast()?;
+        // KEYED writes skip it (sol 4a.6c r3): a race-window duplicate must
+        // reach the locked probe below even when the pending queue is full —
+        // see the sync route's twin comment.
+        if claim.is_none() {
+            self.check_pending_backpressure_fast()?;
+        }
 
         let conn = self.conn.lock();
         // 4a.6c sol r2: locked probe BEFORE admission — same rationale as the
