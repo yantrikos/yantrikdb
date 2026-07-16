@@ -7821,6 +7821,97 @@ fn invalid_idempotency_keys_are_rejected() {
     assert_eq!(rows, 0, "refused keys wrote nothing");
 }
 
+/// 4a.6c sol finding 1: a keyed DUPLICATE retry must resolve to its hit even
+/// when the engine is saturated — Backpressure storms are exactly when clients
+/// retry, and the dup writes nothing, so admission machinery (router, delta
+/// reservation, backpressure checks, seq/HLC) must not run before the claim
+/// probe. Pre-probe, this test dies with Backpressure instead of the Hit.
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn keyed_duplicate_resolves_even_under_backpressure() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let dim = db.embedding_dim();
+
+    // The keyed write lands FIRST, while there is capacity.
+    let keyed = |db: &YantrikDB| {
+        db.record_with_idempotency(
+            "the keyed write that must stay resolvable",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(9.0, 8),
+            "bp_idem_ns",
+            0.8,
+            "work",
+            "user",
+            None,
+            Some("bp-key"),
+        )
+    };
+    let rid = keyed(&db).unwrap();
+
+    // Saturate the delta with keyless writes until Backpressure.
+    let mut saturated = false;
+    for i in 0..400 {
+        let emb: Vec<f32> = (0..dim).map(|j| ((i + j) as f32) * 0.001).collect();
+        match db.record(
+            &format!("bp-filler-{i}"),
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        ) {
+            Ok(_) => {}
+            Err(crate::error::YantrikDbError::Backpressure { .. }) => {
+                saturated = true;
+                break;
+            }
+            Err(e) => panic!("unexpected: {e:?}"),
+        }
+    }
+    assert!(saturated, "delta never saturated");
+
+    // The DUPLICATE retry resolves to its hit despite saturation.
+    let rid2 = keyed(&db).expect(
+        "a keyed duplicate writes nothing and must resolve to its Hit, \
+         not die on Backpressure",
+    );
+    assert_eq!(rid2, rid, "the hit returns the original rid");
+
+    // Sanity: a keyed NEW write (different key) is still subject to
+    // backpressure — the probe only short-circuits duplicates.
+    let err = db
+        .record_with_idempotency(
+            "a genuinely new keyed write",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(10.0, 8),
+            "bp_idem_ns",
+            0.8,
+            "work",
+            "user",
+            None,
+            Some("bp-key-new"),
+        )
+        .expect_err("a NEW keyed write under saturation must still backpressure");
+    assert!(
+        matches!(err, crate::error::YantrikDbError::Backpressure { .. }),
+        "expected Backpressure for the new keyed write, got {err:?}"
+    );
+}
+
 // ── Relationship-Based Entity Type Tests ──
 
 #[test]

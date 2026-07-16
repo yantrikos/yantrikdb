@@ -95,6 +95,82 @@ pub(crate) enum ClaimAttempt {
     Hit { existing_rid: String },
 }
 
+/// Resolve an EXISTING claim row against this attempt's digest — the single
+/// owner of hit/conflict semantics, shared by the pre-admission probe and the
+/// in-transaction lost-INSERT branch (#83: one rule, one spelling).
+fn resolve_existing(
+    namespace: &str,
+    payload_digest: &[u8; 32],
+    existing_rid: String,
+    existing_digest: &[u8],
+    state: &str,
+) -> Result<ClaimAttempt> {
+    if existing_digest != &payload_digest[..] {
+        return Err(YantrikDbError::IdempotencyConflict {
+            namespace: namespace.to_string(),
+            existing_rid,
+            reason: "same idempotency key with a DIFFERENT payload — the first \
+                     write's content stands; change the key or the payload"
+                .to_string(),
+        });
+    }
+    if state != "committed" {
+        // 4a.6c never durably writes 'pending' (claim + op share one tx). A
+        // pending row here means a crash artifact from a future engine version
+        // whose claim/commit are split; refuse loudly rather than return a rid
+        // whose write may not exist.
+        return Err(YantrikDbError::IdempotencyConflict {
+            namespace: namespace.to_string(),
+            existing_rid,
+            reason: format!(
+                "claim is in state '{state}', not 'committed' — a crashed \
+                 prior attempt; the recovery sweep that reconciles this is \
+                 not yet implemented"
+            ),
+        });
+    }
+    Ok(ClaimAttempt::Hit { existing_rid })
+}
+
+/// **Pre-admission probe** (sol 4a.6c finding 1): a READ-ONLY lookup of the
+/// claim, run BEFORE backpressure checks, delta reservation, and seq/HLC
+/// allocation. A duplicate retry writes nothing, so it must resolve to its
+/// Hit/conflict even when the engine is saturated — Backpressure storms are
+/// exactly when clients retry, and a dup retry that can only ever see
+/// `Backpressure` is a retry loop that never converges.
+///
+/// Race window: a MISS here is advisory only — the authoritative decision
+/// remains the `ON CONFLICT` INSERT inside the write transaction
+/// ([`claim_in_tx`]), exactly as the design doc specifies for this probe. A
+/// HIT here is final: committed claims are immutable in 4a (single writer, no
+/// delete path), so acting on one read outside the lock is sound.
+pub(crate) fn probe_committed_claim(
+    conn: &rusqlite::Connection,
+    origin_actor: &str,
+    namespace: &str,
+    idempotency_key: &str,
+    payload_digest: &[u8; 32],
+) -> Result<Option<String>> {
+    let existing: Option<(String, Vec<u8>, String)> = conn
+        .query_row(
+            "SELECT rid, payload_digest, state FROM idempotency_claims \
+             WHERE origin_actor = ?1 AND namespace = ?2 AND idempotency_key = ?3",
+            params![origin_actor, namespace, idempotency_key],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    match existing {
+        None => Ok(None),
+        Some((rid, digest, state)) => {
+            match resolve_existing(namespace, payload_digest, rid, &digest, &state)? {
+                ClaimAttempt::Hit { existing_rid } => Ok(Some(existing_rid)),
+                // resolve_existing never returns Won.
+                ClaimAttempt::Won => unreachable!("resolve_existing cannot yield Won"),
+            }
+        }
+    }
+}
+
 /// INSERT-or-resolve the claim inside the caller's open transaction. See the
 /// module doc for the rule. MUST be the first write of the transaction.
 pub(crate) fn claim_in_tx(
@@ -149,29 +225,11 @@ pub(crate) fn claim_in_tx(
         });
     };
 
-    if existing_digest.as_slice() != &claim.payload_digest[..] {
-        return Err(YantrikDbError::IdempotencyConflict {
-            namespace: claim.namespace.to_string(),
-            existing_rid,
-            reason: "same idempotency key with a DIFFERENT payload — the first \
-                     write's content stands; change the key or the payload"
-                .to_string(),
-        });
-    }
-    if state != "committed" {
-        // 4a.6c never durably writes 'pending' (claim + op share one tx). A
-        // pending row here means a crash artifact from a future engine version
-        // whose claim/commit are split; refuse loudly rather than return a rid
-        // whose write may not exist.
-        return Err(YantrikDbError::IdempotencyConflict {
-            namespace: claim.namespace.to_string(),
-            existing_rid,
-            reason: format!(
-                "claim is in state '{state}', not 'committed' — a crashed \
-                 prior attempt; the recovery sweep that reconciles this is \
-                 not yet implemented"
-            ),
-        });
-    }
-    Ok(ClaimAttempt::Hit { existing_rid })
+    resolve_existing(
+        claim.namespace,
+        claim.payload_digest,
+        existing_rid,
+        &existing_digest,
+        &state,
+    )
 }

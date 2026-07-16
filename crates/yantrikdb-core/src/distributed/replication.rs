@@ -574,14 +574,19 @@ fn materialize_record(
     let domain = payload["domain"].as_str().unwrap_or("general");
     let source = payload["source"].as_str().unwrap_or("user");
     let emotional_state = payload["emotional_state"].as_str();
+    // 4a.6c: the v37 idempotency columns, mirrored from the origin (same
+    // extend-the-#69-pattern as source above). Absent/null on pre-4a.6c ops
+    // and keyless writes -> NULL, identical to the old row shape.
+    let idempotency_key = payload["idempotency_key"].as_str();
+    let claim_origin_actor = payload["origin_actor"].as_str();
 
     // Add-Wins Set: INSERT OR IGNORE means first writer wins (UUIDv7 = no collisions)
     conn.execute(
         "INSERT OR IGNORE INTO memories \
          (rid, type, text, created_at, updated_at, importance, \
           half_life, last_access, valence, metadata, namespace, \
-          certainty, domain, source, emotional_state) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
+          certainty, domain, source, emotional_state, idempotency_key, origin_actor) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
         params![
             rid,
             mem_type,
@@ -598,6 +603,8 @@ fn materialize_record(
             domain,
             source,
             emotional_state,
+            idempotency_key,
+            claim_origin_actor,
         ],
     )?;
 

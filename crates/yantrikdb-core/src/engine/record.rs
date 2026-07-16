@@ -175,6 +175,16 @@ impl YantrikDB {
         // first attempt itself advances, so digesting the calibrated value
         // would turn an honest retry into a false conflict. Computed BEFORE
         // routing so both routes resolve the same key identically.
+        //
+        // The caller-supplied embedding IS in the digest (PayloadVariant::
+        // Record), even though the QUEUED route discards it (the materializer
+        // re-encodes). Deliberate, decided at sol's 4a.6c review: record()'s
+        // idempotency is API-BYTE identity — on the sync route the embedding is
+        // stored, so two calls with different vectors ARE different writes, and
+        // the digest must not depend on which route the router happened to pick.
+        // A caller whose embedder is non-deterministic across retries belongs on
+        // record_text (whose RecordText variant EXCLUDES the generated vector,
+        // 4a.6d) — regeneration is legitimate there and only there.
         let idem: Option<(&str, [u8; 32])> = match idempotency_key {
             None => None,
             Some(key) => {
@@ -205,6 +215,26 @@ impl YantrikDB {
                 Some((key, crate::payload_digest::payload_digest(&view)))
             }
         };
+        // 4a.6c pre-admission probe (sol finding 1): a duplicate retry writes
+        // nothing, so it resolves BEFORE any admission machinery — before the
+        // router, the backpressure checks, the delta reservation, and the
+        // seq/HLC allocation. Backpressure storms are exactly when clients
+        // retry; without this, a keyed dup against a saturated engine could
+        // only ever see Backpressure and the retry loop would never converge.
+        // A probe MISS is advisory (the ON CONFLICT INSERT in the write tx
+        // stays authoritative); a probe HIT is final — committed claims are
+        // immutable in 4a.
+        if let Some((key, digest)) = idem.as_ref() {
+            if let Some(existing_rid) = super::idempotency::probe_committed_claim(
+                &self.conn(),
+                &self.actor_id,
+                namespace,
+                key,
+                digest,
+            )? {
+                return Ok(existing_rid);
+            }
+        }
         // Issue #41 layer 3: route on write_router state. The guard
         // (if acquired) is held for the full sync path and drops via
         // RAII at function return, panic-safe.
@@ -387,6 +417,13 @@ impl YantrikDB {
             "domain": domain,
             "source": source,
             "emotional_state": emotional_state,
+            // 4a.6c: carried so replication's materialize_record writes the
+            // same v37 columns the origin row has — a follower's keyed row must
+            // mirror its leader's, or the memories partial unique index (the
+            // claims table's defense-in-depth) never covers followers. Null for
+            // keyless writes; peers on older payloads default to NULL.
+            "idempotency_key": idem.as_ref().map(|(k, _)| *k),
+            "origin_actor": idem.as_ref().map(|_| self.actor_id.as_str()),
         });
         // **Phase 4.3 Commit B (saga task 3, 2026-05-08).** The unbounded entity
         // / memory_entities / claims loops that used to run inline are enqueued
