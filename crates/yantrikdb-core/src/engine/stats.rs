@@ -239,19 +239,22 @@ impl YantrikDB {
     /// Uses a plain `INSERT`, NOT `INSERT OR IGNORE` — and that difference is
     /// deliberate (sol, 4a.6a review finding 4).
     ///
-    /// [`Self::log_op_pending`] uses `OR IGNORE` because it has cluster-replay
-    /// callers that re-use an existing `op_id`, where a silent no-op is the
-    /// correct outcome. This function mints a FRESH `op_id` and has no such
-    /// caller, so "ignored" could only mean an id collision or some other
-    /// constraint — and swallowing it would let the record transaction commit and
-    /// `record()` return `Ok` while the post-materialization enqueue silently did
-    /// not happen. That write's entity materialization would then be owed to
-    /// nobody, forever, which is the exact failure moving the enqueue into the
-    /// transaction was meant to prevent. A plain INSERT turns that into the error
-    /// it is, rolling the whole write back.
+    /// This function mints a FRESH `op_id`, so "ignored" could only ever mean an
+    /// id collision or some other constraint — and swallowing it would let the
+    /// record transaction commit and `record()` return `Ok` while the
+    /// post-materialization enqueue silently did not happen. That write's entity
+    /// materialization would then be owed to nobody, forever, which is the exact
+    /// failure moving the enqueue into the transaction was meant to prevent. A
+    /// plain INSERT turns that into the error it is, rolling the whole write back.
     ///
-    /// (I originally copied `OR IGNORE` from `log_op_pending` without checking
-    /// whether its rationale applied here. It did not.)
+    /// (I originally copied `OR IGNORE` from [`Self::log_op_pending`] without
+    /// checking whether its rationale applied here. It did not — and this doc
+    /// then spent a release asserting that `log_op_pending` needed `OR IGNORE`
+    /// "because it has cluster-replay callers that re-use an existing `op_id`".
+    /// That was false: it mints its own id and no caller can supply one, so the
+    /// ignore there could never fire for the stated reason and only ever hid real
+    /// violations. #83 made it a plain INSERT too. The rationale I copied was
+    /// never real anywhere — sol #83 r2 caught this paragraph still teaching it.)
     ///
     /// Returns the op_id. Deliberately does NOT touch `pending_op_count`: the
     /// counter may only move AFTER the enclosing transaction commits — increment
@@ -405,8 +408,17 @@ impl YantrikDB {
     /// Phase 1 (this version), the API is exposed for tests and for Phase 3
     /// worker scaffolding.
     ///
-    /// Idempotent on op_id: if the same op_id is appended twice (e.g., via
-    /// crash-restart replay), the second INSERT is silently skipped.
+    /// **NOT idempotent on op_id, and cannot be.** This rustdoc used to claim
+    /// "if the same op_id is appended twice (e.g. via crash-restart replay), the
+    /// second INSERT is silently skipped" — describing a capability the signature
+    /// does not offer: there is no `op_id` parameter, so a caller CANNOT supply
+    /// one. Every call mints a fresh id (below), so the `OR IGNORE` that claim
+    /// justified could never fire for the reason given, and instead silently
+    /// swallowed real constraint violations — returning `Ok(op_id)` for a row
+    /// that was never written. This now uses a plain INSERT so a failure to
+    /// enqueue is an error, not a fiction. (The genuine replay case is
+    /// replication apply, which really does receive a remote op_id and inserts it
+    /// itself.)
     pub fn log_op_pending(
         &self,
         op_type: &str,
@@ -442,7 +454,7 @@ impl YantrikDB {
         // instance, not the class.
         self.check_pending_backpressure_locked()?;
         conn.execute(
-            "INSERT OR IGNORE INTO oplog \
+            "INSERT INTO oplog \
              (op_id, op_type, timestamp, target_rid, payload, \
               actor_id, hlc, embedding_hash, origin_actor, applied, embedding) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 0, ?10)",
@@ -459,13 +471,22 @@ impl YantrikDB {
                 embedding,
             ],
         )?;
-        // **v0.7.1**: maintain the cached counter. INSERT OR IGNORE on
-        // op_id PK means the row may not actually have been added (caller
-        // re-using an op_id is the cluster-replay shape). Check the
-        // changes count to only increment on a real insert.
-        if conn.changes() > 0 {
-            self.pending_op_count.fetch_add(1, Ordering::Relaxed);
-        }
+        // **v0.7.1**: maintain the cached counter.
+        // Unconditional: a plain INSERT that returned Ok inserted exactly one
+        // row — anything else is an Err above. The old `changes() > 0` guard
+        // existed to cope with `OR IGNORE` no-ops that could not happen for the
+        // documented reason (no caller can supply an op_id), and it turned a
+        // swallowed constraint violation into a silently-correct-looking count.
+        //
+        // Scope of that claim (sol #83 finding 3): it is about THIS statement,
+        // not about durability. `conn()` is public, so a caller that opens its
+        // own SAVEPOINT around this and rolls back leaves the row gone and this
+        // counter high — pre-existing, and not something `changes()` ever
+        // caught either. The counter is a cache over `applied = 0` and re-seeds
+        // on restart; the in-transaction sibling (`log_op_pending_in_tx`)
+        // deliberately leaves it alone precisely because only its committer
+        // knows the outcome.
+        self.pending_op_count.fetch_add(1, Ordering::Relaxed);
         Ok(op_id)
     }
 
@@ -1364,8 +1385,12 @@ mod pending_ops_tests {
         assert_eq!(db.count_pending_ops().unwrap(), 0, "no pending after mark");
     }
 
+    /// NOT a typo: this asserts the OPPOSITE of idempotency, which is the real
+    /// contract. It was named `pending_op_idempotent_on_double_append` — a lie
+    /// that agreed with the rustdoc `log_op_pending` used to carry, and which
+    /// justified the `INSERT OR IGNORE` this test's own body disproves.
     #[test]
-    fn pending_op_idempotent_on_double_append() {
+    fn pending_op_double_append_writes_two_distinct_rows() {
         let db = open_test_db();
         let payload = serde_json::json!({"rid": "rid_idem"});
         let emb_bytes = fake_embedding(2.0, 64);

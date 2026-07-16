@@ -22,6 +22,25 @@ pub struct ConflictBurndownReport {
     pub errors: Vec<String>,
 }
 
+/// The member evidence ladder, as SQL over an existing `substitution_members`
+/// row. Higher wins. THE single definition of "may this write beat what's
+/// stored?" for SQL callers — mirrors [`YantrikDB::member_source_rank`], and
+/// `member_source_rank_agrees_with_sql` pins the two together.
+///
+/// This exists as one shared constant because the alternative already failed:
+/// #83 gave `add_member_to_category` a rank guard, and Strategy 1 — which
+/// UPDATEs members directly, bypassing that helper — kept its own unguarded
+/// policy and went on rewriting `source='seed'` rows to `'user_confirmed'`.
+/// That silently made seed members deletable by `reset_category_to_seed` (which
+/// deletes `source != 'seed'`) and made untouched seed categories look
+/// user-expanded to the gossip trigger. One policy, one place, or the sites
+/// drift apart again (sol #83 r3).
+pub(crate) const MEMBER_SOURCE_RANK_SQL: &str = "CASE substitution_members.source \
+     WHEN 'seed' THEN 3 \
+     WHEN 'user_confirmed' THEN 2 \
+     WHEN 'llm_suggested' THEN 1 \
+     ELSE 2 END";
+
 /// Common English stopwords that should never be added to substitution categories.
 const RECLASSIFY_STOPWORDS: &[&str] = &[
     "a",
@@ -794,11 +813,33 @@ impl YantrikDB {
         for &(token_a, cat_id_a, cat_name_a) in &known_a {
             for &(token_b, cat_id_b, _cat_name_b) in &known_b {
                 if cat_id_a == cat_id_b {
-                    // Same category — reinforce confidence
+                    // Same category — reinforce confidence.
+                    //
+                    // `source` only moves UP the ladder (sol #83 r3). This UPDATE
+                    // bypasses add_member_to_category, so it must apply the SAME
+                    // policy rather than its own: it used to rewrite `source` to
+                    // 'user_confirmed' unconditionally, which quietly rebranded
+                    // SEED members as runtime ones. reset_category_to_seed deletes
+                    // `source != 'seed'`, so a reclassify of two seeded tokens
+                    // (e.g. postgresql/mysql, both seeded into "databases") made
+                    // them deletable by a later reset; the gossip trigger, which
+                    // keys on `source != 'seed'`, also then read an untouched seed
+                    // category as user-expanded.
+                    //
+                    // Confidence reinforcement is not provenance and applies to
+                    // every row: the user did confirm these two substitute.
+                    let rank_user_confirmed = Self::member_source_rank("user_confirmed");
                     self.conn().execute(
-                        "UPDATE substitution_members SET confidence = 1.0, source = 'user_confirmed', updated_at = ?1
-                         WHERE category_id = ?2 AND (token_normalized = ?3 OR token_normalized = ?4)",
-                        params![ts, cat_id_a, token_a, token_b],
+                        &format!(
+                            "UPDATE substitution_members SET \
+                               confidence = 1.0, \
+                               source = CASE WHEN ?1 > {MEMBER_SOURCE_RANK_SQL} \
+                                             THEN 'user_confirmed' ELSE source END, \
+                               updated_at = ?2 \
+                             WHERE category_id = ?3 \
+                               AND (token_normalized = ?4 OR token_normalized = ?5)"
+                        ),
+                        params![rank_user_confirmed, ts, cat_id_a, token_a, token_b],
                     )?;
                     if processed.insert(token_a.to_string()) {
                         learned_members.push(LearnedMember {
@@ -842,7 +883,11 @@ impl YantrikDB {
             // Only learn if there's exactly one meaningful unknown — ambiguity = skip
             if unknown_b.len() == 1 {
                 let token_b = unknown_b[0];
-                self.add_member_to_category(
+                // is_new is what add_member_to_category REPORTS, not what this
+                // branch hopes: the member may already exist (then it is promoted,
+                // not created). Hardcoding `true` published a fiction to the oplog
+                // and to the Python caller (sol #83 r2).
+                let added = self.add_member_to_category(
                     cat_id_a,
                     token_b,
                     token_b,
@@ -856,7 +901,7 @@ impl YantrikDB {
                 learned_members.push(LearnedMember {
                     token: token_b.to_string(),
                     category_name: cat_name_a.to_string(),
-                    is_new: true,
+                    is_new: added,
                 });
             }
         }
@@ -877,7 +922,9 @@ impl YantrikDB {
                 .collect();
             if unknown_a.len() == 1 {
                 let token_a = unknown_a[0];
-                self.add_member_to_category(
+                // Report what add_member_to_category actually did — see the twin
+                // site above.
+                let added = self.add_member_to_category(
                     cat_id_b,
                     token_a,
                     token_a,
@@ -891,7 +938,7 @@ impl YantrikDB {
                 learned_members.push(LearnedMember {
                     token: token_a.to_string(),
                     category_name: cat_name_b.to_string(),
-                    is_new: true,
+                    is_new: added,
                 });
             }
         }
@@ -916,14 +963,21 @@ impl YantrikDB {
                 let recurrence = self.count_reclassify_pair_occurrences(ta, tb);
                 if recurrence >= 1 {
                     let prov_name = format!("learned_{}_{}", ta, tb);
-                    let cat_id = crate::id::new_id();
-                    self.conn().execute(
-                        "INSERT OR IGNORE INTO substitution_categories
-                         (id, name, conflict_mode, status, created_at, updated_at, hlc, origin_actor)
-                         VALUES (?1, ?2, 'exclusive', 'provisional', ?3, ?3, ?4, ?5)",
-                        params![cat_id, prov_name, ts, hlc_bytes, actor],
+                    // `learned_{a}_{b}` can already exist while NEITHER token is
+                    // a known member: find_member_category (which fed known_a /
+                    // known_b above) matches only `m.status = 'active'`, so a
+                    // category ingested via learn_category_members with
+                    // source="llm_suggested" — whose members are 'pending' — is
+                    // invisible here and lands us in this branch on a name that
+                    // is already taken.
+                    let (cat_id, created) = self.ensure_substitution_category(
+                        &prov_name,
+                        "provisional",
+                        ts,
+                        &hlc_bytes,
+                        &actor,
                     )?;
-                    self.add_member_to_category(
+                    let ta_added = self.add_member_to_category(
                         &cat_id,
                         ta,
                         ta,
@@ -933,7 +987,7 @@ impl YantrikDB {
                         &hlc_bytes,
                         &actor,
                     )?;
-                    self.add_member_to_category(
+                    let tb_added = self.add_member_to_category(
                         &cat_id,
                         tb,
                         tb,
@@ -943,16 +997,25 @@ impl YantrikDB {
                         &hlc_bytes,
                         &actor,
                     )?;
-                    category_created = Some(prov_name.clone());
+                    // Report what actually happened, not what this branch
+                    // intended: on a pre-existing name we created no category,
+                    // and add_member_to_category returns whether the member was
+                    // really added (its UNIQUE(category_id, token_normalized)
+                    // ignore is a legitimate semantic no-op). Hardcoding
+                    // `Some(name)` / `is_new: true` published that fiction to the
+                    // oplog and to the Python caller.
+                    if created {
+                        category_created = Some(prov_name.clone());
+                    }
                     learned_members.push(LearnedMember {
                         token: ta.to_string(),
                         category_name: prov_name.clone(),
-                        is_new: true,
+                        is_new: ta_added,
                     });
                     learned_members.push(LearnedMember {
                         token: tb.to_string(),
                         category_name: prov_name,
-                        is_new: true,
+                        is_new: tb_added,
                     });
                 }
             }
@@ -1062,41 +1125,30 @@ impl YantrikDB {
         let hlc_bytes = hlc_ts.to_bytes().to_vec();
         let actor = self.actor_id.clone();
 
-        // Find or create category
-        let cat_id = match self.conn().query_row(
-            "SELECT id FROM substitution_categories WHERE name = ?1",
-            params![category_name],
-            |row| row.get::<_, String>(0),
-        ) {
-            Ok(id) => id,
-            Err(rusqlite::Error::QueryReturnedNoRows) => {
-                let id = crate::id::new_id();
-                self.conn().execute(
-                    "INSERT INTO substitution_categories
-                     (id, name, conflict_mode, status, created_at, updated_at, hlc, origin_actor)
-                     VALUES (?1, ?2, 'exclusive', 'active', ?3, ?3, ?4, ?5)",
-                    params![id, category_name, ts, hlc_bytes, actor],
-                )?;
-                self.log_op(
-                    "category_create",
-                    None,
-                    &serde_json::json!({
-                        "category_id": id,
-                        "name": category_name,
-                        "source": source,
-                    }),
-                    None,
-                )?;
-                id
-            }
-            Err(e) => return Err(e.into()),
-        };
+        // Find or create category. This site was already correct in shape — it
+        // re-read by name instead of trusting a fresh id — but SELECT-then-INSERT
+        // is a TOCTOU: two concurrent ingests both see "absent" and one takes a
+        // UNIQUE(name) violation. The shared helper closes that by letting the
+        // INSERT arbitrate and reading back the winner.
+        let (cat_id, created) =
+            self.ensure_substitution_category(category_name, "active", ts, &hlc_bytes, &actor)?;
+        if created {
+            self.log_op(
+                "category_create",
+                None,
+                &serde_json::json!({
+                    "category_id": cat_id,
+                    "name": category_name,
+                    "source": source,
+                }),
+                None,
+            )?;
+        }
 
-        let status = if source == "llm_suggested" {
-            "pending"
-        } else {
-            "active"
-        };
+        // (No local `status` here: add_member_to_category derives it from
+        // `source` itself. A dead duplicate of that policy sat here for
+        // releases — the kind of thing someone eventually "fixes" by wiring it
+        // up and forking the rule. sol #83 r3.)
         let mut added = 0;
 
         for (token, confidence) in members {
@@ -1182,6 +1234,95 @@ impl YantrikDB {
             .ok()
     }
 
+    /// Find-or-create a substitution category by its UNIQUE `name`. Returns the
+    /// id the table actually holds, and whether THIS call created it.
+    ///
+    /// **Why the id must be re-read, never assumed (sol #83 finding 2).**
+    /// `substitution_categories.name` is UNIQUE while `id` is a freshly-minted
+    /// surrogate. A fresh-id + `INSERT OR IGNORE` therefore skips the row on a
+    /// name collision and leaves the fresh id naming NOTHING — and every caller
+    /// here goes on to attach members with it, hitting the
+    /// `substitution_members.category_id` REFERENCES FK (enforced:
+    /// `PRAGMA foreign_keys=ON`). The surviving row's id is the only usable one,
+    /// so the winner is re-read rather than presumed to be ours.
+    ///
+    /// **Why `ON CONFLICT DO NOTHING` + re-read and not `SELECT`-then-`INSERT`.**
+    /// The latter is a TOCTOU: two callers both read "absent", both insert, and
+    /// one takes a UNIQUE violation. Letting the INSERT arbitrate and then
+    /// reading whoever won serializes against a concurrent creator — the
+    /// `graph_ops::ensure_proposition` shape, whose rationale (recover the
+    /// winner from the conflict rather than assume it) applies here for the same
+    /// reason: the name, not the id, is the real key.
+    ///
+    /// **One guard across both statements** (sol #83 r2): `conn()` is public, so
+    /// re-acquiring between the INSERT and the read-back would let a raw caller
+    /// delete the row in between (→ spurious `NoRows`) or delete-and-recreate it
+    /// (→ `inserted > 0` true while the id we return belongs to someone else's
+    /// row). Holding the lock across the pair makes "who won" a question with one
+    /// answer. Callers must therefore NOT hold the conn lock when calling this.
+    fn ensure_substitution_category(
+        &self,
+        name: &str,
+        status: &str,
+        ts: f64,
+        hlc_bytes: &[u8],
+        actor: &str,
+    ) -> Result<(String, bool)> {
+        let fresh_id = crate::id::new_id();
+        let conn = self.conn();
+        let inserted = conn.execute(
+            "INSERT INTO substitution_categories
+             (id, name, conflict_mode, status, created_at, updated_at, hlc, origin_actor)
+             VALUES (?1, ?2, 'exclusive', ?3, ?4, ?4, ?5, ?6)
+             ON CONFLICT(name) DO NOTHING",
+            params![fresh_id, name, status, ts, hlc_bytes, actor],
+        )?;
+        // The INSERT may have been a no-op — re-read to get whichever id won,
+        // ours or an existing/racing creator's. NEVER assume fresh_id landed.
+        let id: String = conn.query_row(
+            "SELECT id FROM substitution_categories WHERE name = ?1",
+            params![name],
+            |row| row.get(0),
+        )?;
+        Ok((id, inserted > 0))
+    }
+
+    /// Evidence strength of a member `source`. Higher wins.
+    ///
+    /// `llm_suggested` is the only source that lands a member as `'pending'`
+    /// (i.e. invisible to `find_member_category`, which reads `'active'` only),
+    /// so it is the weakest. `seed` is ships-with-the-schema ground truth and is
+    /// never overwritten by a runtime observation.
+    ///
+    /// Must agree with [`MEMBER_SOURCE_RANK_SQL`] — pinned by
+    /// `member_source_rank_agrees_with_sql`.
+    pub(crate) fn member_source_rank(source: &str) -> u8 {
+        match source {
+            "seed" => 3,
+            "user_confirmed" => 2,
+            "llm_suggested" => 1,
+            _ => 2, // unknown runtime sources are treated as confirmed-strength
+        }
+    }
+
+    /// Add a member to a category, PROMOTING an existing row when the incoming
+    /// evidence is stronger. Returns whether a NEW member row was created (so
+    /// callers can report `is_new` honestly).
+    ///
+    /// **Why this is not a plain `OR IGNORE` no-op (sol #83 r2).** The ignore
+    /// fires on `UNIQUE(category_id, token_normalized)`, and I originally argued
+    /// that made it a legitimate semantic no-op. It doesn't: skipping is only
+    /// harmless if the surviving row is EQUIVALENT to what we'd have written.
+    /// A member already present as `llm_suggested`/`'pending'` is *not*
+    /// equivalent to the `user_confirmed`/`'active'` row a reclassify wants — so
+    /// the ignore silently threw the user's confirmation away and left the pair
+    /// `'pending'`, which `find_member_category` cannot see. The substitution was
+    /// never learned and nothing reported a failure.
+    ///
+    /// **Promote, never demote.** `DO UPDATE ... WHERE` fires only when the
+    /// incoming source outranks the stored one, so a later `llm_suggested` gossip
+    /// cannot knock a `user_confirmed` member back to `'pending'` (the same data
+    /// loss in the other direction), and `seed` rows are immovable.
     fn add_member_to_category(
         &self,
         cat_id: &str,
@@ -1199,17 +1340,44 @@ impl YantrikDB {
         } else {
             "active"
         };
-        let rows = self.conn().execute(
-            "INSERT OR IGNORE INTO substitution_members
-             (id, category_id, token_normalized, token_display, confidence,
-              source, status, context_hint, created_at, updated_at, hlc, origin_actor)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?8, ?9, ?10)",
+        let rank = Self::member_source_rank(source);
+        let conn = self.conn();
+        let rows = conn.execute(
+            &format!(
+                "INSERT INTO substitution_members
+                 (id, category_id, token_normalized, token_display, confidence,
+                  source, status, context_hint, created_at, updated_at, hlc, origin_actor)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?8, ?9, ?10)
+                 ON CONFLICT(category_id, token_normalized) DO UPDATE SET
+                   token_display = excluded.token_display,
+                   confidence    = excluded.confidence,
+                   source        = excluded.source,
+                   status        = excluded.status,
+                   updated_at    = excluded.updated_at,
+                   hlc           = excluded.hlc,
+                   origin_actor  = excluded.origin_actor
+                 WHERE ?11 > {MEMBER_SOURCE_RANK_SQL}"
+            ),
             params![
                 member_id, cat_id, normalized, display, confidence, source, status, ts, hlc_bytes,
-                actor
+                actor, rank
             ],
         )?;
-        Ok(rows > 0)
+        // `rows` counts the UPDATE too, so it cannot distinguish "created" from
+        // "promoted". Callers report is_new, so ask the row itself: our freshly
+        // minted id is present only if THIS call inserted.
+        if rows == 0 {
+            return Ok(false);
+        }
+        let created: bool = conn
+            .query_row(
+                "SELECT id = ?1 FROM substitution_members \
+                 WHERE category_id = ?2 AND token_normalized = ?3",
+                params![member_id, cat_id, normalized],
+                |r| r.get(0),
+            )
+            .unwrap_or(false);
+        Ok(created)
     }
 
     fn count_reclassify_pair_occurrences(&self, token_a: &str, token_b: &str) -> usize {
