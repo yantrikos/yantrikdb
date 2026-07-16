@@ -886,13 +886,31 @@ impl YantrikDB {
         // Grouped in one transaction so the N advances are all-or-nothing. Each
         // is a plain upsert (SQL blend against the stored value; composes with
         // concurrent writers), fed the RAW importance.
+        //
+        // BEST-EFFORT, deliberately NOT `?` (sol 4a.6b r3 finding 1): the rows
+        // and vectors are already durable and visible — the batch WON. Calibration
+        // is an approximate ranking prior, so failing to advance it is a benign
+        // skipped observation. Propagating a SQLITE_FULL/IO error from this tx
+        // would report Err for an already-committed batch, and a retrying caller
+        // would then write DUPLICATE records under fresh rids — turning a missed
+        // stat into data corruption. So it logs and continues.
         {
             let conn = self.conn();
-            let tx = conn.unchecked_transaction()?;
-            for input in inputs.iter() {
-                self.advance_importance_stats_in_tx(&tx, &input.namespace, input.importance)?;
+            let advanced = (|| -> Result<()> {
+                let tx = conn.unchecked_transaction()?;
+                for input in inputs.iter() {
+                    self.advance_importance_stats_in_tx(&tx, &input.namespace, input.importance)?;
+                }
+                tx.commit()?;
+                Ok(())
+            })();
+            if let Err(e) = advanced {
+                tracing::warn!(
+                    error = %e,
+                    "record_batch: post-commit calibration advance failed; \
+                     batch is durable, calibration observation skipped"
+                );
             }
-            tx.commit()?;
         }
         for verdict in gate_verdicts {
             self.note_flagged_write_committed(verdict);
@@ -1268,9 +1286,14 @@ impl YantrikDB {
             )?;
         }
 
-        // 4a.6b: an ORIGIN write that was warn-flagged and reached here is
-        // durable — count it now. ADMITTED writes carry Clean and tick nothing.
-        self.note_flagged_write_committed(gate_verdict);
+        // 4a.6b: an ORIGIN write that was warn-flagged and actually WROTE A ROW is
+        // durable — count it now. Gated on `was_new_row` (sol r3 finding 2): this
+        // path is `INSERT OR IGNORE`, so a replay of an existing rid persists
+        // nothing, and ticking there would inflate the warn→enforce nudge metric
+        // with no-op replays. ADMITTED writes carry Clean and tick nothing.
+        if was_new_row {
+            self.note_flagged_write_committed(gate_verdict);
+        }
         Ok(())
     }
 

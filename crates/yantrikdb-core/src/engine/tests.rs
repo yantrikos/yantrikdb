@@ -7321,6 +7321,58 @@ fn record_with_rid_gates_origin_but_not_admitted() {
     assert_eq!(n, 1, "admitted apply committed");
 }
 
+/// 4a.6b sol r3 finding 2: `record_with_rid` is `INSERT OR IGNORE`, so replaying
+/// an existing rid persists nothing. A warn-mode ORIGIN replay of a flagged op
+/// must NOT tick `provenance_flagged_since_boot` — that counter gates the
+/// warn→enforce decision, and counting no-op replays inflates it with writes
+/// that never landed.
+#[test]
+fn record_with_rid_origin_replay_does_not_overcount_flags() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    db.set_provenance_gate_mode(crate::provenance::GateMode::Warn)
+        .unwrap();
+    let flagged = |db: &YantrikDB| db.stats(None).unwrap().provenance_flagged_since_boot;
+
+    let write = |db: &YantrikDB| {
+        db.record_with_rid(
+            "dup_rid",
+            "flagged origin write",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &serde_json::json!({"kind": "fact"}),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "work",
+            "inference",
+            None,
+            1_000_000,
+            &[],
+            "test-embedder",
+            None,
+            crate::provenance::WriteAdmission::Origin,
+        )
+    };
+
+    let n0 = flagged(&db);
+    write(&db).expect("first origin write lands");
+    assert_eq!(
+        flagged(&db),
+        n0 + 1,
+        "first flagged origin write ticks once"
+    );
+
+    // Replay the SAME rid: INSERT OR IGNORE persists nothing, so no tick.
+    write(&db).expect("replay is a no-op Ok");
+    assert_eq!(
+        flagged(&db),
+        n0 + 1,
+        "idempotent replay of an existing rid must not tick the nudge counter"
+    );
+}
+
 /// 4a.6b sol r2 finding 1: a batch whose VECTOR APPEND fails (after the SQL
 /// savepoint has committed) must leave `namespace_importance_stats` untouched.
 /// The stats advance is deferred to after the append loop wins; before this fix
