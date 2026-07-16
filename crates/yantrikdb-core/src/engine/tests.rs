@@ -7012,6 +7012,243 @@ fn replicated_correction_publishes_its_vector_without_counting_a_pending_op() {
     assert_eq!(text, "the sky is blue", "replicated correction is durable");
 }
 
+/// The anti-laundering gate had a one-character bypass (found wiring 4a.6b,
+/// verified empirically before fixing): 4a.4b gated the scalar-only correction
+/// path, but a TEXT-CHANGING correction dispatches to `correct_with_reembed`
+/// BEFORE that gate runs — and merges `metadata_merge` all the same. So in
+/// Enforce mode, `correct(new_text=<any change>, metadata_merge={"kind":"fact"})`
+/// on an inference-sourced record committed the exact laundering the gate
+/// exists to refuse. Pre-fix: the scalar flip refused, the text flip stored
+/// kind="fact".
+#[test]
+fn text_changing_correction_cannot_launder_kind() {
+    let db = YantrikDB::new(":memory:", 8).unwrap(); // fresh ⇒ Enforce
+    assert_eq!(db.stats(None).unwrap().provenance_gate_mode, "enforce");
+    let rid = db
+        .record(
+            "the sky might be green",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "work",
+            "inference",
+            None,
+        )
+        .unwrap();
+    let gen = db.search_state.load().generation;
+
+    // The laundering attempt, via the path that used to bypass the gate.
+    let err = db
+        .correct_with_embedding(
+            &rid,
+            Some("the sky might be green!"),
+            &vec_seed(1.1, 8),
+            gen,
+            Some(&serde_json::json!({"kind": "fact"})),
+            None,
+            None,
+            "launder via text change",
+        )
+        .expect_err("text-changing kind flip must be refused in Enforce");
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::ProvenanceInconsistent { .. }
+        ),
+        "expected ProvenanceInconsistent, got {err:?}"
+    );
+
+    // Refused BEFORE any side effect: text, kind, and revision chain untouched.
+    let (text, kind): (String, Option<String>) = db
+        .conn()
+        .query_row(
+            "SELECT text, json_extract(metadata, '$.kind') FROM memories WHERE rid = ?1",
+            rusqlite::params![rid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(text, "the sky might be green", "text must be unchanged");
+    assert_eq!(kind, None, "kind must not have been laundered in");
+    assert_eq!(db.history(&rid).unwrap().len(), 0, "no revision recorded");
+
+    // The documented escape is raising the basis — that must still work
+    // through the SAME text-changing path (the gate refuses contradictions,
+    // not corrections).
+    db.correct_with_embedding(
+        &rid,
+        Some("the sky is verified green"),
+        &vec_seed(1.2, 8),
+        gen,
+        Some(&serde_json::json!({"kind": "fact", "confidence_basis": "verification"})),
+        None,
+        None,
+        "verified independently",
+    )
+    .expect("basis-raising text correction must pass the gate");
+}
+
+/// 4a.6b winner-only, warn-mode half: a FLAGGED write that COMMITS ticks
+/// `provenance_flagged_since_boot` exactly once, on every gated path. (The
+/// anchor backpressure test proves the rejected side; this proves the
+/// accepted side didn't get lost in the verdict refactor.)
+#[test]
+fn flagged_committed_writes_tick_the_nudge_counter_exactly_once() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    db.set_provenance_gate_mode(crate::provenance::GateMode::Warn)
+        .unwrap();
+    let flagged = |db: &YantrikDB| db.stats(None).unwrap().provenance_flagged_since_boot;
+    let launder_meta = serde_json::json!({"kind": "fact"});
+
+    // record(): sync path.
+    let n0 = flagged(&db);
+    let rid = db
+        .record(
+            "flagged one",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &launder_meta,
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "work",
+            "inference",
+            None,
+        )
+        .unwrap();
+    assert_eq!(flagged(&db), n0 + 1, "committed flagged record ticks once");
+
+    // record(): queued path (router in Queueing).
+    db.write_router.switch_to_queueing();
+    db.record(
+        "flagged two",
+        "semantic",
+        0.7,
+        0.0,
+        604800.0,
+        &launder_meta,
+        &vec_seed(1.05, 8),
+        "default",
+        0.8,
+        "work",
+        "inference",
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        flagged(&db),
+        n0 + 2,
+        "committed flagged queued write ticks once"
+    );
+    db.write_router.switch_to_normal();
+
+    // record_batch(): two flagged inputs, one clean.
+    let mk = |text: &str, meta: serde_json::Value, source: &str| RecordInput {
+        text: text.into(),
+        memory_type: "semantic".into(),
+        importance: 0.7,
+        valence: 0.0,
+        half_life: 604800.0,
+        metadata: meta,
+        embedding: vec_seed(1.1, 8),
+        namespace: "default".into(),
+        certainty: 0.8,
+        domain: "work".into(),
+        source: source.into(),
+        emotional_state: None,
+    };
+    db.record_batch(&[
+        mk("flagged three", launder_meta.clone(), "inference"),
+        mk("clean one", serde_json::json!({}), "user"),
+        mk("flagged four", launder_meta.clone(), "inference"),
+    ])
+    .unwrap();
+    assert_eq!(flagged(&db), n0 + 4, "batch ticks once per flagged input");
+
+    // correct(): scalar path (metadata-only flip on the inference record —
+    // warn allows it, counts it).
+    db.correct(&rid, None, Some(&launder_meta), None, None, "warn flip")
+        .unwrap();
+    assert_eq!(
+        flagged(&db),
+        n0 + 5,
+        "committed flagged correction ticks once"
+    );
+
+    // correct(): text-changing path (the ex-bypass — now gated AND counted).
+    let gen = db.search_state.load().generation;
+    db.correct_with_embedding(
+        &rid,
+        Some("flagged one, changed"),
+        &vec_seed(1.15, 8),
+        gen,
+        Some(&launder_meta),
+        None,
+        None,
+        "warn flip with text",
+    )
+    .unwrap();
+    assert_eq!(
+        flagged(&db),
+        n0 + 6,
+        "committed flagged text-correction ticks once"
+    );
+}
+
+/// 4a.6b, batch loser path: a batch deferred by the write-router (reembed
+/// cutover in flight) must leave every namespace's importance distribution
+/// untouched. Pre-fix, `record_batch` calibrated ALL inputs — autocommitting
+/// every namespace's EWMA advance — BEFORE it ever consulted the router.
+#[test]
+fn deferred_batch_leaves_importance_stats_untouched() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    db.write_router.switch_to_queueing();
+
+    let err = db
+        .record_batch(&[RecordInput {
+            text: "deferred".into(),
+            memory_type: "semantic".into(),
+            importance: 0.9,
+            valence: 0.0,
+            half_life: 604800.0,
+            metadata: serde_json::json!({}),
+            embedding: vec_seed(1.0, 8),
+            namespace: "bp_ns".into(),
+            certainty: 0.8,
+            domain: "work".into(),
+            source: "user".into(),
+            emotional_state: None,
+        }])
+        .expect_err("router is Queueing; the batch must defer");
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::BatchDeferredDuringReembed { .. }
+        ),
+        "expected BatchDeferredDuringReembed, got {err:?}"
+    );
+
+    let rows: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM namespace_importance_stats WHERE namespace = 'bp_ns'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        rows, 0,
+        "a deferred batch advanced namespace_importance_stats — a loser moved state"
+    );
+    db.write_router.switch_to_normal();
+}
+
 // ── Relationship-Based Entity Type Tests ──
 
 #[test]
@@ -14485,17 +14722,19 @@ fn boundary_audit_pattern_detects_synthetic_violation() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
-fn record_backpressure_writes_no_row_op_or_session_state() {
-    // **v0.10 Item 4a.6a.** The v0.7.19 sibling below asserts the OLD contract:
-    // the row was written, then a compensating DELETE reclaimed it. record() no
-    // longer needs compensating — it RESERVES delta capacity before touching SQL,
-    // so Backpressure surfaces without a row, an op, or session state.
+fn record_backpressure_writes_nothing_at_all() {
+    // **v0.10 Item 4a.6a + 4a.6b.** The v0.7.19 sibling below asserts the OLD
+    // contract: the row was written, then a compensating DELETE reclaimed it.
+    // record() no longer needs compensating — it RESERVES delta capacity before
+    // touching SQL, so Backpressure surfaces without a row, an op, or session
+    // state.
     //
-    // NAMED PRECISELY, because "writes nothing at all" would be a LIE (sol 4a.6a
-    // finding 2): `calibrate_importance` already autocommitted an update to
-    // `namespace_importance_stats` before routing, so a rejected write HAS moved
-    // this namespace's calibration. That defect predates 4a.6a and is fixed in
-    // 4a.6b (winner-only transactional calibration). What this test does assert:
+    // This test spent 4a.6a named `..._writes_no_row_op_or_session_state`,
+    // because "writes nothing at all" was then a LIE (sol 4a.6a finding 2):
+    // `calibrate_importance` autocommitted a `namespace_importance_stats` update
+    // before routing, and the warn-mode gate ticked its nudge counter before
+    // routing — so a rejected write HAD moved state. 4a.6b made both
+    // winner-only, and the name is finally the contract. Asserted:
     //
     //   1. no memories row              (the old design also achieved this, by
     //                                    writing one and deleting it)
@@ -14592,6 +14831,70 @@ fn record_backpressure_writes_no_row_op_or_session_state() {
     assert!(
         hit.is_some(),
         "delta never saturated — test did not exercise Backpressure"
+    );
+
+    // ── 4a.6b: the LOSER-side effects. The delta is saturated, so this probe is
+    // guaranteed to be rejected — and a rejected write must leave NO trace:
+    //
+    //   5. namespace_importance_stats UNCHANGED — calibrate_importance used to
+    //      autocommit the EWMA advance BEFORE routing, so every rejected write
+    //      still permanently moved this namespace's calibration distribution.
+    //   6. provenance_flagged_since_boot UNCHANGED — the warn-mode gate used to
+    //      tick its nudge counter BEFORE routing, so flagged-but-rejected writes
+    //      inflated the very metric that decides when warn can become enforce.
+    //
+    // The probe is deliberately BOTH flagged and rejected: source="inference" +
+    // kind="fact" + no confidence_basis is the anti-laundering violation, and in
+    // Warn mode that is counted-and-allowed — so only the Backpressure rejection
+    // downstream separates "accepted flagged write" (must count) from "rejected
+    // flagged write" (must not).
+    db.set_provenance_gate_mode(crate::provenance::GateMode::Warn)
+        .unwrap();
+    let stats_row = |db: &YantrikDB| -> Option<(f64, i64)> {
+        db.conn()
+            .query_row(
+                "SELECT ewma, count FROM namespace_importance_stats WHERE namespace = 'default'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok()
+    };
+    let stats_before = stats_row(&db);
+    let flagged_before = db.stats(None).unwrap().provenance_flagged_since_boot;
+
+    let embedding: Vec<f32> = (0..dim).map(|j| ((999 + j) as f32) * 0.001).collect();
+    let err = db
+        .record(
+            "bp-probe-flagged-and-rejected",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({"kind": "fact"}),
+            &embedding,
+            "default",
+            0.8,
+            "general",
+            "inference",
+            None,
+        )
+        .expect_err("delta is saturated; the probe must be rejected");
+    assert!(
+        matches!(err, crate::error::YantrikDbError::Backpressure { .. }),
+        "probe must fail with Backpressure, got {err:?}"
+    );
+
+    assert_eq!(
+        stats_row(&db),
+        stats_before,
+        "rejected write advanced namespace_importance_stats — a loser moved the \
+         namespace's calibration distribution permanently"
+    );
+    assert_eq!(
+        db.stats(None).unwrap().provenance_flagged_since_boot,
+        flagged_before,
+        "flagged-but-REJECTED write ticked provenance_flagged_since_boot — \
+         inflating the warn→enforce nudge metric with writes that never landed"
     );
 }
 

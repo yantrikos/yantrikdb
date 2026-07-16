@@ -75,55 +75,99 @@ pub(crate) fn calibrate_importance_value(raw: f64, ewma: f64, count: u64) -> f64
     (HIGH_FLOOR + frac * (ceiling - HIGH_FLOOR)).clamp(0.0, 1.0)
 }
 
+/// Read-only calibration against `conn`'s current stats: snapshot the
+/// namespace's `(ewma, count)` and run the pure transform. **No write** — safe
+/// to call before the write is known to land, and safe under an already-held
+/// conn guard (takes the connection instead of locking; `record_batch` calls
+/// this with its SAVEPOINT guard held, where a `self.conn()` re-lock would be
+/// the `learn_category_members` deadlock, #83).
+pub(crate) fn calibrated_importance_on(
+    conn: &rusqlite::Connection,
+    namespace: &str,
+    raw: f64,
+) -> Result<f64> {
+    // Key the stats by the normalized namespace so the "" / "default"
+    // aliasing can't split a namespace's distribution across two rows.
+    let namespace = super::record::normalize_namespace(namespace);
+    let existing: Option<(f64, i64)> = conn
+        .query_row(
+            "SELECT ewma, count FROM namespace_importance_stats WHERE namespace = ?1",
+            params![namespace],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let (ewma, count) = existing.unwrap_or((raw, 0));
+    let calibrated = calibrate_importance_value(raw, ewma, count as u64);
+    if (calibrated - raw).abs() > f64::EPSILON {
+        tracing::debug!(
+            target: "yantrikdb::audit::importance",
+            namespace,
+            raw,
+            calibrated,
+            ewma,
+            count,
+            "deflated saturated importance",
+        );
+    }
+    Ok(calibrated)
+}
+
 impl YantrikDB {
-    /// Calibrate a raw importance against the writing namespace's running
-    /// distribution, updating that distribution with the raw value. See the
-    /// module docs for semantics. Called once per write at the ingest entry
-    /// points.
-    pub(crate) fn calibrate_importance(&self, namespace: &str, raw: f64) -> Result<f64> {
-        // Key the stats by the normalized namespace so the "" / "default"
-        // aliasing can't split a namespace's distribution across two rows.
+    /// Read-only: the calibrated importance for `raw` in `namespace`, computed
+    /// against the current stats. **Does not advance the distribution** — that
+    /// is [`Self::advance_importance_stats_in_tx`], which runs inside the
+    /// winner's transaction (4a.6b). Locks `conn`; do not call with the guard
+    /// already held (use [`calibrated_importance_on`] there).
+    pub(crate) fn calibrated_importance(&self, namespace: &str, raw: f64) -> Result<f64> {
+        calibrated_importance_on(&self.conn(), namespace, raw)
+    }
+
+    /// **v0.10 Item 4a.6b — winner-only calibration.** Advance the namespace's
+    /// distribution by one observation of `raw`, INSIDE the transaction (or
+    /// savepoint) that lands the write.
+    ///
+    /// **Why in-tx.** The predecessor (`calibrate_importance`) read the stats,
+    /// blended the EWMA in Rust, and wrote it back on a bare `conn()` — an
+    /// AUTOCOMMIT — at the ingest entry point, BEFORE routing. A write rejected
+    /// afterwards (backpressure, delta capacity, the provenance gate, a failed
+    /// transaction) had already advanced this namespace's calibration
+    /// permanently: losers moved state. Inside the winner's transaction, a
+    /// rollback takes the observation with it.
+    ///
+    /// **Why SQL computes the blend and Rust does not.** Read-in-Rust /
+    /// write-in-Rust is a TOCTOU on an order-dependent accumulator: two writers
+    /// both read `ewma = X`, both blend from X, and the second CLOBBERS the
+    /// first — one observation vanishes with no error. Blending against the
+    /// STORED value in the UPDATE makes the advance atomic, so writers compose.
+    /// `EWMA_ALPHA` is BOUND as a parameter rather than spelled into the SQL, so
+    /// the constant keeps exactly one definition (the #83 lesson: a rule with
+    /// two spellings drifts).
+    ///
+    /// The EWMA tracks the RAW value — what writers asked for (their intent),
+    /// never the deflated output, so saturation is measured honestly. Pass the
+    /// raw importance, not the calibrated one.
+    ///
+    /// Takes `&Connection` (a `Transaction` derefs to it; a SAVEPOINT has no
+    /// typed handle) — the `_in_tx` contract is by convention and enforced
+    /// behaviorally by `record_backpressure_writes_nothing_at_all`: calling it
+    /// outside the winner's transaction recreates the loser-writes bug.
+    pub(crate) fn advance_importance_stats_in_tx(
+        &self,
+        conn: &rusqlite::Connection,
+        namespace: &str,
+        raw: f64,
+    ) -> Result<()> {
         let namespace = super::record::normalize_namespace(namespace);
-
-        let conn = self.conn();
-        let existing: Option<(f64, i64)> = conn
-            .query_row(
-                "SELECT ewma, count FROM namespace_importance_stats WHERE namespace = ?1",
-                params![namespace],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        let (ewma, count) = existing.unwrap_or((raw, 0));
-
-        let calibrated = calibrate_importance_value(raw, ewma, count as u64);
-
-        // Advance the EWMA toward the RAW value — we track what writers ask
-        // for (their intent), not our deflated output, so saturation is
-        // measured honestly.
-        let new_ewma = if count == 0 {
-            raw
-        } else {
-            (1.0 - EWMA_ALPHA) * ewma + EWMA_ALPHA * raw
-        };
         conn.execute(
             "INSERT INTO namespace_importance_stats (namespace, ewma, count, updated_at) \
              VALUES (?1, ?2, 1, ?3) \
-             ON CONFLICT(namespace) DO UPDATE SET ewma = ?2, count = count + 1, updated_at = ?3",
-            params![namespace, new_ewma, now()],
+             ON CONFLICT(namespace) DO UPDATE SET \
+               ewma = (1.0 - ?4) * namespace_importance_stats.ewma + ?4 * ?2, \
+               count = namespace_importance_stats.count + 1, \
+               updated_at = ?3",
+            params![namespace, raw, now(), EWMA_ALPHA],
         )?;
-
-        if (calibrated - raw).abs() > f64::EPSILON {
-            tracing::debug!(
-                target: "yantrikdb::audit::importance",
-                namespace,
-                raw,
-                calibrated,
-                ewma = new_ewma,
-                count = count + 1,
-                "deflated saturated importance",
-            );
-        }
-        Ok(calibrated)
+        Ok(())
     }
 }
 

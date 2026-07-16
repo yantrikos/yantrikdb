@@ -90,6 +90,7 @@ use crate::error::{Result, YantrikDbError};
 use crate::graph_index::GraphIndex;
 use crate::hlc::{HLCTimestamp, HLC};
 use crate::hnsw::HnswIndex;
+use crate::provenance::GateVerdict;
 use crate::schema::{
     MIGRATE_V10_TO_V11, MIGRATE_V11_TO_V12, MIGRATE_V12_TO_V13, MIGRATE_V13_TO_V14,
     MIGRATE_V14_TO_V15, MIGRATE_V15_TO_V16, MIGRATE_V16_TO_V17, MIGRATE_V17_TO_V18,
@@ -1279,13 +1280,17 @@ impl YantrikDB {
     /// unchanged). Runs BEFORE any side effect. In `Enforce` a violation is a
     /// typed `ProvenanceInconsistent` refusal; in `Warn` it is counted
     /// (`provenance_flagged_since_boot`) and allowed; `Off` skips entirely.
-    pub(crate) fn gate_provenance(&self, source: &str, metadata: &serde_json::Value) -> Result<()> {
+    pub(crate) fn gate_provenance(
+        &self,
+        source: &str,
+        metadata: &serde_json::Value,
+    ) -> Result<GateVerdict> {
         use crate::provenance::{
             check_provenance_consistency_opt, ClaimKind, ConfidenceBasis, GateMode, Source,
         };
         let mode = self.provenance_gate_mode();
         if mode == GateMode::Off {
-            return Ok(());
+            return Ok(GateVerdict::Clean);
         }
         let verdict = (|| -> Result<()> {
             // **`source` is a FREE-FORM public dimension — an unrecognized one
@@ -1328,19 +1333,36 @@ impl YantrikDB {
             check_provenance_consistency_opt(src, basis.as_ref(), &kind, override_kind)
         })();
         match verdict {
-            Ok(()) => Ok(()),
+            Ok(()) => Ok(GateVerdict::Clean),
             Err(e) => {
                 if mode == GateMode::Enforce {
                     Err(e)
                 } else {
-                    // Warn: count the nudge and allow the write (never break a
-                    // migrated caller).
-                    self.provenance_flagged_since_boot
-                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    // Warn: allow the write, and REPORT the flag instead of
+                    // counting it here (4a.6b). The gate runs before routing, so
+                    // ticking `provenance_flagged_since_boot` at this point
+                    // counted writes that were subsequently REJECTED —
+                    // inflating the very nudge metric an operator reads to
+                    // decide when warn can become enforce. The caller ticks via
+                    // [`Self::note_flagged_write_committed`] only after the
+                    // write is durable.
                     tracing::warn!(reason = %e, "provenance gate (warn): flagged an inconsistent write");
-                    Ok(())
+                    Ok(GateVerdict::Flagged)
                 }
             }
+        }
+    }
+
+    /// **4a.6b — the winner-only half of the warn-mode gate.** Call exactly once
+    /// AFTER the flagged write's transaction commits. In-memory since-boot
+    /// diagnostic: an unwind between commit and this call loses at most one
+    /// tick of a counter that re-seeds at boot — acceptable, unlike the
+    /// pre-routing overcount this replaces, which inflated the metric with
+    /// writes that never landed.
+    pub(crate) fn note_flagged_write_committed(&self, verdict: GateVerdict) {
+        if verdict == GateVerdict::Flagged {
+            self.provenance_flagged_since_boot
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 
@@ -1759,18 +1781,22 @@ impl YantrikDB {
         )?;
         // v0.10 Item 4a.4 anti-laundering gate — before the (slow) embed and
         // any side effect. `record_text` bypasses `record()`, so it gates here
-        // too (T06 coverage).
-        self.gate_provenance(source, metadata)?;
+        // too (T06 coverage). A warn-mode Flagged verdict is carried to the
+        // routed path and counted only after the write commits (4a.6b).
+        let gate_verdict = self.gate_provenance(source, metadata)?;
         // Task 29 (Ingest Integrity): strip any leaked tool-call
         // serialization tail BEFORE embedding, so both the computed vector
         // and the stored text reflect the real memory rather than the
         // artifact. Borrowed (no allocation) on the clean path.
         let sanitized = sanitize::sanitize_tool_call_artifacts(text);
         let text = sanitized.as_ref();
-        // Task 31 (Ingest Integrity): calibrate importance once, before the
-        // (retryable) embed loop, so a generation-swap retry never
-        // double-counts the namespace distribution.
-        let importance = self.calibrate_importance(namespace, importance)?;
+        // Task 31 (Ingest Integrity): compute the calibrated importance once,
+        // before the (retryable) embed loop — READ-ONLY as of 4a.6b, so the
+        // "retry must not double-count" property this comment used to defend is
+        // now structural: the distribution advances inside the winning path's
+        // transaction, and a retry loop commits at most once.
+        let raw_importance = importance;
+        let importance = self.calibrated_importance(namespace, importance)?;
         loop {
             // Step 1: snapshot SearchState for the embed — capture
             // generation + digest so we can revalidate after the embed.
@@ -1815,6 +1841,7 @@ impl YantrikDB {
                         text,
                         memory_type,
                         importance,
+                        raw_importance,
                         valence,
                         half_life,
                         metadata,
@@ -1824,6 +1851,7 @@ impl YantrikDB {
                         domain,
                         source,
                         emotional_state,
+                        gate_verdict,
                     );
                 }
             };
@@ -1861,6 +1889,7 @@ impl YantrikDB {
                 text,
                 memory_type,
                 importance,
+                raw_importance,
                 valence,
                 half_life,
                 metadata,
@@ -1870,6 +1899,7 @@ impl YantrikDB {
                 domain,
                 source,
                 emotional_state,
+                gate_verdict,
             );
         }
     }

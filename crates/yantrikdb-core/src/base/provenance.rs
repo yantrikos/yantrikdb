@@ -185,6 +185,19 @@ pub enum GateMode {
     Enforce,
 }
 
+/// What the gate concluded about an ALLOWED write (4a.6b). `Enforce`
+/// violations never produce a verdict — they are refused as `Err` before any
+/// side effect. `Flagged` means warn-mode saw a violation and let it through;
+/// the caller must report it via `note_flagged_write_committed` **after** the
+/// write commits, so the warn→enforce nudge metric counts only writes that
+/// actually landed. `#[must_use]`: dropping the verdict silently undercounts.
+#[must_use = "a Flagged verdict must be ticked post-commit via note_flagged_write_committed"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateVerdict {
+    Clean,
+    Flagged,
+}
+
 impl GateMode {
     /// Parse a persisted mode. **Fail-CLOSED (sol 4a.4):** only an exact `off`
     /// yields `Off`. A malformed value (e.g. the typo `enforc`) must NOT
