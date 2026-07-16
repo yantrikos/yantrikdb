@@ -43,6 +43,20 @@
 //! `'pending'` (and the startup sweep that reconciles it) becomes real the day
 //! a claim must be visible across a transaction boundary (4b multi-writer /
 //! cross-process claims); the column is schema-reserved for that, not dead.
+//!
+//! ## Claims are immutable, and `forget()` does not clean them — deliberately
+//!
+//! Nothing UPDATEs or DELETEs a claim row (verified: one INSERT, two SELECTs,
+//! nothing else touches the table — this immutability is what makes the
+//! pre-admission probe's lock-free HIT sound). Consequence: retrying a key
+//! whose record was since `forget()`-ten returns the TOMBSTONED rid. That is
+//! the honest answer — the write happened exactly once, and forgetting it was
+//! a separate, later act; deleting the claim instead would make a retry
+//! silently RE-CREATE forgotten content (resurrection). Callers that want to
+//! re-record forgotten content use a new key. (Same family as #88's
+//! forget-cascade question; if a future sweep ever reaps claims for
+//! tombstoned rids, the probe's immutability assumption must be revisited
+//! together with it.)
 
 use rusqlite::{params, OptionalExtension};
 
