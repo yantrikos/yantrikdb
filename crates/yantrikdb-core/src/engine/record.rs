@@ -894,6 +894,14 @@ impl YantrikDB {
         // would report Err for an already-committed batch, and a retrying caller
         // would then write DUPLICATE records under fresh rids — turning a missed
         // stat into data corruption. So it logs and continues.
+        //
+        // NB (sol r4 / #94): `log_record_ops_batch(...)?` below still `?`-returns
+        // after this winner point — a PRE-EXISTING Err-after-commit (#79-era)
+        // that is NOT best-effortable (the ops are what replicate the batch). Its
+        // correct fix is to move that append inside the savepoint above (needs a
+        // held-conn variant to avoid the #83 re-lock); tracked in #94, out of
+        // 4a.6b's scope. Calibration is best-effort ONLY because it is
+        // approximate — do not copy this pattern to the oplog append.
         {
             let conn = self.conn();
             let advanced = (|| -> Result<()> {
