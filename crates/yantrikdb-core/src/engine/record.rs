@@ -1539,6 +1539,14 @@ impl YantrikDB {
             "domain": domain,
             "source": source,
             "emotional_state": emotional_state,
+            // 4a.6c: carried so the materializer writes the same v37 columns
+            // the sync route writes — the memories partial unique index is the
+            // claims table's defense-in-depth mirror, and a queued keyed write
+            // must not materialize with a NULL key while its claim exists.
+            // null for keyless writes; pre-4a.6c ops lack the fields and the
+            // materializer defaults both to NULL, so old rows are unchanged.
+            "idempotency_key": idem.as_ref().map(|(k, _)| *k),
+            "origin_actor": idem.as_ref().map(|_| self.actor_id.as_str()),
         });
 
         // Write to oplog with applied=0. The v27 `embedding_model`

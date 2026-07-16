@@ -840,6 +840,17 @@ impl YantrikDB {
             .get("emotional_state")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        // 4a.6c: the v37 idempotency columns, carried by keyed queued writes.
+        // Absent/null (every pre-4a.6c op, every keyless write) stores NULL —
+        // identical to the pre-4a.6c row shape.
+        let idempotency_key = payload
+            .get("idempotency_key")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let origin_actor = payload
+            .get("origin_actor")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         // Snapshot the active SearchState. The embedder + generation
         // here are the post-swap ones (caller verified no reembed in
@@ -889,8 +900,10 @@ impl YantrikDB {
                 "INSERT OR IGNORE INTO memories \
                  (rid, type, text, embedding, created_at, updated_at, importance, \
                   half_life, last_access, valence, metadata, namespace, \
-                  certainty, domain, source, emotional_state, embedding_generation) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                  certainty, domain, source, emotional_state, embedding_generation, \
+                  idempotency_key, origin_actor) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
+                         ?18, ?19)",
                 params![
                     rid,
                     memory_type,
@@ -909,6 +922,8 @@ impl YantrikDB {
                     source,
                     emotional_state,
                     embedding_generation,
+                    idempotency_key,
+                    origin_actor,
                 ],
             )?;
         }
