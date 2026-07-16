@@ -1575,6 +1575,7 @@ mod tests {
             &[],
             "test-model",
             None,
+            crate::provenance::WriteAdmission::Admitted,
         )
         .unwrap();
 

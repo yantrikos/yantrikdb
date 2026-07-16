@@ -185,6 +185,44 @@ pub enum GateMode {
     Enforce,
 }
 
+/// What the gate concluded about an ALLOWED write (4a.6b). `Enforce`
+/// violations never produce a verdict — they are refused as `Err` before any
+/// side effect. `Flagged` means warn-mode saw a violation and let it through;
+/// the caller must report it via `note_flagged_write_committed` **after** the
+/// write commits, so the warn→enforce nudge metric counts only writes that
+/// actually landed. `#[must_use]`: dropping the verdict silently undercounts.
+#[must_use = "a Flagged verdict must be ticked post-commit via note_flagged_write_committed"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GateVerdict {
+    Clean,
+    Flagged,
+}
+
+/// Whether a `record_with_rid` call is an ORIGIN write or an already-admitted
+/// APPLY (4a.6b, sol r2 finding 2). `record_with_rid` is BOTH the public
+/// caller-supplied-rid origin API and the cluster commit-apply primitive, and
+/// those want opposite gate behavior:
+///
+/// - **`Origin`** — a fresh write entering here for the first time. Runs the
+///   anti-laundering gate exactly like `record()`; a declared contradiction is
+///   refused in Enforce and flagged in Warn.
+/// - **`Admitted`** — a consensus-committed / replicated op being applied. It
+///   was already gated at the leader's origin ingress, so it MUST NOT be
+///   re-gated: on the openraft apply path every follower re-applies the leader's
+///   committed entry locally, and re-gating would make followers reject the
+///   leader's write and wedge the cluster (yantrikdb-server's consensus-
+///   admission review). The materializer drain and replication apply pass this.
+///
+/// This is a REQUIRED argument, not a defaulted flag, precisely so a caller
+/// cannot silently inherit the wrong behavior: an apply caller that forgets to
+/// pass `Admitted` gets a gated write (safe-ish), and an origin caller that
+/// forgets `Origin` gets a compile error, not a silent bypass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteAdmission {
+    Origin,
+    Admitted,
+}
+
 impl GateMode {
     /// Parse a persisted mode. **Fail-CLOSED (sol 4a.4):** only an exact `off`
     /// yields `Off`. A malformed value (e.g. the typo `enforc`) must NOT

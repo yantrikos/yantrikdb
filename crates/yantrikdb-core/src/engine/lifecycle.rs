@@ -925,8 +925,9 @@ impl YantrikDB {
         // plaintext metadata (not the caller's patch) paired with the record's
         // existing `source` — `correct()` cannot change `source` itself. Runs
         // before the revision insert / UPDATE below, inside the tx, so a refusal
-        // rolls back leaving the row untouched.
-        self.gate_provenance(&original.source, &new_metadata_val)?;
+        // rolls back leaving the row untouched. Warn-mode flags are counted only
+        // after the commit below (4a.6b).
+        let gate_verdict = self.gate_provenance(&original.source, &new_metadata_val)?;
         let stored_new_text = self.encrypt_text(&new_text_val)?;
         let stored_new_metadata = self.encrypt_text(&serde_json::to_string(&new_metadata_val)?)?;
 
@@ -1003,6 +1004,9 @@ impl YantrikDB {
         )?;
 
         tx.commit()?;
+
+        // 4a.6b: the correction is durable — a warn-mode flag counts now.
+        self.note_flagged_write_committed(gate_verdict);
 
         // Refresh the scoring_cache BEFORE dropping conn (finding 4): two
         // serialized corrections must update the cache in commit order, not
@@ -1380,6 +1384,10 @@ impl YantrikDB {
             // SQL transaction. Prior state is re-read HERE (under the
             // serialized conn lock) so it reflects any correction that
             // committed just before us.
+            //
+            // 4a.6b: the gate verdict escapes the closure so a warn-mode flag
+            // can be counted post-commit. `None` only on a pre-gate error path.
+            let mut gate_verdict: Option<crate::provenance::GateVerdict> = None;
             let commit_result: Result<i64> =
                 (|| {
                     let tx = conn.unchecked_transaction()?;
@@ -1444,6 +1452,22 @@ impl YantrikDB {
                         }
                         None => prior_meta_val.clone(),
                     };
+                    // **Anti-laundering gate — the text-changing correction was
+                    // a BYPASS (found while wiring 4a.6b).** 4a.4b gated the
+                    // scalar-only path (correct_impl), but `text_changes`
+                    // dispatches HERE before that gate runs, and this path
+                    // merges `metadata_merge` all the same — so
+                    // `correct(new_text=<any one-char change>,
+                    // metadata_merge={"kind":"fact"})` on an inference-sourced
+                    // record laundered straight past Enforce. Verified
+                    // empirically before fixing: the scalar flip refused, the
+                    // text-change flip committed kind=fact. Gate on the FINAL
+                    // merged metadata, inside the tx (a refusal rolls back and
+                    // the outer match removes the reserved append), same design
+                    // as the scalar site. `original.source` is stable —
+                    // correct() cannot change source.
+                    let v = self.gate_provenance(&original.source, &new_metadata_val)?;
+                    gate_verdict = Some(v);
                     let stored_new_text = self.encrypt_text(new_text)?;
                     let stored_new_metadata =
                         self.encrypt_text(&serde_json::to_string(&new_metadata_val)?)?;
@@ -1578,6 +1602,12 @@ impl YantrikDB {
             // publishes rather than stranding a durable row behind an invisible
             // vector (only an index rebuild would have recovered it).
             reservation.complete();
+
+            // 4a.6b: durable — a warn-mode flag counts now. Set on every path
+            // that reaches the commit (the gate runs before any tx write).
+            if let Some(v) = gate_verdict {
+                self.note_flagged_write_committed(v);
+            }
 
             // Kill boundary. A crash HERE (after the durable commit) leaves
             // SQL wholly-new — new text + embedding + revision + correct op

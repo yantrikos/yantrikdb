@@ -67,8 +67,10 @@ impl YantrikDB {
         source: &str,
         emotional_state: Option<&str>,
     ) -> Result<String> {
-        // v0.9.3 contract gate: validate BEFORE any side effect (importance
-        // calibration below mutates the namespace's running distribution).
+        // v0.9.3 contract gate: validate before anything else. (Historically
+        // "before any side effect" because importance calibration used to
+        // autocommit here; as of 4a.6b nothing below this point mutates state
+        // until the winner's transaction commits.)
         crate::validate::validate_embedding("record", embedding, self.embedding_dim)?;
         crate::validate::validate_scalars(
             "record",
@@ -79,11 +81,13 @@ impl YantrikDB {
                 ("half_life", half_life),
             ],
         )?;
-        // v0.10 Item 4a.4 anti-laundering gate: refuse (enforce) / count (warn)
+        // v0.10 Item 4a.4 anti-laundering gate: refuse (enforce) / flag (warn)
         // a record whose declared provenance is internally inconsistent (e.g.
         // source=inference claiming metadata.kind=fact), BEFORE any side effect.
-        // For a fresh insert `metadata` IS the final merged metadata.
-        self.gate_provenance(source, metadata)?;
+        // For a fresh insert `metadata` IS the final merged metadata. A warn-mode
+        // Flagged verdict is counted only after the write COMMITS (4a.6b) — the
+        // routed paths below carry it to their post-commit tick.
+        let gate_verdict = self.gate_provenance(source, metadata)?;
         // Task 29 (Ingest Integrity): strip any leaked tool-call
         // serialization tail from the stored text. On this entry point the
         // caller supplies the embedding, so the vector may still reflect the
@@ -96,10 +100,14 @@ impl YantrikDB {
         // consumer persists an unscoped "" partition. Shadows the param so
         // both the sync and queued paths below see the normalized value.
         let namespace = normalize_namespace(namespace);
-        // Task 31 (Ingest Integrity): calibrate importance against this
-        // namespace's running distribution before it is stored OR replicated
-        // (the sync, queued, and oplog paths all flow from the value below).
-        let importance = self.calibrate_importance(namespace, importance)?;
+        // Task 31 (Ingest Integrity): compute the calibrated importance against
+        // this namespace's running distribution — READ-ONLY (4a.6b). The
+        // distribution itself advances inside the winning path's transaction
+        // (`advance_importance_stats_in_tx`), fed the RAW value, so a rejected
+        // write leaves the namespace's calibration untouched. The sync, queued,
+        // and oplog paths all store/replicate the calibrated value below.
+        let raw_importance = importance;
+        let importance = self.calibrated_importance(namespace, importance)?;
         // Issue #41 layer 3: route on write_router state. The guard
         // (if acquired) is held for the full sync path and drops via
         // RAII at function return, panic-safe.
@@ -112,6 +120,7 @@ impl YantrikDB {
                 text,
                 memory_type,
                 importance,
+                raw_importance,
                 valence,
                 half_life,
                 metadata,
@@ -121,6 +130,7 @@ impl YantrikDB {
                 domain,
                 source,
                 emotional_state,
+                gate_verdict,
             );
         }
         // guard is held; RAII Drop at function exit decrements inflight.
@@ -144,6 +154,7 @@ impl YantrikDB {
             text,
             memory_type,
             importance,
+            raw_importance,
             valence,
             half_life,
             metadata,
@@ -153,6 +164,7 @@ impl YantrikDB {
             domain,
             source,
             emotional_state,
+            gate_verdict,
         )
     }
 
@@ -180,6 +192,7 @@ impl YantrikDB {
         text: &str,
         memory_type: &str,
         importance: f64,
+        raw_importance: f64,
         valence: f64,
         half_life: f64,
         metadata: &serde_json::Value,
@@ -189,6 +202,7 @@ impl YantrikDB {
         domain: &str,
         source: &str,
         emotional_state: Option<&str>,
+        gate_verdict: crate::provenance::GateVerdict,
     ) -> Result<String> {
         let rid = crate::id::new_id();
         let ts = now();
@@ -244,16 +258,12 @@ impl YantrikDB {
         // binding check happens under the conn lock below. Doing it here too just
         // avoids the embed/serialize work on an obviously-full queue.
         //
-        // KNOWN GAP, deliberately not closed here (sol 4a.6a finding 2): this is
-        // not "before any side effect". `calibrate_importance` (record.rs:101)
-        // already ran and autocommitted an update to `namespace_importance_stats`
-        // (importance.rs:88) BEFORE routing, so a write rejected below — by
-        // backpressure, by delta capacity, or by a transaction failure — has
-        // already advanced this namespace's calibration distribution permanently.
-        // That is a real defect and it predates 4a.6a; sol's own increment plan
-        // puts the fix in 4a.6b ("winner-only, transactional calibration"), where
-        // the claim decides who is allowed to advance it. It is called out here so
-        // nobody reads this path as fully side-effect-free before then.
+        // This IS "before any side effect" as of 4a.6b: the calibration read
+        // upstream is read-only, the stats advance happens inside this write's
+        // transaction below, and the warn-gate's flag is counted post-commit —
+        // so a rejection here (or anywhere later) leaves no trace anywhere.
+        // `record_backpressure_writes_nothing_at_all` is the enforcing test,
+        // and its name is the contract.
         self.check_pending_backpressure_fast()?;
 
         let emb_hash = embedding_hash(embedding);
@@ -365,6 +375,14 @@ impl YantrikDB {
                 )?;
             }
 
+            // 4a.6b winner-only calibration: the namespace's distribution
+            // advances HERE, inside the winning write's transaction, fed the RAW
+            // importance (writer intent, not the deflated output). A rollback —
+            // or never reaching this transaction at all (backpressure, gate,
+            // delta capacity) — leaves the distribution untouched: losers no
+            // longer move state.
+            self.advance_importance_stats_in_tx(&tx, namespace, raw_importance)?;
+
             // Kill boundary. Before 4a.6a the row above was already committed by
             // its own autocommit at this point, while the oplog op below had not
             // been written — a process death here left exactly the orphan the
@@ -428,6 +446,10 @@ impl YantrikDB {
         // a caught panic cannot strand a durable write with an invisible vector
         // or an uncounted pending row.
         let published = reservation.complete();
+
+        // 4a.6b: a warn-mode Flagged verdict is counted only now — the write is
+        // durable, so the nudge metric counts writes that actually landed.
+        self.note_flagged_write_committed(gate_verdict);
 
         // The counter moved inside complete() above — only after the tx
         // committed. Incrementing inside the tx would leak it upward on rollback
@@ -496,6 +518,8 @@ impl YantrikDB {
         // v0.9.3 contract gate: prevalidate the ENTIRE batch before any side
         // effect (calibration / SQL / oplog / index), so a bad element late
         // in the batch can't leave earlier elements half-committed.
+        let mut gate_verdicts: Vec<crate::provenance::GateVerdict> =
+            Vec::with_capacity(inputs.len());
         for (i, input) in inputs.iter().enumerate() {
             crate::validate::validate_embedding(
                 "record_batch",
@@ -527,8 +551,10 @@ impl YantrikDB {
             // the batch PREVALIDATION loop, so an inconsistent element late in
             // the batch rejects the whole batch before any side effect rather
             // than half-committing the earlier ones — the same contract the
-            // embedding/scalar gates above rely on.
-            self.gate_provenance(&input.source, &input.metadata)
+            // embedding/scalar gates above rely on. Warn-mode Flagged verdicts
+            // are only COUNTED after the batch commits (4a.6b).
+            let verdict = self
+                .gate_provenance(&input.source, &input.metadata)
                 .map_err(|e| match e {
                     crate::error::YantrikDbError::ProvenanceInconsistent { path, reason } => {
                         crate::error::YantrikDbError::ProvenanceInconsistent {
@@ -538,6 +564,7 @@ impl YantrikDB {
                     }
                     other => other,
                 })?;
+            gate_verdicts.push(verdict);
         }
 
         // Task 29 (Ingest Integrity): strip any leaked tool-call
@@ -551,14 +578,17 @@ impl YantrikDB {
             .map(|i| sanitize::sanitize_tool_call_artifacts(&i.text))
             .collect();
 
-        // Task 31 (Ingest Integrity): calibrate each input's importance
-        // against its namespace distribution (positionally aligned with
-        // `inputs`). Calls run in order, so later items in the batch see the
-        // running-mean effect of earlier ones in the same namespace.
-        let calibrated_importances: Vec<f64> = inputs
-            .iter()
-            .map(|i| self.calibrate_importance(&i.namespace, i.importance))
-            .collect::<Result<Vec<_>>>()?;
+        // Task 31 (Ingest Integrity): each input's importance is calibrated
+        // against its namespace distribution INSIDE the savepoint below (4a.6b),
+        // positionally aligned with `inputs` via push order. Computing +
+        // advancing per item under the savepoint's transaction view preserves
+        // the documented property that later items in the batch see the
+        // running-mean effect of earlier ones in the same namespace — while a
+        // ROLLBACK TO takes every advance with it, so a rejected batch leaves
+        // every namespace's distribution untouched. (The old pre-routing
+        // autocommit advanced ALL of them even when the batch then deferred on
+        // the write-router or died mid-savepoint.)
+        let mut calibrated_importances: Vec<f64> = Vec::with_capacity(inputs.len());
 
         // **Issue #41 layer 3.** Enter the write-router BEFORE snapshotting
         // SearchState, exactly as `record()` does (record.rs:105/138).
@@ -635,6 +665,31 @@ impl YantrikDB {
                 let ts = now();
                 let emb_blob = serialize_f32(&input.embedding);
                 let meta_str = serde_json::to_string(&input.metadata)?;
+
+                // 4a.6b: calibrate + advance under the savepoint. The `_on`
+                // variant reads through the HELD guard — calling the locking
+                // wrapper here would re-lock `conn` on the same thread, the
+                // `learn_category_members` deadlock (#83).
+                //
+                // 4a.6b (sol r2 finding 1): the stats ADVANCE is NOT done here.
+                // The vector append happens after the savepoint RELEASE and can
+                // still fail, and a committed EWMA blend is irreversible by the
+                // compensating DELETE — so advancing inside the savepoint left a
+                // rejected batch having permanently moved calibration. The
+                // advance is deferred to the post-append-loop block below, run
+                // only once the append wins. Consequence: every item calibrates
+                // against the SAME pre-batch snapshot (no within-batch running
+                // mean). That intra-batch progression was never pinned by a test
+                // and is a defensible semantics change — a batch is one
+                // simultaneous act — and it buys winner-only correctness. The
+                // cross-batch running mean is unchanged (the deferred advances
+                // move the table).
+                let calibrated = super::importance::calibrated_importance_on(
+                    &conn,
+                    &input.namespace,
+                    input.importance,
+                )?;
+                calibrated_importances.push(calibrated);
 
                 // Encrypt fields if encryption is enabled. Task 29: store the
                 // sanitized text (positionally aligned with `inputs`).
@@ -733,6 +788,11 @@ impl YantrikDB {
 
             conn.execute_batch("RELEASE batch_record")?;
         }
+        // NOTE: warn-mode flag ticks are DEFERRED to after the vector-append
+        // loop below (4a.6b finding 1). The append is a post-RELEASE failure
+        // point whose compensation deletes the rows — so ticking here would
+        // count writes the caller then sees fail. See the tick loop past the
+        // append.
         // conn dropped; now update graph_index in-memory.
         {
             let mut gi = self.graph_index.write();
@@ -816,6 +876,53 @@ impl YantrikDB {
             }
             self.bump_visible_seq(&input.namespace, seq);
         }
+        // 4a.6b (sol r2 finding 1): every append landed, so the batch is durable
+        // AND visible — the winner is decided. Advance the calibration stats and
+        // count the warn-mode flags NOW, both winner-only. Ticking or advancing
+        // before this point would have moved state for a batch whose append then
+        // failed and whose rows were compensated away — and a committed EWMA
+        // blend cannot be un-done by the compensating DELETE.
+        //
+        // Grouped in one transaction so the N advances are all-or-nothing. Each
+        // is a plain upsert (SQL blend against the stored value; composes with
+        // concurrent writers), fed the RAW importance.
+        //
+        // BEST-EFFORT, deliberately NOT `?` (sol 4a.6b r3 finding 1): the rows
+        // and vectors are already durable and visible — the batch WON. Calibration
+        // is an approximate ranking prior, so failing to advance it is a benign
+        // skipped observation. Propagating a SQLITE_FULL/IO error from this tx
+        // would report Err for an already-committed batch, and a retrying caller
+        // would then write DUPLICATE records under fresh rids — turning a missed
+        // stat into data corruption. So it logs and continues.
+        //
+        // NB (sol r4 / #94): `log_record_ops_batch(...)?` below still `?`-returns
+        // after this winner point — a PRE-EXISTING Err-after-commit (#79-era)
+        // that is NOT best-effortable (the ops are what replicate the batch). Its
+        // correct fix is to move that append inside the savepoint above (needs a
+        // held-conn variant to avoid the #83 re-lock); tracked in #94, out of
+        // 4a.6b's scope. Calibration is best-effort ONLY because it is
+        // approximate — do not copy this pattern to the oplog append.
+        {
+            let conn = self.conn();
+            let advanced = (|| -> Result<()> {
+                let tx = conn.unchecked_transaction()?;
+                for input in inputs.iter() {
+                    self.advance_importance_stats_in_tx(&tx, &input.namespace, input.importance)?;
+                }
+                tx.commit()?;
+                Ok(())
+            })();
+            if let Err(e) = advanced {
+                tracing::warn!(
+                    error = %e,
+                    "record_batch: post-commit calibration advance failed; \
+                     batch is durable, calibration observation skipped"
+                );
+            }
+        }
+        for verdict in gate_verdicts {
+            self.note_flagged_write_committed(verdict);
+        }
         // vec_index dropped, now scoring_cache
         {
             let mut cache = self.scoring_cache.write();
@@ -862,6 +969,18 @@ impl YantrikDB {
     /// timestamp + embedding_model. Engine does NOT call its own embedder
     /// or NER. Used by yantrikdb-server's cluster-mode applier so
     /// replicated writes are byte-deterministic across leader + followers.
+    ///
+    /// **`admission` (4a.6b, sol r2 finding 2) — REQUIRED, choose deliberately.**
+    /// This method is both a public origin API and the cluster apply primitive.
+    /// Pass `WriteAdmission::Admitted` from any consensus/replication APPLY path
+    /// (the leader already gated the op at origin ingress; re-gating on the apply
+    /// path makes followers reject the leader's committed write and wedge the
+    /// cluster). Pass `WriteAdmission::Origin` for a genuinely new write entering
+    /// here for the first time — it runs the anti-laundering gate exactly like
+    /// `record()`. It is a required argument, not a defaulted flag, so a caller
+    /// cannot silently inherit the apply bypass: `record_with_rid` was a public
+    /// Enforce bypass before this (a direct caller could persist
+    /// `source=inference` + `kind=fact`).
     ///
     /// # Contract
     ///
@@ -920,7 +1039,18 @@ impl YantrikDB {
         extracted_entities: &[&str],
         embedding_model: &str,
         seq: Option<u64>,
+        admission: crate::provenance::WriteAdmission,
     ) -> Result<()> {
+        // 4a.6b (sol r2 finding 2): the anti-laundering gate. ORIGIN callers are
+        // gated exactly like record(); ADMITTED callers (the materializer drain,
+        // replication apply) are NOT re-gated — the op was gated at the leader's
+        // origin ingress, and re-gating the apply path would make followers
+        // reject the leader's consensus-committed write and wedge the cluster
+        // (yantrikdb-server). A warn-mode Flagged verdict is counted post-commit.
+        let gate_verdict = match admission {
+            crate::provenance::WriteAdmission::Origin => self.gate_provenance(source, metadata)?,
+            crate::provenance::WriteAdmission::Admitted => crate::provenance::GateVerdict::Clean,
+        };
         // v0.7.23: coerce a blank namespace to the canonical default. This is
         // the path the server's commit applier uses (record_with_rid on every
         // node), so it closes the gateway `unwrap_or("")` footgun at the
@@ -1164,6 +1294,14 @@ impl YantrikDB {
             )?;
         }
 
+        // 4a.6b: an ORIGIN write that was warn-flagged and actually WROTE A ROW is
+        // durable — count it now. Gated on `was_new_row` (sol r3 finding 2): this
+        // path is `INSERT OR IGNORE`, so a replay of an existing rid persists
+        // nothing, and ticking there would inflate the warn→enforce nudge metric
+        // with no-op replays. ADMITTED writes carry Clean and tick nothing.
+        if was_new_row {
+            self.note_flagged_write_committed(gate_verdict);
+        }
         Ok(())
     }
 
@@ -1194,11 +1332,13 @@ impl YantrikDB {
     /// pre-encoded old-embedder vector in oplog would race against
     /// post-swap replay and produce dim mismatch when the new HNSW is
     /// at a different dim.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn record_queued(
         &self,
         text: &str,
         memory_type: &str,
         importance: f64,
+        raw_importance: f64,
         valence: f64,
         half_life: f64,
         metadata: &serde_json::Value,
@@ -1208,6 +1348,7 @@ impl YantrikDB {
         domain: &str,
         source: &str,
         emotional_state: Option<&str>,
+        gate_verdict: crate::provenance::GateVerdict,
     ) -> Result<String> {
         let rid = crate::id::new_id();
         let ts = now();
@@ -1257,7 +1398,14 @@ impl YantrikDB {
             Some(&rid),
             &payload,
             current_embedder_name.as_deref(),
+            // 4a.6b: the stats advance rides in the same transaction as the
+            // pending op — the queued write's only durable record. RAW value:
+            // the EWMA tracks writer intent, not the deflated output.
+            Some((namespace, raw_importance)),
         )?;
+
+        // 4a.6b: the pending op is durable, so a warn-mode flag counts now.
+        self.note_flagged_write_committed(gate_verdict);
 
         Ok(rid)
     }
@@ -1268,12 +1416,20 @@ impl YantrikDB {
     /// discriminate queued-during-reembed ops (which need re-encoding
     /// under the new embedder) from legacy pre-v27 ops (which have
     /// NULL `embedding_model` and trust their stored embedding bytes).
+    /// `stats_advance`: 4a.6b winner-only calibration for the queued path. The
+    /// pending op IS the queued write's only durable record, so the namespace's
+    /// importance distribution must advance atomically WITH it — `(namespace,
+    /// raw_importance)` here, in the same transaction as the INSERT. `None` for
+    /// op types that are not a record write (none today; the parameter exists so
+    /// a future non-record caller cannot silently inherit a stats advance that
+    /// does not belong to it).
     pub(crate) fn log_op_pending_for_reembed_queue(
         &self,
         op_type: &str,
         target_rid: Option<&str>,
         payload: &serde_json::Value,
         embedding_model: Option<&str>,
+        stats_advance: Option<(&str, f64)>,
     ) -> Result<String> {
         use rusqlite::params;
         use std::sync::atomic::Ordering;
@@ -1291,13 +1447,18 @@ impl YantrikDB {
 
         let conn = self.conn.lock();
         self.check_pending_backpressure_locked()?;
+        // ONE transaction: the pending op + the namespace stats advance. This
+        // used to be a bare autocommit INSERT; wrapping it costs nothing on the
+        // happy path and makes the stats advance winner-only — an INSERT failure
+        // rolls the observation back with it.
+        let tx = conn.unchecked_transaction()?;
         // Plain INSERT, not OR IGNORE. This is the QUEUED write's only durable
         // record — record_queued() writes no memories row (by design), so this op
         // IS the write. `OR IGNORE` here meant any swallowed constraint violation
         // made record_queued() return a rid and Ok while persisting NOTHING: the
-        // caller's write vanished silently. The op_id is minted fresh two lines
-        // up, so no caller could ever have needed the ignore.
-        conn.execute(
+        // caller's write vanished silently. The op_id is minted fresh above, so
+        // no caller could ever have needed the ignore.
+        tx.execute(
             "INSERT INTO oplog \
              (op_id, op_type, timestamp, target_rid, payload, \
               actor_id, hlc, embedding_hash, origin_actor, applied, \
@@ -1316,11 +1477,17 @@ impl YantrikDB {
                 embedding_model,
             ],
         )?;
-        // Unconditional: a plain INSERT that returned Ok inserted exactly one
-        // row. That is a claim about this statement, not about durability — a
-        // caller wrapping its own rolled-back SAVEPOINT around this (via the
-        // public `conn()`) still leaves the counter high. See the fuller note in
-        // `log_op_pending` (sol #83 finding 3).
+        if let Some((namespace, raw_importance)) = stats_advance {
+            self.advance_importance_stats_in_tx(&tx, namespace, raw_importance)?;
+        }
+        tx.commit()?;
+        // Only after commit: a plain INSERT inside a committed tx means exactly
+        // one pending row landed. (Moving the increment before the commit would
+        // leak it upward on rollback — the v0.7.1 counter-leak class.) Still a
+        // claim about this statement, not durability — a caller wrapping its own
+        // rolled-back SAVEPOINT around this (via the public `conn()`) leaves the
+        // counter high. See the fuller note in `log_op_pending` (sol #83
+        // finding 3).
         self.pending_op_count.fetch_add(1, Ordering::Relaxed);
         Ok(op_id)
     }
