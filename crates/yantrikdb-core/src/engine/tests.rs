@@ -7249,6 +7249,170 @@ fn deferred_batch_leaves_importance_stats_untouched() {
     db.write_router.switch_to_normal();
 }
 
+/// 4a.6b sol r2 finding 2: `record_with_rid` is both the public origin API and
+/// the cluster apply primitive. As ORIGIN it must gate provenance (it was a
+/// public Enforce bypass — a Rust caller could persist source=inference/
+/// kind=fact directly). As ADMITTED it must NOT gate — re-gating a
+/// consensus-committed op on the apply path makes followers reject the leader
+/// and wedge the cluster. The required `WriteAdmission` arg forces the choice.
+#[test]
+fn record_with_rid_gates_origin_but_not_admitted() {
+    let mk = |db: &YantrikDB, rid: &str, adm: crate::provenance::WriteAdmission| {
+        db.record_with_rid(
+            rid,
+            "the sky is green",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &serde_json::json!({"kind": "fact"}), // laundering: inference + fact
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "work",
+            "inference",
+            None,
+            1_000_000,
+            &[],
+            "test-embedder",
+            None,
+            adm,
+        )
+    };
+
+    // ORIGIN, Enforce (fresh DB): the contradiction is refused.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    assert_eq!(db.stats(None).unwrap().provenance_gate_mode, "enforce");
+    let err = mk(&db, "rid_origin", crate::provenance::WriteAdmission::Origin)
+        .expect_err("origin record_with_rid must gate a declared contradiction");
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::ProvenanceInconsistent { .. }
+        ),
+        "expected ProvenanceInconsistent, got {err:?}"
+    );
+    let n: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE rid = 'rid_origin'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 0, "refused origin write persisted nothing");
+
+    // ADMITTED, Enforce: the SAME op applies (it was gated at its origin; the
+    // apply path must not re-gate, or the cluster wedges).
+    mk(
+        &db,
+        "rid_admitted",
+        crate::provenance::WriteAdmission::Admitted,
+    )
+    .expect("admitted apply must NOT be re-gated");
+    let n: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE rid = 'rid_admitted'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 1, "admitted apply committed");
+}
+
+/// 4a.6b sol r2 finding 1: a batch whose VECTOR APPEND fails (after the SQL
+/// savepoint has committed) must leave `namespace_importance_stats` untouched.
+/// The stats advance is deferred to after the append loop wins; before this fix
+/// it ran inside the savepoint, and a committed EWMA blend cannot be reversed by
+/// the compensating row DELETE — so a rejected batch permanently moved the
+/// namespace's calibration.
+#[test]
+fn batch_append_failure_leaves_importance_stats_untouched() {
+    // Saturate the delta so the NEXT append fails, using single-record writes in
+    // a DIFFERENT namespace so the target namespace's stats stay pristine.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let dim = db.embedding_dim();
+    let mut saturated = false;
+    for i in 0..400 {
+        let emb: Vec<f32> = (0..dim).map(|j| ((i + j) as f32) * 0.001).collect();
+        match db.record(
+            &format!("filler-{i}"),
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "filler_ns",
+            0.8,
+            "general",
+            "user",
+            None,
+        ) {
+            Ok(_) => {}
+            Err(crate::error::YantrikDbError::Backpressure { .. }) => {
+                saturated = true;
+                break;
+            }
+            Err(e) => panic!("unexpected: {e:?}"),
+        }
+    }
+    assert!(saturated, "delta never saturated");
+
+    // The target namespace has no stats row yet.
+    let stats = |db: &YantrikDB| -> Option<(f64, i64)> {
+        db.conn()
+            .query_row(
+                "SELECT ewma, count FROM namespace_importance_stats WHERE namespace = 'batch_ns'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .ok()
+    };
+    assert_eq!(stats(&db), None, "precondition: no stats for batch_ns");
+
+    // A batch into batch_ns: SQL savepoint commits, then the vector append hits
+    // the saturated delta and fails, triggering the compensating DELETE.
+    let err = db
+        .record_batch(&[RecordInput {
+            text: "batch after saturation".into(),
+            memory_type: "semantic".into(),
+            importance: 0.9,
+            valence: 0.0,
+            half_life: 604800.0,
+            metadata: serde_json::json!({}),
+            embedding: vec_seed(2.0, 8),
+            namespace: "batch_ns".into(),
+            certainty: 0.8,
+            domain: "work".into(),
+            source: "user".into(),
+            emotional_state: None,
+        }])
+        .expect_err("append must fail into the saturated delta");
+    assert!(
+        matches!(err, crate::error::YantrikDbError::Backpressure { .. }),
+        "expected Backpressure from the append, got {err:?}"
+    );
+
+    // Rows compensated AND stats untouched (the winner-only guarantee).
+    let rows: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE namespace = 'batch_ns'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 0, "compensating DELETE removed the batch rows");
+    assert_eq!(
+        stats(&db),
+        None,
+        "a batch whose append failed advanced namespace_importance_stats — \
+         a loser moved calibration state"
+    );
+}
+
 /// 4a.6b finding 3: the in-tx SQL EWMA advance must reproduce the predecessor's
 /// `count == 0 => ewma = raw` seed exactly. A `(ewma=X, count=0)` row is not
 /// produced by any engine path, but the schema permits it and `conn()` is
@@ -9328,6 +9492,7 @@ fn record_with_rid_basic_succeeds() {
         &[],
         "test-model.v1",
         None,
+        crate::provenance::WriteAdmission::Admitted,
     )
     .expect("record_with_rid succeeds");
 
@@ -9359,6 +9524,7 @@ fn record_with_rid_persists_v25_columns() {
         &[],
         "bge-base-en-v1.5",
         None,
+        crate::provenance::WriteAdmission::Admitted,
     )
     .unwrap();
 
@@ -9402,6 +9568,7 @@ fn record_with_rid_is_idempotent_on_replay() {
             &entity_refs,
             "test-model.v1",
             None,
+            crate::provenance::WriteAdmission::Admitted,
         )
         .expect("idempotent re-apply");
     }
@@ -9477,6 +9644,7 @@ fn record_with_rid_rejects_dimension_mismatch() {
             &[],
             "test-model.v1",
             None,
+            crate::provenance::WriteAdmission::Admitted,
         )
         .expect_err("must reject");
     match err {
@@ -9513,6 +9681,7 @@ fn record_with_rid_uses_caller_supplied_timestamp() {
         &[],
         "test-model.v1",
         None,
+        crate::provenance::WriteAdmission::Admitted,
     )
     .unwrap();
     // Verify created_at REAL and created_at_unix_micros INTEGER both
@@ -9557,6 +9726,7 @@ fn record_with_rid_makes_recall_find_it() {
         &[],
         "test-model.v1",
         None,
+        crate::provenance::WriteAdmission::Admitted,
     )
     .unwrap();
 
@@ -10066,6 +10236,7 @@ fn record_with_rid_uses_caller_supplied_seq_and_bumps_visible() {
         &[],
         "test-model.v1",
         Some(1_000_000),
+        crate::provenance::WriteAdmission::Admitted,
     )
     .unwrap();
     assert_eq!(
@@ -10094,6 +10265,7 @@ fn record_with_rid_uses_caller_supplied_seq_and_bumps_visible() {
         &[],
         "test-model.v1",
         None,
+        crate::provenance::WriteAdmission::Admitted,
     )
     .unwrap();
     assert!(
@@ -15163,6 +15335,7 @@ fn record_with_rid_backpressure_does_not_leak_orphan_memories_row() {
             &[],
             "test-embedder",
             None,
+            crate::provenance::WriteAdmission::Admitted,
         );
         if let Err(crate::error::YantrikDbError::Backpressure { .. }) = res {
             last_backpressure_rid = Some(attempted_rid);
@@ -15241,6 +15414,7 @@ fn record_with_rid_backpressure_does_not_overcount_session_memory_count() {
             &[],
             "test-embedder",
             None,
+            crate::provenance::WriteAdmission::Admitted,
         );
         if let Err(crate::error::YantrikDbError::Backpressure { .. }) = res {
             saw_backpressure = true;
@@ -15363,6 +15537,7 @@ fn record_with_rid_coerces_blank_namespace_to_default() {
         &[],
         "test-embedder",
         None,
+        crate::provenance::WriteAdmission::Admitted,
     )
     .unwrap();
     assert_eq!(

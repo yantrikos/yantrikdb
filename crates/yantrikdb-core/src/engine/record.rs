@@ -669,15 +669,26 @@ impl YantrikDB {
                 // 4a.6b: calibrate + advance under the savepoint. The `_on`
                 // variant reads through the HELD guard — calling the locking
                 // wrapper here would re-lock `conn` on the same thread, the
-                // `learn_category_members` deadlock (#83). The snapshot sees the
-                // advances of EARLIER items in this batch (same tx view), which
-                // is what keeps the in-batch running-mean property.
+                // `learn_category_members` deadlock (#83).
+                //
+                // 4a.6b (sol r2 finding 1): the stats ADVANCE is NOT done here.
+                // The vector append happens after the savepoint RELEASE and can
+                // still fail, and a committed EWMA blend is irreversible by the
+                // compensating DELETE — so advancing inside the savepoint left a
+                // rejected batch having permanently moved calibration. The
+                // advance is deferred to the post-append-loop block below, run
+                // only once the append wins. Consequence: every item calibrates
+                // against the SAME pre-batch snapshot (no within-batch running
+                // mean). That intra-batch progression was never pinned by a test
+                // and is a defensible semantics change — a batch is one
+                // simultaneous act — and it buys winner-only correctness. The
+                // cross-batch running mean is unchanged (the deferred advances
+                // move the table).
                 let calibrated = super::importance::calibrated_importance_on(
                     &conn,
                     &input.namespace,
                     input.importance,
                 )?;
-                self.advance_importance_stats_in_tx(&conn, &input.namespace, input.importance)?;
                 calibrated_importances.push(calibrated);
 
                 // Encrypt fields if encryption is enabled. Task 29: store the
@@ -865,21 +876,24 @@ impl YantrikDB {
             }
             self.bump_visible_seq(&input.namespace, seq);
         }
-        // 4a.6b finding 1 (flag half): every append landed, so the batch is
-        // durable AND visible — count the warn-mode flags now. Ticking after
-        // RELEASE but before this point would have counted a batch whose append
-        // then failed and whose rows were compensated away.
+        // 4a.6b (sol r2 finding 1): every append landed, so the batch is durable
+        // AND visible — the winner is decided. Advance the calibration stats and
+        // count the warn-mode flags NOW, both winner-only. Ticking or advancing
+        // before this point would have moved state for a batch whose append then
+        // failed and whose rows were compensated away — and a committed EWMA
+        // blend cannot be un-done by the compensating DELETE.
         //
-        // KNOWN RESIDUAL (sol 4a.6b finding 1, tracked as the 4a.6d batch
-        // restructure): the EWMA advances committed inside the savepoint are NOT
-        // reversed if an append fails here. Unlike a row DELETE or a counter
-        // decrement, a committed EWMA blend is IRREVERSIBLE by compensation — the
-        // prior value is gone — so the only correct fix is to RESERVE delta
-        // capacity before the savepoint (record()'s 4a.6a pattern) so append
-        // cannot fail post-commit. That is the batch's pre-existing
-        // incomplete-compensation gap (entities / graph_index have never been
-        // reversed here either), generalized; it is out of 4a.6b's scope and
-        // deliberately not half-patched.
+        // Grouped in one transaction so the N advances are all-or-nothing. Each
+        // is a plain upsert (SQL blend against the stored value; composes with
+        // concurrent writers), fed the RAW importance.
+        {
+            let conn = self.conn();
+            let tx = conn.unchecked_transaction()?;
+            for input in inputs.iter() {
+                self.advance_importance_stats_in_tx(&tx, &input.namespace, input.importance)?;
+            }
+            tx.commit()?;
+        }
         for verdict in gate_verdicts {
             self.note_flagged_write_committed(verdict);
         }
@@ -929,6 +943,18 @@ impl YantrikDB {
     /// timestamp + embedding_model. Engine does NOT call its own embedder
     /// or NER. Used by yantrikdb-server's cluster-mode applier so
     /// replicated writes are byte-deterministic across leader + followers.
+    ///
+    /// **`admission` (4a.6b, sol r2 finding 2) — REQUIRED, choose deliberately.**
+    /// This method is both a public origin API and the cluster apply primitive.
+    /// Pass `WriteAdmission::Admitted` from any consensus/replication APPLY path
+    /// (the leader already gated the op at origin ingress; re-gating on the apply
+    /// path makes followers reject the leader's committed write and wedge the
+    /// cluster). Pass `WriteAdmission::Origin` for a genuinely new write entering
+    /// here for the first time — it runs the anti-laundering gate exactly like
+    /// `record()`. It is a required argument, not a defaulted flag, so a caller
+    /// cannot silently inherit the apply bypass: `record_with_rid` was a public
+    /// Enforce bypass before this (a direct caller could persist
+    /// `source=inference` + `kind=fact`).
     ///
     /// # Contract
     ///
@@ -987,7 +1013,18 @@ impl YantrikDB {
         extracted_entities: &[&str],
         embedding_model: &str,
         seq: Option<u64>,
+        admission: crate::provenance::WriteAdmission,
     ) -> Result<()> {
+        // 4a.6b (sol r2 finding 2): the anti-laundering gate. ORIGIN callers are
+        // gated exactly like record(); ADMITTED callers (the materializer drain,
+        // replication apply) are NOT re-gated — the op was gated at the leader's
+        // origin ingress, and re-gating the apply path would make followers
+        // reject the leader's consensus-committed write and wedge the cluster
+        // (yantrikdb-server). A warn-mode Flagged verdict is counted post-commit.
+        let gate_verdict = match admission {
+            crate::provenance::WriteAdmission::Origin => self.gate_provenance(source, metadata)?,
+            crate::provenance::WriteAdmission::Admitted => crate::provenance::GateVerdict::Clean,
+        };
         // v0.7.23: coerce a blank namespace to the canonical default. This is
         // the path the server's commit applier uses (record_with_rid on every
         // node), so it closes the gateway `unwrap_or("")` footgun at the
@@ -1231,6 +1268,9 @@ impl YantrikDB {
             )?;
         }
 
+        // 4a.6b: an ORIGIN write that was warn-flagged and reached here is
+        // durable — count it now. ADMITTED writes carry Clean and tick nothing.
+        self.note_flagged_write_committed(gate_verdict);
         Ok(())
     }
 

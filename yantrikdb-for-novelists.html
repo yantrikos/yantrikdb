@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>YantrikDB — Capabilities Overview</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b22;
+    --ink: #e6edf3;
+    --muted: #9aa7b4;
+    --accent: #7c9cff;
+    --accent-2: #58d39b;
+    --line: #2a323d;
+    --code-bg: #0b0e13;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 900px; margin: 0 auto; padding: 0 24px; }
+
+  header {
+    border-bottom: 1px solid var(--line);
+    padding: 48px 0 32px;
+  }
+  h1 { font-size: 30px; margin: 0 0 8px; letter-spacing: -0.01em; }
+  .tagline { color: var(--muted); font-size: 17px; margin: 0 0 18px; max-width: 680px; }
+  .meta-row { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    font-size: 12.5px; color: var(--ink);
+    background: var(--panel); border: 1px solid var(--line);
+    padding: 5px 11px; border-radius: 7px;
+  }
+  .chip b { color: var(--accent-2); }
+
+  section { padding: 38px 0; border-bottom: 1px solid var(--line); }
+  h2 { font-size: 21px; margin: 0 0 6px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); margin: 0 0 22px; font-size: 15px; }
+  h3 { font-size: 15.5px; margin: 24px 0 8px; color: var(--accent); }
+  p { margin: 0 0 12px; }
+
+  /* what it is */
+  .what { color: var(--muted); font-size: 15.5px; }
+  .what b { color: var(--ink); }
+
+  /* capability list */
+  .caps { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 720px) { .caps { grid-template-columns: 1fr; } h1 { font-size: 25px; } }
+  .cap {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 10px; padding: 15px 17px;
+  }
+  .cap h4 { margin: 0 0 5px; font-size: 15px; }
+  .cap p { margin: 0; color: var(--muted); font-size: 14px; }
+  .cap code { color: var(--accent-2); font-size: 12.5px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 14.5px; margin-top: 6px; }
+  th, td { text-align: left; padding: 10px 13px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.05em; }
+  td b { color: var(--ink); }
+  td.tool code { color: var(--accent-2); background: var(--code-bg); padding: 2px 6px; border-radius: 5px; font-size: 12.5px; }
+  .bench td b { color: var(--accent-2); }
+
+  pre {
+    background: var(--code-bg); border: 1px solid var(--line); border-radius: 10px;
+    padding: 16px 18px; overflow-x: auto; font-size: 13px; line-height: 1.55; margin: 14px 0;
+  }
+  code { font-family: "SF Mono", "JetBrains Mono", Consolas, "Liberation Mono", monospace; }
+  pre code { color: #d6dee8; }
+  .c { color: #6b7785; }
+  .k { color: #7c9cff; }
+  .s { color: #58d39b; }
+  .f { color: #f0b34a; }
+  .tablabel { font-size: 12.5px; color: var(--muted); margin: 18px 0 -6px; }
+
+  .api-list { columns: 2; column-gap: 28px; font-size: 14px; color: var(--muted); margin: 0; padding-left: 18px; }
+  @media (max-width: 720px) { .api-list { columns: 1; } }
+  .api-list li { margin: 4px 0; break-inside: avoid; }
+  .api-list code { color: var(--accent-2); font-size: 12.5px; }
+
+  footer { color: var(--muted); font-size: 12.5px; padding: 24px 0; text-align: center; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <h1>YantrikDB — capabilities overview</h1>
+    <p class="tagline">
+      A cognitive memory engine for AI agents and apps: vector search, a knowledge graph, a
+      temporal model, decay, and conflict detection in one embedded engine. Notes below on how it
+      lines up with a novel-writing app.
+    </p>
+    <div class="meta-row">
+      <span class="chip">Engine <b>v0.7.22</b></span>
+      <span class="chip">Rust core · <b>Python + MCP</b></span>
+      <span class="chip">Embedded · <b>single file</b></span>
+      <span class="chip"><b>Local-first</b>, offline</span>
+      <span class="chip">MIT (MCP) / AGPL (engine)</span>
+    </div>
+  </div>
+</header>
+
+<!-- WHAT IT IS -->
+<section>
+  <div class="wrap">
+    <h2>What it is</h2>
+    <p class="what">
+      YantrikDB stores facts as <b>memories</b> rather than rows. You write in natural language and
+      query in natural language; the engine decides what's relevant using semantic similarity
+      <em>plus</em> recency, importance, and graph connections. It runs <b>embedded</b> — a single
+      SQLite file, no server process — and works <b>offline</b>. The Rust core is wrapped by a Python
+      package (<code>yantrikdb</code>) and an MCP server (<code>yantrikdb-mcp</code>) that exposes the
+      same operations as tools to Claude, Cursor, Windsurf, or any MCP client.
+    </p>
+    <p class="what">
+      It's built around <b>cognitive operations</b> — <code>record</code>, <code>recall</code>,
+      <code>relate</code>, <code>think</code> — not SQL, and it does background work between calls
+      (consolidation, conflict scanning, decay).
+    </p>
+  </div>
+</section>
+
+<!-- CAPABILITIES -->
+<section>
+  <div class="wrap">
+    <h2>Current capabilities (v0.7.22)</h2>
+    <p class="sub">Each ships today across the engine, the Python package, and the MCP server.</p>
+    <div class="caps">
+      <div class="cap"><h4>Five indexes, one engine</h4><p>Vector (HNSW), graph (entities), temporal (events), decay heap, and key-value — queried together.</p></div>
+      <div class="cap"><h4>Relevance-conditioned recall</h4><p>Blends semantic similarity, temporal decay, importance, graph proximity, and retrieval feedback. Weights auto-tune from usage.</p></div>
+      <div class="cap"><h4>Knowledge graph</h4><p>Entity relations, profile aggregation, relationship-depth queries, and memory↔entity linking for graph-boosted recall. <code>relate · get_edges · entity_profile</code></p></div>
+      <div class="cap"><h4>First-class record links</h4><p>Link memory to memory: <code>advances</code>, <code>supersedes</code>, <code>contradicts</code>, <code>supports</code>, <code>questions</code>, <code>derived_from</code>, or <code>custom:&lt;name&gt;</code>. Recall can expand linked records.</p></div>
+      <div class="cap"><h4>Conflict detection &amp; resolution</h4><p>Contradicting facts become typed, prioritized conflict segments you resolve explicitly — no silent guessing. <code>scan_conflicts · resolve_conflict</code></p></div>
+      <div class="cap"><h4>Think / consolidate</h4><p><code>think()</code> merges similar memories, scans for conflicts, mines cross-domain patterns, and evaluates triggers.</p></div>
+      <div class="cap"><h4>Memory types</h4><p>Semantic (facts), episodic (events), procedural (strategies) — each carrying importance, valence, domain, source, certainty, timestamps.</p></div>
+      <div class="cap"><h4>Temporal awareness</h4><p>Decay models forgetting; <code>stale()</code> / <code>upcoming()</code> surface fading high-importance facts and approaching deadlines.</p></div>
+      <div class="cap"><h4>Proactive triggers</h4><p>Flags what's worth surfacing: unresolved conflicts, decaying important facts, detected patterns — all grounded in stored data.</p></div>
+      <div class="cap"><h4>Multi-device CRDT sync</h4><p>Append-only replication log; memories and graph edges merge conflict-free. Tombstones make "forget" propagate.</p></div>
+      <div class="cap"><h4>Sessions</h4><p>Group a working session's writes; auto-computes memory count, topics, average valence, duration.</p></div>
+      <div class="cap"><h4>Namespaces</h4><p>Isolated partitions in one database — e.g. one per book or series.</p></div>
+      <div class="cap"><h4>Embedded &amp; private</h4><p>Single SQLite file, no server, data stays local. A separate <code>yantrikdb-server</code> adds Raft-replicated cluster mode if needed.</p></div>
+      <div class="cap"><h4>Zero-setup embeddings</h4><p>Bundled ~7 MB embedder (~89% of MiniLM quality). One line swaps in a stronger model when wanted.</p></div>
+      <div class="cap"><h4>MCP + framework adapters</h4><p>Drop-in MCP server, plus LangChain, CrewAI, and OpenAI-Agents adapters.</p></div>
+      <div class="cap"><h4>Decoupled write path</h4><p>Two-tier LSM vector index: foreground writes touch a small delta; HNSW work amortizes on a background thread, so writes never starve reads.</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- FULL API -->
+<section>
+  <div class="wrap">
+    <h2>Full operation set</h2>
+    <p class="sub">The complete API surface, by area.</p>
+    <ul class="api-list">
+      <li><b>Core</b> — <code>record</code>, <code>record_batch</code>, <code>recall</code>, <code>recall_with_response</code>, <code>recall_refine</code>, <code>forget</code>, <code>correct</code></li>
+      <li><b>Links</b> — <code>record_with_links</code>, <code>record_with_links_partial</code>, <code>recall_with_links</code></li>
+      <li><b>Knowledge graph</b> — <code>relate</code>, <code>get_edges</code>, <code>search_entities</code>, <code>entity_profile</code>, <code>relationship_depth</code>, <code>link_memory_entity</code></li>
+      <li><b>Cognition</b> — <code>think</code>, <code>get_patterns</code>, <code>scan_conflicts</code>, <code>resolve_conflict</code>, <code>derive_personality</code></li>
+      <li><b>Triggers</b> — <code>get_pending_triggers</code>, <code>acknowledge_trigger</code>, <code>deliver_trigger</code>, <code>act_on_trigger</code>, <code>dismiss_trigger</code></li>
+      <li><b>Sessions</b> — <code>session_start</code>, <code>session_end</code>, <code>session_history</code>, <code>active_session</code></li>
+      <li><b>Temporal</b> — <code>stale</code>, <code>upcoming</code></li>
+      <li><b>Procedural</b> — <code>record_procedural</code>, <code>surface_procedural</code>, <code>reinforce_procedural</code></li>
+      <li><b>Lifecycle</b> — <code>archive</code>, <code>hydrate</code>, <code>decay</code>, <code>evict</code>, <code>list_memories</code>, <code>stats</code></li>
+      <li><b>Sync</b> — <code>extract_ops_since</code>, <code>apply_ops</code>, <code>get_peer_watermark</code>, <code>set_peer_watermark</code></li>
+      <li><b>Maintenance</b> — <code>rebuild_vec_index</code>, <code>rebuild_graph_index</code>, <code>learned_weights</code></li>
+    </ul>
+  </div>
+</section>
+
+<!-- NOVEL MAPPING -->
+<section>
+  <div class="wrap">
+    <h2>How it maps to a novel-writing app</h2>
+    <p class="sub">The same primitives, applied to a story bible.</p>
+    <table>
+      <thead>
+        <tr><th>Capability</th><th>Use in the app</th><th class="tool">Tool</th></tr>
+      </thead>
+      <tbody>
+        <tr><td><b>Semantic recall</b></td><td>"What is the protagonist afraid of?" surfaces the fact even 80k words later, without exact keywords.</td><td class="tool"><code>recall</code></td></tr>
+        <tr><td><b>Knowledge graph</b></td><td>Model the cast — alliances, feuds, oaths, family lines — and query a character's whole web of connections.</td><td class="tool"><code>relate · get_edges</code></td></tr>
+        <tr><td><b>Record links</b></td><td>Tie a ch.3 clue to its ch.18 payoff; recall the payoff and the seed comes with it.</td><td class="tool"><code>record_with_links</code></td></tr>
+        <tr><td><b>Conflict detection</b></td><td>"Aria's eyes are green" clashes with canonical "storm-grey" — surfaced for review.</td><td class="tool"><code>think · scan_conflicts</code></td></tr>
+        <tr><td><b>Temporal index</b></td><td>Keep in-story chronology straight and surface approaching plot deadlines.</td><td class="tool"><code>stale · upcoming</code></td></tr>
+        <tr><td><b>Memory types</b></td><td>Hard canon (semantic) vs. one-off scene beats (episodic) vs. writing strategies (procedural).</td><td class="tool"><code>record</code></td></tr>
+        <tr><td><b>Namespaces / sync</b></td><td>One book per namespace; draft on a laptop, edit on a tablet, bibles merge conflict-free.</td><td class="tool"><code>apply_ops</code></td></tr>
+      </tbody>
+    </table>
+
+    <h3>Why selective recall matters here</h3>
+    <p class="sub" style="margin-bottom:8px">Token cost stays flat as the bible grows; precision rises with more data. (From the repo's benchmark.)</p>
+    <table class="bench">
+      <thead><tr><th>Bible size</th><th>Prompt-stuffed</th><th>YantrikDB</th><th>Token savings</th><th>Precision</th></tr></thead>
+      <tbody>
+        <tr><td>100 facts</td><td>1,770 tok</td><td>69 tok</td><td><b>96%</b></td><td>66%</td></tr>
+        <tr><td>500 facts</td><td>9,807 tok</td><td>72 tok</td><td><b>99.3%</b></td><td>77%</td></tr>
+        <tr><td>1,000 facts</td><td>19,988 tok</td><td>72 tok</td><td><b>99.6%</b></td><td>84%</td></tr>
+        <tr><td>5,000 facts</td><td>101,739 tok</td><td>53 tok</td><td><b>99.9%</b></td><td>88%</td></tr>
+      </tbody>
+    </table>
+    <p class="sub" style="margin-top:10px">At ~500 facts a stuffed bible already exceeds a 32K window; at 5,000 it fits in no window. YantrikDB stays near 70 tokens per query.</p>
+  </div>
+</section>
+
+<!-- USING IT -->
+<section>
+  <div class="wrap">
+    <h2>Using it</h2>
+    <p class="sub">As a Python library, or over MCP with no integration code.</p>
+
+    <p class="tablabel">Python — a story bible in ~25 lines</p>
+<pre><code><span class="k">import</span> yantrikdb
+
+db = yantrikdb.YantrikDB.<span class="f">with_default</span>(<span class="s">"novel_bible.db"</span>)   <span class="c"># single local file</span>
+
+<span class="c"># 1. store canon facts</span>
+db.<span class="f">record</span>(<span class="s">"Aria Veth has storm-grey eyes and fears deep water."</span>,
+          importance=<span class="s">0.9</span>, domain=<span class="s">"character"</span>)
+clue = db.<span class="f">record</span>(<span class="s">"In ch.3 Aria flinches at the harbour at dusk."</span>,
+                 importance=<span class="s">0.7</span>, domain=<span class="s">"plot"</span>)
+
+<span class="c"># 2. character / faction graph</span>
+db.<span class="f">relate</span>(src=<span class="s">"Aria Veth"</span>, dst=<span class="s">"House Veth"</span>, rel_type=<span class="s">"member_of"</span>)
+db.<span class="f">relate</span>(src=<span class="s">"House Veth"</span>, dst=<span class="s">"House Corin"</span>, rel_type=<span class="s">"blood_feud_with"</span>)
+
+<span class="c"># 3. fuzzy recall — no exact keywords needed</span>
+<span class="k">for</span> r <span class="k">in</span> db.<span class="f">recall</span>(<span class="s">"what is the protagonist afraid of?"</span>, top_k=<span class="s">3</span>):
+    <span class="f">print</span>(r[<span class="s">"score"</span>], r[<span class="s">"text"</span>])
+
+<span class="c"># 4. link a plant to its payoff</span>
+db.<span class="f">record_with_links</span>(
+    text=<span class="s">"In ch.18 Aria nearly drowns escaping the harbour ambush."</span>,
+    links=[{<span class="s">"target_rid"</span>: clue, <span class="s">"link_type"</span>: <span class="s">"custom:pays_off"</span>}])
+
+<span class="c"># 5. consistency check</span>
+db.<span class="f">record</span>(<span class="s">"Aria Veth's eyes are bright green."</span>)   <span class="c"># contradicts canon</span>
+db.<span class="f">think</span>()                                       <span class="c"># runs conflict scan</span>
+<span class="k">for</span> c <span class="k">in</span> db.<span class="f">get_conflicts</span>(status=<span class="s">"open"</span>):
+    <span class="f">print</span>(<span class="s">"conflict:"</span>, c)
+
+db.<span class="f">close</span>()</code></pre>
+
+    <p class="tablabel">MCP — expose the same operations to an AI assistant</p>
+<pre><code><span class="c">// .mcp.json</span>
+{
+  <span class="s">"mcpServers"</span>: {
+    <span class="s">"yantrikdb"</span>: {
+      <span class="s">"command"</span>: <span class="s">"uvx"</span>,
+      <span class="s">"args"</span>: [<span class="s">"yantrikdb-mcp"</span>],
+      <span class="s">"env"</span>: { <span class="s">"YANTRIKDB_DB_PATH"</span>: <span class="s">"./novels/storm-veth.db"</span> }
+    }
+  }
+}</code></pre>
+    <p class="sub" style="margin-top:6px">The assistant then has <code>remember · recall · relate · graph · record_with_links · recall_with_links · conflict · think</code> as callable tools — the writer just talks, the model calls the right one.</p>
+  </div>
+</section>
+
+<!-- NOTES -->
+<section>
+  <div class="wrap">
+    <h2>Notes &amp; limitations</h2>
+    <div class="caps">
+      <div class="cap"><h4>Suggests, doesn't auto-edit</h4><p>Conflict detection is semantic/heuristic, not a logic prover — it flags likely contradictions for review.</p></div>
+      <div class="cap"><h4>Embedded by design</h4><p>One file, ideal for desktop/offline. Multi-user cloud needs the separate <code>yantrikdb-server</code> (Raft cluster mode).</p></div>
+      <div class="cap"><h4>Licensing</h4><p>MCP server is MIT; core engine is AGPL. Fine for SaaS / self-host; check before shipping a closed-source binary.</p></div>
+      <div class="cap"><h4>Embeddings are tunable</h4><p>Default bundled model is ~89% of MiniLM at 7 MB; swap in a stronger model with one line for sharper recall.</p></div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    YantrikDB v0.7.22 · <code>pip install yantrikdb</code> · capabilities reflect the version shown.
+  </div>
+</footer>
+
+</body>
+</html>

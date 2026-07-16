@@ -392,6 +392,7 @@ mod tests {
                 &[],
                 "test-embedder",
                 None,
+                crate::provenance::WriteAdmission::Admitted,
             )
             .expect("with the compactor running, 350 writes must not 503 at delta_max=256");
         }
@@ -475,6 +476,7 @@ mod tests {
                 &[],
                 "test-embedder",
                 None,
+                crate::provenance::WriteAdmission::Admitted,
             );
             if let Err(e) = res {
                 last_err = Some(e);
