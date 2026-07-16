@@ -7910,6 +7910,19 @@ fn keyed_duplicate_resolves_even_under_backpressure() {
         matches!(err, crate::error::YantrikDbError::Backpressure { .. }),
         "expected Backpressure for the new keyed write, got {err:?}"
     );
+
+    // The QUEUED route under the same saturation: the dup must resolve there
+    // too. (No new-key backpressure assert here, and its absence is itself a
+    // finding from writing this test: the saturation above is DELTA capacity,
+    // and the queued route consumes none — it writes no vector, which is
+    // exactly why it is the escape valve during reembed cutover. A new keyed
+    // queued write legitimately succeeds under delta saturation; only a full
+    // PENDING queue gates it, and the helper's locked probe precedes that
+    // check by the same one-owner code path the sync mutation proof covers.)
+    db.write_router.switch_to_queueing();
+    let rid3 = keyed(&db).expect("queued dup under saturation must resolve");
+    assert_eq!(rid3, rid, "queued dup returns the original rid");
+    db.write_router.switch_to_normal();
 }
 
 // ── Relationship-Based Entity Type Tests ──

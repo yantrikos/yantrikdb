@@ -443,6 +443,30 @@ impl YantrikDB {
 
         let conn = self.conn();
 
+        // 4a.6c sol r2: the LOCKED probe. The unlocked pre-admission probe can
+        // race — two same-key writers both MISS, A commits the claim and
+        // saturates the engine, and B would then die on the backpressure check
+        // below without ever resolving its duplicate. Re-probing here, under
+        // the SAME conn guard that stays held through the transaction, closes
+        // that window completely: nothing can commit a claim between this read
+        // and our tx. A hit resolves BEFORE admission (no backpressure, no seq,
+        // no reservation), which is the point — a duplicate writes nothing, so
+        // saturation must not be able to fail it. (The in-tx ON CONFLICT stays
+        // as the authoritative serialization point; under this locking it is
+        // belt-and-suspenders, reachable only by raw-`conn()` writers outside
+        // the engine.)
+        if let Some((key, digest)) = idem.as_ref() {
+            if let Some(existing_rid) = super::idempotency::probe_committed_claim(
+                &conn,
+                &self.actor_id,
+                namespace,
+                key,
+                digest,
+            )? {
+                return Ok(existing_rid);
+            }
+        }
+
         // THE authoritative admission check: under the lock, before the
         // reservation and before any durable write. The pre-lock check above is a
         // TOCTOU on its own (sol 4a.6a finding 1) — at MAX_PENDING_OPS-1, N
@@ -1543,15 +1567,6 @@ impl YantrikDB {
         let rid = crate::id::new_id();
         let ts = now();
 
-        // Assign a seq for caller's RYW use. Note we do NOT bump
-        // visible_seq — the active generation doesn't yet cover this
-        // op; the post-swap materializer is responsible for advancing
-        // visible_seq as it drains queued ops.
-        let _seq = self
-            .vec_seq
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1;
-
         // Capture the current runtime embedder name (the one active
         // before reembed flipped the router). The post-swap materializer
         // uses this to discriminate ops queued under the old embedder
@@ -1617,11 +1632,22 @@ impl YantrikDB {
             pending_claim.as_ref(),
         )? {
             // Idempotent hit: the SAME payload is already durably enqueued (or
-            // committed) under this key. Nothing was written — the helper's
-            // transaction aborted before its INSERT — and the flag tick below
-            // is skipped: a retry that landed nothing is not a flagged write.
+            // committed) under this key. Nothing was written — the helper
+            // resolved before its INSERT — and both the seq mint and the flag
+            // tick below are skipped: a retry that landed nothing is not a
+            // flagged write and does not advance sequencing (sol 4a.6c r2
+            // finding 2).
             return Ok(existing_rid);
         }
+
+        // Assign a seq for caller's RYW use, only now that the write really
+        // enqueued. Note we do NOT bump visible_seq — the active generation
+        // doesn't yet cover this op; the post-swap materializer is responsible
+        // for advancing visible_seq as it drains queued ops.
+        let _seq = self
+            .vec_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
 
         // 4a.6b: the pending op is durable, so a warn-mode flag counts now.
         self.note_flagged_write_committed(gate_verdict);
@@ -1659,9 +1685,6 @@ impl YantrikDB {
         use rusqlite::params;
         use std::sync::atomic::Ordering;
 
-        let op_id = crate::id::new_id();
-        let hlc_ts = self.tick_hlc();
-        let hlc_bytes = hlc_ts.to_bytes().to_vec();
         let payload_str = serde_json::to_string(payload)?;
 
         // Advisory fast reject (unlocked); the AUTHORITATIVE check is under the
@@ -1671,7 +1694,27 @@ impl YantrikDB {
         self.check_pending_backpressure_fast()?;
 
         let conn = self.conn.lock();
+        // 4a.6c sol r2: locked probe BEFORE admission — same rationale as the
+        // sync route's (see record_under_guard_and_state): a race-window
+        // duplicate must resolve to its hit even when the queue is full, and
+        // under this continuously-held guard nothing can commit a claim between
+        // this read and our transaction. A hit exits before the backpressure
+        // check and before the op id / HLC mint below, burning nothing.
+        if let Some(pc) = claim {
+            if let Some(existing_rid) = super::idempotency::probe_committed_claim(
+                &conn,
+                &self.actor_id,
+                pc.namespace,
+                pc.idempotency_key,
+                pc.payload_digest,
+            )? {
+                return Ok(Some(existing_rid));
+            }
+        }
         self.check_pending_backpressure_locked()?;
+        let op_id = crate::id::new_id();
+        let hlc_ts = self.tick_hlc();
+        let hlc_bytes = hlc_ts.to_bytes().to_vec();
         // ONE transaction: the pending op + the namespace stats advance. This
         // used to be a bare autocommit INSERT; wrapping it costs nothing on the
         // happy path and makes the stats advance winner-only — an INSERT failure
