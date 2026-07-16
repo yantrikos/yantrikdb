@@ -37,6 +37,23 @@ impl PyYantrikDB {
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
 
+        // 4a.6c (sol r4 note): a key with an ENGINE-GENERATED embedding is
+        // refused for now. record()'s digest includes the embedding (API-byte
+        // identity — the sync route stores it), so if this wrapper embedded the
+        // text itself, an embedder drift across retries would turn an honest
+        // retry into a false IdempotencyConflict. The generated-vector variant
+        // (digest excludes it) ships with record_text idempotency in 4a.6d;
+        // until then, fail loud rather than subtly mis-dedup.
+        if idempotency_key.is_some() && embedding.is_none() {
+            return Err(PyValueError::new_err(
+                "idempotency_key with an engine-generated embedding is not \
+                 supported yet: record()'s payload digest includes the \
+                 embedding, and a regenerated vector would make an honest \
+                 retry a false conflict. Pass an explicit `embedding` to use \
+                 a key today (generated-embedding idempotency lands with \
+                 record_text support).",
+            ));
+        }
         let emb = match embedding {
             Some(e) => e,
             None => self.embed_text(py, text)?,
