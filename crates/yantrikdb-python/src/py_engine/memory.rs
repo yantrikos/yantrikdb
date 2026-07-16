@@ -9,7 +9,12 @@ use super::{map_err, PyYantrikDB};
 
 #[pymethods]
 impl PyYantrikDB {
-    #[pyo3(signature = (text, memory_type="episodic", importance=0.5, valence=0.0, half_life=604800.0, metadata=None, embedding=None, namespace="default", certainty=0.8, domain="general", source="user", emotional_state=None))]
+    /// `idempotency_key` (v0.10, 4a.6c): dedups caller retries durably. Same
+    /// key + same payload returns the ORIGINAL rid with nothing re-written;
+    /// same key + different payload raises an idempotency-conflict error. The
+    /// trailing kwarg default keeps every existing Python caller unchanged.
+    #[pyo3(signature = (text, memory_type="episodic", importance=0.5, valence=0.0, half_life=604800.0, metadata=None, embedding=None, namespace="default", certainty=0.8, domain="general", source="user", emotional_state=None, idempotency_key=None))]
+    #[allow(clippy::too_many_arguments)]
     fn record(
         &self,
         py: Python<'_>,
@@ -25,12 +30,30 @@ impl PyYantrikDB {
         domain: &str,
         source: &str,
         emotional_state: Option<&str>,
+        idempotency_key: Option<&str>,
     ) -> PyResult<String> {
         let db = self
             .inner
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
 
+        // 4a.6c (sol r4 note): a key with an ENGINE-GENERATED embedding is
+        // refused for now. record()'s digest includes the embedding (API-byte
+        // identity — the sync route stores it), so if this wrapper embedded the
+        // text itself, an embedder drift across retries would turn an honest
+        // retry into a false IdempotencyConflict. The generated-vector variant
+        // (digest excludes it) ships with record_text idempotency in 4a.6d;
+        // until then, fail loud rather than subtly mis-dedup.
+        if idempotency_key.is_some() && embedding.is_none() {
+            return Err(PyValueError::new_err(
+                "idempotency_key with an engine-generated embedding is not \
+                 supported yet: record()'s payload digest includes the \
+                 embedding, and a regenerated vector would make an honest \
+                 retry a false conflict. Pass an explicit `embedding` to use \
+                 a key today (generated-embedding idempotency lands with \
+                 record_text support).",
+            ));
+        }
         let emb = match embedding {
             Some(e) => e,
             None => self.embed_text(py, text)?,
@@ -41,7 +64,7 @@ impl PyYantrikDB {
             None => serde_json::json!({}),
         };
 
-        db.record(
+        db.record_with_idempotency(
             text,
             memory_type,
             importance,
@@ -54,6 +77,7 @@ impl PyYantrikDB {
             domain,
             source,
             emotional_state,
+            idempotency_key,
         )
         .map_err(map_err)
     }

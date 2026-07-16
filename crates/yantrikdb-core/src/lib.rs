@@ -11,8 +11,8 @@ mod vector;
 
 // ── Re-exports at original crate paths ──
 pub use base::{
-    bench_utils, compression, encryption, error, fitting, hlc, provenance, schema, scoring,
-    serde_helpers, testing, types, validate, vault,
+    bench_utils, compression, encryption, error, fitting, hlc, payload_digest, provenance, schema,
+    scoring, serde_helpers, testing, types, validate, vault,
 };
 pub use cognition::{
     action, agenda, analogy, attention, belief, belief_network, belief_query, benchmark,

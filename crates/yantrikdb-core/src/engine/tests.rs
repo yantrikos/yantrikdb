@@ -7513,6 +7513,486 @@ fn stats_advance_seeds_from_raw_when_stored_count_is_zero() {
     assert_eq!(count, 1, "count advances to 1");
 }
 
+/// 4a.6c (T07 "repetition is not corroboration"), sync route: an exact retry
+/// under the same idempotency key returns the ORIGINAL rid and writes NOTHING —
+/// no second row, no second op, no pending-op count, no calibration advance.
+#[test]
+fn idempotent_retry_returns_original_rid_and_writes_nothing() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let write = |db: &YantrikDB| {
+        db.record_with_idempotency(
+            "the deploy uses zorbium for caching",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &serde_json::json!({"k": "v"}),
+            &vec_seed(1.0, 8),
+            "idem_ns",
+            0.8,
+            "work",
+            "user",
+            None,
+            Some("client-req-001"),
+        )
+    };
+    let rid1 = write(&db).unwrap();
+
+    let rows = |db: &YantrikDB| -> i64 {
+        db.conn()
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE namespace = 'idem_ns'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let ops = |db: &YantrikDB| -> i64 {
+        db.conn()
+            .query_row("SELECT COUNT(*) FROM oplog", [], |r| r.get(0))
+            .unwrap()
+    };
+    let stats_count = |db: &YantrikDB| -> i64 {
+        db.conn()
+            .query_row(
+                "SELECT count FROM namespace_importance_stats WHERE namespace = 'idem_ns'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    };
+    let (r1, o1, s1, p1) = (
+        rows(&db),
+        ops(&db),
+        stats_count(&db),
+        db.count_pending_ops().unwrap(),
+    );
+    assert_eq!(r1, 1, "first keyed write lands one row");
+    assert_eq!(s1, 1, "first keyed write advances stats once");
+
+    // The exact retry.
+    let rid2 = write(&db).unwrap();
+    assert_eq!(rid2, rid1, "retry returns the ORIGINAL rid");
+    assert_eq!(rows(&db), r1, "retry wrote no second row");
+    assert_eq!(ops(&db), o1, "retry wrote no oplog op of any kind");
+    assert_eq!(stats_count(&db), s1, "retry advanced no calibration stats");
+    assert_eq!(
+        db.count_pending_ops().unwrap(),
+        p1,
+        "retry enqueued no pending op"
+    );
+    let claims: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM idempotency_claims", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(claims, 1, "one claim row, state committed");
+
+    // Keyless behavior is untouched: the same content twice makes two rows.
+    for _ in 0..2 {
+        db.record(
+            "keyless duplicate content",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "idem_ns",
+            0.8,
+            "work",
+            "user",
+            None,
+        )
+        .unwrap();
+    }
+    assert_eq!(rows(&db), r1 + 2, "keyless writes still append");
+}
+
+/// 4a.6c: the same key with a DIFFERENT payload is a typed conflict carrying
+/// the existing rid — never a silent merge, and it writes nothing.
+#[test]
+fn idempotency_conflict_on_different_payload() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let write = |db: &YantrikDB, importance: f64| {
+        db.record_with_idempotency(
+            "conflicting payload probe",
+            "semantic",
+            importance,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "conf_ns",
+            0.8,
+            "work",
+            "user",
+            None,
+            Some("key-x"),
+        )
+    };
+    let rid1 = write(&db, 0.7).unwrap();
+
+    // Same key, different importance — the mutable scalars are IN the digest
+    // (design doc: they alter the first write's observable state).
+    let err = write(&db, 0.9).expect_err("scalar diff under the same key must conflict");
+    match &err {
+        crate::error::YantrikDbError::IdempotencyConflict { existing_rid, .. } => {
+            assert_eq!(existing_rid, &rid1, "conflict names the existing record");
+        }
+        other => panic!("expected IdempotencyConflict, got {other:?}"),
+    }
+    let rows: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE namespace = 'conf_ns'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 1, "the conflicting write persisted nothing");
+    let stats: i64 = db
+        .conn()
+        .query_row(
+            "SELECT count FROM namespace_importance_stats WHERE namespace = 'conf_ns'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stats, 1, "the conflicting write advanced no stats");
+}
+
+/// 4a.6c, queued route: the claim rides the pending-op transaction. A retry
+/// during reembed cutover enqueues exactly one op; cross-route retries (sync
+/// then queued) also resolve to the same rid — the claim is route-agnostic.
+#[test]
+fn idempotency_holds_on_and_across_the_queued_route() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let write = |db: &YantrikDB, key: &str| {
+        db.record_with_idempotency(
+            "queued idempotent probe",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "q_ns",
+            0.8,
+            "work",
+            "user",
+            None,
+            Some(key),
+        )
+    };
+
+    // Queued-only: both attempts under Queueing.
+    db.write_router.switch_to_queueing();
+    let rid_q = write(&db, "q-key").unwrap();
+    let pending_after_first = db.count_pending_ops().unwrap();
+    let rid_q2 = write(&db, "q-key").unwrap();
+    assert_eq!(rid_q2, rid_q, "queued retry returns the original rid");
+    assert_eq!(
+        db.count_pending_ops().unwrap(),
+        pending_after_first,
+        "queued retry enqueued no second op"
+    );
+    db.write_router.switch_to_normal();
+
+    // Cross-route: first write lands sync, retry arrives during Queueing.
+    let rid_s = write(&db, "cross-key").unwrap();
+    db.write_router.switch_to_queueing();
+    let pending_before = db.count_pending_ops().unwrap();
+    let rid_s2 = write(&db, "cross-key").unwrap();
+    assert_eq!(rid_s2, rid_s, "cross-route retry resolves to the sync rid");
+    assert_eq!(
+        db.count_pending_ops().unwrap(),
+        pending_before,
+        "cross-route retry enqueued nothing"
+    );
+    db.write_router.switch_to_normal();
+}
+
+/// 4a.6c: the digest is computed from the RAW caller importance, never the
+/// calibrated value. Discriminating setup: in a saturated namespace the EWMA
+/// deepens with every write, so the CALIBRATED value of an identical retry
+/// differs from the first attempt's — a digest over calibrated output would
+/// turn the honest retry into a false conflict.
+#[test]
+fn idempotency_digest_uses_raw_importance_not_calibrated() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    // Saturate: 8 keyless writes at 1.0 puts the namespace at MIN_COUNT with
+    // ewma 1.0, so calibration engages (and keeps deepening) from write 9 on.
+    for i in 0..8 {
+        db.record(
+            &format!("sat-{i}"),
+            "semantic",
+            1.0,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0 + i as f32 * 0.01, 8),
+            "sat_ns",
+            0.8,
+            "work",
+            "user",
+            None,
+        )
+        .unwrap();
+    }
+    // raw = 0.9, NOT 1.0, and this is load-bearing for the discrimination:
+    // with all-1.0 saturation the EWMA sits pinned at exactly 1.0, so an
+    // identical retry calibrates to the SAME deflated value and a digest over
+    // calibrated output would accidentally still hit. 0.9 moves the EWMA on
+    // the first attempt's own advance (1.0 -> 0.985), so the retry's
+    // calibrated value differs (0.7333 -> 0.7458) — a calibrated digest now
+    // MUST conflict, and only a raw digest hits. (The first draft used 1.0
+    // and survived exactly that mutation.)
+    let write = |db: &YantrikDB| {
+        db.record_with_idempotency(
+            "saturated keyed write",
+            "semantic",
+            0.9, // raw — deflated by calibration when stored
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "sat_ns",
+            0.8,
+            "work",
+            "user",
+            None,
+            Some("sat-key"),
+        )
+    };
+    let rid1 = write(&db).unwrap();
+    let stored: f64 = db
+        .conn()
+        .query_row(
+            "SELECT importance FROM memories WHERE rid = ?1",
+            rusqlite::params![rid1],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert!(
+        stored < 0.9,
+        "precondition: calibration deflated the stored importance, got {stored}"
+    );
+    // The honest retry: same RAW payload. Stats advanced since attempt 1, so
+    // the calibrated value now differs — a calibrated-digest would conflict.
+    let rid2 = write(&db).expect("identical RAW retry must be a hit, not a conflict");
+    assert_eq!(rid2, rid1);
+}
+
+/// 4a.6c: empty / oversized keys are refused loudly — silently treating "" as
+/// "no key" would leave the caller believing they have dedup they don't have.
+#[test]
+fn invalid_idempotency_keys_are_rejected() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    for bad in ["", "   ", &"k".repeat(513)] {
+        let err = db
+            .record_with_idempotency(
+                "probe",
+                "semantic",
+                0.7,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &vec_seed(1.0, 8),
+                "default",
+                0.8,
+                "work",
+                "user",
+                None,
+                Some(bad),
+            )
+            .expect_err("bad key must be refused");
+        assert!(
+            matches!(
+                err,
+                crate::error::YantrikDbError::InvalidIdempotencyKey { .. }
+            ),
+            "expected InvalidIdempotencyKey, got {err:?}"
+        );
+    }
+    let rows: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(rows, 0, "refused keys wrote nothing");
+}
+
+/// 4a.6c sol finding 1: a keyed DUPLICATE retry must resolve to its hit even
+/// when the engine is saturated — Backpressure storms are exactly when clients
+/// retry, and the dup writes nothing, so admission machinery (router, delta
+/// reservation, backpressure checks, seq/HLC) must not run before the claim
+/// probe. Pre-probe, this test dies with Backpressure instead of the Hit.
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn keyed_duplicate_resolves_even_under_backpressure() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let dim = db.embedding_dim();
+
+    // The keyed write lands FIRST, while there is capacity.
+    let keyed = |db: &YantrikDB| {
+        db.record_with_idempotency(
+            "the keyed write that must stay resolvable",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(9.0, 8),
+            "bp_idem_ns",
+            0.8,
+            "work",
+            "user",
+            None,
+            Some("bp-key"),
+        )
+    };
+    let rid = keyed(&db).unwrap();
+
+    // Saturate the delta with keyless writes until Backpressure.
+    let mut saturated = false;
+    for i in 0..400 {
+        let emb: Vec<f32> = (0..dim).map(|j| ((i + j) as f32) * 0.001).collect();
+        match db.record(
+            &format!("bp-filler-{i}"),
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        ) {
+            Ok(_) => {}
+            Err(crate::error::YantrikDbError::Backpressure { .. }) => {
+                saturated = true;
+                break;
+            }
+            Err(e) => panic!("unexpected: {e:?}"),
+        }
+    }
+    assert!(saturated, "delta never saturated");
+
+    // The DUPLICATE retry resolves to its hit despite saturation.
+    let rid2 = keyed(&db).expect(
+        "a keyed duplicate writes nothing and must resolve to its Hit, \
+         not die on Backpressure",
+    );
+    assert_eq!(rid2, rid, "the hit returns the original rid");
+
+    // Sanity: a keyed NEW write (different key) is still subject to
+    // backpressure — the probe only short-circuits duplicates.
+    let err = db
+        .record_with_idempotency(
+            "a genuinely new keyed write",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(10.0, 8),
+            "bp_idem_ns",
+            0.8,
+            "work",
+            "user",
+            None,
+            Some("bp-key-new"),
+        )
+        .expect_err("a NEW keyed write under saturation must still backpressure");
+    assert!(
+        matches!(err, crate::error::YantrikDbError::Backpressure { .. }),
+        "expected Backpressure for the new keyed write, got {err:?}"
+    );
+
+    // The QUEUED route under the same saturation: the dup must resolve there
+    // too. (No new-key backpressure assert here, and its absence is itself a
+    // finding from writing this test: the saturation above is DELTA capacity,
+    // and the queued route consumes none — it writes no vector, which is
+    // exactly why it is the escape valve during reembed cutover. A new keyed
+    // queued write legitimately succeeds under delta saturation; only a full
+    // PENDING queue gates it, and the helper's locked probe precedes that
+    // check by the same one-owner code path the sync mutation proof covers.)
+    db.write_router.switch_to_queueing();
+    let rid3 = keyed(&db).expect("queued dup under saturation must resolve");
+    assert_eq!(rid3, rid, "queued dup returns the original rid");
+    db.write_router.switch_to_normal();
+}
+
+/// 4a.6c sol r3: the FAST (pre-lock) backpressure check ran before the locked
+/// probe, so a race-window duplicate under PENDING-queue saturation (a
+/// different resource from the delta saturation the sibling test exercises)
+/// still died with Backpressure before it could resolve. Keyed writes now skip
+/// the fast check — the authoritative locked check still gates keyed WINNERS,
+/// proven by the second half.
+#[test]
+fn keyed_duplicate_resolves_under_pending_queue_saturation() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let write = |db: &YantrikDB, key: &str| {
+        db.record_with_idempotency(
+            "pending-saturation probe",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "pq_ns",
+            0.8,
+            "work",
+            "user",
+            None,
+            Some(key),
+        )
+    };
+    // The keyed write lands while there is capacity.
+    let rid = write(&db, "pq-key").unwrap();
+
+    // Force the PENDING queue to read as saturated — the exact resource in
+    // sol's scenario. The cached counter is what both backpressure checks
+    // consult, so storing past the ceiling makes every admission check reject
+    // deterministically, with no timing dependence.
+    let real = db
+        .pending_op_count
+        .swap(1_000_000, std::sync::atomic::Ordering::SeqCst);
+
+    // The duplicate must resolve despite full-pending admission rejecting
+    // everything: keyed writes skip the fast check and the locked probe runs
+    // before the locked check.
+    let rid2 = write(&db, "pq-key").expect("keyed dup must resolve under pending-queue saturation");
+    assert_eq!(rid2, rid, "dup returns the original rid");
+
+    // A keyed NEW write must still hear Backpressure — from the AUTHORITATIVE
+    // locked check, which keyed writes do not skip.
+    let err = write(&db, "pq-key-new")
+        .expect_err("a NEW keyed write under pending saturation must backpressure");
+    assert!(
+        matches!(err, crate::error::YantrikDbError::Backpressure { .. }),
+        "expected Backpressure from the locked check, got {err:?}"
+    );
+
+    // And the queued route, same resource: dup resolves, new key rejects.
+    db.write_router.switch_to_queueing();
+    let rid3 = write(&db, "pq-key").expect("queued dup must resolve under pending saturation");
+    assert_eq!(rid3, rid);
+    let err = write(&db, "pq-key-new-q")
+        .expect_err("a NEW keyed queued write under pending saturation must backpressure");
+    assert!(
+        matches!(err, crate::error::YantrikDbError::Backpressure { .. }),
+        "expected Backpressure on the queued route, got {err:?}"
+    );
+    db.write_router.switch_to_normal();
+
+    db.pending_op_count
+        .store(real, std::sync::atomic::Ordering::SeqCst);
+}
+
 // ── Relationship-Based Entity Type Tests ──
 
 #[test]

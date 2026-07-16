@@ -67,6 +67,67 @@ impl YantrikDB {
         source: &str,
         emotional_state: Option<&str>,
     ) -> Result<String> {
+        self.record_with_idempotency(
+            text,
+            memory_type,
+            importance,
+            valence,
+            half_life,
+            metadata,
+            embedding,
+            namespace,
+            certainty,
+            domain,
+            source,
+            emotional_state,
+            None,
+        )
+    }
+
+    /// `record()` plus a durable idempotency key (v0.10 Item 4a.6c, T07
+    /// "repetition is not corroboration").
+    ///
+    /// With `idempotency_key = Some(k)`, the write is deduplicated on
+    /// `(origin_actor, namespace, k)` against the canonical RAW payload digest
+    /// (`base/payload_digest`):
+    ///
+    /// - **same key + same payload** -> the original rid is returned and NOTHING
+    ///   is written or moved — no second row, no oplog op, no calibration
+    ///   advance, no session bump, no warn-flag tick, certainty untouched. A
+    ///   retry is a retry, not corroboration.
+    /// - **same key + different payload** -> typed
+    ///   [`crate::error::YantrikDbError::IdempotencyConflict`] carrying the
+    ///   existing rid. The first write's content stands; a silent near-dup
+    ///   merge is exactly what T07 forbids.
+    ///
+    /// The claim commits atomically with the route's authoritative op (the
+    /// memories row + record op on the sync route; the pending oplog op on the
+    /// queued route), so a crash leaves either both or neither — recovery never
+    /// has to guess from row existence. The digest uses the RAW caller
+    /// importance (pre-calibration) deliberately: calibration output depends on
+    /// the namespace's running EWMA, which the first attempt itself advances,
+    /// so a digest over the calibrated value would make an honest retry into a
+    /// false conflict.
+    ///
+    /// `None` is byte-for-byte `record()`.
+    #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(skip(self, metadata, embedding), fields(memory_type, namespace))]
+    pub fn record_with_idempotency(
+        &self,
+        text: &str,
+        memory_type: &str,
+        importance: f64,
+        valence: f64,
+        half_life: f64,
+        metadata: &serde_json::Value,
+        embedding: &[f32],
+        namespace: &str,
+        certainty: f64,
+        domain: &str,
+        source: &str,
+        emotional_state: Option<&str>,
+        idempotency_key: Option<&str>,
+    ) -> Result<String> {
         // v0.9.3 contract gate: validate before anything else. (Historically
         // "before any side effect" because importance calibration used to
         // autocommit here; as of 4a.6b nothing below this point mutates state
@@ -108,6 +169,72 @@ impl YantrikDB {
         // and oplog paths all store/replicate the calibrated value below.
         let raw_importance = importance;
         let importance = self.calibrated_importance(namespace, importance)?;
+        // 4a.6c: the idempotency digest — canonical RAW payload (post-sanitize
+        // text, post-normalize namespace, PRE-calibration importance). Raw on
+        // purpose: calibration output depends on the namespace EWMA, which the
+        // first attempt itself advances, so digesting the calibrated value
+        // would turn an honest retry into a false conflict. Computed BEFORE
+        // routing so both routes resolve the same key identically.
+        //
+        // The caller-supplied embedding IS in the digest (PayloadVariant::
+        // Record), even though the QUEUED route discards it (the materializer
+        // re-encodes). Deliberate, decided at sol's 4a.6c review: record()'s
+        // idempotency is API-BYTE identity — on the sync route the embedding is
+        // stored, so two calls with different vectors ARE different writes, and
+        // the digest must not depend on which route the router happened to pick.
+        // A caller whose embedder is non-deterministic across retries belongs on
+        // record_text (whose RecordText variant EXCLUDES the generated vector,
+        // 4a.6d) — regeneration is legitimate there and only there.
+        let idem: Option<(&str, [u8; 32])> = match idempotency_key {
+            None => None,
+            Some(key) => {
+                if key.trim().is_empty() || key.len() > 512 {
+                    return Err(crate::error::YantrikDbError::InvalidIdempotencyKey {
+                        reason: if key.len() > 512 {
+                            format!("key is {} bytes; max 512", key.len())
+                        } else {
+                            "key is empty or whitespace-only".to_string()
+                        },
+                    });
+                }
+                let view = crate::payload_digest::PayloadView {
+                    variant: crate::payload_digest::PayloadVariant::Record,
+                    namespace,
+                    text,
+                    memory_type,
+                    importance: raw_importance,
+                    valence,
+                    half_life,
+                    certainty,
+                    domain,
+                    source,
+                    emotional_state,
+                    metadata,
+                    embedding: Some(embedding),
+                };
+                Some((key, crate::payload_digest::payload_digest(&view)))
+            }
+        };
+        // 4a.6c pre-admission probe (sol finding 1): a duplicate retry writes
+        // nothing, so it resolves BEFORE any admission machinery — before the
+        // router, the backpressure checks, the delta reservation, and the
+        // seq/HLC allocation. Backpressure storms are exactly when clients
+        // retry; without this, a keyed dup against a saturated engine could
+        // only ever see Backpressure and the retry loop would never converge.
+        // A probe MISS is advisory (the ON CONFLICT INSERT in the write tx
+        // stays authoritative); a probe HIT is final — committed claims are
+        // immutable in 4a.
+        if let Some((key, digest)) = idem.as_ref() {
+            if let Some(existing_rid) = super::idempotency::probe_committed_claim(
+                &self.conn(),
+                &self.actor_id,
+                namespace,
+                key,
+                digest,
+            )? {
+                return Ok(existing_rid);
+            }
+        }
         // Issue #41 layer 3: route on write_router state. The guard
         // (if acquired) is held for the full sync path and drops via
         // RAII at function return, panic-safe.
@@ -131,6 +258,7 @@ impl YantrikDB {
                 source,
                 emotional_state,
                 gate_verdict,
+                idem,
             );
         }
         // guard is held; RAII Drop at function exit decrements inflight.
@@ -165,6 +293,7 @@ impl YantrikDB {
             source,
             emotional_state,
             gate_verdict,
+            idem,
         )
     }
 
@@ -203,11 +332,17 @@ impl YantrikDB {
         source: &str,
         emotional_state: Option<&str>,
         gate_verdict: crate::provenance::GateVerdict,
+        idem: Option<(&str, [u8; 32])>,
     ) -> Result<String> {
         let rid = crate::id::new_id();
         let ts = now();
         let emb_blob = serialize_f32(embedding);
         let meta_str = serde_json::to_string(metadata)?;
+        // 4a.6c: the record op's id is minted BEFORE the transaction when a
+        // claim rides it — the claim binds to this op as recovery evidence and
+        // must be the tx's FIRST statement (the v37 partial unique index on
+        // memories would otherwise fire before a dup resolves to a hit).
+        let record_op_id = crate::id::new_id();
 
         // Encrypt fields if encryption is enabled
         let stored_text = self.encrypt_text(text)?;
@@ -264,7 +399,18 @@ impl YantrikDB {
         // so a rejection here (or anywhere later) leaves no trace anywhere.
         // `record_backpressure_writes_nothing_at_all` is the enforcing test,
         // and its name is the contract.
-        self.check_pending_backpressure_fast()?;
+        //
+        // KEYED writes skip the fast check (sol 4a.6c r3): it is a
+        // work-avoidance optimization, and for a keyed write the priority
+        // inverts — a race-window duplicate must REACH the locked probe below
+        // even when the pending queue is full, or saturation can permanently
+        // fail a retry that would write nothing. The AUTHORITATIVE locked
+        // check still gates every keyed write that wins its claim, so the
+        // ceiling holds; the only cost is that a keyed loser does slightly
+        // more work before hearing Backpressure.
+        if idem.is_none() {
+            self.check_pending_backpressure_fast()?;
+        }
 
         let emb_hash = embedding_hash(embedding);
         let record_payload = serde_json::json!({
@@ -282,6 +428,13 @@ impl YantrikDB {
             "domain": domain,
             "source": source,
             "emotional_state": emotional_state,
+            // 4a.6c: carried so replication's materialize_record writes the
+            // same v37 columns the origin row has — a follower's keyed row must
+            // mirror its leader's, or the memories partial unique index (the
+            // claims table's defense-in-depth) never covers followers. Null for
+            // keyless writes; peers on older payloads default to NULL.
+            "idempotency_key": idem.as_ref().map(|(k, _)| *k),
+            "origin_actor": idem.as_ref().map(|_| self.actor_id.as_str()),
         });
         // **Phase 4.3 Commit B (saga task 3, 2026-05-08).** The unbounded entity
         // / memory_entities / claims loops that used to run inline are enqueued
@@ -300,6 +453,30 @@ impl YantrikDB {
         });
 
         let conn = self.conn();
+
+        // 4a.6c sol r2: the LOCKED probe. The unlocked pre-admission probe can
+        // race — two same-key writers both MISS, A commits the claim and
+        // saturates the engine, and B would then die on the backpressure check
+        // below without ever resolving its duplicate. Re-probing here, under
+        // the SAME conn guard that stays held through the transaction, closes
+        // that window completely: nothing can commit a claim between this read
+        // and our tx. A hit resolves BEFORE admission (no backpressure, no seq,
+        // no reservation), which is the point — a duplicate writes nothing, so
+        // saturation must not be able to fail it. (The in-tx ON CONFLICT stays
+        // as the authoritative serialization point; under this locking it is
+        // belt-and-suspenders, reachable only by raw-`conn()` writers outside
+        // the engine.)
+        if let Some((key, digest)) = idem.as_ref() {
+            if let Some(existing_rid) = super::idempotency::probe_committed_claim(
+                &conn,
+                &self.actor_id,
+                namespace,
+                key,
+                digest,
+            )? {
+                return Ok(existing_rid);
+            }
+        }
 
         // THE authoritative admission check: under the lock, before the
         // reservation and before any durable write. The pre-lock check above is a
@@ -332,16 +509,43 @@ impl YantrikDB {
         let mut reservation =
             ReservationGuard::with_pending_op(&state, &self.pending_op_count, &rid, seq);
 
-        // ONE transaction: row + session links + the record op + the
-        // post-materialization enqueue. Either all of it is durable or none is.
-        let committed = (|| -> Result<()> {
+        // ONE transaction: claim (if keyed) + row + session links + the record
+        // op + the post-materialization enqueue. Either all of it is durable or
+        // none is. Returns Some(existing_rid) on an idempotent hit, in which
+        // case the transaction is dropped un-committed (it wrote nothing — the
+        // claim lost its ON CONFLICT and everything else comes after).
+        let committed = (|| -> Result<Option<String>> {
             let tx = conn.unchecked_transaction()?;
+            // 4a.6c: the claim is the FIRST statement — a dup must resolve to a
+            // hit/conflict here, not surface later as a bare constraint error
+            // from the memories partial unique index.
+            if let Some((key, digest)) = idem.as_ref() {
+                use super::idempotency::{claim_in_tx, ClaimAttempt, ClaimRow};
+                match claim_in_tx(
+                    &tx,
+                    &ClaimRow {
+                        origin_actor: &self.actor_id,
+                        namespace,
+                        idempotency_key: key,
+                        rid: &rid,
+                        payload_digest: digest,
+                        op_id: &record_op_id,
+                        route: "sync",
+                        generation: embedding_generation,
+                    },
+                )? {
+                    ClaimAttempt::Won => {}
+                    ClaimAttempt::Hit { existing_rid } => return Ok(Some(existing_rid)),
+                }
+            }
             tx.execute(
                 "INSERT INTO memories \
                  (rid, type, text, embedding, created_at, updated_at, importance, \
                   half_life, last_access, valence, metadata, namespace, \
-                  certainty, domain, source, emotional_state, embedding_generation) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                  certainty, domain, source, emotional_state, embedding_generation, \
+                  idempotency_key, origin_actor) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
+                         ?18, ?19)",
                 params![
                     rid,
                     memory_type,
@@ -360,6 +564,12 @@ impl YantrikDB {
                     source,
                     emotional_state,
                     embedding_generation,
+                    // v37 idempotency columns: set only for keyed writes (the
+                    // partial unique index ignores NULLs, so keyless behavior
+                    // is unchanged). origin_actor scopes the key per the
+                    // claims-table PK.
+                    idem.as_ref().map(|(k, _)| *k),
+                    idem.as_ref().map(|_| self.actor_id.as_str()),
                 ],
             )?;
 
@@ -404,6 +614,9 @@ impl YantrikDB {
                 Some(&emb_hash),
                 None,
                 embedding_generation,
+                // The claim (if any) already bound to this id as its recovery
+                // evidence — the op and the claim must agree.
+                Some(&record_op_id),
             )?;
 
             // Plain INSERT: if this cannot land, the whole write must fail
@@ -419,7 +632,7 @@ impl YantrikDB {
             )?;
 
             tx.commit()?;
-            Ok(())
+            Ok(None)
         })();
 
         match committed {
@@ -427,7 +640,18 @@ impl YantrikDB {
             // reservation" to "publish it and count the pending op". It is not
             // defused — an unwind between here and complete() must still finish
             // the job, because the row is already committed.
-            Ok(()) => reservation.mark_committed(),
+            Ok(None) => reservation.mark_committed(),
+            // 4a.6c idempotent hit: the SAME payload already committed under
+            // this key. The transaction above was dropped un-committed (it had
+            // written nothing), the reservation drops here in Reserved phase and
+            // removes the reserved vector entry, and EVERY post-commit effect is
+            // skipped — no publish, no pending count, no flag tick, no scoring
+            // cache, no visible_seq bump. Repetition is not corroboration: the
+            // caller gets the ORIGINAL rid and the store is untouched.
+            Ok(Some(existing_rid)) => {
+                drop(conn);
+                return Ok(existing_rid);
+            }
             Err(e) => {
                 // Nothing durable exists. `reservation` drops here and removes the
                 // entry — a removal, NOT a tombstone (a tombstone would suppress
@@ -1349,18 +1573,10 @@ impl YantrikDB {
         source: &str,
         emotional_state: Option<&str>,
         gate_verdict: crate::provenance::GateVerdict,
+        idem: Option<(&str, [u8; 32])>,
     ) -> Result<String> {
         let rid = crate::id::new_id();
         let ts = now();
-
-        // Assign a seq for caller's RYW use. Note we do NOT bump
-        // visible_seq — the active generation doesn't yet cover this
-        // op; the post-swap materializer is responsible for advancing
-        // visible_seq as it drains queued ops.
-        let _seq = self
-            .vec_seq
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1;
 
         // Capture the current runtime embedder name (the one active
         // before reembed flipped the router). The post-swap materializer
@@ -1386,6 +1602,14 @@ impl YantrikDB {
             "domain": domain,
             "source": source,
             "emotional_state": emotional_state,
+            // 4a.6c: carried so the materializer writes the same v37 columns
+            // the sync route writes — the memories partial unique index is the
+            // claims table's defense-in-depth mirror, and a queued keyed write
+            // must not materialize with a NULL key while its claim exists.
+            // null for keyless writes; pre-4a.6c ops lack the fields and the
+            // materializer defaults both to NULL, so old rows are unchanged.
+            "idempotency_key": idem.as_ref().map(|(k, _)| *k),
+            "origin_actor": idem.as_ref().map(|_| self.actor_id.as_str()),
         });
 
         // Write to oplog with applied=0. The v27 `embedding_model`
@@ -1393,7 +1617,21 @@ impl YantrikDB {
         // materializer knows this needs re-encoding (vs being a
         // legacy pre-v27 op where embedding_model IS NULL and the
         // materializer trusts the embedding bytes as-is).
-        self.log_op_pending_for_reembed_queue(
+        // 4a.6c: the claim rides the pending-op transaction — the op IS the
+        // queued write's only durable record, so claim + op commit atomically.
+        // The helper mints the op id and assembles the full claim row so the
+        // two agree by construction.
+        let generation = self.search_state.load().generation as i64;
+        let pending_claim = idem
+            .as_ref()
+            .map(|(key, digest)| super::idempotency::PendingClaim {
+                namespace,
+                idempotency_key: key,
+                payload_digest: digest,
+                rid: &rid,
+                generation,
+            });
+        if let Some(existing_rid) = self.log_op_pending_for_reembed_queue(
             "record",
             Some(&rid),
             &payload,
@@ -1402,7 +1640,25 @@ impl YantrikDB {
             // pending op — the queued write's only durable record. RAW value:
             // the EWMA tracks writer intent, not the deflated output.
             Some((namespace, raw_importance)),
-        )?;
+            pending_claim.as_ref(),
+        )? {
+            // Idempotent hit: the SAME payload is already durably enqueued (or
+            // committed) under this key. Nothing was written — the helper
+            // resolved before its INSERT — and both the seq mint and the flag
+            // tick below are skipped: a retry that landed nothing is not a
+            // flagged write and does not advance sequencing (sol 4a.6c r2
+            // finding 2).
+            return Ok(existing_rid);
+        }
+
+        // Assign a seq for caller's RYW use, only now that the write really
+        // enqueued. Note we do NOT bump visible_seq — the active generation
+        // doesn't yet cover this op; the post-swap materializer is responsible
+        // for advancing visible_seq as it drains queued ops.
+        let _seq = self
+            .vec_seq
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
 
         // 4a.6b: the pending op is durable, so a warn-mode flag counts now.
         self.note_flagged_write_committed(gate_verdict);
@@ -1423,6 +1679,11 @@ impl YantrikDB {
     /// op types that are not a record write (none today; the parameter exists so
     /// a future non-record caller cannot silently inherit a stats advance that
     /// does not belong to it).
+    /// `claim` (4a.6c): a durable idempotency claim to commit atomically WITH
+    /// the pending op — the op is the queued write's only durable record, so
+    /// this transaction is the claim's only honest home. On a dup, returns
+    /// `Ok(Some(existing_rid))` with the transaction aborted before any write.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn log_op_pending_for_reembed_queue(
         &self,
         op_type: &str,
@@ -1430,28 +1691,75 @@ impl YantrikDB {
         payload: &serde_json::Value,
         embedding_model: Option<&str>,
         stats_advance: Option<(&str, f64)>,
-    ) -> Result<String> {
+        claim: Option<&super::idempotency::PendingClaim<'_>>,
+    ) -> Result<Option<String>> {
         use rusqlite::params;
         use std::sync::atomic::Ordering;
 
-        let op_id = crate::id::new_id();
-        let hlc_ts = self.tick_hlc();
-        let hlc_bytes = hlc_ts.to_bytes().to_vec();
         let payload_str = serde_json::to_string(payload)?;
 
         // Advisory fast reject (unlocked); the AUTHORITATIVE check is under the
         // lock below. Same TOCTOU, same fix as log_op_pending (sol 4a.6a r2
         // finding 1): two queued writers at MAX_PENDING_OPS-1 could both pass an
         // unlocked load and then serialize their inserts past the ceiling.
-        self.check_pending_backpressure_fast()?;
+        // KEYED writes skip it (sol 4a.6c r3): a race-window duplicate must
+        // reach the locked probe below even when the pending queue is full —
+        // see the sync route's twin comment.
+        if claim.is_none() {
+            self.check_pending_backpressure_fast()?;
+        }
 
         let conn = self.conn.lock();
+        // 4a.6c sol r2: locked probe BEFORE admission — same rationale as the
+        // sync route's (see record_under_guard_and_state): a race-window
+        // duplicate must resolve to its hit even when the queue is full, and
+        // under this continuously-held guard nothing can commit a claim between
+        // this read and our transaction. A hit exits before the backpressure
+        // check and before the op id / HLC mint below, burning nothing.
+        if let Some(pc) = claim {
+            if let Some(existing_rid) = super::idempotency::probe_committed_claim(
+                &conn,
+                &self.actor_id,
+                pc.namespace,
+                pc.idempotency_key,
+                pc.payload_digest,
+            )? {
+                return Ok(Some(existing_rid));
+            }
+        }
         self.check_pending_backpressure_locked()?;
+        let op_id = crate::id::new_id();
+        let hlc_ts = self.tick_hlc();
+        let hlc_bytes = hlc_ts.to_bytes().to_vec();
         // ONE transaction: the pending op + the namespace stats advance. This
         // used to be a bare autocommit INSERT; wrapping it costs nothing on the
         // happy path and makes the stats advance winner-only — an INSERT failure
         // rolls the observation back with it.
         let tx = conn.unchecked_transaction()?;
+        // 4a.6c: claim FIRST (cheap dup exit — the losing transaction has
+        // written nothing when it aborts). stats_advance's namespace is the
+        // claim's namespace: both come from the same normalized caller value.
+        if let Some(pc) = claim {
+            use super::idempotency::{claim_in_tx, ClaimAttempt, ClaimRow};
+            match claim_in_tx(
+                &tx,
+                &ClaimRow {
+                    origin_actor: &self.actor_id,
+                    namespace: pc.namespace,
+                    idempotency_key: pc.idempotency_key,
+                    rid: pc.rid,
+                    payload_digest: pc.payload_digest,
+                    op_id: &op_id,
+                    route: "queued",
+                    generation: pc.generation,
+                },
+            )? {
+                ClaimAttempt::Won => {}
+                // tx drops un-committed: it has written nothing (the claim
+                // lost its ON CONFLICT; the op INSERT comes after).
+                ClaimAttempt::Hit { existing_rid } => return Ok(Some(existing_rid)),
+            }
+        }
         // Plain INSERT, not OR IGNORE. This is the QUEUED write's only durable
         // record — record_queued() writes no memories row (by design), so this op
         // IS the write. `OR IGNORE` here meant any swallowed constraint violation
@@ -1489,6 +1797,7 @@ impl YantrikDB {
         // counter high. See the fuller note in `log_op_pending` (sol #83
         // finding 3).
         self.pending_op_count.fetch_add(1, Ordering::Relaxed);
-        Ok(op_id)
+        let _ = op_id; // the op is bound to the claim; callers get the hit signal
+        Ok(None)
     }
 }

@@ -185,6 +185,7 @@ impl YantrikDB {
     /// here: the caller holds a `SyncWriteGuard` pinning the generation for its
     /// whole critical section, and must stamp the same generation its vector
     /// entry was written against.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn log_op_in_tx(
         &self,
         tx: &rusqlite::Transaction<'_>,
@@ -194,8 +195,17 @@ impl YantrikDB {
         emb_hash: Option<&[u8]>,
         embedding: Option<&[u8]>,
         applied_generation: i64,
+        // 4a.6c: an idempotency claim binds to the authoritative op's id as its
+        // recovery evidence, and the claim must be the FIRST statement of the
+        // transaction (the v37 partial unique index on memories would otherwise
+        // fire before the claim resolves a dup). So the keyed path mints the
+        // op_id BEFORE the tx and passes it here; None keeps minting inline.
+        preminted_op_id: Option<&str>,
     ) -> Result<String> {
-        let op_id = crate::id::new_id();
+        let op_id = match preminted_op_id {
+            Some(id) => id.to_string(),
+            None => crate::id::new_id(),
+        };
         let hlc_bytes = self.tick_hlc().to_bytes().to_vec();
         let payload_str = serde_json::to_string(payload)?;
         tx.execute(
@@ -830,6 +840,17 @@ impl YantrikDB {
             .get("emotional_state")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string());
+        // 4a.6c: the v37 idempotency columns, carried by keyed queued writes.
+        // Absent/null (every pre-4a.6c op, every keyless write) stores NULL —
+        // identical to the pre-4a.6c row shape.
+        let idempotency_key = payload
+            .get("idempotency_key")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let origin_actor = payload
+            .get("origin_actor")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
 
         // Snapshot the active SearchState. The embedder + generation
         // here are the post-swap ones (caller verified no reembed in
@@ -879,8 +900,10 @@ impl YantrikDB {
                 "INSERT OR IGNORE INTO memories \
                  (rid, type, text, embedding, created_at, updated_at, importance, \
                   half_life, last_access, valence, metadata, namespace, \
-                  certainty, domain, source, emotional_state, embedding_generation) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                  certainty, domain, source, emotional_state, embedding_generation, \
+                  idempotency_key, origin_actor) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
+                         ?18, ?19)",
                 params![
                     rid,
                     memory_type,
@@ -899,6 +922,8 @@ impl YantrikDB {
                     source,
                     emotional_state,
                     embedding_generation,
+                    idempotency_key,
+                    origin_actor,
                 ],
             )?;
         }

@@ -261,6 +261,33 @@ pub enum YantrikDbError {
     #[error("provenance rejected at {path}: {reason}")]
     ProvenanceInconsistent { path: &'static str, reason: String },
 
+    /// **v0.10 Item 4a.6c — durable idempotency (T07).** The caller reused an
+    /// idempotency key whose committed claim does not match this write —
+    /// normally a DIFFERENT payload digest under the same key ("repetition is
+    /// not corroboration": the first write's content stands; a same-key rewrite
+    /// must be loud, never a silent near-dup merge). `existing_rid` is the
+    /// record the key already binds to, so the caller can inspect what it
+    /// conflicts with. Also raised, with a distinguishing `reason`, for
+    /// anomalous claim states (e.g. a crashed pre-commit claim from a future
+    /// engine version) where returning a rid would assert a write that may not
+    /// exist.
+    #[error(
+        "idempotency conflict in namespace '{namespace}' (existing rid {existing_rid}): {reason}"
+    )]
+    IdempotencyConflict {
+        namespace: String,
+        existing_rid: String,
+        reason: String,
+    },
+
+    /// **v0.10 Item 4a.6c.** The caller passed an idempotency key the engine
+    /// refuses to accept (empty / whitespace-only / over-long). Rejected
+    /// loudly instead of coerced: silently treating `""` as "no key" would
+    /// leave a caller believing they have dedup protection they don't have —
+    /// the same silent-failure class the rest of Item 4a exists to kill.
+    #[error("invalid idempotency key: {reason}")]
+    InvalidIdempotencyKey { reason: String },
+
     /// **Phase 6 RYW**: caller-requested visible_seq was not reached within
     /// the timeout window. Either the write that should have bumped the seq
     /// has not yet materialized (legitimate timeout — caller should retry or
