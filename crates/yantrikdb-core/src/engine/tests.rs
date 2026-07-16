@@ -6696,6 +6696,158 @@ fn learn_category_members_promotes_but_never_demotes() {
     );
 }
 
+/// Strategy 1 UPDATEs members directly instead of going through
+/// `add_member_to_category`, so #83's rank guard did not cover it and it kept
+/// rewriting `source` to 'user_confirmed' unconditionally — including
+/// `source='seed'` rows (sol #83 r3).
+///
+/// That is not cosmetic. `reset_category_to_seed` deletes `source != 'seed'`, so
+/// a reclassify of two SEEDED tokens made them deletable by a later reset; and
+/// the gossip trigger keys on `source != 'seed'`, so an untouched seed category
+/// started reading as user-expanded.
+///
+/// `postgresql` and `mysql` both ship seeded into "databases", so this is the
+/// real, default-configuration path — no fixture needed.
+#[test]
+fn reclassify_reinforcement_does_not_rebrand_seed_members() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+
+    let seed_sources = |db: &YantrikDB| -> Vec<(String, String)> {
+        db.conn()
+            .prepare(
+                "SELECT token_normalized, source FROM substitution_members \
+                 WHERE token_normalized IN ('postgresql', 'mysql') ORDER BY token_normalized",
+            )
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap()
+    };
+    assert_eq!(
+        seed_sources(&db),
+        vec![
+            ("mysql".to_string(), "seed".to_string()),
+            ("postgresql".to_string(), "seed".to_string()),
+        ],
+        "precondition: both ship as seed members"
+    );
+
+    let mk = |text: &str, emb: &[f32]| {
+        db.record(
+            text,
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            emb,
+            "default",
+            0.8,
+            "work",
+            "user",
+            None,
+        )
+        .unwrap()
+    };
+    let a = mk("the service stores rows in postgresql", &vec_seed(1.0, 8));
+    let b = mk("the service stores rows in mysql", &vec_seed(1.1, 8));
+    db.conn()
+        .execute(
+            "INSERT INTO conflicts \
+             (conflict_id, conflict_type, priority, status, memory_a, memory_b, \
+              detected_at, detected_by, detection_reason, hlc, origin_actor) \
+             VALUES ('cf_seed', 'redundancy', 'medium', 'open', ?1, ?2, 2000.0, 'test', \
+                     'same attribute, different value', X'00', 'test')",
+            rusqlite::params![a, b],
+        )
+        .unwrap();
+
+    // Both tokens are known active members of the SAME category → strategy 1.
+    db.reclassify_conflict("cf_seed", "semantic").unwrap();
+
+    assert_eq!(
+        seed_sources(&db),
+        vec![
+            ("mysql".to_string(), "seed".to_string()),
+            ("postgresql".to_string(), "seed".to_string()),
+        ],
+        "seed provenance must survive a user_confirmed reinforcement"
+    );
+
+    // The consequence that made it data loss: a later reset must not delete them.
+    let removed = db.reset_category_to_seed("databases").unwrap();
+    let survivors: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM substitution_members \
+             WHERE token_normalized IN ('postgresql', 'mysql')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        survivors, 2,
+        "reset_category_to_seed deleted seed members that reclassify had rebranded \
+         (removed {removed})"
+    );
+}
+
+/// The Rust ladder (`member_source_rank`, which computes the INCOMING rank) and
+/// the SQL ladder (`MEMBER_SOURCE_RANK_SQL`, which computes the STORED rank) are
+/// two spellings of one policy that must agree — every rank guard compares one
+/// against the other, so a silent disagreement re-opens exactly the demotion bug
+/// this pins shut.
+///
+/// This evaluates the REAL constant, not a copy of it. (The first draft inlined
+/// its own third copy of the CASE, which would have pinned the Rust fn against
+/// the test's private duplicate and gone on passing while the two real
+/// definitions drifted — the same mistake this whole PR is about, committed
+/// inside the test written to prevent it.)
+#[test]
+fn member_source_rank_agrees_with_sql() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let conn = db.conn();
+    conn.execute(
+        "INSERT INTO substitution_categories \
+         (id, name, conflict_mode, status, created_at, updated_at, hlc, origin_actor) \
+         VALUES ('rc', 'rank_probe_cat', 'exclusive', 'active', 1.0, 1.0, X'00', 't')",
+        [],
+    )
+    .unwrap();
+
+    for (i, source) in ["seed", "user_confirmed", "llm_suggested", "something_else"]
+        .iter()
+        .enumerate()
+    {
+        let tok = format!("tok{i}");
+        conn.execute(
+            "INSERT INTO substitution_members \
+             (id, category_id, token_normalized, token_display, confidence, source, \
+              status, context_hint, created_at, updated_at, hlc, origin_actor) \
+             VALUES (?1, 'rc', ?2, ?2, 1.0, ?3, 'active', NULL, 1.0, 1.0, X'00', 't')",
+            rusqlite::params![format!("rp{i}"), tok, source],
+        )
+        .unwrap();
+
+        let sql_rank: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT {} FROM substitution_members WHERE token_normalized = ?1",
+                    crate::engine::conflict::MEMBER_SOURCE_RANK_SQL
+                ),
+                rusqlite::params![tok],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let rust_rank = YantrikDB::member_source_rank(source);
+        assert_eq!(
+            sql_rank, rust_rank as i64,
+            "rank ladders disagree for source '{source}'"
+        );
+    }
+}
+
 // ── Relationship-Based Entity Type Tests ──
 
 #[test]

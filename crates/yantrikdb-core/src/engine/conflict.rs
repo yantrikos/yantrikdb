@@ -22,6 +22,25 @@ pub struct ConflictBurndownReport {
     pub errors: Vec<String>,
 }
 
+/// The member evidence ladder, as SQL over an existing `substitution_members`
+/// row. Higher wins. THE single definition of "may this write beat what's
+/// stored?" for SQL callers — mirrors [`YantrikDB::member_source_rank`], and
+/// `member_source_rank_agrees_with_sql` pins the two together.
+///
+/// This exists as one shared constant because the alternative already failed:
+/// #83 gave `add_member_to_category` a rank guard, and Strategy 1 — which
+/// UPDATEs members directly, bypassing that helper — kept its own unguarded
+/// policy and went on rewriting `source='seed'` rows to `'user_confirmed'`.
+/// That silently made seed members deletable by `reset_category_to_seed` (which
+/// deletes `source != 'seed'`) and made untouched seed categories look
+/// user-expanded to the gossip trigger. One policy, one place, or the sites
+/// drift apart again (sol #83 r3).
+pub(crate) const MEMBER_SOURCE_RANK_SQL: &str = "CASE substitution_members.source \
+     WHEN 'seed' THEN 3 \
+     WHEN 'user_confirmed' THEN 2 \
+     WHEN 'llm_suggested' THEN 1 \
+     ELSE 2 END";
+
 /// Common English stopwords that should never be added to substitution categories.
 const RECLASSIFY_STOPWORDS: &[&str] = &[
     "a",
@@ -794,11 +813,33 @@ impl YantrikDB {
         for &(token_a, cat_id_a, cat_name_a) in &known_a {
             for &(token_b, cat_id_b, _cat_name_b) in &known_b {
                 if cat_id_a == cat_id_b {
-                    // Same category — reinforce confidence
+                    // Same category — reinforce confidence.
+                    //
+                    // `source` only moves UP the ladder (sol #83 r3). This UPDATE
+                    // bypasses add_member_to_category, so it must apply the SAME
+                    // policy rather than its own: it used to rewrite `source` to
+                    // 'user_confirmed' unconditionally, which quietly rebranded
+                    // SEED members as runtime ones. reset_category_to_seed deletes
+                    // `source != 'seed'`, so a reclassify of two seeded tokens
+                    // (e.g. postgresql/mysql, both seeded into "databases") made
+                    // them deletable by a later reset; the gossip trigger, which
+                    // keys on `source != 'seed'`, also then read an untouched seed
+                    // category as user-expanded.
+                    //
+                    // Confidence reinforcement is not provenance and applies to
+                    // every row: the user did confirm these two substitute.
+                    let rank_user_confirmed = Self::member_source_rank("user_confirmed");
                     self.conn().execute(
-                        "UPDATE substitution_members SET confidence = 1.0, source = 'user_confirmed', updated_at = ?1
-                         WHERE category_id = ?2 AND (token_normalized = ?3 OR token_normalized = ?4)",
-                        params![ts, cat_id_a, token_a, token_b],
+                        &format!(
+                            "UPDATE substitution_members SET \
+                               confidence = 1.0, \
+                               source = CASE WHEN ?1 > {MEMBER_SOURCE_RANK_SQL} \
+                                             THEN 'user_confirmed' ELSE source END, \
+                               updated_at = ?2 \
+                             WHERE category_id = ?3 \
+                               AND (token_normalized = ?4 OR token_normalized = ?5)"
+                        ),
+                        params![rank_user_confirmed, ts, cat_id_a, token_a, token_b],
                     )?;
                     if processed.insert(token_a.to_string()) {
                         learned_members.push(LearnedMember {
@@ -1104,11 +1145,10 @@ impl YantrikDB {
             )?;
         }
 
-        let status = if source == "llm_suggested" {
-            "pending"
-        } else {
-            "active"
-        };
+        // (No local `status` here: add_member_to_category derives it from
+        // `source` itself. A dead duplicate of that policy sat here for
+        // releases — the kind of thing someone eventually "fixes" by wiring it
+        // up and forking the rule. sol #83 r3.)
         let mut added = 0;
 
         for (token, confidence) in members {
@@ -1253,7 +1293,10 @@ impl YantrikDB {
     /// (i.e. invisible to `find_member_category`, which reads `'active'` only),
     /// so it is the weakest. `seed` is ships-with-the-schema ground truth and is
     /// never overwritten by a runtime observation.
-    fn member_source_rank(source: &str) -> u8 {
+    ///
+    /// Must agree with [`MEMBER_SOURCE_RANK_SQL`] — pinned by
+    /// `member_source_rank_agrees_with_sql`.
+    pub(crate) fn member_source_rank(source: &str) -> u8 {
         match source {
             "seed" => 3,
             "user_confirmed" => 2,
@@ -1300,24 +1343,21 @@ impl YantrikDB {
         let rank = Self::member_source_rank(source);
         let conn = self.conn();
         let rows = conn.execute(
-            "INSERT INTO substitution_members
-             (id, category_id, token_normalized, token_display, confidence,
-              source, status, context_hint, created_at, updated_at, hlc, origin_actor)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?8, ?9, ?10)
-             ON CONFLICT(category_id, token_normalized) DO UPDATE SET
-               token_display = excluded.token_display,
-               confidence    = excluded.confidence,
-               source        = excluded.source,
-               status        = excluded.status,
-               updated_at    = excluded.updated_at,
-               hlc           = excluded.hlc,
-               origin_actor  = excluded.origin_actor
-             WHERE ?11 > CASE substitution_members.source
-                           WHEN 'seed' THEN 3
-                           WHEN 'user_confirmed' THEN 2
-                           WHEN 'llm_suggested' THEN 1
-                           ELSE 2
-                         END",
+            &format!(
+                "INSERT INTO substitution_members
+                 (id, category_id, token_normalized, token_display, confidence,
+                  source, status, context_hint, created_at, updated_at, hlc, origin_actor)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?8, ?9, ?10)
+                 ON CONFLICT(category_id, token_normalized) DO UPDATE SET
+                   token_display = excluded.token_display,
+                   confidence    = excluded.confidence,
+                   source        = excluded.source,
+                   status        = excluded.status,
+                   updated_at    = excluded.updated_at,
+                   hlc           = excluded.hlc,
+                   origin_actor  = excluded.origin_actor
+                 WHERE ?11 > {MEMBER_SOURCE_RANK_SQL}"
+            ),
             params![
                 member_id, cat_id, normalized, display, confidence, source, status, ts, hlc_bytes,
                 actor, rank
