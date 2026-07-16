@@ -6599,8 +6599,13 @@ fn reclassify_reuses_existing_category_when_name_already_taken() {
 ///
 /// Reachable from the public Python binding (`learn_category_members(...,
 /// source="llm_suggested")`). The fix (`ensure_substitution_category`) removes the
-/// nesting: the INSERT and the read-back are separate statements, each releasing
-/// the guard.
+/// RE-LOCK: it acquires `conn` ONCE and runs both the INSERT and the read-back on
+/// that single guard, so there is no second `self.conn()` to deadlock against.
+///
+/// Note it deliberately does NOT drop the guard between the two statements —
+/// holding it across the pair is what makes "who won the name" a question with one
+/// answer (see the helper's own doc). Splitting them into separate acquisitions
+/// would fix the deadlock too, and quietly reopen that gap.
 ///
 /// Runs on a worker with a deadline so the deadlock FAILS this test instead of
 /// hanging the whole suite.
