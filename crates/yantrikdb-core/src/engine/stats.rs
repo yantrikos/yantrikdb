@@ -185,6 +185,7 @@ impl YantrikDB {
     /// here: the caller holds a `SyncWriteGuard` pinning the generation for its
     /// whole critical section, and must stamp the same generation its vector
     /// entry was written against.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn log_op_in_tx(
         &self,
         tx: &rusqlite::Transaction<'_>,
@@ -194,8 +195,17 @@ impl YantrikDB {
         emb_hash: Option<&[u8]>,
         embedding: Option<&[u8]>,
         applied_generation: i64,
+        // 4a.6c: an idempotency claim binds to the authoritative op's id as its
+        // recovery evidence, and the claim must be the FIRST statement of the
+        // transaction (the v37 partial unique index on memories would otherwise
+        // fire before the claim resolves a dup). So the keyed path mints the
+        // op_id BEFORE the tx and passes it here; None keeps minting inline.
+        preminted_op_id: Option<&str>,
     ) -> Result<String> {
-        let op_id = crate::id::new_id();
+        let op_id = match preminted_op_id {
+            Some(id) => id.to_string(),
+            None => crate::id::new_id(),
+        };
         let hlc_bytes = self.tick_hlc().to_bytes().to_vec();
         let payload_str = serde_json::to_string(payload)?;
         tx.execute(

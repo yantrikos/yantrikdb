@@ -1153,6 +1153,7 @@ impl YantrikDB {
             emb_hash,
             embedding,
             applied_generation,
+            None,
         )?;
         Ok(())
     }

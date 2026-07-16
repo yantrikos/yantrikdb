@@ -46,6 +46,7 @@ mod procedural;
 mod query_dsl;
 mod recall;
 mod receptivity;
+mod idempotency;
 mod record;
 pub mod reembed;
 pub mod repair;
