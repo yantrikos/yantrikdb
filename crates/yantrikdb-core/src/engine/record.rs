@@ -777,13 +777,11 @@ impl YantrikDB {
 
             conn.execute_batch("RELEASE batch_record")?;
         }
-        // 4a.6b: the RELEASE above committed the batch (the savepoint is the
-        // outermost transaction on this autocommit connection), so warn-mode
-        // flags count only now — an enforce-rejected or deferred batch ticks
-        // nothing.
-        for verdict in gate_verdicts {
-            self.note_flagged_write_committed(verdict);
-        }
+        // NOTE: warn-mode flag ticks are DEFERRED to after the vector-append
+        // loop below (4a.6b finding 1). The append is a post-RELEASE failure
+        // point whose compensation deletes the rows — so ticking here would
+        // count writes the caller then sees fail. See the tick loop past the
+        // append.
         // conn dropped; now update graph_index in-memory.
         {
             let mut gi = self.graph_index.write();
@@ -866,6 +864,24 @@ impl YantrikDB {
                 return Err(e);
             }
             self.bump_visible_seq(&input.namespace, seq);
+        }
+        // 4a.6b finding 1 (flag half): every append landed, so the batch is
+        // durable AND visible — count the warn-mode flags now. Ticking after
+        // RELEASE but before this point would have counted a batch whose append
+        // then failed and whose rows were compensated away.
+        //
+        // KNOWN RESIDUAL (sol 4a.6b finding 1, tracked as the 4a.6d batch
+        // restructure): the EWMA advances committed inside the savepoint are NOT
+        // reversed if an append fails here. Unlike a row DELETE or a counter
+        // decrement, a committed EWMA blend is IRREVERSIBLE by compensation — the
+        // prior value is gone — so the only correct fix is to RESERVE delta
+        // capacity before the savepoint (record()'s 4a.6a pattern) so append
+        // cannot fail post-commit. That is the batch's pre-existing
+        // incomplete-compensation gap (entities / graph_index have never been
+        // reversed here either), generalized; it is out of 4a.6b's scope and
+        // deliberately not half-patched.
+        for verdict in gate_verdicts {
+            self.note_flagged_write_committed(verdict);
         }
         // vec_index dropped, now scoring_cache
         {

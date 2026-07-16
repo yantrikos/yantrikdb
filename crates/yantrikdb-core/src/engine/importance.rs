@@ -158,11 +158,19 @@ impl YantrikDB {
         raw: f64,
     ) -> Result<()> {
         let namespace = super::record::normalize_namespace(namespace);
+        // The CASE on stored count reproduces the predecessor's `count == 0 =>
+        // ewma = raw` seed EXACTLY (sol 4a.6b finding 3). A row with count = 0 is
+        // not produced by any engine path — every advance sets count >= 1 — but
+        // the schema permits it and `conn()` is public, so a maintenance/test
+        // insert of `(ewma=X, count=0)` must still seed to `raw`, not blend X in.
+        // EWMA_ALPHA is a bound parameter (?4), never spelled into the SQL, so the
+        // Rust const stays the one definition (#83).
         conn.execute(
             "INSERT INTO namespace_importance_stats (namespace, ewma, count, updated_at) \
              VALUES (?1, ?2, 1, ?3) \
              ON CONFLICT(namespace) DO UPDATE SET \
-               ewma = (1.0 - ?4) * namespace_importance_stats.ewma + ?4 * ?2, \
+               ewma = CASE WHEN namespace_importance_stats.count = 0 THEN ?2 \
+                           ELSE (1.0 - ?4) * namespace_importance_stats.ewma + ?4 * ?2 END, \
                count = namespace_importance_stats.count + 1, \
                updated_at = ?3",
             params![namespace, raw, now(), EWMA_ALPHA],

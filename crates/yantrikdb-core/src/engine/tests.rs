@@ -7249,6 +7249,54 @@ fn deferred_batch_leaves_importance_stats_untouched() {
     db.write_router.switch_to_normal();
 }
 
+/// 4a.6b finding 3: the in-tx SQL EWMA advance must reproduce the predecessor's
+/// `count == 0 => ewma = raw` seed exactly. A `(ewma=X, count=0)` row is not
+/// produced by any engine path, but the schema permits it and `conn()` is
+/// public, so a stray zero-count row must SEED to the incoming raw, not blend
+/// the stale X in. Without the CASE, this stores 0.32 instead of 1.0.
+#[test]
+fn stats_advance_seeds_from_raw_when_stored_count_is_zero() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    db.conn()
+        .execute(
+            "INSERT INTO namespace_importance_stats (namespace, ewma, count, updated_at) \
+             VALUES ('zc', 0.2, 0, 1.0)",
+            [],
+        )
+        .unwrap();
+
+    // Drive one real write through the sync path into namespace 'zc'.
+    db.record(
+        "seed from raw",
+        "semantic",
+        1.0,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "zc",
+        0.8,
+        "work",
+        "user",
+        None,
+    )
+    .unwrap();
+
+    let (ewma, count): (f64, i64) = db
+        .conn()
+        .query_row(
+            "SELECT ewma, count FROM namespace_importance_stats WHERE namespace = 'zc'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert!(
+        (ewma - 1.0).abs() < 1e-9,
+        "count=0 must seed ewma to raw (1.0), not blend the stale 0.2 in; got {ewma}"
+    );
+    assert_eq!(count, 1, "count advances to 1");
+}
+
 // ── Relationship-Based Entity Type Tests ──
 
 #[test]
