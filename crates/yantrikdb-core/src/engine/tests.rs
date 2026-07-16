@@ -6853,6 +6853,85 @@ fn member_source_rank_agrees_with_sql() {
     }
 }
 
+/// A text-changing correction reserves a vector, commits, publishes — the same
+/// protocol `record()` runs. But its `correct` op commits via `log_op_in_tx` with
+/// `applied = 1`, so it enqueues NO pending op and must never move
+/// `pending_op_count`.
+///
+/// This is the test that catches a correction site built with the WRONG guard
+/// constructor (`with_pending_op` instead of `publish_only`). The guard's own unit
+/// test cannot: `publish_only` holds `None`, so the type system already stops it
+/// there — only a real site can pick the wrong one.
+///
+/// Getting it wrong inflates the cache against zero pending rows. Nothing brings
+/// it back down (`mark_op_applied` only decrements rows it actually transitions,
+/// and there is no row), so the drift is monotonic and at `MAX_PENDING_OPS` the
+/// admission check wedges EVERY foreground write into `Backpressure` forever —
+/// the v0.7.1 counter-leak class, reached by "reusing" record()'s guard.
+#[test]
+fn text_correction_publishes_its_vector_without_counting_a_pending_op() {
+    struct Fake;
+    impl crate::types::Embedder for Fake {
+        fn embed(
+            &self,
+            t: &str,
+        ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
+            // Deterministic, text-dependent: the corrected text must produce a
+            // DIFFERENT vector, or there is nothing to reserve and publish.
+            let mut v = vec![0.1; 8];
+            v[0] = (t.len() % 7) as f32 * 0.1;
+            Ok(v)
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+    }
+
+    let mut db = YantrikDB::new(":memory:", 8).unwrap();
+    db.set_embedder(Box::new(Fake)).unwrap();
+
+    let rid = db
+        .record_text(
+            "the sky is green today",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "work",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    let pending_before = db
+        .pending_op_count
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    db.correct(&rid, Some("the sky is blue"), None, None, None, "observed")
+        .expect("text correction must succeed");
+
+    assert_eq!(
+        db.pending_op_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        pending_before,
+        "a correction commits an applied op and enqueues nothing pending — \
+         counting here is the v0.7.1 counter-leak class"
+    );
+
+    // ...and it really did run the reserve→publish protocol: the corrected text
+    // is durable and retrievable, i.e. the vector was published, not stranded.
+    let text: String = db
+        .conn()
+        .query_row("SELECT text FROM memories WHERE rid = ?1", [&rid], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(text, "the sky is blue", "correction is durable");
+}
+
 // ── Relationship-Based Entity Type Tests ──
 
 #[test]

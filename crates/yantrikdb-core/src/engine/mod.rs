@@ -50,6 +50,7 @@ mod record;
 pub mod reembed;
 pub mod repair;
 mod replay_engine;
+mod reservation;
 mod sanitize;
 mod schema_induction_engine;
 mod session;
