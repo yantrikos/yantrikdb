@@ -74,6 +74,7 @@ pub(crate) struct ClaimRow<'a> {
 /// assembles the full [`ClaimRow`] (op_id = the pending op it is about to
 /// write, route = "queued") — keeping op and claim agreeing by construction.
 pub(crate) struct PendingClaim<'a> {
+    pub namespace: &'a str,
     pub idempotency_key: &'a str,
     pub payload_digest: &'a [u8; 32],
     /// The rid the queued write minted (returned to the caller; the

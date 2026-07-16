@@ -23,6 +23,7 @@ mod flywheel;
 pub mod graph_ops;
 pub mod graph_state;
 mod hawkes;
+mod idempotency;
 pub mod importance;
 mod impressions;
 mod indices;
@@ -46,7 +47,6 @@ mod procedural;
 mod query_dsl;
 mod recall;
 mod receptivity;
-mod idempotency;
 mod record;
 pub mod reembed;
 pub mod repair;
@@ -1853,6 +1853,9 @@ impl YantrikDB {
                         source,
                         emotional_state,
                         gate_verdict,
+                        // record_text idempotency fans out in 4a.6d (its digest
+                        // variant excludes the generated embedding).
+                        None,
                     );
                 }
             };
@@ -1901,6 +1904,7 @@ impl YantrikDB {
                 source,
                 emotional_state,
                 gate_verdict,
+                None,
             );
         }
     }
