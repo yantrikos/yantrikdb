@@ -1,0 +1,300 @@
+//! The reserve → commit → publish protocol's RAII guard (v0.10 Item 4a.6a
+//! finding 2).
+//!
+//! Every writer that puts a vector into the delta index BEFORE its SQL is
+//! durable owes one of two obligations, and which one it owes INVERTS at the
+//! commit point. Both halves must survive an unwinding panic. This module is the
+//! single owner of that rule.
+//!
+//! ## Why it must be RAII, and why a kill proof cannot cover it
+//!
+//! - **Before commit** — nothing durable exists, so the reservation must be
+//!   REMOVED. `append_reserved` consumes delta capacity with an entry search
+//!   skips and compaction deliberately RETAINS rather than seals (the property
+//!   that makes rollback safe). A leaked reservation is therefore PERMANENT:
+//!   nobody else will ever remove it, it holds capacity until restart, and
+//!   enough of them wedge every writer into `Backpressure`.
+//! - **After commit** — the row is durable, so the reservation must be PUBLISHED
+//!   (and any pending op counted). A panic here leaves a durable row whose vector
+//!   is invisible until an index rebuild.
+//!
+//! Restart repairs both — the index rebuilds from `memories`, the counter
+//! re-seeds — which is exactly why the kill proofs do NOT cover this. The engine
+//! deliberately uses non-poisoning locks, so a `catch_unwind` process CONTINUES
+//! carrying the leak. That continuing process is the whole exposure.
+//!
+//! ## Why the pending-op count is a parameter and not part of the rule
+//!
+//! `record()` owes `publish + count` because its transaction enqueues a PENDING
+//! op (`applied = 0`, via `log_op_pending_in_tx`) that `pending_op_count` caches.
+//! The correction paths owe `publish` ALONE: `log_op_in_tx` commits `applied = 1`,
+//! so they never create a pending op. Counting there would inflate the cache
+//! against zero pending rows — monotonic drift with nothing to bring it back down
+//! (`mark_op_applied` only decrements rows it actually transitions), and at
+//! `MAX_PENDING_OPS` of drift the admission check wedges EVERY foreground write
+//! into `Backpressure` forever. That is the v0.7.1 counter-leak class.
+//!
+//! So the obligation is shared; the counting is not. Copying `record()`'s guard
+//! wholesale onto a correction would have introduced precisely the bug the guard
+//! exists to prevent, in the other direction.
+
+use std::sync::atomic::{AtomicI64, Ordering};
+
+use super::reembed::SearchState;
+
+/// Which obligation the write currently owes.
+enum ResPhase {
+    /// Reserved, nothing durable. Owe: remove the reservation.
+    Reserved,
+    /// Durable. Owe: publish the vector (and count the pending op, if any).
+    Committed,
+    /// All obligations discharged.
+    Done,
+}
+
+/// PHASE-AWARE RAII for `reserve → commit → publish`.
+///
+/// Construct immediately after `append_reserved`. Call [`Self::mark_committed`]
+/// the instant the transaction commits — that is the point the obligation
+/// inverts, and nothing fallible may sit between the commit and that call.
+/// [`Self::complete`] discharges the post-commit work on the happy path; `Drop`
+/// discharges whichever obligation is still owed on any unwind.
+pub(crate) struct ReservationGuard<'a> {
+    state: &'a SearchState,
+    /// `Some` only for writers whose committed transaction enqueued a pending
+    /// op. See the module doc: this is per-site because the RATIONALE is
+    /// per-site, not because the rule is.
+    pending_op_count: Option<&'a AtomicI64>,
+    rid: &'a str,
+    seq: u64,
+    phase: ResPhase,
+}
+
+impl<'a> ReservationGuard<'a> {
+    /// A writer whose transaction enqueues a pending op: post-commit it owes
+    /// `publish` AND the `pending_op_count` increment. (`record()`.)
+    pub(crate) fn with_pending_op(
+        state: &'a SearchState,
+        pending_op_count: &'a AtomicI64,
+        rid: &'a str,
+        seq: u64,
+    ) -> Self {
+        Self {
+            state,
+            pending_op_count: Some(pending_op_count),
+            rid,
+            seq,
+            phase: ResPhase::Reserved,
+        }
+    }
+
+    /// A writer whose transaction commits an ALREADY-APPLIED op: post-commit it
+    /// owes `publish` only. Counting here would inflate `pending_op_count`
+    /// against zero pending rows. (The correction paths.)
+    pub(crate) fn publish_only(state: &'a SearchState, rid: &'a str, seq: u64) -> Self {
+        Self {
+            state,
+            pending_op_count: None,
+            rid,
+            seq,
+            phase: ResPhase::Reserved,
+        }
+    }
+
+    /// The transaction committed: from here the obligation is publish (+count).
+    pub(crate) fn mark_committed(&mut self) {
+        self.phase = ResPhase::Committed;
+    }
+
+    /// Discharge the post-commit obligations exactly once. Returns whether
+    /// `publish` found the reservation.
+    pub(crate) fn complete(&mut self) -> bool {
+        let published = self.discharge_committed();
+        self.phase = ResPhase::Done;
+        published
+    }
+
+    /// publish + count. Idempotent-by-phase: only ever runs once, either from
+    /// `complete()` or from `Drop` on a post-commit unwind.
+    fn discharge_committed(&self) -> bool {
+        let published = self.state.vec_index.publish(self.rid, self.seq);
+        if let Some(counter) = self.pending_op_count {
+            counter.fetch_add(1, Ordering::Relaxed);
+        }
+        published
+    }
+}
+
+impl Drop for ReservationGuard<'_> {
+    fn drop(&mut self) {
+        match self.phase {
+            // Always succeeds: reserved entries are never sealed. A removal, NOT
+            // a tombstone — a tombstone would suppress the rid and hide a
+            // still-valid older vector.
+            ResPhase::Reserved => {
+                self.state.vec_index.remove_appended(self.rid, self.seq);
+            }
+            // Unwound after commit. The write IS durable, so finish the job
+            // rather than strand it.
+            ResPhase::Committed => {
+                self.discharge_committed();
+            }
+            ResPhase::Done => {}
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::YantrikDB;
+
+    /// These pin the RULE the guard owns, in the DEFAULT test suite — no
+    /// `testing` feature, so CI runs them on every PR regardless of the
+    /// failpoint seam.
+    ///
+    /// They exercise the property a kill proof structurally cannot: the engine
+    /// uses non-poisoning locks, so a caught panic leaves the PROCESS ALIVE
+    /// holding whatever the unwind skipped. A killed process is repaired by
+    /// restart; this one is not.
+    fn db() -> YantrikDB {
+        YantrikDB::new(":memory:", 8).unwrap()
+    }
+
+    #[test]
+    fn drop_before_commit_removes_the_reservation() {
+        let db = db();
+        let state = db.search_state.load_full();
+        state
+            .vec_index
+            .append_reserved("r1".into(), vec![0.1; 8], 7)
+            .unwrap();
+
+        {
+            let _g = ReservationGuard::publish_only(&state, "r1", 7);
+            // falls out of scope still Reserved
+        }
+
+        assert!(
+            !state.vec_index.remove_appended("r1", 7),
+            "guard's Drop must have removed the reservation (nothing left to remove)"
+        );
+    }
+
+    #[test]
+    fn unwind_before_commit_removes_the_reservation() {
+        let db = db();
+        let state = db.search_state.load_full();
+        state
+            .vec_index
+            .append_reserved("r2".into(), vec![0.1; 8], 8)
+            .unwrap();
+
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _g = ReservationGuard::publish_only(&state, "r2", 8);
+            panic!("simulated panic between reserve and commit");
+        }));
+        assert!(res.is_err(), "panic must propagate");
+
+        // THE bug this guard exists for: a leaked reservation is permanent —
+        // compaction retains unpublished entries, so nobody ever reclaims the
+        // capacity, and enough of them wedge every writer into Backpressure.
+        assert!(
+            !state.vec_index.remove_appended("r2", 8),
+            "unwind must not leak the reservation"
+        );
+    }
+
+    #[test]
+    fn unwind_after_commit_publishes_rather_than_stranding() {
+        let db = db();
+        let state = db.search_state.load_full();
+        state
+            .vec_index
+            .append_reserved("r3".into(), vec![0.1; 8], 9)
+            .unwrap();
+
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut g = ReservationGuard::publish_only(&state, "r3", 9);
+            g.mark_committed();
+            panic!("simulated panic between commit and publish");
+        }));
+        assert!(res.is_err(), "panic must propagate");
+
+        // The write IS durable at this point, so the obligation inverted: the
+        // vector must be published, not removed. Otherwise the row exists with an
+        // invisible vector until an index rebuild.
+        assert!(
+            !state.vec_index.publish("r3", 9),
+            "Drop must have published it already (a second publish finds nothing unpublished)"
+        );
+        assert!(
+            state.vec_index.remove_appended("r3", 9),
+            "the entry must still EXIST — post-commit it is published, never removed"
+        );
+    }
+
+    #[test]
+    fn complete_then_drop_discharges_exactly_once() {
+        let db = db();
+        let state = db.search_state.load_full();
+        state
+            .vec_index
+            .append_reserved("r4".into(), vec![0.1; 8], 10)
+            .unwrap();
+        let before = db.pending_op_count.load(Ordering::Relaxed);
+
+        {
+            let mut g = ReservationGuard::with_pending_op(&state, &db.pending_op_count, "r4", 10);
+            g.mark_committed();
+            assert!(g.complete(), "complete() publishes and reports it");
+            // Drop runs here in Done phase and must NOT count again.
+        }
+
+        assert_eq!(
+            db.pending_op_count.load(Ordering::Relaxed),
+            before + 1,
+            "exactly one increment — complete() then Drop must not double-count"
+        );
+    }
+
+    /// The counting is per-SITE because the rationale is per-site. The
+    /// correction paths commit `applied = 1` ops (log_op_in_tx) and enqueue
+    /// nothing pending, so counting there would inflate the cache against zero
+    /// pending rows — monotonic drift with nothing to bring it down, which at
+    /// MAX_PENDING_OPS wedges every foreground write into Backpressure forever.
+    /// That is the v0.7.1 counter-leak class, and it is exactly what copying
+    /// record()'s guard wholesale onto a correction would have introduced.
+    #[test]
+    fn publish_only_never_touches_the_pending_counter() {
+        let db = db();
+        let state = db.search_state.load_full();
+        let before = db.pending_op_count.load(Ordering::Relaxed);
+
+        // committed-and-completed
+        state
+            .vec_index
+            .append_reserved("r5".into(), vec![0.1; 8], 11)
+            .unwrap();
+        {
+            let mut g = ReservationGuard::publish_only(&state, "r5", 11);
+            g.mark_committed();
+            g.complete();
+        }
+        // committed-and-unwound (Drop discharges)
+        state
+            .vec_index
+            .append_reserved("r6".into(), vec![0.1; 8], 12)
+            .unwrap();
+        {
+            let mut g = ReservationGuard::publish_only(&state, "r6", 12);
+            g.mark_committed();
+        }
+
+        assert_eq!(
+            db.pending_op_count.load(Ordering::Relaxed),
+            before,
+            "publish_only must never move pending_op_count, on either discharge path"
+        );
+    }
+}

@@ -6853,6 +6853,165 @@ fn member_source_rank_agrees_with_sql() {
     }
 }
 
+/// A text-changing correction reserves a vector, commits, publishes — the same
+/// protocol `record()` runs. But its `correct` op commits via `log_op_in_tx` with
+/// `applied = 1`, so it enqueues NO pending op and must never move
+/// `pending_op_count`.
+///
+/// This is the test that catches a correction site built with the WRONG guard
+/// constructor (`with_pending_op` instead of `publish_only`). The guard's own unit
+/// test cannot: `publish_only` holds `None`, so the type system already stops it
+/// there — only a real site can pick the wrong one.
+///
+/// Getting it wrong inflates the cache against zero pending rows. Nothing brings
+/// it back down (`mark_op_applied` only decrements rows it actually transitions,
+/// and there is no row), so the drift is monotonic and at `MAX_PENDING_OPS` the
+/// admission check wedges EVERY foreground write into `Backpressure` forever —
+/// the v0.7.1 counter-leak class, reached by "reusing" record()'s guard.
+#[test]
+fn text_correction_publishes_its_vector_without_counting_a_pending_op() {
+    struct Fake;
+    impl crate::types::Embedder for Fake {
+        fn embed(
+            &self,
+            t: &str,
+        ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
+            // Deterministic, text-dependent: the corrected text must produce a
+            // DIFFERENT vector, or there is nothing to reserve and publish.
+            let mut v = vec![0.1; 8];
+            v[0] = (t.len() % 7) as f32 * 0.1;
+            Ok(v)
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+    }
+
+    let mut db = YantrikDB::new(":memory:", 8).unwrap();
+    db.set_embedder(Box::new(Fake)).unwrap();
+
+    let rid = db
+        .record_text(
+            "the sky is green today",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "work",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    let pending_before = db
+        .pending_op_count
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    db.correct(&rid, Some("the sky is blue"), None, None, None, "observed")
+        .expect("text correction must succeed");
+
+    assert_eq!(
+        db.pending_op_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        pending_before,
+        "a correction commits an applied op and enqueues nothing pending — \
+         counting here is the v0.7.1 counter-leak class"
+    );
+
+    // ...and it really did run the reserve→publish protocol: the corrected text
+    // is durable and retrievable, i.e. the vector was published, not stranded.
+    let text: String = db
+        .conn()
+        .query_row("SELECT text FROM memories WHERE rid = ?1", [&rid], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(text, "the sky is blue", "correction is durable");
+}
+
+/// The REPLICATED correction's twin of the test above (sol's item-2 review: the
+/// leader site was covered and this one was not — asymmetric coverage between two
+/// sites owning one rule is exactly how the whole 4a series kept getting bitten).
+///
+/// `apply_replicated_correct` reserves a vector and publishes it post-commit, but
+/// its oplog rows all commit `applied = 1`, so like the leader it must never move
+/// `pending_op_count`. Mutating its `publish_only` to `with_pending_op` must fail
+/// THIS test — the leader's test cannot see that site.
+#[test]
+fn replicated_correction_publishes_its_vector_without_counting_a_pending_op() {
+    struct Fake;
+    impl crate::types::Embedder for Fake {
+        fn embed(
+            &self,
+            t: &str,
+        ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
+            let mut v = vec![0.1; 8];
+            v[0] = (t.len() % 7) as f32 * 0.1;
+            Ok(v)
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+    }
+
+    let mut db = YantrikDB::new(":memory:", 8).unwrap();
+    db.set_embedder(Box::new(Fake)).unwrap();
+
+    let rid = db
+        .record_text(
+            "the sky is green today",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "work",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    let pending_before = db
+        .pending_op_count
+        .load(std::sync::atomic::Ordering::Relaxed);
+
+    // reembedded=true with no usable exact bytes → the follower re-embeds
+    // locally, which is the branch that reserves a vector.
+    db.apply_replicated_correct(
+        &serde_json::json!({
+            "rid": rid,
+            "revision_num": 1,
+            "new_text": "the sky is blue",
+            "reason": "peer correction",
+            "reembedded": true,
+        }),
+        None,
+        "peer-actor",
+    )
+    .expect("replicated correction must apply");
+
+    assert_eq!(
+        db.pending_op_count
+            .load(std::sync::atomic::Ordering::Relaxed),
+        pending_before,
+        "a replicated correction commits applied=1 ops and enqueues nothing pending — \
+         counting here is the v0.7.1 counter-leak class"
+    );
+
+    let text: String = db
+        .conn()
+        .query_row("SELECT text FROM memories WHERE rid = ?1", [&rid], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(text, "the sky is blue", "replicated correction is durable");
+}
+
 // ── Relationship-Based Entity Type Tests ──
 
 #[test]

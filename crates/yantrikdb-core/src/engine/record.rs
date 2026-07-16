@@ -6,91 +6,9 @@ use crate::serde_helpers::serialize_f32;
 use crate::types::*;
 
 use super::reembed::SearchState;
+use super::reservation::ReservationGuard;
 use super::write_router::SyncWriteGuard;
 use super::{embedding_hash, now, sanitize, YantrikDB};
-
-/// Which obligation the write currently owes (v0.10 Item 4a.6a).
-enum ResPhase {
-    /// Reserved, nothing durable. Owe: remove the reservation.
-    Reserved,
-    /// Durable. Owe: publish the vector AND count the pending op.
-    Committed,
-    /// All obligations discharged.
-    Done,
-}
-
-/// PHASE-AWARE RAII for the reserve → commit → publish protocol (sol 4a.6a
-/// findings 3 and r2-2).
-///
-/// The obligation this guard carries INVERTS at commit, and both halves must
-/// survive an unwinding panic:
-///
-/// - **Before commit** — nothing durable exists, so the reservation must be
-///   REMOVED. `append_reserved` consumes delta capacity with an entry search
-///   skips and compaction deliberately RETAINS rather than seals (the property
-///   that makes rollback safe). So a leaked reservation is permanent: nobody
-///   else will ever remove it, it holds capacity until restart, and enough of
-///   them wedge every writer into Backpressure.
-/// - **After commit** — the row is durable, so the reservation must be
-///   PUBLISHED and the pending op COUNTED. A panic here previously left a
-///   durable row whose vector was invisible until an index rebuild, plus a
-///   pending row missing from `pending_op_count`. The first version defused the
-///   guard AT commit, before both — and the `debug_assert!` added to be careful
-///   was itself a panic point in that window.
-///
-/// Restart repairs both (the index rebuilds from `memories`; the counter
-/// re-seeds), but the engine deliberately uses non-poisoning locks so a
-/// `catch_unwind` process CONTINUES — and that process is the exposure.
-struct ReservationGuard<'a> {
-    state: &'a SearchState,
-    pending_op_count: &'a std::sync::atomic::AtomicI64,
-    rid: &'a str,
-    seq: u64,
-    phase: ResPhase,
-}
-
-impl ReservationGuard<'_> {
-    /// The transaction committed: from here the obligation is publish+count.
-    fn mark_committed(&mut self) {
-        self.phase = ResPhase::Committed;
-    }
-
-    /// Discharge the post-commit obligations exactly once. Returns whether
-    /// `publish` found the reservation.
-    fn complete(&mut self) -> bool {
-        let published = self.discharge_committed();
-        self.phase = ResPhase::Done;
-        published
-    }
-
-    /// publish + count. Idempotent-by-phase: only ever run once, either from
-    /// `complete()` or from `Drop` on a post-commit unwind.
-    fn discharge_committed(&self) -> bool {
-        let published = self.state.vec_index.publish(self.rid, self.seq);
-        self.pending_op_count
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        published
-    }
-}
-
-impl Drop for ReservationGuard<'_> {
-    fn drop(&mut self) {
-        match self.phase {
-            // Always succeeds: reserved entries are never sealed. A removal, NOT
-            // a tombstone — a tombstone would suppress the rid and hide a
-            // still-valid older vector.
-            ResPhase::Reserved => {
-                self.state.vec_index.remove_appended(self.rid, self.seq);
-            }
-            // Unwound after commit. The write IS durable, so finish the job
-            // rather than strand it.
-            ResPhase::Committed => {
-                self.discharge_committed();
-            }
-            ResPhase::Done => {}
-        }
-    }
-}
 
 /// Coerce a blank namespace to the canonical default (v0.7.23).
 ///
@@ -398,13 +316,11 @@ impl YantrikDB {
         // From here until commit, ANY exit — including an unwinding panic —
         // must drop the reservation, or its capacity is held forever
         // (compaction retains unpublished entries by design).
-        let mut reservation = ReservationGuard {
-            state: &state,
-            pending_op_count: &self.pending_op_count,
-            rid: &rid,
-            seq,
-            phase: ResPhase::Reserved,
-        };
+        // with_pending_op, not publish_only: this transaction enqueues a PENDING
+        // op (log_op_pending_in_tx, applied=0) that `pending_op_count` caches, so
+        // post-commit this writer owes the increment as well as the publish.
+        let mut reservation =
+            ReservationGuard::with_pending_op(&state, &self.pending_op_count, &rid, seq);
 
         // ONE transaction: row + session links + the record op + the
         // post-materialization enqueue. Either all of it is durable or none is.

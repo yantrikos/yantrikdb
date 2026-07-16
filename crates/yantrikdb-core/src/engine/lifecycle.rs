@@ -4,6 +4,7 @@ use crate::error::{Result, YantrikDbError};
 use crate::scoring;
 use crate::types::*;
 
+use super::reservation::ReservationGuard;
 use super::{embedding_hash, now, YantrikDB};
 
 /// **v0.10 Item 3 — correction seqlock guard (sol r4).** Bumps the DB-wide
@@ -1362,6 +1363,20 @@ impl YantrikDB {
                 return Err(e);
             }
 
+            // From here the reservation is owed back on EVERY exit — including an
+            // unwinding panic. The hand-rolled `remove_appended` this replaces
+            // could not cover that: a panic inside the commit closure unwound
+            // straight past it and leaked the reservation permanently (compaction
+            // retains unpublished entries by design, so nobody ever reclaims it,
+            // and enough leaks wedge every writer into Backpressure).
+            //
+            // publish_only, NOT with_pending_op: this transaction's `correct` op
+            // commits via log_op_in_tx with applied=1, so it creates no pending
+            // op. Incrementing pending_op_count here would inflate the cache
+            // against zero pending rows — the v0.7.1 counter-leak class, in the
+            // other direction.
+            let mut reservation = ReservationGuard::publish_only(&state_for_commit, rid, seq_new);
+
             // SQL transaction. Prior state is re-read HERE (under the
             // serialized conn lock) so it reflects any correction that
             // committed just before us.
@@ -1535,12 +1550,13 @@ impl YantrikDB {
                 Err(e) => {
                     // Commit failed (rare IO error) OR the row was forgotten
                     // mid-correction (NotFound from the active-status guard).
-                    // Remove the RESERVED append so the delta returns to its
+                    // The guard is still in Reserved phase, so dropping it here
+                    // removes the reservation — the delta returns to its
                     // pre-correction visibility (old vector shows / rid stays
-                    // forgotten), matching the unchanged SQL. Compaction
-                    // could not have sealed it — reserved entries are skipped
-                    // by the seal — so this removal always succeeds.
-                    state_for_commit.vec_index.remove_appended(rid, seq_new);
+                    // forgotten), matching the unchanged SQL. Compaction could
+                    // not have sealed it (reserved entries are skipped by the
+                    // seal), so the removal always succeeds.
+                    drop(reservation);
                     drop(_epoch);
                     drop(conn);
                     drop(sync_guard);
@@ -1548,11 +1564,20 @@ impl YantrikDB {
                 }
             };
 
+            // The correction is durable: the obligation INVERTS here from
+            // "remove the reservation" to "publish it". Nothing fallible may sit
+            // between the commit and this call.
+            reservation.mark_committed();
+
             // **Publish** the reserved append now that the correction is
             // durable: it becomes the visible, compaction-eligible live
             // vector, atomically superseding the old one. Still under the
             // conn lock, so the publish order matches the commit order.
-            state_for_commit.vec_index.publish(rid, seq_new);
+            //
+            // Via the guard, so an unwind between the commit and here still
+            // publishes rather than stranding a durable row behind an invisible
+            // vector (only an index rebuild would have recovered it).
+            reservation.complete();
 
             // Kill boundary. A crash HERE (after the durable commit) leaves
             // SQL wholly-new — new text + embedding + revision + correct op
@@ -1792,6 +1817,15 @@ impl YantrikDB {
                 None
             };
 
+            // Same obligation as the leader path, via the same guard: owed back on
+            // every exit including an unwind, which the hand-rolled cleanup below
+            // could not cover. `None` when this correction carries no vector —
+            // there is nothing reserved, so nothing is owed.
+            //
+            // publish_only: this tx commits an already-applied replicated
+            // correction and enqueues no pending op.
+            let mut reservation = seq_new.map(|s| ReservationGuard::publish_only(&state, rid, s));
+
             let commit: Result<()> = (|| {
                 let tx = conn.unchecked_transaction()?;
                 tx.execute(
@@ -1870,13 +1904,14 @@ impl YantrikDB {
                 Ok(())
             })();
             if let Err(e) = commit {
-                if let Some(s) = seq_new {
-                    state.vec_index.remove_appended(rid, s);
-                }
+                // Still Reserved: dropping removes the reservation.
+                drop(reservation);
                 return Err(e);
             }
-            if let Some(s) = seq_new {
-                state.vec_index.publish(rid, s);
+            if let Some(r) = reservation.as_mut() {
+                // Durable — the obligation inverts to publish.
+                r.mark_committed();
+                r.complete();
             }
             {
                 let mut cache = self.scoring_cache.write();

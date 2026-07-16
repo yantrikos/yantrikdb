@@ -91,6 +91,17 @@ jobs:
       - name: Run Rust Tests
         run: cargo test --workspace --exclude yantrikdb-python --verbose
 
+      # The `testing` feature gates the failpoint seam, and every kill proof
+      # is `#![cfg(feature = "testing")]`. Without this step they compile out
+      # of every CI run and report "ok. 0 passed" — so the three kill proofs
+      # cited as proof of the v0.10 write boundaries had never actually run on
+      # a PR. A test that never runs is worse than no test: it reports green.
+      # Also covers the correction-path unwind failpoints (4a.6a finding 2),
+      # which assert the RAII discharge that a killed process would hide —
+      # restart repairs a crash, so only a caught, continuing unwind exposes it.
+      - name: Run Rust Tests (testing feature — failpoints + kill proofs)
+        run: cargo test --workspace --exclude yantrikdb-python --features testing --verbose
+
       - name: Install Python package
         run: pip install -e ".[all,dev]"
 
