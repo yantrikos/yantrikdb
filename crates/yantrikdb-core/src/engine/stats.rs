@@ -280,7 +280,11 @@ impl YantrikDB {
     /// SQL. That is the v0.7.1 counter-leak class.
     pub(crate) fn log_op_pending_in_tx(
         &self,
-        tx: &rusqlite::Transaction<'_>,
+        // &Connection, not &Transaction — same generalization as
+        // `log_op_in_tx` (4a.6d-2b): Transaction derefs, so tx callers are
+        // unchanged, and SAVEPOINT-guarded callers (record_with_rid,
+        // 4a.6d-3) have no Transaction to offer.
+        tx: &rusqlite::Connection,
         op_type: &str,
         target_rid: Option<&str>,
         payload: &serde_json::Value,

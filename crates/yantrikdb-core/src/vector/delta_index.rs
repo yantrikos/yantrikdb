@@ -241,7 +241,7 @@ impl DeltaIndex {
     /// the second append is silently a no-op (recovery may replay the
     /// same op multiple times).
     pub fn append(&self, rid: String, embedding: Vec<f32>, seq: u64) -> Result<()> {
-        self.append_inner(rid, embedding, seq, true)
+        self.append_inner(rid, embedding, seq, true).map(|_| ())
     }
 
     /// **v0.10 Item 3 — reserved append.** Append the new vector as an
@@ -252,7 +252,16 @@ impl DeltaIndex {
     /// then publishes on commit / [`Self::remove_appended`]s on failure —
     /// so a correction's vector never becomes visible (or gets sealed into
     /// cold) unless its text change is durable.
-    pub fn append_reserved(&self, rid: String, embedding: Vec<f32>, seq: u64) -> Result<()> {
+    ///
+    /// Returns whether an entry was INSERTED (4a.6d-3). `false` means an
+    /// identical `(rid, seq)` already exists — the idempotent-replay no-op —
+    /// and the caller owns NO obligation for it: it must neither publish it
+    /// (the existing entry's published flag belongs to the write that made
+    /// it) nor remove it on failure (that would delete a prior write's
+    /// possibly-PUBLISHED vector). Writers minting fresh rids/seqs treat
+    /// `false` as an invariant violation; the deterministic-replay path
+    /// (`record_with_rid` with a caller seq) treats it as "already applied".
+    pub fn append_reserved(&self, rid: String, embedding: Vec<f32>, seq: u64) -> Result<bool> {
         self.append_inner(rid, embedding, seq, false)
     }
 
@@ -262,7 +271,7 @@ impl DeltaIndex {
         embedding: Vec<f32>,
         seq: u64,
         published: bool,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         if embedding.len() != self.dim {
             return Err(YantrikDbError::InvalidInput(format!(
                 "embedding dimension mismatch: expected {}, got {}",
@@ -273,9 +282,10 @@ impl DeltaIndex {
 
         let mut delta = self.delta.write();
 
-        // Idempotent on rid+seq.
+        // Idempotent on rid+seq: the existing entry stands, whatever its
+        // published state — the second arrival owns nothing (4a.6d-3).
         if delta.iter().any(|e| e.rid == rid && e.seq == seq) {
-            return Ok(());
+            return Ok(false);
         }
 
         if delta.len() >= self.delta_max {
@@ -317,7 +327,7 @@ impl DeltaIndex {
         if new_len >= self.delta_max * 80 / 100 {
             self.compactor_wake_cv.notify_one();
         }
-        Ok(())
+        Ok(true)
     }
 
     /// Append a tombstone for `rid` to the delta tier.

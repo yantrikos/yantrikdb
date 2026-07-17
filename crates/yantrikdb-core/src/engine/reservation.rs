@@ -106,6 +106,18 @@ impl<'a> ReservationGuard<'a> {
         self.phase = ResPhase::Committed;
     }
 
+    /// Upgrade a `publish_only` guard to ALSO owe the pending-op count —
+    /// called at the moment the surrounding transaction actually ENQUEUES a
+    /// pending row (4a.6d-3: `record_with_rid` only learns whether it will
+    /// enqueue after `was_new_row` resolves INSIDE the transaction, so the
+    /// obligation cannot be chosen at construction). Safe at any pre-commit
+    /// point: an unwind before `mark_committed` still takes the Reserved arm
+    /// (removal, no count — the rollback removed the pending row too), and
+    /// after commit both discharge paths publish AND count.
+    pub(crate) fn count_pending_op_on_completion(&mut self, counter: &'a AtomicI64) {
+        self.pending_op_count = Some(counter);
+    }
+
     /// Discharge the post-commit obligations exactly once. Returns whether
     /// `publish` found the reservation.
     pub(crate) fn complete(&mut self) -> bool {
@@ -190,9 +202,19 @@ impl<'a> BatchReservationGuard<'a> {
         embedding: Vec<f32>,
         seq: u64,
     ) -> crate::error::Result<()> {
-        self.state
+        // Batch rids are freshly minted, so an already-present (rid, seq)
+        // is an invariant violation — and it must NOT be pushed as an entry
+        // (this guard would then publish/remove a vector it doesn't own).
+        if !self
+            .state
             .vec_index
-            .append_reserved(rid.clone(), embedding, seq)?;
+            .append_reserved(rid.clone(), embedding, seq)?
+        {
+            return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                "freshly minted rid {rid} already present in the delta at seq \
+                 {seq} — engine invariant violation"
+            )));
+        }
         self.entries.push((rid, seq));
         Ok(())
     }
