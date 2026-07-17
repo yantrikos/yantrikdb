@@ -106,6 +106,18 @@ impl<'a> ReservationGuard<'a> {
         self.phase = ResPhase::Committed;
     }
 
+    /// Upgrade a `publish_only` guard to ALSO owe the pending-op count —
+    /// called at the moment the surrounding transaction actually ENQUEUES a
+    /// pending row (4a.6d-3: `record_with_rid` only learns whether it will
+    /// enqueue after `was_new_row` resolves INSIDE the transaction, so the
+    /// obligation cannot be chosen at construction). Safe at any pre-commit
+    /// point: an unwind before `mark_committed` still takes the Reserved arm
+    /// (removal, no count — the rollback removed the pending row too), and
+    /// after commit both discharge paths publish AND count.
+    pub(crate) fn count_pending_op_on_completion(&mut self, counter: &'a AtomicI64) {
+        self.pending_op_count = Some(counter);
+    }
+
     /// Discharge the post-commit obligations exactly once. Returns whether
     /// `publish` found the reservation.
     pub(crate) fn complete(&mut self) -> bool {
@@ -190,9 +202,20 @@ impl<'a> BatchReservationGuard<'a> {
         embedding: Vec<f32>,
         seq: u64,
     ) -> crate::error::Result<()> {
-        self.state
+        // Batch rids are freshly minted, so an already-present (rid, seq)
+        // is an invariant violation — and it must NOT be pushed as an entry
+        // (this guard would then publish/remove a vector it doesn't own).
+        if self
+            .state
             .vec_index
-            .append_reserved(rid.clone(), embedding, seq)?;
+            .append_reserved(rid.clone(), embedding, seq)?
+            == crate::vector::delta_index::ReservedAppend::AlreadyPresent
+        {
+            return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                "freshly minted rid {rid} already present in the delta at seq \
+                 {seq} — engine invariant violation"
+            )));
+        }
         self.entries.push((rid, seq));
         Ok(())
     }
@@ -257,7 +280,7 @@ mod tests {
     fn drop_before_commit_removes_the_reservation() {
         let db = db();
         let state = db.search_state.load_full();
-        state
+        let _ = state
             .vec_index
             .append_reserved("r1".into(), vec![0.1; 8], 7)
             .unwrap();
@@ -277,7 +300,7 @@ mod tests {
     fn unwind_before_commit_removes_the_reservation() {
         let db = db();
         let state = db.search_state.load_full();
-        state
+        let _ = state
             .vec_index
             .append_reserved("r2".into(), vec![0.1; 8], 8)
             .unwrap();
@@ -301,7 +324,7 @@ mod tests {
     fn unwind_after_commit_publishes_rather_than_stranding() {
         let db = db();
         let state = db.search_state.load_full();
-        state
+        let _ = state
             .vec_index
             .append_reserved("r3".into(), vec![0.1; 8], 9)
             .unwrap();
@@ -330,7 +353,7 @@ mod tests {
     fn complete_then_drop_discharges_exactly_once() {
         let db = db();
         let state = db.search_state.load_full();
-        state
+        let _ = state
             .vec_index
             .append_reserved("r4".into(), vec![0.1; 8], 10)
             .unwrap();
@@ -364,7 +387,7 @@ mod tests {
         let before = db.pending_op_count.load(Ordering::Relaxed);
 
         // committed-and-completed
-        state
+        let _ = state
             .vec_index
             .append_reserved("r5".into(), vec![0.1; 8], 11)
             .unwrap();
@@ -374,7 +397,7 @@ mod tests {
             g.complete();
         }
         // committed-and-unwound (Drop discharges)
-        state
+        let _ = state
             .vec_index
             .append_reserved("r6".into(), vec![0.1; 8], 12)
             .unwrap();

@@ -499,10 +499,19 @@ impl YantrikDB {
 
         // RESERVE: consumes delta capacity and validates dim, but stays invisible
         // to search until published. This is where Backpressure surfaces — before
-        // a single durable byte has been written.
-        state
+        // a single durable byte has been written. `AlreadyPresent` is
+        // impossible here — the rid is freshly minted — so it is an invariant
+        // violation, never a replay.
+        if state
             .vec_index
-            .append_reserved(rid.clone(), embedding.to_vec(), seq)?;
+            .append_reserved(rid.clone(), embedding.to_vec(), seq)?
+            == crate::vector::delta_index::ReservedAppend::AlreadyPresent
+        {
+            return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                "freshly minted rid {rid} already present in the delta at seq \
+                 {seq} — engine invariant violation"
+            )));
+        }
 
         // From here until commit, ANY exit — including an unwinding panic —
         // must drop the reservation, or its capacity is held forever
@@ -1621,111 +1630,197 @@ impl YantrikDB {
 
         let session_id = self.active_sessions.read().get(namespace).cloned();
 
-        // Single conn block: INSERT OR IGNORE on memories (idempotent on rid),
-        // session links, entity persistence. SAVEPOINT for atomicity within
-        // the call.
-        let was_new_row: bool = {
-            let conn = self.conn();
-            conn.execute_batch("SAVEPOINT record_with_rid")?;
+        // ── 4a.6d-3: reserve → one savepoint → publish ──────────────────
+        // The pre-port shape was record()'s pre-4a.6a disease, worse: the row
+        // committed alone; the vector appended AFTER (with a partial
+        // compensating DELETE on failure — the #92 class); and the op and the
+        // materialization enqueue ran as separate post-commit autocommits. A
+        // failure or kill between the commit and the op was UNREPAIRABLE:
+        // the retry takes the was_new_row=false arm, which skips log_op by
+        // design, so the row existed forever with no oplog provenance and the
+        // write never replicated (kill_record_with_rid_boundary.rs). Now the
+        // row, the session link, the op, and the enqueue commit in ONE
+        // savepoint, with the vector reserved before it opens and published
+        // after RELEASE.
+        let emb_hash = embedding_hash(embedding);
+        let conn = self.conn();
 
-            let result: Result<bool> = (|| {
-                // **Issue #41 brainstorm-4 §6.** v28 embedding_generation
-                // stamp from the SearchState snapshot loaded above.
-                let embedding_generation: i64 = state.generation as i64;
-                let inserted = conn.execute(
-                    "INSERT OR IGNORE INTO memories \
-                     (rid, type, text, embedding, created_at, updated_at, importance, \
-                      half_life, last_access, valence, metadata, namespace, \
-                      certainty, domain, source, emotional_state, \
-                      created_at_unix_micros, embedding_model, embedding_generation) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?5, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
-                    params![
-                        rid, memory_type, stored_text, stored_emb,
-                        ts_secs,
-                        importance, half_life, valence, stored_meta, namespace,
-                        certainty, domain, source, emotional_state,
-                        created_at_unix_micros, embedding_model,
-                        embedding_generation,
-                    ],
-                )?;
-                let was_new_row = inserted == 1;
-
-                if was_new_row {
-                    // Auto-link only on first insert. Replay should not
-                    // re-bump session memory_count.
-                    if let Some(session_id) = &session_id {
-                        conn.execute(
-                            "UPDATE memories SET session_id = ?1 WHERE rid = ?2",
-                            params![session_id, rid],
-                        )?;
-                        conn.execute(
-                            "UPDATE sessions SET memory_count = memory_count + 1 WHERE session_id = ?1",
-                            params![session_id],
-                        )?;
-                    }
-                }
-
-                // **Phase 4.3 Commit C (saga task 19, 2026-05-08).** The
-                // entity / memory_entities INSERT loop was previously here
-                // inside the SAVEPOINT, holding `db.conn().lock()` for
-                // O(extracted_entities.len()) statements. Now enqueued as
-                // OP_MATERIALIZE_RECORD_WITH_RID_POST after the SAVEPOINT
-                // releases. See docs/phase_4_3_design.md for the contract.
-
-                Ok(was_new_row)
-            })();
-
-            match result {
-                Ok(b) => {
-                    conn.execute_batch("RELEASE record_with_rid")?;
-                    b
-                }
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK TO record_with_rid");
-                    let _ = conn.execute_batch("RELEASE record_with_rid");
-                    return Err(e);
-                }
-            }
-        };
-        // conn dropped
-
-        // DeltaIndex append. The seq is either caller-supplied (cluster
-        // mode: openraft commit-log index for byte-deterministic replay)
-        // or engine-allocated (single-node). On idempotent replay the rid
-        // is the same and the seq is identical (cluster) or fresh
-        // (single-node retry); the compactor's highest-seq-wins rule
-        // converges state identically on both paths.
+        // Seq minted under the conn lock (search resolves a rid to its
+        // HIGHEST seq; minting in the serialized region keeps seq order and
+        // commit order aligned — record()'s rationale). Cluster callers pass
+        // their commit-log index; fetch_max ratchets either way.
         let seq = self.assign_seq(seq);
-        // **v0.7.19 orphan-on-Backpressure fix.** The trader's
-        // `trader_ledger` DB shows `record_with_rid` pinned at
-        // exactly 256 (the v0.7.17 delta_max wedge ceiling) — every
-        // additional call after that left a memories row from the
-        // INSERT OR IGNORE above with no oplog provenance because
-        // the vec_index.append Err short-circuited the log_op below.
-        // Compensating DELETE on failure. Skip the delete when
-        // was_new_row=false (replay path: the row pre-existed; we
-        // shouldn't yank it).
-        if let Err(e) = state
+
+        // RESERVE before any SQL — Backpressure and dim surface here, before
+        // a single durable byte. `inserted == false` is the deterministic-
+        // replay case: an identical (rid, seq) is already in the delta
+        // (cluster re-delivery; the prior apply published it), and this call
+        // then owes the delta NOTHING — publishing is done, and a removal on
+        // failure would delete the prior write's PUBLISHED vector — so no
+        // guard is constructed at all. `inserted == true` with an EXISTING
+        // row (was_new_row=false below) is the repair case the old
+        // post-commit append also served: a row whose vector was lost gets
+        // it re-published.
+        let inserted = state
             .vec_index
-            .append(rid.to_string(), embedding.to_vec(), seq)
-        {
-            if was_new_row {
-                let conn = self.conn();
-                let _ = conn.execute("DELETE FROM memories WHERE rid = ?1", params![rid]);
-                // **v0.7.23 residual fix.** The session `memory_count`
-                // bumped inside the (already-RELEASEd) SAVEPOINT survives
-                // the compensating DELETE. Reverse it so the stat matches
-                // the surviving rows. Mirrors the was_new_row guard on the
-                // original bump — replay (was_new_row=false) never bumped.
-                if let Some(session_id) = &session_id {
-                    let _ = conn.execute(
-                        "UPDATE sessions SET memory_count = memory_count - 1 WHERE session_id = ?1",
-                        params![session_id],
-                    );
+            .append_reserved(rid.to_string(), embedding.to_vec(), seq)?
+            == crate::vector::delta_index::ReservedAppend::Inserted;
+        let mut reservation = if inserted {
+            Some(ReservationGuard::publish_only(&state, rid, seq))
+        } else {
+            None
+        };
+
+        // #91's class: RAII — every `?` below and any unwinding panic rolls
+        // the whole write back AND releases the frame.
+        let savepoint = super::savepoint::SavepointGuard::new(&conn, "record_with_rid")?;
+
+        // **Issue #41 brainstorm-4 §6.** v28 embedding_generation
+        // stamp from the SearchState snapshot loaded above.
+        let embedding_generation: i64 = state.generation as i64;
+        let inserted_row = conn.execute(
+            "INSERT OR IGNORE INTO memories \
+             (rid, type, text, embedding, created_at, updated_at, importance, \
+              half_life, last_access, valence, metadata, namespace, \
+              certainty, domain, source, emotional_state, \
+              created_at_unix_micros, embedding_model, embedding_generation) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?5, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+            params![
+                rid, memory_type, stored_text, stored_emb,
+                ts_secs,
+                importance, half_life, valence, stored_meta, namespace,
+                certainty, domain, source, emotional_state,
+                created_at_unix_micros, embedding_model,
+                embedding_generation,
+            ],
+        )?;
+        let was_new_row = inserted_row == 1;
+        debug_assert!(
+            inserted || !was_new_row,
+            "row {rid} is NEW but its (rid, seq {seq}) vector entry pre-exists — \
+             a fresh row cannot have a prior published vector"
+        );
+
+        if was_new_row {
+            // Auto-link only on first insert. Replay should not
+            // re-bump session memory_count.
+            if let Some(session_id) = &session_id {
+                conn.execute(
+                    "UPDATE memories SET session_id = ?1 WHERE rid = ?2",
+                    params![session_id, rid],
+                )?;
+                conn.execute(
+                    "UPDATE sessions SET memory_count = memory_count + 1 WHERE session_id = ?1",
+                    params![session_id],
+                )?;
+            }
+
+            // Kill boundary (4a.6d-3): pre-port the process could die between
+            // the RELEASEd row and the op's autocommit — the unrepairable
+            // orphan. Inside the savepoint, dying here rolls back BOTH.
+            crate::testing::fail_point("record_with_rid.between_row_and_oplog");
+
+            // The op commits WITH the row — applied=1, generation pinned to
+            // the same snapshot the reserved delta entry was written against.
+            // Payload unchanged (peers' record_with_rid materialization
+            // contract).
+            self.log_op_in_tx(
+                &conn,
+                "record_with_rid",
+                Some(rid),
+                &serde_json::json!({
+                    "rid": rid,
+                    "type": memory_type,
+                    "text": text,
+                    "importance": importance,
+                    "valence": valence,
+                    "half_life": half_life,
+                    "metadata": metadata,
+                    "created_at_unix_micros": created_at_unix_micros,
+                    "namespace": namespace,
+                    "certainty": certainty,
+                    "domain": domain,
+                    "source": source,
+                    "emotional_state": emotional_state,
+                    "embedding_model": embedding_model,
+                    "extracted_entities": extracted_entities,
+                }),
+                Some(&emb_hash),
+                None,
+                embedding_generation,
+                None,
+            )?;
+
+            // **Phase 4.3 Commit C**, moved IN-TX (4a.6a's record() fix,
+            // ported): the entity-materialization enqueue commits with the
+            // row, so a crash can no longer keep the row while losing the
+            // enqueue. Gated on was_new_row — the pre-port unconditional
+            // re-enqueue on replay was repair for exactly the crash window
+            // this savepoint closes; with atomicity it is pure duplicate
+            // work inflating the pending queue on every re-delivery.
+            if !extracted_entities.is_empty() {
+                // Pending-queue admission BEFORE the enqueue, inside the tx:
+                // an Err here rolls the whole write back. Pre-port this check
+                // lived inside the post-commit log_op_pending — it reported
+                // Err for a write that was already durable AND visible, and
+                // the retry could never log the skipped op.
+                self.check_pending_backpressure_locked()?;
+                let post_payload = serde_json::json!({
+                    "rid": rid,
+                    "namespace": namespace,
+                    "ts_secs": ts_secs,
+                    "extracted_entities": extracted_entities.to_vec(),
+                    "was_new_row": true,
+                });
+                self.log_op_pending_in_tx(
+                    &conn,
+                    crate::engine::op_types::OP_MATERIALIZE_RECORD_WITH_RID_POST,
+                    Some(rid),
+                    &post_payload,
+                    None,
+                    None,
+                )?;
+                // The tx now holds a pending row: the guard owes its count
+                // post-commit (log_op_pending_in_tx deliberately never
+                // touches the counter — counting inside the tx would strand
+                // the increment on rollback, the v0.7.1 drift).
+                if let Some(r) = reservation.as_mut() {
+                    r.count_pending_op_on_completion(&self.pending_op_count);
                 }
             }
-            return Err(e);
         }
+
+        savepoint.release()?;
+        // The obligation inverts HERE: the write is durable, so the
+        // reservation owes publish (+count if it enqueued), not removal.
+        // Nothing fallible may sit between the RELEASE and this call.
+        if let Some(r) = reservation.as_mut() {
+            r.mark_committed();
+        }
+        let published = match reservation.as_mut() {
+            Some(r) => r.complete(),
+            // Replay whose vector already exists: nothing was reserved,
+            // nothing publishes — the existing entry is the truth.
+            None => false,
+        };
+        debug_assert!(
+            published || !inserted,
+            "record_with_rid reservation for {rid} seq {seq} vanished before publish"
+        );
+        if inserted && !published {
+            tracing::error!(
+                rid = %rid,
+                seq,
+                "reserved vector entry missing at publish — row is durable but \
+                 unsearchable until the index is rebuilt from SQL"
+            );
+        }
+        drop(reservation);
+
+        // LAST: a read-your-write waiter must not wake against a
+        // half-applied record (CONCURRENCY.md: bump visible_seq AFTER the
+        // delta publish). Idempotent fetch_max, so the no-reservation replay
+        // arm bumps harmlessly.
         self.bump_visible_seq(namespace, seq);
 
         // Scoring cache (engine-internal; replay safe since insert is
@@ -1751,70 +1846,6 @@ impl YantrikDB {
             );
         }
 
-        // Op log entry — applied=1 since leader has materialized inline.
-        // Followers will receive a separate replicated entry via the
-        // cluster sync path; this path never logs applied=0.
-        //
-        // Logged BEFORE the post-record materialization enqueue so
-        // extract_ops_since reports the user-data op in causal order
-        // (record_with_rid arrived, then its entity-link materialization
-        // was queued).
-        let emb_hash = embedding_hash(embedding);
-        if was_new_row {
-            self.log_op(
-                "record_with_rid",
-                Some(rid),
-                &serde_json::json!({
-                    "rid": rid,
-                    "type": memory_type,
-                    "text": text,
-                    "importance": importance,
-                    "valence": valence,
-                    "half_life": half_life,
-                    "metadata": metadata,
-                    "created_at_unix_micros": created_at_unix_micros,
-                    "namespace": namespace,
-                    "certainty": certainty,
-                    "domain": domain,
-                    "source": source,
-                    "emotional_state": emotional_state,
-                    "embedding_model": embedding_model,
-                    "extracted_entities": extracted_entities,
-                }),
-                Some(&emb_hash),
-            )?;
-        }
-
-        // **Phase 4.3 Commit C (saga task 19, 2026-05-08).** Enqueue the
-        // entity / memory_entities / graph_index materialization for the
-        // worker thread. Skip when there are no entities to apply — the
-        // dispatch arm short-circuits the same way, but skipping avoids
-        // a wasteful oplog row in the common no-entity case.
-        //
-        // Cluster determinism: the leader and each follower will both
-        // enqueue + apply this op against their local state. Convergence
-        // on entities + memory_entities is guaranteed by the same
-        // INSERT OR IGNORE / ON CONFLICT idempotency the inline path
-        // had. The convergence *time* differs by the materializer-lag
-        // window (ms-scale), but the converged final state is identical.
-        if !extracted_entities.is_empty() {
-            let entities_json: Vec<&str> = extracted_entities.to_vec();
-            let post_payload = serde_json::json!({
-                "rid": rid,
-                "namespace": namespace,
-                "ts_secs": ts_secs,
-                "extracted_entities": entities_json,
-                "was_new_row": was_new_row,
-            });
-            self.log_op_pending(
-                crate::engine::op_types::OP_MATERIALIZE_RECORD_WITH_RID_POST,
-                Some(rid),
-                &post_payload,
-                None,
-                None,
-            )?;
-        }
-
         // 4a.6b: an ORIGIN write that was warn-flagged and actually WROTE A ROW is
         // durable — count it now. Gated on `was_new_row` (sol r3 finding 2): this
         // path is `INSERT OR IGNORE`, so a replay of an existing rid persists
@@ -1823,6 +1854,7 @@ impl YantrikDB {
         if was_new_row {
             self.note_flagged_write_committed(gate_verdict);
         }
+        drop(conn);
         Ok(())
     }
 
