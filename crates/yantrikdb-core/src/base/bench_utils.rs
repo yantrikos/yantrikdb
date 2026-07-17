@@ -64,6 +64,7 @@ pub fn seed_db_scaled(db: &YantrikDB, n: usize, dim: usize, with_graph: bool) {
                 let topic = i % 20;
                 let entity_idx = i % entity_names.len();
                 RecordInput {
+                    idempotency_key: None,
                     text: format!(
                         "Memory {} about topic {} involving {} in context {}",
                         i,

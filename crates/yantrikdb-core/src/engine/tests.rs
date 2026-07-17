@@ -104,6 +104,7 @@ fn test_record_batch_auto_extracts_entities() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let inputs = vec![
         RecordInput {
+            idempotency_key: None,
             text: "Alice Chen is the CEO of Acme Corp".to_string(),
             memory_type: "semantic".to_string(),
             importance: 0.8,
@@ -118,6 +119,7 @@ fn test_record_batch_auto_extracts_entities() {
             emotional_state: None,
         },
         RecordInput {
+            idempotency_key: None,
             text: "Sarah Kim is the CTO of Acme Corp".to_string(),
             memory_type: "semantic".to_string(),
             importance: 0.8,
@@ -630,6 +632,7 @@ fn contract_gate_rejects_invalid_writes() {
     // (no earlier element half-committed), and the error names the position.
     let batch = vec![
         crate::types::RecordInput {
+            idempotency_key: None,
             text: "good".into(),
             memory_type: "episodic".into(),
             importance: 0.5,
@@ -644,6 +647,7 @@ fn contract_gate_rejects_invalid_writes() {
             emotional_state: None,
         },
         crate::types::RecordInput {
+            idempotency_key: None,
             text: "bad".into(),
             memory_type: "episodic".into(),
             importance: 0.5,
@@ -1578,6 +1582,7 @@ fn gate_batch_rejects_inconsistent_element_atomically() {
     // side effect — earlier elements must not be half-committed.
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let mk = |text: &str, source: &str, meta: serde_json::Value| RecordInput {
+        idempotency_key: None,
         text: text.to_string(),
         memory_type: "semantic".to_string(),
         importance: 0.5,
@@ -4528,6 +4533,7 @@ fn test_record_batch() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let inputs: Vec<RecordInput> = (0..10)
         .map(|i| RecordInput {
+            idempotency_key: None,
             text: format!("batch memory {i}"),
             memory_type: "episodic".to_string(),
             importance: 0.5,
@@ -4937,6 +4943,7 @@ fn test_encrypted_record_batch() {
 
     let inputs: Vec<RecordInput> = (0..5)
         .map(|i| RecordInput {
+            idempotency_key: None,
             text: format!("encrypted batch {i}"),
             memory_type: "episodic".to_string(),
             importance: 0.5,
@@ -5568,6 +5575,7 @@ fn test_batch_record_with_dimensions() {
 
     let inputs: Vec<RecordInput> = vec![
         RecordInput {
+            idempotency_key: None,
             text: "batch work meeting".to_string(),
             memory_type: "episodic".to_string(),
             importance: 0.6,
@@ -5582,6 +5590,7 @@ fn test_batch_record_with_dimensions() {
             emotional_state: Some("focus".to_string()),
         },
         RecordInput {
+            idempotency_key: None,
             text: "batch health jog".to_string(),
             memory_type: "episodic".to_string(),
             importance: 0.4,
@@ -5596,6 +5605,7 @@ fn test_batch_record_with_dimensions() {
             emotional_state: None,
         },
         RecordInput {
+            idempotency_key: None,
             text: "batch personal diary".to_string(),
             memory_type: "semantic".to_string(),
             importance: 0.3,
@@ -7150,6 +7160,7 @@ fn flagged_committed_writes_tick_the_nudge_counter_exactly_once() {
 
     // record_batch(): two flagged inputs, one clean.
     let mk = |text: &str, meta: serde_json::Value, source: &str| RecordInput {
+        idempotency_key: None,
         text: text.into(),
         memory_type: "semantic".into(),
         importance: 0.7,
@@ -7212,6 +7223,7 @@ fn deferred_batch_leaves_importance_stats_untouched() {
 
     let err = db
         .record_batch(&[RecordInput {
+            idempotency_key: None,
             text: "deferred".into(),
             memory_type: "semantic".into(),
             importance: 0.9,
@@ -7431,6 +7443,7 @@ fn batch_append_failure_leaves_importance_stats_untouched() {
     // stats assertions below are what this test pins.
     let err = db
         .record_batch(&[RecordInput {
+            idempotency_key: None,
             text: "batch after saturation".into(),
             memory_type: "semantic".into(),
             importance: 0.9,
@@ -8242,6 +8255,7 @@ fn batch_append_failure_writes_nothing_at_all() {
     // absence assertions below are meaningful rather than vacuously true. A
     // regression test whose branch never fires is decoration (#83 lesson).
     db.record_batch(&[RecordInput {
+        idempotency_key: None,
         text: "Quarterly sync with Klaxonberg about the roadmap".into(),
         memory_type: "episodic".into(),
         importance: 0.6,
@@ -8306,6 +8320,7 @@ fn batch_append_failure_writes_nothing_at_all() {
     // The doomed batch: same text shape, a DIFFERENT unique entity.
     let err = db
         .record_batch(&[RecordInput {
+            idempotency_key: None,
             text: "Quarterly sync with Quorvexia about the roadmap".into(),
             memory_type: "episodic".into(),
             importance: 0.9,
@@ -8405,6 +8420,7 @@ fn record_batch_normalizes_blank_namespace_like_record() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
 
     let mk = |text: &str, ns: &str, emb: f32| RecordInput {
+        idempotency_key: None,
         text: text.into(),
         memory_type: "semantic".into(),
         importance: 0.7,
@@ -8483,6 +8499,282 @@ fn record_batch_normalizes_blank_namespace_like_record() {
         )
         .unwrap();
     assert_eq!(count, 2, "both observations under the normalized namespace");
+}
+
+/// 4a.6d-2b helper: a keyed batch input. Explicit embedding (batch items are
+/// always caller-supplied vectors -> PayloadVariant::Record digest).
+fn keyed_input(text: &str, ns: &str, emb: f32, key: Option<&str>) -> RecordInput {
+    RecordInput {
+        idempotency_key: key.map(|k| k.to_string()),
+        text: text.into(),
+        memory_type: "semantic".into(),
+        importance: 0.7,
+        valence: 0.0,
+        half_life: 604800.0,
+        metadata: serde_json::json!({}),
+        embedding: vec_seed(emb, 8),
+        namespace: ns.into(),
+        certainty: 0.8,
+        domain: "work".into(),
+        source: "user".into(),
+        emotional_state: None,
+    }
+}
+
+/// 4a.6d-2b: retrying an identical keyed batch is a per-item idempotent HIT —
+/// the same rids come back in the same order and the store is untouched:
+/// no second rows, no stats advance, no second record ops. Repetition is not
+/// corroboration (T07), now for batches.
+#[test]
+fn keyed_batch_retry_returns_original_rids_and_writes_nothing() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let batch = vec![
+        keyed_input("kb item one", "kb_ns", 1.0, Some("kb-1")),
+        keyed_input("kb item two", "kb_ns", 2.0, Some("kb-2")),
+    ];
+
+    let rids1 = db.record_batch(&batch).unwrap();
+    assert_eq!(rids1.len(), 2);
+
+    let count = |sql: &str| -> i64 { db.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+    let rows_before = count("SELECT COUNT(*) FROM memories WHERE namespace = 'kb_ns'");
+    let ops_before = count("SELECT COUNT(*) FROM oplog WHERE op_type = 'record'");
+    let stats_before: i64 = db
+        .conn()
+        .query_row(
+            "SELECT count FROM namespace_importance_stats WHERE namespace = 'kb_ns'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows_before, 2);
+    assert_eq!(stats_before, 2);
+
+    let rids2 = db.record_batch(&batch).unwrap();
+    assert_eq!(rids2, rids1, "retry returns the ORIGINAL rids, in order");
+    assert_eq!(
+        count("SELECT COUNT(*) FROM memories WHERE namespace = 'kb_ns'"),
+        rows_before,
+        "a keyed retry must write no rows"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM oplog WHERE op_type = 'record'"),
+        ops_before,
+        "a keyed retry must log no ops"
+    );
+    let stats_after: i64 = db
+        .conn()
+        .query_row(
+            "SELECT count FROM namespace_importance_stats WHERE namespace = 'kb_ns'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        stats_after, stats_before,
+        "a keyed retry must not advance stats"
+    );
+}
+
+/// 4a.6d-2b: the same key appearing twice WITHIN one batch with an identical
+/// payload is one write — both positions return the same rid, one row lands.
+#[test]
+fn batch_in_batch_same_key_same_payload_aliases_to_one_write() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rids = db
+        .record_batch(&[
+            keyed_input("alias item", "ib_ns", 1.0, Some("ib-dup")),
+            keyed_input("independent item", "ib_ns", 2.0, None),
+            keyed_input("alias item", "ib_ns", 1.0, Some("ib-dup")),
+        ])
+        .unwrap();
+    assert_eq!(rids.len(), 3, "positional result for every input");
+    assert_eq!(rids[0], rids[2], "in-batch dup aliases to the first write");
+    assert_ne!(rids[0], rids[1]);
+
+    let rows: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE namespace = 'ib_ns'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 2, "the aliased dup must not write a second row");
+}
+
+/// 4a.6d-2b: the same key WITHIN one batch with a DIFFERENT payload is a
+/// caller bug — the whole batch fails typed and writes NOTHING (batches stay
+/// all-or-nothing on failure; a partial batch would silently drop the item a
+/// retry then can never distinguish).
+#[test]
+fn batch_in_batch_same_key_divergent_payload_is_a_conflict() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let err = db
+        .record_batch(&[
+            keyed_input("first payload", "dv_ns", 1.0, Some("dv-key")),
+            keyed_input("DIFFERENT payload", "dv_ns", 2.0, Some("dv-key")),
+        ])
+        .expect_err("divergent payloads under one key must fail the batch");
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::IdempotencyConflict { .. }
+        ),
+        "expected IdempotencyConflict, got {err:?}"
+    );
+    let rows: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE namespace = 'dv_ns'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 0, "a conflicted batch must write nothing");
+}
+
+/// 4a.6d-2b, the 4a.6c invariant on the batch surface: NOTHING may reject a
+/// duplicate that would write nothing. A fully-duplicate keyed batch resolves
+/// to its rids even when the delta is saturated — that is exactly when
+/// clients retry — because hits are excluded from the write set BEFORE any
+/// capacity is reserved.
+#[test]
+fn keyed_batch_duplicate_resolves_even_under_backpressure() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let dim = db.embedding_dim();
+    let batch = vec![
+        keyed_input("bp keyed one", "bp_ns", 1.0, Some("bp-1")),
+        keyed_input("bp keyed two", "bp_ns", 2.0, Some("bp-2")),
+    ];
+    let rids1 = db.record_batch(&batch).unwrap();
+
+    // Saturate the delta.
+    let mut saturated = false;
+    for i in 0..400 {
+        let emb: Vec<f32> = (0..dim).map(|j| ((i + j) as f32) * 0.001).collect();
+        match db.record(
+            &format!("bp-filler-{i}"),
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "bp_filler_ns",
+            0.8,
+            "general",
+            "user",
+            None,
+        ) {
+            Ok(_) => {}
+            Err(crate::error::YantrikDbError::Backpressure { .. }) => {
+                saturated = true;
+                break;
+            }
+            Err(e) => panic!("unexpected: {e:?}"),
+        }
+    }
+    assert!(saturated, "delta never saturated");
+
+    // A fresh unkeyed batch must still backpressure (the saturation is real)…
+    let fresh_err = db
+        .record_batch(&[keyed_input("bp fresh", "bp_ns", 3.0, None)])
+        .expect_err("fresh batch into saturated delta must fail");
+    assert!(matches!(
+        fresh_err,
+        crate::error::YantrikDbError::Backpressure { .. }
+    ));
+
+    // …but the keyed duplicate batch resolves to its original rids.
+    let rids2 = db
+        .record_batch(&batch)
+        .expect("a fully-duplicate keyed batch must resolve, not backpressure");
+    assert_eq!(rids2, rids1);
+}
+
+/// 4a.6d-2b: record() and record_batch share the Record digest variant, so the
+/// SAME key with a byte-identical payload is a HIT across the two surfaces —
+/// they are the same write (caller-supplied embedding, identical canonical
+/// payload). Divergent payloads under the key conflict as always.
+#[test]
+fn same_key_across_record_and_record_batch_hits_on_identical_payload() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let input = keyed_input("cross surface batch text", "xb_ns", 1.5, Some("xb-key"));
+
+    let rid = db
+        .record_with_idempotency(
+            &input.text,
+            &input.memory_type,
+            input.importance,
+            input.valence,
+            input.half_life,
+            &input.metadata,
+            &input.embedding,
+            &input.namespace,
+            input.certainty,
+            &input.domain,
+            &input.source,
+            input.emotional_state.as_deref(),
+            Some("xb-key"),
+        )
+        .unwrap();
+
+    let rids = db.record_batch(&[input]).unwrap();
+    assert_eq!(
+        rids[0], rid,
+        "identical payload under the same key is the same write on either surface"
+    );
+    let rows: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE namespace = 'xb_ns'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 1, "the batch hit must not write a second row");
+}
+
+/// 4a.6d-2b (#94): a keyed batch item's claim binds to a REAL op that
+/// committed in the same transaction — op_id in the claim exists in the oplog
+/// as an applied record op targeting the claimed rid. This is only possible
+/// because 2b moves the batch's op INSERTs INSIDE the savepoint (the 4a.6c
+/// rule: recovery never has to guess from row existence).
+#[test]
+fn keyed_batch_claim_binds_to_a_committed_op() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rids = db
+        .record_batch(&[keyed_input(
+            "claim binding probe",
+            "cb_ns",
+            1.0,
+            Some("cb-key"),
+        )])
+        .unwrap();
+
+    let (claim_rid, op_id, state): (String, String, String) = db
+        .conn()
+        .query_row(
+            "SELECT rid, op_id, state FROM idempotency_claims              WHERE idempotency_key = 'cb-key' AND namespace = 'cb_ns'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .expect("a keyed batch item must write a claim");
+    assert_eq!(claim_rid, rids[0]);
+    assert_eq!(state, "committed");
+
+    let (op_type, applied, target_rid): (String, i64, String) = db
+        .conn()
+        .query_row(
+            "SELECT op_type, applied, target_rid FROM oplog WHERE op_id = ?1",
+            rusqlite::params![op_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .expect("the claim's op_id must exist in the oplog — the claim binds to it");
+    assert_eq!(op_type, "record");
+    assert_eq!(applied, 1);
+    assert_eq!(target_rid, rids[0]);
 }
 
 // ── Relationship-Based Entity Type Tests ──
@@ -17547,6 +17839,7 @@ fn record_batch_defers_during_reembed_instead_of_writing_a_doomed_generation() {
     // its own comment claimed every append lands on one anchored generation.
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let inputs = vec![RecordInput {
+        idempotency_key: None,
         text: "written during a cutover".to_string(),
         memory_type: "semantic".to_string(),
         importance: 0.5,
@@ -17675,6 +17968,7 @@ fn record_batch_replicates_to_a_peer() {
     let follower = YantrikDB::new(":memory:", 8).unwrap();
 
     let mk = |text: &str, seed: f32| RecordInput {
+        idempotency_key: None,
         text: text.to_string(),
         memory_type: "semantic".to_string(),
         importance: 0.6,

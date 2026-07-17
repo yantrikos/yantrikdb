@@ -541,6 +541,7 @@ mod tests {
     #[test]
     fn caller_supplied_embedding_is_digested_but_generated_one_is_not() {
         let mk = |emb: Vec<f32>| RecordInput {
+            idempotency_key: None,
             text: "t".to_string(),
             memory_type: "semantic".to_string(),
             importance: 0.5,

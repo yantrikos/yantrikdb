@@ -1064,6 +1064,16 @@ impl PyYantrikDB {
                 .transpose()?
                 .flatten();
 
+            // 4a.6d-2b: optional per-item idempotency key, same contract as
+            // record(idempotency_key=...). Batch items carry explicit
+            // caller-supplied embeddings, so the Record digest variant
+            // applies and no embedder-drift guard is needed here.
+            let idempotency_key: Option<String> = d
+                .get_item("idempotency_key")?
+                .map(|v| v.extract::<Option<String>>())
+                .transpose()?
+                .flatten();
+
             record_inputs.push(yantrikdb_core::RecordInput {
                 text,
                 memory_type,
@@ -1077,6 +1087,7 @@ impl PyYantrikDB {
                 domain,
                 source,
                 emotional_state,
+                idempotency_key,
             });
         }
 
