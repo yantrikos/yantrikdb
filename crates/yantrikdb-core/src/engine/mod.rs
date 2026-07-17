@@ -53,6 +53,7 @@ pub mod repair;
 mod replay_engine;
 mod reservation;
 mod sanitize;
+mod savepoint;
 mod schema_induction_engine;
 mod session;
 mod skills;

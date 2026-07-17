@@ -144,6 +144,98 @@ impl Drop for ReservationGuard<'_> {
     }
 }
 
+/// The batch analogue of [`ReservationGuard`] (v0.10 Item 4a.6d-2a, #92):
+/// one phase, N `(rid, seq)` reservations, all owing the SAME obligation at
+/// the same moment — a batch is one write with one commit point.
+///
+/// `record_batch` reserves delta capacity for EVERY item before its savepoint
+/// opens, so capacity exhaustion (the old post-RELEASE append failure)
+/// surfaces before a single durable byte — there is nothing to compensate,
+/// which is what actually closes #92: the compensating DELETE reversed rows
+/// and session counts but could never reverse `entities` upserts,
+/// `memory_entities` links, or the in-memory graph_index.
+///
+/// Always publish-only, and deliberately WITHOUT a `with_pending_op`
+/// constructor: `record_batch`'s ops commit `applied = 1` via
+/// `log_record_ops_batch`, so it never enqueues a pending op. Counting here
+/// would inflate `pending_op_count` against zero pending rows — the v0.7.1
+/// counter-leak class the module doc describes. If a queued-batch primitive
+/// ever exists, add the constructor WITH its rationale; do not default to
+/// counting.
+pub(crate) struct BatchReservationGuard<'a> {
+    state: &'a SearchState,
+    /// Owned because the rids outlive no caller borrow this early: the guard
+    /// is constructed before the batch's SQL loop mints its row parameters.
+    entries: Vec<(String, u64)>,
+    phase: ResPhase,
+}
+
+impl<'a> BatchReservationGuard<'a> {
+    pub(crate) fn new(state: &'a SearchState, capacity: usize) -> Self {
+        Self {
+            state,
+            entries: Vec::with_capacity(capacity),
+            phase: ResPhase::Reserved,
+        }
+    }
+
+    /// Reserve one item. On `Err` the FAILED item was never reserved (the
+    /// delta rejects before inserting), and every PRIOR reservation is still
+    /// held by this guard — the caller just returns and `Drop` removes them
+    /// all. Partial reservation must never leak: that capacity is
+    /// unreclaimable by anyone else (compaction retains unpublished entries).
+    pub(crate) fn reserve(
+        &mut self,
+        rid: String,
+        embedding: Vec<f32>,
+        seq: u64,
+    ) -> crate::error::Result<()> {
+        self.state
+            .vec_index
+            .append_reserved(rid.clone(), embedding, seq)?;
+        self.entries.push((rid, seq));
+        Ok(())
+    }
+
+    /// The batch's savepoint RELEASEd: all N obligations invert to publish.
+    /// Nothing fallible may sit between the RELEASE and this call.
+    pub(crate) fn mark_committed(&mut self) {
+        self.phase = ResPhase::Committed;
+    }
+
+    /// Publish all N exactly once. Returns whether every publish found its
+    /// reservation.
+    pub(crate) fn complete(&mut self) -> bool {
+        let all_published = self.discharge_committed();
+        self.phase = ResPhase::Done;
+        all_published
+    }
+
+    fn discharge_committed(&self) -> bool {
+        let mut all_published = true;
+        for (rid, seq) in &self.entries {
+            all_published &= self.state.vec_index.publish(rid, *seq);
+        }
+        all_published
+    }
+}
+
+impl Drop for BatchReservationGuard<'_> {
+    fn drop(&mut self) {
+        match self.phase {
+            ResPhase::Reserved => {
+                for (rid, seq) in &self.entries {
+                    self.state.vec_index.remove_appended(rid, *seq);
+                }
+            }
+            ResPhase::Committed => {
+                self.discharge_committed();
+            }
+            ResPhase::Done => {}
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +387,91 @@ mod tests {
             db.pending_op_count.load(Ordering::Relaxed),
             before,
             "publish_only must never move pending_op_count, on either discharge path"
+        );
+    }
+
+    // ── BatchReservationGuard (4a.6d-2a) ──
+
+    /// THE #92 shape: some items reserve, a later one fails (capacity/dim),
+    /// the batch returns Err — every reservation already taken must be
+    /// removed, or its capacity is held until restart.
+    #[test]
+    fn batch_drop_before_commit_removes_every_reservation() {
+        let db = db();
+        let state = db.search_state.load_full();
+
+        {
+            let mut g = BatchReservationGuard::new(&state, 3);
+            g.reserve("b1".into(), vec![0.1; 8], 21).unwrap();
+            g.reserve("b2".into(), vec![0.2; 8], 22).unwrap();
+            // A third item WOULD have failed here; the caller `?`-returns and
+            // the guard falls out of scope still Reserved.
+        }
+
+        assert!(
+            !state.vec_index.remove_appended("b1", 21),
+            "first reservation must have been removed by Drop"
+        );
+        assert!(
+            !state.vec_index.remove_appended("b2", 22),
+            "second reservation must have been removed by Drop"
+        );
+    }
+
+    #[test]
+    fn batch_unwind_after_commit_publishes_all_rather_than_stranding() {
+        let db = db();
+        let state = db.search_state.load_full();
+
+        let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let mut g = BatchReservationGuard::new(&state, 2);
+            g.reserve("b3".into(), vec![0.1; 8], 23).unwrap();
+            g.reserve("b4".into(), vec![0.2; 8], 24).unwrap();
+            g.mark_committed();
+            panic!("simulated panic between the batch RELEASE and publish");
+        }));
+        assert!(res.is_err(), "panic must propagate");
+
+        // Post-commit the rows are durable: every vector must be published,
+        // none removed.
+        for (rid, seq) in [("b3", 23u64), ("b4", 24u64)] {
+            assert!(
+                !state.vec_index.publish(rid, seq),
+                "{rid} must already be published by Drop"
+            );
+            assert!(
+                state.vec_index.remove_appended(rid, seq),
+                "{rid} must still EXIST — post-commit it is published, never removed"
+            );
+        }
+    }
+
+    #[test]
+    fn batch_complete_then_drop_discharges_exactly_once_and_never_counts() {
+        let db = db();
+        let state = db.search_state.load_full();
+        let before = db.pending_op_count.load(Ordering::Relaxed);
+
+        {
+            let mut g = BatchReservationGuard::new(&state, 2);
+            g.reserve("b5".into(), vec![0.1; 8], 25).unwrap();
+            g.reserve("b6".into(), vec![0.2; 8], 26).unwrap();
+            g.mark_committed();
+            assert!(g.complete(), "complete() publishes all and reports it");
+            // Drop runs in Done phase: no second publish, no removal.
+        }
+
+        assert!(
+            state.vec_index.remove_appended("b5", 25),
+            "published entry must survive the Done-phase Drop"
+        );
+        // record_batch commits applied=1 ops (log_record_ops_batch), so the
+        // batch guard has NO counting mode at all — the v0.7.1 counter-leak
+        // class, kept impossible by construction.
+        assert_eq!(
+            db.pending_op_count.load(Ordering::Relaxed),
+            before,
+            "the batch guard must never move pending_op_count"
         );
     }
 }

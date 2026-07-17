@@ -7424,8 +7424,11 @@ fn batch_append_failure_leaves_importance_stats_untouched() {
     };
     assert_eq!(stats(&db), None, "precondition: no stats for batch_ns");
 
-    // A batch into batch_ns: SQL savepoint commits, then the vector append hits
-    // the saturated delta and fails, triggering the compensating DELETE.
+    // A batch into batch_ns: since 4a.6d-2a the capacity reservation fails
+    // BEFORE the savepoint even opens (pre-restructure: the savepoint
+    // committed, the post-RELEASE append failed, and a compensating DELETE
+    // reversed the rows). Either way the caller sees Backpressure and the
+    // stats assertions below are what this test pins.
     let err = db
         .record_batch(&[RecordInput {
             text: "batch after saturation".into(),
@@ -7447,7 +7450,7 @@ fn batch_append_failure_leaves_importance_stats_untouched() {
         "expected Backpressure from the append, got {err:?}"
     );
 
-    // Rows compensated AND stats untouched (the winner-only guarantee).
+    // No rows AND stats untouched (the winner-only guarantee).
     let rows: i64 = db
         .conn()
         .query_row(
@@ -7456,7 +7459,7 @@ fn batch_append_failure_leaves_importance_stats_untouched() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(rows, 0, "compensating DELETE removed the batch rows");
+    assert_eq!(rows, 0, "a rejected batch must write no rows");
     assert_eq!(
         stats(&db),
         None,
@@ -8218,6 +8221,268 @@ fn record_text_normalizes_blank_namespace_like_record() {
         rid2, rid,
         "'' and '   ' resolve to the same normalized scope"
     );
+}
+
+/// 4a.6d-2a (#92): a batch rejected for delta capacity must write NOTHING AT
+/// ALL. The pre-restructure code committed the savepoint (rows + sessions +
+/// entities + memory_entities), updated graph_index in-memory, and only THEN
+/// appended vectors — so a capacity failure triggered a compensating DELETE
+/// that reversed rows and session counts but left `entities`,
+/// `memory_entities`, and the in-memory graph_index permanently inflated with
+/// linkage for memories that do not exist. The fix reserves delta capacity for
+/// ALL N items BEFORE the savepoint opens, so capacity failure surfaces before
+/// a single durable byte — the same reserve→commit→publish protocol record()
+/// uses (4a.6a), batched.
+#[test]
+fn batch_append_failure_writes_nothing_at_all() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let dim = db.embedding_dim();
+
+    // CONTROL: prove this text shape actually drives entity extraction, so the
+    // absence assertions below are meaningful rather than vacuously true. A
+    // regression test whose branch never fires is decoration (#83 lesson).
+    db.record_batch(&[RecordInput {
+        text: "Quarterly sync with Klaxonberg about the roadmap".into(),
+        memory_type: "episodic".into(),
+        importance: 0.6,
+        valence: 0.0,
+        half_life: 604800.0,
+        metadata: serde_json::json!({}),
+        embedding: vec_seed(1.5, 8),
+        namespace: "ctrl_ns".into(),
+        certainty: 0.8,
+        domain: "work".into(),
+        source: "user".into(),
+        emotional_state: None,
+    }])
+    .unwrap();
+    let ctrl_entities: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM entities WHERE name = 'Klaxonberg'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        ctrl_entities, 1,
+        "control precondition: batch entity extraction must fire for this \
+         text shape, or the absence assertions below prove nothing"
+    );
+
+    // Saturate the delta with single-record writes in a different namespace.
+    let mut saturated = false;
+    for i in 0..400 {
+        let emb: Vec<f32> = (0..dim).map(|j| ((i + j) as f32) * 0.001).collect();
+        match db.record(
+            &format!("filler-{i}"),
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "filler_ns",
+            0.8,
+            "general",
+            "user",
+            None,
+        ) {
+            Ok(_) => {}
+            Err(crate::error::YantrikDbError::Backpressure { .. }) => {
+                saturated = true;
+                break;
+            }
+            Err(e) => panic!("unexpected: {e:?}"),
+        }
+    }
+    assert!(saturated, "delta never saturated");
+
+    let ops_before: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM oplog", [], |r| r.get(0))
+        .unwrap();
+
+    // The doomed batch: same text shape, a DIFFERENT unique entity.
+    let err = db
+        .record_batch(&[RecordInput {
+            text: "Quarterly sync with Quorvexia about the roadmap".into(),
+            memory_type: "episodic".into(),
+            importance: 0.9,
+            valence: 0.0,
+            half_life: 604800.0,
+            metadata: serde_json::json!({}),
+            embedding: vec_seed(2.0, 8),
+            namespace: "batch_ns".into(),
+            certainty: 0.8,
+            domain: "work".into(),
+            source: "user".into(),
+            emotional_state: None,
+        }])
+        .expect_err("batch into the saturated delta must fail");
+    assert!(
+        matches!(err, crate::error::YantrikDbError::Backpressure { .. }),
+        "expected Backpressure, got {err:?}"
+    );
+
+    // NOTHING may exist: not rows, not entities, not memory_entities, not the
+    // in-memory graph, not oplog entries. Pre-restructure, the first three SQL
+    // assertions below held only for `memories` — entities/memory_entities
+    // committed in the savepoint and the compensating DELETE never touched
+    // them (#92).
+    let rows: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE namespace = 'batch_ns'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 0, "no memory rows for the rejected batch");
+
+    let orphan_entities: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM entities WHERE name = 'Quorvexia'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        orphan_entities, 0,
+        "a rejected batch left an orphaned `entities` row (#92)"
+    );
+
+    let orphan_links: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memory_entities WHERE entity_name = 'Quorvexia'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        orphan_links, 0,
+        "a rejected batch left orphaned `memory_entities` links (#92)"
+    );
+
+    assert!(
+        !db.graph_index
+            .read()
+            .all_entity_names()
+            .iter()
+            .any(|n| n == "Quorvexia"),
+        "a rejected batch polluted the in-memory graph_index (#92)"
+    );
+
+    let ops_after: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM oplog", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        ops_after, ops_before,
+        "no oplog entries for a rejected batch"
+    );
+
+    // And the connection is back in autocommit — no savepoint left open (#91's
+    // class: an error arm that unwinds the savepoint must RELEASE it too, or
+    // every later write on this conn silently nests inside it).
+    assert!(
+        db.conn().is_autocommit(),
+        "record_batch failure left a savepoint open on the shared conn"
+    );
+}
+
+/// 4a.6d-2a (#98): record_batch never normalized blank namespaces, while the
+/// calibration helpers it calls normalize INTERNALLY — so a blank-namespace
+/// batch split across two partitions: the ROW landed under the raw "  " (a
+/// partition no reader queries), while its importance observation advanced the
+/// stats under "default". record() and (since #99) record_text both coerce at
+/// entry; the batch must behave identically, and the replicated op payload
+/// must carry the NORMALIZED namespace so peers land it in the same partition.
+#[test]
+fn record_batch_normalizes_blank_namespace_like_record() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+
+    let mk = |text: &str, ns: &str, emb: f32| RecordInput {
+        text: text.into(),
+        memory_type: "semantic".into(),
+        importance: 0.7,
+        valence: 0.0,
+        half_life: 604800.0,
+        metadata: serde_json::json!({}),
+        embedding: vec_seed(emb, 8),
+        namespace: ns.into(),
+        certainty: 0.8,
+        domain: "work".into(),
+        source: "user".into(),
+        emotional_state: None,
+    };
+
+    let rids = db
+        .record_batch(&[
+            mk("blank ns batch item one", "   ", 1.0),
+            mk("blank ns batch item two", "", 2.0),
+        ])
+        .unwrap();
+    assert_eq!(rids.len(), 2);
+
+    let in_default: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE namespace = 'default'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        in_default, 2,
+        "blank-namespace batch rows must land under 'default', like record()"
+    );
+
+    let in_blank: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE TRIM(namespace) = ''",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        in_blank, 0,
+        "no row may persist under a raw blank namespace partition (#98)"
+    );
+
+    // The replicated op payload must carry the normalized namespace too —
+    // otherwise every PEER materializes the row back into the unreachable
+    // blank partition and the fix only holds locally.
+    for rid in &rids {
+        let payload: String = db
+            .conn()
+            .query_row(
+                "SELECT payload FROM oplog WHERE target_rid = ?1 AND op_type = 'record'",
+                rusqlite::params![rid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(
+            v["namespace"], "default",
+            "op payload must replicate the NORMALIZED namespace"
+        );
+    }
+
+    // Stats already normalized internally (that was the divergence); pin the
+    // now-consistent whole: one 'default' stats row observing both items.
+    let count: i64 = db
+        .conn()
+        .query_row(
+            "SELECT count FROM namespace_importance_stats WHERE namespace = 'default'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(count, 2, "both observations under the normalized namespace");
 }
 
 // ── Relationship-Based Entity Type Tests ──

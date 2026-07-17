@@ -739,6 +739,21 @@ impl YantrikDB {
             return Ok(vec![]);
         }
 
+        // 4a.6d-2a (#98): normalize namespaces ONCE at entry, positionally
+        // aligned with `inputs`, and use `namespaces[idx]` for EVERY consumer
+        // below — the row, the session lookup, the replicated op payload, the
+        // audit event, the scoring cache, the visible_seq bump, and the
+        // importance stats. record() and record_text coerce blank namespaces
+        // to "default" at entry; record_batch never did, while the calibration
+        // helpers it calls normalize INTERNALLY — so one blank-namespace batch
+        // item split across two partitions: the row landed under the raw "  "
+        // (which no reader queries) and its importance observation advanced
+        // "default"'s stats.
+        let namespaces: Vec<&str> = inputs
+            .iter()
+            .map(|i| normalize_namespace(&i.namespace))
+            .collect();
+
         // v0.9.3 contract gate: prevalidate the ENTIRE batch before any side
         // effect (calibration / SQL / oplog / index), so a bad element late
         // in the batch can't leave earlier elements half-committed.
@@ -803,15 +818,18 @@ impl YantrikDB {
             .collect();
 
         // Task 31 (Ingest Integrity): each input's importance is calibrated
-        // against its namespace distribution INSIDE the savepoint below (4a.6b),
-        // positionally aligned with `inputs` via push order. Computing +
-        // advancing per item under the savepoint's transaction view preserves
-        // the documented property that later items in the batch see the
-        // running-mean effect of earlier ones in the same namespace — while a
-        // ROLLBACK TO takes every advance with it, so a rejected batch leaves
-        // every namespace's distribution untouched. (The old pre-routing
-        // autocommit advanced ALL of them even when the batch then deferred on
-        // the write-router or died mid-savepoint.)
+        // against its namespace distribution INSIDE the savepoint below,
+        // positionally aligned with `inputs` via push order. Every item
+        // calibrates against the SAME pre-batch snapshot (4a.6b: a batch is
+        // one simultaneous act, no within-batch running mean): all the
+        // calibration READS happen in the item loop, and the stats ADVANCES
+        // run after it — still inside the savepoint, so a rejected batch
+        // rolls its advances back with everything else. That in-savepoint
+        // advance is safe again BECAUSE of 4a.6d-2a: capacity is reserved
+        // before the savepoint opens, so nothing can fail after RELEASE —
+        // the deferred best-effort advance (and its silently-skipped-
+        // observation gap) existed only to survive the post-RELEASE append
+        // failure that no longer exists.
         let mut calibrated_importances: Vec<f64> = Vec::with_capacity(inputs.len());
 
         // **Issue #41 layer 3.** Enter the write-router BEFORE snapshotting
@@ -872,45 +890,68 @@ impl YantrikDB {
                 })
                 .collect();
 
-        let mut rids = Vec::with_capacity(inputs.len());
+        let mut rids: Vec<String> = Vec::with_capacity(inputs.len());
+        let mut seqs: Vec<u64> = Vec::with_capacity(inputs.len());
         // One canonical "record" op per item, emitted after the savepoint
         // releases. See `log_record_ops_batch`: the old single "record_batch" op
         // was silently dropped by every peer, so batch writes never replicated.
         let mut record_op_entries: Vec<(String, serde_json::Value, Vec<u8>)> =
             Vec::with_capacity(inputs.len());
 
+        // 4a.6d-2a (#92): the batch's reserve → commit → publish guard.
+        // Declared OUTSIDE the conn scope: it publishes the vectors after the
+        // savepoint's fate is decided (and the conn lock is released), and on
+        // ANY pre-commit exit its Drop removes every reservation taken so far.
+        let mut batch_reservation =
+            super::reservation::BatchReservationGuard::new(&state, inputs.len());
+
         // Lock conn once for the entire batch SQL work
         {
             let conn = self.conn();
-            conn.execute_batch("SAVEPOINT batch_record")?;
+
+            // RESERVE delta capacity for ALL N items BEFORE the savepoint
+            // opens — the batch analogue of record()'s protocol (4a.6a). This
+            // is where Backpressure and dim mismatches surface: before a
+            // single durable byte. The old shape appended AFTER the RELEASE
+            // and compensated failure with a DELETE that reversed rows and
+            // session counts but could never reverse `entities` upserts,
+            // `memory_entities` links, or the in-memory graph_index (#92) —
+            // now there is nothing to compensate. Seqs are minted under the
+            // conn lock for the same reason record() mints there: search
+            // resolves a rid to its HIGHEST seq, so minting must serialize
+            // with the commits that act on it.
+            for input in inputs.iter() {
+                let rid = crate::id::new_id();
+                let seq = self.assign_seq(None);
+                batch_reservation.reserve(rid.clone(), input.embedding.clone(), seq)?;
+                rids.push(rid);
+                seqs.push(seq);
+            }
+
+            // #91: RAII, not manual unwinding. EVERY fallible statement below
+            // — serde, the encrypt wrappers, each INSERT, the stats advances —
+            // may `?`-return and the guard's Drop runs `ROLLBACK TO; RELEASE`.
+            // The old error arm rolled back WITHOUT releasing (and the paths
+            // before the INSERT returned without even the rollback), leaving
+            // the savepoint open on the engine's single shared connection so
+            // every later write silently nested inside it.
+            let savepoint = super::savepoint::SavepointGuard::new(&conn, "batch_record")?;
 
             for (idx, input) in inputs.iter().enumerate() {
-                let rid = crate::id::new_id();
+                let rid = &rids[idx];
                 let ts = now();
                 let emb_blob = serialize_f32(&input.embedding);
                 let meta_str = serde_json::to_string(&input.metadata)?;
 
-                // 4a.6b: calibrate + advance under the savepoint. The `_on`
-                // variant reads through the HELD guard — calling the locking
-                // wrapper here would re-lock `conn` on the same thread, the
-                // `learn_category_members` deadlock (#83).
-                //
-                // 4a.6b (sol r2 finding 1): the stats ADVANCE is NOT done here.
-                // The vector append happens after the savepoint RELEASE and can
-                // still fail, and a committed EWMA blend is irreversible by the
-                // compensating DELETE — so advancing inside the savepoint left a
-                // rejected batch having permanently moved calibration. The
-                // advance is deferred to the post-append-loop block below, run
-                // only once the append wins. Consequence: every item calibrates
-                // against the SAME pre-batch snapshot (no within-batch running
-                // mean). That intra-batch progression was never pinned by a test
-                // and is a defensible semantics change — a batch is one
-                // simultaneous act — and it buys winner-only correctness. The
-                // cross-batch running mean is unchanged (the deferred advances
-                // move the table).
+                // 4a.6b: calibrate under the savepoint. The `_on` variant
+                // reads through the HELD guard — calling the locking wrapper
+                // here would re-lock `conn` on the same thread, the
+                // `learn_category_members` deadlock (#83). Read-only: the
+                // matching advances run after this loop (same-snapshot
+                // calibration — see the `calibrated_importances` comment).
                 let calibrated = super::importance::calibrated_importance_on(
                     &conn,
-                    &input.namespace,
+                    namespaces[idx],
                     input.importance,
                 )?;
                 calibrated_importances.push(calibrated);
@@ -924,7 +965,7 @@ impl YantrikDB {
                 // **Issue #41 brainstorm-4 §6.** v28 embedding_generation
                 // stamped from the batch's snapshot.
                 let embedding_generation: i64 = state.generation as i64;
-                let result = conn.execute(
+                conn.execute(
                     "INSERT INTO memories \
                      (rid, type, text, embedding, created_at, updated_at, importance, \
                       half_life, last_access, valence, metadata, namespace, \
@@ -932,20 +973,17 @@ impl YantrikDB {
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
                     params![rid, input.memory_type, stored_text, stored_emb, ts, ts,
                             calibrated_importances[idx], input.half_life, ts, input.valence, stored_meta,
-                            input.namespace, input.certainty, input.domain, input.source,
+                            namespaces[idx], input.certainty, input.domain, input.source,
                             input.emotional_state, embedding_generation],
-                );
-
-                if let Err(e) = result {
-                    conn.execute_batch("ROLLBACK TO batch_record")?;
-                    return Err(e.into());
-                }
+                )?;
 
                 // Byte-for-byte the payload `record()` emits (record.rs:325-340)
                 // so peers materialize batch items through the existing, tested
                 // "record" arm. Plaintext text/metadata, matching record() — the
                 // encrypted forms above are the at-rest representation, not the
-                // replication one.
+                // replication one. NORMALIZED namespace (#98): peers must land
+                // the row in the same partition this node did, not the raw
+                // blank one.
                 record_op_entries.push((
                     rid.clone(),
                     serde_json::json!({
@@ -958,7 +996,7 @@ impl YantrikDB {
                         "metadata": input.metadata,
                         "created_at": ts,
                         "updated_at": ts,
-                        "namespace": input.namespace,
+                        "namespace": namespaces[idx],
                         "certainty": input.certainty,
                         "domain": input.domain,
                         "source": input.source,
@@ -966,13 +1004,11 @@ impl YantrikDB {
                     }),
                     embedding_hash(&input.embedding),
                 ));
-
-                rids.push(rid);
             }
 
             // Auto-link batch to active sessions
-            for (rid, input) in rids.iter().zip(inputs.iter()) {
-                if let Some(session_id) = sessions.get(&input.namespace) {
+            for (idx, rid) in rids.iter().enumerate() {
+                if let Some(session_id) = sessions.get(namespaces[idx]) {
                     conn.execute(
                         "UPDATE memories SET session_id = ?1 WHERE rid = ?2",
                         params![session_id, rid],
@@ -1010,13 +1046,30 @@ impl YantrikDB {
                 }
             }
 
-            conn.execute_batch("RELEASE batch_record")?;
+            // 4a.6b winner-only calibration, 4a.6d-2a placement: the advances
+            // run INSIDE the savepoint, after every calibration READ above —
+            // so items still calibrate against the same pre-batch snapshot,
+            // and a rejected batch rolls its advances back with everything
+            // else instead of permanently moving a namespace's distribution.
+            // This retires the old post-commit best-effort advance: that
+            // deferral existed only because the vector append could fail
+            // after RELEASE, and with capacity reserved up front it cannot.
+            // An Err here is PRE-commit — the whole batch rolls back and a
+            // retry writes once — so `?` is correct where post-commit it was
+            // the retry-duplicates trap (sol 4a.6b r3 finding 1).
+            for (idx, input) in inputs.iter().enumerate() {
+                self.advance_importance_stats_in_tx(&conn, namespaces[idx], input.importance)?;
+            }
+
+            savepoint.release()?;
+            // The obligation inverts HERE: the rows are durable, so from this
+            // point the reservations owe publish, not removal. Nothing
+            // fallible may sit between the RELEASE and this call.
+            batch_reservation.mark_committed();
         }
-        // NOTE: warn-mode flag ticks are DEFERRED to after the vector-append
-        // loop below (4a.6b finding 1). The append is a post-RELEASE failure
-        // point whose compensation deletes the rows — so ticking here would
-        // count writes the caller then sees fail. See the tick loop past the
-        // append.
+        // NOTE: warn-mode flag ticks are DEFERRED to after the publish below
+        // (4a.6b finding 1): the nudge metric counts writes that landed and
+        // became visible, in the same order record() counts them.
         // conn dropped; now update graph_index in-memory.
         {
             let mut gi = self.graph_index.write();
@@ -1040,7 +1093,7 @@ impl YantrikDB {
                 crate::graph::analyze_text_features(sanitized_texts[idx].as_ref(), &heuristic_vec);
             tracing::info!(
                 target: "yantrikdb::audit::extraction",
-                namespace = %input.namespace,
+                namespace = %namespaces[idx],
                 memory_rid = %rid,
                 domain = %input.domain,
                 source = %input.source,
@@ -1059,91 +1112,45 @@ impl YantrikDB {
             );
         }
 
-        // Append to vec_index (DeltaIndex) after SQL commit.
-        // **v0.7.19 orphan-on-Backpressure fix.** If any append in
-        // the batch fails (delta saturation, dim mismatch), the
-        // SAVEPOINT above has already committed all N memories
-        // rows. Compensating DELETE clears the entire batch so the
-        // caller sees an atomic batch-fail outcome rather than
-        // partial-commit state. See record() for the rationale on
-        // single-row writes.
-        for (idx, (rid, input)) in rids.iter().zip(inputs.iter()).enumerate() {
-            let seq = self
-                .vec_seq
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-                + 1;
-            if let Err(e) = state
-                .vec_index
-                .append(rid.clone(), input.embedding.clone(), seq)
-            {
-                // Roll back all N rows from memories (DELETE is fast
-                // under a single conn lock; idempotent via WHERE).
-                let conn = self.conn();
-                for r in &rids {
-                    let _ = conn.execute("DELETE FROM memories WHERE rid = ?1", params![r]);
-                }
-                // **v0.7.23 residual fix.** Reverse the per-session
-                // `memory_count` bumps committed in the SAVEPOINT above,
-                // once per memory that was session-linked — mirrors the
-                // increment loop exactly so the stat matches the rows the
-                // compensating DELETE just removed.
-                for input in inputs.iter() {
-                    if let Some(session_id) = sessions.get(&input.namespace) {
-                        let _ = conn.execute(
-                            "UPDATE sessions SET memory_count = memory_count - 1 WHERE session_id = ?1",
-                            params![session_id],
-                        );
-                    }
-                }
-                let _ = idx; // index of the failing entry, kept for future logging
-                return Err(e);
-            }
-            self.bump_visible_seq(&input.namespace, seq);
+        // Durable. PUBLISH all N vectors — infallible, so there is no failure
+        // window between "committed" and "visible", and therefore nothing to
+        // compensate. (This retires the v0.7.19 compensating DELETE and its
+        // v0.7.23 session-count reversal: both existed because the append used
+        // to happen HERE, after the commit, where it could still fail. The
+        // DELETE never reversed `entities`, `memory_entities`, or the
+        // in-memory graph_index — #92 — which is unfixable by adding more
+        // compensation and gone by construction with the up-front reserve.)
+        let all_published = batch_reservation.complete();
+        debug_assert!(
+            all_published,
+            "batch reservation vanished before publish (rids {rids:?})"
+        );
+        if !all_published {
+            tracing::error!(
+                batch_size = rids.len(),
+                "reserved batch vector entries missing at publish — rows are \
+                 durable but unsearchable until the index is rebuilt from SQL"
+            );
         }
-        // 4a.6b (sol r2 finding 1): every append landed, so the batch is durable
-        // AND visible — the winner is decided. Advance the calibration stats and
-        // count the warn-mode flags NOW, both winner-only. Ticking or advancing
-        // before this point would have moved state for a batch whose append then
-        // failed and whose rows were compensated away — and a committed EWMA
-        // blend cannot be un-done by the compensating DELETE.
-        //
-        // Grouped in one transaction so the N advances are all-or-nothing. Each
-        // is a plain upsert (SQL blend against the stored value; composes with
-        // concurrent writers), fed the RAW importance.
-        //
-        // BEST-EFFORT, deliberately NOT `?` (sol 4a.6b r3 finding 1): the rows
-        // and vectors are already durable and visible — the batch WON. Calibration
-        // is an approximate ranking prior, so failing to advance it is a benign
-        // skipped observation. Propagating a SQLITE_FULL/IO error from this tx
-        // would report Err for an already-committed batch, and a retrying caller
-        // would then write DUPLICATE records under fresh rids — turning a missed
-        // stat into data corruption. So it logs and continues.
-        //
-        // NB (sol r4 / #94): `log_record_ops_batch(...)?` below still `?`-returns
-        // after this winner point — a PRE-EXISTING Err-after-commit (#79-era)
-        // that is NOT best-effortable (the ops are what replicate the batch). Its
-        // correct fix is to move that append inside the savepoint above (needs a
-        // held-conn variant to avoid the #83 re-lock); tracked in #94, out of
-        // 4a.6b's scope. Calibration is best-effort ONLY because it is
-        // approximate — do not copy this pattern to the oplog append.
-        {
-            let conn = self.conn();
-            let advanced = (|| -> Result<()> {
-                let tx = conn.unchecked_transaction()?;
-                for input in inputs.iter() {
-                    self.advance_importance_stats_in_tx(&tx, &input.namespace, input.importance)?;
-                }
-                tx.commit()?;
-                Ok(())
-            })();
-            if let Err(e) = advanced {
-                tracing::warn!(
-                    error = %e,
-                    "record_batch: post-commit calibration advance failed; \
-                     batch is durable, calibration observation skipped"
-                );
-            }
+        drop(batch_reservation);
+
+        // LAST: a read-your-write waiter must not wake against a half-applied
+        // batch (CONCURRENCY.md: bump visible_seq AFTER the delta publish).
+        for (idx, _) in inputs.iter().enumerate() {
+            self.bump_visible_seq(namespaces[idx], seqs[idx]);
         }
+        // 4a.6b: the warn-mode flags are counted only now — the batch is
+        // durable AND visible, so the nudge metric counts writes that landed.
+        // (The matching calibration advances moved INSIDE the savepoint in
+        // 4a.6d-2a — see the comment there; the winner is decided at RELEASE
+        // now that nothing can fail after it.)
+        //
+        // NB (sol r4 / #94): `log_record_ops_batch(...)?` below still
+        // `?`-returns after the commit — a PRE-EXISTING Err-after-commit
+        // (#79-era) that is NOT best-effortable (the ops are what replicate
+        // the batch). Its correct fix is to move that append inside the
+        // savepoint above (needs a held-conn variant to avoid the #83
+        // re-lock); tracked in #94, out of 4a.6d-2a's scope.
         for verdict in gate_verdicts {
             self.note_flagged_write_committed(verdict);
         }
@@ -1163,7 +1170,7 @@ impl YantrikDB {
                         valence: input.valence,
                         consolidation_status: "active".to_string(),
                         memory_type: input.memory_type.clone(),
-                        namespace: input.namespace.clone(),
+                        namespace: namespaces[idx].to_string(),
                         certainty: input.certainty,
                         domain: input.domain.clone(),
                         source: input.source.clone(),
