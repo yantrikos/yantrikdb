@@ -1840,6 +1840,16 @@ impl YantrikDB {
         // artifact. Borrowed (no allocation) on the clean path.
         let sanitized = sanitize::sanitize_tool_call_artifacts(text);
         let text = sanitized.as_ref();
+        // v0.7.23 normalization, APPLIED HERE for the first time (sol 4a.6d-1
+        // finding): record_text never normalized blank namespaces — a
+        // pre-existing divergence from record(), which coerces ""/whitespace to
+        // "default" at its entry (record.rs). It went unnoticed while the
+        // Python wrapper routed embedding=None through record(); routing it
+        // through THIS path exposed the gap: rows and idempotency claims would
+        // scope under "" while every reader queries "default". Normalize once,
+        // before calibration, digest, probe, and routing — the same
+        // engine-boundary contract every other write entry keeps.
+        let namespace = record::normalize_namespace(namespace);
         // Task 31 (Ingest Integrity): compute the calibrated importance once,
         // before the (retryable) embed loop — READ-ONLY as of 4a.6b, so the
         // "retry must not double-count" property this comment used to defend is

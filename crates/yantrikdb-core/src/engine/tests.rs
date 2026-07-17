@@ -8132,6 +8132,94 @@ fn same_key_across_record_and_record_text_is_a_conflict() {
     );
 }
 
+/// 4a.6d-1 sol finding: record_text never normalized blank namespaces — a
+/// pre-existing divergence from record() (which coerces ""/whitespace to
+/// "default" at entry) that surfaced when the Python wrapper's
+/// embedding=None flow was rerouted through record_text. A blank-namespace
+/// record_text write must land in "default" — rows, calibration stats, AND
+/// the idempotency claim scope — or every reader querying "default" misses it.
+#[test]
+fn record_text_normalizes_blank_namespace_like_record() {
+    struct Fake;
+    impl crate::types::Embedder for Fake {
+        fn embed(
+            &self,
+            t: &str,
+        ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
+            let mut v = vec![0.1; 8];
+            v[0] = (t.len() % 7) as f32 * 0.1;
+            Ok(v)
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+    }
+    let mut db = YantrikDB::new(":memory:", 8).unwrap();
+    db.set_embedder(Box::new(Fake)).unwrap();
+
+    let rid = db
+        .record_text_with_idempotency(
+            "blank namespace probe",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "   ",
+            0.8,
+            "work",
+            "user",
+            None,
+            Some("ns-key"),
+        )
+        .unwrap();
+
+    let ns: String = db
+        .conn()
+        .query_row(
+            "SELECT namespace FROM memories WHERE rid = ?1",
+            rusqlite::params![rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ns, "default", "blank namespace must normalize to default");
+
+    let claim_ns: String = db
+        .conn()
+        .query_row(
+            "SELECT namespace FROM idempotency_claims WHERE idempotency_key = 'ns-key'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        claim_ns, "default",
+        "the claim must scope under the NORMALIZED namespace"
+    );
+
+    // And the retry with the same blank namespace resolves (same scope).
+    let rid2 = db
+        .record_text_with_idempotency(
+            "blank namespace probe",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "",
+            0.8,
+            "work",
+            "user",
+            None,
+            Some("ns-key"),
+        )
+        .unwrap();
+    assert_eq!(
+        rid2, rid,
+        "'' and '   ' resolve to the same normalized scope"
+    );
+}
+
 // ── Relationship-Based Entity Type Tests ──
 
 #[test]
