@@ -7,6 +7,7 @@ from yantrikdb._yantrikdb_rust import (
     IdempotencyConflict,
     InvalidIdempotencyKey,
     ProvenanceInconsistent,
+    RecallContended,
     TenantManager,
     YantrikDB,
 )
@@ -39,4 +40,5 @@ __all__ = [
     "IdempotencyConflict",
     "InvalidIdempotencyKey",
     "ProvenanceInconsistent",
+    "RecallContended",
 ]

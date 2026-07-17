@@ -145,6 +145,7 @@ class TestTypedExceptions:
             "IdempotencyConflict",
             "InvalidIdempotencyKey",
             "ProvenanceInconsistent",
+            "RecallContended",
         ):
             cls = getattr(y, name)
             assert issubclass(cls, RuntimeError), name

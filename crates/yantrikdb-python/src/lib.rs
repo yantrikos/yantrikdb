@@ -37,6 +37,10 @@ fn _yantrikdb_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "ProvenanceInconsistent",
         m.py().get_type::<py_errors::ProvenanceInconsistent>(),
     )?;
+    m.add(
+        "RecallContended",
+        m.py().get_type::<py_errors::RecallContended>(),
+    )?;
 
     // Triggers
     m.add_class::<py_triggers::PyTrigger>()?;

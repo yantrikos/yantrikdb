@@ -49,9 +49,14 @@ create_exception!(
     yantrikdb,
     IdempotencyConflict,
     PyRuntimeError,
-    "The same idempotency key was already committed with a DIFFERENT \
-     payload. The first write's content stands; the message carries the \
-     existing rid. Not retryable as-is: change the key or the payload."
+    "An idempotency claim could not resolve to a hit. USUALLY: the same key \
+     was already committed with a DIFFERENT payload — the first write's \
+     content stands, the message carries the existing rid, and the fix is to \
+     change the key or the payload (not retryable as-is). The variant also \
+     covers anomalous claim states (a crashed prior attempt, an \
+     engine-invariant violation), some of which the message marks as \
+     retryable — read it before deciding, but branch on this TYPE to know \
+     you are in claim-resolution territory at all."
 );
 
 create_exception!(
@@ -60,6 +65,15 @@ create_exception!(
     PyRuntimeError,
     "The idempotency key is empty, whitespace-only, or longer than 512 \
      bytes. Not retryable as-is: fix the key."
+);
+
+create_exception!(
+    yantrikdb,
+    RecallContended,
+    PyRuntimeError,
+    "A recall lost a bounded read-contention race (writer-priority lock \
+     tuning). Nothing is wrong with the query. Retryable: back off briefly \
+     and reissue the identical recall."
 );
 
 create_exception!(

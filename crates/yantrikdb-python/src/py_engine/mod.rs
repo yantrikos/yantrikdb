@@ -238,6 +238,7 @@ pub(crate) fn map_err(e: yantrikdb_core::YantrikDbError) -> PyErr {
         E::ProvenanceInconsistent { .. } => {
             py_errors::ProvenanceInconsistent::new_err(e.to_string())
         }
+        E::RecallContended { .. } => py_errors::RecallContended::new_err(e.to_string()),
         E::NoEmbedder => PyRuntimeError::new_err(e.to_string()),
         E::NoQuery => PyValueError::new_err(e.to_string()),
         _ => PyRuntimeError::new_err(e.to_string()),
