@@ -9179,10 +9179,13 @@ fn t06_anti_laundering_chokepoint() {
         )
     };
 
-    // 1) The core laundering shape: an inference claiming kind=fact is a
-    //    TYPED refusal at write time.
+    // 1) The core laundering shapes: an inference claiming EITHER
+    //    authoritative kind — fact or observation — is a TYPED refusal at
+    //    write time (the fixture names both; sol 4a.7 r1 finding 1).
     let err = rec("inference", serde_json::json!({"kind": "fact"}), 1.0).unwrap_err();
-    assert!(is_refusal(&err), "record(): got {err:?}");
+    assert!(is_refusal(&err), "record() kind=fact: got {err:?}");
+    let err = rec("inference", serde_json::json!({"kind": "observation"}), 1.5).unwrap_err();
+    assert!(is_refusal(&err), "record() kind=observation: got {err:?}");
 
     // 2) The consistency matrix: you did not OBSERVE an inference.
     let err = rec(
@@ -9193,11 +9196,37 @@ fn t06_anti_laundering_chokepoint() {
     .unwrap_err();
     assert!(is_refusal(&err), "matrix: got {err:?}");
 
-    // 3) Recall returns source VERBATIM: a consistent inference write stores
-    //    and returns source=inference — the gate refuses lies, not lineage.
+    // 3) RECALL returns source VERBATIM — asserted through the actual recall
+    //    projection, not the point-read (sol 4a.7 r1 finding 2: RecallResult
+    //    has its own `source` field, so a recall-path rewrite would slip past
+    //    a get()-based check). The gate refuses lies, not lineage.
     let rid = rec("inference", serde_json::json!({"kind": "inference"}), 3.0).unwrap();
-    let got = db.get(&rid).unwrap().expect("stored");
-    assert_eq!(got.source, "inference", "source must round-trip verbatim");
+    let results = db
+        .recall(
+            &vec_seed(3.0, 8),
+            5,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true, // skip_reinforce: this trace asserts state, not usage
+            Some("t06_ns"),
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+    let hit = results
+        .iter()
+        .find(|r| r.rid == rid)
+        .expect("the inference record must be recallable");
+    assert_eq!(
+        hit.source, "inference",
+        "recall must return source verbatim"
+    );
 
     // 4) Bypass path: batch. One inconsistent element refuses the WHOLE
     //    batch before any side effect.
