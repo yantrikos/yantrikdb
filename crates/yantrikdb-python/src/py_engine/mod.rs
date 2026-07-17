@@ -218,9 +218,29 @@ pub(crate) fn py_to_sql_value(obj: &Bound<'_, PyAny>) -> PyResult<Box<dyn rusqli
 }
 
 pub(crate) fn map_err(e: yantrikdb_core::YantrikDbError) -> PyErr {
+    use crate::py_errors;
+    use yantrikdb_core::YantrikDbError as E;
+    // v0.10 (yantrikdb-mcp friction 2): actionable variants cross the pyo3
+    // boundary as TYPED exception classes so hosts branch on type, never on
+    // message text. Every class subclasses RuntimeError — pre-v0.10 handlers
+    // keep working. The message still carries the details (e.g. the existing
+    // rid on a conflict).
     match e {
-        yantrikdb_core::YantrikDbError::NoEmbedder => PyRuntimeError::new_err(e.to_string()),
-        yantrikdb_core::YantrikDbError::NoQuery => PyValueError::new_err(e.to_string()),
+        E::Backpressure { .. } => py_errors::Backpressure::new_err(e.to_string()),
+        E::CorrectionDeferredDuringReembed { .. } => {
+            py_errors::CorrectionDeferredDuringReembed::new_err(e.to_string())
+        }
+        E::BatchDeferredDuringReembed { .. } => {
+            py_errors::BatchDeferredDuringReembed::new_err(e.to_string())
+        }
+        E::IdempotencyConflict { .. } => py_errors::IdempotencyConflict::new_err(e.to_string()),
+        E::InvalidIdempotencyKey { .. } => py_errors::InvalidIdempotencyKey::new_err(e.to_string()),
+        E::ProvenanceInconsistent { .. } => {
+            py_errors::ProvenanceInconsistent::new_err(e.to_string())
+        }
+        E::RecallContended { .. } => py_errors::RecallContended::new_err(e.to_string()),
+        E::NoEmbedder => PyRuntimeError::new_err(e.to_string()),
+        E::NoQuery => PyValueError::new_err(e.to_string()),
         _ => PyRuntimeError::new_err(e.to_string()),
     }
 }
