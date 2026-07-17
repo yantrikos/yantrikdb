@@ -156,8 +156,8 @@ impl Drop for ReservationGuard<'_> {
 /// `memory_entities` links, or the in-memory graph_index.
 ///
 /// Always publish-only, and deliberately WITHOUT a `with_pending_op`
-/// constructor: `record_batch`'s ops commit `applied = 1` via
-/// `log_record_ops_batch`, so it never enqueues a pending op. Counting here
+/// constructor: `record_batch`'s ops commit `applied = 1` (in-savepoint
+/// `log_op_in_tx` since 4a.6d-2b), so it never enqueues a pending op. Counting here
 /// would inflate `pending_op_count` against zero pending rows — the v0.7.1
 /// counter-leak class the module doc describes. If a queued-batch primitive
 /// ever exists, add the constructor WITH its rationale; do not default to
@@ -465,7 +465,7 @@ mod tests {
             state.vec_index.remove_appended("b5", 25),
             "published entry must survive the Done-phase Drop"
         );
-        // record_batch commits applied=1 ops (log_record_ops_batch), so the
+        // record_batch commits applied=1 ops (in-savepoint log_op_in_tx), so the
         // batch guard has NO counting mode at all — the v0.7.1 counter-leak
         // class, kept impossible by construction.
         assert_eq!(

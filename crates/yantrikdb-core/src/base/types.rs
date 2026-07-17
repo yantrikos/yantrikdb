@@ -433,6 +433,15 @@ pub struct RecordInput {
     pub domain: String,
     pub source: String,
     pub emotional_state: Option<String>,
+    /// v0.10 4a.6d-2b: per-item idempotency key, same contract and scope as
+    /// `record_with_idempotency` — (origin_actor, normalized namespace, key),
+    /// digest variant `Record` (the caller-supplied embedding is part of the
+    /// payload). `None` = unkeyed item. A key that already committed with the
+    /// SAME payload makes this item an idempotent hit (its position in the
+    /// returned rids carries the ORIGINAL rid; the item writes nothing);
+    /// the same key with a DIFFERENT payload fails the WHOLE batch with a
+    /// typed `IdempotencyConflict` — batches stay all-or-nothing on failure.
+    pub idempotency_key: Option<String>,
 }
 
 // ── Conflict types (V2) ──

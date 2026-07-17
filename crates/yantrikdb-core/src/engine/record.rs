@@ -221,6 +221,10 @@ impl YantrikDB {
         // seq/HLC allocation. Backpressure storms are exactly when clients
         // retry; without this, a keyed dup against a saturated engine could
         // only ever see Backpressure and the retry loop would never converge.
+        // "Admission" is the precise word (sol 4a.6d-2b r1 finding 2): the
+        // validation gates above still run first, because they are
+        // deterministic payload-shape checks an identical retry passes
+        // identically — not saturation-dependent rejection.
         // A probe MISS is advisory (the ON CONFLICT INSERT in the write tx
         // stays authoritative); a probe HIT is final — committed claims are
         // immutable in 4a.
@@ -817,6 +821,138 @@ impl YantrikDB {
             .map(|i| sanitize::sanitize_tool_call_artifacts(&i.text))
             .collect();
 
+        // ── 4a.6d-2b: per-item idempotency, prevalidated with everything else ──
+        //
+        // Digests are the canonical RAW payload exactly as
+        // `record_with_idempotency` computes them — SANITIZED text, NORMALIZED
+        // namespace, RAW importance, the caller-supplied embedding included
+        // (PayloadVariant::Record) — so the same key with a byte-identical
+        // payload is the SAME write whether it arrives via record() or a batch
+        // item, and a divergent payload conflicts identically. The two
+        // overrides below are load-bearing: `from_record_input` views the raw
+        // struct, and digesting raw text/namespace would make an honest
+        // cross-surface retry a false conflict.
+        //
+        // In-batch duplicates resolve here, before any probe or side effect:
+        // the same (namespace, key) twice with the same digest makes the later
+        // item an ALIAS of the first (one write, both positions return its
+        // rid); with a different digest the whole batch fails typed — batches
+        // are all-or-nothing on failure, and silently dropping one divergent
+        // item would leave a retry unable to tell which content won.
+        let n = inputs.len();
+        let mut digests: Vec<Option<[u8; 32]>> = vec![None; n];
+        let mut alias_of: Vec<Option<usize>> = vec![None; n];
+        // resolved[i] = the committed rid a keyed item hit — set by the probes.
+        let mut resolved: Vec<Option<String>> = vec![None; n];
+        {
+            let mut first_by_key: std::collections::HashMap<(&str, &str), usize> =
+                std::collections::HashMap::new();
+            for (i, input) in inputs.iter().enumerate() {
+                let Some(key) = input.idempotency_key.as_deref() else {
+                    continue;
+                };
+                if key.trim().is_empty() || key.len() > 512 {
+                    return Err(crate::error::YantrikDbError::InvalidIdempotencyKey {
+                        reason: if key.len() > 512 {
+                            format!("inputs[{i}]: key is {} bytes; max 512", key.len())
+                        } else {
+                            format!("inputs[{i}]: key is empty or whitespace-only")
+                        },
+                    });
+                }
+                let mut view = crate::payload_digest::PayloadView::from_record_input(
+                    input,
+                    crate::payload_digest::PayloadVariant::Record,
+                );
+                view.namespace = namespaces[i];
+                view.text = sanitized_texts[i].as_ref();
+                let digest = crate::payload_digest::payload_digest(&view);
+                match first_by_key.entry((namespaces[i], key)) {
+                    std::collections::hash_map::Entry::Occupied(e) => {
+                        let j = *e.get();
+                        if digests[j] != Some(digest) {
+                            return Err(crate::error::YantrikDbError::IdempotencyConflict {
+                                namespace: namespaces[i].to_string(),
+                                existing_rid: String::new(),
+                                reason: format!(
+                                    "inputs[{i}] reuses inputs[{j}]'s idempotency key \
+                                     with a DIFFERENT payload — change the key or make \
+                                     the payloads identical"
+                                ),
+                            });
+                        }
+                        alias_of[i] = Some(j);
+                    }
+                    std::collections::hash_map::Entry::Vacant(v) => {
+                        v.insert(i);
+                    }
+                }
+                digests[i] = Some(digest);
+            }
+        }
+
+        // Positional result assembly, shared by the two early-resolution exits
+        // and the final return. alias roots are always original (non-alias)
+        // items, so one hop suffices.
+        fn assemble_rids(
+            resolved: &[Option<String>],
+            alias_of: &[Option<usize>],
+            rid_slots: &[Option<String>],
+        ) -> Vec<String> {
+            (0..resolved.len())
+                .map(|i| {
+                    let root = alias_of[i].unwrap_or(i);
+                    resolved[root]
+                        .clone()
+                        .or_else(|| rid_slots[root].clone())
+                        .expect("every position resolves to a hit or a written rid")
+                })
+                .collect()
+        }
+
+        // 4a.6d-2b unlocked pre-admission probe (the 4a.6c invariant on the
+        // batch surface): no RESOURCE admission check may reject a duplicate
+        // that would write nothing. Committed hits leave the write set here —
+        // BEFORE the write-router, the delta reservation, and the seq mint —
+        // so a fully-duplicate batch resolves to its rids even during a
+        // reembed cutover or under full delta saturation. That is exactly
+        // when clients retry. The guarantee is deliberately NARROWER than
+        // "nothing rejects a duplicate": prevalidation (embedding/scalar/
+        // provenance gates, key format, in-batch divergence) runs above and
+        // still errors first — those are deterministic payload-shape checks
+        // an identical retry passes identically, not saturation-dependent
+        // admission that would starve a retry loop (sol 4a.6d-2b r1
+        // finding 2). A MISS is advisory (the locked probe under the conn
+        // guard below is what closes the race window); a HIT is final —
+        // committed claims are immutable in 4a.
+        if digests.iter().any(Option::is_some) {
+            let conn = self.conn();
+            for i in 0..n {
+                if alias_of[i].is_some() {
+                    continue;
+                }
+                if let (Some(digest), Some(key)) =
+                    (digests[i].as_ref(), inputs[i].idempotency_key.as_deref())
+                {
+                    if let Some(existing_rid) = super::idempotency::probe_committed_claim(
+                        &conn,
+                        &self.actor_id,
+                        namespaces[i],
+                        key,
+                        digest,
+                    )? {
+                        resolved[i] = Some(existing_rid);
+                    }
+                }
+            }
+        }
+        let all_resolved = (0..n).all(|i| resolved[alias_of[i].unwrap_or(i)].is_some());
+        if all_resolved {
+            // Every item is an idempotent hit: the batch writes nothing and
+            // returns the original rids, saturated engine or not.
+            return Ok(assemble_rids(&resolved, &alias_of, &vec![None; n]));
+        }
+
         // Task 31 (Ingest Integrity): each input's importance is calibrated
         // against its namespace distribution INSIDE the savepoint below,
         // positionally aligned with `inputs` via push order. Every item
@@ -830,7 +966,10 @@ impl YantrikDB {
         // the deferred best-effort advance (and its silently-skipped-
         // observation gap) existed only to survive the post-RELEASE append
         // failure that no longer exists.
-        let mut calibrated_importances: Vec<f64> = Vec::with_capacity(inputs.len());
+        //
+        // 4a.6d-2b: indexed by ORIGINAL input position, `Some` only for items
+        // that write — hits and aliases never calibrate (they store nothing).
+        let mut calibrated_importances: Vec<Option<f64>> = vec![None; n];
 
         // **Issue #41 layer 3.** Enter the write-router BEFORE snapshotting
         // SearchState, exactly as `record()` does (record.rs:105/138).
@@ -872,10 +1011,20 @@ impl YantrikDB {
         //   (a) heuristic extraction from text (capitalized proper-nouns)
         //   (b) match against already-known entities in graph_index
         let known_entities = self.graph_index.read().all_entity_names();
-        let per_memory_linkage: Vec<(Vec<String>, std::collections::HashSet<String>)> =
+        // 4a.6d-2b: `None` for items leaving the write set as idempotent hits
+        // or in-batch aliases — a hit writes nothing, so it must not
+        // re-extract entities (mention_count would inflate on every retry,
+        // the #80 class), and an alias is the SAME text as its root (one
+        // write, one extraction). Locked-probe hits below leave an unused
+        // `Some` here; unused is harmless, used-would-be-the-bug.
+        let per_memory_linkage: Vec<Option<(Vec<String>, std::collections::HashSet<String>)>> =
             sanitized_texts
                 .iter()
-                .map(|text| {
+                .enumerate()
+                .map(|(i, text)| {
+                    if resolved[i].is_some() || alias_of[i].is_some() {
+                        return None;
+                    }
                     let text = text.as_ref();
                     let text_tokens = crate::graph::tokenize(text);
                     let heuristic = crate::graph::extract_heuristic_entities(text);
@@ -886,17 +1035,19 @@ impl YantrikDB {
                             candidates.insert(known.clone());
                         }
                     }
-                    (heuristic, candidates)
+                    Some((heuristic, candidates))
                 })
                 .collect();
 
-        let mut rids: Vec<String> = Vec::with_capacity(inputs.len());
-        let mut seqs: Vec<u64> = Vec::with_capacity(inputs.len());
-        // One canonical "record" op per item, emitted after the savepoint
-        // releases. See `log_record_ops_batch`: the old single "record_batch" op
-        // was silently dropped by every peer, so batch writes never replicated.
-        let mut record_op_entries: Vec<(String, serde_json::Value, Vec<u8>)> =
-            Vec::with_capacity(inputs.len());
+        // Per-ORIGINAL-index slots: `Some` only for items that actually write.
+        // Hits and aliases stay `None` and resolve positionally at return.
+        let mut rid_slots: Vec<Option<String>> = vec![None; n];
+        let mut seq_slots: Vec<Option<u64>> = vec![None; n];
+        // 4a.6d-2b (#94): op ids preminted BEFORE the transaction, exactly as
+        // record() premints `record_op_id` — a keyed item's claim binds to its
+        // op id as recovery evidence, so the id must exist before the claim
+        // INSERT, and the op itself now commits INSIDE the savepoint.
+        let mut op_ids: Vec<Option<String>> = vec![None; n];
 
         // 4a.6d-2a (#92): the batch's reserve → commit → publish guard.
         // Declared OUTSIDE the conn scope: it publishes the vectors after the
@@ -909,23 +1060,63 @@ impl YantrikDB {
         {
             let conn = self.conn();
 
-            // RESERVE delta capacity for ALL N items BEFORE the savepoint
-            // opens — the batch analogue of record()'s protocol (4a.6a). This
-            // is where Backpressure and dim mismatches surface: before a
-            // single durable byte. The old shape appended AFTER the RELEASE
-            // and compensated failure with a DELETE that reversed rows and
-            // session counts but could never reverse `entities` upserts,
+            // 4a.6d-2b LOCKED probe (4a.6c sol r2, batch surface): the
+            // unlocked probe above can race — another same-key writer may
+            // commit between it and this lock. Re-probing under the SAME conn
+            // guard that stays held through the transaction closes the window
+            // completely: nothing can commit a claim between this read and our
+            // tx. Items hitting here leave the write set before any capacity
+            // is reserved. (The in-tx ON CONFLICT below stays the
+            // authoritative serialization point; under this locking it is
+            // belt-and-suspenders, reachable only by raw-`conn()` writers
+            // outside the engine.)
+            for i in 0..n {
+                if resolved[i].is_some() || alias_of[i].is_some() {
+                    continue;
+                }
+                if let (Some(digest), Some(key)) =
+                    (digests[i].as_ref(), inputs[i].idempotency_key.as_deref())
+                {
+                    if let Some(existing_rid) = super::idempotency::probe_committed_claim(
+                        &conn,
+                        &self.actor_id,
+                        namespaces[i],
+                        key,
+                        digest,
+                    )? {
+                        resolved[i] = Some(existing_rid);
+                    }
+                }
+            }
+            if (0..n).all(|i| resolved[alias_of[i].unwrap_or(i)].is_some()) {
+                // The race resolved every remaining item: nothing to write.
+                drop(conn);
+                return Ok(assemble_rids(&resolved, &alias_of, &rid_slots));
+            }
+
+            // RESERVE delta capacity for every WRITING item BEFORE the
+            // savepoint opens — the batch analogue of record()'s protocol
+            // (4a.6a). This is where Backpressure and dim mismatches surface:
+            // before a single durable byte. The old shape appended AFTER the
+            // RELEASE and compensated failure with a DELETE that reversed rows
+            // and session counts but could never reverse `entities` upserts,
             // `memory_entities` links, or the in-memory graph_index (#92) —
-            // now there is nothing to compensate. Seqs are minted under the
-            // conn lock for the same reason record() mints there: search
-            // resolves a rid to its HIGHEST seq, so minting must serialize
-            // with the commits that act on it.
-            for input in inputs.iter() {
+            // now there is nothing to compensate. Idempotent hits and in-batch
+            // aliases reserve NOTHING: a duplicate writes nothing, so it must
+            // never consume capacity a fresh write is then denied. Seqs are
+            // minted under the conn lock for the same reason record() mints
+            // there: search resolves a rid to its HIGHEST seq, so minting must
+            // serialize with the commits that act on it.
+            for (i, input) in inputs.iter().enumerate() {
+                if resolved[i].is_some() || alias_of[i].is_some() {
+                    continue;
+                }
                 let rid = crate::id::new_id();
                 let seq = self.assign_seq(None);
                 batch_reservation.reserve(rid.clone(), input.embedding.clone(), seq)?;
-                rids.push(rid);
-                seqs.push(seq);
+                rid_slots[i] = Some(rid);
+                seq_slots[i] = Some(seq);
+                op_ids[i] = Some(crate::id::new_id());
             }
 
             // #91: RAII, not manual unwinding. EVERY fallible statement below
@@ -937,8 +1128,61 @@ impl YantrikDB {
             // every later write silently nested inside it.
             let savepoint = super::savepoint::SavepointGuard::new(&conn, "batch_record")?;
 
+            // 4a.6c rule, batch surface: the claims are the FIRST statements of
+            // the transaction — a dup must resolve to a hit/conflict at the
+            // claim, never surface later as a bare constraint error from the
+            // v37 partial unique index on memories. All claims precede all row
+            // INSERTs; each binds to its item's preminted op id.
+            for (i, input) in inputs.iter().enumerate() {
+                if resolved[i].is_some() || alias_of[i].is_some() {
+                    continue;
+                }
+                let (Some(digest), Some(key)) =
+                    (digests[i].as_ref(), input.idempotency_key.as_deref())
+                else {
+                    continue;
+                };
+                use super::idempotency::{claim_in_tx, ClaimAttempt, ClaimRow};
+                match claim_in_tx(
+                    &conn,
+                    &ClaimRow {
+                        origin_actor: &self.actor_id,
+                        namespace: namespaces[i],
+                        idempotency_key: key,
+                        rid: rid_slots[i].as_deref().expect("write items have rids"),
+                        payload_digest: digest,
+                        op_id: op_ids[i].as_deref().expect("write items have op ids"),
+                        route: "batch",
+                        generation: state.generation as i64,
+                    },
+                )? {
+                    ClaimAttempt::Won => {}
+                    // Unreachable in 4a: the LOCKED probe above runs under the
+                    // SAME conn guard held continuously through this
+                    // transaction, and the conn mutex is the engine's single
+                    // write lock — no other claim can commit in between. Loud,
+                    // not silent, if that invariant ever breaks; the savepoint
+                    // guard rolls the whole batch back.
+                    ClaimAttempt::Hit { existing_rid } => {
+                        return Err(crate::error::YantrikDbError::IdempotencyConflict {
+                            namespace: namespaces[i].to_string(),
+                            existing_rid,
+                            reason: format!(
+                                "inputs[{i}]: claim committed between the locked probe \
+                                 and the batch transaction — impossible under the \
+                                 engine's single-writer conn unless the claims table \
+                                 is written outside the engine"
+                            ),
+                        });
+                    }
+                }
+            }
+
             for (idx, input) in inputs.iter().enumerate() {
-                let rid = &rids[idx];
+                if resolved[idx].is_some() || alias_of[idx].is_some() {
+                    continue;
+                }
+                let rid = rid_slots[idx].as_ref().expect("write items have rids");
                 let ts = now();
                 let emb_blob = serialize_f32(&input.embedding);
                 let meta_str = serde_json::to_string(&input.metadata)?;
@@ -954,7 +1198,7 @@ impl YantrikDB {
                     namespaces[idx],
                     input.importance,
                 )?;
-                calibrated_importances.push(calibrated);
+                calibrated_importances[idx] = Some(calibrated);
 
                 // Encrypt fields if encryption is enabled. Task 29: store the
                 // sanitized text (positionally aligned with `inputs`).
@@ -969,45 +1213,76 @@ impl YantrikDB {
                     "INSERT INTO memories \
                      (rid, type, text, embedding, created_at, updated_at, importance, \
                       half_life, last_access, valence, metadata, namespace, \
-                      certainty, domain, source, emotional_state, embedding_generation) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+                      certainty, domain, source, emotional_state, embedding_generation, \
+                      idempotency_key, origin_actor) \
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
+                             ?18, ?19)",
                     params![rid, input.memory_type, stored_text, stored_emb, ts, ts,
-                            calibrated_importances[idx], input.half_life, ts, input.valence, stored_meta,
+                            calibrated, input.half_life, ts, input.valence, stored_meta,
                             namespaces[idx], input.certainty, input.domain, input.source,
-                            input.emotional_state, embedding_generation],
+                            input.emotional_state, embedding_generation,
+                            // v37 idempotency columns, exactly as record()
+                            // stamps them: set only for keyed items (the
+                            // partial unique index ignores NULLs, so unkeyed
+                            // behavior is unchanged).
+                            input.idempotency_key.as_deref(),
+                            input.idempotency_key.as_ref().map(|_| self.actor_id.as_str())],
                 )?;
 
-                // Byte-for-byte the payload `record()` emits (record.rs:325-340)
+                // The canonical "record" op, byte-for-byte what record() emits,
                 // so peers materialize batch items through the existing, tested
-                // "record" arm. Plaintext text/metadata, matching record() — the
-                // encrypted forms above are the at-rest representation, not the
-                // replication one. NORMALIZED namespace (#98): peers must land
-                // the row in the same partition this node did, not the raw
-                // blank one.
-                record_op_entries.push((
-                    rid.clone(),
-                    serde_json::json!({
-                        "rid": rid,
-                        "type": input.memory_type,
-                        "text": sanitized_texts[idx].as_ref(),
-                        "importance": calibrated_importances[idx],
-                        "valence": input.valence,
-                        "half_life": input.half_life,
-                        "metadata": input.metadata,
-                        "created_at": ts,
-                        "updated_at": ts,
-                        "namespace": namespaces[idx],
-                        "certainty": input.certainty,
-                        "domain": input.domain,
-                        "source": input.source,
-                        "emotional_state": input.emotional_state,
-                    }),
-                    embedding_hash(&input.embedding),
-                ));
+                // "record" arm. Plaintext text/metadata (the encrypted forms
+                // above are the at-rest representation, not the replication
+                // one); NORMALIZED namespace (#98) so peers land the row in the
+                // same partition this node did. 4a.6d-2b (#94): committed HERE,
+                // inside the savepoint, under the item's preminted op id — the
+                // op the claim binds to either commits with the row or neither
+                // exists. The old shape logged all ops AFTER the release, so a
+                // crash in between left durable rows that never replicated,
+                // and an Err there surfaced as a failure for a batch that had
+                // already committed (a retry then duplicated every row).
+                let record_payload = serde_json::json!({
+                    "rid": rid,
+                    "type": input.memory_type,
+                    "text": sanitized_texts[idx].as_ref(),
+                    "importance": calibrated,
+                    "valence": input.valence,
+                    "half_life": input.half_life,
+                    "metadata": input.metadata,
+                    "created_at": ts,
+                    "updated_at": ts,
+                    "namespace": namespaces[idx],
+                    "certainty": input.certainty,
+                    "domain": input.domain,
+                    "source": input.source,
+                    "emotional_state": input.emotional_state,
+                    // 4a.6c/4a.6d-2b (sol r2 finding 1): carried so
+                    // replication's materialize_record writes the same v37
+                    // columns the origin row has — a follower's keyed row must
+                    // mirror its leader's, or the memories partial unique
+                    // index (the claims table's defense-in-depth) never covers
+                    // followers for batch writes. Null for keyless items;
+                    // peers on older payloads default to NULL. Same two
+                    // fields record() and record_queued emit.
+                    "idempotency_key": input.idempotency_key.as_deref(),
+                    "origin_actor": input.idempotency_key.as_ref().map(|_| self.actor_id.as_str()),
+                });
+                let emb_hash = embedding_hash(&input.embedding);
+                self.log_op_in_tx(
+                    &conn,
+                    "record",
+                    Some(rid),
+                    &record_payload,
+                    Some(&emb_hash),
+                    None,
+                    embedding_generation,
+                    Some(op_ids[idx].as_deref().expect("write items have op ids")),
+                )?;
             }
 
             // Auto-link batch to active sessions
-            for (idx, rid) in rids.iter().enumerate() {
+            for (idx, rid_slot) in rid_slots.iter().enumerate() {
+                let Some(rid) = rid_slot else { continue };
                 if let Some(session_id) = sessions.get(namespaces[idx]) {
                     conn.execute(
                         "UPDATE memories SET session_id = ?1 WHERE rid = ?2",
@@ -1022,8 +1297,13 @@ impl YantrikDB {
 
             // Persist entity linkage (SQL side). graph_index in-memory update
             // happens after conn is dropped to avoid holding two write locks.
+            // Gated on rid_slots, not the linkage Option: a locked-probe hit
+            // has a stale Some(linkage) that must not be persisted.
             let batch_ts = now();
-            for (rid, (heuristic, candidates)) in rids.iter().zip(per_memory_linkage.iter()) {
+            for (rid, linkage) in rid_slots.iter().zip(per_memory_linkage.iter()) {
+                let (Some(rid), Some((heuristic, candidates))) = (rid, linkage) else {
+                    continue;
+                };
                 for entity in heuristic {
                     let entity_type = crate::graph::classify_entity_type(entity);
                     conn.execute(
@@ -1057,7 +1337,13 @@ impl YantrikDB {
             // An Err here is PRE-commit — the whole batch rolls back and a
             // retry writes once — so `?` is correct where post-commit it was
             // the retry-duplicates trap (sol 4a.6b r3 finding 1).
+            // Write items only: an idempotent hit stores nothing, so it must
+            // not advance the distribution — repetition is not corroboration
+            // (T07), and record()'s hit path skips this identically.
             for (idx, input) in inputs.iter().enumerate() {
+                if rid_slots[idx].is_none() {
+                    continue;
+                }
                 self.advance_importance_stats_in_tx(&conn, namespaces[idx], input.importance)?;
             }
 
@@ -1070,10 +1356,14 @@ impl YantrikDB {
         // NOTE: warn-mode flag ticks are DEFERRED to after the publish below
         // (4a.6b finding 1): the nudge metric counts writes that landed and
         // became visible, in the same order record() counts them.
-        // conn dropped; now update graph_index in-memory.
+        // conn dropped; now update graph_index in-memory. Write items only —
+        // gated on rid_slots (a hit's stale linkage must not re-link).
         {
             let mut gi = self.graph_index.write();
-            for (rid, (_, candidates)) in rids.iter().zip(per_memory_linkage.iter()) {
+            for (rid, linkage) in rid_slots.iter().zip(per_memory_linkage.iter()) {
+                let (Some(rid), Some((_, candidates))) = (rid, linkage) else {
+                    continue;
+                };
                 for entity in candidates {
                     let entity_type = crate::graph::classify_entity_type(entity);
                     gi.add_entity(entity, entity_type);
@@ -1082,12 +1372,15 @@ impl YantrikDB {
             }
         }
 
-        // RFC 006 Phase 0: emit one audit event per memory in the batch.
-        for (idx, (rid, (input, (heuristic_entities, candidates)))) in rids
-            .iter()
-            .zip(inputs.iter().zip(per_memory_linkage.iter()))
-            .enumerate()
-        {
+        // RFC 006 Phase 0: emit one audit event per memory WRITTEN in the
+        // batch. Hits and aliases extracted nothing and stored nothing, so an
+        // audit event for them would attest an extraction that never ran.
+        for (idx, input) in inputs.iter().enumerate() {
+            let (Some(rid), Some((heuristic_entities, candidates))) =
+                (rid_slots[idx].as_ref(), per_memory_linkage[idx].as_ref())
+            else {
+                continue;
+            };
             let heuristic_vec: Vec<String> = heuristic_entities.iter().cloned().collect();
             let features =
                 crate::graph::analyze_text_features(sanitized_texts[idx].as_ref(), &heuristic_vec);
@@ -1123,11 +1416,11 @@ impl YantrikDB {
         let all_published = batch_reservation.complete();
         debug_assert!(
             all_published,
-            "batch reservation vanished before publish (rids {rids:?})"
+            "batch reservation vanished before publish (rids {rid_slots:?})"
         );
         if !all_published {
             tracing::error!(
-                batch_size = rids.len(),
+                batch_size = rid_slots.iter().flatten().count(),
                 "reserved batch vector entries missing at publish — rows are \
                  durable but unsearchable until the index is rebuilt from SQL"
             );
@@ -1136,34 +1429,36 @@ impl YantrikDB {
 
         // LAST: a read-your-write waiter must not wake against a half-applied
         // batch (CONCURRENCY.md: bump visible_seq AFTER the delta publish).
-        for (idx, _) in inputs.iter().enumerate() {
-            self.bump_visible_seq(namespaces[idx], seqs[idx]);
+        for idx in 0..n {
+            if let Some(seq) = seq_slots[idx] {
+                self.bump_visible_seq(namespaces[idx], seq);
+            }
         }
         // 4a.6b: the warn-mode flags are counted only now — the batch is
         // durable AND visible, so the nudge metric counts writes that landed.
-        // (The matching calibration advances moved INSIDE the savepoint in
-        // 4a.6d-2a — see the comment there; the winner is decided at RELEASE
-        // now that nothing can fail after it.)
-        //
-        // NB (sol r4 / #94): `log_record_ops_batch(...)?` below still
-        // `?`-returns after the commit — a PRE-EXISTING Err-after-commit
-        // (#79-era) that is NOT best-effortable (the ops are what replicate
-        // the batch). Its correct fix is to move that append inside the
-        // savepoint above (needs a held-conn variant to avoid the #83
-        // re-lock); tracked in #94, out of 4a.6d-2a's scope.
-        for verdict in gate_verdicts {
+        // Write items only: a hit landed nothing, so its verdict must not
+        // tick (record()'s hit path returns before its tick identically).
+        for (idx, verdict) in gate_verdicts.into_iter().enumerate() {
+            if rid_slots[idx].is_none() {
+                continue;
+            }
             self.note_flagged_write_committed(verdict);
         }
-        // vec_index dropped, now scoring_cache
+        // vec_index dropped, now scoring_cache — write items only (a hit's
+        // row already has its cache entry from its original write).
         {
             let mut cache = self.scoring_cache.write();
-            for (idx, (rid, input)) in rids.iter().zip(inputs.iter()).enumerate() {
+            for (idx, input) in inputs.iter().enumerate() {
+                let Some(rid) = rid_slots[idx].as_ref() else {
+                    continue;
+                };
                 let ts = now();
                 cache.insert(
                     rid.clone(),
                     ScoringRow {
                         created_at: ts,
-                        importance: calibrated_importances[idx],
+                        importance: calibrated_importances[idx]
+                            .expect("write items calibrated in the savepoint"),
                         half_life: input.half_life,
                         last_access: ts,
                         access_count: 0,
@@ -1180,17 +1475,12 @@ impl YantrikDB {
             }
         }
 
-        // One canonical "record" op per item, under a single conn lock.
-        //
-        // This REPLACES a single `log_op("record_batch", {count, rids})`. That op
-        // was unreplicable twice over: replication has no "record_batch" arm, so
-        // peers hit the `_ =>` forward-compat catch-all and silently dropped it;
-        // and the payload carried no text/embedding/scalars, so it could not have
-        // rebuilt the memories even with an arm. Batch-written memories simply
-        // never reached peers. Nothing consumes the old op type locally.
-        self.log_record_ops_batch(&record_op_entries)?;
-
-        Ok(rids)
+        // The per-item "record" ops committed INSIDE the savepoint above
+        // (4a.6d-2b, closing #94 for this path) — there is no post-commit
+        // oplog write left to fail. Positional assembly: written items return
+        // their fresh rids, hits their original rids, in-batch aliases their
+        // root's rid.
+        Ok(assemble_rids(&resolved, &alias_of, &rid_slots))
     }
 
     /// **Issue #9 — deterministic mutation primitive for cluster replication.**

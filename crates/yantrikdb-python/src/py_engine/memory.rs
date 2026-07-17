@@ -1029,9 +1029,35 @@ impl PyYantrikDB {
                 .transpose()?
                 .unwrap_or(serde_json::json!({}));
 
+            // 4a.6d-2b (sol r1 finding 1): a key on a batch item requires an
+            // EXPLICIT embedding. Rust record_batch digests PayloadVariant::
+            // Record — API-byte identity, the caller-supplied vector included —
+            // so a wrapper-synthesized vector would make an honest retry a
+            // false conflict the moment the embedder drifts, and would make
+            // `record(text, key)` (which routes to record_text's
+            // embedding-EXCLUDED digest) and `record_batch([{text, key}])`
+            // resolve the same user-level write differently. No engine-side
+            // text-batch idempotency surface exists yet, so fail loud rather
+            // than subtly mis-dedup — same interim stance 4a.6c took on
+            // record() before 4a.6d-1 shipped the RecordText variant.
+            let has_key = d
+                .get_item("idempotency_key")?
+                .map(|v| !v.is_none())
+                .unwrap_or(false);
             let embedding: Vec<f32> = match d.get_item("embedding")? {
-                Some(v) => v.extract()?,
-                None => self.embed_text(py, &text)?,
+                Some(v) if !v.is_none() => v.extract()?,
+                _ if has_key => {
+                    return Err(PyValueError::new_err(
+                        "idempotency_key on a record_batch item requires an \
+                         explicit 'embedding': the batch digest includes the \
+                         caller's vector (API-byte identity), and a \
+                         wrapper-generated vector would make an honest retry \
+                         a false conflict. Pass the embedding, or use \
+                         record(text, idempotency_key=...) for an \
+                         engine-embedded keyed write.",
+                    ));
+                }
+                _ => self.embed_text(py, &text)?,
             };
 
             let namespace: String = d
@@ -1064,6 +1090,16 @@ impl PyYantrikDB {
                 .transpose()?
                 .flatten();
 
+            // 4a.6d-2b: optional per-item idempotency key, same contract as
+            // record(idempotency_key=...). Batch items carry explicit
+            // caller-supplied embeddings, so the Record digest variant
+            // applies and no embedder-drift guard is needed here.
+            let idempotency_key: Option<String> = d
+                .get_item("idempotency_key")?
+                .map(|v| v.extract::<Option<String>>())
+                .transpose()?
+                .flatten();
+
             record_inputs.push(yantrikdb_core::RecordInput {
                 text,
                 memory_type,
@@ -1077,6 +1113,7 @@ impl PyYantrikDB {
                 domain,
                 source,
                 emotional_state,
+                idempotency_key,
             });
         }
 
