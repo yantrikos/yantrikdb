@@ -8870,6 +8870,81 @@ fn partial_hit_batch_writes_only_the_fresh_items() {
     assert_eq!(ns, "ph_ns");
 }
 
+/// 4a.6d-2b sol r2 finding 1: a KEYED batch item's record op must carry the
+/// v37 idempotency fields — record()'s payload does (record.rs ~440,
+/// "a follower's keyed row must mirror its leader's"), and replication's
+/// materialize_record persists them to the follower row. The batch payload
+/// omitted both, so a keyed batch row replicated as an UNKEYED row on every
+/// peer: the memories partial-unique mirror (the claims table's
+/// defense-in-depth) silently never covered follower rows for batch writes.
+/// The pre-existing batch replication test missed it because its inputs are
+/// unkeyed — same lesson as the python wrapper in r1: bugs live where the
+/// keyed variant is untested.
+#[test]
+fn keyed_batch_record_op_replicates_the_key_to_a_peer() {
+    use crate::replication::{apply_ops, extract_ops_since};
+    let leader = YantrikDB::new(":memory:", 8).unwrap();
+    let follower = YantrikDB::new(":memory:", 8).unwrap();
+
+    let rids = leader
+        .record_batch(&[
+            keyed_input("replicated keyed item", "rk_ns", 1.0, Some("rk-key")),
+            keyed_input("replicated unkeyed item", "rk_ns", 2.0, None),
+        ])
+        .unwrap();
+
+    // Payload-level: the keyed item's op carries BOTH fields; the unkeyed
+    // item's op carries them as null (identical to record()'s shape).
+    let payload_for = |rid: &str| -> serde_json::Value {
+        let raw: String = leader
+            .conn()
+            .query_row(
+                "SELECT payload FROM oplog WHERE op_type = 'record' AND target_rid = ?1",
+                rusqlite::params![rid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&raw).unwrap()
+    };
+    let keyed_payload = payload_for(&rids[0]);
+    assert_eq!(
+        keyed_payload["idempotency_key"], "rk-key",
+        "keyed batch op payload must carry the key for follower mirroring"
+    );
+    assert_eq!(
+        keyed_payload["origin_actor"],
+        leader.actor_id(),
+        "keyed batch op payload must carry the origin actor"
+    );
+    let unkeyed_payload = payload_for(&rids[1]);
+    assert!(
+        unkeyed_payload["idempotency_key"].is_null(),
+        "unkeyed items carry null, matching record()'s keyless shape"
+    );
+
+    // End-to-end: the follower row mirrors the leader's v37 columns.
+    let ops = extract_ops_since(&leader.conn(), None, None, None, 100).unwrap();
+    apply_ops(&follower, &ops).unwrap();
+    let (f_key, f_actor): (Option<String>, Option<String>) = follower
+        .conn()
+        .query_row(
+            "SELECT idempotency_key, origin_actor FROM memories WHERE rid = ?1",
+            rusqlite::params![rids[0]],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(
+        f_key.as_deref(),
+        Some("rk-key"),
+        "follower keyed row must mirror the leader's idempotency_key"
+    );
+    assert_eq!(
+        f_actor.as_deref(),
+        Some(leader.actor_id()),
+        "follower keyed row must mirror the leader's origin_actor"
+    );
+}
+
 // ── Relationship-Based Entity Type Tests ──
 
 #[test]

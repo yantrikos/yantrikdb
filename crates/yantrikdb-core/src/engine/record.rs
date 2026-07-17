@@ -1256,6 +1256,16 @@ impl YantrikDB {
                     "domain": input.domain,
                     "source": input.source,
                     "emotional_state": input.emotional_state,
+                    // 4a.6c/4a.6d-2b (sol r2 finding 1): carried so
+                    // replication's materialize_record writes the same v37
+                    // columns the origin row has — a follower's keyed row must
+                    // mirror its leader's, or the memories partial unique
+                    // index (the claims table's defense-in-depth) never covers
+                    // followers for batch writes. Null for keyless items;
+                    // peers on older payloads default to NULL. Same two
+                    // fields record() and record_queued emit.
+                    "idempotency_key": input.idempotency_key.as_deref(),
+                    "origin_actor": input.idempotency_key.as_ref().map(|_| self.actor_id.as_str()),
                 });
                 let emb_hash = embedding_hash(&input.embedding);
                 self.log_op_in_tx(
