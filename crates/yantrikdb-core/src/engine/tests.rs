@@ -8777,6 +8777,43 @@ fn keyed_batch_claim_binds_to_a_committed_op() {
     assert_eq!(target_rid, rids[0]);
 }
 
+/// 4a.6d-2b: the UNLOCKED pre-admission probe's unique contribution — it runs
+/// BEFORE the write-router, so a fully-duplicate keyed batch resolves to its
+/// rids even while a reembed cutover has the router in Queueing (a fresh batch
+/// correctly defers, since no queued-batch primitive exists). Without the
+/// pre-router probe, a dup retry during cutover could only ever see
+/// BatchDeferredDuringReembed — the retry loop that never converges, again.
+#[test]
+fn keyed_batch_duplicate_resolves_during_reembed_cutover() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let batch = vec![
+        keyed_input("cutover keyed one", "co_ns", 1.0, Some("co-1")),
+        keyed_input("cutover keyed two", "co_ns", 2.0, Some("co-2")),
+    ];
+    let rids1 = db.record_batch(&batch).unwrap();
+
+    // Simulate a reembed cutover in flight.
+    db.write_router.switch_to_queueing();
+
+    // Control: a FRESH batch must defer — the router state is real.
+    let err = db
+        .record_batch(&[keyed_input("cutover fresh", "co_ns", 3.0, None)])
+        .expect_err("fresh batch must defer during cutover");
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::BatchDeferredDuringReembed { .. }
+        ),
+        "expected BatchDeferredDuringReembed, got {err:?}"
+    );
+
+    // The fully-duplicate keyed batch resolves BEFORE the router.
+    let rids2 = db
+        .record_batch(&batch)
+        .expect("a fully-duplicate keyed batch must resolve during cutover");
+    assert_eq!(rids2, rids1);
+}
+
 // ── Relationship-Based Entity Type Tests ──
 
 #[test]

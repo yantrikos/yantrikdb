@@ -188,7 +188,11 @@ impl YantrikDB {
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn log_op_in_tx(
         &self,
-        tx: &rusqlite::Transaction<'_>,
+        // &Connection, not &Transaction: a `Transaction` derefs to it, so tx
+        // callers are unchanged, while SAVEPOINT-guarded callers (record_batch,
+        // 4a.6d-2b) have no `Transaction` to offer — same generalization
+        // `advance_importance_stats_in_tx` made in 4a.6b.
+        tx: &rusqlite::Connection,
         op_type: &str,
         target_rid: Option<&str>,
         payload: &serde_json::Value,
@@ -337,74 +341,11 @@ impl YantrikDB {
         Ok(())
     }
 
-    /// Batched sibling of [`Self::log_op`] that writes one canonical `"record"`
-    /// op per entry under a SINGLE connection lock.
-    ///
-    /// `record_batch` used to log one opaque `"record_batch"` op carrying only
-    /// `{count, rids}`. Replication has no arm for that op type, so peers hit the
-    /// `_ =>` catch-all and silently dropped it — and the payload could not have
-    /// reconstructed the memories anyway. Batch-written memories therefore never
-    /// replicated. Emitting the same canonical `"record"` op that `record()`
-    /// emits makes them replicate through the existing, tested materializer
-    /// rather than needing a new one.
-    ///
-    /// op_ids and HLCs are minted BEFORE the conn lock is taken: `log_op` ticks
-    /// the HLC and *then* locks the connection, so nothing in the codebase ever
-    /// holds `self.hlc` while acquiring `self.conn`. Pre-minting keeps it that
-    /// way and lets the whole batch share one lock instead of taking N.
-    /// HLCs are ticked in batch order, so the ops carry increasing timestamps
-    /// and replicate in their natural causal order.
-    pub(crate) fn log_record_ops_batch(
-        &self,
-        entries: &[(String, serde_json::Value, Vec<u8>)],
-    ) -> Result<Vec<String>> {
-        if entries.is_empty() {
-            return Ok(Vec::new());
-        }
-        let applied_generation: i64 = self.search_state.load().generation as i64;
-
-        // Pre-mint everything that needs a non-conn lock or can fail, so the
-        // critical section below is pure SQL.
-        let mut prepared: Vec<(String, Vec<u8>, String, &[u8], &str)> =
-            Vec::with_capacity(entries.len());
-        for (rid, payload, emb_hash) in entries {
-            let op_id = crate::id::new_id();
-            let hlc_bytes = self.tick_hlc().to_bytes().to_vec();
-            let payload_str = serde_json::to_string(payload)?;
-            prepared.push((
-                op_id,
-                hlc_bytes,
-                payload_str,
-                emb_hash.as_slice(),
-                rid.as_str(),
-            ));
-        }
-
-        let ts = now();
-        let conn = self.conn.lock();
-        let mut stmt = conn.prepare(
-            "INSERT INTO oplog (op_id, op_type, timestamp, target_rid, payload, \
-             actor_id, hlc, embedding_hash, origin_actor, applied, applied_generation) \
-             VALUES (?1, 'record', ?2, ?3, ?4, ?5, ?6, ?7, ?8, 1, ?9)",
-        )?;
-        for (op_id, hlc_bytes, payload_str, emb_hash, rid) in &prepared {
-            stmt.execute(params![
-                op_id,
-                ts,
-                rid,
-                payload_str,
-                self.actor_id,
-                hlc_bytes,
-                emb_hash,
-                self.actor_id,
-                applied_generation,
-            ])?;
-        }
-        drop(stmt);
-        drop(conn);
-
-        Ok(prepared.into_iter().map(|(op_id, ..)| op_id).collect())
-    }
+    // NOTE (4a.6d-2b): `log_record_ops_batch` — the post-commit batched
+    // "record"-op writer introduced by #79's fix — was deleted here. Its one
+    // caller, `record_batch`, now commits each item's op INSIDE its savepoint
+    // via `log_op_in_tx` under a preminted op id (the id an idempotency claim
+    // binds to), which is what closed #94's Err-after-commit for that path.
 
     /// **Decoupled write path RFC, Phase 1.**
     ///
