@@ -1759,6 +1759,7 @@ impl YantrikDB {
         // extract_ops_since reports the user-data op in causal order
         // (record_with_rid arrived, then its entity-link materialization
         // was queued).
+        crate::testing::fail_point("record_with_rid.between_row_and_oplog");
         let emb_hash = embedding_hash(embedding);
         if was_new_row {
             self.log_op(

@@ -8945,6 +8945,135 @@ fn keyed_batch_record_op_replicates_the_key_to_a_peer() {
     );
 }
 
+/// 4a.6d-3 helper: a record_with_rid call with every knob defaulted.
+#[allow(clippy::too_many_arguments)]
+fn rwr(
+    db: &YantrikDB,
+    rid: &str,
+    text: &str,
+    ns: &str,
+    entities: &[&str],
+    seq: Option<u64>,
+) -> crate::error::Result<()> {
+    db.record_with_rid(
+        rid,
+        text,
+        "semantic",
+        0.6,
+        0.0,
+        604800.0,
+        &serde_json::json!({}),
+        &vec_seed(4.0, 8),
+        ns,
+        0.8,
+        "general",
+        "user",
+        None,
+        1_750_000_000_000_000,
+        entities,
+        "test-embedder",
+        seq,
+        crate::provenance::WriteAdmission::Origin,
+    )
+}
+
+/// 4a.6d-3 (#94's class on this path): the pending-queue admission check ran
+/// INSIDE `log_op_pending`, AFTER the row and vector were durable — so a
+/// saturated pending queue returned Err for a write that had already
+/// committed, and a retrying caller (the cluster applier!) then hit the
+/// was_new_row=false arm which never logs the op: the row exists forever
+/// without provenance. Post-port the locked check runs BEFORE any durable
+/// byte: Err means nothing was written.
+#[test]
+fn record_with_rid_pending_saturation_rejects_before_writing() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    db.pending_op_count
+        .swap(1_000_000, std::sync::atomic::Ordering::SeqCst);
+
+    let err = rwr(
+        &db,
+        "0198c1c2-0000-7000-8000-0000000000aa",
+        "saturated pending write",
+        "sat_ns",
+        &["SaturatedEntity"],
+        None,
+    )
+    .expect_err("pending saturation must reject the write");
+    assert!(
+        matches!(err, crate::error::YantrikDbError::Backpressure { .. }),
+        "expected Backpressure, got {err:?}"
+    );
+
+    let rows: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE namespace = 'sat_ns'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        rows, 0,
+        "a write rejected for pending saturation must write NOTHING —          pre-port the row and vector were already durable when the check ran"
+    );
+    let ops: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM oplog WHERE op_type = 'record_with_rid'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ops, 0, "no op for a rejected write");
+    assert!(db.conn().is_autocommit(), "no savepoint left open");
+}
+
+/// 4a.6d-3: replaying an EXISTING rid must not re-enqueue its entity
+/// materialization. Pre-port the enqueue ran post-commit unconditionally
+/// (its rationale: repair a crash between the row and the enqueue) — but the
+/// port commits row + op + enqueue in ONE savepoint, so the repair case
+/// cannot exist and a replay re-enqueue is pure duplicate work inflating the
+/// pending queue on every cluster re-delivery.
+#[test]
+fn record_with_rid_replay_does_not_reenqueue_materialization() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid = "0198c1c2-0000-7000-8000-0000000000bb";
+
+    rwr(&db, rid, "replayed write", "rp_ns", &["ReplayEntity"], None).unwrap();
+    rwr(&db, rid, "replayed write", "rp_ns", &["ReplayEntity"], None).unwrap();
+
+    let enqueues: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM oplog WHERE op_type = ?1 AND target_rid = ?2",
+            rusqlite::params![
+                crate::engine::op_types::OP_MATERIALIZE_RECORD_WITH_RID_POST,
+                rid
+            ],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        enqueues, 1,
+        "replay of an existing rid re-enqueued its materialization"
+    );
+
+    // And the replay logged no second record_with_rid op (pre-existing
+    // was_new_row gate — pinned here so the port cannot regress it).
+    let ops: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM oplog WHERE op_type = 'record_with_rid' AND target_rid = ?1",
+            rusqlite::params![rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        ops, 1,
+        "exactly one record_with_rid op for one logical write"
+    );
+}
+
 // ── Relationship-Based Entity Type Tests ──
 
 #[test]
