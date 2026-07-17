@@ -9133,6 +9133,300 @@ fn record_with_rid_enqueue_counts_exactly_one_pending_op() {
     );
 }
 
+// ── v0.10 4a.7 — trace-contract tests (docs/traces/T06.toml, T07.toml) ──
+// These two tests ARE the `test_path` targets of the release-blocking trace
+// contracts. Each walks its contract's fixture and asserts every line of its
+// `assertions` list, in the default suite (explicit vectors, no embedder, no
+// wall-clock asserts). Renaming or weakening them breaks the contract: the
+// registry test pins test_path, and implemented -> pending is illegal.
+
+/// TRACE T06 — "anti-laundering-chokepoint" (docs/traces/T06.toml).
+///
+/// Fixture: a source=inference record; derived write attempts kind=fact/
+/// observation; and the consistency matrix (source=inference AND
+/// basis=observation). Assertions: typed refusal at WRITE time via the
+/// central mutation gate; recall returns source verbatim; bypass paths
+/// covered — correct(metadata_merge), record_with_rid, batch,
+/// links-after-record, replication.
+#[test]
+fn t06_anti_laundering_chokepoint() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    assert_eq!(
+        db.provenance_gate_mode(),
+        crate::provenance::GateMode::Enforce,
+        "fresh DB defaults to enforce — the chokepoint is on by default"
+    );
+    let is_refusal = |e: &crate::error::YantrikDbError| {
+        matches!(
+            e,
+            crate::error::YantrikDbError::ProvenanceInconsistent { .. }
+        )
+    };
+    let rec = |source: &str, meta: serde_json::Value, seed: f32| {
+        db.record(
+            "t06 probe text",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &meta,
+            &vec_seed(seed, 8),
+            "t06_ns",
+            0.8,
+            "general",
+            source,
+            None,
+        )
+    };
+
+    // 1) The core laundering shape: an inference claiming kind=fact is a
+    //    TYPED refusal at write time.
+    let err = rec("inference", serde_json::json!({"kind": "fact"}), 1.0).unwrap_err();
+    assert!(is_refusal(&err), "record(): got {err:?}");
+
+    // 2) The consistency matrix: you did not OBSERVE an inference.
+    let err = rec(
+        "inference",
+        serde_json::json!({"kind": "inference", "confidence_basis": "observation"}),
+        2.0,
+    )
+    .unwrap_err();
+    assert!(is_refusal(&err), "matrix: got {err:?}");
+
+    // 3) Recall returns source VERBATIM: a consistent inference write stores
+    //    and returns source=inference — the gate refuses lies, not lineage.
+    let rid = rec("inference", serde_json::json!({"kind": "inference"}), 3.0).unwrap();
+    let got = db.get(&rid).unwrap().expect("stored");
+    assert_eq!(got.source, "inference", "source must round-trip verbatim");
+
+    // 4) Bypass path: batch. One inconsistent element refuses the WHOLE
+    //    batch before any side effect.
+    let mk = |source: &str, meta: serde_json::Value, seed: f32| RecordInput {
+        idempotency_key: None,
+        text: "t06 batch probe".into(),
+        memory_type: "semantic".into(),
+        importance: 0.5,
+        valence: 0.0,
+        half_life: 604800.0,
+        metadata: meta,
+        embedding: vec_seed(seed, 8),
+        namespace: "t06_batch_ns".into(),
+        certainty: 0.8,
+        domain: "general".into(),
+        source: source.into(),
+        emotional_state: None,
+    };
+    let err = db
+        .record_batch(&[
+            mk("user", serde_json::json!({}), 4.0),
+            mk("inference", serde_json::json!({"kind": "fact"}), 5.0),
+        ])
+        .unwrap_err();
+    assert!(is_refusal(&err), "batch: got {err:?}");
+    let rows: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE namespace = 't06_batch_ns'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 0, "a refused batch writes nothing");
+
+    // 5) Bypass path: record_with_rid at ORIGIN admission is gated exactly
+    //    like record(); at ADMITTED it is deliberately NOT re-gated — the
+    //    op was gated at its leader's origin ingress, and re-gating the
+    //    apply path would make followers reject consensus-committed writes.
+    //    That pair IS the replication coverage: one chokepoint, at origin.
+    let err = db
+        .record_with_rid(
+            "0198c1c2-0000-7000-8000-000000000d60",
+            "t06 rwr probe",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({"kind": "fact"}),
+            &vec_seed(6.0, 8),
+            "t06_ns",
+            0.8,
+            "general",
+            "inference",
+            None,
+            1_750_000_000_000_000,
+            &[],
+            "test-embedder",
+            None,
+            crate::provenance::WriteAdmission::Origin,
+        )
+        .unwrap_err();
+    assert!(is_refusal(&err), "record_with_rid(Origin): got {err:?}");
+    db.record_with_rid(
+        "0198c1c2-0000-7000-8000-000000000d61",
+        "t06 admitted replica probe",
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &serde_json::json!({"kind": "fact"}),
+        &vec_seed(7.0, 8),
+        "t06_ns",
+        0.8,
+        "general",
+        "inference",
+        None,
+        1_750_000_000_000_000,
+        &[],
+        "test-embedder",
+        None,
+        crate::provenance::WriteAdmission::Admitted,
+    )
+    .expect("Admitted apply is not re-gated (leader gated at origin)");
+
+    // 6) Bypass path: correct(metadata_merge) gates the FINAL merged
+    //    metadata against the record's source — no post-hoc promotion.
+    let err = db
+        .correct(
+            &rid,
+            None,
+            Some(&serde_json::json!({"kind": "fact"})),
+            None,
+            None,
+            "promote",
+        )
+        .unwrap_err();
+    assert!(is_refusal(&err), "correct(metadata_merge): got {err:?}");
+    assert_eq!(db.history(&rid).unwrap().len(), 0, "no revision on refusal");
+
+    // 7) Bypass path: links-after-record (record_with_links delegates
+    //    through record()'s gate; refused before any link effect).
+    let target = rec("user", serde_json::json!({}), 8.0).unwrap();
+    let links = [RecordLink {
+        target_rid: target.clone(),
+        link_type: LinkType::Supports,
+    }];
+    let err = db
+        .record_with_links(
+            "t06 laundered via wrapper",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({"kind": "fact"}),
+            &vec_seed(9.0, 8),
+            "t06_ns",
+            0.8,
+            "general",
+            "inference",
+            None,
+            &links,
+        )
+        .unwrap_err();
+    assert!(is_refusal(&err), "record_with_links: got {err:?}");
+    let inbound = db
+        .linked_records(&target, LinkDirection::Inbound, None)
+        .unwrap();
+    assert!(
+        inbound.is_empty(),
+        "refused write applied links: {inbound:?}"
+    );
+}
+
+/// TRACE T07 — "repetition-not-corroboration" (docs/traces/T07.toml).
+///
+/// Fixture: the same content written 3x with the same idempotency key; and
+/// without a key. Assertions: one record with certainty UNCHANGED (retries
+/// must not inflate confidence); same key + different payload = typed
+/// conflict; no silent near-dup merge without a key.
+#[test]
+fn t07_repetition_is_not_corroboration() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let write = |text: &str, key: Option<&str>| {
+        db.record_with_idempotency(
+            text,
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            &vec_seed(1.0, 8),
+            "t07_ns",
+            0.8,
+            "general",
+            "user",
+            None,
+            key,
+        )
+    };
+
+    // Same content, same key, three times.
+    let rid1 = write("the same assertion", Some("t07-key")).unwrap();
+    let rid2 = write("the same assertion", Some("t07-key")).unwrap();
+    let rid3 = write("the same assertion", Some("t07-key")).unwrap();
+    assert_eq!(rid1, rid2);
+    assert_eq!(rid1, rid3, "every retry returns the ORIGINAL rid");
+
+    // ONE record…
+    let rows: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE namespace = 't07_ns'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 1, "three keyed writes, one record");
+    // …with certainty UNCHANGED: repetition must not inflate confidence.
+    let (certainty, importance): (f64, f64) = db
+        .conn()
+        .query_row(
+            "SELECT certainty, importance FROM memories WHERE rid = ?1",
+            rusqlite::params![rid1],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(certainty, 0.8, "certainty untouched by retries");
+    // …and the namespace observed exactly ONE importance sample (a retry
+    // that advanced the EWMA would be corroboration through the back door).
+    let stats_count: i64 = db
+        .conn()
+        .query_row(
+            "SELECT count FROM namespace_importance_stats WHERE namespace = 't07_ns'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stats_count, 1, "one write, one calibration observation");
+    let _ = importance; // stored calibrated value; pinned by 4a.6b tests
+
+    // Same key, DIFFERENT payload: a typed conflict, never a silent merge.
+    let err = write("a different assertion", Some("t07-key")).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::IdempotencyConflict { .. }
+        ),
+        "expected IdempotencyConflict, got {err:?}"
+    );
+
+    // WITHOUT a key: the same content three times is three records — the
+    // engine must not silently near-dup-merge unkeyed writes.
+    let ka = write("unkeyed repeated content", None).unwrap();
+    let kb = write("unkeyed repeated content", None).unwrap();
+    let kc = write("unkeyed repeated content", None).unwrap();
+    assert_ne!(ka, kb);
+    assert_ne!(kb, kc);
+    let rows: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE namespace = 't07_ns' AND text = 'unkeyed repeated content'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 3, "no key, no dedup: three distinct records");
+}
+
 // ── Relationship-Based Entity Type Tests ──
 
 #[test]

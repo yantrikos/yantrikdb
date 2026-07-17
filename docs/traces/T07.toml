@@ -6,9 +6,9 @@ id = "T07"
 title = "repetition-not-corroboration"
 item = "4"           # v0.10 plan item that must make this passable
 owner = "yantrikdb-core"
-status = "pending"
-# implemented_since = ""    # set on implementation (version string)
-# test_path = ""            # set on implementation (module::test_fn)
+status = "implemented"
+implemented_since = "0.10.0"
+test_path = "engine::tests::t07_repetition_is_not_corroboration"
 seeds = "YANTRIKDB_HNSW_SEED via testing feature; fixtures declare exact vectors"
 clock = "injectable via testing feature (set_test_clock); no wall-clock asserts"
 
