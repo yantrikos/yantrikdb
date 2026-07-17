@@ -100,3 +100,59 @@ class TestBatchIdempotency:
             [{**common, "embedding": _vec(3.0), "idempotency_key": "x-1"}]
         )
         assert rids == [rid]
+
+class TestTypedExceptions:
+    """v0.10 (yantrikdb-mcp friction 2): actionable errors cross the pyo3
+    boundary as typed exception classes — hosts branch on type, never on
+    message text. Each subclasses RuntimeError, so pre-v0.10 handlers keep
+    working unchanged."""
+
+    def test_idempotency_conflict_is_typed(self, db):
+        import yantrikdb as y
+
+        db.record(text="first", embedding=_vec(1.0), idempotency_key="te-1")
+        with pytest.raises(y.IdempotencyConflict) as exc_info:
+            db.record(text="DIFFERENT", embedding=_vec(2.0), idempotency_key="te-1")
+        # Back-compat: still a RuntimeError.
+        assert isinstance(exc_info.value, RuntimeError)
+        # The message carries the existing rid for the caller's fetch-and-decide.
+        assert "existing rid" in str(exc_info.value)
+
+    def test_invalid_key_is_typed(self, db):
+        import yantrikdb as y
+
+        with pytest.raises(y.InvalidIdempotencyKey):
+            db.record(text="x", embedding=_vec(3.0), idempotency_key="   ")
+
+    def test_provenance_refusal_is_typed(self, db):
+        import yantrikdb as y
+
+        with pytest.raises(y.ProvenanceInconsistent):
+            db.record(
+                text="laundered",
+                embedding=_vec(4.0),
+                source="inference",
+                metadata={"kind": "fact"},
+            )
+
+    def test_typed_classes_are_exported(self):
+        import yantrikdb as y
+
+        for name in (
+            "Backpressure",
+            "BatchDeferredDuringReembed",
+            "CorrectionDeferredDuringReembed",
+            "IdempotencyConflict",
+            "InvalidIdempotencyKey",
+            "ProvenanceInconsistent",
+        ):
+            cls = getattr(y, name)
+            assert issubclass(cls, RuntimeError), name
+
+    def test_version_is_not_the_stale_hardcode(self):
+        import yantrikdb as y
+
+        # The old hardcoded "0.2.4" drifted from the real wheel version —
+        # the version-string lie. It must now come from dist metadata.
+        assert y.__version__ != "0.2.4"
+

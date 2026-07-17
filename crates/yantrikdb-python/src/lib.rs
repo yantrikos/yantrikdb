@@ -2,6 +2,7 @@ use pyo3::prelude::*;
 
 pub mod py_consolidate;
 pub mod py_engine;
+pub mod py_errors;
 pub mod py_tenant;
 pub mod py_triggers;
 pub mod py_types;
@@ -11,6 +12,31 @@ fn _yantrikdb_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Engine
     m.add_class::<py_engine::PyYantrikDB>()?;
     m.add_class::<py_tenant::PyTenantManager>()?;
+
+    // Typed exceptions (v0.10) — all subclass RuntimeError, so pre-v0.10
+    // `except RuntimeError:` handlers keep working; new code branches on type.
+    m.add("Backpressure", m.py().get_type::<py_errors::Backpressure>())?;
+    m.add(
+        "CorrectionDeferredDuringReembed",
+        m.py()
+            .get_type::<py_errors::CorrectionDeferredDuringReembed>(),
+    )?;
+    m.add(
+        "BatchDeferredDuringReembed",
+        m.py().get_type::<py_errors::BatchDeferredDuringReembed>(),
+    )?;
+    m.add(
+        "IdempotencyConflict",
+        m.py().get_type::<py_errors::IdempotencyConflict>(),
+    )?;
+    m.add(
+        "InvalidIdempotencyKey",
+        m.py().get_type::<py_errors::InvalidIdempotencyKey>(),
+    )?;
+    m.add(
+        "ProvenanceInconsistent",
+        m.py().get_type::<py_errors::ProvenanceInconsistent>(),
+    )?;
 
     // Triggers
     m.add_class::<py_triggers::PyTrigger>()?;
