@@ -9074,6 +9074,65 @@ fn record_with_rid_replay_does_not_reenqueue_materialization() {
     );
 }
 
+/// 4a.6d-3: the in-tx materialization enqueue owes pending_op_count exactly
+/// +1, discharged post-commit by the reservation guard's upgrade
+/// (`count_pending_op_on_completion`). Counting is what the backpressure
+/// ceiling reads — a skipped increment drifts the counter low and the
+/// ceiling stops engaging (the inverse of the v0.7.1 wedge).
+#[test]
+fn record_with_rid_enqueue_counts_exactly_one_pending_op() {
+    use std::sync::atomic::Ordering;
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+
+    let before = db.pending_op_count.load(Ordering::SeqCst);
+    rwr(
+        &db,
+        "0198c1c2-0000-7000-8000-0000000000cc",
+        "counted enqueue",
+        "cnt_ns",
+        &["CountedEntity"],
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        db.pending_op_count.load(Ordering::SeqCst),
+        before + 1,
+        "one enqueued materialization op = exactly one count"
+    );
+
+    // No entities -> no enqueue -> no count.
+    rwr(
+        &db,
+        "0198c1c2-0000-7000-8000-0000000000cd",
+        "uncounted write",
+        "cnt_ns",
+        &[],
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        db.pending_op_count.load(Ordering::SeqCst),
+        before + 1,
+        "an entity-less write enqueues nothing and must not count"
+    );
+
+    // Replay -> no enqueue -> no count.
+    rwr(
+        &db,
+        "0198c1c2-0000-7000-8000-0000000000cc",
+        "counted enqueue",
+        "cnt_ns",
+        &["CountedEntity"],
+        None,
+    )
+    .unwrap();
+    assert_eq!(
+        db.pending_op_count.load(Ordering::SeqCst),
+        before + 1,
+        "a replay enqueues nothing and must not count"
+    );
+}
+
 // ── Relationship-Based Entity Type Tests ──
 
 #[test]
