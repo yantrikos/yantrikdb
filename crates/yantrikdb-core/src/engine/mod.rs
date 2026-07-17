@@ -1768,6 +1768,55 @@ impl YantrikDB {
         source: &str,
         emotional_state: Option<&str>,
     ) -> Result<String> {
+        self.record_text_with_idempotency(
+            text,
+            memory_type,
+            importance,
+            valence,
+            half_life,
+            metadata,
+            namespace,
+            certainty,
+            domain,
+            source,
+            emotional_state,
+            None,
+        )
+    }
+
+    /// `record_text()` plus a durable idempotency key (v0.10 Item 4a.6d).
+    ///
+    /// Same contract as [`Self::record_with_idempotency`] with ONE deliberate
+    /// difference: the digest uses [`PayloadVariant::RecordText`], which
+    /// **excludes the engine-generated embedding**. The engine embeds the text
+    /// itself here, and an embedder can legitimately be swapped (or drift)
+    /// between attempts — digesting the generated vector would turn an honest
+    /// retry into a false conflict. Idempotency is decided from the TEXT and
+    /// scalars, before any embedding work: the pre-admission probe runs before
+    /// the (slow) embed, so a duplicate retry never pays the embed cost at all.
+    ///
+    /// The variant is also part of the digest's op_kind discriminator, so the
+    /// SAME key used across `record()` (embedding-inclusive) and
+    /// `record_text()` (embedding-exclusive) is a typed conflict, not a hit —
+    /// a cross-surface retry is not the same write.
+    ///
+    /// `None` is byte-for-byte `record_text()`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_text_with_idempotency(
+        &self,
+        text: &str,
+        memory_type: &str,
+        importance: f64,
+        valence: f64,
+        half_life: f64,
+        metadata: &serde_json::Value,
+        namespace: &str,
+        certainty: f64,
+        domain: &str,
+        source: &str,
+        emotional_state: Option<&str>,
+        idempotency_key: Option<&str>,
+    ) -> Result<String> {
         // v0.9.3 contract gate: scalars validated BEFORE calibration mutates
         // the namespace's running distribution. (The embedding is engine-
         // generated below and validated inside the embed step.)
@@ -1798,6 +1847,52 @@ impl YantrikDB {
         // transaction, and a retry loop commits at most once.
         let raw_importance = importance;
         let importance = self.calibrated_importance(namespace, importance)?;
+        // 4a.6d: the RecordText digest — RAW canonical payload with the
+        // embedding EXCLUDED (the engine generates it below, and idempotency
+        // must be decided before re-embedding; see the method doc). Then the
+        // pre-admission probe: a duplicate retry resolves HERE, before the
+        // slow embed, before the router, before any admission machinery.
+        let idem: Option<(&str, [u8; 32])> = match idempotency_key {
+            None => None,
+            Some(key) => {
+                if key.trim().is_empty() || key.len() > 512 {
+                    return Err(YantrikDbError::InvalidIdempotencyKey {
+                        reason: if key.len() > 512 {
+                            format!("key is {} bytes; max 512", key.len())
+                        } else {
+                            "key is empty or whitespace-only".to_string()
+                        },
+                    });
+                }
+                let view = crate::payload_digest::PayloadView {
+                    variant: crate::payload_digest::PayloadVariant::RecordText,
+                    namespace,
+                    text,
+                    memory_type,
+                    importance: raw_importance,
+                    valence,
+                    half_life,
+                    certainty,
+                    domain,
+                    source,
+                    emotional_state,
+                    metadata,
+                    embedding: None,
+                };
+                Some((key, crate::payload_digest::payload_digest(&view)))
+            }
+        };
+        if let Some((key, digest)) = idem.as_ref() {
+            if let Some(existing_rid) = idempotency::probe_committed_claim(
+                &self.conn(),
+                &self.actor_id,
+                namespace,
+                key,
+                digest,
+            )? {
+                return Ok(existing_rid);
+            }
+        }
         loop {
             // Step 1: snapshot SearchState for the embed — capture
             // generation + digest so we can revalidate after the embed.
@@ -1853,9 +1948,7 @@ impl YantrikDB {
                         source,
                         emotional_state,
                         gate_verdict,
-                        // record_text idempotency fans out in 4a.6d (its digest
-                        // variant excludes the generated embedding).
-                        None,
+                        idem,
                     );
                 }
             };
@@ -1904,7 +1997,7 @@ impl YantrikDB {
                 source,
                 emotional_state,
                 gate_verdict,
-                None,
+                idem,
             );
         }
     }
