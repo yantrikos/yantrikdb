@@ -7993,6 +7993,233 @@ fn keyed_duplicate_resolves_under_pending_queue_saturation() {
         .store(real, std::sync::atomic::Ordering::SeqCst);
 }
 
+/// 4a.6d: record_text idempotency. The digest EXCLUDES the engine-generated
+/// embedding, and the pre-admission probe runs BEFORE the embed — proven with a
+/// counting embedder: the duplicate retry returns the original rid without
+/// invoking the embedder at all. (Also the reason a drifting embedder can never
+/// fake a conflict on this surface.)
+#[test]
+fn record_text_keyed_retry_hits_without_embedding_again() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Arc;
+
+    struct CountingEmbedder(Arc<AtomicUsize>);
+    impl crate::types::Embedder for CountingEmbedder {
+        fn embed(
+            &self,
+            t: &str,
+        ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
+            self.0.fetch_add(1, Ordering::SeqCst);
+            let mut v = vec![0.1; 8];
+            v[0] = (t.len() % 7) as f32 * 0.1;
+            Ok(v)
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+    }
+
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut db = YantrikDB::new(":memory:", 8).unwrap();
+    db.set_embedder(Box::new(CountingEmbedder(Arc::clone(&calls))))
+        .unwrap();
+
+    let write = |db: &YantrikDB| {
+        db.record_text_with_idempotency(
+            "keyed text write",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "rt_ns",
+            0.8,
+            "work",
+            "user",
+            None,
+            Some("rt-key"),
+        )
+    };
+    let rid = write(&db).unwrap();
+    let embeds_after_first = calls.load(Ordering::SeqCst);
+    assert!(embeds_after_first >= 1, "first write embeds");
+
+    let rid2 = write(&db).unwrap();
+    assert_eq!(rid2, rid, "retry returns the original rid");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        embeds_after_first,
+        "the duplicate retry must resolve at the probe, BEFORE the embed — \
+         zero additional embedder invocations"
+    );
+
+    // And nothing was written by the retry.
+    let rows: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE namespace = 'rt_ns'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 1, "one row total");
+}
+
+/// 4a.6d: the SAME key used across record() (embedding-inclusive digest) and
+/// record_text() (embedding-exclusive digest) is a typed conflict — a
+/// cross-surface retry is not the same write.
+#[test]
+fn same_key_across_record_and_record_text_is_a_conflict() {
+    struct Fake;
+    impl crate::types::Embedder for Fake {
+        fn embed(
+            &self,
+            t: &str,
+        ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
+            let mut v = vec![0.1; 8];
+            v[0] = (t.len() % 7) as f32 * 0.1;
+            Ok(v)
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+    }
+    let mut db = YantrikDB::new(":memory:", 8).unwrap();
+    db.set_embedder(Box::new(Fake)).unwrap();
+
+    // First write via record() with an explicit vector.
+    db.record_with_idempotency(
+        "cross surface text",
+        "semantic",
+        0.7,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "xs_ns",
+        0.8,
+        "work",
+        "user",
+        None,
+        Some("xs-key"),
+    )
+    .unwrap();
+
+    // Same key, same text, via record_text — different surface, different
+    // digest variant: typed conflict, never a silent hit.
+    let err = db
+        .record_text_with_idempotency(
+            "cross surface text",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "xs_ns",
+            0.8,
+            "work",
+            "user",
+            None,
+            Some("xs-key"),
+        )
+        .expect_err("cross-surface same-key must conflict");
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::IdempotencyConflict { .. }
+        ),
+        "expected IdempotencyConflict, got {err:?}"
+    );
+}
+
+/// 4a.6d-1 sol finding: record_text never normalized blank namespaces — a
+/// pre-existing divergence from record() (which coerces ""/whitespace to
+/// "default" at entry) that surfaced when the Python wrapper's
+/// embedding=None flow was rerouted through record_text. A blank-namespace
+/// record_text write must land in "default" — rows, calibration stats, AND
+/// the idempotency claim scope — or every reader querying "default" misses it.
+#[test]
+fn record_text_normalizes_blank_namespace_like_record() {
+    struct Fake;
+    impl crate::types::Embedder for Fake {
+        fn embed(
+            &self,
+            t: &str,
+        ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
+            let mut v = vec![0.1; 8];
+            v[0] = (t.len() % 7) as f32 * 0.1;
+            Ok(v)
+        }
+        fn dim(&self) -> usize {
+            8
+        }
+    }
+    let mut db = YantrikDB::new(":memory:", 8).unwrap();
+    db.set_embedder(Box::new(Fake)).unwrap();
+
+    let rid = db
+        .record_text_with_idempotency(
+            "blank namespace probe",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "   ",
+            0.8,
+            "work",
+            "user",
+            None,
+            Some("ns-key"),
+        )
+        .unwrap();
+
+    let ns: String = db
+        .conn()
+        .query_row(
+            "SELECT namespace FROM memories WHERE rid = ?1",
+            rusqlite::params![rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ns, "default", "blank namespace must normalize to default");
+
+    let claim_ns: String = db
+        .conn()
+        .query_row(
+            "SELECT namespace FROM idempotency_claims WHERE idempotency_key = 'ns-key'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        claim_ns, "default",
+        "the claim must scope under the NORMALIZED namespace"
+    );
+
+    // And the retry with the same blank namespace resolves (same scope).
+    let rid2 = db
+        .record_text_with_idempotency(
+            "blank namespace probe",
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "",
+            0.8,
+            "work",
+            "user",
+            None,
+            Some("ns-key"),
+        )
+        .unwrap();
+    assert_eq!(
+        rid2, rid,
+        "'' and '   ' resolve to the same normalized scope"
+    );
+}
+
 // ── Relationship-Based Entity Type Tests ──
 
 #[test]

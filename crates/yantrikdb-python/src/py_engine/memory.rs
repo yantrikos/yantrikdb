@@ -37,49 +37,82 @@ impl PyYantrikDB {
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
 
-        // 4a.6c (sol r4 note): a key with an ENGINE-GENERATED embedding is
-        // refused for now. record()'s digest includes the embedding (API-byte
-        // identity — the sync route stores it), so if this wrapper embedded the
-        // text itself, an embedder drift across retries would turn an honest
-        // retry into a false IdempotencyConflict. The generated-vector variant
-        // (digest excludes it) ships with record_text idempotency in 4a.6d;
-        // until then, fail loud rather than subtly mis-dedup.
-        if idempotency_key.is_some() && embedding.is_none() {
-            return Err(PyValueError::new_err(
-                "idempotency_key with an engine-generated embedding is not \
-                 supported yet: record()'s payload digest includes the \
-                 embedding, and a regenerated vector would make an honest \
-                 retry a false conflict. Pass an explicit `embedding` to use \
-                 a key today (generated-embedding idempotency lands with \
-                 record_text support).",
-            ));
-        }
-        let emb = match embedding {
-            Some(e) => e,
-            None => self.embed_text(py, text)?,
-        };
-
         let meta = match metadata {
             Some(d) => py_to_json(&d.as_any())?,
             None => serde_json::json!({}),
         };
 
-        db.record_with_idempotency(
-            text,
-            memory_type,
-            importance,
-            valence,
-            half_life,
-            &meta,
-            &emb,
-            namespace,
-            certainty,
-            domain,
-            source,
-            emotional_state,
-            idempotency_key,
-        )
-        .map_err(map_err)
+        // 4a.6d: routing decides the digest variant. An EXPLICIT embedding is
+        // part of the payload (record()'s API-byte identity — different vectors
+        // are different writes). No embedding + an ENGINE embedder routes
+        // through record_text_with_idempotency, whose digest EXCLUDES the
+        // generated vector — embedder drift across retries can never fake a
+        // conflict. This lifts the 4a.6c interim guard. The one remaining
+        // refusal: a key with a PYTHON-object fallback embedder (wrapper-side
+        // vector generation the engine cannot reproduce — same drift hazard the
+        // guard existed for, still real on that path only).
+        match embedding {
+            Some(emb) => db
+                .record_with_idempotency(
+                    text,
+                    memory_type,
+                    importance,
+                    valence,
+                    half_life,
+                    &meta,
+                    &emb,
+                    namespace,
+                    certainty,
+                    domain,
+                    source,
+                    emotional_state,
+                    idempotency_key,
+                )
+                .map_err(map_err),
+            None if db.has_embedder() => db
+                .record_text_with_idempotency(
+                    text,
+                    memory_type,
+                    importance,
+                    valence,
+                    half_life,
+                    &meta,
+                    namespace,
+                    certainty,
+                    domain,
+                    source,
+                    emotional_state,
+                    idempotency_key,
+                )
+                .map_err(map_err),
+            None => {
+                if idempotency_key.is_some() {
+                    return Err(PyValueError::new_err(
+                        "idempotency_key with a Python-side fallback embedder is \
+                         not supported: the wrapper generates the vector outside \
+                         the engine, so a drift across retries would fake a \
+                         conflict. Pass an explicit `embedding`, or attach an \
+                         engine embedder (bundled/named).",
+                    ));
+                }
+                let emb = self.embed_text(py, text)?;
+                db.record(
+                    text,
+                    memory_type,
+                    importance,
+                    valence,
+                    half_life,
+                    &meta,
+                    &emb,
+                    namespace,
+                    certainty,
+                    domain,
+                    source,
+                    emotional_state,
+                )
+                .map_err(map_err)
+            }
+        }
     }
 
     #[pyo3(signature = (query=None, query_embedding=None, top_k=10, time_window=None, memory_type=None, include_consolidated=false, expand_entities=true, skip_reinforce=false, namespace=None, domain=None, source=None, certainty_min=None, order=None, include_superseded=false))]
