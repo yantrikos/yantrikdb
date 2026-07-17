@@ -1863,6 +1863,10 @@ impl YantrikDB {
         // must be decided before re-embedding; see the method doc). Then the
         // pre-admission probe: a duplicate retry resolves HERE, before the
         // slow embed, before the router, before any admission machinery.
+        // "Admission" is precise (sol 4a.6d-2b r1 finding 2): the validation
+        // gates above still precede the probe — deterministic payload-shape
+        // checks an identical retry passes identically, unlike the
+        // saturation-dependent admission this probe exists to bypass.
         let idem: Option<(&str, [u8; 32])> = match idempotency_key {
             None => None,
             Some(key) => {

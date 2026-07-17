@@ -221,6 +221,10 @@ impl YantrikDB {
         // seq/HLC allocation. Backpressure storms are exactly when clients
         // retry; without this, a keyed dup against a saturated engine could
         // only ever see Backpressure and the retry loop would never converge.
+        // "Admission" is the precise word (sol 4a.6d-2b r1 finding 2): the
+        // validation gates above still run first, because they are
+        // deterministic payload-shape checks an identical retry passes
+        // identically — not saturation-dependent rejection.
         // A probe MISS is advisory (the ON CONFLICT INSERT in the write tx
         // stays authoritative); a probe HIT is final — committed claims are
         // immutable in 4a.
@@ -907,14 +911,20 @@ impl YantrikDB {
         }
 
         // 4a.6d-2b unlocked pre-admission probe (the 4a.6c invariant on the
-        // batch surface): NOTHING may reject a duplicate that would write
-        // nothing. Committed hits leave the write set here — BEFORE the
-        // write-router, the delta reservation, and the seq mint — so a
-        // fully-duplicate batch resolves to its rids even during a reembed
-        // cutover or under full delta saturation. That is exactly when clients
-        // retry. A MISS is advisory (the locked probe under the conn guard
-        // below is what closes the race window); a HIT is final — committed
-        // claims are immutable in 4a.
+        // batch surface): no RESOURCE admission check may reject a duplicate
+        // that would write nothing. Committed hits leave the write set here —
+        // BEFORE the write-router, the delta reservation, and the seq mint —
+        // so a fully-duplicate batch resolves to its rids even during a
+        // reembed cutover or under full delta saturation. That is exactly
+        // when clients retry. The guarantee is deliberately NARROWER than
+        // "nothing rejects a duplicate": prevalidation (embedding/scalar/
+        // provenance gates, key format, in-batch divergence) runs above and
+        // still errors first — those are deterministic payload-shape checks
+        // an identical retry passes identically, not saturation-dependent
+        // admission that would starve a retry loop (sol 4a.6d-2b r1
+        // finding 2). A MISS is advisory (the locked probe under the conn
+        // guard below is what closes the race window); a HIT is final —
+        // committed claims are immutable in 4a.
         if digests.iter().any(Option::is_some) {
             let conn = self.conn();
             for i in 0..n {
