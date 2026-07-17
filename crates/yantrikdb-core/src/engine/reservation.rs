@@ -205,10 +205,11 @@ impl<'a> BatchReservationGuard<'a> {
         // Batch rids are freshly minted, so an already-present (rid, seq)
         // is an invariant violation — and it must NOT be pushed as an entry
         // (this guard would then publish/remove a vector it doesn't own).
-        if !self
+        if self
             .state
             .vec_index
             .append_reserved(rid.clone(), embedding, seq)?
+            == crate::vector::delta_index::ReservedAppend::AlreadyPresent
         {
             return Err(crate::error::YantrikDbError::InvalidInput(format!(
                 "freshly minted rid {rid} already present in the delta at seq \
@@ -279,7 +280,7 @@ mod tests {
     fn drop_before_commit_removes_the_reservation() {
         let db = db();
         let state = db.search_state.load_full();
-        state
+        let _ = state
             .vec_index
             .append_reserved("r1".into(), vec![0.1; 8], 7)
             .unwrap();
@@ -299,7 +300,7 @@ mod tests {
     fn unwind_before_commit_removes_the_reservation() {
         let db = db();
         let state = db.search_state.load_full();
-        state
+        let _ = state
             .vec_index
             .append_reserved("r2".into(), vec![0.1; 8], 8)
             .unwrap();
@@ -323,7 +324,7 @@ mod tests {
     fn unwind_after_commit_publishes_rather_than_stranding() {
         let db = db();
         let state = db.search_state.load_full();
-        state
+        let _ = state
             .vec_index
             .append_reserved("r3".into(), vec![0.1; 8], 9)
             .unwrap();
@@ -352,7 +353,7 @@ mod tests {
     fn complete_then_drop_discharges_exactly_once() {
         let db = db();
         let state = db.search_state.load_full();
-        state
+        let _ = state
             .vec_index
             .append_reserved("r4".into(), vec![0.1; 8], 10)
             .unwrap();
@@ -386,7 +387,7 @@ mod tests {
         let before = db.pending_op_count.load(Ordering::Relaxed);
 
         // committed-and-completed
-        state
+        let _ = state
             .vec_index
             .append_reserved("r5".into(), vec![0.1; 8], 11)
             .unwrap();
@@ -396,7 +397,7 @@ mod tests {
             g.complete();
         }
         // committed-and-unwound (Drop discharges)
-        state
+        let _ = state
             .vec_index
             .append_reserved("r6".into(), vec![0.1; 8], 12)
             .unwrap();

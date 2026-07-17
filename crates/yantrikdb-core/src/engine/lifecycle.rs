@@ -1357,15 +1357,32 @@ impl YantrikDB {
             // remove it; (b) a reader on a separate connection could see the
             // new vector paired with the not-yet-committed old text. While
             // reserved, search still returns the old durable vector.
-            if let Err(e) = state_for_commit.vec_index.append_reserved(
+            // `false` = an identical (rid, seq_new) already exists. seq_new is
+            // freshly minted for this correction, so that is an invariant
+            // violation — and constructing the guard below over an entry this
+            // call does not own would let a failure path remove another
+            // write's published vector (4a.6d-3, sol r1 finding 1).
+            match state_for_commit.vec_index.append_reserved(
                 rid.to_string(),
                 new_embedding.clone(),
                 seq_new,
             ) {
-                drop(_epoch);
-                drop(conn);
-                drop(sync_guard);
-                return Err(e);
+                Ok(crate::vector::delta_index::ReservedAppend::Inserted) => {}
+                Ok(crate::vector::delta_index::ReservedAppend::AlreadyPresent) => {
+                    drop(_epoch);
+                    drop(conn);
+                    drop(sync_guard);
+                    return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                        "freshly minted seq {seq_new} for rid {rid} already \
+                         present in the delta — engine invariant violation"
+                    )));
+                }
+                Err(e) => {
+                    drop(_epoch);
+                    drop(conn);
+                    drop(sync_guard);
+                    return Err(e);
+                }
             }
 
             // From here the reservation is owed back on EVERY exit — including an
@@ -1835,14 +1852,25 @@ impl YantrikDB {
             });
 
             // Reserve-append BEFORE commit; propagate failure (op retried).
+            // `false` = the freshly minted seq collided with an existing
+            // (rid, seq) entry — an invariant violation; constructing the
+            // guard over an entry this call does not own would let a failure
+            // path remove another write's published vector (4a.6d-3).
             let seq_new = if let Some(v) = &new_vec {
                 let s = self
                     .vec_seq
                     .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
                     + 1;
-                state
+                if state
                     .vec_index
-                    .append_reserved(rid.to_string(), v.clone(), s)?;
+                    .append_reserved(rid.to_string(), v.clone(), s)?
+                    == crate::vector::delta_index::ReservedAppend::AlreadyPresent
+                {
+                    return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                        "freshly minted seq {s} for rid {rid} already present \
+                         in the delta — engine invariant violation"
+                    )));
+                }
                 Some(s)
             } else {
                 None

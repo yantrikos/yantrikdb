@@ -499,12 +499,13 @@ impl YantrikDB {
 
         // RESERVE: consumes delta capacity and validates dim, but stays invisible
         // to search until published. This is where Backpressure surfaces — before
-        // a single durable byte has been written. `false` (entry already
-        // present) is impossible here — the rid is freshly minted — so it is
-        // an invariant violation, never a replay.
-        if !state
+        // a single durable byte has been written. `AlreadyPresent` is
+        // impossible here — the rid is freshly minted — so it is an invariant
+        // violation, never a replay.
+        if state
             .vec_index
             .append_reserved(rid.clone(), embedding.to_vec(), seq)?
+            == crate::vector::delta_index::ReservedAppend::AlreadyPresent
         {
             return Err(crate::error::YantrikDbError::InvalidInput(format!(
                 "freshly minted rid {rid} already present in the delta at seq \
@@ -1662,7 +1663,8 @@ impl YantrikDB {
         // it re-published.
         let inserted = state
             .vec_index
-            .append_reserved(rid.to_string(), embedding.to_vec(), seq)?;
+            .append_reserved(rid.to_string(), embedding.to_vec(), seq)?
+            == crate::vector::delta_index::ReservedAppend::Inserted;
         let mut reservation = if inserted {
             Some(ReservationGuard::publish_only(&state, rid, seq))
         } else {

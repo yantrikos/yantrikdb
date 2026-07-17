@@ -155,6 +155,23 @@ pub struct DeltaIndex {
     compactor_wake_mu: parking_lot::Mutex<()>,
 }
 
+/// Outcome of [`DeltaIndex::append_reserved`]. `#[must_use]` is the
+/// load-bearing part: it makes `append_reserved(...)?;` — the statement
+/// shape that silently discarded the old bool return (sol 4a.6d-3 r1
+/// finding 1: two correction sites did exactly that) — a compiler warning,
+/// so every caller must decide which arm it is on.
+#[must_use = "AlreadyPresent means the caller owns NO reservation — \
+              publishing or removing the existing entry corrupts a prior \
+              write's vector"]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReservedAppend {
+    /// A new unpublished entry was inserted; the caller owes
+    /// publish-on-commit / remove-on-failure (the ReservationGuard rule).
+    Inserted,
+    /// An identical (rid, seq) already exists; the caller owes NOTHING.
+    AlreadyPresent,
+}
+
 impl DeltaIndex {
     /// Create a new empty `DeltaIndex` with the given embedding dimension.
     /// Cold starts as a fresh empty `HnswIndex(dim)`. Delta is empty.
@@ -253,16 +270,32 @@ impl DeltaIndex {
     /// so a correction's vector never becomes visible (or gets sealed into
     /// cold) unless its text change is durable.
     ///
-    /// Returns whether an entry was INSERTED (4a.6d-3). `false` means an
-    /// identical `(rid, seq)` already exists — the idempotent-replay no-op —
+    /// Returns whether an entry was INSERTED (4a.6d-3). `AlreadyPresent`
+    /// means an identical `(rid, seq)` exists — the idempotent-replay no-op —
     /// and the caller owns NO obligation for it: it must neither publish it
     /// (the existing entry's published flag belongs to the write that made
     /// it) nor remove it on failure (that would delete a prior write's
     /// possibly-PUBLISHED vector). Writers minting fresh rids/seqs treat
-    /// `false` as an invariant violation; the deterministic-replay path
-    /// (`record_with_rid` with a caller seq) treats it as "already applied".
-    pub fn append_reserved(&self, rid: String, embedding: Vec<f32>, seq: u64) -> Result<bool> {
+    /// `AlreadyPresent` as an invariant violation; the deterministic-replay
+    /// path (`record_with_rid` with a caller seq) treats it as "already
+    /// applied". The outcome is a `#[must_use]` ENUM, not a bool, precisely
+    /// so `append_reserved(...)?;` cannot silently discard it (sol 4a.6d-3
+    /// r1 finding 1: two correction sites did exactly that — `?` consumes
+    /// the Result, and a bare bool then drops without a whisper).
+    pub fn append_reserved(
+        &self,
+        rid: String,
+        embedding: Vec<f32>,
+        seq: u64,
+    ) -> Result<ReservedAppend> {
         self.append_inner(rid, embedding, seq, false)
+            .map(|inserted| {
+                if inserted {
+                    ReservedAppend::Inserted
+                } else {
+                    ReservedAppend::AlreadyPresent
+                }
+            })
     }
 
     fn append_inner(
@@ -772,7 +805,8 @@ mod tests {
         idx.append("rid".to_string(), old.clone(), 1).unwrap();
 
         // Reserve the new vector at a higher seq — still invisible.
-        idx.append_reserved("rid".to_string(), new.clone(), 2)
+        let _ = idx
+            .append_reserved("rid".to_string(), new.clone(), 2)
             .unwrap();
         let hit_old = idx.search(&old, 1).unwrap();
         assert_eq!(hit_old[0].0, "rid");
@@ -804,7 +838,8 @@ mod tests {
         let mut new = vec![0.0f32; 8];
         new[4] = 1.0;
         idx.append("rid".to_string(), old.clone(), 1).unwrap();
-        idx.append_reserved("rid".to_string(), new.clone(), 2)
+        let _ = idx
+            .append_reserved("rid".to_string(), new.clone(), 2)
             .unwrap();
 
         // Compact: the published old entry seals into cold; the reserved
