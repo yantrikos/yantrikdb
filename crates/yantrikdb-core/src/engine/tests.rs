@@ -8814,6 +8814,62 @@ fn keyed_batch_duplicate_resolves_during_reembed_cutover() {
     assert_eq!(rids2, rids1);
 }
 
+/// 4a.6d-2b: a batch mixing an idempotent HIT with fresh items writes ONLY
+/// the fresh items — hits are per-item successes (original rid at their
+/// position), failures stay all-or-nothing. The hit contributes no row, no
+/// second record op, no stats observation, and no entity re-extraction.
+#[test]
+fn partial_hit_batch_writes_only_the_fresh_items() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let keyed = keyed_input("partial hit anchor", "ph_ns", 1.0, Some("ph-key"));
+    let first = db.record_batch(std::slice::from_ref(&keyed)).unwrap();
+
+    let rids = db
+        .record_batch(&[
+            keyed.clone(),
+            keyed_input("partial fresh item", "ph_ns", 2.0, None),
+        ])
+        .unwrap();
+    assert_eq!(rids.len(), 2);
+    assert_eq!(rids[0], first[0], "hit position carries the ORIGINAL rid");
+    assert_ne!(rids[1], rids[0]);
+
+    let count = |sql: &str| -> i64 { db.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+    assert_eq!(
+        count("SELECT COUNT(*) FROM memories WHERE namespace = 'ph_ns'"),
+        2,
+        "one row from each batch — the hit wrote nothing"
+    );
+    assert_eq!(
+        count("SELECT COUNT(*) FROM oplog WHERE op_type = 'record'"),
+        2,
+        "one record op per WRITTEN item"
+    );
+    let stats_count: i64 = db
+        .conn()
+        .query_row(
+            "SELECT count FROM namespace_importance_stats WHERE namespace = 'ph_ns'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        stats_count, 2,
+        "two written observations, the hit added none"
+    );
+
+    // And the fresh item is durable + visible: point-read it back.
+    let ns: String = db
+        .conn()
+        .query_row(
+            "SELECT namespace FROM memories WHERE rid = ?1",
+            rusqlite::params![rids[1]],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(ns, "ph_ns");
+}
+
 // ── Relationship-Based Entity Type Tests ──
 
 #[test]
