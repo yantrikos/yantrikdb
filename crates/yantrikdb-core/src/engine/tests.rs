@@ -7424,8 +7424,11 @@ fn batch_append_failure_leaves_importance_stats_untouched() {
     };
     assert_eq!(stats(&db), None, "precondition: no stats for batch_ns");
 
-    // A batch into batch_ns: SQL savepoint commits, then the vector append hits
-    // the saturated delta and fails, triggering the compensating DELETE.
+    // A batch into batch_ns: since 4a.6d-2a the capacity reservation fails
+    // BEFORE the savepoint even opens (pre-restructure: the savepoint
+    // committed, the post-RELEASE append failed, and a compensating DELETE
+    // reversed the rows). Either way the caller sees Backpressure and the
+    // stats assertions below are what this test pins.
     let err = db
         .record_batch(&[RecordInput {
             text: "batch after saturation".into(),
@@ -7447,7 +7450,7 @@ fn batch_append_failure_leaves_importance_stats_untouched() {
         "expected Backpressure from the append, got {err:?}"
     );
 
-    // Rows compensated AND stats untouched (the winner-only guarantee).
+    // No rows AND stats untouched (the winner-only guarantee).
     let rows: i64 = db
         .conn()
         .query_row(
@@ -7456,7 +7459,7 @@ fn batch_append_failure_leaves_importance_stats_untouched() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(rows, 0, "compensating DELETE removed the batch rows");
+    assert_eq!(rows, 0, "a rejected batch must write no rows");
     assert_eq!(
         stats(&db),
         None,
@@ -8376,7 +8379,10 @@ fn batch_append_failure_writes_nothing_at_all() {
         .conn()
         .query_row("SELECT COUNT(*) FROM oplog", [], |r| r.get(0))
         .unwrap();
-    assert_eq!(ops_after, ops_before, "no oplog entries for a rejected batch");
+    assert_eq!(
+        ops_after, ops_before,
+        "no oplog entries for a rejected batch"
+    );
 
     // And the connection is back in autocommit — no savepoint left open (#91's
     // class: an error arm that unwinds the savepoint must RELEASE it too, or
