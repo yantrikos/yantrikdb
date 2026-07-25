@@ -1435,7 +1435,17 @@ fn test_schema_v37_item4a_columns_table_and_index() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(version, 37, "schema version must be stamped 37");
+    // `>=`, not `==`: this test's subject is that the v37 Item-4a surfaces
+    // EXIST (asserted above), not that v37 is the newest schema. An equality
+    // pin here fails on every later bump for no reason — it broke on the v38
+    // materializer-index migration (#113) despite every Item-4a surface being
+    // intact — which trains the next person to edit the number rather than
+    // read the failure. Forward-only stamping (see `open`'s MAX stamp) makes
+    // `>=` the correct assertion.
+    assert!(
+        version >= 37,
+        "schema version must be at least 37 (Item 4a); got {version}"
+    );
 }
 
 // ── Item 4a.4: anti-laundering gate wiring + backward-compat modes ──

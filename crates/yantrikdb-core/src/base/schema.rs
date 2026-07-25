@@ -1,4 +1,4 @@
-pub const SCHEMA_VERSION: i32 = 37;
+pub const SCHEMA_VERSION: i32 = 38;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -921,6 +921,20 @@ CREATE INDEX IF NOT EXISTS idx_oplog_timestamp ON oplog(timestamp);
 CREATE INDEX IF NOT EXISTS idx_oplog_target ON oplog(target_rid);
 CREATE INDEX IF NOT EXISTS idx_oplog_hlc ON oplog(hlc);
 CREATE INDEX IF NOT EXISTS idx_oplog_actor ON oplog(origin_actor);
+-- v38 (#113): the materializer drain index, and it MUST live here in
+-- SCHEMA_SQL rather than only in a migration — that placement is the bug.
+-- Its predecessor `idx_oplog_pending` was added in MIGRATE_V23_TO_V24 and
+-- never added here, and migrations only run for databases that already have
+-- a version. So every database CREATED since v24 had no pending index at
+-- all, and the drain query (`WHERE applied = 0 ORDER BY hlc, op_id LIMIT n`)
+-- fell back to `SCAN oplog USING INDEX idx_oplog_hlc` — walking the entire
+-- oplog in hlc order, filtering row by row. With nothing pending (the idle
+-- case) no LIMIT short-circuit ever fires, so every poll scanned ALL
+-- history: 16 workers x N engines x 10/sec, cost growing with history depth.
+-- Partial on the SORT KEYS (not the filter column) so it both filters and
+-- orders — no temp B-tree — and holds only pending rows, so an idle poll
+-- touches ~zero. Pinned by `pending_ops_query_uses_the_partial_index...`.
+CREATE INDEX IF NOT EXISTS idx_oplog_pending_ordered ON oplog(hlc, op_id) WHERE applied = 0;
 -- v25 (RFC issue #9): cluster-replication determinism column indexes
 CREATE INDEX IF NOT EXISTS idx_memories_created_at_micros ON memories(created_at_unix_micros);
 CREATE INDEX IF NOT EXISTS idx_memories_embedding_model ON memories(embedding_model) WHERE embedding_model IS NOT NULL;
@@ -2661,4 +2675,41 @@ CREATE TABLE IF NOT EXISTS idempotency_claims (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_idempotency
     ON memories(origin_actor, namespace, idempotency_key)
     WHERE idempotency_key IS NOT NULL;
+";
+
+/// **v38 (#113) — the materializer idle-scan fix.** Field-reported: a user's
+/// machine at ~55% CPU of 32 logical cores while IDLE, ~600k read ops/sec in
+/// engine threads, with idle cost growing superlinearly in oplog history depth
+/// (6 engines, no work: 500 rows → 1.2%, 6,000 rows → 35.3%) and starving the
+/// ingest path into `Backpressure` at depth.
+///
+/// Cause — and the precise version matters, because the obvious reading is
+/// wrong: `idx_oplog_pending ON oplog(applied) WHERE applied = 0` was added
+/// in `MIGRATE_V23_TO_V24` and **never added to `SCHEMA_SQL`**. Migrations
+/// only run for databases that already carry a version, so every database
+/// CREATED from v24 onward — i.e. every install of the last fourteen schema
+/// versions — has had no pending index at all. Measured plans:
+///
+/// - fresh db (no pending index): `SCAN oplog USING INDEX idx_oplog_hlc` +
+///   temp B-tree — a full walk of all history on every poll, and with nothing
+///   pending there is no LIMIT short-circuit to stop it. This is the defect.
+/// - legacy db (upgraded through v24): `SEARCH oplog USING INDEX
+///   idx_oplog_pending (applied=?)` + temp B-tree — actually fine on the
+///   scan, still paying an avoidable sort.
+///
+/// So the index that looked like coverage was real and working *for the
+/// databases nobody runs any more*, while every current install silently had
+/// none. That is why the fix is placement first and shape second: it lives in
+/// `SCHEMA_SQL` (so it exists everywhere, on every open) and is partial on
+/// the SORT KEYS (so it serves the ORDER BY and removes the temp B-tree on
+/// legacy databases too). Swept the rest of the schema for the same
+/// migration-only placement: this was the only one. Not systemic — but the
+/// sweep is why that can be asserted.
+///
+/// The old index is dropped rather than left: it is strictly subsumed by the
+/// new one (which also serves `COUNT(*) WHERE applied = 0`), and leaving an
+/// artifact that reads like coverage is the shape of the original failure.
+pub const MIGRATE_V37_TO_V38: &str = "
+CREATE INDEX IF NOT EXISTS idx_oplog_pending_ordered ON oplog(hlc, op_id) WHERE applied = 0;
+DROP INDEX IF EXISTS idx_oplog_pending;
 ";

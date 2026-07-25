@@ -535,6 +535,24 @@ impl YantrikDB {
     /// fills in the actual application logic (memories INSERT, vec_index
     /// update, graph_index update, scoring_cache insert) — and at that point
     /// foreground record() can stop doing it inline.
+    /// THE materializer drain query — one definition, shared by the drain
+    /// itself and by the test that pins its query plan (#113).
+    ///
+    /// It is a const rather than an inline literal specifically so the
+    /// plan-assertion test cannot pin a private copy: a test that asserted
+    /// against its own duplicated SQL would keep passing while this query
+    /// drifted back into a full scan. The index it depends on is
+    /// `idx_oplog_pending_ordered` — partial on `(hlc, op_id)`, i.e. on the
+    /// SORT KEYS, because a partial index on the filter column alone cannot
+    /// serve the ORDER BY and SQLite will silently prefer a full history
+    /// scan via `idx_oplog_hlc`. Changing the ORDER BY here without changing
+    /// that index re-introduces the idle-CPU defect.
+    pub(crate) const PENDING_OPS_QUERY: &'static str =
+        "SELECT op_id, op_type, payload, embedding_model FROM oplog \
+         WHERE applied = 0 \
+         ORDER BY hlc, op_id \
+         LIMIT ?1";
+
     pub fn apply_pending_ops_once(&self, limit: usize) -> Result<usize> {
         // **Issue #41 Layer 5.** Pull `embedding_model` alongside the
         // standard tuple so we can dispatch queued-during-reembed
@@ -543,12 +561,7 @@ impl YantrikDB {
         // record() leaves it NULL).
         let pending: Vec<(String, String, String, Option<String>)> = {
             let conn = self.read_conn();
-            let mut stmt = conn.prepare(
-                "SELECT op_id, op_type, payload, embedding_model FROM oplog \
-                 WHERE applied = 0 \
-                 ORDER BY hlc, op_id \
-                 LIMIT ?1",
-            )?;
+            let mut stmt = conn.prepare(Self::PENDING_OPS_QUERY)?;
             let rows = stmt.query_map(params![limit as i64], |row| {
                 Ok((
                     row.get::<_, String>(0)?,
@@ -1311,6 +1324,76 @@ mod pending_ops_tests {
     fn open_test_db() -> YantrikDB {
         // Use :memory: so tests don't touch disk and migrations are fresh.
         YantrikDB::new(":memory:", 64).expect("open test db")
+    }
+
+    /// **#113 — the idle-CPU defect, pinned at the query plan.**
+    ///
+    /// A field user burned ~55% of a 32-core machine while IDLE because every
+    /// 100ms materializer poll scanned the ENTIRE oplog: the drain query's
+    /// `ORDER BY hlc, op_id` could not be served by a partial index on the
+    /// filter column, so SQLite chose `idx_oplog_hlc`, walked all history
+    /// filtering row-by-row, and added a temp B-tree — and with nothing
+    /// pending, no LIMIT short-circuit ever fired. Cost grew with history
+    /// depth, times 16 workers, times N engines.
+    ///
+    /// Asserting the PLAN, not a latency budget: the plan is deterministic
+    /// and the regression is structural (a re-ordered ORDER BY, a dropped
+    /// index, a "harmless" index rename all reintroduce it), whereas a timing
+    /// assertion would be flaky on CI and would only fail once a corpus grew
+    /// large enough to hurt — i.e. in a user's process, not here.
+    ///
+    /// It runs against [`YantrikDB::PENDING_OPS_QUERY`], the same const the
+    /// drain executes. That is deliberate: pinning a copy of the SQL would
+    /// pass forever while the real query drifted.
+    #[test]
+    fn pending_ops_query_uses_the_partial_index_and_never_scans_history() {
+        let db = open_test_db();
+        let conn = db.conn();
+
+        // The index must exist on a FRESH database — the original
+        // `idx_oplog_pending` was added in a migration and never in
+        // SCHEMA_SQL, so every new install since v24 silently had no pending
+        // index at all.
+        let idx_exists: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' \
+                 AND name = 'idx_oplog_pending_ordered'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            idx_exists, 1,
+            "fresh databases must carry idx_oplog_pending_ordered (it must live in \
+             SCHEMA_SQL, not only in a migration)"
+        );
+
+        let plan: Vec<String> = {
+            let sql = format!("EXPLAIN QUERY PLAN {}", YantrikDB::PENDING_OPS_QUERY);
+            let mut stmt = conn.prepare(&sql).unwrap();
+            let rows = stmt
+                .query_map(params![64_i64], |r| r.get::<_, String>(3))
+                .unwrap();
+            rows.collect::<std::result::Result<Vec<_>, _>>().unwrap()
+        };
+        let joined = plan.join(" | ");
+
+        assert!(
+            joined.contains("idx_oplog_pending_ordered"),
+            "the drain must use the partial pending index; plan was: {joined}"
+        );
+        // The two signatures of the defect, asserted separately so a failure
+        // says WHICH half regressed.
+        assert!(
+            !joined.contains("idx_oplog_hlc"),
+            "the drain fell back to the full-history hlc index — this is the #113 \
+             idle-scan defect; plan was: {joined}"
+        );
+        assert!(
+            !joined.to_uppercase().contains("TEMP B-TREE"),
+            "the drain is sorting in a temp B-tree, so the index no longer serves \
+             the ORDER BY; plan was: {joined}"
+        );
     }
 
     fn fake_embedding(seed: f32, dim: usize) -> Vec<u8> {
