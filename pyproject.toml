@@ -73,7 +73,20 @@ agent = ["httpx>=0.27.0", "pyyaml>=6.0"]
 # provider for Claude Desktop, Hermes Agent, and other MCP clients.
 # Not required for engine use; only for users wiring yantrikdb behind
 # an MCP server.
-mcp = ["mcp>=1.0.0"]
+#
+# **Upper bound added 2026-07-29.** The requirement was `mcp>=1.0.0`
+# with no ceiling, so the day the SDK published 2.0.0 — which removes
+# `mcp.server.fastmcp` — every CI job on every platform started failing
+# on a green codebase. `main` passed on 2026-07-25 and would fail today
+# without a single commit in between. An unbounded requirement on a
+# pre-2.0 dependency is a build that breaks on someone else's release
+# schedule.
+#
+# Pinned rather than ported deliberately: these modules target the 1.x
+# FastMCP API, and the maintained MCP server is the separate
+# `yantrikdb-mcp` package. Porting this bundled copy to the 2.x API is
+# its own scope item, not something to fold into a release.
+mcp = ["mcp>=1.0.0,<2.0.0"]
 all = [
     "yantrikdb[sentence-transformers,server,sync,langchain,openai,agent,mcp]",
 ]
