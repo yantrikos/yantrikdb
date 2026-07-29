@@ -1,0 +1,136 @@
+/*
+Theme Name: Field Notes
+Theme URI: https://packs.yantrikdb.com/p/yantrik-wordpress-theme
+Author: YantrikDB
+Description: The reference block theme for the wordpress-theme pack — an editorial journal built to score full marks on the pack's rendered-craft benchmark, and to be imitated rather than merely obeyed.
+Version: 1.0.0
+Requires at least: 6.5
+Tested up to: 6.8
+Requires PHP: 7.4
+License: GNU General Public License v2 or later
+License URI: http://www.gnu.org/licenses/gpl-2.0.html
+Text Domain: field-notes
+Tags: block-patterns, full-site-editing, editorial, one-column
+*/
+
+/* Everything that can live in theme.json lives there. What remains is
+   what theme.json has no expression for: optical corrections, state
+   styling, and the accessibility floors. */
+
+/* ── Optical corrections ─────────────────────────────────────────────
+   Tracking that suits 16px reads loose at 42px, so display sizes get
+   negative tracking; all-caps labels get positive tracking or the
+   letters collide. text-wrap does the work that manual line breaks
+   used to. */
+
+h1, h2, h3, .wp-block-site-title {
+  text-wrap: balance;
+}
+
+p, .wp-block-post-excerpt__excerpt {
+  text-wrap: pretty;
+  hanging-punctuation: first last;
+}
+
+.wp-block-post-date,
+.eyebrow {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Optical alignment: a quote's opening mark should hang into the margin
+   rather than indenting the first line. */
+.wp-block-quote {
+  border-inline-start: 2px solid var(--wp--preset--color--primary);
+  padding-inline-start: var(--wp--preset--spacing--40);
+  font-style: normal;
+}
+
+/* ── State styling ───────────────────────────────────────────────────
+   Derived from the palette with color-mix, so a style variation that
+   redefines `primary` gets matching hovers for free. */
+
+a {
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.18em;
+  transition: color 120ms ease, text-decoration-thickness 120ms ease;
+}
+
+a:hover {
+  color: color-mix(in oklab, var(--wp--preset--color--primary) 78%, black);
+  text-decoration-thickness: 2px;
+}
+
+.wp-block-button__link:hover {
+  background: color-mix(in oklab, var(--wp--preset--color--primary) 86%, black);
+}
+
+/* Focus must be visible and must not be the only signal. */
+:focus-visible {
+  outline: 2px solid var(--wp--preset--color--primary);
+  outline-offset: 3px;
+  border-radius: 1px;
+}
+
+/* ── Accessibility floors ────────────────────────────────────────────
+   Interactive targets reach 24px in their smaller dimension (WCAG 2.2
+   AA, 2.5.8). Nav links are the usual offender: inline text with no
+   padding measures the cap height and nothing else. */
+
+.wp-block-navigation .wp-block-navigation-item__content,
+.wp-block-post-date a,
+.wp-block-read-more,
+.wp-block-post-title a {
+  display: inline-block;
+  min-height: 24px;
+  padding-block: 0.3rem;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ── Editorial furniture ─────────────────────────────────────────────
+   A rule above each entry in the feed, so the list reads as a sequence
+   of articles rather than a stack of paragraphs. */
+
+.entry-list > li + li,
+.wp-block-post-template > li + li {
+  border-block-start: 1px solid color-mix(in oklab, var(--wp--preset--color--contrast) 12%, transparent);
+  padding-block-start: var(--wp--preset--spacing--40);
+}
+
+.eyebrow {
+  font-family: var(--wp--preset--font-family--ui);
+  font-size: var(--wp--preset--font-size--small);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--wp--preset--color--secondary);
+}
+
+/* Responsive without breakpoints: the track floors at 16rem but the
+   inner min() stops it overflowing a narrow screen. */
+.card-grid {
+  display: grid;
+  gap: var(--wp--preset--spacing--40);
+  grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
+}
+
+/* Component-relative layout — the same card lays out differently in a
+   sidebar and in the main column without knowing where it is. */
+.card-area {
+  container-type: inline-size;
+}
+
+@container (min-width: 34rem) {
+  .card {
+    display: grid;
+    grid-template-columns: 8rem 1fr;
+    gap: var(--wp--preset--spacing--40);
+    align-items: start;
+  }
+}

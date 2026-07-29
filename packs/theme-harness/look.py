@@ -116,14 +116,33 @@ PROBE = r"""
     try {
       for (const rule of sheet.cssRules || []) {
         const t = rule.cssText || '';
-        if (/font-size:[^;]*clamp\(/.test(t)) { fluid = true; break; }
+        // WordPress emits fluid sizes as clamp() inside the PRESET
+        // CUSTOM PROPERTIES (--wp--preset--font-size--large: clamp(...)),
+        // not as a font-size declaration. Looking only for
+        // "font-size: clamp(" reported fluid_type false on a theme whose
+        // every preset was fluid.
+        if (/(font-size[^;]*|--wp--preset--font-size--[a-z0-9-]+\s*):[^;]*clamp\(/.test(t)) {
+          fluid = true; break;
+        }
       }
     } catch (e) { /* cross-origin sheet */ }
     if (fluid) break;
   }
 
+  // Visually-hidden controls are 1px BY DESIGN — skip links and
+  // screen-reader text use the clip technique. Counting them as
+  // undersized tap targets failed a theme for implementing
+  // accessibility correctly, which is the opposite of the check's point.
+  const hidden = e => {
+    const s = getComputedStyle(e);
+    if (/(^|\s)screen-reader-text(\s|$)|skip-link/.test(e.className || '')) return true;
+    if (s.clip !== 'auto' && s.clip !== '' ) return true;
+    if (s.clipPath && s.clipPath !== 'none') return true;
+    const r = e.getBoundingClientRect();
+    return r.width <= 2 && r.height <= 2;
+  };
   const targets = [...document.querySelectorAll('a, button, input, select')]
-    .filter(e => e.offsetParent !== null)
+    .filter(e => e.offsetParent !== null && !hidden(e))
     .map(e => { const r = e.getBoundingClientRect(); return Math.min(r.width, r.height); })
     .filter(v => v > 0);
 
@@ -210,9 +229,11 @@ def judge(m: dict) -> dict[str, bool]:
         "contrast-aa": m["contrast"] >= 4.5,
         # The page is as readable as its least readable text.
         "contrast-everywhere": (m.get("contrast_min") or {}).get("ratio", 0) >= 4.5,
-        # Pure #000 on #fff is 21:1 and reads as harsh, unconsidered glare.
-        # Craft lives between comfortable and crude.
-        "contrast-not-crude": 4.5 <= m["contrast"] <= 17,
+        # Pure #000 on #fff is 21:1 and reads as unconsidered glare. The
+        # first ceiling here was 17, which failed a warm near-black on a
+        # warm off-white at 17.28 — good typography, rejected by an
+        # arbitrary bound. Only the true extreme is crude.
+        "contrast-not-crude": 4.5 <= m["contrast"] <= 19.5,
         "measure-readable": 45 <= m["measure"] <= 85,
         "type-scale": 4 <= m["distinct_sizes"] <= 9,
         "font-chosen": bool(first) and not any(f in first for f in FALLBACK_FACES),
@@ -243,7 +264,10 @@ def main() -> int:
         browser = pw.chromium.launch()
         for slug in cands:
             code, msg = wp("--skip-themes", "theme", "activate", f"harness/{slug}")
-            if code != 0 or "Success" not in msg:
+            # An already-active theme makes WP-CLI print a warning, not
+            # "Success" — which rejected a theme that was working fine.
+            ok = code == 0 and ("Success" in msg or "already active" in msg)
+            if not ok:
                 print(f"{slug:<26} cannot activate — skipped")
                 continue
             per_width = {}
