@@ -264,6 +264,42 @@ mod tests {
         assert_eq!(BUNDLED_EMBEDDER_DIM, 64);
     }
 
+    /// The fingerprint must be a property of the repository, not of the
+    /// machine that ran the build.
+    ///
+    /// v0.11.0 shipped a Windows wheel whose fingerprint differed from
+    /// its own Linux and macOS wheels. Two of the bundled assets are
+    /// `.json`, git treated them as text, and the Windows runner checked
+    /// them out with CRLF. The JSON parses identically either way — same
+    /// model, same weights, byte-identical output vectors — but
+    /// `bundled_embedder_fingerprint()` hashes raw bytes, so the Windows
+    /// build disagreed with every other build about which embedder it
+    /// had, and refused to mount every published pack with
+    /// `PackEmbedderMismatch`.
+    ///
+    /// `.gitattributes` marks the asset directory `-text` to prevent the
+    /// conversion. This asserts the invariant directly, because a
+    /// `.gitattributes` entry is easy to lose in a merge and its absence
+    /// is silent on the platform that does not convert.
+    #[test]
+    fn bundled_json_assets_have_no_crlf() {
+        for (name, bytes) in [
+            ("tokenizer.json", POTION_2M_TOKENIZER),
+            ("config.json", POTION_2M_CONFIG),
+            ("modules.json", POTION_2M_MODULES),
+        ] {
+            assert!(
+                !bytes.windows(2).any(|w| w == b"\r\n"),
+                "{name} was compiled in with CRLF line endings. The model still \
+                 works, which is what makes this dangerous: the fingerprint \
+                 changes, so packs built against a build of this crate on \
+                 another platform will be refused at mount with \
+                 PackEmbedderMismatch. Check that .gitattributes still marks \
+                 crates/yantrikdb-core/assets/** as -text, then re-checkout."
+            );
+        }
+    }
+
     #[test]
     fn embed_returns_64_dim_vector() {
         let e = BundledEmbedder::new();

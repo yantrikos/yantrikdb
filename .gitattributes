@@ -1,0 +1,22 @@
+# Bundled embedder assets are compiled into the binary with
+# `include_bytes!` and hashed byte-for-byte by
+# `bundled_embedder_fingerprint()`, which is the identity a pack is
+# checked against at mount time.
+#
+# Two of them are .json, so git treated them as text and normalised line
+# endings on checkout. On a Windows runner (autocrlf=true) that produced
+# CRLF, on Linux and macOS LF — same model, same weights, byte-identical
+# output vectors, and a *different* fingerprint. The published v0.11.0
+# Windows wheel therefore refused to mount every pack in the marketplace
+# with PackEmbedderMismatch, while the Linux and macOS wheels of the same
+# release accepted them.
+#
+# `-text` disables all EOL conversion for these paths, in both
+# directions, on every platform. The fingerprint is now a property of the
+# repository rather than of the machine that ran the build.
+crates/yantrikdb-core/assets/** -text
+
+# The same reasoning applies to any file whose bytes are hashed or
+# signed rather than parsed. Pack fixtures are sealed SQLite databases.
+*.ydbpack -text
+*.safetensors -text
