@@ -131,31 +131,61 @@ claim.
 conditions. It is there to catch a pack that wins its category by
 capturing attention and wrecking everything else.
 
+> **These numbers were revised down on 2026-07-29.** They previously read
+> 18/20 across the board. The pack did not change; the *grader* did. It
+> matched substrings, so `"no"` matched *k**no**w* and `"20"` matched
+> "20**24**" — every model lost exactly 3 points once matching became
+> word-boundary aware. A uniform drop across six models is the signature
+> of a grader fix rather than a regression. The old figures are withdrawn.
+> See `lint_evals.py` for the checks that now stop a grader that cannot
+> fail.
+
 | Model | Pack | Baseline | Mounted | Control |
 |---|---|---|---|---|
-| qwen3.6:27b | yantrikdb-engine | 1/20 | **18/20** | 11/12 → 11/12 |
-| qwen3.5:4b | yantrikdb-engine | 2/20 | **18/20** | 12/12 → 12/12 |
-| granite4:3b | yantrikdb-engine | 3/20 | **18/20** | 12/12 → 12/12 |
+| gemma3:270m | yantrikdb-engine | 1/20 | 10/20 | 7/12 → 8/12 |
+| qwen3.5:0.8b | yantrikdb-engine | 0/20 | **15/20** | 8/12 → 8/12 |
+| qwen3.5:2b | yantrikdb-engine | 2/20 | 13/20 | 10/12 → **8/12** |
+| granite4:3b | yantrikdb-engine | 2/20 | **15/20** | 12/12 → 12/12 |
+| qwen3.5:4b | yantrikdb-engine | 2/20 | **15/20** | 12/12 → 12/12 |
+| qwen3.6:27b | yantrikdb-engine | 1/20 | **15/20** | 11/12 → 11/12 |
 | qwen3.6:27b | agent-memory-discipline | 7/12 | **11/12** | 11/12 → 11/12 |
 | qwen3.5:4b | agent-memory-discipline | 6/12 | **10/12** | 12/12 → 12/12 |
 | granite4:3b | agent-memory-discipline | 7/12 | **10/12** | 12/12 → 12/12 |
 
 ### The pack, not the model, supplies the knowledge
 
-Three models spanning 3B to 27B parameters start at 1, 2 and 3 out of 20
-and all land on **18/20** with the same pack mounted. Model size predicts
-almost nothing about the baseline — being bigger does not help you know a
-private codebase — and predicts nothing at all about the mounted score.
+Five models spanning **0.8B to 27B** — a 34× parameter range — start
+between 0 and 2 out of 20 and all land on exactly **15/20** with the same
+pack mounted. Model size predicts almost nothing about the baseline
+(being bigger does not help you know a private codebase) and nothing at
+all about the mounted score.
 
-That is the marketplace thesis in one row: a 3B model with the right pack
-answers domain questions as well as a 27B model with the same pack. The
-pack is the capability.
+That is the marketplace thesis in one column: an 0.8B model with the
+right pack answers domain questions as well as a 27B model with the same
+pack. The pack is the capability.
 
-The contrast between the two packs is the other honest part. A pack of
-facts a model cannot possibly know moves it from ~2/20 to 18/20. A pack
-of operating rules it already half-knows moves it from ~7/12 to ~10/12 —
-real, but a different and smaller claim. Both belong on a listing;
-publishing only the first would be marketing, not measurement.
+### Where the floor is
+
+Convergence does not continue forever. `gemma3:270m` reaches only 10/20,
+and its control baseline is 7/12 against 12/12 for the 3B and 4B — it is
+not merely worse at the pack's subject, it is worse at everything, and
+there is not enough model left for retrieved facts to be assembled into
+an answer. **The floor sits between 270M and 800M.**
+
+The other signal at the small end is attach-harm. `qwen3.5:2b` is the
+only model whose control set *dropped* when the pack was mounted, 10/12 →
+8/12. One run at n=12 is not proof, but it points the same way as an
+earlier finding — smaller models blend near-neighbour facts more — and it
+is the reason a small-model listing should carry its control column
+rather than only its headline.
+
+### Two packs, two sizes of claim
+
+A pack of facts a model cannot possibly know moves it from ~1/20 to
+15/20. A pack of operating rules it already half-knows moves it from
+~7/12 to ~10/12 — real, but a different and much smaller claim. Both
+belong on a listing; publishing only the first would be marketing, not
+measurement.
 
 One caveat on the control column: `qwen3.6:27b` scores 11/12 rather than
 12/12 in *both* conditions, because it answered the git question with
@@ -179,8 +209,12 @@ The first run of this harness injected the top 5 retrieved facts on
 
 | | Pack questions | Control |
 |---|---|---|
-| Unconditional top-k | 1/20 → 18/20 | 12/12 → **5/12** |
-| Similarity-gated | 2/20 → 18/20 | 12/12 → **12/12** |
+| Unconditional top-k | 1/20 → 18/20 † | 12/12 → **5/12** |
+| Similarity-gated | 2/20 → 18/20 † | 12/12 → **12/12** |
+
+† Both rows are from the pre-2026-07-29 grader and are shown only for
+the *comparison between them*, which the grader change affects equally.
+The absolute figures are superseded by the table above.
 
 Mounting the pack destroyed the model's ability to answer questions the
 pack had nothing to do with. Not because the content was wrong, but
@@ -281,7 +315,8 @@ certified yantrik/yantrikdb-engine@0.1.0
   attach-harm: 12 -> 12 / 12  PASS
 ```
 
-The held-out rate (0→7/8) matching the public-set rate (2→18/20) is
+The held-out rate (0→7/8) matching the public-set rate (2→18/20, old
+grader) is
 itself a finding: the pack generalizes to unseen questions rather than
 being tuned to its own eval.
 

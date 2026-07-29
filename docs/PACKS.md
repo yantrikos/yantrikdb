@@ -452,9 +452,14 @@ of private engine internals), against a fresh empty host:
 
 | Model | Baseline | Mounted |
 |---|---|---|
-| qwen3.6:27b | 1/20 | **18/20** |
-| qwen3.5:4b | 2/20 | **18/20** |
-| granite4:3b | 3/20 | **18/20** |
+| qwen3.5:0.8b | 0/20 | **15/20** |
+| granite4:3b | 2/20 | **15/20** |
+| qwen3.5:4b | 2/20 | **15/20** |
+| qwen3.6:27b | 1/20 | **15/20** |
+
+(Revised down from 18/20 on 2026-07-29 — the grader was matching
+substrings, so every model lost the same 3 points once matching became
+word-boundary aware. The pack is unchanged.)
 
 Three models from 3B to 27B converge on the same mounted score from
 different baselines. Model size predicts almost nothing about knowing a
