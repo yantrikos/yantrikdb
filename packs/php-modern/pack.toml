@@ -1,0 +1,22 @@
+[pack]
+name = "php-modern"
+version = "0.1.0"
+origin = "yantrik/php-modern"
+namespace = "php_modern"
+description = "PHP 8 as it is actually written now: enums, readonly, constructor promotion, property hooks and match; the comparison and array semantics that changed under you; and the security defaults — PDO emulation, unserialize, escaping, randomness, password hashing — that decide whether the application is exploitable."
+coverage = [
+    "Modern PHP 8 language features: enums, readonly, promotion, match, attributes",
+    "PHP type system, strict_types and nullability",
+    "PHP arrays, comparison semantics and string handling",
+    "PHP security: SQL injection, XSS escaping, deserialization, file uploads",
+    "PHP passwords, sessions, cryptographic randomness",
+    "PHP error handling, exceptions and JSON",
+    "PHP dates and decimal arithmetic",
+]
+
+[content]
+memory_type = "procedural"
+domain = "engineering"
+source = "document"
+importance = 0.6
+certainty = 0.9

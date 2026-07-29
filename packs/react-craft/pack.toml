@@ -1,0 +1,23 @@
+[pack]
+name = "react-craft"
+version = "0.2.0"
+origin = "yantrik/react-craft"
+namespace = "react_craft"
+description = "React 19 as it is written now: Actions, useActionState, useOptimistic and use(); ref as a plain prop; Server Components and the client boundary — plus the effect, key, closure and context bugs that only surface under StrictMode, reordering or a slow network."
+coverage = [
+    "writing React components and hooks",
+    "React 19 Actions, useActionState, useOptimistic, useFormStatus and use()",
+    "React Server Components and the 'use client' boundary",
+    "useEffect discipline, cleanup, StrictMode and fetch race conditions",
+    "React list keys, reconciliation and component remounting",
+    "React context, memoisation and render performance",
+    "React forms, controlled inputs and accessibility",
+    "React error boundaries, Suspense and concurrent rendering",
+]
+
+[content]
+memory_type = "procedural"
+domain = "engineering"
+source = "document"
+importance = 0.6
+certainty = 0.9

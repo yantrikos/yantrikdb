@@ -1,0 +1,8 @@
+{"id": "ho-hnsw-params", "q": "What are YantrikDB's default HNSW parameters: M, ef_construction and ef_search?", "expect": [["16"], ["200"], ["50"]]}
+{"id": "ho-gate-tau", "q": "YantrikDB gates the importance boost behind a sigmoid of similarity. At what similarity value is that sigmoid centered?", "expect": [["0.25"]]}
+{"id": "ho-keyword-slots", "q": "How many recall result slots does YantrikDB reserve for FTS keyword matches that would otherwise rank below the cutoff?", "expect": [["3", "three"]]}
+{"id": "ho-recency-constant", "q": "YantrikDB's recency score decays exponentially with what time constant?", "expect": [["7", "seven"], ["day"]]}
+{"id": "ho-procedural-halflife", "q": "What half-life does YantrikDB assign to procedural memories recorded via record_procedural?", "expect": [["4", "four"], ["week"]]}
+{"id": "ho-cold-compression", "q": "What compression does YantrikDB apply to embeddings when a memory is archived to the cold tier, and where is the compressed blob stored?", "expect": [["zstd"], ["same column", "embedding column", "in place"]]}
+{"id": "ho-gate-mode-default", "q": "What provenance gate mode does a fresh YantrikDB install default to, and what do migrated databases default to?", "expect": [["enforce"], ["warn"]]}
+{"id": "ho-pack-journal", "q": "What SQLite journal mode does a sealed YantrikDB pack use, and why does that matter for how it can be opened?", "expect": [["delete"], ["read-only", "read only", "wal sidecar", "no wal"]]}

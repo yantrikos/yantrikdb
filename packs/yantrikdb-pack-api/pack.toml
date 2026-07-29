@@ -1,0 +1,18 @@
+[pack]
+name = "yantrikdb-pack-api"
+version = "0.1.0"
+origin = "yantrik/yantrikdb-pack-api"
+namespace = "yantrikdb_pack_api"
+description = "The YantrikDB pack API: sealing, signing, mounting, installing and trusting knowledge packs from Python — an API surface that did not exist before 2026-07-28."
+coverage = [
+    "creating, sealing and signing YantrikDB packs from Python",
+    "mounting, installing and trusting packs in a YantrikDB database",
+    "yantrikdb Python pack API calls and their arguments",
+]
+
+[content]
+memory_type = "semantic"
+domain = "engineering"
+source = "document"
+importance = 0.6
+certainty = 0.95

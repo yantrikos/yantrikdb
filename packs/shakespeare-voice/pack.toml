@@ -1,0 +1,18 @@
+[pack]
+name = "shakespeare-voice"
+version = "0.1.0"
+origin = "yantrik/shakespeare-voice"
+namespace = "shakespeare_voice"
+description = "Early Modern English verse craft: the grammar, vocabulary and rhetorical devices of Shakespearean writing, as enforceable rules plus retrievable exemplars."
+coverage = [
+    "writing in Shakespearean or Early Modern English style",
+    "blank verse, sonnets and iambic pentameter",
+    "period vocabulary and rhetorical devices",
+]
+
+[content]
+memory_type = "semantic"
+domain = "writing"
+source = "document"
+importance = 0.6
+certainty = 0.9
