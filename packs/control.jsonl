@@ -1,0 +1,12 @@
+{"id": "ctl-capital", "q": "What is the capital city of Japan?", "expect": [["tokyo"]]}
+{"id": "ctl-arith", "q": "What is 17 multiplied by 23? Give just the number.", "expect": [["391"]]}
+{"id": "ctl-rust-kw", "q": "Which of these languages declares a function with the keyword 'fn': Rust or Python?", "expect": [["rust"]]}
+{"id": "ctl-http", "q": "In HTTP, what does status code 404 mean?", "expect": [["not found"]]}
+{"id": "ctl-sql-truncate", "q": "Which SQL statement removes every row from a table faster than DELETE, without a WHERE clause?", "expect": [["truncate"]]}
+{"id": "ctl-python-list", "q": "In Python, which list method adds a single item to the end of a list?", "expect": [["append"]]}
+{"id": "ctl-boiling", "q": "At standard sea-level pressure, what is the boiling point of water in degrees Celsius?", "expect": [["100"]]}
+{"id": "ctl-planet", "q": "Which planet in our solar system is commonly called the Red Planet?", "expect": [["mars"]]}
+{"id": "ctl-git-branch", "q": "Which git command creates a new branch and switches to it in one step, using the -b flag?", "expect": [["checkout -b", "switch -c"]]}
+{"id": "ctl-json-type", "q": "In JSON, what are the two boolean literal values, written exactly as JSON requires?", "expect": [["true"], ["false"]]}
+{"id": "ctl-bigo", "q": "What is the average-case time complexity of binary search on a sorted array?", "expect": [["log n", "log(n)", "logarithmic"]]}
+{"id": "ctl-tcp-udp", "q": "Which transport protocol provides guaranteed ordered delivery: TCP or UDP?", "expect": [["tcp"]]}

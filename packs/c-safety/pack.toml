@@ -1,0 +1,21 @@
+[pack]
+name = "c-safety"
+version = "0.1.0"
+origin = "yantrik/c-safety"
+namespace = "c_safety"
+description = "Writing C that does not have a CVE in it. Memory safety, the undefined behaviour a modern optimiser will exploit, the standard-library functions whose signatures lie about what they do, integer promotion and overflow, and the build flags and sanitizers that catch what review misses."
+coverage = [
+    "C memory safety: allocation, lifetime, use-after-free, double free",
+    "C undefined behaviour and what optimisers do with it",
+    "C string handling and buffer overflows",
+    "C integer overflow, promotion and conversion rules",
+    "C error handling, cleanup patterns and resource management",
+    "C compiler flags, sanitizers and static analysis",
+]
+
+[content]
+memory_type = "procedural"
+domain = "engineering"
+source = "document"
+importance = 0.6
+certainty = 0.9

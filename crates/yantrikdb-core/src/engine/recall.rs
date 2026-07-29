@@ -311,7 +311,12 @@ impl YantrikDB {
             state.vec_index.search(query_embedding, fetch_k)?
         };
 
-        if vec_results.is_empty() {
+        // This short-circuit's premise is that the host index is the only
+        // candidate source, which mounting a pack falsifies. Taking it
+        // with a pack mounted would make the flagship case — a database
+        // with few or no memories of its own mounting a knowledge pack —
+        // return nothing at all.
+        if vec_results.is_empty() && self.packs.read().is_empty() {
             // No candidates → no vector/text pairing to protect. Still
             // validate the epoch (sol r6): a successful recall must never be
             // returned during an unvalidated correction interval, even when
@@ -1806,6 +1811,45 @@ impl YantrikDB {
                     }
                     drop(cache);
                 }
+            }
+        }
+
+        // Step 3.45 (packs): merge candidates from mounted packs.
+        //
+        // Placed after host candidate generation and BEFORE the status
+        // filter so pack rows compete in the same pool as host rows for
+        // everything that follows. Two properties depend on this exact
+        // position:
+        //
+        // - Step 3.4 below removes pack rows that a host record
+        //   supersedes, because `superseded_rids_among` matches on
+        //   target rid regardless of which file the target lives in.
+        //   That is the user-correction overlay, for free.
+        // - MMR (step 4) runs once over the union, so a pack cannot
+        //   flood top_k with near-duplicates.
+        //
+        // Pack rows arrive already hydrated: their text lives in the
+        // pack file, and step 5 hydrates only from the host.
+        {
+            let pack_candidates = self.collect_pack_candidates(
+                query_embedding,
+                top_k,
+                ts,
+                &learned_weights,
+                query_sentiment,
+                &crate::engine::pack::PackFilters {
+                    include_consolidated,
+                    memory_type,
+                    time_window,
+                    namespace,
+                    domain,
+                    source,
+                    certainty_min,
+                },
+            )?;
+            if !pack_candidates.is_empty() {
+                tracing::debug!(count = pack_candidates.len(), "merged pack candidates");
+                scored.extend(pack_candidates);
             }
         }
 

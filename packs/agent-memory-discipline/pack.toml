@@ -1,0 +1,20 @@
+[pack]
+name = "agent-memory-discipline"
+version = "0.1.0"
+origin = "yantrik/agent-memory-discipline"
+namespace = "agent_memory_discipline"
+description = "Operating rules for an agent working against a persistent memory substrate: which call to reach for, how to band importance, and the traps that silently degrade a memory store over time."
+# Tier 3 — coverage index. Author-curated and short: this is read on every
+# turn, so it must be phrases a model can hold, not a table of contents.
+coverage = [
+    "writing and correcting agent memories",
+    "choosing between recall, chain-head and correction",
+    "importance banding and calibration traps",
+]
+
+[content]
+memory_type = "procedural"
+domain = "operations"
+source = "document"
+importance = 0.6
+certainty = 0.9

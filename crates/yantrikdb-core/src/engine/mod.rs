@@ -39,6 +39,7 @@ pub mod moves;
 mod narrative_engine;
 mod observer;
 pub(crate) mod op_types;
+pub mod pack;
 mod personality_bias;
 mod perspective_engine;
 mod planner;
@@ -145,6 +146,10 @@ pub struct YantrikDB {
     /// Round-robin starting index for read pool acquisition.
     pub(crate) read_idx: std::sync::atomic::AtomicUsize,
     pub(crate) embedding_dim: usize,
+    /// The path this database was opened from. Needed to locate the
+    /// sibling `<stem>.packs/` directory where installed packs live.
+    /// `":memory:"` for in-memory databases, which cannot host packs.
+    pub(crate) db_path: String,
     pub(crate) hlc: Mutex<HLC>,
     pub(crate) actor_id: String,
     pub(crate) scoring_cache: RwLock<HashMap<String, ScoringRow>>,
@@ -290,6 +295,22 @@ pub struct YantrikDB {
     /// No double-locking risk: set_embedder doesn't acquire
     /// write_router, writers don't acquire index_write_lock.
     pub(crate) index_write_lock: parking_lot::Mutex<()>,
+
+    /// **Packs.** Read-only knowledge packs currently mounted against
+    /// this database, in mount order. Each entry owns its own
+    /// connection, HNSW and scoring cache; none of them touch host
+    /// state, so unmounting is `retain()` and nothing else.
+    ///
+    /// Recall clones the Arcs under a short read lock
+    /// (`pack_snapshot()`) rather than holding the registry for the
+    /// request, so mounting or unmounting never blocks a recall in
+    /// flight.
+    pub(crate) packs: parking_lot::RwLock<Vec<std::sync::Arc<crate::engine::pack::MountedPack>>>,
+
+    /// Whether this database's embedder identity is already on disk.
+    /// Keeps `stamp_embedder_identity_once` to a relaxed atomic load on
+    /// the `record_text` hot path after the first write.
+    pub(crate) embedder_identity_stamped: std::sync::atomic::AtomicBool,
 }
 
 impl YantrikDB {
@@ -348,7 +369,7 @@ impl YantrikDB {
     /// Create a new YantrikDB instance with auto-generated actor_id.
     pub fn new(db_path: &str, embedding_dim: usize) -> Result<Self> {
         let mut db = Self::open(db_path, embedding_dim, None, None)?;
-        Self::auto_attach_bundled_embedder(&mut db);
+        Self::finish_construction(&mut db);
         Ok(db)
     }
 
@@ -413,7 +434,7 @@ impl YantrikDB {
     /// Create a new YantrikDB instance with an explicit actor_id (for sync tests).
     pub fn new_with_actor(db_path: &str, embedding_dim: usize, actor_id: &str) -> Result<Self> {
         let mut db = Self::open(db_path, embedding_dim, Some(actor_id.to_string()), None)?;
-        Self::auto_attach_bundled_embedder(&mut db);
+        Self::finish_construction(&mut db);
         Ok(db)
     }
 
@@ -428,7 +449,7 @@ impl YantrikDB {
         master_key: &[u8; 32],
     ) -> Result<Self> {
         let mut db = Self::open(db_path, embedding_dim, None, Some(master_key))?;
-        Self::auto_attach_bundled_embedder(&mut db);
+        Self::finish_construction(&mut db);
         Ok(db)
     }
 
@@ -441,6 +462,17 @@ impl YantrikDB {
     /// caller running with a non-default dim sees `NoEmbedder` until they
     /// wire their own (avoids silent dim-mismatch corruption).
     #[allow(unused_variables)]
+    /// Attach the bundled embedder, then re-mount installed packs.
+    ///
+    /// Order matters and is not incidental: mounting proves a pack shares
+    /// this database's embedding space, and on an empty database that
+    /// proof comes from the *attached* embedder. Re-mounting before the
+    /// embedder is attached would refuse every pack on a fresh install.
+    fn finish_construction(db: &mut Self) {
+        Self::auto_attach_bundled_embedder(db);
+        db.remount_installed();
+    }
+
     fn auto_attach_bundled_embedder(db: &mut Self) {
         #[cfg(feature = "bundled-embedder")]
         {
@@ -990,11 +1022,35 @@ impl YantrikDB {
         )?
         .as_u8();
 
+        // **Packs / issue #117.** Restore durable embedder identity.
+        //
+        // Before this read existed, `SearchState::initial` reconstructed
+        // provenance as `ExternalOrUnknown` on every open, which made
+        // `set_embedder`'s same-dim-different-model guard unreachable
+        // across a restart — reopen a database, attach a different
+        // 64-dim model, and every recall silently searched one vector
+        // space with queries encoded in another. Promoting to `Known`
+        // here is what arms that guard, and what lets `mount_pack`
+        // prove a pack shares this database's embedding space.
+        //
+        // A recorded dim that disagrees with the index dim is ignored
+        // rather than fatal: it means the identity predates a dim
+        // change, and `ExternalOrUnknown` is exactly the honest state
+        // for "we cannot prove what built these vectors".
+        let persisted_embedder =
+            Self::read_embedder_identity(&conn)?.filter(|(_, _, dim)| *dim == embedding_dim);
+        // Presence, not dim-match: a stored-but-mismatched identity
+        // still means the write path has nothing new to stamp, and
+        // re-stamping under a different dim is `reembed`'s job.
+        let persisted_embedder_present =
+            Self::get_meta(&conn, pack::META_EMBEDDER_DIGEST)?.is_some();
+
         Ok(Self {
             conn: Mutex::new(conn),
             read_conns,
             read_idx: std::sync::atomic::AtomicUsize::new(0),
             embedding_dim,
+            db_path: db_path.to_string(),
             hlc: Mutex::new(HLC::new(node_id)),
             actor_id,
             scoring_cache: RwLock::new(scoring_cache),
@@ -1048,9 +1104,17 @@ impl YantrikDB {
                     vec_index_arc,
                 );
                 s.generation = active_generation;
+                if let Some((name, digest, dim)) = persisted_embedder {
+                    s.index_embedding =
+                        crate::engine::reembed::EmbeddingProvenance::Known { name, digest, dim };
+                }
                 s
             })),
             index_write_lock: parking_lot::Mutex::new(()),
+            packs: parking_lot::RwLock::new(Vec::new()),
+            embedder_identity_stamped: std::sync::atomic::AtomicBool::new(
+                persisted_embedder_present,
+            ),
         })
     }
 
@@ -1718,6 +1782,13 @@ impl YantrikDB {
         // user's ONNX mean-pool bug) can emit NaN; catch it here rather
         // than persist it. Covers every engine-side embedding consumer.
         crate::validate::validate_embedding("embed", &out, state.dim())?;
+        // **Issue #117 / packs.** A vector in this database's space was
+        // just produced by the attached embedder — record that identity
+        // once. This is the hook that covers the binding path, where
+        // `record_text` embeds through here and then calls `record()`
+        // with the result, so the engine-internal `record_text` stamp
+        // never fires.
+        self.stamp_embedder_identity_once();
         Ok(out)
     }
 
@@ -1837,6 +1908,12 @@ impl YantrikDB {
         // too (T06 coverage). A warn-mode Flagged verdict is carried to the
         // routed path and counted only after the write commits (4a.6b).
         let gate_verdict = self.gate_provenance(source, metadata)?;
+        // **Issue #117 / packs.** This is the engine-embeds-the-text
+        // path, so the vector about to be stored provably comes from the
+        // attached embedder — the one moment this database can honestly
+        // claim an embedding-space identity. One relaxed atomic load
+        // after the first write.
+        self.stamp_embedder_identity_once();
         // Task 29 (Ingest Integrity): strip any leaked tool-call
         // serialization tail BEFORE embedding, so both the computed vector
         // and the stored text reflect the real memory rather than the

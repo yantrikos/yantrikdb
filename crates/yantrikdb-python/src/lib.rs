@@ -41,6 +41,18 @@ fn _yantrikdb_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "RecallContended",
         m.py().get_type::<py_errors::RecallContended>(),
     )?;
+    m.add(
+        "PackEmbedderMismatch",
+        m.py().get_type::<py_errors::PackEmbedderMismatch>(),
+    )?;
+    m.add(
+        "PackAlreadyMounted",
+        m.py().get_type::<py_errors::PackAlreadyMounted>(),
+    )?;
+    m.add(
+        "PackSignatureInvalid",
+        m.py().get_type::<py_errors::PackSignatureInvalid>(),
+    )?;
 
     // Triggers
     m.add_class::<py_triggers::PyTrigger>()?;

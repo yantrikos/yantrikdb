@@ -42,6 +42,9 @@ pub use engine::graph_ops::AutoRelateReport;
 pub use engine::importance::ImportanceRecalibrationReport;
 pub use engine::links::ChainAuditReport;
 pub use engine::maintenance::{MaintenanceCycleConfig, MaintenanceCycleReport};
+pub use engine::pack::{
+    MountOptions, MountedPack, PackEmbedder, PackInfo, PackManifest, PackTrust,
+};
 pub use engine::repair::{RepairError, RepairReport};
 pub use engine::split::SplitReport;
 pub use engine::tasks::Task;

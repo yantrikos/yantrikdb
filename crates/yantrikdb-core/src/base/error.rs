@@ -158,6 +158,83 @@ pub enum YantrikDbError {
         memory_count: u64,
     },
 
+    /// **Packs.** The pack file is missing, unreadable, or is not a
+    /// YantrikDB database.
+    #[error("pack at {path} could not be opened: {reason}")]
+    PackUnreadable { path: String, reason: String },
+
+    /// **Packs.** The file opened but carries no pack manifest, so it is
+    /// a plain database rather than a sealed pack. Seal it first with
+    /// `seal_pack()`.
+    #[error(
+        "no pack manifest in {path} — this is a plain database, not a sealed pack. \
+         Produce one with db.seal_pack(dest, manifest, namespace)."
+    )]
+    PackManifestMissing { path: String },
+
+    /// **Packs.** The manifest is present but malformed.
+    #[error("pack manifest in {path} is malformed: {reason}")]
+    PackManifestInvalid { path: String, reason: String },
+
+    /// **Packs.** Mounting would place vectors from a different embedding
+    /// space alongside the host's. This is the silent-corruption case the
+    /// mount-time check exists to prevent: the query is encoded once, by
+    /// the host's embedder, and searched against both indexes — so a pack
+    /// built by a different model returns confident nonsense.
+    #[error(
+        "pack '{pack_id}' is not compatible with this database's embedding space: {reason}. \
+         The query is encoded once and searched against both indexes, so mounting across \
+         embedders returns plausible-looking but meaningless results. \
+         Rebuild the pack with the host's embedder, or (only if you are certain the vectors \
+         are compatible) mount with MountOptions::allow_unverified_embedder."
+    )]
+    PackEmbedderMismatch { pack_id: String, reason: String },
+
+    /// **Packs.** A pack with this id is already mounted.
+    #[error("pack '{pack_id}' is already mounted (from {path})")]
+    PackAlreadyMounted { pack_id: String, path: String },
+
+    /// **Packs.** No mounted pack carries this id.
+    #[error("no mounted pack with id '{pack_id}'")]
+    PackNotMounted { pack_id: String },
+
+    /// **Packs.** Encrypted packs are not supported: the host would need
+    /// the pack's key to build its index, and the key-exchange story is
+    /// not designed yet. Rejected rather than half-working.
+    #[error("pack at {path} is encrypted; encrypted packs are not supported")]
+    PackEncrypted { path: String },
+
+    /// **Packs.** `seal_pack` refuses to overwrite an existing file, so a
+    /// mounted pack can never be rewritten underneath its own reader.
+    #[error("cannot seal pack to {path}: the file already exists")]
+    PackDestinationExists { path: String },
+
+    /// **Packs.** The constitution exceeds its token budget. Enforced at
+    /// seal time — where the author can still fix it — because every
+    /// constitution rule costs tokens on every turn of every consumer,
+    /// and an unbounded constitution degenerates into the
+    /// prompt-stuffing the engine exists to replace.
+    #[error(
+        "pack constitution is ~{approx_tokens} tokens; the budget is {budget}. \
+         The constitution is for hard rules the model must always see — \
+         move reference facts into the corpus, where retrieval serves them on demand."
+    )]
+    PackConstitutionTooLarge { approx_tokens: usize, budget: usize },
+
+    /// **Packs.** The pack claims a signature that does not verify.
+    ///
+    /// This is refused outright — strictly worse than carrying no
+    /// signature at all, because a claimed-and-failed signature means
+    /// the pack was modified after signing, the signature was forged,
+    /// or the key material is corrupt. There is no legitimate state
+    /// that produces it, so there is no override.
+    #[error(
+        "pack '{pack_id}' carries a signature that does not verify: {reason}. \
+         The pack was modified after signing or the signature is forged; \
+         re-download it from the publisher."
+    )]
+    PackSignatureInvalid { pack_id: String, reason: String },
+
     /// **Decoupled write path RFC, Phase 1.**
     ///
     /// The bounded global ingest queue is full. Foreground writers receive

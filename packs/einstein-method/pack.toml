@@ -1,0 +1,18 @@
+[pack]
+name = "einstein-method"
+version = "0.1.0"
+origin = "yantrik/einstein-method"
+namespace = "einstein_method"
+description = "Einstein's working method as procedure: thought experiments, invariance-first reasoning, operational definitions and limiting cases — with his classic gedankenexperiments as worked examples."
+coverage = [
+    "reasoning by thought experiment",
+    "invariance and frames of reference",
+    "operational definitions and limiting cases",
+]
+
+[content]
+memory_type = "procedural"
+domain = "reasoning"
+source = "document"
+importance = 0.6
+certainty = 0.9

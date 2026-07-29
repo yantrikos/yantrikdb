@@ -1,6 +1,7 @@
 mod cognition;
 mod graph;
 mod memory;
+mod pack;
 mod session_temporal;
 mod sync;
 
@@ -239,6 +240,9 @@ pub(crate) fn map_err(e: yantrikdb_core::YantrikDbError) -> PyErr {
             py_errors::ProvenanceInconsistent::new_err(e.to_string())
         }
         E::RecallContended { .. } => py_errors::RecallContended::new_err(e.to_string()),
+        E::PackEmbedderMismatch { .. } => py_errors::PackEmbedderMismatch::new_err(e.to_string()),
+        E::PackAlreadyMounted { .. } => py_errors::PackAlreadyMounted::new_err(e.to_string()),
+        E::PackSignatureInvalid { .. } => py_errors::PackSignatureInvalid::new_err(e.to_string()),
         E::NoEmbedder => PyRuntimeError::new_err(e.to_string()),
         E::NoQuery => PyValueError::new_err(e.to_string()),
         _ => PyRuntimeError::new_err(e.to_string()),

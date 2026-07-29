@@ -1,0 +1,23 @@
+[pack]
+name = "java-modern"
+version = "0.1.0"
+origin = "yantrik/java-modern"
+namespace = "java_modern"
+description = "Java as it is written on a current LTS, not as it was written in 2014. Records, sealed types and pattern matching; virtual threads and what still pins them; the concurrency and equality contracts that fail silently; java.time, BigDecimal and the numeric traps; and the JDK APIs that are insecure by default until you configure them."
+coverage = [
+    "Modern Java language features: records, sealed types, pattern matching, text blocks",
+    "Java virtual threads and structured concurrency",
+    "Java concurrency correctness: visibility, atomicity, thread-safe collections",
+    "Java equality, hashCode, comparison and collection contracts",
+    "Java exception handling, try-with-resources and interruption",
+    "java.time, BigDecimal and numeric precision",
+    "Java streams and the Collections API",
+    "Java security defaults: SQL injection, XML parsing, deserialization, randomness",
+]
+
+[content]
+memory_type = "procedural"
+domain = "engineering"
+source = "document"
+importance = 0.6
+certainty = 0.9

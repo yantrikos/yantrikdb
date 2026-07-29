@@ -285,7 +285,13 @@ impl YantrikDB {
         }
 
         if is_supersedes {
-            Self::gate_supersedes(&conn, source_rid, &link.target_rid)?;
+            // The target may live in a mounted pack rather than in this
+            // database — that is how a user correction supersedes a
+            // vendor-pack fact. Resolved here (not inside the gate) so
+            // the gate stays a pure function of the connection plus a
+            // resolved endpoint.
+            let target_in_pack = self.pack_row_ns_status(&link.target_rid)?;
+            Self::gate_supersedes(&conn, source_rid, &link.target_rid, target_in_pack)?;
         }
 
         let payload = serde_json::json!({
@@ -358,10 +364,16 @@ impl YantrikDB {
     /// invariant is one selected active INBOUND edge per target
     /// (predecessor), and the cycle check walks the TARGET's outgoing
     /// predecessor closure looking for the source.
+    ///
+    /// `target_in_pack` carries the target's `(namespace, status)` when
+    /// it was resolved in a mounted pack instead of in this database —
+    /// see `pack_row_ns_status`. The source is always required to be a
+    /// host row: a pack is read-only, so it can never be the new claim.
     fn gate_supersedes(
         conn: &rusqlite::Connection,
         source_rid: &str,
         target_rid: &str,
+        target_in_pack: Option<(String, String)>,
     ) -> Result<()> {
         // Endpoints: exist, non-tombstoned, same namespace.
         let fetch = |rid: &str| -> Result<Option<(String, String)>> {
@@ -378,7 +390,7 @@ impl YantrikDB {
                 reason: format!("supersedes source {source_rid} not found"),
             });
         };
-        let Some((tgt_ns, tgt_status)) = fetch(target_rid)? else {
+        let Some((tgt_ns, tgt_status)) = fetch(target_rid)?.or(target_in_pack) else {
             return Err(YantrikDbError::InvalidLinkEndpoints {
                 reason: format!("supersedes target {target_rid} not found"),
             });

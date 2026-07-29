@@ -18,6 +18,9 @@ thiserror = "2"
 blake3 = "1"
 hex = "0.4"
 rand = { version = "0.8", features = ["small_rng"] }
+# Pack signing (marketplace trust): Ed25519 signatures over a canonical
+# manifest payload. `rand_core` feature enables SigningKey::generate.
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 zstd = "0.13"
 tracing = "0.1"
 aes-gcm = "0.10"
@@ -82,6 +85,10 @@ testing = []
 criterion = "0.5"
 toml = "0.8"
 tempfile = "3"
+# Pack tests hash the host file to prove unmount mutates nothing, and
+# tamper with a sealed pack to prove the content digest catches it.
+blake3 = "1"
+rusqlite = { version = "0.37", features = ["bundled"] }
 
 [[bench]]
 name = "engine_bench"
