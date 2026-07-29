@@ -68,6 +68,26 @@ def build(src: Path, out_dir: Path = DIST) -> Path:
     if not facts:
         raise SystemExit(f"{src}: corpus.md produced no facts")
 
+    # A record that is mostly code does not retrieve on its own topic.
+    # The bundled embedder is 64-dimensional, so an embedding is dominated
+    # by whatever the record has most of: a 2.5KB theme.json exemplar was
+    # unreachable by every query tried, while the shortest exemplar — most
+    # prose, least code — won even for the other's queries. A fact nobody
+    # can retrieve is dead weight that costs pack size and delivers
+    # nothing, and the failure is silent because the record is present and
+    # correct. Warn at build time; `lint_pack.py` proves it per record.
+    heavy = []
+    for topic, body in facts:
+        fenced = sum(len(b) for b in re.findall(r"```.*?```", body, re.S))
+        if len(body) > 400 and fenced / max(len(body), 1) > 0.5:
+            heavy.append((topic, int(100 * fenced / len(body))))
+    if heavy:
+        print(f"  warning: {len(heavy)} record(s) are code-dominated and may not "
+              f"be retrievable on their own topic — lead with prose, keep the "
+              f"snippet short:")
+        for topic, pct in heavy[:6]:
+            print(f"    {pct:>3}% code  {topic[:60]}")
+
     # Tier 1: optional constitution.md, one rule per `## ` heading. These
     # inject on EVERY turn while mounted, so the file should hold only
     # rules that fail if they are ever absent — reference facts belong in

@@ -64,6 +64,63 @@ every constitution line costs tokens on every turn.
 **Coverage (tier 3) — what it covers.** Three to five short phrases. A
 model does not consult knowledge it does not know exists.
 
+## The tiers must be in sync, and that is checkable
+
+The two tiers fail together in a way neither shows on its own. The
+constitution says *"declare presets and then apply them under styles"*;
+the corpus holds the worked example that demonstrates it; and the model
+never sees the example, because the record is mostly code and does not
+retrieve on its topic. **The rule arrives with no evidence, the evidence
+is never delivered, and both files look correct in isolation.**
+
+```bash
+python packs/lint_pack.py <pack>      # rules without evidence, records nobody can reach
+```
+
+Measured on `wordpress-theme`: **7 of 23 rules had no corpus record above
+the 0.55 floor** — the pack instructed the model to do things it could not
+show — and **every worked example was unreachable**. Two laws came out of
+fixing it, and both are enforced now: `build.py` warns, `lint_pack.py`
+proves it per record.
+
+### Law 1 — a record that is mostly code does not retrieve
+
+The bundled embedder is 64-dimensional, so an embedding is dominated by
+whatever the record has most of. A 2.5 KB `theme.json` example was
+unreachable by **every** query tried, while the shortest example — most
+prose, least code — won even for the other's queries. Retrievability is
+inversely proportional to code volume.
+
+So: **lead with prose that names the subject, and keep the snippet
+short.** Ten to twenty lines of code inside sixty percent prose retrieves;
+a whole file does not. A large worked example belongs split into
+rule-aligned fragments, not stored whole. If a complete file must ship,
+ship it as a `reference/` directory in the pack source and teach from
+fragments of it.
+
+### Law 2 — write in the vocabulary a consumer queries with
+
+Constitution headings are imperatives, and imperatives make terrible
+queries. `"Layout type is chosen deliberately"` retrieves nothing at
+0.386; `"constrained flex grid layout type"` finds the right record at
+0.679. The embedder matches concrete technical vocabulary — identifiers,
+API names, error strings — not abstract instruction.
+
+Corpus headings therefore carry the concrete terms someone would actually
+ask about. The rule can stay imperative; the record it depends on must
+not.
+
+### Pair every rule with a record
+
+Each constitution rule should have at least one corpus record that shows
+it, reachable by the task language around that rule. A rule with no
+retrievable support is an assertion the pack cannot back up — and on a
+generation task the model will follow the rule shape without the detail
+that makes it work, which is how a theme ends up structurally correct and
+visually unstyled.
+
+Run the linter before publishing. Zero orphan rules is the bar.
+
 ## Authoring rules that come from engine behaviour
 
 - **One fact per record.** Retrieval serves records, not documents. A
@@ -91,13 +148,17 @@ model does not consult knowledge it does not know exists.
 # 1. author, then build
 python packs/build.py packs/<name>
 
-# 2. does it teach? (knowledge questions + attach-harm control)
+# 2. are the tiers in sync? (rules with no evidence, unreachable records)
+python packs/lint_pack.py <pack>
+python packs/lint_evals.py <pack>
+
+# 3. does it teach? (knowledge questions + attach-harm control)
 python packs/evaluate.py --model qwen3.5:4b --pack <name>
 
-# 3. if it has a constitution, does that tier earn its tokens?
+# 4. if it has a constitution, does that tier earn its tokens?
 python packs/evaluate_tiers.py --model qwen3.5:4b --pack <name>
 
-# 4. sign and publish
+# 5. sign and publish
 yantrikdb pack keygen                       # once; keep the secret offline
 yantrikdb pack sign packs/dist/<name>-<v>.ydbpack --key <secret>
 # upload at https://packs.yantrikdb.com/dashboard

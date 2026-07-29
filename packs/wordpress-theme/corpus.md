@@ -699,514 +699,251 @@ This is the whole distinction. `patterns/*.php` are executed, so
 `templates/*.html` and `parts/*.html` are not. When a template needs
 something only PHP can produce, the answer is a pattern referenced from
 the template — never PHP inlined into the HTML.
+## Colour is chosen: the palette and ground of a composed theme
 
-
-## A complete theme.json for a block theme — worked example
-
-Every design decision in one file, and the shape to imitate. Note what makes it work rather than merely validate: every preset declared under `settings` is *applied* under `styles`; `fluid` is true so the whole scale gets clamps; `contentSize` is 38rem because that is a reading measure rather than a layout width; the palette is four roles named by role; and `elements` plus `blocks` carry the typographic detail. This file scores full marks on a rendered-craft benchmark that measures contrast, measure, type scale, spacing scale and fluid type in a real browser.
+Colour choice is what separates a designed theme from a default one, and
+the decision is about *restraint* rather than range. Four roles carry a
+whole site. The ground is an off-white with a hint of warmth rather than
+`#ffffff`; the text is a near-black carrying the same warmth rather than
+`#000000`. That pairing lands near 16:1 — far past the 4.5:1 floor, and
+without the glare of the 21:1 extreme, which reads as a decision not to
+decide.
 
 ```json
-{
-  "$schema": "https://schemas.wp.org/trunk/theme.json",
-  "version": 3,
-  "settings": {
-    "appearanceTools": true,
-    "useRootPaddingAwareAlignments": true,
-    "layout": {
-      "contentSize": "38rem",
-      "wideSize": "72rem"
-    },
-    "color": {
-      "defaultPalette": false,
-      "defaultGradients": false,
-      "palette": [
-        { "slug": "base",      "name": "Base",      "color": "#faf7f2" },
-        { "slug": "contrast",  "name": "Contrast",  "color": "#171310" },
-        { "slug": "primary",   "name": "Primary",   "color": "#8c3a1e" },
-        { "slug": "secondary", "name": "Secondary", "color": "#55635c" },
-        { "slug": "tint",      "name": "Tint",      "color": "#eee7dc" }
-      ]
-    },
-    "typography": {
-      "fluid": true,
-      "defaultFontSizes": false,
-      "fontFamilies": [
-        {
-          "slug": "display",
-          "name": "Display",
-          "fontFamily": "\"Iowan Old Style\", \"Palatino Linotype\", Palatino, \"Book Antiqua\", Georgia, serif"
-        },
-        {
-          "slug": "text",
-          "name": "Text",
-          "fontFamily": "\"Charter\", \"Bitstream Charter\", \"Sitka Text\", Cambria, Georgia, serif"
-        },
-        {
-          "slug": "ui",
-          "name": "Interface",
-          "fontFamily": "\"Inter\", \"Segoe UI\", Roboto, \"Helvetica Neue\", Arial, sans-serif"
-        }
-      ],
-      "fontSizes": [
-        { "slug": "small",    "name": "Small",    "size": "0.85rem",   "fluid": { "min": "0.8rem",   "max": "0.9rem" } },
-        { "slug": "medium",   "name": "Medium",   "size": "1.0625rem", "fluid": { "min": "1rem",     "max": "1.125rem" } },
-        { "slug": "large",    "name": "Large",    "size": "1.33rem",   "fluid": { "min": "1.2rem",   "max": "1.45rem" } },
-        { "slug": "x-large",  "name": "XL",       "size": "1.66rem",   "fluid": { "min": "1.45rem",  "max": "1.9rem" } },
-        { "slug": "xx-large", "name": "2XL",      "size": "2.08rem",   "fluid": { "min": "1.75rem",  "max": "2.6rem" } },
-        { "slug": "huge",     "name": "3XL",      "size": "2.6rem",    "fluid": { "min": "2.1rem",   "max": "3.6rem" } }
-      ]
-    },
-    "spacing": {
-      "units": ["rem", "em", "%", "px"],
-      "spacingScale": { "steps": 0 },
-      "spacingSizes": [
-        { "slug": "20", "name": "1", "size": "0.5rem" },
-        { "slug": "30", "name": "2", "size": "1rem" },
-        { "slug": "40", "name": "3", "size": "1.75rem" },
-        { "slug": "50", "name": "4", "size": "3rem" },
-        { "slug": "60", "name": "5", "size": "5rem" },
-        { "slug": "70", "name": "6", "size": "8rem" }
-      ]
-    }
-  },
-  "styles": {
-    "color": {
-      "background": "var(--wp--preset--color--base)",
-      "text": "var(--wp--preset--color--contrast)"
-    },
-    "typography": {
-      "fontFamily": "var(--wp--preset--font-family--text)",
-      "fontSize": "var(--wp--preset--font-size--medium)",
-      "lineHeight": "1.65",
-      "letterSpacing": "0.002em"
-    },
-    "spacing": {
-      "blockGap": "var(--wp--preset--spacing--40)",
-      "padding": {
-        "top": "0",
-        "bottom": "0",
-        "left": "var(--wp--preset--spacing--40)",
-        "right": "var(--wp--preset--spacing--40)"
-      }
-    },
-    "elements": {
-      "link": {
-        "color": { "text": "var(--wp--preset--color--primary)" },
-        "typography": { "textDecoration": "underline" },
-        ":hover": { "typography": { "textDecoration": "underline" } }
-      },
-      "heading": {
-        "typography": {
-          "fontFamily": "var(--wp--preset--font-family--display)",
-          "fontWeight": "600",
-          "lineHeight": "1.12",
-          "letterSpacing": "-0.021em"
-        }
-      },
-      "h1": { "typography": { "fontSize": "var(--wp--preset--font-size--huge)", "lineHeight": "1.05" } },
-      "h2": { "typography": { "fontSize": "var(--wp--preset--font-size--xx-large)" } },
-      "h3": { "typography": { "fontSize": "var(--wp--preset--font-size--x-large)", "lineHeight": "1.2" } },
-      "button": {
-        "color": {
-          "background": "var(--wp--preset--color--primary)",
-          "text": "var(--wp--preset--color--base)"
-        },
-        "typography": {
-          "fontFamily": "var(--wp--preset--font-family--ui)",
-          "fontSize": "var(--wp--preset--font-size--small)",
-          "fontWeight": "600",
-          "letterSpacing": "0.04em"
-        },
-        "spacing": { "padding": { "top": "0.85rem", "bottom": "0.85rem", "left": "1.5rem", "right": "1.5rem" } },
-        "border": { "radius": "2px" }
-      },
-      "caption": {
-        "typography": {
-          "fontFamily": "var(--wp--preset--font-family--ui)",
-          "fontSize": "var(--wp--preset--font-size--small)"
-        },
-        "color": { "text": "var(--wp--preset--color--secondary)" }
-      }
-    },
-    "blocks": {
-      "core/site-title": {
-        "typography": {
-          "fontFamily": "var(--wp--preset--font-family--display)",
-          "fontSize": "var(--wp--preset--font-size--large)",
-          "fontWeight": "600",
-          "letterSpacing": "-0.015em"
-        }
-      },
-      "core/post-title": {
-        "typography": { "fontFamily": "var(--wp--preset--font-family--display)" }
-      },
-      "core/post-date": {
-        "typography": {
-          "fontFamily": "var(--wp--preset--font-family--ui)",
-          "fontSize": "var(--wp--preset--font-size--small)",
-          "letterSpacing": "0.06em",
-          "textTransform": "uppercase"
-        },
-        "color": { "text": "var(--wp--preset--color--secondary)" }
-      },
-      "core/pullquote": {
-        "typography": { "fontFamily": "var(--wp--preset--font-family--display)" }
-      }
-    }
-  },
-  "templateParts": [
-    { "name": "header", "title": "Header", "area": "header" },
-    { "name": "footer", "title": "Footer", "area": "footer" }
-  ]
+"palette": [
+  { "slug": "base",      "name": "Base",      "color": "#faf7f2" },
+  { "slug": "contrast",  "name": "Contrast",  "color": "#171310" },
+  { "slug": "primary",   "name": "Primary",   "color": "#8c3a1e" },
+  { "slug": "secondary", "name": "Secondary", "color": "#55635c" },
+  { "slug": "tint",      "name": "Tint",      "color": "#eee7dc" }
+]
+```
+
+`tint` exists to make section bands possible without introducing a new
+hue. Naming by role rather than by hue is what lets a style variation
+restyle the entire theme by redefining five values.
+
+## Applying the palette and type: the styles block that makes design appear
+
+The most consequential few lines in a block theme. Presets declared under
+`settings` are only *available*; nothing renders differently until they
+are applied under `styles`. A theme that skips this looks unstyled and
+reports no error at all.
+
+```json
+"styles": {
+  "color": { "background": "var(--wp--preset--color--base)",
+             "text": "var(--wp--preset--color--contrast)" },
+  "typography": { "fontFamily": "var(--wp--preset--font-family--text)",
+                  "fontSize": "var(--wp--preset--font-size--medium)",
+                  "lineHeight": "1.65" },
+  "spacing": { "blockGap": "var(--wp--preset--spacing--40)" },
+  "elements": { "link": { "color": { "text": "var(--wp--preset--color--primary)" } } }
 }
 ```
 
-## A complete templates/index.html — worked example
+Font family, font size, line height, background, text, link colour, block
+gap. Six entries, and their absence is the single most common reason a
+structurally correct theme renders in Times New Roman at line-height
+normal.
 
-Block markup, not PHP. The structure to imitate is the section rhythm: a full-bleed tinted band, then a constrained reading column, then a closing band — rather than one undifferentiated stack. Note that the reading column is a group with `{"layout":{"type":"constrained"}}`, which is what makes `contentSize` take effect at all.
+## A type scale from one ratio, applied to headings through elements
 
-```html
-<!-- wp:template-part {"slug":"header","tagName":"header"} /-->
+Sizes derive from a single ratio so that everything on the page feels
+related. Six steps from a 1.0625rem base at 1.25, with `fluid` true so
+WordPress generates a clamp for every step rather than for one favourite
+size. Display sizes then get their own line height, because leading that
+suits body copy looks like a gap at 42px.
 
-<!-- wp:group {"tagName":"main","align":"full","layout":{"type":"default"}} -->
-<main class="wp-block-group alignfull">
-
-	<!-- A full-bleed tinted band. Section rhythm: band, then reading
-	     column, then band — so the page reads as composed rather than as
-	     one long stack. -->
-	<!-- wp:group {"align":"full","backgroundColor":"tint","style":{"spacing":{"padding":{"top":"var:preset|spacing|60","bottom":"var:preset|spacing|60"}}},"layout":{"type":"constrained"}} -->
-	<div class="wp-block-group alignfull has-tint-background-color has-background" style="padding-top:var(--wp--preset--spacing--60);padding-bottom:var(--wp--preset--spacing--60)">
-		<!-- wp:paragraph {"className":"eyebrow"} -->
-		<p class="eyebrow">The Journal</p>
-		<!-- /wp:paragraph -->
-
-		<!-- wp:heading {"level":1,"style":{"spacing":{"margin":{"top":"var:preset|spacing|20"}}}} -->
-		<h1 class="wp-block-heading" style="margin-top:var(--wp--preset--spacing--20)">Notes from the measurement floor</h1>
-		<!-- /wp:heading -->
-
-		<!-- wp:paragraph {"style":{"typography":{"fontSize":"var:preset|font-size|large","lineHeight":"1.5"}},"textColor":"secondary"} -->
-		<p class="has-secondary-color has-text-color" style="font-size:var(--wp--preset--font-size--large);line-height:1.5">Short pieces on packs, small models, and the difference between a number and a measurement.</p>
-		<!-- /wp:paragraph -->
-	</div>
-	<!-- /wp:group -->
-
-	<!-- The reading column. contentSize does the width; nothing here
-	     hand-rolls a max-width. -->
-	<!-- wp:group {"style":{"spacing":{"padding":{"top":"var:preset|spacing|60","bottom":"var:preset|spacing|60"}}},"layout":{"type":"constrained"}} -->
-	<div class="wp-block-group" style="padding-top:var(--wp--preset--spacing--60);padding-bottom:var(--wp--preset--spacing--60)">
-
-		<!-- wp:query {"queryId":1,"query":{"perPage":6,"pages":0,"offset":0,"postType":"post","order":"desc","orderBy":"date","inherit":true},"layout":{"type":"default"}} -->
-		<div class="wp-block-query">
-			<!-- wp:post-template {"style":{"spacing":{"blockGap":"var:preset|spacing|50"}}} -->
-				<!-- wp:post-date {"format":"j M Y"} /-->
-
-				<!-- wp:post-title {"level":2,"isLink":true,"style":{"spacing":{"margin":{"top":"var:preset|spacing|20"}},"elements":{"link":{"color":{"text":"var:preset|color|contrast"}}}},"fontSize":"x-large"} /-->
-
-				<!-- wp:post-excerpt {"moreText":"Keep reading","excerptLength":42} /-->
-			<!-- /wp:post-template -->
-
-			<!-- wp:query-pagination {"style":{"spacing":{"margin":{"top":"var:preset|spacing|60"}},"typography":{"fontFamily":"var:preset|font-family|ui","fontSize":"var:preset|font-size|small"}},"layout":{"type":"flex","justifyContent":"space-between"}} -->
-				<!-- wp:query-pagination-previous /-->
-				<!-- wp:query-pagination-next /-->
-			<!-- /wp:query-pagination -->
-
-			<!-- wp:query-no-results -->
-				<!-- wp:paragraph -->
-				<p>Nothing published yet.</p>
-				<!-- /wp:paragraph -->
-			<!-- /wp:query-no-results -->
-		</div>
-		<!-- /wp:query -->
-
-	</div>
-	<!-- /wp:group -->
-
-	<!-- Closing band, with the one button on the page. -->
-	<!-- wp:group {"align":"full","backgroundColor":"tint","style":{"spacing":{"padding":{"top":"var:preset|spacing|60","bottom":"var:preset|spacing|60"}}},"layout":{"type":"constrained"}} -->
-	<div class="wp-block-group alignfull has-tint-background-color has-background" style="padding-top:var(--wp--preset--spacing--60);padding-bottom:var(--wp--preset--spacing--60)">
-		<!-- wp:heading {"level":2,"fontSize":"xx-large"} -->
-		<h2 class="wp-block-heading has-xx-large-font-size">Measure it, or it did not happen</h2>
-		<!-- /wp:heading -->
-
-		<!-- wp:paragraph {"textColor":"secondary"} -->
-		<p class="has-secondary-color has-text-color">Every claim in the journal carries the run that produced it.</p>
-		<!-- /wp:paragraph -->
-
-		<!-- wp:buttons {"style":{"spacing":{"margin":{"top":"var:preset|spacing|40"}}}} -->
-		<div class="wp-block-buttons" style="margin-top:var(--wp--preset--spacing--40)">
-			<!-- wp:button -->
-			<div class="wp-block-button"><a class="wp-block-button__link wp-element-button" href="#top">Read the archive</a></div>
-			<!-- /wp:button -->
-		</div>
-		<!-- /wp:buttons -->
-	</div>
-	<!-- /wp:group -->
-
-</main>
-<!-- /wp:group -->
-
-<!-- wp:template-part {"slug":"footer","tagName":"footer"} /-->
+```json
+"elements": {
+  "heading": { "typography": { "fontFamily": "var(--wp--preset--font-family--display)",
+                               "fontWeight": "600", "lineHeight": "1.12",
+                               "letterSpacing": "-0.021em" } },
+  "h1": { "typography": { "fontSize": "var(--wp--preset--font-size--huge)",
+                          "lineHeight": "1.05" } },
+  "h2": { "typography": { "fontSize": "var(--wp--preset--font-size--xx-large)" } }
+}
 ```
 
-## A complete parts/header.html — worked example
+## Sections carry rhythm: alternating full-bleed bands and reading columns
 
-A header with real content: site title and tagline stacked on the left, navigation on the right, in a `flex` group with `justifyContent: space-between`. No PHP — the site title is `wp:site-title` and the tagline is `wp:site-tagline`.
+A page of identically spaced blocks reads as a list. Rhythm comes from
+alternating the *kind* of section: a full-bleed tinted band, then a
+constrained reading column, then a closing band. The band is a group with
+`align: full` and a background colour; the vertical padding comes from
+the spacing scale rather than a fixed rem.
 
 ```html
-<!-- wp:group {"tagName":"header","align":"full","style":{"spacing":{"padding":{"top":"var:preset|spacing|40","bottom":"var:preset|spacing|40"}},"border":{"bottom":{"color":"var:preset|color|tint","width":"1px"}}},"layout":{"type":"constrained","wideSize":"72rem"}} -->
-<header class="wp-block-group alignfull has-border-color" style="border-bottom-color:var(--wp--preset--color--tint);border-bottom-width:1px;padding-top:var(--wp--preset--spacing--40);padding-bottom:var(--wp--preset--spacing--40)">
-	<!-- wp:group {"layout":{"type":"flex","justifyContent":"space-between","flexWrap":"wrap"}} -->
-	<div class="wp-block-group">
-		<!-- wp:group {"style":{"spacing":{"blockGap":"0.1rem"}},"layout":{"type":"flex","orientation":"vertical"}} -->
-		<div class="wp-block-group">
-			<!-- wp:site-title {"level":0} /-->
-			<!-- wp:site-tagline {"style":{"typography":{"fontSize":"var:preset|font-size|small","fontStyle":"italic","fontWeight":"400"}},"textColor":"secondary"} /-->
-		</div>
-		<!-- /wp:group -->
-
-		<!-- wp:navigation {"overlayMenu":"mobile","style":{"typography":{"fontFamily":"var:preset|font-family|ui","fontSize":"var:preset|font-size|small","letterSpacing":"0.04em"},"spacing":{"blockGap":"var:preset|spacing|40"}},"textColor":"contrast"} -->
-			<!-- wp:page-list /-->
-		<!-- /wp:navigation -->
-	</div>
-	<!-- /wp:group -->
-</header>
+<!-- wp:group {"align":"full","backgroundColor":"tint","style":{"spacing":{"padding":{"top":"var:preset|spacing|60","bottom":"var:preset|spacing|60"}}},"layout":{"type":"constrained"}} -->
+<div class="wp-block-group alignfull has-tint-background-color has-background">
+  <!-- section content -->
+</div>
 <!-- /wp:group -->
 ```
 
-## A complete parts/footer.html — worked example
+Note that the band is `align: full` while its *layout* is `constrained` —
+the background reaches the viewport edges and the text inside still obeys
+`contentSize`. Getting those two the wrong way round produces either a
+band that will not span or text that runs the full width of a monitor.
 
-The footer is where a dark band goes wrong. Setting `backgroundColor: contrast` without also setting `textColor` leaves near-black text on a near-black ground — invisible, and no error anywhere. Note the explicit `textColor` on the group AND on the blocks inside it, plus the `elements.link.color` override so links stay legible against the dark ground.
+## Layout type is chosen deliberately, one per purpose
+
+Four layout types and each has one job. `constrained` centres children and
+applies `contentSize` — the reading column. `default` applies no width
+constraint, for a wrapper that must span. `flex` with `justifyContent`
+for a header row or a vertical stack. `grid` with `minimumColumnWidth`
+for a card set that should reflow without breakpoints.
 
 ```html
-<!-- wp:group {"tagName":"footer","align":"full","backgroundColor":"contrast","textColor":"base","style":{"spacing":{"padding":{"top":"var:preset|spacing|60","bottom":"var:preset|spacing|60"}},"elements":{"link":{"color":{"text":"var:preset|color|tint"}}}},"layout":{"type":"constrained","wideSize":"72rem"}} -->
-<footer class="wp-block-group alignfull has-base-color has-contrast-background-color has-text-color has-background has-link-color" style="padding-top:var(--wp--preset--spacing--60);padding-bottom:var(--wp--preset--spacing--60)">
-
-	<!-- wp:group {"layout":{"type":"flex","justifyContent":"space-between","flexWrap":"wrap","verticalAlignment":"top"}} -->
-	<div class="wp-block-group">
-
-		<!-- wp:group {"style":{"spacing":{"blockGap":"var:preset|spacing|20"}},"layout":{"type":"flex","orientation":"vertical"}} -->
-		<div class="wp-block-group">
-			<!-- wp:site-title {"level":0,"textColor":"base","style":{"elements":{"link":{"color":{"text":"var:preset|color|base"}}}}} /-->
-			<!-- wp:site-tagline {"style":{"typography":{"fontSize":"var:preset|font-size|small","fontStyle":"italic"}},"textColor":"tint"} /-->
-		</div>
-		<!-- /wp:group -->
-
-		<!-- wp:group {"style":{"spacing":{"blockGap":"var:preset|spacing|20"}},"layout":{"type":"flex","orientation":"vertical"}} -->
-		<div class="wp-block-group">
-			<!-- wp:paragraph {"className":"eyebrow","style":{"typography":{"fontSize":"var:preset|font-size|small","letterSpacing":"0.1em","textTransform":"uppercase"}},"textColor":"tint"} -->
-			<p class="eyebrow has-tint-color has-text-color" style="font-size:var(--wp--preset--font-size--small);letter-spacing:0.1em;text-transform:uppercase">Elsewhere</p>
-			<!-- /wp:paragraph -->
-			<!-- wp:navigation {"overlayMenu":"never","style":{"typography":{"fontFamily":"var:preset|font-family|ui","fontSize":"var:preset|font-size|small"},"spacing":{"blockGap":"var:preset|spacing|30"}},"textColor":"base"} -->
-				<!-- wp:page-list /-->
-			<!-- /wp:navigation -->
-		</div>
-		<!-- /wp:group -->
-
-	</div>
-	<!-- /wp:group -->
-
-	<!-- wp:paragraph {"align":"left","style":{"typography":{"fontSize":"var:preset|font-size|small"},"spacing":{"margin":{"top":"var:preset|spacing|50"}}},"textColor":"tint"} -->
-	<p class="has-text-align-left has-tint-color has-text-color" style="font-size:var(--wp--preset--font-size--small);margin-top:var(--wp--preset--spacing--50)">Built and measured with YantrikDB packs. Licensed GPL-2.0-or-later.</p>
-	<!-- /wp:paragraph -->
-
-</footer>
-<!-- /wp:group -->
+<!-- wp:group {"layout":{"type":"flex","justifyContent":"space-between","flexWrap":"wrap"}} -->
+<!-- wp:group {"layout":{"type":"grid","minimumColumnWidth":"16rem"}} -->
 ```
 
-## A complete style.css for a block theme — worked example
+Choosing `constrained` for a header that should be full-bleed is the usual
+reason a header refuses to span the viewport.
 
-Only what theme.json cannot express: optical corrections, state styling, and the accessibility floors. Note the negative tracking and `text-wrap` on display type, hover colours derived with `color-mix` so they track the palette, `:focus-visible` with an offset, the `prefers-reduced-motion` block, and explicit `min-height` on inline links so tap targets reach 24px.
+## Optical corrections are applied: tracking and text-wrap
+
+Typeset rather than typed. Large text needs negative tracking, because
+spacing that suits 16px reads loose at 42px. `text-wrap: balance` stops a
+heading stranding one word on its own line, and `text-wrap: pretty`
+prevents orphans in body copy. All-caps labels need positive tracking or
+the letters collide.
 
 ```css
-/*
-Theme Name: Field Notes
-Theme URI: https://packs.yantrikdb.com/p/yantrik-wordpress-theme
-Author: YantrikDB
-Description: The reference block theme for the wordpress-theme pack — an editorial journal built to score full marks on the pack's rendered-craft benchmark, and to be imitated rather than merely obeyed.
-Version: 1.0.0
-Requires at least: 6.5
-Tested up to: 6.8
-Requires PHP: 7.4
-License: GNU General Public License v2 or later
-License URI: http://www.gnu.org/licenses/gpl-2.0.html
-Text Domain: field-notes
-Tags: block-patterns, full-site-editing, editorial, one-column
-*/
+h1, h2, h3 { letter-spacing: -0.02em; text-wrap: balance; }
+p          { text-wrap: pretty; hanging-punctuation: first last; }
+.eyebrow   { letter-spacing: 0.1em; text-transform: uppercase; }
+```
 
-/* Everything that can live in theme.json lives there. What remains is
-   what theme.json has no expression for: optical corrections, state
-   styling, and the accessibility floors. */
+These belong in `style.css` rather than theme.json, because theme.json has
+no expression for `text-wrap` or `hanging-punctuation`.
 
-/* ── Optical corrections ─────────────────────────────────────────────
-   Tracking that suits 16px reads loose at 42px, so display sizes get
-   negative tracking; all-caps labels get positive tracking or the
-   letters collide. text-wrap does the work that manual line breaks
-   used to. */
+## Accessibility is built in: focus, motion and tap targets
 
-h1, h2, h3, .wp-block-site-title {
-  text-wrap: balance;
+Three floors, all in the theme's own stylesheet. A visible focus ring with
+an offset, never `outline: none` alone. A reduced-motion block, which is
+one of the few legitimate uses of `!important` because it must beat
+whatever any block or plugin declares. And interactive targets reaching
+24px in their smaller dimension, which inline text links do not manage on
+their own.
+
+```css
+:focus-visible { outline: 2px solid var(--wp--preset--color--primary);
+                 outline-offset: 3px; }
+
+.wp-block-navigation .wp-block-navigation-item__content,
+.wp-block-post-date a { display: inline-block; min-height: 24px;
+                        padding-block: 0.3rem; }
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 0.01ms !important;
+                           animation-duration: 0.01ms !important; }
 }
+```
 
-p, .wp-block-post-excerpt__excerpt {
-  text-wrap: pretty;
-  hanging-punctuation: first last;
-}
+Screen-reader-only elements are deliberately 1px and are the one exception
+to the tap-target floor.
 
-.wp-block-post-date,
-.eyebrow {
-  font-variant-numeric: tabular-nums;
-}
+## States derived from the palette, so they track a restyle
 
-/* Optical alignment: a quote's opening mark should hang into the margin
-   rather than indenting the first line. */
-.wp-block-quote {
-  border-inline-start: 2px solid var(--wp--preset--color--primary);
-  padding-inline-start: var(--wp--preset--spacing--40);
-  font-style: normal;
-}
+Every link and button needs a hover and a focus state, and the colour for
+it should be computed from the preset rather than added as a second
+hard-coded value. `color-mix` in `oklab` darkens perceptually evenly,
+where `srgb` shifts unevenly across hues.
 
-/* ── State styling ───────────────────────────────────────────────────
-   Derived from the palette with color-mix, so a style variation that
-   redefines `primary` gets matching hovers for free. */
-
-a {
-  text-decoration-thickness: 1px;
-  text-underline-offset: 0.18em;
-  transition: color 120ms ease, text-decoration-thickness 120ms ease;
-}
-
-a:hover {
-  color: color-mix(in oklab, var(--wp--preset--color--primary) 78%, black);
-  text-decoration-thickness: 2px;
-}
+```css
+a:hover { color: color-mix(in oklab, var(--wp--preset--color--primary) 78%, black);
+          text-decoration-thickness: 2px; text-underline-offset: 0.18em; }
 
 .wp-block-button__link:hover {
   background: color-mix(in oklab, var(--wp--preset--color--primary) 86%, black);
 }
-
-/* Focus must be visible and must not be the only signal. */
-:focus-visible {
-  outline: 2px solid var(--wp--preset--color--primary);
-  outline-offset: 3px;
-  border-radius: 1px;
-}
-
-/* ── Accessibility floors ────────────────────────────────────────────
-   Interactive targets reach 24px in their smaller dimension (WCAG 2.2
-   AA, 2.5.8). Nav links are the usual offender: inline text with no
-   padding measures the cap height and nothing else. */
-
-.wp-block-navigation .wp-block-navigation-item__content,
-.wp-block-post-date a,
-.wp-block-read-more,
-.wp-block-post-title a {
-  display: inline-block;
-  min-height: 24px;
-  padding-block: 0.3rem;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
-  }
-}
-
-/* ── Editorial furniture ─────────────────────────────────────────────
-   A rule above each entry in the feed, so the list reads as a sequence
-   of articles rather than a stack of paragraphs. */
-
-.entry-list > li + li,
-.wp-block-post-template > li + li {
-  border-block-start: 1px solid color-mix(in oklab, var(--wp--preset--color--contrast) 12%, transparent);
-  padding-block-start: var(--wp--preset--spacing--40);
-}
-
-.eyebrow {
-  font-family: var(--wp--preset--font-family--ui);
-  font-size: var(--wp--preset--font-size--small);
-  letter-spacing: 0.1em;
-  text-transform: uppercase;
-  color: var(--wp--preset--color--secondary);
-}
-
-/* Responsive without breakpoints: the track floors at 16rem but the
-   inner min() stops it overflowing a narrow screen. */
-.card-grid {
-  display: grid;
-  gap: var(--wp--preset--spacing--40);
-  grid-template-columns: repeat(auto-fit, minmax(min(16rem, 100%), 1fr));
-}
-
-/* Component-relative layout — the same card lays out differently in a
-   sidebar and in the main column without knowing where it is. */
-.card-area {
-  container-type: inline-size;
-}
-
-@container (min-width: 34rem) {
-  .card {
-    display: grid;
-    grid-template-columns: 8rem 1fr;
-    gap: var(--wp--preset--spacing--40);
-    align-items: start;
-  }
-}
 ```
 
-## A complete functions.php for a block theme — worked example
+A style variation that redefines `primary` then gets matching hover states
+for free, which is the whole point of deriving rather than declaring.
 
-Nearly empty, and the one thing it must do is the thing that is easy to omit: a block theme's `style.css` is NOT enqueued automatically. Without this file every rule in style.css is inert — and the page still looks designed, because theme.json is carrying it, which is what makes the omission so hard to notice.
+## A header with real content: title, tagline and navigation
+
+An empty template part renders as blank space and reads as a broken page.
+A header needs the site title, usually the tagline, and navigation — laid
+out as a flex group pushed apart. No PHP: the title is `wp:site-title` and
+the tagline is `wp:site-tagline`.
+
+```html
+<!-- wp:group {"layout":{"type":"flex","justifyContent":"space-between","flexWrap":"wrap"}} -->
+<div class="wp-block-group">
+  <!-- wp:group {"layout":{"type":"flex","orientation":"vertical"}} -->
+  <div class="wp-block-group">
+    <!-- wp:site-title {"level":0} /-->
+    <!-- wp:site-tagline {"textColor":"secondary"} /-->
+  </div>
+  <!-- /wp:group -->
+  <!-- wp:navigation {"overlayMenu":"mobile"} --><!-- wp:page-list /--><!-- /wp:navigation -->
+</div>
+<!-- /wp:group -->
+```
+
+## A footer on a dark band needs its text colour set explicitly
+
+Where dark footers go wrong. Setting `backgroundColor` to the contrast
+colour without also setting `textColor` leaves near-black text on a
+near-black ground: invisible, HTTP 200, no error anywhere. The group needs
+a `textColor`, and links need an `elements.link.color` override, or they
+stay the primary colour and disappear against the dark.
+
+```html
+<!-- wp:group {"tagName":"footer","align":"full","backgroundColor":"contrast","textColor":"base","style":{"elements":{"link":{"color":{"text":"var:preset|color|tint"}}}},"layout":{"type":"constrained"}} -->
+<footer class="wp-block-group alignfull has-base-color has-contrast-background-color has-text-color has-background has-link-color">
+  <!-- wp:site-title {"level":0,"textColor":"base"} /-->
+</footer>
+<!-- /wp:group -->
+```
+
+## Strings are translated and output is escaped, in patterns
+
+Templates are HTML and hold no PHP, so this applies where PHP legitimately
+lives: `patterns/*.php`, and `functions.php`. Every user-facing string
+goes through a translation function with a literal text domain matching
+the `Text Domain` header, and anything dynamic is escaped at the point of
+output.
 
 ```php
-<?php
-/**
- * Field Notes — theme setup.
- *
- * Deliberately almost empty: the palette, type scale, spacing scale and
- * every default style live in theme.json, where the site editor can see
- * them. Duplicating any of that here would create a second source of
- * truth that theme.json silently wins.
- *
- * What cannot live in theme.json is this enqueue. A block theme's
- * `style.css` is NOT loaded automatically — it is a manifest that
- * WordPress reads for the theme header, and its CSS reaches the page only
- * if something enqueues it. The first version of this theme had no
- * functions.php at all, so every optical correction, focus ring, hover
- * state and tap-target rule in style.css was inert. The page still looked
- * designed, because theme.json was carrying it, which is exactly what
- * made the omission hard to notice.
- *
- * @package field-notes
- */
-
-defined( 'ABSPATH' ) || exit;
-
-add_action(
-	'wp_enqueue_scripts',
-	static function () {
-		wp_enqueue_style(
-			'field-notes',
-			get_stylesheet_uri(),
-			array(),
-			wp_get_theme()->get( 'Version' )
-		);
-	}
-);
-
-add_action(
-	'after_setup_theme',
-	static function () {
-		// Core block default styles. Everything else a classic theme
-		// declared here — colour palette, font sizes, content width,
-		// editor styles — is theme.json's job now.
-		add_theme_support( 'wp-block-styles' );
-		add_theme_support( 'custom-logo', array( 'height' => 48, 'flex-width' => true ) );
-
-		// theme.json reaches the editor on its own; style.css does not.
-		add_editor_style( 'style.css' );
-	}
-);
+<p><?php echo esc_html__( 'The Journal', 'field-notes' ); ?></p>
+<a href="<?php echo esc_url( home_url( '/' ) ); ?>"><?php
+    echo esc_html( get_bloginfo( 'name' ) ); ?></a>
 ```
+
+The text domain must be a literal — the extraction tooling parses source
+statically and silently skips a variable, so nothing translates and
+nothing warns.
+
+## The one thing functions.php must do
+
+A block theme's `style.css` is not enqueued automatically. Without this,
+every optical correction, focus ring and hover state in it is inert — and
+the page still looks designed, because theme.json is carrying the rest,
+which is exactly what makes the omission hard to notice.
+
+```php
+add_action( 'wp_enqueue_scripts', static function () {
+    wp_enqueue_style( 'my-theme', get_stylesheet_uri(), array(),
+                      wp_get_theme()->get( 'Version' ) );
+} );
+```
+
+Everything a classic theme did here — colour palette, font sizes, content
+width, editor styles — is theme.json's job now, and duplicating any of it
+creates a second source of truth that theme.json silently wins.
+
+## Ship screenshot.png and readme.txt, or the theme looks unfinished
+
+Neither affects rendering, and their absence is what makes a finished
+theme feel like a work in progress. `screenshot.png` at 1200x900 is what
+the Appearance screen displays; without it the theme appears as a grey
+placeholder however good it looks in use. `readme.txt` carries the licence
+attributions the directory requires for every bundled asset, and fonts in
+particular must be GPL-compatible and served from the theme rather than a
+CDN — which is both a directory rejection and a GDPR exposure.
