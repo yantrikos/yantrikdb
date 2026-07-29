@@ -1,0 +1,62 @@
+[
+  {
+    "theme": "qwen3-6-27b-mounted",
+    "score": 10,
+    "checks": {
+      "no-overflow": true,
+      "contrast-aa": true,
+      "contrast-everywhere": false,
+      "contrast-not-crude": true,
+      "measure-readable": true,
+      "type-scale": true,
+      "font-chosen": false,
+      "line-height-set": true,
+      "spacing-scale": true,
+      "fluid-type": false,
+      "tap-targets": false,
+      "has-states": true,
+      "has-content": true,
+      "no-leaked-source": true
+    },
+    "desktop": {
+      "overflow": 0,
+      "contrast": 15.99,
+      "measure": 65,
+      "font_family": "-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Oxygen-Sans, Ubuntu, Cantarell, \"Helvetica Neue\", sans-serif",
+      "font_size": 20,
+      "line_height": "32px",
+      "distinct_sizes": 4,
+      "distinct_spaces": 2,
+      "fluid_type": false,
+      "tap_min": 17,
+      "tap_under_24": 1,
+      "state_rules": 13,
+      "contrast_min": {
+        "ratio": 1,
+        "el": "a."
+      },
+      "text_len": 204,
+      "leaked": []
+    },
+    "mobile": {
+      "overflow": 0,
+      "contrast": 15.99,
+      "measure": 55,
+      "font_family": "-apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, Oxygen-Sans, Ubuntu, Cantarell, \"Helvetica Neue\", sans-serif",
+      "font_size": 14.4,
+      "line_height": "23.1px",
+      "distinct_sizes": 4,
+      "distinct_spaces": 2,
+      "fluid_type": false,
+      "tap_min": 17,
+      "tap_under_24": 2,
+      "state_rules": 13,
+      "contrast_min": {
+        "ratio": 1,
+        "el": "a."
+      },
+      "text_len": 192,
+      "leaked": []
+    }
+  }
+]

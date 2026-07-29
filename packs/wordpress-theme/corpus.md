@@ -504,3 +504,198 @@ literal, no hard-coded `wp-content` paths (`content_url()` instead), a
 bundled asset. Bundled fonts in particular must be GPL-compatible and
 served locally — linking Google Fonts from a CDN is a GDPR problem and a
 directory rejection.
+
+## Declaring a preset is not applying it — this is the defect
+
+The most consequential mistake in a block theme, because everything looks
+unstyled and nothing errors. `settings` declares what is *available*;
+`styles` declares what is *used*. A theme.json with a beautiful
+`fontFamilies` list and no `styles.typography.fontFamily` renders in the
+browser default — Times New Roman — and WordPress reports no problem at
+all.
+
+```json
+{
+  "settings": { "typography": { "fontFamilies": [
+      { "slug": "body", "name": "Body", "fontFamily": "Source Serif 4, Georgia, serif" } ] } },
+  "styles": {
+    "typography": {
+      "fontFamily": "var(--wp--preset--font-family--body)",
+      "fontSize":   "var(--wp--preset--font-size--medium)",
+      "lineHeight": "1.6"
+    },
+    "color": { "background": "var(--wp--preset--color--base)",
+               "text":       "var(--wp--preset--color--contrast)" }
+  }
+}
+```
+
+Every preset a theme intends to use as a default needs a matching entry
+under `styles`. The checklist is short: font family, font size, line
+height, background, text, link colour, and `spacing.blockGap`.
+
+## line-height must be set, because the default is not a number
+
+An unset `line-height` computes to `normal`, roughly 1.2 for most faces —
+far too tight for body copy, and the fastest way for a page to look
+amateur. Body copy wants 1.5 to 1.7; display sizes want 1.05 to 1.2,
+because leading that suits 16px looks like a gap at 48px. Set both:
+`styles.typography.lineHeight` for the root, and
+`styles.elements.h1.typography.lineHeight` for display.
+
+## A type scale is a ratio, not a list of sizes someone liked
+
+Pick a ratio and derive every step from it: 1.2 (minor third) for dense
+interfaces, 1.25 (major third) for general use, 1.333 (perfect fourth)
+for editorial contrast. From a 1rem base at 1.25: 0.8, 1, 1.25, 1.563,
+1.953, 2.441. Five to seven steps is a scale; fifteen arbitrary values is
+a pile, and it shows as a page where nothing feels related to anything
+else.
+
+## Make the whole scale fluid, not one size in it
+
+A single `fluid` entry on `large` while everything else is fixed produces
+a page that reflows unevenly. Set `settings.typography.fluid: true` so
+WordPress derives clamps for every size, then override `fluid.min` and
+`fluid.max` per step where you want control. Display sizes should travel
+the most between small and large viewports; body copy should barely move
+at all — 1rem to 1.125rem is plenty.
+
+## contentSize is a measure, not a layout width
+
+The number that matters is characters per line: 45 to 75 for comfortable
+reading, and past about 85 the eye loses its place returning to the left
+edge. At a 1.125rem body size that is roughly 34rem to 42rem, not the
+1200px a theme reaches for by reflex. Set `contentSize` for reading and
+`wideSize` for media and section furniture. A page whose paragraphs run
+the full width of a desktop monitor is the most common single reason a
+theme looks unconsidered.
+
+## Declaring contentSize does nothing unless the content is constrained
+
+The layout only applies to blocks inside a group whose layout type is
+`constrained`. A template that drops post content directly into the
+document body ignores `contentSize` entirely — the setting is present,
+correct, and irrelevant:
+
+```html
+<!-- wp:group {"tagName":"main","layout":{"type":"constrained"}} -->
+<main class="wp-block-group">
+  <!-- wp:post-content /-->
+</main>
+<!-- /wp:group -->
+```
+
+## Pure black on pure white is a decision not to decide
+
+21:1 is the maximum contrast the medium allows and it reads as glare;
+long-form reading is more comfortable a little inside the extremes. Pick
+a near-black carrying a hint of the theme's hue and an off-white ground —
+`#141210` on `#faf8f5` is about 16:1, comfortably past AA, and looks
+composed rather than default. WCAG sets the floor at 4.5:1 for body text
+and 3:1 for large text; the floor is not the target.
+
+## A palette needs roles, not favourite colours
+
+Four named roles carry a whole theme: `base` (page ground), `contrast`
+(text), `primary` (interactive and emphasis), `secondary` (support). Add
+accent steps only when something needs them. Naming by role rather than
+by hue — `primary`, not `teal` — is what lets a style variation swap the
+entire look by redefining four values, and it is why WordPress's own
+themes use exactly this vocabulary.
+
+## Derive states from the palette rather than adding presets
+
+```css
+.wp-block-button__link:hover {
+  background: color-mix(in oklab, var(--wp--preset--color--primary) 88%, black);
+}
+a:hover { text-decoration-thickness: 2px; text-underline-offset: 0.15em; }
+```
+
+Every interactive element needs a hover and a `:focus-visible`. A link
+that changes only its colour on hover fails for anyone who cannot
+distinguish those two hues. Underline thickness and offset are the
+cheapest way to make a text link feel deliberate.
+
+## Optical corrections are what separate typeset from typed
+
+```css
+h1, h2, h3 { letter-spacing: -0.02em; text-wrap: balance; }
+p { text-wrap: pretty; }
+```
+
+Large text needs *negative* tracking — spacing that suits 16px looks
+loose at 48px. `text-wrap: balance` stops a heading leaving one word
+alone on its own line; `text-wrap: pretty` prevents orphans in body copy.
+All-caps labels need *positive* tracking, around 0.08em, or the letters
+collide.
+
+## Section rhythm is what makes a page feel designed
+
+A page of identically-spaced blocks reads as a list. Alternate: a
+full-bleed section with a different background, then a constrained
+reading column, then a wide media band. In block markup that is
+`{"align":"full"}` with a background colour on the group, and vertical
+padding from the spacing scale rather than a fixed value:
+
+```html
+<!-- wp:group {"align":"full","backgroundColor":"primary","style":{"spacing":{"padding":{"top":"var(--wp--preset--spacing--60)","bottom":"var(--wp--preset--spacing--60)"}}},"layout":{"type":"constrained"}} -->
+```
+
+## blockGap is the vertical rhythm of the whole site
+
+`styles.spacing.blockGap` sets the default space between sibling blocks,
+and setting it once is worth more than any amount of per-block margin.
+Leave it unset and WordPress uses a flat default that makes every
+relationship on the page look equally important.
+
+## A header and footer with nothing in them are not a header and footer
+
+`parts/header.html` needs the site title or logo and navigation, laid out
+with a `flex` group and `justifyContent: space-between`. The footer needs
+at least the site title, a tagline or copyright line, and usually
+navigation. A template part containing a bare group renders as empty
+space, which is worse than not having one — it reads as a broken page
+rather than a simple one.
+
+## Screenshot and readme are what make a theme look finished
+
+`screenshot.png` at 1200x900 is what the Appearance screen shows; without
+it a theme appears as a grey placeholder no matter how good it looks in
+use. `readme.txt` carries the licence attributions the directory
+requires. Neither affects rendering, and both are why a theme feels
+unfinished when they are missing.
+
+## A block template .html file is not PHP and is never executed
+
+The reflex a classic theme trains, and the damage is spectacular rather
+than subtle. Files under `templates/` and `parts/` are parsed as block
+markup and served as HTML. PHP in them is not executed and not stripped —
+it is emitted as literal text.
+
+```html
+<!-- WRONG: .html files are not PHP -->
+<a href="<?php echo esc_url( home_url( '/' ) ); ?>">Home</a>
+```
+
+The `<?php` opens no valid tag, so the `href="` attribute never
+terminates and the HTML parser swallows everything that follows into it —
+including the inline scripts WordPress injects at `wp_footer`, which then
+render as visible body text. A page can look catastrophically broken with
+no PHP error, no block-recovery warning, and a 200 response.
+
+Use blocks for dynamic values instead. The site title and its home link
+are `<!-- wp:site-title /-->`; the tagline is
+`<!-- wp:site-tagline /-->`; a home link is `<!-- wp:navigation-link -->`
+or a `wp:site-logo`. There is no block for a dynamic copyright year —
+write the year as static text, or if it must be dynamic, register a
+pattern (patterns *are* PHP) and reference it from the template.
+
+## Patterns are PHP; templates and parts are not
+
+This is the whole distinction. `patterns/*.php` are executed, so
+`esc_url( home_url() )`, `__()` and a dynamic year all work there.
+`templates/*.html` and `parts/*.html` are not. When a template needs
+something only PHP can produce, the answer is a pattern referenced from
+the template — never PHP inlined into the HTML.

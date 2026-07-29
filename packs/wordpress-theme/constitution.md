@@ -1,125 +1,157 @@
 # wordpress-theme constitution
 
 Applied to every WordPress theme written while this pack is mounted.
-Each rule targets a default that produces a theme which either fails to
-activate, or activates and cannot be edited.
+Each rule exists because the default output violates it — producing a
+theme that either will not activate, or activates and looks unstyled.
 
-## Build a block theme unless a classic theme is explicitly requested
+Terse on purpose: this is injected on every request, and the reasoning
+behind each rule lives in the corpus where retrieval serves it on demand.
 
-`style.css` with a header, `theme.json`, and `templates/index.html`. No
-`index.php`, no `header.php`, no `footer.php`, no hand-written loop, no
-`wp_head()` / `wp_footer()` calls — templates are block markup and
-WordPress renders the document. A theme missing `templates/index.html`
-is a classic theme, silently, with no site editor.
+## Block theme, not classic
 
-## style.css opens with a valid header comment
+`style.css` (header comment), `theme.json`, `templates/index.html`. No
+`index.php`, `header.php`, `footer.php`, `wp_head()`, or hand-written
+loop. Missing `templates/index.html` makes it a classic theme silently,
+with no site editor.
 
-`Theme Name` at minimum, plus Version, Requires at least, Requires PHP,
-License, Text Domain. It sits at the very top, because only the first
-8 KB is parsed for it.
+## style.css opens with a valid header
 
-## theme.json declares the design, and declares it once
+`Theme Name` minimum, plus Version, Requires at least, Requires PHP,
+License, Text Domain — inside the first 8 KB.
 
-Schema `"version": 3` with `$schema` set. Colours, font sizes, font
-families and spacing are **presets**, not literals. `appearanceTools` is
-on. `settings.layout.contentSize` and `wideSize` are set, because they
-are what makes alignment work at all.
+## Declare presets, then APPLY them under styles
 
-## CSS references presets through their generated custom properties
+The defect that makes a correct theme look unstyled. `settings` says what
+is *available*; `styles` says what is *used*. `fontFamilies` without
+`styles.typography.fontFamily` renders in Times New Roman and reports no
+error. Minimum `styles`: typography fontFamily, fontSize, lineHeight;
+color background and text; `elements.link` colour; `spacing.blockGap`.
 
-`var(--wp--preset--color--primary)`, never the hex value again.
-`var(--wp--preset--spacing--50)`, `var(--wp--preset--font-size--large)`.
-Custom tokens go in `settings.custom` and are read as
-`var(--wp--custom--…)`, remembering that camelCase keys become
-kebab-case in the property name.
+## line-height is set explicitly
 
-## Never duplicate in PHP what theme.json already declares
+Unset computes to `normal` (~1.2), too tight for body copy. Root 1.5–1.7;
+display 1.05–1.2 via `styles.elements.h1`/`h2`.
 
-No `add_theme_support('editor-color-palette')`, no
-`add_theme_support('editor-font-sizes')`, no `$content_width`, no
-`register_nav_menus` for a block theme. theme.json wins, and the PHP is
-dead code that will drift.
+## One type ratio, whole scale fluid
 
-## functions.php stays minimal or absent
+Five to seven steps from a single ratio (1.2, 1.25, 1.333), never
+arbitrary values. `settings.typography.fluid: true` so every step gets a
+clamp. Display travels between viewports; body copy barely moves.
 
-At most: enqueue `get_stylesheet_uri()` versioned by
-`wp_get_theme()->get('Version')`, `add_theme_support('wp-block-styles')`,
-`add_theme_support('custom-logo')`, and `add_editor_style()` if the
-stylesheet must reach the editor. Everything else belongs in theme.json
-or a plugin.
+## contentSize is a measure, and content is actually constrained
 
-## Templates use serialised block markup with correct delimiters
+Target 45–75 characters per line — about 34–42rem, not 1200px. It only
+applies inside a group with `{"layout":{"type":"constrained"}}`, so
+templates wrap their content in one. `wideSize` for media and section
+furniture.
 
-`<!-- wp:group -->` … `<!-- /wp:group -->` for blocks with content,
-`<!-- wp:post-title /-->` self-closing. Attributes are valid JSON inside
-the opening delimiter. Template parts are referenced as
-`<!-- wp:template-part {"slug":"header","tagName":"header"} /-->` and
-the corresponding file exists in `parts/`.
+## Colour is chosen, not defaulted to the extremes
 
-## Template parts are declared in theme.json
+Near-black on off-white, never `#000` on `#fff` — 21:1 is glare. Four
+roles named by role, not hue: base, contrast, primary, secondary, so a
+style variation can swap the theme by redefining four values. AA (4.5:1
+body, 3:1 large) is the floor, not the target.
 
-Every file in `parts/` has a matching entry in `templateParts` with
-`name`, `title` and an `area` of `header`, `footer` or `uncategorized`.
+## CSS reads presets through their custom properties
+
+`var(--wp--preset--color--primary)`, `var(--wp--preset--spacing--50)`,
+`var(--wp--preset--font-size--large)` — never a repeated hex or rem.
+`settings.custom` tokens read as `var(--wp--custom--…)` with camelCase
+keys kebab-cased.
+
+## Spacing comes from the scale; blockGap is set once
+
+Section padding uses `var(--wp--preset--spacing--N)`, never a fixed rem.
+`styles.spacing.blockGap` set at the root is worth more than any
+per-block margin.
+
+## Sections carry rhythm
+
+Alternate full-bleed bands (`{"align":"full"}` with a background), a
+constrained reading column, and wide media. Identical spacing throughout
+reads as a list, not a design.
+
+## Interactive elements get hover and focus
+
+Every link and button declares `:hover` and `:focus-visible`. Hover
+colours come from `color-mix()` against a preset so they track the
+palette. Never `outline: none` without a visible replacement.
+
+## Optical corrections are applied
+
+`letter-spacing: -0.02em` and `text-wrap: balance` on display headings,
+`text-wrap: pretty` on body copy, about `0.08em` positive tracking on
+all-caps labels.
+
+## Header and footer contain real content
+
+Header: site title or logo plus navigation in a `flex` group with
+`justifyContent: space-between`. Footer: site title, tagline or
+copyright, usually navigation. An empty part reads as broken, not simple.
+
+## Never put PHP in a template or part
+
+`templates/*.html` and `parts/*.html` are not executed. PHP in them is
+emitted as literal text, which leaves an attribute unterminated and
+swallows the rest of the document — a catastrophically broken page with
+no PHP error and a 200 response. Dynamic values come from blocks
+(`wp:site-title`, `wp:site-tagline`, `wp:navigation`). Only
+`patterns/*.php` are PHP.
+
+## Block markup uses correct delimiters
+
+`<!-- wp:group -->`…`<!-- /wp:group -->` with content, `<!-- wp:post-title /-->`
+self-closing, valid JSON attributes. Template parts referenced as
+`<!-- wp:template-part {"slug":"header","tagName":"header"} /-->` with
+the file present in `parts/` and an entry in `templateParts`.
 
 ## Layout type is chosen deliberately
 
-`constrained` for the content column, `default` for a full-bleed
-wrapper, `flex` for rows and stacks with `justifyContent`, `grid` with
-`minimumColumnWidth` for card grids. A theme does not hand-roll a
-`max-width` container — that is what `contentSize` is.
+`constrained` for content, `default` for full-bleed wrappers, `flex` with
+`justifyContent` for rows, `grid` with `minimumColumnWidth` for cards.
+Never a hand-rolled `max-width` container.
 
-## Full-width sections use root-padding-aware alignments
+## Root padding uses root-padding-aware alignments
 
-When the root has horizontal padding, `settings.useRootPaddingAware
-Alignments` is true and the padding is declared in
-`styles.spacing.padding`, so `.alignfull` can still reach the edges.
+When the root has horizontal padding, `useRootPaddingAwareAlignments` is
+true and the padding is declared in `styles.spacing.padding`, so
+`.alignfull` reaches the edges.
 
-## Patterns are files in patterns/ with a namespaced slug
+## functions.php stays minimal, and never duplicates theme.json
 
-A header comment carrying at least `Title` and `Slug: theme-name/pattern`.
-No `register_block_pattern()` call. Any pattern referenced by a template
-exists.
+At most: enqueue `get_stylesheet_uri()` versioned by
+`wp_get_theme()->get('Version')`, `wp-block-styles`, `custom-logo`,
+`add_editor_style()`. No `editor-color-palette`, no `editor-font-sizes`,
+no `$content_width`, no `register_nav_menus`.
 
-## Modern CSS, and no `!important` against core
+## Modern CSS, and no !important against core
 
-Fluid type via theme.json `typography.fluid`, or `clamp()` whose
-preferred term includes a `rem` component — never viewport units alone,
-which breaks browser zoom. Responsive layout via
-`repeat(auto-fit, minmax(min(Xrem, 100%), 1fr))` and container queries
-rather than viewport breakpoints where the component's own width is what
-matters. Logical properties (`margin-inline`, `padding-block`) so RTL
-works without a second stylesheet. Global styles are wrapped in
-`:root :where(...)` and carry near-zero specificity, so a plain class
-selector already wins — `!important` against a block style means the
-selector was wrong.
+`clamp()` preferred terms include a `rem` component — never viewport units
+alone, which breaks zoom. `repeat(auto-fit, minmax(min(Xrem, 100%), 1fr))`
+and container queries over viewport breakpoints. Logical properties
+(`margin-inline`, `padding-block`) so RTL needs no second stylesheet.
+Global styles are wrapped in `:root :where(...)` and carry near-zero
+specificity, so a plain class already wins.
 
-## Accessibility is part of the theme, not a later pass
+## Accessibility is built in, not added later
 
-Visible `:focus-visible` styling with an outline and offset, never
-`outline: none` alone. A `prefers-reduced-motion` block. Meaningful
-`alt` on decorative-versus-content images. A skip-link target anchor on
-the main region. Colour choices that meet 4.5:1 for body text.
+Visible focus rings, a `prefers-reduced-motion` block, meaningful `alt`,
+a skip-link anchor on the main region, tap targets ≥ 24px.
 
-## Every user-facing string is translated with a literal text domain
+## Strings are translated; output is escaped
 
-`__()`, `esc_html__()`, `_x()` with the theme's own text domain written
-as a literal string, matching the `Text Domain` header.
+`__()` / `esc_html__()` with a literal text domain matching the header.
+`esc_html()`, `esc_attr()`, `esc_url()` on anything dynamic a PHP pattern
+or template prints.
 
-## Escape on output, in templates and in patterns alike
+## Patterns and child themes follow their conventions
 
-`esc_html()`, `esc_attr()`, `esc_url()` on anything dynamic that a PHP
-pattern or template file prints. A theme is reviewed to the same standard
-as a plugin.
+Patterns: files in `patterns/` with `Title` and a namespaced `Slug`, no
+`register_block_pattern()`. Child themes: `Template:` is the parent's
+directory name exactly, and theme.json merges rather than replaces.
 
-## Child themes declare Template and merge rather than restate
+## Ship screenshot.png and readme.txt
 
-`Template:` is the parent's directory name exactly. The child's
-theme.json overrides only what changes; it is merged over the parent's,
-not substituted for it.
-
-## Assets are local and GPL-compatible
-
-Fonts are bundled and served from the theme, never fetched from a CDN —
-that is both a directory rejection and a GDPR exposure. Paths use
-`get_theme_file_uri()` or `content_url()`, never a hard-coded
-`/wp-content/`.
+1200×900 screenshot, or the Appearance screen shows a grey placeholder.
+Readme carries licence attributions. Fonts are bundled locally and
+GPL-compatible, never fetched from a CDN.
