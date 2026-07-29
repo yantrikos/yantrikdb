@@ -2,10 +2,10 @@
   {
     "model": "qwen3.5:4b",
     "condition": "baseline",
-    "score": 4,
+    "score": 3,
     "checks": {
       "files-emitted": true,
-      "style-header": true,
+      "style-header": false,
       "theme-json-valid": false,
       "templates-index": false,
       "appears-in-wp": true,
@@ -18,13 +18,13 @@
       "uses-presets": false
     },
     "files": [
-      "assets/css/style.scss",
+      "assets/css/variables.scss",
+      "assets/scss/main.scss",
       "footer.php",
-      "front-page.php",
       "functions.php",
       "header.php",
       "index.php",
-      "readme.txt",
+      "page-home.html",
       "screenshot.png",
       "style.css"
     ],
@@ -33,24 +33,26 @@
   {
     "model": "qwen3.5:4b",
     "condition": "mounted",
-    "score": 10,
+    "score": 9,
     "checks": {
       "files-emitted": true,
       "style-header": true,
-      "theme-json-valid": false,
+      "theme-json-valid": true,
       "templates-index": true,
       "appears-in-wp": true,
       "activates": true,
       "is-block-theme": true,
-      "front-page-200": true,
-      "no-php-error": true,
-      "renders-title": true,
-      "layout-sizes": false,
+      "front-page-200": false,
+      "no-php-error": false,
+      "renders-title": false,
+      "layout-sizes": true,
       "uses-presets": true
     },
     "files": [
+      "parts/footer.php",
       "parts/header.php",
       "patterns/hero.php",
+      "patterns/post-card.php",
       "readme.txt",
       "screenshot.png",
       "style.css",

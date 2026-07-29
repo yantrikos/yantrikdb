@@ -84,7 +84,74 @@ The complete theme consists of exactly these files:
 
 Write the full contents of {path} and nothing else. No explanation, no
 code fences, no file-path header — output starts with the first character
-of the file."""
+of the file. {size}"""
+
+# A size expectation, because without one a small model does not stop. The
+# 4B produced a 56,314-character theme.json in a repetition loop inventing
+# [data-atomic-type] selectors until it hit the token ceiling, so the JSON
+# was truncated and invalid. Knowledge was never the constraint on that
+# file. Numbers are taken from the reference theme, which scores full
+# marks — so they describe a sufficient file rather than a small one.
+SIZE_HINT = {
+    ".json": "Aim for roughly 120-160 lines. Be complete but do not invent "
+             "selectors or settings beyond what the theme needs — stop when "
+             "the design is expressed.",
+    ".css":  "Aim for roughly 60-120 lines. Only what theme.json cannot "
+             "express: optical corrections, states, accessibility.",
+    ".html": "Aim for roughly 20-60 lines of block markup.",
+    ".php":  "Aim for roughly 20-50 lines.",
+    ".txt":  "A few short sections.",
+}
+
+
+# Law 2 applied to the QUERY side. A bare path is a terrible query for a
+# 64-dimensional embedder: "theme.json" retrieves "Style variations are
+# JSON files in styles/" at 0.653 and misses every record about colour,
+# type and applying presets. The embedder matches concrete technical
+# vocabulary, so the consumer has to supply it — a real agent forming a
+# retrieval query would do the same rather than sending a filename.
+FILE_QUERIES = {
+    "theme.json": ("theme.json palette colour base contrast primary presets "
+                   "applied under styles background text link",
+                   "theme.json typography font sizes one ratio fluid clamp "
+                   "line height elements headings",
+                   "theme.json layout contentSize wideSize spacing scale "
+                   "blockGap root padding aware alignments"),
+    "style.css":  ("style.css optical corrections letter-spacing tracking "
+                   "text-wrap balance pretty hanging punctuation",
+                   "style.css focus-visible outline prefers-reduced-motion "
+                   "tap target min-height accessibility",
+                   "style.css hover focus states color-mix oklab derived "
+                   "from the palette"),
+    "templates/index.html": (
+                   "block markup template full-bleed band align full "
+                   "background constrained reading column section rhythm",
+                   "wp:query post-template post-title post-excerpt "
+                   "template-part header footer block markup"),
+    "parts/header.html": (
+                   "header template part site title tagline navigation flex "
+                   "group justifyContent space-between",),
+    "parts/footer.html": (
+                   "footer dark band backgroundColor contrast textColor base "
+                   "elements link colour legible",),
+    "functions.php": (
+                   "functions.php enqueue get_stylesheet_uri wp_get_theme "
+                   "version block theme style.css not loaded automatically",),
+}
+
+
+def file_queries(path: str) -> tuple[str, ...]:
+    for key, qs in FILE_QUERIES.items():
+        if path.endswith(key):
+            return qs
+    return (path, f"a complete {path} worked example")
+
+
+def size_hint(path: str) -> str:
+    for ext, hint in SIZE_HINT.items():
+        if path.endswith(ext):
+            return hint
+    return ""
 
 SYSTEM = (
     "You write files that will be installed into a real WordPress "
@@ -417,9 +484,35 @@ def main() -> int:
                     ollama, model,
                     ref(path, f"a complete {path} worked example")
                     + FILE_BRIEF.format(path=path, spec=SPEC,
-                                        manifest="\n".join(paths)),
+                                        manifest="\n".join(paths),
+                                        size=size_hint(path)),
                     SYSTEM)
-                files[path] = strip_fences(body) + "\n"
+                content = strip_fences(body)
+
+                # Validate and retry once. A truncated theme.json fails two
+                # checks for one reason, and one extra call is cheaper than
+                # reporting a model as unable to write JSON it can write.
+                if path.endswith(".json") and content.strip():
+                    try:
+                        json.loads(content)
+                    except json.JSONDecodeError as e:
+                        print(f"      ! {path} invalid JSON ({e.msg}) — "
+                              f"retrying once, shorter", flush=True)
+                        body, d2 = ask(
+                            ollama, model,
+                            ref(*file_queries(path))
+                            + FILE_BRIEF.format(
+                                path=path, spec=SPEC,
+                                manifest="\n".join(paths),
+                                size="Keep it under 120 lines. It MUST be "
+                                     "valid JSON: every brace and bracket "
+                                     "closed, no trailing commas, no "
+                                     "comments. Prefer fewer settings over "
+                                     "an unterminated file."),
+                            SYSTEM)
+                        content = strip_fences(body)
+
+                files[path] = content + "\n"
                 if d2 not in ("stop", "?"):
                     print(f"      ! {path} {d2}", flush=True)
             (RAW / f"{slug}.files.json").write_text(

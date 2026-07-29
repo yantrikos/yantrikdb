@@ -699,7 +699,7 @@ This is the whole distinction. `patterns/*.php` are executed, so
 `templates/*.html` and `parts/*.html` are not. When a template needs
 something only PHP can produce, the answer is a pattern referenced from
 the template — never PHP inlined into the HTML.
-## Colour is chosen: the palette and ground of a composed theme
+## theme.json colour: the palette and ground of a composed theme
 
 Colour choice is what separates a designed theme from a default one, and
 the decision is about *restraint* rather than range. Four roles carry a
@@ -723,7 +723,7 @@ decide.
 hue. Naming by role rather than by hue is what lets a style variation
 restyle the entire theme by redefining five values.
 
-## Applying the palette and type: the styles block that makes design appear
+## theme.json styles: applying the palette and type so the design appears
 
 The most consequential few lines in a block theme. Presets declared under
 `settings` are only *available*; nothing renders differently until they
@@ -747,7 +747,7 @@ gap. Six entries, and their absence is the single most common reason a
 structurally correct theme renders in Times New Roman at line-height
 normal.
 
-## A type scale from one ratio, applied to headings through elements
+## theme.json typography: one ratio, fluid, applied through elements
 
 Sizes derive from a single ratio so that everything on the page feels
 related. Six steps from a 1.0625rem base at 1.25, with `fluid` true so
@@ -766,7 +766,7 @@ suits body copy looks like a gap at 42px.
 }
 ```
 
-## Sections carry rhythm: alternating full-bleed bands and reading columns
+## templates/index.html section rhythm: full-bleed bands and reading columns
 
 A page of identically spaced blocks reads as a list. Rhythm comes from
 alternating the *kind* of section: a full-bleed tinted band, then a
@@ -787,7 +787,7 @@ the background reaches the viewport edges and the text inside still obeys
 `contentSize`. Getting those two the wrong way round produces either a
 band that will not span or text that runs the full width of a monitor.
 
-## Layout type is chosen deliberately, one per purpose
+## theme.json and template layout types: constrained, flex, grid
 
 Four layout types and each has one job. `constrained` centres children and
 applies `contentSize` — the reading column. `default` applies no width
@@ -803,7 +803,7 @@ for a card set that should reflow without breakpoints.
 Choosing `constrained` for a header that should be full-bleed is the usual
 reason a header refuses to span the viewport.
 
-## Optical corrections are applied: tracking and text-wrap
+## style.css optical corrections: tracking, text-wrap, hanging punctuation
 
 Typeset rather than typed. Large text needs negative tracking, because
 spacing that suits 16px reads loose at 42px. `text-wrap: balance` stops a
@@ -820,7 +820,7 @@ p          { text-wrap: pretty; hanging-punctuation: first last; }
 These belong in `style.css` rather than theme.json, because theme.json has
 no expression for `text-wrap` or `hanging-punctuation`.
 
-## Accessibility is built in: focus, motion and tap targets
+## style.css accessibility: focus-visible, reduced motion, tap targets
 
 Three floors, all in the theme's own stylesheet. A visible focus ring with
 an offset, never `outline: none` alone. A reduced-motion block, which is
@@ -846,7 +846,7 @@ their own.
 Screen-reader-only elements are deliberately 1px and are the one exception
 to the tap-target floor.
 
-## States derived from the palette, so they track a restyle
+## style.css states: hover and focus derived from the palette with color-mix
 
 Every link and button needs a hover and a focus state, and the colour for
 it should be computed from the preset rather than added as a second
@@ -865,7 +865,7 @@ a:hover { color: color-mix(in oklab, var(--wp--preset--color--primary) 78%, blac
 A style variation that redefines `primary` then gets matching hover states
 for free, which is the whole point of deriving rather than declaring.
 
-## A header with real content: title, tagline and navigation
+## parts/header.html with real content: site title, tagline, navigation
 
 An empty template part renders as blank space and reads as a broken page.
 A header needs the site title, usually the tagline, and navigation — laid
@@ -886,7 +886,7 @@ the tagline is `wp:site-tagline`.
 <!-- /wp:group -->
 ```
 
-## A footer on a dark band needs its text colour set explicitly
+## parts/footer.html on a dark band needs its text colour set explicitly
 
 Where dark footers go wrong. Setting `backgroundColor` to the contrast
 colour without also setting `textColor` leaves near-black text on a
@@ -920,7 +920,7 @@ The text domain must be a literal — the extraction tooling parses source
 statically and silently skips a variable, so nothing translates and
 nothing warns.
 
-## The one thing functions.php must do
+## functions.php: the one thing it must do, or style.css never loads
 
 A block theme's `style.css` is not enqueued automatically. Without this,
 every optical correction, focus ring and hover state in it is inert — and
@@ -938,7 +938,7 @@ Everything a classic theme did here — colour palette, font sizes, content
 width, editor styles — is theme.json's job now, and duplicating any of it
 creates a second source of truth that theme.json silently wins.
 
-## Ship screenshot.png and readme.txt, or the theme looks unfinished
+## screenshot.png and readme.txt, or the theme looks unfinished
 
 Neither affects rendering, and their absence is what makes a finished
 theme feel like a work in progress. `screenshot.png` at 1200x900 is what
