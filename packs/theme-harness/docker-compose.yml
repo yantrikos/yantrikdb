@@ -1,0 +1,65 @@
+# Execution harness for the wordpress-theme pack.
+#
+# The point of this file is that the grade is not a string match. A model
+# writes a theme, the theme is dropped into a real WordPress, and WP-CLI
+# is asked to activate it. WordPress decides whether it worked.
+#
+# `themes/` is bind-mounted rather than copied so the harness can write a
+# candidate theme and immediately activate it without rebuilding anything.
+
+services:
+  db:
+    image: mariadb:11
+    environment:
+      MARIADB_ROOT_PASSWORD: wp
+      MARIADB_DATABASE: wordpress
+      MARIADB_USER: wordpress
+      MARIADB_PASSWORD: wordpress
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    tmpfs:
+      - /var/lib/mysql   # throwaway: every run starts from a clean install
+
+  wordpress:
+    image: wordpress:6.8-php8.3-apache
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8099:80"
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: wordpress
+      WORDPRESS_DB_NAME: wordpress
+      # Errors must reach the log, not the response body — a notice
+      # printed before the document would corrupt the very output the
+      # harness is grading.
+      WORDPRESS_CONFIG_EXTRA: |
+        define('WP_DEBUG', true);
+        define('WP_DEBUG_LOG', true);
+        define('WP_DEBUG_DISPLAY', false);
+    volumes:
+      - wp:/var/www/html
+      - ./themes:/var/www/html/wp-content/themes/harness
+
+  cli:
+    image: wordpress:cli-php8.3
+    depends_on:
+      - wordpress
+    user: "33:33"          # www-data, so files it writes stay readable
+    entrypoint: ["sleep", "infinity"]
+    environment:
+      WORDPRESS_DB_HOST: db
+      WORDPRESS_DB_USER: wordpress
+      WORDPRESS_DB_PASSWORD: wordpress
+      WORDPRESS_DB_NAME: wordpress
+    volumes:
+      - wp:/var/www/html
+      - ./themes:/var/www/html/wp-content/themes/harness
+
+volumes:
+  wp:

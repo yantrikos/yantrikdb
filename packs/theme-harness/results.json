@@ -1,0 +1,181 @@
+[
+  {
+    "model": "granite4:3b",
+    "condition": "baseline",
+    "score": 6,
+    "checks": {
+      "files-emitted": true,
+      "style-header": false,
+      "theme-json-valid": false,
+      "templates-index": false,
+      "appears-in-wp": true,
+      "activates": true,
+      "is-block-theme": false,
+      "front-page-200": true,
+      "no-php-error": true,
+      "renders-title": true,
+      "layout-sizes": false,
+      "uses-presets": false
+    },
+    "files": [
+      "css/fonts.css",
+      "css/style.css",
+      "footer.php",
+      "functions.php",
+      "header.php",
+      "index.php",
+      "js/script.js",
+      "screenshot.png",
+      "style.css"
+    ],
+    "done_reason": "stop"
+  },
+  {
+    "model": "granite4:3b",
+    "condition": "mounted",
+    "score": 5,
+    "checks": {
+      "files-emitted": true,
+      "style-header": true,
+      "theme-json-valid": true,
+      "templates-index": false,
+      "appears-in-wp": false,
+      "activates": false,
+      "is-block-theme": false,
+      "front-page-200": false,
+      "no-php-error": false,
+      "renders-title": false,
+      "layout-sizes": true,
+      "uses-presets": true
+    },
+    "files": [
+      "footer.php",
+      "functions.php",
+      "header.php",
+      "index.html",
+      "part-footer.php",
+      "part-header.php",
+      "part-hero.php",
+      "style.css",
+      "theme.json"
+    ],
+    "done_reason": "stop"
+  },
+  {
+    "model": "qwen3.5:4b",
+    "condition": "baseline",
+    "score": 3,
+    "checks": {
+      "files-emitted": true,
+      "style-header": false,
+      "theme-json-valid": false,
+      "templates-index": false,
+      "appears-in-wp": true,
+      "activates": true,
+      "is-block-theme": false,
+      "front-page-200": false,
+      "no-php-error": false,
+      "renders-title": false,
+      "layout-sizes": false,
+      "uses-presets": false
+    },
+    "files": [
+      "archive.html.twig",
+      "assets/css/style.css",
+      "footer.html.twig",
+      "functions.php",
+      "header.html.twig",
+      "index.php",
+      "search.html.twig",
+      "single.html.twig",
+      "style.css"
+    ],
+    "done_reason": "stop"
+  },
+  {
+    "model": "qwen3.5:4b",
+    "condition": "mounted",
+    "score": 10,
+    "checks": {
+      "files-emitted": true,
+      "style-header": true,
+      "theme-json-valid": true,
+      "templates-index": true,
+      "appears-in-wp": true,
+      "activates": true,
+      "is-block-theme": true,
+      "front-page-200": true,
+      "no-php-error": true,
+      "renders-title": false,
+      "layout-sizes": false,
+      "uses-presets": true
+    },
+    "files": [
+      "assets/fonts/harness-demo-font.css",
+      "functions.php",
+      "parts/header.php",
+      "patterns/hero-pattern.json",
+      "style.css",
+      "templates/index.html",
+      "theme.json"
+    ],
+    "done_reason": "stop"
+  },
+  {
+    "model": "qwen3.6:27b",
+    "condition": "baseline",
+    "score": 4,
+    "checks": {
+      "files-emitted": true,
+      "style-header": true,
+      "theme-json-valid": false,
+      "templates-index": false,
+      "appears-in-wp": true,
+      "activates": true,
+      "is-block-theme": false,
+      "front-page-200": false,
+      "no-php-error": false,
+      "renders-title": false,
+      "layout-sizes": false,
+      "uses-presets": false
+    },
+    "files": [
+      "assets/css/style.css",
+      "assets/js/main.js",
+      "footer.php",
+      "functions.php",
+      "header.php",
+      "index.php",
+      "style.css"
+    ],
+    "done_reason": "stop"
+  },
+  {
+    "model": "qwen3.6:27b",
+    "condition": "mounted",
+    "score": 12,
+    "checks": {
+      "files-emitted": true,
+      "style-header": true,
+      "theme-json-valid": true,
+      "templates-index": true,
+      "appears-in-wp": true,
+      "activates": true,
+      "is-block-theme": true,
+      "front-page-200": true,
+      "no-php-error": true,
+      "renders-title": true,
+      "layout-sizes": true,
+      "uses-presets": true
+    },
+    "files": [
+      "functions.php",
+      "parts/footer.html",
+      "parts/header.html",
+      "style.css",
+      "templates/index.html",
+      "theme.json"
+    ],
+    "done_reason": "stop"
+  }
+]

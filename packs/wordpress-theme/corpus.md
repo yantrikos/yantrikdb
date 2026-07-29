@@ -1,0 +1,506 @@
+# wordpress-theme corpus
+
+Building a WordPress **block theme** — the kind WordPress has shipped since
+6.0 — and the CSS that has to coexist with the CSS WordPress generates on
+your behalf.
+
+The dominant failure this targets is not a subtle one: asked for a modern
+WordPress theme, a model writes a *classic* theme. `index.php`,
+`header.php`, `functions.php`, a `wp_head()` call, a hand-rolled loop.
+That is a 2014 answer, it is what most training data contains, and on a
+current WordPress it produces a theme that works but cannot be edited in
+the site editor and ignores every design tool the platform now has.
+
+## A block theme's minimum viable file set
+
+Three files, and only three:
+
+```
+my-theme/
+  style.css            ← header comment only; can contain no CSS at all
+  theme.json           ← design tokens and settings
+  templates/index.html ← required; block markup, not PHP
+```
+
+`index.php` is **not** required and `functions.php` is optional. If
+`templates/index.html` is absent WordPress treats the directory as a
+classic theme, silently, and the site editor disappears.
+
+## style.css is a manifest before it is a stylesheet
+
+WordPress reads the theme's identity from the header comment, and parses
+only the first 8 KB of the file:
+
+```css
+/*
+Theme Name: My Theme
+Theme URI: https://example.com/my-theme
+Author: You
+Description: A block theme.
+Version: 1.0.0
+Requires at least: 6.5
+Tested up to: 6.8
+Requires PHP: 7.4
+License: GNU General Public License v2 or later
+License URI: http://www.gnu.org/licenses/gpl-2.0.html
+Text Domain: my-theme
+Tags: block-patterns, full-site-editing
+*/
+```
+`Theme Name` is the only strictly required field. A missing or malformed
+header is why a theme does not appear on the Appearance screen at all.
+
+## theme.json version 3, and what the version means
+
+```json
+{
+  "$schema": "https://schemas.wp.org/trunk/theme.json",
+  "version": 3,
+  "settings": { },
+  "styles": { }
+}
+```
+The `version` is the **schema** version, not the WordPress version. 3 is
+current (WordPress 6.6+); 2 is still read correctly. The most visible v2 →
+v3 change is that default font sizes and spacing are no longer inherited
+unless opted into, so a v3 file that omits `settings.typography.fontSizes`
+gets the theme's own list only.
+
+## Every preset becomes a CSS custom property
+
+This is the single highest-value fact about theme.json. A colour declared
+as:
+
+```json
+{ "settings": { "color": { "palette": [
+  { "slug": "primary", "color": "#2f5d50", "name": "Primary" } ] } } }
+```
+is emitted by WordPress as `--wp--preset--color--primary`, and is usable
+anywhere in your CSS. The naming is mechanical:
+
+```
+--wp--preset--color--{slug}
+--wp--preset--font-size--{slug}
+--wp--preset--font-family--{slug}
+--wp--preset--spacing--{slug}
+--wp--custom--{path}--{to}--{value}
+```
+Hard-coding `#2f5d50` in `style.css` after declaring it in theme.json is
+the most common way a theme's colours drift out of sync with its editor.
+
+## settings.custom is a free-form token namespace
+
+```json
+{ "settings": { "custom": {
+  "lineHeight": { "tight": 1.1, "body": 1.6 },
+  "shadow": { "card": "0 1px 3px rgb(0 0 0 / 0.12)" } } } }
+```
+becomes `--wp--custom--line-height--tight` and
+`--wp--custom--shadow--card`. Note the transformation: camelCase keys are
+**kebab-cased** in the generated property name. `lineHeight` → `line-height`.
+
+## appearanceTools turns on a whole panel of settings at once
+
+`"settings": { "appearanceTools": true }` opts into border, colour link,
+spacing (margin, padding, blockGap), and typography (lineHeight)
+controls in one flag, instead of setting eight booleans individually. It
+is the sane default for a new theme.
+
+## Layout: contentSize and wideSize are what make alignment work
+
+```json
+{ "settings": { "layout": {
+  "contentSize": "680px", "wideSize": "1200px" } } }
+```
+These two values are the entire basis of `.alignwide` and `.alignfull`.
+WordPress generates the constrained-layout CSS from them; a theme that
+writes its own `max-width` container instead will fight that CSS and
+alignment will not work in the editor.
+
+## useRootPaddingAwareAlignments, for full-width inside a padded page
+
+```json
+{
+  "settings": { "useRootPaddingAwareAlignments": true },
+  "styles": { "spacing": { "padding": {
+      "left": "var(--wp--preset--spacing--50)",
+      "right": "var(--wp--preset--spacing--50)" } } }
+}
+```
+Without it, root padding indents full-width blocks too, and edge-to-edge
+sections become impossible. With it, WordPress applies the padding to
+content while letting `.alignfull` escape it. It only works when the root
+padding is declared in `styles.spacing.padding`.
+
+## Fluid typography is a setting, not a clamp() you write
+
+```json
+{ "settings": { "typography": {
+  "fluid": true,
+  "fontSizes": [
+    { "slug": "large", "size": "1.75rem", "name": "Large",
+      "fluid": { "min": "1.5rem", "max": "2.5rem" } } ] } } }
+```
+WordPress generates the `clamp()` itself. Setting `"fluid": true` alone
+derives min and max from the size; supplying the object controls them.
+Hand-writing `clamp()` in a font-size preset works but is invisible to
+the editor's size controls.
+
+## Spacing presets, and the scale WordPress generates
+
+`settings.spacing.spacingScale` produces a numbered set —
+`--wp--preset--spacing--30`, `--40`, `--50` and so on — or
+`spacingSizes` declares them explicitly. Block gap and padding controls
+offer exactly these values. A theme that uses raw `rem` values for
+section spacing gives the editor nothing to offer the user.
+
+## styles is where the theme actually looks like something
+
+```json
+{ "styles": {
+    "color": { "background": "var(--wp--preset--color--base)",
+               "text": "var(--wp--preset--color--contrast)" },
+    "typography": { "fontFamily": "var(--wp--preset--font-family--body)",
+                    "lineHeight": "1.6" },
+    "elements": { "link": { "color": { "text": "var(--wp--preset--color--primary)" } } },
+    "blocks": { "core/heading": { "typography": { "fontWeight": "600" } } } } }
+```
+`elements` covers link, heading, h1–h6, button, caption, cite.
+`blocks` targets any registered block by name. Both accept the same
+property shapes as the top level.
+
+## WordPress wraps global styles in :root :where(...) to keep specificity low
+
+Since WordPress 6.1 the generated global-styles CSS uses
+`:root :where(.wp-block-quote)` rather than a bare class. The
+`:where()` contributes **zero** specificity, so a plain
+`.wp-block-quote { … }` in your `style.css` overrides it without
+`!important`. Reaching for `!important` against a block style is almost
+always a sign the selector was written against the old assumption.
+
+## Templates are block markup in .html files
+
+`templates/index.html` is not HTML in the ordinary sense — it is
+serialised block markup:
+
+```html
+<!-- wp:template-part {"slug":"header","tagName":"header"} /-->
+
+<!-- wp:group {"tagName":"main","layout":{"type":"constrained"}} -->
+<main class="wp-block-group">
+  <!-- wp:query {"queryId":1,"query":{"perPage":10,"postType":"post"}} -->
+  <div class="wp-block-query">
+    <!-- wp:post-template -->
+      <!-- wp:post-title {"isLink":true} /-->
+      <!-- wp:post-excerpt /-->
+    <!-- /wp:post-template -->
+  </div>
+  <!-- /wp:query -->
+</main>
+<!-- /wp:group -->
+
+<!-- wp:template-part {"slug":"footer","tagName":"footer"} /-->
+```
+The comment delimiters are the markup; the HTML between them is a cached
+rendering. Self-closing blocks use `/-->`. Malformed delimiters produce
+a block-recovery error in the editor rather than a PHP failure, which is
+why a theme can look fine on the front end and be broken in the editor.
+
+## The block template hierarchy
+
+In `templates/`: `index.html` (required), then `front-page.html`,
+`home.html`, `single.html`, `page.html`, `archive.html`, `category.html`,
+`tag.html`, `author.html`, `date.html`, `search.html`, `404.html`,
+`singular.html`, `attachment.html`. Specific wins over general and the
+resolution order mirrors the classic hierarchy — `single-{post-type}.html`
+before `single.html`.
+
+## Template parts live in parts/ and are declared in theme.json
+
+Files go in `parts/header.html` and `parts/footer.html`. Their areas are
+declared so the editor groups them correctly:
+
+```json
+{ "templateParts": [
+  { "name": "header", "title": "Header", "area": "header" },
+  { "name": "footer", "title": "Footer", "area": "footer" } ] }
+```
+`name` matches the filename without extension. Valid areas are `header`,
+`footer` and `uncategorized`. A part with no declaration still works but
+appears uncategorised in the editor.
+
+## Patterns are PHP files with a header comment
+
+Since WordPress 6.0, anything in `patterns/` is auto-registered:
+
+```php
+<?php
+/**
+ * Title: Hero with heading and button
+ * Slug: my-theme/hero
+ * Categories: featured, banner
+ * Block Types: core/post-content
+ * Viewport Width: 1400
+ */
+?>
+<!-- wp:cover {"minHeight":60,"minHeightUnit":"vh"} -->
+…
+<!-- /wp:cover -->
+```
+`Title` and `Slug` are required and the slug must be namespaced. No
+`register_block_pattern()` call is needed. A pattern referenced by a
+template must exist or the template renders empty.
+
+## Style variations are JSON files in styles/
+
+`styles/dark.json` with the same shape as theme.json — `version`,
+`settings`, `styles`, plus a `title` — appears in the site editor as an
+alternate style for the whole theme. This is how a theme ships light and
+dark, or three colourways, without a settings page. Section-level
+variations add `blockTypes` and a `slug` to apply to individual blocks.
+
+## functions.php in a block theme should be nearly empty
+
+Everything a classic theme did in `functions.php` — registering menus,
+sidebars, editor styles, colour palettes, content width — theme.json now
+does. What remains:
+
+```php
+<?php
+add_action( 'wp_enqueue_scripts', function () {
+    wp_enqueue_style(
+        'my-theme',
+        get_stylesheet_uri(),
+        [],
+        wp_get_theme()->get( 'Version' )
+    );
+} );
+```
+Themes that declare a colour palette in both `add_theme_support(
+'editor-color-palette', … )` and theme.json end up with two competing
+palettes; theme.json wins and the PHP is dead code.
+
+## Theme supports that still matter for a block theme
+
+Block themes get `title-tag`, `post-thumbnails`, `responsive-embeds`,
+`html5` and editor styles implicitly. The ones still worth declaring:
+
+```php
+add_theme_support( 'wp-block-styles' );   // core block default styles
+add_theme_support( 'custom-logo', [ 'height' => 60, 'flex-width' => true ] );
+```
+`add_theme_support('align-wide')` is implied by declaring `wideSize` in
+theme.json and does not need repeating.
+
+## Enqueue with get_stylesheet_uri, and version by the theme version
+
+`get_stylesheet_uri()` returns the active theme's `style.css` — the
+*child* theme's when one is active, which is what you want.
+`get_template_directory_uri()` always points at the parent. Passing the
+theme version as `$ver` means the browser cache breaks on every release
+without a manual cache-buster.
+
+## Child themes need Template, and inherit theme.json
+
+```css
+/*
+Theme Name: My Theme Child
+Template: my-theme
+Version: 1.0.0
+*/
+```
+`Template` is the parent's **directory name**, and a wrong value makes
+the child fail to activate. A child theme's `theme.json` is merged over
+the parent's rather than replacing it, so a child can override one colour
+without restating the palette. Since WordPress 5.7 the parent stylesheet
+is not auto-enqueued for block themes — check whether you need it at all
+before adding an enqueue.
+
+## Loading a stylesheet only for the editor
+
+Block themes get theme.json styles in the editor automatically, but a
+`style.css` rule is front-end only unless added:
+
+```php
+add_action( 'after_setup_theme', function () {
+    add_editor_style( 'style.css' );
+} );
+```
+This is why a theme can look right on the front end and wrong in the
+editor — the editor never saw the stylesheet.
+
+## The block class naming convention
+
+Every core block outputs `wp-block-{name}`: `wp-block-group`,
+`wp-block-post-title`, `wp-block-columns`. Preset choices become
+utility classes — `has-primary-color`, `has-large-font-size`,
+`has-background`. Targeting these is stable; targeting the generated
+`wp-container-*` layout classes is not, because they are hashed per
+layout and change between renders.
+
+## Layout types: constrained, flex, grid
+
+`{"layout":{"type":"constrained"}}` centres children and honours
+contentSize/wideSize — the right choice for a page's main column.
+`{"type":"default"}` (flow) applies no width constraint.
+`{"type":"flex","orientation":"vertical"}` for a row or stack, with
+`justifyContent` and `flexWrap`. `{"type":"grid","columnCount":3}` or
+`minimumColumnWidth` for auto-fitting grids. Choosing `constrained` for
+a header that should be full-bleed is the usual reason a header refuses
+to span the viewport.
+
+## Fluid type without theme.json, when you need it in CSS
+
+```css
+h1 { font-size: clamp(2rem, 1.5rem + 2.5vw, 3.5rem); }
+```
+The middle term must include a `rem` component, not `vw` alone —
+otherwise the text does not scale when the user changes their browser's
+default size, which is a WCAG 1.4.4 failure. `clamp()` with a
+viewport-only preferred value is the most common accessibility defect in
+modern CSS.
+
+## Layout without media queries
+
+```css
+.cards {
+  display: grid;
+  gap: var(--wp--preset--spacing--40);
+  grid-template-columns: repeat(auto-fit, minmax(min(18rem, 100%), 1fr));
+}
+```
+`auto-fit` plus `minmax` gives a responsive grid with no breakpoints, and
+the inner `min(18rem, 100%)` is what stops it overflowing on a narrow
+screen — without it the track floors at 18rem and the layout breaks below
+that width.
+
+## Container queries size a component by its container, not the viewport
+
+```css
+.card-area { container-type: inline-size; }
+@container (min-width: 30rem) {
+  .card { display: grid; grid-template-columns: 12rem 1fr; }
+}
+```
+This is what a media query cannot do: the same card in a narrow sidebar
+and a wide main column lays out differently without knowing where it is.
+Baseline across all major browsers since early 2023.
+
+## Cascade layers keep theme CSS out of a specificity war
+
+```css
+@layer base, components, utilities;
+@layer components { .card { padding: 1.5rem; } }
+```
+Any rule inside a layer loses to any rule outside one, regardless of
+specificity — so unlayered WordPress core CSS will beat layered theme
+CSS. That makes layers excellent for organising a theme's *own* CSS and
+a poor tool for overriding core's.
+
+## Logical properties, because themes get translated
+
+`margin-inline`, `padding-block`, `inset-inline-start`, `border-inline-end`
+follow the writing direction, so a theme built with them works in RTL
+with no `rtl.css` and no `body.rtl` overrides. WordPress ships RTL
+support and a theme using `margin-left` opts out of it.
+
+## :has() replaces the classes themes used to add in PHP
+
+```css
+.wp-block-group:has(> .wp-block-cover) { padding-block: 0; }
+.wp-block-post-title:has(+ .wp-block-post-featured-image) { margin-block-end: 0; }
+```
+Styling a parent by its children removes a whole category of
+`body_class` filters and conditional wrapper classes. Baseline since
+December 2023.
+
+## color-mix() for hover states derived from a preset
+
+```css
+.wp-block-button__link:hover {
+  background: color-mix(in oklab, var(--wp--preset--color--primary) 85%, black);
+}
+```
+The hover colour tracks the palette automatically, so a user changing the
+primary colour in the site editor gets a matching hover without the theme
+declaring a second preset. `in oklab` keeps the mix perceptually even —
+`in srgb` darkens unevenly across hues.
+
+## Respect prefers-reduced-motion, and do it as an opt-out
+
+```css
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+```
+One of the few legitimate uses of `!important` — it must beat whatever
+any block or plugin declares.
+
+## Focus visibility is a theme responsibility
+
+Removing an outline without replacing it is the most common accessibility
+failure in themes:
+
+```css
+:focus-visible { outline: 2px solid var(--wp--preset--color--primary);
+                 outline-offset: 2px; }
+```
+`:focus-visible` shows the ring for keyboard users and not on mouse
+click, which is what makes designers accept keeping it. Never
+`outline: none` without a visible replacement.
+
+## Screen-reader text and skip links are expected of a theme
+
+WordPress ships the `.screen-reader-text` convention, and the
+`wp-block-navigation` skip link relies on the template exposing an id
+the link can target — typically `<main id="wp--skip-link--target">` via
+the group block's `anchor`. A block theme that never sets an anchor on
+its main region silently drops skip-link support.
+
+## Images: aspect-ratio instead of padding hacks
+
+```css
+.wp-block-post-featured-image img {
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  width: 100%;
+  height: auto;
+}
+```
+The featured-image block also accepts `aspectRatio` and `scale`
+attributes directly in block markup, which is preferable because the
+editor then shows the same crop.
+
+## What WordPress already does, so the theme should not
+
+Core emits: layout CSS from theme.json, block default styles (with
+`wp-block-styles`), `wp-image-{id}` sizing, responsive embeds, gap
+handling for flex and grid layouts, and `:root :where()` global styles.
+A theme reimplementing a container width, a grid gap or a button reset is
+usually fighting one of these — and the symptom is a rule that "does not
+apply" until it is given `!important`.
+
+## Debugging a theme that will not activate
+
+In order: is `style.css` present with a `Theme Name` header; is the
+header inside the first 8 KB; does `templates/index.html` exist for a
+block theme; is `theme.json` valid JSON (a trailing comma is the usual
+culprit and it fails silently, falling back to defaults); for a child
+theme, does `Template` exactly match the parent directory name. Enable
+`WP_DEBUG` with `WP_DEBUG_LOG` and read `wp-content/debug.log` — a fatal
+in `functions.php` produces a white screen with nothing in the browser.
+
+## Theme check before shipping
+
+The Theme Check plugin runs the directory's automated requirements:
+escaping on output, no removed functions, text domain present and
+literal, no hard-coded `wp-content` paths (`content_url()` instead), a
+`readme.txt` for the directory, and GPL-compatible licensing for every
+bundled asset. Bundled fonts in particular must be GPL-compatible and
+served locally — linking Google Fonts from a CDN is a GDPR problem and a
+directory rejection.

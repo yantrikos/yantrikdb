@@ -1,0 +1,23 @@
+[pack]
+name = "wordpress-theme"
+version = "0.1.0"
+origin = "yantrik/wordpress-theme"
+namespace = "wordpress_theme"
+description = "Building WordPress block themes that actually activate and render: the required file set, theme.json as the design-token source, block markup in template HTML, patterns and style variations — plus the modern CSS (fluid type, layout, container queries, cascade layers) that has to coexist with the CSS WordPress emits for you."
+coverage = [
+    "WordPress block theme structure and required files",
+    "theme.json settings, styles and generated CSS custom properties",
+    "WordPress block markup in templates and template parts",
+    "WordPress block patterns and style variations",
+    "WordPress theme functions.php, enqueueing and theme supports",
+    "CSS for WordPress themes: layout, alignment, specificity",
+    "Modern CSS: fluid typography, grid, container queries, cascade layers",
+    "WordPress child themes and classic theme structure",
+]
+
+[content]
+memory_type = "procedural"
+domain = "engineering"
+source = "document"
+importance = 0.6
+certainty = 0.9

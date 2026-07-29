@@ -1,0 +1,5 @@
+# Generated per run. The scorecard in results.json is the durable record;
+# the candidate themes and raw model output are large and regenerate.
+themes/
+raw/
+fp.html
