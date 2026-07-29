@@ -308,32 +308,55 @@ def theme_slug(model: str, condition: str) -> str:
 
 # ── pack context ─────────────────────────────────────────────────────
 
-def pack_reference(pack_file: Path, brief: str) -> str:
-    sys.path.insert(0, str(PACKS.parent / "src"))
-    from yantrikdb import YantrikDB  # noqa: PLC0415
+class PackHost:
+    """Keeps the pack mounted so retrieval can be done PER FILE.
 
-    td = tempfile.mkdtemp()
-    try:
-        db = YantrikDB(os.path.join(td, "host.ydb"), 64)
-        db.mount_pack(str(pack_file))
-        parts = [db.pack_context()]
+    The first version built one reference blob from the brief and reused it
+    for every file. That is the wrong shape for a generation task: the
+    harness asks for one file at a time, so the query that should drive
+    retrieval is the FILE PATH, not the brief. Recalling on "theme.json"
+    lands on the theme.json exemplar; recalling on the brief lands on
+    whatever is nearest the brief and nothing in particular.
+
+    The constitution is injected every time — it is the always-on tier.
+    Retrieval is gated at the same 0.55 similarity floor as evaluate.py,
+    because ungated injection measured 12/12 -> 5/12 on an unrelated
+    control set.
+    """
+
+    def __init__(self, pack_file: Path):
+        sys.path.insert(0, str(PACKS.parent / "src"))
+        from yantrikdb import YantrikDB  # noqa: PLC0415
+        self._td = tempfile.mkdtemp()
+        self.db = YantrikDB(os.path.join(self._td, "host.ydb"), 64)
+        self.db.mount_pack(str(pack_file))
+        self.constitution = self.db.pack_context()
+
+    def reference(self, *queries: str, top_k: int = 5) -> str:
+        parts = [self.constitution]
         seen: set[str] = set()
-        # The constitution carries the rules; retrieval adds specifics for
-        # whatever the brief happens to mention. Same 0.55 gate as
-        # evaluate.py — ungated injection measured 12/12 -> 5/12 on an
-        # unrelated control set.
-        for q in (brief, "block theme file structure", "theme.json settings",
-                  "block markup templates", "CSS layout and typography"):
-            for h in db.recall(q, top_k=6):
-                sim = h.get("similarity") or 0
+        for q in queries:
+            for h in self.db.recall(q, top_k=top_k):
+                # scores.similarity, NOT a top-level "similarity" key —
+                # there is no such key, so `h.get("similarity") or 0` is
+                # always 0 and the gate rejected EVERY retrieved fact.
+                # Every "mounted" run before this fix used the
+                # constitution alone. evaluate.py had it right; this file
+                # re-implemented the read from memory instead of copying
+                # the working one, and got it subtly wrong.
+                if h.get("scores", {}).get("similarity", 0.0) < MIN_SIMILARITY:
+                    continue
                 text = h.get("text", "")
-                if sim >= MIN_SIMILARITY and text not in seen:
+                if text and text not in seen:
                     seen.add(text)
                     parts.append(text)
-        db.close()
         return "\n\n".join(p for p in parts if p)
-    finally:
-        shutil.rmtree(td, ignore_errors=True)
+
+    def close(self) -> None:
+        try:
+            self.db.close()
+        finally:
+            shutil.rmtree(self._td, ignore_errors=True)
 
 
 def main() -> int:
@@ -344,10 +367,11 @@ def main() -> int:
     ap.add_argument("--keep", action="store_true", help="leave candidate themes on disk")
     args = ap.parse_args()
 
-    host = resolve_host(args.ollama)
-    print(f"ollama: {host}\nsite  : {SITE}\n")
+    ollama = resolve_host(args.ollama)
+    print(f"ollama: {ollama}\nsite  : {SITE}\n")
 
     RAW.mkdir(exist_ok=True)
+    host = PackHost(Path(args.pack))
     # Start from an empty themes dir: a candidate left over from a prior
     # run is another way for one model's bad PHP to reach another's score.
     reset_to_core()
@@ -355,27 +379,46 @@ def main() -> int:
         for stale in THEMES.iterdir():
             if stale.is_dir():
                 shutil.rmtree(stale, ignore_errors=True)
-    reference = pack_reference(Path(args.pack), SPEC)
-    print(f"pack context: {len(reference.split())} words\n")
+    print(f"constitution: {len(host.constitution.split())} words\n")
 
     rows = []
     for model in args.model:
         for condition in ("baseline", "mounted"):
-            head = "" if condition == "baseline" else (
-                "Reference material for the WordPress version you are "
-                "targeting:\n\n" + reference + "\n\n---\n\n")
+            def ref(*queries: str, _c=condition) -> str:
+                """Reference material for THIS file, not for the run.
+
+                Retrieval keyed on the file path is what reaches the
+                worked exemplar for that file. Keying it on the brief
+                instead returns whatever is nearest the brief, which is
+                nothing in particular.
+                """
+                if _c == "baseline":
+                    return ""
+                return ("Reference material for the WordPress version you "
+                        "are targeting. Follow it closely, including the "
+                        "worked examples:\n\n"
+                        + host.reference(*queries) + "\n\n---\n\n")
             slug = theme_slug(model, condition)
             print(f"=== {model} x {condition} ===", flush=True)
 
-            manifest_raw, done = ask(host, model, head + MANIFEST_BRIEF, SYSTEM)
+            manifest_raw, done = ask(
+                  ollama, model,
+                  ref("block theme file structure and required files") + MANIFEST_BRIEF,
+                  SYSTEM)
             (RAW / f"{slug}.manifest.txt").write_text(manifest_raw, encoding="utf-8")
             paths = parse_manifest(manifest_raw)
             print(f"    manifest ({done}): {', '.join(paths) or '(none)'}", flush=True)
 
             files: dict[str, str] = {}
             for path in paths:
-                body, d2 = ask(host, model, head + FILE_BRIEF.format(
-                    path=path, spec=SPEC, manifest="\n".join(paths)), SYSTEM)
+                # Query BY FILE PATH — this is what reaches the exemplar
+                # record for the file about to be written.
+                body, d2 = ask(
+                    ollama, model,
+                    ref(path, f"a complete {path} worked example")
+                    + FILE_BRIEF.format(path=path, spec=SPEC,
+                                        manifest="\n".join(paths)),
+                    SYSTEM)
                 files[path] = strip_fences(body) + "\n"
                 if d2 not in ("stop", "?"):
                     print(f"      ! {path} {d2}", flush=True)
@@ -391,6 +434,7 @@ def main() -> int:
             failed = ", ".join(k for k, v in res.items() if not v) or "—"
             print(f"    failed: {failed}\n", flush=True)
 
+    host.close()
     reset_to_core()
 
     print("=" * 78)

@@ -1,8 +1,8 @@
 [
   {
-    "model": "qwen3.6:27b",
+    "model": "qwen3.5:4b",
     "condition": "baseline",
-    "score": 7,
+    "score": 4,
     "checks": {
       "files-emitted": true,
       "style-header": true,
@@ -11,31 +11,33 @@
       "appears-in-wp": true,
       "activates": true,
       "is-block-theme": false,
-      "front-page-200": true,
-      "no-php-error": true,
-      "renders-title": true,
+      "front-page-200": false,
+      "no-php-error": false,
+      "renders-title": false,
       "layout-sizes": false,
       "uses-presets": false
     },
     "files": [
-      "assets/css/style.css",
-      "assets/js/main.js",
+      "assets/css/style.scss",
       "footer.php",
+      "front-page.php",
       "functions.php",
       "header.php",
       "index.php",
+      "readme.txt",
+      "screenshot.png",
       "style.css"
     ],
     "done_reason": "stop"
   },
   {
-    "model": "qwen3.6:27b",
+    "model": "qwen3.5:4b",
     "condition": "mounted",
-    "score": 12,
+    "score": 10,
     "checks": {
       "files-emitted": true,
       "style-header": true,
-      "theme-json-valid": true,
+      "theme-json-valid": false,
       "templates-index": true,
       "appears-in-wp": true,
       "activates": true,
@@ -43,12 +45,12 @@
       "front-page-200": true,
       "no-php-error": true,
       "renders-title": true,
-      "layout-sizes": true,
+      "layout-sizes": false,
       "uses-presets": true
     },
     "files": [
-      "parts/footer.html",
-      "parts/header.html",
+      "parts/header.php",
+      "patterns/hero.php",
       "readme.txt",
       "screenshot.png",
       "style.css",
