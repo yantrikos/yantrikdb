@@ -25,11 +25,33 @@ else.**
 | Pack | Facts | Shape of value |
 |---|---|---|
 | `yantrikdb-engine` | 45 | Knowledge the model cannot have — private, post-cutoff engine internals |
-| `agent-memory-discipline` | 19 | Procedure the model half-knows — operating rules with non-obvious rationale |
+| `agent-memory-discipline` | 19 + 5 rules | Procedure the model half-knows — operating rules with non-obvious rationale |
 | `shakespeare-voice` | 14 + 6 rules | Style as craft: Early Modern grammar, verse shape, rhetorical devices |
 | `einstein-method` | 8 + 5 rules | Method as procedure: thought experiments, invariance, limit cases |
-| `react-craft` | 10 + 7 rules | Framework house rules: hooks discipline, keys, accessibility |
-| `wordpress-expert` | 12 + 7 rules | Domain expertise: hook system + the security craft plugin reviews demand |
+| `c-safety` | 40 + 20 rules | The C that compiles clean and has a CVE in it: lifetime, UB, integer rules |
+| `java-modern` | 47 + 20 rules | Java on a current LTS: records, virtual threads, and the contracts that fail silently |
+| `php-modern` | 38 + 17 rules | PHP 8 language and the security defaults that decide if the app is exploitable |
+| `react-craft` | 36 + 15 rules | React 19: Actions, `use()`, RSC boundary, and the bugs that only appear under load |
+| `wordpress-expert` | 46 + 15 rules | Plugin and theme engineering: load order, REST, WooCommerce, and review-grade security |
+
+The four language and framework packs share a selection rule, and it is
+the opposite of what a "learn X" pack would do. A competent model
+already knows how C, Java, PHP and React work, so explaining them buys
+nothing — the first `react-craft` (10 general facts) moved a 27B model
+by **+1** for exactly that reason. What is left worth packing is the
+delta between what the model knows and what is true, plus the defects it
+produces by default. So every entry is one of:
+
+- **a version fact it cannot have** — React 19 `ref`-as-a-prop, PHP 8.4
+  property hooks, Java 21 sequenced collections;
+- **a rule whose violation compiles clean and passes a smoke test** —
+  `strncpy` not terminating, `foreach` by reference leaving its
+  reference bound, check-then-act on a `ConcurrentHashMap`, PDO's
+  emulated prepares, a `fetch` in an effect racing itself;
+- **a correction to training data** — Java string templates
+  (`STR."…"`) previewed in JDK 21 and 22 and were withdrawn in 23, so
+  the syntax is in every model's training set and compiles nowhere.
+  Same shape for `forwardRef`, deprecated in React 19.
 
 ## Use-case validation: can a 4B model do the thing?
 
