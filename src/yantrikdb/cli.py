@@ -451,6 +451,155 @@ def triggers(db_path, embedding_dim):
         db.close()
 
 
+# ── Knowledge packs ──
+
+# Packs are built against the bundled embedder (potion-base-2M, 64 dims),
+# so the pack commands default there rather than to the CLI-wide 384 —
+# otherwise every `pack install` would open a 384-dim database and be
+# refused for a dimension mismatch it did nothing to cause.
+_pack_dim_option = click.option(
+    "--dim", "embedding_dim",
+    envvar="YANTRIKDB_EMBEDDING_DIM",
+    default=64, type=int, show_envvar=True,
+    help="Embedding dimension of the target database (packs use 64).",
+)
+
+
+@cli.group()
+def pack():
+    """Install, list and remove mountable knowledge packs."""
+
+
+@pack.command("info")
+@click.argument("pack_file", type=click.Path(exists=True, dir_okay=False))
+def pack_info(pack_file):
+    """Show a pack file's manifest without installing it."""
+    from yantrikdb import YantrikDB
+    m = YantrikDB.read_pack_manifest(pack_file)
+    click.echo(f"{m['pack_id']}")
+    click.echo(f"  name        {m['name']} {m['version']}")
+    if m.get("description"):
+        click.echo(f"  description {m['description']}")
+    click.echo(f"  namespace   {m.get('namespace')}")
+    click.echo(f"  facts       {m.get('corpus_rows')}")
+    e = m.get("embedder", {})
+    click.echo(f"  embedder    {e.get('name')} dim={e.get('dim')}")
+    click.echo(f"  digest      {m.get('content_digest')}")
+
+
+@pack.command("install")
+@_db_option
+@_pack_dim_option
+@click.argument("pack_file", type=click.Path(exists=True, dir_okay=False))
+def pack_install(db_path, embedding_dim, pack_file):
+    """Install a downloaded pack so it mounts on every open."""
+    from yantrikdb import YantrikDB
+    # The pack declares the embedding space it was built in; trust that
+    # over the flag, so the common case needs no flags at all.
+    try:
+        declared = YantrikDB.read_pack_manifest(pack_file).get("embedder", {}).get("dim")
+        if declared:
+            embedding_dim = int(declared)
+    except Exception:
+        pass  # let install_pack produce the real, specific error
+
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    db = _open_db(db_path, embedding_dim)
+    try:
+        pack_id = db.install_pack(pack_file)
+        click.echo(f"installed {pack_id}")
+        click.echo(f"  into {db.pack_dir()}")
+    finally:
+        db.close()
+
+
+@pack.command("list")
+@_db_option
+@_pack_dim_option
+def pack_list(db_path, embedding_dim):
+    """List installed packs and whether they are mounted."""
+    db = _open_db(db_path, embedding_dim)
+    try:
+        installed = db.installed_packs()
+        if not installed:
+            click.echo("No packs installed.")
+            return
+        mounted = {p["pack_id"] for p in db.mounted_packs()}
+        for p in installed:
+            mark = "mounted" if p["pack_id"] in mounted else "NOT MOUNTED"
+            click.echo(f"  {p['pack_id']:<40} {mark}")
+        # A pack that is installed but did not mount is the failure worth
+        # explaining, so say why rather than leaving a bare label.
+        for o in db.remount_installed():
+            if not o["mounted"]:
+                click.echo(f"    {o['pack_id']}: {o['reason']}", err=True)
+    finally:
+        db.close()
+
+
+@pack.command("keygen")
+def pack_keygen():
+    """Generate a publisher keypair. Keep the secret key safe — it IS
+    your publisher identity."""
+    from yantrikdb import YantrikDB
+    secret, public = YantrikDB.generate_pack_keypair()
+    click.echo(f"public key (share this):  {public}")
+    click.echo(f"secret key (KEEP SAFE):   {secret}")
+
+
+@pack.command("sign")
+@click.argument("pack_file", type=click.Path(exists=True, dir_okay=False))
+@click.option("--key", "secret_key", required=True, envvar="YANTRIKDB_PACK_KEY",
+              show_envvar=True, help="Publisher secret key (hex).")
+def pack_sign(pack_file, secret_key):
+    """Sign a sealed pack. Covers identity, content, embedder,
+    constitution and coverage — a pack modified after signing is refused
+    at mount."""
+    from yantrikdb import YantrikDB
+    public = YantrikDB.sign_pack(pack_file, secret_key)
+    click.echo(f"signed by {public}")
+
+
+@pack.command("trust")
+@_db_option
+@_pack_dim_option
+@click.argument("pubkey")
+@click.option("--label", default=None, help="Human-readable publisher name.")
+def pack_trust(db_path, embedding_dim, pubkey, label):
+    """Trust a publisher key: their validly-signed packs mount at the
+    signed tier."""
+    db = _open_db(db_path, embedding_dim)
+    try:
+        db.trust_publisher(pubkey, label)
+        click.echo(f"trusted {pubkey[:16]}…" + (f" ({label})" if label else ""))
+    finally:
+        db.close()
+
+
+@pack.command("remove")
+@_db_option
+@_pack_dim_option
+@click.argument("pack_id")
+def pack_remove(db_path, embedding_dim, pack_id):
+    """Uninstall a pack and delete its copy."""
+    db = _open_db(db_path, embedding_dim)
+    try:
+        if db.uninstall_pack(pack_id):
+            click.echo(f"removed {pack_id}")
+        else:
+            click.echo(f"not installed: {pack_id}", err=True)
+            raise SystemExit(1)
+    finally:
+        db.close()
+
+
 def main():
     """Entry point for the yantrikdb CLI console script."""
     cli()
+
+
+# Without this, `python -m yantrikdb.cli` imports the module and exits
+# silently — no commands run, no error printed, which reads exactly like
+# a command that did nothing.
+if __name__ == "__main__":
+    main()

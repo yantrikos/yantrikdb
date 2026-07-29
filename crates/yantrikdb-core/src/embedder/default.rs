@@ -152,6 +152,46 @@ mod once_cell_lite {
     }
 }
 
+/// Human-readable name of the bundled model.
+pub const BUNDLED_EMBEDDER_NAME: &str = "potion-base-2M";
+
+/// Content fingerprint of the bundled model, computed from the baked-in
+/// bytes on first use and memoized for the process.
+///
+/// The `Embedder::fingerprint` contract asks for "SHA-256 of model
+/// weights, or equivalent"; hashing the four `include_bytes!` blobs is
+/// exactly that, and it is self-maintaining — if the bundle is ever
+/// swapped (the Slice C 256-dim variant, say) the digest changes on its
+/// own and `set_embedder`'s guard fires without anyone remembering to
+/// bump a constant.
+///
+/// Until this existed the bundled embedder returned `None` here, which
+/// meant the *default* embedder for every database had no provable
+/// identity: `set_embedder`'s same-dim-different-model guard could never
+/// fire, and packs could never prove they shared a host's vector space.
+/// The trait's own doc comment claimed bundled embedders overrode this.
+/// They did not.
+pub fn bundled_embedder_fingerprint() -> &'static str {
+    static FP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FP.get_or_init(|| {
+        let mut h = blake3::Hasher::new();
+        h.update(b"yantrikdb.embedder.v1");
+        h.update(BUNDLED_EMBEDDER_NAME.as_bytes());
+        // Length-prefixed so the concatenation cannot be forged by a
+        // different split of the same total bytes.
+        for bytes in [
+            POTION_2M_MODEL,
+            POTION_2M_TOKENIZER,
+            POTION_2M_CONFIG,
+            POTION_2M_MODULES,
+        ] {
+            h.update(&(bytes.len() as u64).to_le_bytes());
+            h.update(bytes);
+        }
+        format!("blake3:{}", h.finalize().to_hex())
+    })
+}
+
 impl BundledEmbedder {
     /// Construct a new bundled embedder. Cheap — the model is not
     /// loaded until the first call to [`embed`] / [`embed_batch`].
@@ -203,6 +243,14 @@ impl Embedder for BundledEmbedder {
 
     fn dim(&self) -> usize {
         BUNDLED_EMBEDDER_DIM
+    }
+
+    fn fingerprint(&self) -> Option<String> {
+        Some(bundled_embedder_fingerprint().to_string())
+    }
+
+    fn name(&self) -> Option<String> {
+        Some(BUNDLED_EMBEDDER_NAME.to_string())
     }
 }
 

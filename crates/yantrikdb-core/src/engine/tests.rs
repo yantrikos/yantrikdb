@@ -15172,14 +15172,20 @@ fn set_embedder_test_2_different_dim_on_populated_db_rejected() {
 fn set_embedder_test_3_empty_db_with_fingerprint_upgrades_provenance_to_known() {
     // Empty DB + candidate has fingerprint → provenance upgrades to
     // Known(fp). Locks the initial-attach upgrade path.
+    //
+    // Dim 128, not 64: at 64 `YantrikDB::new` auto-attaches the bundled
+    // embedder, which now carries a real fingerprint, so provenance is
+    // already Known before this test's own set_embedder call and the
+    // pre-condition below could never hold. A dim with no bundled
+    // default keeps the test measuring the upgrade path it names.
     use mode_test_embedders::FakeEmbedder;
-    let mut db = YantrikDB::new(":memory:", 64).unwrap();
+    let mut db = YantrikDB::new(":memory:", 128).unwrap();
     assert!(matches!(
         db.search_state.load().index_embedding,
         crate::engine::reembed::EmbeddingProvenance::ExternalOrUnknown { .. }
     ));
     db.set_embedder(Box::new(FakeEmbedder {
-        dim: 64,
+        dim: 128,
         fp: Some("sha256:initial".to_string()),
         name: Some("initial".to_string()),
         sentinel: 1.0,
@@ -15190,7 +15196,7 @@ fn set_embedder_test_3_empty_db_with_fingerprint_upgrades_provenance_to_known() 
         crate::engine::reembed::EmbeddingProvenance::Known { name, digest, dim } => {
             assert_eq!(name.as_deref(), Some("initial"));
             assert_eq!(digest, "sha256:initial");
-            assert_eq!(*dim, 64);
+            assert_eq!(*dim, 128);
         }
         other => panic!("expected Known provenance after attach on empty DB, got {other:?}"),
     }
@@ -15262,8 +15268,12 @@ fn set_embedder_test_6_external_or_unknown_compat_attach_does_not_claim_provenan
     // ExternalOrUnknown-provenance populated DB + candidate with
     // matching dim → compat attach. Runtime embedder is set, but
     // index_embedding stays ExternalOrUnknown.
+    // Dim 128 so `YantrikDB::new` does not auto-attach the bundled
+    // embedder — at 64 it would, and its (now real) fingerprint would
+    // make provenance Known before this test ever gets to populate the
+    // DB from an external source.
     use mode_test_embedders::FakeEmbedder;
-    let mut db = YantrikDB::new(":memory:", 64).unwrap();
+    let mut db = YantrikDB::new(":memory:", 128).unwrap();
     // Populate DB without setting an embedder — vectors come from
     // external source. Provenance stays ExternalOrUnknown.
     let _ = db
@@ -15274,7 +15284,7 @@ fn set_embedder_test_6_external_or_unknown_compat_attach_does_not_claim_provenan
             0.0,
             86400.0,
             &empty_meta(),
-            &vec_seed(1.0, 64),
+            &vec_seed(1.0, 128),
             "default",
             0.9,
             "general",
@@ -15287,7 +15297,7 @@ fn set_embedder_test_6_external_or_unknown_compat_attach_does_not_claim_provenan
         crate::engine::reembed::EmbeddingProvenance::ExternalOrUnknown { .. }
     ));
     db.set_embedder(Box::new(FakeEmbedder {
-        dim: 64,
+        dim: 128,
         fp: Some("sha256:attached".to_string()),
         name: Some("attached".to_string()),
         sentinel: 1.0,

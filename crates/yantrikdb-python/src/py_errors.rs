@@ -85,3 +85,33 @@ create_exception!(
      and the anti-laundering gate refused it. Not retryable as-is: fix the \
      declaration or raise the confidence basis."
 );
+
+create_exception!(
+    yantrikdb,
+    PackEmbedderMismatch,
+    PyRuntimeError,
+    "The pack's vectors are not provably in this database's embedding space, \
+     so mounting it would return confident nonsense rather than an error — \
+     the query is encoded once, by the host's embedder, and searched against \
+     both indexes. Not retryable: rebuild the pack with the host's embedder. \
+     If the spaces are merely UNPROVEN (a legacy database with no recorded \
+     embedder identity) rather than known to differ, mount with \
+     allow_unverified_embedder=True to accept that risk explicitly."
+);
+
+create_exception!(
+    yantrikdb,
+    PackAlreadyMounted,
+    PyRuntimeError,
+    "A pack with this origin@version is already mounted. Not retryable as-is: \
+     unmount it first, or mount a different version."
+);
+
+create_exception!(
+    yantrikdb,
+    PackSignatureInvalid,
+    PyRuntimeError,
+    "The pack claims a signature that does not verify: it was modified after \
+     signing or the signature is forged. There is no legitimate state that \
+     produces this and no override — re-download the pack from its publisher."
+);

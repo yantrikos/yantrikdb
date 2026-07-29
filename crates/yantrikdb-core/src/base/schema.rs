@@ -1,4 +1,10 @@
-pub const SCHEMA_VERSION: i32 = 38;
+// v39 adds the `pack_mounts` and `trusted_publishers` tables. No migration
+// constant is needed for either: the
+// change is a new CREATE TABLE IF NOT EXISTS, and `SCHEMA_SQL` is executed
+// unconditionally on every open, so existing databases pick it up. The
+// migration list exists for changes SQL-with-IF-NOT-EXISTS cannot express
+// (ALTER TABLE ADD COLUMN, index replacement, backfills).
+pub const SCHEMA_VERSION: i32 = 39;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -140,6 +146,36 @@ CREATE TABLE IF NOT EXISTS idempotency_claims (
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_idempotency
     ON memories(origin_actor, namespace, idempotency_key)
     WHERE idempotency_key IS NOT NULL;
+
+-- Installed knowledge packs (v39). A `mount_pack()` is TRANSIENT by design:
+-- it must leave the host file byte-identical, which is the property that makes
+-- mounting reversible where importing is not. `install_pack()` is the durable
+-- variant — it copies the pack into the database's sibling `<stem>.packs/`
+-- directory and records it here, so `open()` can re-mount it and a downloaded
+-- pack stays installed across restarts.
+--
+-- Only the FILE NAME is stored, never a full path: the pack always lives in
+-- the pack directory beside the database, so the database plus its packs can
+-- be moved or copied as a unit without rewriting rows.
+CREATE TABLE IF NOT EXISTS pack_mounts (
+    pack_id        TEXT PRIMARY KEY,
+    file_name      TEXT NOT NULL,
+    name           TEXT,
+    version        TEXT,
+    content_digest TEXT,
+    installed_at   REAL NOT NULL
+);
+
+-- Publisher keys this host has chosen to trust (v39, with pack_mounts).
+-- A valid signature proves a pack came from whoever holds the key and was
+-- not modified since signing; whether that key earns the `Signed` trust
+-- tier — and its recall-ranking multiplier — is the HOST's decision,
+-- recorded here. Trust-on-first-use, like SSH: no central authority.
+CREATE TABLE IF NOT EXISTS trusted_publishers (
+    pubkey   TEXT PRIMARY KEY,
+    label    TEXT,
+    added_at REAL NOT NULL
+);
 
 -- Session tracking (V13)
 CREATE TABLE IF NOT EXISTS sessions (
