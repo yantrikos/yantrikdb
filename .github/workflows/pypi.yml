@@ -73,7 +73,15 @@ jobs:
         with:
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
-          args: --release --out dist -i python3.10 python3.11 python3.12 python3.13 python3.14
+          # **abi3.** One wheel per platform, not one per interpreter.
+          # `pyo3/abi3-py310` links against CPython's stable ABI, so a
+          # single `cp310-abi3` wheel runs on 3.10 through 3.14 and every
+          # future 3.x — which is also why no `-i` list appears here any
+          # more. Building five interpreters produced 25 wheels at ~20 MB
+          # a release, and v0.11.1 hit PyPI's 10 GB project limit
+          # mid-upload and published a half-release (cp310/cp311 only)
+          # that left most users on the previous, broken build.
+          args: --release --out dist
           sccache: "true"
 
       - name: Upload wheels
