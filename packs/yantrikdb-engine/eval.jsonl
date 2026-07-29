@@ -10,7 +10,7 @@
 {"id": "idempotency-pk", "q": "What three columns form the primary key of YantrikDB's idempotency_claims table?", "expect": [["origin_actor", "origin actor"], ["namespace"], ["idempotency_key", "idempotency key"]], "note": "The serialization point for exactly-once writes."}
 {"id": "idempotency-keylen", "q": "What is the maximum allowed length, in bytes, of a YantrikDB idempotency key?", "expect": [["512"]], "note": "Non-empty after trim, at most 512 bytes."}
 {"id": "origin-actor-meaning", "q": "In YantrikDB's memories table, what is the origin_actor column actually used for, despite its name suggesting provenance?", "expect": [["idempoten"]], "note": "It scopes the idempotency key; it is not a provenance field."}
-{"id": "schema-version", "q": "What is the YantrikDB SCHEMA_VERSION constant as of release v0.10.1?", "expect": [["38"]], "note": "Small integer, but not one a model would land on by chance."}
+{"id": "schema-version", "q": "What is the YantrikDB SCHEMA_VERSION constant as of release v0.10.1?", "expect": [["38"]], "note": "Exact schema version number - a genuine short answer.", "short_ok": ["38"]}
 {"id": "mmr-lambda", "q": "What lambda value does YantrikDB use for MMR diversity selection during recall?", "expect": [["0.7"]], "note": "LAMBDA = 0.7."}
 {"id": "scoring-weights", "q": "State the three default weights in YantrikDB's base relevance score for similarity, decay and recency.", "expect": [["0.5"], ["0.2"], ["0.3"]], "note": "W_SIM 0.50, W_DECAY 0.20, W_RECENCY 0.30."}
 {"id": "fetch-k-cap", "q": "YantrikDB's recall builds a candidate pool of twenty times top_k. What hard maximum is that pool capped at?", "expect": [["500"]], "note": "fetch_k = (top_k * 20).min(500)."}

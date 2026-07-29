@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import tempfile
 import time
 import urllib.error
@@ -119,9 +120,29 @@ def ask(
         return f"<<error: {e}>>"
 
 
+def _alt_matches(alt: str, low: str) -> bool:
+    """Match one alternative against a lowercased answer.
+
+    Plain `alt in low` was wrong in the direction that inflates scores:
+    "no" matched *k*no*w*, "not" matched can*not* and *not*hing, "20"
+    matched "2024", "19" matched "1999". Every one of those turns a
+    question the model failed into a pass, and nothing about the run
+    looks wrong afterwards.
+
+    So a bare alphanumeric alternative is matched on word boundaries.
+    Anything containing punctuation or spaces — `wp_unslash`,
+    `#[\\Override]`, `strlen(...)`, `no found rows` — stays a substring
+    test, because \\b does not behave usefully around symbols and those
+    alternatives are long enough not to collide by accident.
+    """
+    if alt.isalnum():
+        return re.search(rf"\b{re.escape(alt)}\b", low) is not None
+    return alt in low
+
+
 def grade(answer: str, expect: list[list[str]]) -> bool:
     low = answer.lower()
-    return all(any(alt.lower() in low for alt in group) for group in expect)
+    return all(any(_alt_matches(alt.lower(), low) for alt in group) for group in expect)
 
 
 def load_jsonl(p: Path) -> list[dict]:
