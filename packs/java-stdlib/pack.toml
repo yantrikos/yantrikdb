@@ -1,0 +1,21 @@
+[pack]
+name = "java-stdlib"
+version = "0.1.0"
+origin = "yantrik/java-stdlib"
+namespace = "java_stdlib"
+description = "The Java standard library's actual API surface, disassembled from the local JDK with javap: exact method signatures for the sixty classes agent code touches most — collections, streams, files, HTTP client, time, concurrency — correct by construction, never from memory. Complements yantrik/java-modern (idioms and style) with ground truth aimed at the measured failure mode of local models: invented methods and wrong signatures."
+coverage = [
+    "Java standard library class and method signatures",
+    "Java collections, streams and optionals",
+    "Java file, path and process operations",
+    "Java HTTP client, URI and networking",
+    "Java time, dates, formatting and duration",
+    "Java concurrency, executors, futures and virtual threads",
+]
+
+[content]
+memory_type = "semantic"
+domain = "engineering"
+source = "document"
+importance = 0.6
+certainty = 0.95

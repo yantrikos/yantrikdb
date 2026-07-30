@@ -18,9 +18,17 @@ Two real bugs found by hand before this file existed:
     for one.
 
 Both scored the pack *higher* than the truth. That is the direction
-grader bugs always fail in, because a grader that is too strict gets
+grader bugs usually fail in, because a grader that is too strict gets
 noticed the first time a correct answer is marked wrong, and a grader
 that is too lenient never gets noticed at all.
+
+The too-strict direction did eventually appear, and it is worth its own
+check: `evaluate.py` matches on WORD BOUNDARIES (the fix for the "s"
+bug above), so a truncated stem can never match its own inflection.
+An expectation of "cach" scores a model that answered "cache the tool
+list" as wrong. That is a false negative — cheap to notice on one
+question, and invisible when it silently deflates a whole listing.
+`stem_suspects` below catches it before the number is published.
 
 Usage:
     python packs/lint_evals.py            # every pack
@@ -30,6 +38,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -48,6 +57,34 @@ TOO_COMMON = {
     "function", "code", "data", "type", "return", "returns", "set",
     "call", "calls", "called", "when", "what", "how", "yes",
 }
+
+
+# Suffixes an author silently assumes a stem will cover. It will not:
+# the grader matches whole words.
+INFLECTIONS = ("e", "s", "es", "ed", "ing", "y", "ies", "ion", "ions",
+               "al", "ity", "ies", "er", "ers", "ly")
+
+
+def stem_suspects(alt: str, context: str, alts: set[str]) -> str | None:
+    """Return the inflected form an alternative was probably meant to
+    cover, if the alternative looks like a truncated stem.
+
+    Evidence, not guesswork: the inflected form has to actually appear
+    in the question or note — the author wrote the real word there while
+    typing a stem into `expect`. A stem whose inflection is also listed
+    as its own alternative is fine, since the group can still match.
+    """
+    if not alt.isalpha() or len(alt) < 4:
+        return None
+    for suf in INFLECTIONS:
+        cand = alt + suf
+        if cand in alts:
+            return None
+        # Word-boundary search so "task" does not "find" itself in "tasks"
+        # only because the substring is there.
+        if re.search(rf"\b{re.escape(cand)}\b", context, re.I):
+            return cand
+    return None
 
 
 def lint_file(path: Path) -> list[str]:
@@ -107,6 +144,17 @@ def lint_file(path: Path) -> list[str]:
                         f"{where} [{qid}]: group {gi} alternative {alt!r} is a "
                         f"word almost any answer contains (add to short_ok if "
                         f"it is genuinely the answer)"
+                    )
+                # The too-strict direction: a stem the word-boundary
+                # matcher can never match, marking correct answers wrong.
+                ctx = f"{row.get('q', '')} {row.get('note', '')}"
+                inflected = stem_suspects(alt, ctx, set(alts))
+                if inflected:
+                    problems.append(
+                        f"{where} [{qid}]: group {gi} alternative {alt!r} is a "
+                        f"stem — the grader matches whole words, so it will "
+                        f"NOT match {inflected!r}, which this question's own "
+                        f"text uses. List the full form(s) instead."
                     )
 
         for alt in sorted(waived):

@@ -1,0 +1,20 @@
+[pack]
+name = "python-stdlib"
+version = "0.1.0"
+origin = "yantrik/python-stdlib"
+namespace = "python_stdlib"
+description = "The Python 3.13.5 standard library's actual API surface, generated from the interpreter itself: every signature via inspect.signature (correct by construction, never from memory), CPython's own docstring summaries, plus authored recipes for the tasks agents actually do. Aimed at the measured failure mode of local models — invented imports and wrong signatures."
+coverage = [
+    "Python standard library function and class signatures",
+    "Python file, path and subprocess operations",
+    "Python text, JSON, CSV and regular expression handling",
+    "Python dates, times, collections and itertools",
+    "Python logging, testing mocks and concurrency futures",
+]
+
+[content]
+memory_type = "semantic"
+domain = "engineering"
+source = "document"
+importance = 0.6
+certainty = 0.95
