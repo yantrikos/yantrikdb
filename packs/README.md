@@ -131,34 +131,50 @@ claim.
 conditions. It is there to catch a pack that wins its category by
 capturing attention and wrecking everything else.
 
-> **These numbers were revised down on 2026-07-29.** They previously read
-> 18/20 across the board. The pack did not change; the *grader* did. It
-> matched substrings, so `"no"` matched *k**no**w* and `"20"` matched
-> "20**24**" — every model lost exactly 3 points once matching became
-> word-boundary aware. A uniform drop across six models is the signature
-> of a grader fix rather than a regression. The old figures are withdrawn.
-> See `lint_evals.py` for the checks that now stop a grader that cannot
-> fail.
+> **Revised twice, in both directions, and both times the grader moved
+> rather than the pack.**
+>
+> *2026-07-29, down.* The figures previously read 18/20 across the board.
+> The grader matched substrings, so `"no"` matched *k**no**w* and `"20"`
+> matched "20**24**"; every model lost exactly 3 points once matching
+> became word-boundary aware. A uniform drop across six models is the
+> signature of a grader fix, not a regression.
+>
+> *2026-07-30, up.* Word-boundary matching then exposed the opposite bug:
+> an expectation written as a truncated stem can never match its own
+> inflection. `forget-semantics` expected `"tombston"`, which does not
+> match "tombstoned" — so every model that answered correctly was scored
+> wrong. An audit found 35 such stems across 11 packs, each one silently
+> *deflating* a published number. That direction hides better than the
+> first, because a lower score reads as an honest one.
+>
+> Both figures are withdrawn; the table below is the corrected run.
+> `lint_evals.py` now checks the matcher in both directions — that it can
+> fail, and that it can pass.
 
 | Model | Pack | Baseline | Mounted | Control |
 |---|---|---|---|---|
 | gemma3:270m | yantrikdb-engine | 1/20 | 10/20 | 7/12 → 8/12 |
-| qwen3.5:0.8b | yantrikdb-engine | 0/20 | **15/20** | 8/12 → 8/12 |
-| qwen3.5:2b | yantrikdb-engine | 2/20 | 13/20 | 10/12 → **8/12** |
-| granite4:3b | yantrikdb-engine | 2/20 | **15/20** | 12/12 → 12/12 |
-| qwen3.5:4b | yantrikdb-engine | 2/20 | **15/20** | 12/12 → 12/12 |
-| qwen3.6:27b | yantrikdb-engine | 1/20 | **15/20** | 11/12 → 11/12 |
-| qwen3.6:27b | agent-memory-discipline | 7/12 | **11/12** | 11/12 → 11/12 |
-| qwen3.5:4b | agent-memory-discipline | 6/12 | **10/12** | 12/12 → 12/12 |
-| granite4:3b | agent-memory-discipline | 7/12 | **10/12** | 12/12 → 12/12 |
+| qwen3.5:0.8b | yantrikdb-engine | 0/20 | **16/20** | 8/12 → 8/12 |
+| qwen3.5:2b | yantrikdb-engine | 2/20 | 14/20 | 10/12 → **8/12** |
+| granite4:3b | yantrikdb-engine | 2/20 | **16/20** | 12/12 → 12/12 |
+| qwen3.5:4b | yantrikdb-engine | 2/20 | **16/20** | 12/12 → 12/12 |
+| qwen3.6:27b | yantrikdb-engine | 1/20 | **16/20** | 11/12 → 11/12 |
+| gemma3:270m | agent-memory-discipline | 1/12 | 4/12 | 7/12 → 8/12 |
+| qwen3.5:0.8b | agent-memory-discipline | 1/12 | 8/12 | 8/12 → 8/12 |
+| qwen3.5:2b | agent-memory-discipline | 3/12 | 8/12 | 10/12 → 10/12 |
+| granite4:3b | agent-memory-discipline | 5/12 | 9/12 | 12/12 → 12/12 |
+| qwen3.5:4b | agent-memory-discipline | 5/12 | **10/12** | 12/12 → 12/12 |
+| qwen3.6:27b | agent-memory-discipline | 6/12 | **11/12** | 11/12 → 11/12 |
 
 ### The pack, not the model, supplies the knowledge
 
-Five models spanning **0.8B to 27B** — a 34× parameter range — start
-between 0 and 2 out of 20 and all land on exactly **15/20** with the same
+Four models spanning **0.8B to 27B** — a 34× parameter range — start
+between 0 and 2 out of 20 and all land on exactly **16/20** with the same
 pack mounted. Model size predicts almost nothing about the baseline
 (being bigger does not help you know a private codebase) and nothing at
-all about the mounted score.
+all about the mounted score. `qwen3.5:2b` is the one model between the
+floor and the plateau, at 14/20.
 
 That is the marketplace thesis in one column: an 0.8B model with the
 right pack answers domain questions as well as a 27B model with the same
@@ -182,25 +198,32 @@ rather than only its headline.
 ### Two packs, two sizes of claim
 
 A pack of facts a model cannot possibly know moves it from ~1/20 to
-15/20. A pack of operating rules it already half-knows moves it from
-~7/12 to ~10/12 — real, but a different and much smaller claim. Both
-belong on a listing; publishing only the first would be marketing, not
-measurement.
+16/20. A pack of operating rules it already half-knows moves it from
+~5/12 to ~10/12 — real, but a different and much smaller claim, and one
+that keeps some dependence on model size rather than flattening the way
+the facts pack does. Both belong on a listing; publishing only the first
+would be marketing, not measurement.
 
 One caveat on the control column: `qwen3.6:27b` scores 11/12 rather than
 12/12 in *both* conditions, because it answered the git question with
-`git checkout` where the expectation requires the `-b` flag. That is a
-strictness artifact in the control question, not a model failure, and
-since it is identical in both conditions it does not affect the
-attach-harm measurement.
+`git checkout` where the question explicitly asks for the one-step form
+and the expectation accepts either `checkout -b` or `switch -c`. Earlier
+revisions of this document called that a strictness artifact; re-reading
+the question, it is a genuine incomplete answer. Either way it is
+identical in both conditions, so it does not affect the attach-harm
+measurement.
 
-`agent-memory-discipline` also produced one regression per small model —
-`searchable-phrasing` on qwen3.5:4b, `granularity` on granite4:3b. In
-both cases the model answered with the wrong neighbouring rule: asked
-about unresolvable pronouns, it explained the relative-dates rule
-instead. Retrieving several near-adjacent procedural rules can blend
-them, and smaller models blend more. qwen3.6:27b had no regressions. The
-harness names every such case rather than netting it out of the total.
+`agent-memory-discipline` also produces a regression on every model
+below 27B — `searchable-phrasing` on qwen3.5:4b, `hard-constraint` and
+`granularity` on granite4:3b, `granularity` on qwen3.5:2b,
+`relative-dates` on gemma3:270m. In each case the model answered with
+the wrong neighbouring rule: asked about unresolvable pronouns, it
+explained the relative-dates rule instead. Retrieving several
+near-adjacent procedural rules can blend them, and smaller models blend
+more. `qwen3.6:27b` is the only model with none, which is the same
+pattern as the mounted column: this pack keeps a dependence on model
+size that the facts pack does not. The harness names every such case
+rather than netting it out of the total.
 
 ## The finding that matters most: unconditional injection is harmful
 
