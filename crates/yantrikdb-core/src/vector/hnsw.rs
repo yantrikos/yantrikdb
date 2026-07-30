@@ -499,7 +499,45 @@ impl HnswIndex {
         let Some(ep) = self.entry_point else {
             return 0;
         };
-        let mut seen = vec![false; self.nodes.len()];
+        let n = self.nodes.len();
+
+        // Pass 1: restore layer-0 symmetry.
+        //
+        // Reachability from the entry point is NOT the property search
+        // needs. `search` first descends the upper layers greedily and
+        // only then explores layer 0, starting from wherever that descent
+        // landed — a different node for every query. Layer-0 edges are
+        // directed, and pruning removes one direction at a time, so a
+        // node can keep an outgoing edge into the graph while nothing
+        // points back at it from where the descent begins. That is how
+        // the regression test still failed (~25% of builds, always on a
+        // far outlier) after the in-degree guard: connectivity from the
+        // entry point held, and search still could not find the node.
+        //
+        // Making layer-0 edges symmetric collapses the distinction —
+        // directed reachability becomes undirected reachability, so one
+        // connected component means search finds the node no matter where
+        // the descent lands. Insertion already links both ways; this only
+        // repairs what pruning broke, and it runs at rebuild time.
+        let mut restore: Vec<(usize, usize)> = Vec::new();
+        for u in 0..n {
+            if self.nodes[u].neighbors.is_empty() {
+                continue;
+            }
+            for &v in &self.nodes[u].neighbors[0] {
+                if v < n && !self.nodes[v].neighbors[0].contains(&u) {
+                    restore.push((v, u));
+                }
+            }
+        }
+        for (v, u) in restore {
+            if !self.nodes[v].neighbors[0].contains(&u) {
+                self.nodes[v].neighbors[0].push(u);
+                self.incoming0[u] += 1;
+            }
+        }
+
+        let mut seen = vec![false; n];
         let mut stack = vec![ep];
         seen[ep] = true;
         while let Some(cur) = stack.pop() {
@@ -535,8 +573,12 @@ impl HnswIndex {
             let Some((j, _)) = best else {
                 continue;
             };
+            // Link both ways, or pass 1's symmetry invariant would be
+            // broken by the very repair that depends on it.
             self.nodes[j].neighbors[0].push(i);
             self.incoming0[i] += 1;
+            self.nodes[i].neighbors[0].push(j);
+            self.incoming0[j] += 1;
             rescued += 1;
             // The rescued node's outgoing edges may reach further
             // stranded nodes — mark its whole component reachable so a
