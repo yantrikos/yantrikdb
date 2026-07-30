@@ -153,6 +153,19 @@ pub struct HnswIndex {
     free_list: Vec<usize>,
     active_count: usize,
     rng: SmallRng,
+    /// Layer-0 incoming edge count per node slot. Search always finishes
+    /// with an ef-bounded exploration of layer 0, so a node with zero
+    /// incoming layer-0 edges (and not the entry point) can never be
+    /// returned — it exists in the index and is silently unfindable.
+    /// Pure-distance pruning creates exactly that: in a dense cluster,
+    /// every neighbor of a new node may immediately prune its backlink
+    /// because it already holds `max_m` closer edges (found live: a
+    /// 65-record pack dropped a different record per mount). Pruning
+    /// consults this count and never removes an edge whose target it
+    /// would orphan. Counts include edges FROM tombstoned nodes — the
+    /// traversal expands through tombstones, so those edges still
+    /// provide reachability.
+    incoming0: Vec<usize>,
 }
 
 impl HnswIndex {
@@ -198,6 +211,7 @@ impl HnswIndex {
             free_list: Vec::new(),
             active_count: 0,
             rng,
+            incoming0: Vec::new(),
         }
     }
 
@@ -261,7 +275,9 @@ impl HnswIndex {
 
         // Allocate node index
         let idx = if let Some(free_idx) = self.free_list.pop() {
-            // Reuse a freed slot
+            // Reuse a freed slot. incoming0[free_idx] is deliberately NOT
+            // reset: stale edges from other nodes still point at this slot
+            // and now reach the new occupant, so the count is still true.
             let neighbors = (0..=level).map(|_| Vec::new()).collect();
             self.nodes[free_idx] = HnswNode {
                 embedding: embedding.to_vec(),
@@ -281,6 +297,7 @@ impl HnswIndex {
                 tombstoned: false,
             });
             self.idx_to_rid.push(rid.to_string());
+            self.incoming0.push(0);
             self.nodes.len() - 1
         };
 
@@ -345,14 +362,30 @@ impl HnswIndex {
             // Select top M neighbors
             let selected: Vec<usize> = nearest.iter().take(max_m).map(|c| c.idx).collect();
 
-            // Connect bidirectionally
+            // Connect bidirectionally, keeping layer-0 incoming counts
+            // true: decrement targets of any outgoing edges being
+            // overwritten (the resurrection path re-connects a node that
+            // already has edges), then count the new ones.
+            if lc == 0 {
+                for old_i in 0..self.nodes[idx].neighbors[0].len() {
+                    let old = self.nodes[idx].neighbors[0][old_i];
+                    self.incoming0[old] = self.incoming0[old].saturating_sub(1);
+                }
+            }
             self.nodes[idx].neighbors[lc] = selected.clone();
+            if lc == 0 {
+                for &t in &selected {
+                    self.incoming0[t] += 1;
+                }
+            }
             for &neighbor_idx in &selected {
-                let neighbor = &mut self.nodes[neighbor_idx];
-                if neighbor.neighbors.len() > lc {
-                    neighbor.neighbors[lc].push(idx);
+                if self.nodes[neighbor_idx].neighbors.len() > lc {
+                    self.nodes[neighbor_idx].neighbors[lc].push(idx);
+                    if lc == 0 {
+                        self.incoming0[idx] += 1;
+                    }
                     // Prune if over capacity
-                    if neighbor.neighbors[lc].len() > max_m {
+                    if self.nodes[neighbor_idx].neighbors[lc].len() > max_m {
                         self.prune_neighbors(neighbor_idx, lc, max_m);
                     }
                 }
@@ -367,6 +400,13 @@ impl HnswIndex {
     }
 
     /// Prune a node's neighbors at a given layer to max_m connections.
+    ///
+    /// At layer 0 the prune is orphan-safe: an edge whose target has no
+    /// OTHER incoming layer-0 edge is kept even over capacity, because
+    /// dropping it would make that target unreachable to every future
+    /// search — present in the index, silently unfindable. The over-
+    /// capacity this allows is bounded and self-heals as later inserts
+    /// give protected targets more incoming edges.
     fn prune_neighbors(&mut self, node_idx: usize, layer: usize, max_m: usize) {
         let node_emb = self.nodes[node_idx].embedding.clone();
         let node_norm = self.nodes[node_idx].norm;
@@ -376,6 +416,28 @@ impl HnswIndex {
             .map(|&n| (n, self.dist_to(&node_emb, node_norm, n)))
             .collect();
         neighbors_with_dist.sort_by(|a, b| a.1.total_cmp(&b.1));
+
+        if layer == 0 {
+            // Tombstone-filtered edges vanish from the list; their targets
+            // lose an incoming edge and the count must say so.
+            for old_i in 0..self.nodes[node_idx].neighbors[0].len() {
+                let old = self.nodes[node_idx].neighbors[0][old_i];
+                if self.nodes[old].tombstoned {
+                    self.incoming0[old] = self.incoming0[old].saturating_sub(1);
+                }
+            }
+            let mut kept: Vec<usize> = Vec::with_capacity(max_m + 2);
+            for (i, &(n, _)) in neighbors_with_dist.iter().enumerate() {
+                if i < max_m || self.incoming0[n] <= 1 {
+                    kept.push(n);
+                } else {
+                    self.incoming0[n] = self.incoming0[n].saturating_sub(1);
+                }
+            }
+            self.nodes[node_idx].neighbors[0] = kept;
+            return;
+        }
+
         neighbors_with_dist.truncate(max_m);
         self.nodes[node_idx].neighbors[layer] =
             neighbors_with_dist.iter().map(|&(n, _)| n).collect();
@@ -418,6 +480,83 @@ impl HnswIndex {
         Ok(results)
     }
 
+    /// Guarantee that every active node is reachable from the entry point
+    /// over layer 0, force-linking any that are not. Returns how many
+    /// nodes needed rescuing.
+    ///
+    /// The in-degree guard in `prune_neighbors` keeps pruning from
+    /// orphaning nodes one edge at a time, but it is a LOCAL invariant:
+    /// two nodes whose only incoming edges come from each other satisfy
+    /// it while forming an island the search can never enter (found by
+    /// the regression test below — the dense-cluster outliers paired up).
+    /// Reachability is a property of the whole graph, so it has to be
+    /// checked as one: BFS from the entry point (traversing through
+    /// tombstones, which search also does), then link each unreachable
+    /// node from its nearest reachable one. Called after bulk builds
+    /// (host open, pack mount, compaction, reembed); incremental inserts
+    /// between rebuilds are covered by the in-degree guard.
+    pub fn ensure_all_reachable(&mut self) -> usize {
+        let Some(ep) = self.entry_point else {
+            return 0;
+        };
+        let mut seen = vec![false; self.nodes.len()];
+        let mut stack = vec![ep];
+        seen[ep] = true;
+        while let Some(cur) = stack.pop() {
+            if let Some(nbrs) = self.nodes[cur].neighbors.first() {
+                for &n in nbrs {
+                    if n < self.nodes.len() && !seen[n] {
+                        seen[n] = true;
+                        stack.push(n);
+                    }
+                }
+            }
+        }
+
+        let mut rescued = 0;
+        for i in 0..self.nodes.len() {
+            if seen[i] || self.nodes[i].tombstoned {
+                continue;
+            }
+            // Nearest reachable node by brute force — orphans are rare and
+            // this runs at rebuild time, so exactness beats speed here.
+            let emb = self.nodes[i].embedding.clone();
+            let norm = self.nodes[i].norm;
+            let mut best: Option<(usize, f64)> = None;
+            for (j, seen_j) in seen.iter().enumerate() {
+                if !seen_j {
+                    continue;
+                }
+                let d = self.dist_to(&emb, norm, j);
+                if best.is_none_or(|(_, bd)| d < bd) {
+                    best = Some((j, d));
+                }
+            }
+            let Some((j, _)) = best else {
+                continue;
+            };
+            self.nodes[j].neighbors[0].push(i);
+            self.incoming0[i] += 1;
+            rescued += 1;
+            // The rescued node's outgoing edges may reach further
+            // stranded nodes — mark its whole component reachable so a
+            // chain of orphans costs one rescue edge, not one each.
+            seen[i] = true;
+            let mut st = vec![i];
+            while let Some(c) = st.pop() {
+                if let Some(nbrs) = self.nodes[c].neighbors.first() {
+                    for &n in nbrs {
+                        if n < self.nodes.len() && !seen[n] {
+                            seen[n] = true;
+                            st.push(n);
+                        }
+                    }
+                }
+            }
+        }
+        rescued
+    }
+
     /// Remove a vector by rid (tombstone-based).
     pub fn remove(&mut self, rid: &str) -> bool {
         if let Some(&idx) = self.rid_to_idx.get(rid) {
@@ -440,6 +579,7 @@ impl HnswIndex {
         self.entry_point = None;
         self.max_layer = 0;
         self.active_count = 0;
+        self.incoming0.clear();
     }
 
     // ── Internal helpers ──
@@ -655,6 +795,53 @@ mod tests {
         let a = build(42);
         let b = build(42);
         assert_eq!(a, b, "same seed must reproduce identical results");
+    }
+
+    #[test]
+    fn every_insert_is_reachable_by_its_own_vector() {
+        // The mount-drop bug: pure-distance pruning in a dense cluster
+        // removed every incoming layer-0 edge of some node, making it
+        // present-but-unfindable — a 65-record pack lost a different
+        // record per mount (RNG-dependent), and a 377-record pack lost 2.
+        // The invariant: searching a stored vector itself must return its
+        // rid. Run several unseeded builds so the entropy-seeded level
+        // RNG cannot mask an orphan-producing construction.
+        for round in 0..5u64 {
+            let mut idx = HnswIndex::new(16);
+            // A dense cluster (tiny perturbations of one direction) plus
+            // scattered outliers — the shape that saturates max_m and
+            // makes distance-only pruning drop backlinks.
+            for i in 0..120 {
+                let mut v = vec_seed(1.0, 16);
+                v[i % 16] += 0.001 * ((i as f32) + 1.0);
+                let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                let v: Vec<f32> = v.iter().map(|x| x / norm).collect();
+                idx.insert(&format!("dense-{round}-{i}"), &v).unwrap();
+            }
+            for i in 0..30 {
+                idx.insert(&format!("far-{round}-{i}"), &vec_seed(100.0 + i as f32, 16))
+                    .unwrap();
+            }
+            // The repair pass is part of every bulk build; a second call
+            // must find nothing left to rescue.
+            idx.ensure_all_reachable();
+            assert_eq!(
+                idx.ensure_all_reachable(),
+                0,
+                "round {round}: repair must be idempotent"
+            );
+            // Every rid must come back for a search of its own vector.
+            let rids: Vec<String> = idx.idx_to_rid.clone();
+            for (i, rid) in rids.iter().enumerate() {
+                let emb = idx.nodes[i].embedding.clone();
+                let hits = idx.search(&emb, 5).unwrap();
+                assert!(
+                    hits.iter().any(|(r, _)| r == rid),
+                    "round {round}: {rid} is stored but unreachable by its \
+                     own vector — orphaned by pruning"
+                );
+            }
+        }
     }
 
     #[test]
