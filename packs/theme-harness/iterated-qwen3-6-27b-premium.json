@@ -1,7 +1,7 @@
 {
   "model": "qwen3.6:27b",
   "slug": "qwen3-6-27b-premium",
-  "repairs": 12,
+  "repairs": 3,
   "score": 12,
   "checks": {
     "files-emitted": true,
@@ -19,10 +19,10 @@
   },
   "files": [
     "functions.php",
+    "parts/footer.html",
     "parts/header.html",
-    "readme.txt",
     "style.css",
-    "templates/404.html",
+    "templates/home.html",
     "templates/index.html",
     "templates/single.html",
     "theme.json"

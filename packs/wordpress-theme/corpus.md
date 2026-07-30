@@ -1434,3 +1434,47 @@ full width → card grid of recent posts → pullquote band on tint → stats
 band on dark → closing CTA band → three-column footer. Rhythm rule
 still holds: no two adjacent bands share a background, and the page
 pauses exactly once (the pullquote).
+
+## A front-page cover never uses useFeaturedImage
+
+`useFeaturedImage` on `core/cover` resolves the featured image of the
+CURRENT POST — and a front-page template outside the loop has no current
+post, so the cover renders a broken-image glyph over a flat band. On a
+front page the cover takes an explicit background: a gradient built from
+the palette, or a media-library URL. The gradient needs no asset and
+always matches the theme:
+
+```html
+<!-- wp:cover {"dimRatio":50,"overlayColor":"contrast","minHeight":70,"minHeightUnit":"vh","align":"full","gradient":"hero","customGradient":"linear-gradient(135deg,var(--wp--preset--color--contrast) 0%,var(--wp--preset--color--primary) 100%)","layout":{"type":"constrained"}} -->
+<div class="wp-block-cover alignfull" style="min-height:70vh">
+	<span aria-hidden="true" class="wp-block-cover__background has-background-dim-50 has-background-dim" style="background:linear-gradient(135deg,var(--wp--preset--color--contrast) 0%,var(--wp--preset--color--primary) 100%)"></span>
+	<div class="wp-block-cover__inner-container">
+		<!-- wp:heading {"level":1,"textColor":"base","fontSize":"huge"} -->
+		<h1 class="wp-block-heading has-base-color has-text-color has-huge-font-size">Notes from the measurement floor</h1>
+		<!-- /wp:heading -->
+	</div>
+</div>
+<!-- /wp:cover -->
+```
+
+`useFeaturedImage: true` is correct in exactly one place: a cover inside
+`wp:post-template` or on a single-post template, where a current post
+exists to supply the image.
+
+## Every card in a grid uses the same aspect ratio
+
+A card grid reads as designed only when every image is the same shape.
+Set the SAME `aspectRatio` on every `wp:post-featured-image` in the grid
+— `"3/2"` for cards, `"16/9"` for the featured entry — and never mix
+them. The grid gap comes from the spacing presets, not a raw value:
+
+```html
+<!-- wp:post-template {"layout":{"type":"grid","columnCount":2},"style":{"spacing":{"blockGap":"var:preset|spacing|40"}}} -->
+	<!-- wp:post-featured-image {"aspectRatio":"3/2","style":{"border":{"radius":"4px"}}} /-->
+	<!-- wp:post-date {"format":"j M Y"} /-->
+	<!-- wp:post-title {"level":3,"isLink":true} /-->
+<!-- /wp:post-template -->
+```
+
+Mixed aspect ratios in one grid — one card 16/9, the next natural-size —
+is the single most visible tell of an assembled-not-designed page.
