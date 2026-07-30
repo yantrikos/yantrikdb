@@ -184,6 +184,60 @@ def defects_theme_json(raw: str) -> list[str]:
     return out
 
 
+OUTLINE_BRIEF = """List the sections of the front page, top to bottom,
+between the header and the footer. One line per section: a short name, a
+colon, then the blocks it contains. 2 to 4 sections. Example:
+
+intro band: heading, tagline paragraph
+recent posts: post date, post title, post excerpt, pagination
+closing band: heading, one button
+
+Output only the lines, nothing else."""
+
+
+def parse_outline(text: str) -> list[tuple[str, str]]:
+    out = []
+    for raw in strip_fences(text).splitlines():
+        line = raw.strip().strip("`").lstrip("-*0123456789. ")
+        if ":" in line and 3 <= len(line) <= 120:
+            name, blocks = line.split(":", 1)
+            out.append((name.strip().lower(), blocks.strip()))
+        if len(out) >= 4:
+            break
+    return out
+
+
+def defects_outline(outline: list[tuple[str, str]]) -> list[str]:
+    """The two composition mistakes measured on real runs, caught before
+    any markup exists: no post loop at all, and site identity inside the
+    repeated section (which renders the site name once per post)."""
+    defects = []
+    joined = " ".join(n + " " + b for n, b in outline)
+    if not any(w in joined for w in ("post", "article", "quer", "blog", "entries")):
+        defects.append("no section lists the recent posts — the front page "
+                       "must show the post query.")
+    for name, blocks in outline:
+        if any(w in name + blocks for w in ("post", "article", "quer"))                 and "site title" in (name + " " + blocks):
+            defects.append(f'section "{name}" puts the site title inside the '
+                           f'post loop — site identity belongs in the header, '
+                           f'or it renders once per post.')
+    return defects
+
+
+def section_queries(name: str, blocks: str, index: int, total: int) -> tuple[str, ...]:
+    """Retrieval vocabulary per section kind — the model's own outline
+    words plus the concrete terms the composition records are named by."""
+    text = f"{name} {blocks}"
+    if any(w in text for w in ("post", "article", "quer", "blog", "entries")):
+        return ("post query section date title excerpt each exactly once",
+                "block ordering inside a post entry reading order",)
+    if index == total - 1 and total > 1:
+        return ("closing band section heading one button full-bleed tint",
+                "section sequence stunning front page rhythm alternation",)
+    return ("intro band section full-bleed tint eyebrow heading constrained",
+            "stunning paragraph eyebrow lede heading text treatments",)
+
+
 def defects_parsed(slug: str, path: str) -> list[str]:
     """Ask WordPress's own parser what is wrong with the markup.
 
@@ -364,7 +418,47 @@ def main() -> int:
     # ── 3. markup, written against the theme.json that actually exists ──
     ctx = (f"The theme.json for this theme is already written and is FINAL. "
            f"Use only the preset slugs it defines:\n\n{files['theme.json']}\n\n")
-    for path in [p for p in manifest if p.endswith(".html")]:
+    # ── 3a. the front template is COMPOSED, not written whole ────────
+    # An outline first (short lines — the unit a small model closes
+    # correctly), validated for the two measured composition mistakes,
+    # then ONE SECTION of markup at a time with retrieval vocabulary
+    # matched to that section. Assembly is mechanical concatenation in
+    # the model's own declared order: the model owns the composition,
+    # the harness owns the stapler.
+    main_tpl = next((p for p in manifest if p.startswith("templates/")), None)
+    if main_tpl:
+        raw, _ = ask(ollama, model,
+                     host.reference("composing templates sections in order "
+                                    "band reading column")
+                     + "You are planning the front page for " + SPEC
+                     + "\n\n" + OUTLINE_BRIEF, SYSTEM)
+        outline = parse_outline(raw)
+        for d in defects_outline(outline):
+            print(f"3a outline defect: {d}")
+            raw, _ = ask(ollama, model,
+                         "Your section plan:\n" + raw
+                         + "\n\nProblem: " + d + "\n\n"
+                         + OUTLINE_BRIEF, SYSTEM)
+            outline = parse_outline(raw)
+        print("3a outline: " + "; ".join(n for n, _ in outline))
+
+        pieces = ['<!-- wp:template-part {"slug":"header","tagName":"header"} /-->']
+        for i, (name, blocks) in enumerate(outline):
+            frag, _ = ask(
+                ollama, model,
+                host.reference(*section_queries(name, blocks, i, len(outline)))
+                + ctx
+                + f'Write ONLY the block markup for one section of the front '
+                f'page: "{name}" containing {blocks}. One wp:group with its '
+                f'own background and spacing, 8-20 lines. No explanation, no '
+                f'code fences, no header or footer — just this section.',
+                SYSTEM)
+            pieces.append(strip_fences(frag))
+            print(f"3b section '{name}': {len(strip_fences(frag).splitlines())} lines")
+        pieces.append('<!-- wp:template-part {"slug":"footer","tagName":"footer"} /-->')
+        files[main_tpl] = "\n\n".join(pieces) + "\n"
+
+    for path in [p for p in manifest if p.endswith(".html") and p != main_tpl]:
         body = gen(path, ctx)
         for attempt in range(args.rounds + 1):
             defects = defects_markup(path, body, manifest, files["theme.json"])

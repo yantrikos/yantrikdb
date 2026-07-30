@@ -947,3 +947,222 @@ placeholder however good it looks in use. `readme.txt` carries the licence
 attributions the directory requires for every bundled asset, and fonts in
 particular must be GPL-compatible and served from the theme rather than a
 CDN — which is both a directory rejection and a GDPR exposure.
+
+## Composing templates/index.html: sections in order, one band at a time
+
+A front page is composed, not accumulated. The order that reads as
+designed: a full-bleed intro band on the tint colour, then a constrained
+reading column holding the post query, then a closing band, with header
+and footer as template parts outside all of it. Each section is one
+`wp:group` with its own background and vertical padding from the spacing
+scale. Compose the page as that list of sections first, then write each
+section alone — a section is 8 to 15 lines of block markup, and small
+units stay correct where whole files drift.
+
+## The intro band section: full-bleed tint with an eyebrow and heading
+
+The opening section of a front page. `align: full` so the background
+reaches the viewport edges, `layout constrained` so the text inside still
+obeys contentSize, vertical padding from the spacing presets — never a
+fixed rem.
+
+```html
+<!-- wp:group {"align":"full","backgroundColor":"tint","style":{"spacing":{"padding":{"top":"var:preset|spacing|60","bottom":"var:preset|spacing|60"}}},"layout":{"type":"constrained"}} -->
+<div class="wp-block-group alignfull has-tint-background-color has-background" style="padding-top:var(--wp--preset--spacing--60);padding-bottom:var(--wp--preset--spacing--60)">
+	<!-- wp:heading {"level":1} -->
+	<h1 class="wp-block-heading">Notes from the measurement floor</h1>
+	<!-- /wp:heading -->
+	<!-- wp:paragraph {"textColor":"secondary","fontSize":"large"} -->
+	<p class="has-secondary-color has-text-color has-large-font-size">Short pieces on packs and small machines.</p>
+	<!-- /wp:paragraph -->
+</div>
+<!-- /wp:group -->
+```
+
+Getting `align: full` and `layout constrained` the wrong way round
+produces either a band that will not span or text that runs the full
+width of a monitor.
+
+## The post query section: date, title, excerpt — each exactly once
+
+The reading column of a blog front page. The `wp:query` sits inside a
+constrained group; `wp:post-template` holds ONLY what repeats per post:
+date, then title, then excerpt, in that reading order. Choose excerpt OR
+post-content, never both — both renders every entry twice, first the
+summary and then the same text again, which reads as a broken page. The
+date comes before the title as quiet metadata, not after the excerpt
+where it reads as a caption for the wrong entry.
+
+```html
+<!-- wp:group {"style":{"spacing":{"padding":{"top":"var:preset|spacing|60","bottom":"var:preset|spacing|60"}}},"layout":{"type":"constrained"}} -->
+<div class="wp-block-group" style="padding-top:var(--wp--preset--spacing--60);padding-bottom:var(--wp--preset--spacing--60)">
+	<!-- wp:query {"queryId":1,"query":{"perPage":6,"postType":"post","order":"desc","orderBy":"date","inherit":true}} -->
+	<div class="wp-block-query">
+		<!-- wp:post-template {"style":{"spacing":{"blockGap":"var:preset|spacing|50"}}} -->
+			<!-- wp:post-date {"format":"j M Y"} /-->
+			<!-- wp:post-title {"level":2,"isLink":true} /-->
+			<!-- wp:post-excerpt {"excerptLength":40} /-->
+		<!-- /wp:post-template -->
+		<!-- wp:query-pagination -->
+			<!-- wp:query-pagination-previous /-->
+			<!-- wp:query-pagination-next /-->
+		<!-- /wp:query-pagination -->
+	</div>
+	<!-- /wp:query -->
+</div>
+<!-- /wp:group -->
+```
+
+Site identity never goes inside `wp:post-template` — a site title there
+renders once per post, six copies of the site name where six post titles
+should be.
+
+## The closing band section: heading, one line, one button
+
+A front page ends with a deliberate full-bleed band rather than trailing
+off after the last post. Same shape as the intro band — tint background,
+spacing presets — holding a heading, one sentence, and at most one
+button. This is what makes the page read as composed rather than as a
+list that ran out.
+
+```html
+<!-- wp:group {"align":"full","backgroundColor":"tint","style":{"spacing":{"padding":{"top":"var:preset|spacing|60","bottom":"var:preset|spacing|60"}}},"layout":{"type":"constrained"}} -->
+<div class="wp-block-group alignfull has-tint-background-color has-background" style="padding-top:var(--wp--preset--spacing--60);padding-bottom:var(--wp--preset--spacing--60)">
+	<!-- wp:heading {"level":2} -->
+	<h2 class="wp-block-heading">Measure it, or it did not happen</h2>
+	<!-- /wp:heading -->
+	<!-- wp:buttons -->
+	<div class="wp-block-buttons"><!-- wp:button -->
+	<div class="wp-block-button"><a class="wp-block-button__link wp-element-button" href="#top">Read the archive</a></div>
+	<!-- /wp:button --></div>
+	<!-- /wp:buttons -->
+</div>
+<!-- /wp:group -->
+```
+
+## Block ordering inside a post entry is a reading order
+
+Within `wp:post-template` the order is the order a reader scans: date
+(small, uppercase, quiet), then title (the largest thing in the entry),
+then excerpt, then an optional read-more. Date after the excerpt reads as
+a caption for the following entry. Featured image, when used, goes first
+or beside — never between title and excerpt, where it severs the
+sentence the title started.
+
+## Which goes with what: the pairing table for a warm editorial theme
+
+The combinations that hold together, stated as pairs so nothing is chosen
+alone. Serif display (Iowan Old Style, Palatino, Georgia) pairs with a
+serif text face (Charter, Georgia) and a sans interface face (Inter,
+Segoe UI) for dates and labels — three roles, never one font everywhere.
+A warm off-white ground (#faf7f2 family) pairs with a warm near-black
+(#171310 family), a terracotta or rust primary (#8c3a1e to #d94e36), a
+muted green-grey or brown-grey secondary, and a deeper cream tint
+(#eee7dc family) for bands. Tint bands pair with generous vertical
+padding (spacing 60) and constrained text; the dark footer pairs with the
+base colour for its text and the tint colour for its links. Uppercase
+labels pair with the sans face, small size, and 0.08-0.1em tracking.
+Display headings pair with tight leading (1.05-1.12) and negative
+tracking (-0.02em). Body copy pairs with 1.6-1.7 leading at a 34-42rem
+measure. Break any of these pairs and the page reads as assembled from
+parts; keep them and it reads as designed.
+
+## A stunning header: identity stacked left, navigation right, hairline below
+
+The header that makes an editorial site read as considered. Site title
+and an italic tagline stacked tight on the left, navigation in the sans
+face on the right, a hairline border in the tint colour underneath — not
+a heavy bar, not a centered logo.
+
+```html
+<!-- wp:group {"tagName":"header","align":"full","style":{"spacing":{"padding":{"top":"var:preset|spacing|40","bottom":"var:preset|spacing|40"}},"border":{"bottom":{"color":"var:preset|color|tint","width":"1px"}}},"layout":{"type":"constrained","wideSize":"72rem"}} -->
+<header class="wp-block-group alignfull" style="border-bottom-color:var(--wp--preset--color--tint);border-bottom-width:1px;padding-top:var(--wp--preset--spacing--40);padding-bottom:var(--wp--preset--spacing--40)">
+	<!-- wp:group {"layout":{"type":"flex","justifyContent":"space-between","flexWrap":"wrap"}} -->
+	<div class="wp-block-group">
+		<!-- wp:group {"style":{"spacing":{"blockGap":"0.1rem"}},"layout":{"type":"flex","orientation":"vertical"}} -->
+		<div class="wp-block-group">
+			<!-- wp:site-title {"level":0} /-->
+			<!-- wp:site-tagline {"style":{"typography":{"fontStyle":"italic"}},"fontSize":"small","textColor":"secondary"} /-->
+		</div>
+		<!-- /wp:group -->
+		<!-- wp:navigation {"overlayMenu":"mobile","style":{"typography":{"fontSize":"var:preset|font-size|small"}}} -->
+			<!-- wp:page-list /-->
+		<!-- /wp:navigation -->
+	</div>
+	<!-- /wp:group -->
+</header>
+<!-- /wp:group -->
+```
+
+The tagline is italic, small, and in the secondary colour — quiet. The
+navigation is small sans, never large, never bold.
+
+## A stunning footer: dark band, light text, two columns, licence line
+
+The footer that closes a page instead of trailing off. Contrast
+background with `textColor: base` set explicitly — dark bands with unset
+text colour render invisible text — identity on the left, an
+uppercase-label navigation column on the right, and a small licence line
+at the bottom after generous spacing.
+
+```html
+<!-- wp:group {"tagName":"footer","align":"full","backgroundColor":"contrast","textColor":"base","style":{"spacing":{"padding":{"top":"var:preset|spacing|60","bottom":"var:preset|spacing|60"}},"elements":{"link":{"color":{"text":"var:preset|color|tint"}}}},"layout":{"type":"constrained","wideSize":"72rem"}} -->
+<footer class="wp-block-group alignfull has-base-color has-contrast-background-color has-text-color has-background has-link-color" style="padding-top:var(--wp--preset--spacing--60);padding-bottom:var(--wp--preset--spacing--60)">
+	<!-- wp:group {"layout":{"type":"flex","justifyContent":"space-between","verticalAlignment":"top","flexWrap":"wrap"}} -->
+	<div class="wp-block-group">
+		<!-- wp:group {"style":{"spacing":{"blockGap":"var:preset|spacing|20"}},"layout":{"type":"flex","orientation":"vertical"}} -->
+		<div class="wp-block-group">
+			<!-- wp:site-title {"level":0,"textColor":"base"} /-->
+			<!-- wp:site-tagline {"fontSize":"small","textColor":"tint","style":{"typography":{"fontStyle":"italic"}}} /-->
+		</div>
+		<!-- /wp:group -->
+		<!-- wp:navigation {"overlayMenu":"never","textColor":"base","style":{"typography":{"fontSize":"var:preset|font-size|small"}}} -->
+			<!-- wp:page-list /-->
+		<!-- /wp:navigation -->
+	</div>
+	<!-- /wp:group -->
+	<!-- wp:paragraph {"fontSize":"small","textColor":"tint","style":{"spacing":{"margin":{"top":"var:preset|spacing|50"}}}} -->
+	<p class="has-tint-color has-text-color has-small-font-size" style="margin-top:var(--wp--preset--spacing--50)">Licensed GPL-2.0-or-later.</p>
+	<!-- /wp:paragraph -->
+</footer>
+<!-- /wp:group -->
+```
+
+## Stunning paragraph and text treatments: the four kinds a page needs
+
+Four text treatments cover an editorial page, each one deliberate. The
+eyebrow — a short uppercase sans label above a heading, small size,
+letter-spacing 0.1em, secondary colour. The lede — the first paragraph
+after a heading, one size up (large), looser colour (secondary), line
+height 1.5. Body copy — medium size at 1.6-1.7 leading, never wider than
+the reading measure. The quiet metadata line — dates and read times, small
+sans, uppercase, tabular numerals.
+
+```html
+<!-- wp:paragraph {"className":"eyebrow","fontSize":"small","textColor":"secondary","style":{"typography":{"textTransform":"uppercase","letterSpacing":"0.1em"}}} -->
+<p class="eyebrow has-secondary-color has-text-color has-small-font-size" style="letter-spacing:0.1em;text-transform:uppercase">The Journal</p>
+<!-- /wp:paragraph -->
+
+<!-- wp:heading {"level":1} -->
+<h1 class="wp-block-heading">Notes from the measurement floor</h1>
+<!-- /wp:heading -->
+
+<!-- wp:paragraph {"fontSize":"large","textColor":"secondary","style":{"typography":{"lineHeight":"1.5"}}} -->
+<p class="has-secondary-color has-text-color has-large-font-size" style="line-height:1.5">Short pieces on packs, small models, and the difference between a number and a measurement.</p>
+<!-- /wp:paragraph -->
+```
+
+An eyebrow always sits directly above its heading with almost no gap, and
+the lede directly below it — the three are one unit, never separated by
+other blocks.
+
+## The section sequence of a stunning front page
+
+The full-page rhythm, as a sequence: header part → tint intro band
+(eyebrow + h1 + lede) → constrained posts column (date, title, excerpt
+per entry, hairline rules between) → tint closing band (h2 + one line +
+one button) → dark footer part. Two tint bands frame one reading column;
+the dark footer anchors the bottom. Never two adjacent sections with the
+same background — alternation is the rhythm. Never more than one button
+per band. The posts column is the only section that repeats content; every
+other section says one thing.

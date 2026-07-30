@@ -129,11 +129,13 @@ FILE_QUERIES = {
                    "wp:query post-template post-title post-excerpt "
                    "template-part header footer block markup"),
     "parts/header.html": (
-                   "header template part site title tagline navigation flex "
-                   "group justifyContent space-between",),
+                   "stunning header identity stacked left navigation right "
+                   "hairline site title tagline",
+                   "which goes with what pairing table fonts colours",),
     "parts/footer.html": (
-                   "footer dark band backgroundColor contrast textColor base "
-                   "elements link colour legible",),
+                   "stunning footer dark band light text two columns licence "
+                   "textColor base",
+                   "which goes with what pairing table fonts colours",),
     "functions.php": (
                    "functions.php enqueue get_stylesheet_uri wp_get_theme "
                    "version block theme style.css not loaded automatically",),

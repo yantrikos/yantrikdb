@@ -21,8 +21,7 @@
     "functions.php",
     "parts/footer.html",
     "parts/header.html",
-    "patterns/home.php",
-    "readme.txt",
+    "patterns/index-patterns.json",
     "style.css",
     "templates/index.html",
     "theme.json"
