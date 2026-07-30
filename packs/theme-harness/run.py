@@ -332,8 +332,16 @@ def grade(slug: str, root: Path, files: dict[str, str]) -> dict[str, bool]:
 
     r["templates-index"] = (root / "templates" / "index.html").is_file()
 
+    # Present is not the same as valid. A 4B wrote "contentSize": 700 with
+    # no unit; WordPress needs a CSS length, so the constrained layout never
+    # applied and body text ran 196 characters — while this check passed,
+    # because it only asked whether the key existed. Fifth lenient check
+    # found in my own rubric, and the same shape as all the others.
     layout = ((tj.get("settings") or {}).get("layout") or {})
-    r["layout-sizes"] = bool(layout.get("contentSize") and layout.get("wideSize"))
+    def _len(v: object) -> bool:
+        return bool(re.fullmatch(r"\s*(clamp\(.+\)|[\d.]+\s*(px|rem|em|%|vw|ch))\s*",
+                                 str(v or ""), re.I))
+    r["layout-sizes"] = _len(layout.get("contentSize")) and _len(layout.get("wideSize"))
 
     all_css = "\n".join(v for k, v in files.items()
                         if k.endswith((".css", ".html", ".json", ".php")))
