@@ -148,6 +148,14 @@ def assemble_theme_json(fields: dict) -> str:
                     "fontFamily": "var(--wp--preset--font-family--display)",
                     "lineHeight": "1.12", "letterSpacing": "-0.02em"}},
             },
+            # Post titles are links and would inherit the primary colour —
+            # six terracotta headlines where near-black belongs. The pack's
+            # pairing rule, applied mechanically: titles in contrast,
+            # interactivity on hover.
+            "blocks": {"core/post-title": {"elements": {"link": {
+                "color": {"text": f"var(--wp--preset--color--{text})"},
+                ":hover": {"color": {"text": "var(--wp--preset--color--primary)"}},
+            }}}},
         },
         "templateParts": [
             {"name": "header", "title": "Header", "area": "header"},
@@ -228,6 +236,13 @@ def section_queries(name: str, blocks: str, index: int, total: int) -> tuple[str
     """Retrieval vocabulary per section kind — the model's own outline
     words plus the concrete terms the composition records are named by."""
     text = f"{name} {blocks}"
+    if any(w in text for w in ("photo", "gallery", "image", "picture")):
+        return ("photo gallery section core gallery caption wide",
+                "which goes with what pairing table",)
+    if any(w in text for w in ("contact", "email", "write", "reach")):
+        return ("contact section core no form block mailto button tint",)
+    if any(w in text for w in ("feature", "column", "showcase", "media")):
+        return ("feature rows media-text columns grid alternate",)
     if any(w in text for w in ("post", "article", "quer", "blog", "entries")):
         return ("post query section date title excerpt each exactly once",
                 "block ordering inside a post entry reading order",)
@@ -331,13 +346,23 @@ def main() -> int:
     ap.add_argument("--model", required=True)
     ap.add_argument("--pack", default=str(HERE.parent / "dist" / "wordpress-theme-0.1.0.ydbpack"))
     ap.add_argument("--rounds", type=int, default=2, help="repair attempts per file")
+    ap.add_argument("--extended", action="store_true",
+                    help="add gallery and contact sections to the brief")
     ap.add_argument("--ollama")
     args = ap.parse_args()
 
     ollama = resolve_host(args.ollama)
     host = PackHost(Path(args.pack))
     model = args.model
-    slug = theme_slug(model, "iterated")
+    if args.extended:
+        # A versioned change to the task, not a silent one: the extended
+        # brief exercises the component records (gallery, contact) and is
+        # scored as its own slug so numbers never mix with the base brief.
+        global SPEC
+        SPEC = SPEC + """
+- a photo gallery section
+- a contact section (core blocks only)"""
+    slug = theme_slug(model, "extended" if args.extended else "iterated")
     print(f"model: {model}\nslug : {slug}\n")
 
     def gen(path: str, prompt_extra: str = "") -> str:
@@ -453,8 +478,20 @@ def main() -> int:
                 f'own background and spacing, 8-20 lines. No explanation, no '
                 f'code fences, no header or footer — just this section.',
                 SYSTEM)
-            pieces.append(strip_fences(frag))
-            print(f"3b section '{name}': {len(strip_fences(frag).splitlines())} lines")
+            body_frag = strip_fences(frag)
+            if len(body_frag.splitlines()) < 3 or "wp:group" not in body_frag:
+                frag, _ = ask(
+                    ollama, model,
+                    host.reference(*section_queries(name, blocks, i, len(outline)))
+                    + ctx
+                    + f'Write ONLY the block markup for one front-page section: '
+                    f'"{name}" containing {blocks}. It must be one complete '
+                    f'wp:group with a background and spacing presets, 8-20 '
+                    f'lines of block markup. No explanation, no fences.',
+                    SYSTEM)
+                body_frag = strip_fences(frag)
+            pieces.append(body_frag)
+            print(f"3b section '{name}': {len(body_frag.splitlines())} lines")
         pieces.append('<!-- wp:template-part {"slug":"footer","tagName":"footer"} /-->')
         files[main_tpl] = "\n\n".join(pieces) + "\n"
 

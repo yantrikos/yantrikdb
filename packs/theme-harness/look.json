@@ -1,62 +1,64 @@
 [
   {
-    "theme": "qwen3-5-9b-iterated",
+    "theme": "qwen3-5-9b-extended",
     "score": 11,
     "checks": {
       "no-overflow": true,
       "contrast-aa": true,
-      "contrast-everywhere": false,
+      "contrast-everywhere": true,
       "contrast-not-crude": true,
-      "measure-readable": true,
+      "measure-readable": false,
       "type-scale": false,
       "font-chosen": true,
       "line-height-set": true,
       "spacing-scale": true,
       "fluid-type": true,
-      "tap-targets": false,
+      "tap-targets": true,
       "has-states": true,
-      "has-content": true,
+      "has-content": false,
       "no-leaked-source": true
     },
-    "hard_fail": [],
+    "hard_fail": [
+      "has-content"
+    ],
     "desktop": {
       "overflow": 0,
-      "contrast": 16.58,
-      "measure": 81,
+      "contrast": 16.57,
+      "measure": 173,
       "font_family": "Charter, Georgia, serif",
       "font_size": 16.6,
       "line_height": "27.4428px",
-      "distinct_sizes": 3,
-      "distinct_spaces": 3,
+      "distinct_sizes": 2,
+      "distinct_spaces": 2,
       "fluid_type": true,
-      "tap_min": 19,
-      "tap_under_24": 1,
-      "state_rules": 15,
+      "tap_min": 27,
+      "tap_under_24": 0,
+      "state_rules": 9,
       "contrast_min": {
-        "ratio": 3.86,
+        "ratio": 17.12,
         "el": "a."
       },
-      "text_len": 1209,
+      "text_len": 24,
       "leaked": []
     },
     "mobile": {
       "overflow": 0,
-      "contrast": 16.58,
-      "measure": 51,
+      "contrast": 16.57,
+      "measure": 55,
       "font_family": "Charter, Georgia, serif",
       "font_size": 14.2,
       "line_height": "23.3714px",
-      "distinct_sizes": 3,
-      "distinct_spaces": 3,
+      "distinct_sizes": 2,
+      "distinct_spaces": 2,
       "fluid_type": true,
-      "tap_min": 16,
-      "tap_under_24": 7,
-      "state_rules": 15,
+      "tap_min": 24,
+      "tap_under_24": 0,
+      "state_rules": 9,
       "contrast_min": {
-        "ratio": 3.86,
+        "ratio": 17.12,
         "el": "a."
       },
-      "text_len": 1182,
+      "text_len": 12,
       "leaked": []
     }
   }

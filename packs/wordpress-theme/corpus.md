@@ -1166,3 +1166,132 @@ the dark footer anchors the bottom. Never two adjacent sections with the
 same background — alternation is the rhythm. Never more than one button
 per band. The posts column is the only section that repeats content; every
 other section says one thing.
+
+## Hairline rules between post entries
+
+The quiet detail that makes a post list read as a designed sequence
+rather than a stack: a one-pixel rule above each entry after the first,
+in the contrast colour at low opacity, with the entry's top padding
+matching the list's block gap. It lives in style.css because theme.json
+has no sibling selector.
+
+```css
+.wp-block-post-template > li + li {
+  border-block-start: 1px solid color-mix(in oklab, var(--wp--preset--color--contrast) 12%, transparent);
+  padding-block-start: var(--wp--preset--spacing--50);
+}
+```
+
+## Post titles in the contrast colour, not the link colour
+
+Post titles are links, so they inherit `elements.link` and turn the
+primary colour — six terracotta headlines where six near-black ones
+belong. Titles take the contrast colour and reveal interactivity on
+hover instead:
+
+```json
+"blocks": { "core/post-title": { "elements": { "link": {
+  "color": { "text": "var(--wp--preset--color--contrast)" },
+  ":hover": { "color": { "text": "var(--wp--preset--color--primary)" } }
+} } } }
+```
+
+The primary colour is for actions and inline links in running text; a
+heading that happens to be a link is still a heading first.
+
+## A photo gallery section: core/gallery with a caption discipline
+
+Photos on a front page are one constrained section using `core/gallery` —
+a real core block. Three columns, cropped, lightbox on click. Captions in
+the quiet-metadata treatment. Never more than one gallery per page
+section, and the gallery gets the wide width while text stays at content
+width.
+
+```html
+<!-- wp:group {"style":{"spacing":{"padding":{"top":"var:preset|spacing|60","bottom":"var:preset|spacing|60"}}},"layout":{"type":"constrained"}} -->
+<div class="wp-block-group" style="padding-top:var(--wp--preset--spacing--60);padding-bottom:var(--wp--preset--spacing--60)">
+	<!-- wp:heading {"level":2} -->
+	<h2 class="wp-block-heading">From the field</h2>
+	<!-- /wp:heading -->
+	<!-- wp:gallery {"columns":3,"imageCrop":true,"linkTo":"none","align":"wide"} -->
+	<figure class="wp-block-gallery alignwide has-nested-images columns-3 is-cropped">
+		<!-- wp:image {"sizeSlug":"large"} -->
+		<figure class="wp-block-image size-large"><img alt=""/></figure>
+		<!-- /wp:image -->
+	</figure>
+	<!-- /wp:gallery -->
+</div>
+<!-- /wp:group -->
+```
+
+## A contact section in core WordPress: there is no form block
+
+WordPress core has NO contact-form block — `core/contact-form` and
+`core/form` do not exist, and an invented name renders as nothing.
+Forms need a plugin. The core-only contact section that works: heading,
+one sentence, and a mailto button, in a tint band.
+
+```html
+<!-- wp:group {"align":"full","backgroundColor":"tint","style":{"spacing":{"padding":{"top":"var:preset|spacing|60","bottom":"var:preset|spacing|60"}}},"layout":{"type":"constrained"}} -->
+<div class="wp-block-group alignfull has-tint-background-color has-background" style="padding-top:var(--wp--preset--spacing--60);padding-bottom:var(--wp--preset--spacing--60)">
+	<!-- wp:heading {"level":2} -->
+	<h2 class="wp-block-heading">Write to us</h2>
+	<!-- /wp:heading -->
+	<!-- wp:paragraph {"textColor":"secondary"} -->
+	<p class="has-secondary-color has-text-color">Replies within two days, usually sooner.</p>
+	<!-- /wp:paragraph -->
+	<!-- wp:buttons -->
+	<div class="wp-block-buttons"><!-- wp:button -->
+	<div class="wp-block-button"><a class="wp-block-button__link wp-element-button" href="mailto:hello@example.com">Email the editors</a></div>
+	<!-- /wp:button --></div>
+	<!-- /wp:buttons -->
+</div>
+<!-- /wp:group -->
+```
+
+## Polls and event calendars are plugins, not core blocks
+
+There is no core poll block and no core events-calendar block — do not
+invent `core/poll` or `core/events`. `core/calendar` DOES exist but it is
+the posts-archive calendar (which days have posts), not an events
+calendar; using it as one shows visitors an empty month. The honest
+core-only alternatives: for a poll, a paragraph linking to an external
+survey; for events, a styled list. Anything richer is a plugin
+recommendation, not markup.
+
+## Feature rows with core/media-text, feature grids with core/columns
+
+Two core layouts for showcasing. `core/media-text` puts an image beside
+text — alternate `mediaPosition` left and right down the page for
+editorial rhythm. `core/columns` makes a 2-4 column feature grid; give
+each column a heading, two lines and nothing else, and keep column count
+at 3 or fewer so excerpts stay readable.
+
+```html
+<!-- wp:media-text {"mediaPosition":"right","mediaType":"image","verticalAlignment":"center"} -->
+<div class="wp-block-media-text alignwide is-stacked-on-mobile is-vertically-aligned-center has-media-on-the-right">
+	<div class="wp-block-media-text__content">
+		<!-- wp:heading {"level":3} --><h3 class="wp-block-heading">Measured, not claimed</h3><!-- /wp:heading -->
+		<!-- wp:paragraph --><p>Every listing carries the run that produced it.</p><!-- /wp:paragraph -->
+	</div>
+	<figure class="wp-block-media-text__media"><img alt=""/></figure>
+</div>
+<!-- /wp:media-text -->
+```
+
+## Search and social links: the small core blocks worth styling
+
+`core/search` renders the site search — give it the button-inside style
+and small sans typography, in the header or footer, never mid-content.
+`core/social-links` renders icon links — footer only, `size: has-small-
+icon-size`, icon colour set to the tint on dark bands. Both are real core
+blocks; neither needs a plugin.
+
+```html
+<!-- wp:search {"label":"Search","showLabel":false,"buttonPosition":"button-inside","buttonUseIcon":true} /-->
+<!-- wp:social-links {"iconColor":"tint","iconColorValue":"#eee7dc","className":"has-small-icon-size"} -->
+<ul class="wp-block-social-links has-small-icon-size has-icon-color">
+	<!-- wp:social-link {"url":"https://example.com","service":"x"} /-->
+</ul>
+<!-- /wp:social-links -->
+```
