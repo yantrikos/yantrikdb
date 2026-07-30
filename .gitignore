@@ -37,3 +37,15 @@ src/yantrikdb/_yantrikdb_rust*.so
 src/yantrikdb/_yantrikdb_rust*.dylib
 packs/dist/
 packs/efficacy*.json
+
+# Local wheel builds. `maturin build -o dist-wheel` from the repo root
+# (NOT from crates/yantrikdb-python — that manifest has no python-source
+# and silently produces a wheel containing no .py files at all).
+dist-wheel/
+
+# Measurement output. Every number this project publishes has to be
+# reproducible by re-running the harness, so a committed JSON of one
+# run's results is a claim nobody can check and a merge conflict nobody
+# can resolve. Findings belong in commit messages; artifacts regenerate.
+*.cert.json
+shots/

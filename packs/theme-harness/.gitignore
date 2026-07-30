@@ -1,5 +1,19 @@
-# Generated per run. The scorecard in results.json is the durable record;
-# the candidate themes and raw model output are large and regenerate.
+# Everything here regenerates from a run. Nothing in this directory is
+# an input except the scripts, docker-compose.yml, and seed_img/ (the
+# palette-matched demo images the themes attach as featured images).
+#
+# The scorecards used to be tracked on the theory that they were "the
+# durable record" — but a JSON blob of one run's numbers is a claim
+# nobody can check without re-running, and the findings that matter
+# live in commit messages and memory instead. The screenshots were
+# never covered by a rule at all: look.py started writing shots/ and
+# 7 MB of PNGs accumulated a run at a time.
 themes/
 raw/
+shots/
 fp.html
+ref.html
+look.json
+results.json
+controls.json
+iterated-*.json
