@@ -1,11 +1,11 @@
 {
   "model": "qwen3.5:9b",
   "slug": "qwen3-5-9b-extended",
-  "repairs": 3,
-  "score": 11,
+  "repairs": 9,
+  "score": 12,
   "checks": {
     "files-emitted": true,
-    "style-header": false,
+    "style-header": true,
     "theme-json-valid": true,
     "templates-index": true,
     "appears-in-wp": true,

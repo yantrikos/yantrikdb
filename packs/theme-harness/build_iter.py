@@ -236,21 +236,20 @@ def section_queries(name: str, blocks: str, index: int, total: int) -> tuple[str
     """Retrieval vocabulary per section kind — the model's own outline
     words plus the concrete terms the composition records are named by."""
     text = f"{name} {blocks}"
+    extra = (f"{name} {blocks} section block markup",)
     if any(w in text for w in ("photo", "gallery", "image", "picture")):
-        return ("photo gallery section core gallery caption wide",
-                "which goes with what pairing table",)
+        return extra + ("photo gallery section core gallery caption wide",)
     if any(w in text for w in ("contact", "email", "write", "reach")):
-        return ("contact section core no form block mailto button tint",)
+        return extra + ("contact section core no form block mailto button tint",)
     if any(w in text for w in ("feature", "column", "showcase", "media")):
-        return ("feature rows media-text columns grid alternate",)
+        return extra + ("feature rows media-text columns grid alternate",)
     if any(w in text for w in ("post", "article", "quer", "blog", "entries")):
-        return ("post query section date title excerpt each exactly once",
-                "block ordering inside a post entry reading order",)
+        return extra + ("post query section date title excerpt each exactly once",
+                        "block ordering inside a post entry reading order",)
     if index == total - 1 and total > 1:
-        return ("closing band section heading one button full-bleed tint",
-                "section sequence stunning front page rhythm alternation",)
-    return ("intro band section full-bleed tint eyebrow heading constrained",
-            "stunning paragraph eyebrow lede heading text treatments",)
+        return extra + ("closing band section heading one button full-bleed tint",)
+    return extra + ("intro band section full-bleed tint eyebrow heading constrained",
+                    "closing band section heading one button full-bleed tint",)
 
 
 def defects_parsed(slug: str, path: str) -> list[str]:
@@ -391,7 +390,12 @@ def main() -> int:
     if "style.css" in manifest + added and "functions.php" not in manifest:
         added.append("functions.php")
     if added:
-        manifest = (manifest + added)[:MAX_FILES]
+        # Required files go FIRST: this run the model wrote "styles.css"
+        # (plural), the fix-up appended style.css — and [:MAX_FILES]
+        # sliced it off the end. WordPress identifies a theme BY
+        # style.css, so the activation error was "theme could not be
+        # found". Required additions must survive the cap.
+        manifest = (added + manifest)[:MAX_FILES]
         repairs += 1
         print(f"  repaired: added {', '.join(added)} "
               f"(required, or nothing would load style.css)")
@@ -467,33 +471,118 @@ def main() -> int:
             outline = parse_outline(raw)
         print("3a outline: " + "; ".join(n for n, _ in outline))
 
-        pieces = ['<!-- wp:template-part {"slug":"header","tagName":"header"} /-->']
-        for i, (name, blocks) in enumerate(outline):
+        HEADER_REF = '<!-- wp:template-part {"slug":"header","tagName":"header"} /-->'
+        FOOTER_REF = '<!-- wp:template-part {"slug":"footer","tagName":"footer"} /-->'
+
+        def gen_section(name: str, blocks: str, i: int, total: int,
+                        defect: str = "") -> str:
+            """One section, regenerated the same way whether it is being
+            written for the first time or repaired — the defect is just
+            more context. Sections never contain site identity or
+            navigation; those live in the header and footer parts."""
+            extra = (f"\nThe previous attempt had this problem, fix it: "
+                     f"{defect}\n") if defect else ""
             frag, _ = ask(
                 ollama, model,
-                host.reference(*section_queries(name, blocks, i, len(outline)))
+                host.reference(*section_queries(name, blocks, i, total))
                 + ctx
                 + f'Write ONLY the block markup for one section of the front '
-                f'page: "{name}" containing {blocks}. One wp:group with its '
-                f'own background and spacing, 8-20 lines. No explanation, no '
-                f'code fences, no header or footer — just this section.',
+                f'page: "{name}" containing {blocks}. One complete wp:group '
+                f'with its own background and spacing presets, 8-20 lines. '
+                f'Do NOT include wp:site-title, wp:navigation, header or '
+                f'footer — those exist elsewhere.{extra} No explanation, no '
+                f'code fences — just this section.',
                 SYSTEM)
-            body_frag = strip_fences(frag)
-            if len(body_frag.splitlines()) < 3 or "wp:group" not in body_frag:
-                frag, _ = ask(
-                    ollama, model,
-                    host.reference(*section_queries(name, blocks, i, len(outline)))
-                    + ctx
-                    + f'Write ONLY the block markup for one front-page section: '
-                    f'"{name}" containing {blocks}. It must be one complete '
-                    f'wp:group with a background and spacing presets, 8-20 '
-                    f'lines of block markup. No explanation, no fences.',
-                    SYSTEM)
-                body_frag = strip_fences(frag)
-            pieces.append(body_frag)
-            print(f"3b section '{name}': {len(body_frag.splitlines())} lines")
-        pieces.append('<!-- wp:template-part {"slug":"footer","tagName":"footer"} /-->')
-        files[main_tpl] = "\n\n".join(pieces) + "\n"
+            out = strip_fences(frag)
+            if len(out.splitlines()) < 3 or "wp:group" not in out:
+                return gen_section(name, blocks, i, total,
+                                   "it was empty or not a wp:group") \
+                    if not defect else out
+            return out
+
+        sections: list[str] = []
+        for i, (name, blocks) in enumerate(outline):
+            sections.append(gen_section(name, blocks, i, len(outline)))
+            print(f"3b section '{name}': {len(sections[-1].splitlines())} lines")
+
+        def assemble() -> str:
+            return "\n\n".join([HEADER_REF, *sections, FOOTER_REF]) + "\n"
+
+        def localise(defect: str) -> int:
+            """Which section does a defect belong to? Match quoted block
+            names or the dropped-delimiter snippet against each section's
+            text; fall back to topic routing. Whole-file rewriting is NOT
+            a fallback — it is how the extended run died: each full-file
+            repair fixed one defect and collapsed the query loop to a
+            self-closing tag, and three rounds never converged. The repair
+            unit must be the same size as the generation unit."""
+            for m in re.findall(r'"([a-z0-9/_-]+)"', defect):
+                for idx, sec in enumerate(sections):
+                    if m in sec:
+                        return idx
+            snip = re.search(r'dropped: "(.{10,40})', defect)
+            if snip:
+                for idx, sec in enumerate(sections):
+                    if snip.group(1)[:20] in sec:
+                        return idx
+            low = defect.lower()
+            if any(w in low for w in ("query", "post", "loop", "excerpt", "date")):
+                for idx, sec in enumerate(sections):
+                    if "wp:query" in sec or "wp:post-template" in sec:
+                        return idx
+            return 0
+
+        files[main_tpl] = assemble()
+        write_theme(slug, files)
+        seen: dict[int, list[str]] = {}
+        for round_ in range(args.rounds):
+            defects = defects_parsed(slug, main_tpl)
+            # Site identity belongs to the parts, never a section.
+            for idx, sec in enumerate(sections):
+                if "wp:site-title" in sec or "wp:navigation" in sec:
+                    defects.append(f'section {idx} duplicates the header — it '
+                                   f'contains site-title or navigation, which '
+                                   f'live in the header part. "{outline[idx][0]}"')
+            if not defects:
+                print(f"3c {main_tpl}: verified section-by-section")
+                break
+            print(f"3c {main_tpl}: {len(defects)} defect(s) -> section-scoped repair")
+            snapshot = list(sections)
+            prev_count = len(defects)
+            hit = set()
+            for d in defects:
+                idx = localise(d)
+                seen.setdefault(idx, [])
+                if d not in seen[idx]:
+                    seen[idx].append(d)
+                if idx in hit:      # one repair per section per round
+                    continue
+                hit.add(idx)
+                name, blocks = outline[idx] if idx < len(outline) else outline[0]
+                print(f"    section '{name}': {d[:96]}")
+                # The FULL defect history for this section, not the latest:
+                # single-defect feedback oscillated — the hero fixed
+                # core/simple-button and invented core/navigation-item,
+                # fixed that and reinvented the first.
+                history = "; ".join(seen[idx][-4:])
+                sections[idx] = gen_section(name, blocks, idx, len(outline), history)
+                repairs += 1
+            files[main_tpl] = assemble()
+            write_theme(slug, files)
+            new_count = len(defects_parsed(slug, main_tpl))
+            if new_count > prev_count + 3:
+                # A regeneration exploded (348 "defects" from one mangled
+                # fragment). Hill-climb: revert this round's changes and
+                # try again from the better state.
+                print(f"3c repair made it worse ({prev_count} -> {new_count}) "
+                      f"— reverting this round")
+                sections[:] = snapshot
+                files[main_tpl] = assemble()
+                write_theme(slug, files)
+        else:
+            left = defects_parsed(slug, main_tpl)
+            if left:
+                print(f"3c {main_tpl}: {len(left)} defect(s) remain")
 
     for path in [p for p in manifest if p.endswith(".html") and p != main_tpl]:
         body = gen(path, ctx)
@@ -527,6 +616,22 @@ def main() -> int:
         else:
             print("4 functions.php: enqueues style.css")
 
+    # style.css is how WordPress identifies a theme, and its header is
+    # boilerplate, not design. Guarantee both mechanically: adopt a
+    # wrongly-named stylesheet, and prepend the header if absent.
+    for wrong in ("styles.css", "css/style.css", "assets/css/style.css"):
+        if "style.css" not in files and wrong in files:
+            files["style.css"] = files.pop(wrong)
+    css = files.get("style.css", "")
+    if "Theme Name" not in css[:1000]:
+        header = ("/*\n"
+                  "Theme Name: Harness Demo\n"
+                  "Version: 1.0.0\n"
+                  "License: GNU General Public License v2 or later\n"
+                  "Text Domain: harness-demo\n"
+                  "*/\n\n")
+        files["style.css"] = header + css
+
     # ── 5. activate, feeding WP-CLI's own error back ────────────────
     root = write_theme(slug, files)
     reset_to_core()
@@ -551,7 +656,9 @@ def main() -> int:
     # template whose query loop had no body. Same lesson as the release
     # that hid behind PYTHONPATH: verify the artifact that exists, not the
     # step that produced it.
-    for path in [p for p in files if p.endswith(".html")]:
+    # main_tpl is repaired section-by-section in 3c; whole-file rewriting
+    # it here is the exact mechanism that collapsed the extended run.
+    for path in [p for p in files if p.endswith(".html") and p != main_tpl]:
         for attempt in range(args.rounds):
             defects = defects_parsed(slug, path)
             if not defects:
