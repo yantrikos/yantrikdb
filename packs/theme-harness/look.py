@@ -205,6 +205,14 @@ PROBE = r"""
 }
 """
 
+# Checks whose failure means the page is UNUSABLE, not merely unpolished.
+# They are reported apart from the sum because aggregate points are
+# fungible: in the three-control experiment a random palette produced
+# 1.02:1 contrast — invisible text — and still tied the model's total by
+# luckily passing measure-readable and font-chosen. A sum lets a page
+# nobody can read trade its way back to par; a hard gate does not.
+HARD = ("contrast-aa", "no-leaked-source", "has-content", "no-overflow")
+
 # Substring match, not equality. The first version compared the whole
 # first family name against this list, so a page rendering in literal
 # "Times New Roman" PASSED font-chosen — a lenient check in the very
@@ -284,9 +292,12 @@ def main() -> int:
             verdict = judge(d)
             verdict["no-overflow"] = per_width["mobile"]["overflow"] == 0  # judged where it breaks
             score = sum(verdict.values())
+            hard_fail = [k for k in HARD if not verdict.get(k, True)]
             out.append({"theme": slug, "score": score, "checks": verdict,
+                        "hard_fail": hard_fail,
                         "desktop": d, "mobile": per_width["mobile"]})
-            print(f"{slug:<26} {score:>2}/{len(verdict)}   "
+            gate = f"  HARD-FAIL: {','.join(hard_fail)}" if hard_fail else ""
+            print(f"{slug:<26} {score:>2}/{len(verdict)}{gate}   "
                   f"contrast {d['contrast']} (min {d.get('contrast_min',{}).get('ratio','?')} "f"on {d.get('contrast_min',{}).get('el','?')})  measure {d['measure']}ch  "
                   f"sizes {d['distinct_sizes']}  overflow(390) {per_width['mobile']['overflow']}px")
             print(f"{'':<26} failed: "
