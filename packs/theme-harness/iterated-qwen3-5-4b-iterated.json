@@ -1,0 +1,30 @@
+{
+  "model": "qwen3.5:4b",
+  "slug": "qwen3-5-4b-iterated",
+  "repairs": 5,
+  "score": 11,
+  "checks": {
+    "files-emitted": true,
+    "style-header": false,
+    "theme-json-valid": true,
+    "templates-index": true,
+    "appears-in-wp": true,
+    "activates": true,
+    "is-block-theme": true,
+    "front-page-200": true,
+    "no-php-error": true,
+    "renders-title": true,
+    "layout-sizes": true,
+    "uses-presets": true
+  },
+  "files": [
+    "functions.php",
+    "parts/footer.php",
+    "parts/header.php",
+    "patterns/hero.php",
+    "readme.txt",
+    "style.css",
+    "templates/index.html",
+    "theme.json"
+  ]
+}
