@@ -1295,3 +1295,142 @@ blocks; neither needs a plugin.
 </ul>
 <!-- /wp:social-links -->
 ```
+
+## A premium hero: core/cover with an overlay, display heading and paired buttons
+
+What separates a premium front page from a basic one at first glance. A
+full-width `core/cover` at 70vh with a dim overlay so text stays legible
+over any image, the largest display size, a one-line lede, and a button
+PAIR — one filled, one outline. Text colour is always base over the
+overlay; never rely on the image staying dark.
+
+```html
+<!-- wp:cover {"useFeaturedImage":true,"dimRatio":60,"overlayColor":"contrast","minHeight":70,"minHeightUnit":"vh","align":"full","layout":{"type":"constrained"}} -->
+<div class="wp-block-cover alignfull" style="min-height:70vh">
+	<span aria-hidden="true" class="wp-block-cover__background has-contrast-background-color has-background-dim-60 has-background-dim"></span>
+	<div class="wp-block-cover__inner-container">
+		<!-- wp:heading {"level":1,"textColor":"base","fontSize":"huge"} -->
+		<h1 class="wp-block-heading has-base-color has-text-color has-huge-font-size">Notes from the measurement floor</h1>
+		<!-- /wp:heading -->
+		<!-- wp:paragraph {"textColor":"base","fontSize":"large"} -->
+		<p class="has-base-color has-text-color has-large-font-size">Field notes on packs, small machines and honest numbers.</p>
+		<!-- /wp:paragraph -->
+		<!-- wp:buttons -->
+		<div class="wp-block-buttons">
+			<!-- wp:button --><div class="wp-block-button"><a class="wp-block-button__link wp-element-button" href="#latest">Read the latest</a></div><!-- /wp:button -->
+			<!-- wp:button {"className":"is-style-outline","textColor":"base"} --><div class="wp-block-button is-style-outline"><a class="wp-block-button__link has-base-color has-text-color wp-element-button" href="#about">About</a></div><!-- /wp:button -->
+		</div>
+		<!-- /wp:buttons -->
+	</div>
+</div>
+<!-- /wp:cover -->
+```
+
+## The magazine layout: one featured post large, the rest in a card grid
+
+The premium post layout. TWO queries: the first shows only the newest
+post, full width with its featured image; the second offsets by one and
+grids the rest in cards. The offset is what prevents the featured post
+repeating in the grid.
+
+```html
+<!-- wp:query {"queryId":10,"query":{"perPage":1,"postType":"post","order":"desc","orderBy":"date"}} -->
+<div class="wp-block-query">
+	<!-- wp:post-template -->
+		<!-- wp:post-featured-image {"aspectRatio":"16/9","style":{"border":{"radius":"4px"}}} /-->
+		<!-- wp:post-date {"format":"j M Y"} /-->
+		<!-- wp:post-title {"level":2,"isLink":true,"fontSize":"xx-large"} /-->
+		<!-- wp:post-excerpt {"excerptLength":32} /-->
+	<!-- /wp:post-template -->
+</div>
+<!-- /wp:query -->
+
+<!-- wp:query {"queryId":11,"query":{"perPage":4,"offset":1,"postType":"post","order":"desc","orderBy":"date"}} -->
+<div class="wp-block-query">
+	<!-- wp:post-template {"layout":{"type":"grid","columnCount":2}} -->
+		<!-- wp:post-featured-image {"aspectRatio":"3/2","style":{"border":{"radius":"4px"}}} /-->
+		<!-- wp:post-date {"format":"j M Y"} /-->
+		<!-- wp:post-title {"level":3,"isLink":true} /-->
+	<!-- /wp:post-template -->
+</div>
+<!-- /wp:query -->
+```
+
+Cards carry image, date, title — no excerpt in a grid; excerpts belong to
+full-width entries only.
+
+## The pullquote band: one voice, huge, on the tint
+
+A premium page pauses once. A full-bleed tint band holding a single
+`core/pullquote` in the display face at a large size — no other content
+in the band. One per page, never more.
+
+```html
+<!-- wp:group {"align":"full","backgroundColor":"tint","style":{"spacing":{"padding":{"top":"var:preset|spacing|60","bottom":"var:preset|spacing|60"}}},"layout":{"type":"constrained"}} -->
+<div class="wp-block-group alignfull has-tint-background-color has-background" style="padding-top:var(--wp--preset--spacing--60);padding-bottom:var(--wp--preset--spacing--60)">
+	<!-- wp:pullquote {"textAlign":"center"} -->
+	<figure class="wp-block-pullquote has-text-align-center"><blockquote><p>Measure it, or it did not happen.</p><cite>The house rule</cite></blockquote></figure>
+	<!-- /wp:pullquote -->
+</div>
+<!-- /wp:group -->
+```
+
+## The stats band: three numbers that earn their size
+
+Numbers in the display face at xx-large, labels in the small sans
+underneath, three columns, never four. Dark band variant: contrast
+background with base text set explicitly.
+
+```html
+<!-- wp:group {"align":"full","backgroundColor":"contrast","textColor":"base","style":{"spacing":{"padding":{"top":"var:preset|spacing|60","bottom":"var:preset|spacing|60"}}},"layout":{"type":"constrained"}} -->
+<div class="wp-block-group alignfull has-base-color has-contrast-background-color has-text-color has-background" style="padding-top:var(--wp--preset--spacing--60);padding-bottom:var(--wp--preset--spacing--60)">
+	<!-- wp:columns -->
+	<div class="wp-block-columns">
+		<!-- wp:column -->
+		<div class="wp-block-column">
+			<!-- wp:heading {"level":3,"fontSize":"xx-large","textColor":"base"} --><h3 class="wp-block-heading has-base-color has-text-color has-xx-large-font-size">1,766</h3><!-- /wp:heading -->
+			<!-- wp:paragraph {"fontSize":"small","textColor":"tint"} --><p class="has-tint-color has-text-color has-small-font-size">Tests passing</p><!-- /wp:paragraph -->
+		</div>
+		<!-- /wp:column -->
+	</div>
+	<!-- /wp:columns -->
+</div>
+<!-- /wp:group -->
+```
+
+## Premium card and image treatment in style.css
+
+The hover language of a premium theme: cards lift a little, images are
+rounded consistently, transitions are fast and respect reduced motion.
+One radius everywhere — mixed radii read as accidental.
+
+```css
+.wp-block-post-template .wp-block-post-featured-image img {
+  border-radius: 4px;
+  transition: transform 180ms ease;
+}
+.wp-block-post-template li:hover .wp-block-post-featured-image img {
+  transform: translateY(-3px);
+}
+.wp-block-pullquote blockquote {
+  font-family: var(--wp--preset--font-family--display);
+  font-size: var(--wp--preset--font-size--x-large);
+  line-height: 1.3;
+}
+```
+
+## The premium footer: three columns and a bottom bar
+
+Identity and tagline in the first column, navigation in the second, a
+short about line in the third; then a full-width bottom bar with the
+copyright at small size. All on the contrast band with explicit base
+text. Columns collapse gracefully because core/columns stacks on mobile
+by default.
+
+## The premium page sequence
+
+Cover hero (image, overlay, display type, button pair) → featured post
+full width → card grid of recent posts → pullquote band on tint → stats
+band on dark → closing CTA band → three-column footer. Rhythm rule
+still holds: no two adjacent bands share a background, and the page
+pauses exactly once (the pullquote).

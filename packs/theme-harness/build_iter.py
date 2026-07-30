@@ -194,7 +194,7 @@ def defects_theme_json(raw: str) -> list[str]:
 
 OUTLINE_BRIEF = """List the sections of the front page, top to bottom,
 between the header and the footer. One line per section: a short name, a
-colon, then the blocks it contains. 2 to 4 sections. Example:
+colon, then the blocks it contains. 2 to 6 sections. Example:
 
 intro band: heading, tagline paragraph
 recent posts: post date, post title, post excerpt, pagination
@@ -210,7 +210,7 @@ def parse_outline(text: str) -> list[tuple[str, str]]:
         if ":" in line and 3 <= len(line) <= 120:
             name, blocks = line.split(":", 1)
             out.append((name.strip().lower(), blocks.strip()))
-        if len(out) >= 4:
+        if len(out) >= 6:
             break
     return out
 
@@ -237,6 +237,14 @@ def section_queries(name: str, blocks: str, index: int, total: int) -> tuple[str
     words plus the concrete terms the composition records are named by."""
     text = f"{name} {blocks}"
     extra = (f"{name} {blocks} section block markup",)
+    if any(w in text for w in ("hero", "cover", "banner", "welcome")):
+        return extra + ("premium hero cover overlay display heading paired buttons",)
+    if any(w in text for w in ("featured", "magazine", "grid", "card")):
+        return extra + ("magazine layout featured post large card grid offset",)
+    if any(w in text for w in ("quote", "pull", "testimonial", "voice")):
+        return extra + ("pullquote band one voice huge tint",)
+    if any(w in text for w in ("stat", "number", "metric", "count")):
+        return extra + ("stats band three numbers display face dark",)
     if any(w in text for w in ("photo", "gallery", "image", "picture")):
         return extra + ("photo gallery section core gallery caption wide",)
     if any(w in text for w in ("contact", "email", "write", "reach")):
@@ -341,27 +349,35 @@ def repair(host, ollama, model, path: str, body: str, defects: list[str],
 
 
 def main() -> int:
+    global SPEC
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", required=True)
     ap.add_argument("--pack", default=str(HERE.parent / "dist" / "wordpress-theme-0.1.0.ydbpack"))
     ap.add_argument("--rounds", type=int, default=2, help="repair attempts per file")
     ap.add_argument("--extended", action="store_true",
                     help="add gallery and contact sections to the brief")
+    ap.add_argument("--premium", action="store_true",
+                    help="the premium brief: cover hero, magazine layout, "
+                         "pullquote and stats bands")
     ap.add_argument("--ollama")
     args = ap.parse_args()
 
     ollama = resolve_host(args.ollama)
     host = PackHost(Path(args.pack))
     model = args.model
-    if args.extended:
-        # A versioned change to the task, not a silent one: the extended
-        # brief exercises the component records (gallery, contact) and is
-        # scored as its own slug so numbers never mix with the base brief.
-        global SPEC
+    if args.premium:
+        SPEC = SPEC + """
+- a full-width cover hero with an image overlay, display heading and two buttons
+- a magazine post layout: newest post large with its featured image, the rest as an image card grid
+- one pullquote band and one stats band
+- a three-column footer"""
+    elif args.extended:
+        # A versioned change to the task, not a silent one.
         SPEC = SPEC + """
 - a photo gallery section
 - a contact section (core blocks only)"""
-    slug = theme_slug(model, "extended" if args.extended else "iterated")
+    kind = "premium" if args.premium else ("extended" if args.extended else "iterated")
+    slug = theme_slug(model, kind)
     print(f"model: {model}\nslug : {slug}\n")
 
     def gen(path: str, prompt_extra: str = "") -> str:
