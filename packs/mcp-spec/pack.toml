@@ -1,0 +1,21 @@
+[pack]
+name = "mcp-spec"
+version = "0.1.0"
+origin = "yantrik/mcp-spec"
+namespace = "mcp_spec"
+description = "The Model Context Protocol specification revision 2026-07-28 — published after every current model's training data, which is exactly why it matters: this revision removes the initialize handshake and protocol sessions, deprecates Roots, Sampling and Logging, replaces server-initiated requests with Multi Round-Trip Requests (MRTR), and replaces resources/subscribe with subscriptions/listen. A model writing MCP code from memory writes the old protocol; this pack carries the delta first, then the full mechanics: per-request _meta, server/discover, Streamable HTTP headers, error-code allocation, and requestState security."
+coverage = [
+    "MCP protocol revision 2026-07-28 changes and migration from earlier revisions",
+    "MCP stateless requests, _meta fields and capability negotiation",
+    "MCP Multi Round-Trip Requests, elicitation, sampling and roots",
+    "MCP Streamable HTTP transport, headers and SSE streams",
+    "MCP subscriptions, notifications and server discovery",
+    "MCP error codes, JSON-RPC message rules and JSON Schema usage",
+]
+
+[content]
+memory_type = "semantic"
+domain = "engineering"
+source = "document"
+importance = 0.6
+certainty = 0.95
