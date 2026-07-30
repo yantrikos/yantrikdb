@@ -50,6 +50,15 @@ impl YantrikDB {
                 index.insert(&rid, &embedding)?;
             }
         }
+        // Distance-only pruning can leave a node with no incoming layer-0
+        // edges — stored, active, and unfindable by any search. Found
+        // live: a mounted 65-record pack lost a different record per
+        // mount. Every bulk build ends with the connectivity repair so
+        // the guarantee holds at the one point all rebuild paths share.
+        let rescued = index.ensure_all_reachable();
+        if rescued > 0 {
+            tracing::warn!(rescued, "vec index rebuild reconnected unreachable nodes");
+        }
         Ok(index)
     }
 
