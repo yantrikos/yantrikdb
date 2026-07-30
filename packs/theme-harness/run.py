@@ -236,13 +236,32 @@ def strip_fences(text: str) -> str:
 
 
 def parse_manifest(text: str) -> list[str]:
-    """One path per line, defensively."""
-    out: list[str] = []
+    """One path per line, defensively.
+
+    Strips a shared leading directory before validating. The 9B answered
+    with a PERFECT block-theme manifest — theme.json, templates/index.html,
+    parts/ — but prefixed every line with "Harness Demo/", and the
+    SAFE_PATH check rejected the space, dropped every line, and scored the
+    model 0/12 for a correct answer. Prefixing files with the theme
+    directory is a reasonable reading of "relative to the theme directory",
+    and normalising it away is mechanical, not semantic.
+    """
+    lines = []
     for raw in strip_fences(text).splitlines():
         line = raw.strip().strip("`").lstrip("-*0123456789. ").lstrip("./")
         line = line.split("#")[0].split("//")[0].strip()
-        if not line or line.endswith("/") or ".." in line:
-            continue
+        if line and not line.endswith("/") and ".." not in line:
+            lines.append(line)
+
+    # A first segment shared by every line is a wrapper directory, not a
+    # file-layout decision. Drop it once.
+    if len(lines) > 1:
+        firsts = {l.split("/", 1)[0] for l in lines if "/" in l}
+        if len(firsts) == 1 and all("/" in l for l in lines):
+            lines = [l.split("/", 1)[1] for l in lines]
+
+    out: list[str] = []
+    for line in lines:
         if not SAFE_PATH.match(line) or line in out:
             continue
         out.append(line)
@@ -450,9 +469,15 @@ def main() -> int:
     # Start from an empty themes dir: a candidate left over from a prior
     # run is another way for one model's bad PHP to reach another's score.
     reset_to_core()
-    if THEMES.exists():
-        for stale in THEMES.iterdir():
-            if stale.is_dir():
+    # Clear only the slugs THIS run regenerates. Wiping the whole
+    # directory destroyed the iterated 9B theme, the hand-written
+    # reference and every control variant as a side effect of re-running
+    # the single-shot — an hour of evidence gone to tidy-up. Isolation
+    # means owning your own artifacts, not everyone else's.
+    for model in args.model:
+        for condition in ("baseline", "mounted"):
+            stale = THEMES / theme_slug(model, condition)
+            if stale.exists():
                 shutil.rmtree(stale, ignore_errors=True)
     print(f"constitution: {len(host.constitution.split())} words\n")
 
