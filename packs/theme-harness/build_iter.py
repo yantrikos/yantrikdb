@@ -184,6 +184,46 @@ def defects_theme_json(raw: str) -> list[str]:
     return out
 
 
+def defects_parsed(slug: str, path: str) -> list[str]:
+    """Ask WordPress's own parser what is wrong with the markup.
+
+    Not a Python reimplementation of the block grammar — that would be a
+    second parser to keep in step with the first, and the point of this
+    harness is that WordPress decides. It is also the only thing that
+    knows the defect that produced an empty page:
+
+        <!-- wp:post-template;{"layout":...}-->
+
+    a semicolon where a space belongs. parse_blocks() drops the block
+    entirely, so the query loop has no body and renders nothing. HTTP 200,
+    no PHP error, blank page.
+
+    Calibrated before use: 0 defects on all three reference-theme files,
+    3 real defects on the 4B's. A validator that has never passed a
+    known-good artifact is just an opinion.
+    """
+    code, out = wp("eval-file",
+                   "/var/www/html/wp-content/themes/harness/validate_blocks.php",
+                   f"{slug}/{path}")
+    # A validation that could not RUN must never read as a validation that
+    # PASSED. The first version returned [] here, so when WP-CLI failed to
+    # bootstrap — a broken theme left active by an earlier run — the loop
+    # printed "verified" for a template whose query loop had no body. That
+    # is the sixth check in this project to fail by being silently
+    # permissive, and the shape is always the same: the absence of a
+    # finding treated as the absence of a problem.
+    if code != 0 or "{" not in out:
+        first = (out.strip().splitlines() or ["no output"])[0][:160]
+        return [f"__unvalidated__ WordPress could not parse this file "
+                f"({first}) — treat as unverified, not as clean."]
+    try:
+        payload = json.loads(out[out.index("{"):out.rindex("}") + 1])
+    except (json.JSONDecodeError, ValueError):
+        return ["__unvalidated__ validator output was not JSON — treat as "
+                "unverified, not as clean."]
+    return list(payload.get("defects") or [])
+
+
 def defects_markup(path: str, body: str, manifest: list[str],
                    theme_json: str) -> list[str]:
     out = []
@@ -372,6 +412,38 @@ def main() -> int:
         reset_to_core()
         code, out = wp("theme", "activate", f"harness/{slug}")
     print(f"5 activate: {'ok' if 'Success' in out else 'still failing'}")
+
+    # ── 6. verify the ASSEMBLED theme, then repair ──────────────────
+    # The in-loop check validated each file the instant it was written,
+    # and on a Windows bind mount the container had not seen it yet — so
+    # WordPress parsed a stale copy and the loop printed "verified" for a
+    # template whose query loop had no body. Same lesson as the release
+    # that hid behind PYTHONPATH: verify the artifact that exists, not the
+    # step that produced it.
+    for path in [p for p in files if p.endswith(".html")]:
+        for attempt in range(args.rounds):
+            defects = defects_parsed(slug, path)
+            if not defects:
+                print(f"6 {path}: verified against the assembled theme")
+                break
+            print(f"6 {path}: {len(defects)} defect(s) -> repairing")
+            for d in defects:
+                print(f"    - {d[:110]}")
+            files[path] = repair(host, ollama, model, path, files[path],
+                                 defects, ctx) + "\n"
+            repairs += 1
+            write_theme(slug, files)
+            reset_to_core()
+            wp("theme", "activate", f"harness/{slug}")
+        else:
+            left = defects_parsed(slug, path)
+            if left:
+                print(f"6 {path}: {len(left)} defect(s) remain after "
+                      f"{args.rounds} repair(s)")
+
+    root = write_theme(slug, files)
+    reset_to_core()
+    wp("theme", "activate", f"harness/{slug}")
 
     res = grade(slug, root, files)
     print(f"\n{sum(res.values())}/{len(CHECKS)} plumbing   repairs: {repairs}")

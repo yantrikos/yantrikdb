@@ -1,7 +1,7 @@
 {
   "model": "qwen3.5:4b",
   "slug": "qwen3-5-4b-iterated",
-  "repairs": 5,
+  "repairs": 9,
   "score": 11,
   "checks": {
     "files-emitted": true,
@@ -18,10 +18,10 @@
     "uses-presets": true
   },
   "files": [
-    "functions.php",
     "parts/footer.php",
     "parts/header.php",
     "patterns/hero.php",
+    "patterns/post-card.php",
     "readme.txt",
     "style.css",
     "templates/index.html",
