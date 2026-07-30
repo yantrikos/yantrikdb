@@ -1,9 +1,9 @@
 [pack]
 name = "wordpress-theme"
-version = "0.1.0"
+version = "0.2.0"
 origin = "yantrik/wordpress-theme"
 namespace = "wordpress_theme"
-description = "Building WordPress block themes that actually activate and render: the required file set, theme.json as the design-token source, block markup in template HTML, patterns and style variations — plus the modern CSS (fluid type, layout, container queries, cascade layers) that has to coexist with the CSS WordPress emits for you."
+description = "A complete design system for WordPress block themes, from activation to premium: the required file set and theme.json token discipline, a worked editorial design system with pairing rules (which fonts, colours and spacing go together), section-level exemplars for heroes, magazine layouts, pullquote and stats bands, galleries and contact sections — plus the composition grammar that took a 27B model to full marks on a rendered-craft benchmark and what is NOT a core block (there is no core/contact-form)."
 coverage = [
     "WordPress block theme structure and required files",
     "theme.json settings, styles and generated CSS custom properties",
@@ -13,6 +13,8 @@ coverage = [
     "CSS for WordPress themes: layout, alignment, specificity",
     "Modern CSS: fluid typography, grid, container queries, cascade layers",
     "WordPress child themes and classic theme structure",
+    "premium hero, magazine layout, pullquote and stats sections",
+    "WordPress core component blocks: gallery, media-text, columns, search, social links",
 ]
 
 [content]

@@ -136,17 +136,41 @@ def main() -> int:
             # heading — the most favourable query it will ever get. A
             # record that cannot be retrieved by its own title cannot be
             # retrieved at all.
+            # Reachable = the record appears in the TOP-3 for a query
+            # built from its heading plus its first prose sentence, at or
+            # above the floor. The first version demanded rank-1 on the
+            # bare heading, which flagged 17 records whose top hit was
+            # their own SIBLING on the same topic — records the builder
+            # measurably delivers, because consumers query with task
+            # vocabulary at top_k=5 and inject everything over the floor.
+            # A rank-2 record is a delivered record; only absence is a
+            # defect. (The 14/14 premium run is the ground truth the old
+            # proxy contradicted.)
             unreachable = []
             corpus_text = (src / "corpus.md").read_text(encoding="utf-8")
             blocks = re.split(r"^##\s+", corpus_text, flags=re.M)[1:]
             for block in blocks:
-                head = block.splitlines()[0].strip()
-                best, top = 0.0, ""
-                for hit in db.recall(head, top_k=3):
+                lines = block.splitlines()
+                head = lines[0].strip()
+                lead = next((l.strip() for l in lines[1:]
+                             if l.strip() and not l.strip().startswith("```")), "")
+                query = f"{head}. {lead}"[:300]
+                found, best, top = False, 0.0, ""
+                for hit in db.recall(query, top_k=3):
                     sim = hit.get("scores", {}).get("similarity", 0.0)
-                    if sim > best:
-                        best, top = sim, hit.get("text", "").split(" — ")[0]
-                if top.strip() != head or best < args.floor:
+                    text = hit.get("text", "")
+                    label = text.split(" — ")[0].strip()
+                    if not top:
+                        best, top = sim, label
+                    # The stored text is "topic — body", and a heading may
+                    # itself contain an em-dash — splitting on the first
+                    # one truncates it, and the flagship symptom was a
+                    # record flagged as unreachable while its own name sat
+                    # in the "instead got" column. Prefix-match instead.
+                    if text.startswith(head) and sim >= args.floor:
+                        found = True
+                        break
+                if not found:
                     unreachable.append((head, best, top[:46], code_ratio(block)))
 
             db.close()

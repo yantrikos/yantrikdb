@@ -965,16 +965,13 @@ The opening section of a front page. `align: full` so the background
 reaches the viewport edges, `layout constrained` so the text inside still
 obeys contentSize, vertical padding from the spacing presets — never a
 fixed rem.
+The intro band section that opens a front page: full-bleed tint background, eyebrow label, display heading and lede paragraph, text constrained to the reading measure.
 
 ```html
 <!-- wp:group {"align":"full","backgroundColor":"tint","style":{"spacing":{"padding":{"top":"var:preset|spacing|60","bottom":"var:preset|spacing|60"}}},"layout":{"type":"constrained"}} -->
 <div class="wp-block-group alignfull has-tint-background-color has-background" style="padding-top:var(--wp--preset--spacing--60);padding-bottom:var(--wp--preset--spacing--60)">
-	<!-- wp:heading {"level":1} -->
-	<h1 class="wp-block-heading">Notes from the measurement floor</h1>
-	<!-- /wp:heading -->
-	<!-- wp:paragraph {"textColor":"secondary","fontSize":"large"} -->
-	<p class="has-secondary-color has-text-color has-large-font-size">Short pieces on packs and small machines.</p>
-	<!-- /wp:paragraph -->
+	<!-- wp:heading {"level":1} --><h1 class="wp-block-heading">Notes from the measurement floor</h1><!-- /wp:heading -->
+	<!-- wp:paragraph {"textColor":"secondary","fontSize":"large"} --><p class="has-secondary-color has-text-color has-large-font-size">Short pieces on packs and small machines.</p><!-- /wp:paragraph -->
 </div>
 <!-- /wp:group -->
 ```
@@ -1024,18 +1021,13 @@ off after the last post. Same shape as the intro band — tint background,
 spacing presets — holding a heading, one sentence, and at most one
 button. This is what makes the page read as composed rather than as a
 list that ran out.
+The closing band section that ends a front page: full-bleed tint background, heading, one sentence, exactly one button — the deliberate ending that stops a page trailing off.
 
 ```html
 <!-- wp:group {"align":"full","backgroundColor":"tint","style":{"spacing":{"padding":{"top":"var:preset|spacing|60","bottom":"var:preset|spacing|60"}}},"layout":{"type":"constrained"}} -->
 <div class="wp-block-group alignfull has-tint-background-color has-background" style="padding-top:var(--wp--preset--spacing--60);padding-bottom:var(--wp--preset--spacing--60)">
-	<!-- wp:heading {"level":2} -->
-	<h2 class="wp-block-heading">Measure it, or it did not happen</h2>
-	<!-- /wp:heading -->
-	<!-- wp:buttons -->
-	<div class="wp-block-buttons"><!-- wp:button -->
-	<div class="wp-block-button"><a class="wp-block-button__link wp-element-button" href="#top">Read the archive</a></div>
-	<!-- /wp:button --></div>
-	<!-- /wp:buttons -->
+	<!-- wp:heading {"level":2} --><h2 class="wp-block-heading">Measure it, or it did not happen</h2><!-- /wp:heading -->
+	<!-- wp:buttons --><div class="wp-block-buttons"><!-- wp:button --><div class="wp-block-button"><a class="wp-block-button__link wp-element-button" href="#top">Read the archive</a></div><!-- /wp:button --></div><!-- /wp:buttons -->
 </div>
 <!-- /wp:group -->
 ```
@@ -1073,23 +1065,15 @@ The header that makes an editorial site read as considered. Site title
 and an italic tagline stacked tight on the left, navigation in the sans
 face on the right, a hairline border in the tint colour underneath — not
 a heavy bar, not a centered logo.
+The stunning header template part: site title and italic tagline stacked on the left, navigation menu on the right, hairline border below — identity left, nav right, space between.
 
 ```html
-<!-- wp:group {"tagName":"header","align":"full","style":{"spacing":{"padding":{"top":"var:preset|spacing|40","bottom":"var:preset|spacing|40"}},"border":{"bottom":{"color":"var:preset|color|tint","width":"1px"}}},"layout":{"type":"constrained","wideSize":"72rem"}} -->
-<header class="wp-block-group alignfull" style="border-bottom-color:var(--wp--preset--color--tint);border-bottom-width:1px;padding-top:var(--wp--preset--spacing--40);padding-bottom:var(--wp--preset--spacing--40)">
-	<!-- wp:group {"layout":{"type":"flex","justifyContent":"space-between","flexWrap":"wrap"}} -->
-	<div class="wp-block-group">
-		<!-- wp:group {"style":{"spacing":{"blockGap":"0.1rem"}},"layout":{"type":"flex","orientation":"vertical"}} -->
-		<div class="wp-block-group">
-			<!-- wp:site-title {"level":0} /-->
-			<!-- wp:site-tagline {"style":{"typography":{"fontStyle":"italic"}},"fontSize":"small","textColor":"secondary"} /-->
-		</div>
-		<!-- /wp:group -->
-		<!-- wp:navigation {"overlayMenu":"mobile","style":{"typography":{"fontSize":"var:preset|font-size|small"}}} -->
-			<!-- wp:page-list /-->
-		<!-- /wp:navigation -->
-	</div>
-	<!-- /wp:group -->
+<!-- wp:group {"tagName":"header","align":"full","layout":{"type":"constrained","wideSize":"72rem"}} -->
+<header class="wp-block-group alignfull">
+	<!-- wp:group {"layout":{"type":"flex","justifyContent":"space-between","flexWrap":"wrap"}} --><div class="wp-block-group">
+		<!-- wp:site-title {"level":0} /--><!-- wp:site-tagline {"fontSize":"small","textColor":"secondary","style":{"typography":{"fontStyle":"italic"}}} /-->
+		<!-- wp:navigation {"overlayMenu":"mobile"} --><!-- wp:page-list /--><!-- /wp:navigation -->
+	</div><!-- /wp:group -->
 </header>
 <!-- /wp:group -->
 ```
@@ -1104,26 +1088,16 @@ background with `textColor: base` set explicitly — dark bands with unset
 text colour render invisible text — identity on the left, an
 uppercase-label navigation column on the right, and a small licence line
 at the bottom after generous spacing.
+The stunning footer template part: dark contrast band with textColor base set explicitly so the light text stays legible, site identity and navigation in two columns, small licence line at the bottom.
 
 ```html
-<!-- wp:group {"tagName":"footer","align":"full","backgroundColor":"contrast","textColor":"base","style":{"spacing":{"padding":{"top":"var:preset|spacing|60","bottom":"var:preset|spacing|60"}},"elements":{"link":{"color":{"text":"var:preset|color|tint"}}}},"layout":{"type":"constrained","wideSize":"72rem"}} -->
-<footer class="wp-block-group alignfull has-base-color has-contrast-background-color has-text-color has-background has-link-color" style="padding-top:var(--wp--preset--spacing--60);padding-bottom:var(--wp--preset--spacing--60)">
-	<!-- wp:group {"layout":{"type":"flex","justifyContent":"space-between","verticalAlignment":"top","flexWrap":"wrap"}} -->
-	<div class="wp-block-group">
-		<!-- wp:group {"style":{"spacing":{"blockGap":"var:preset|spacing|20"}},"layout":{"type":"flex","orientation":"vertical"}} -->
-		<div class="wp-block-group">
-			<!-- wp:site-title {"level":0,"textColor":"base"} /-->
-			<!-- wp:site-tagline {"fontSize":"small","textColor":"tint","style":{"typography":{"fontStyle":"italic"}}} /-->
-		</div>
-		<!-- /wp:group -->
-		<!-- wp:navigation {"overlayMenu":"never","textColor":"base","style":{"typography":{"fontSize":"var:preset|font-size|small"}}} -->
-			<!-- wp:page-list /-->
-		<!-- /wp:navigation -->
-	</div>
-	<!-- /wp:group -->
-	<!-- wp:paragraph {"fontSize":"small","textColor":"tint","style":{"spacing":{"margin":{"top":"var:preset|spacing|50"}}}} -->
-	<p class="has-tint-color has-text-color has-small-font-size" style="margin-top:var(--wp--preset--spacing--50)">Licensed GPL-2.0-or-later.</p>
-	<!-- /wp:paragraph -->
+<!-- wp:group {"tagName":"footer","align":"full","backgroundColor":"contrast","textColor":"base","style":{"elements":{"link":{"color":{"text":"var:preset|color|tint"}}}},"layout":{"type":"constrained","wideSize":"72rem"}} -->
+<footer class="wp-block-group alignfull has-base-color has-contrast-background-color has-text-color has-background has-link-color">
+	<!-- wp:group {"layout":{"type":"flex","justifyContent":"space-between","flexWrap":"wrap"}} --><div class="wp-block-group">
+		<!-- wp:site-title {"level":0,"textColor":"base"} /-->
+		<!-- wp:navigation {"overlayMenu":"never","textColor":"base"} --><!-- wp:page-list /--><!-- /wp:navigation -->
+	</div><!-- /wp:group -->
+	<!-- wp:paragraph {"fontSize":"small","textColor":"tint"} --><p class="has-tint-color has-text-color has-small-font-size">Licensed GPL-2.0-or-later.</p><!-- /wp:paragraph -->
 </footer>
 <!-- /wp:group -->
 ```
@@ -1206,22 +1180,14 @@ a real core block. Three columns, cropped, lightbox on click. Captions in
 the quiet-metadata treatment. Never more than one gallery per page
 section, and the gallery gets the wide width while text stays at content
 width.
+The photo gallery section: pictures and images in a core/gallery block, three columns, cropped, gallery wide while the heading stays at content width.
 
 ```html
-<!-- wp:group {"style":{"spacing":{"padding":{"top":"var:preset|spacing|60","bottom":"var:preset|spacing|60"}}},"layout":{"type":"constrained"}} -->
-<div class="wp-block-group" style="padding-top:var(--wp--preset--spacing--60);padding-bottom:var(--wp--preset--spacing--60)">
-	<!-- wp:heading {"level":2} -->
-	<h2 class="wp-block-heading">From the field</h2>
-	<!-- /wp:heading -->
-	<!-- wp:gallery {"columns":3,"imageCrop":true,"linkTo":"none","align":"wide"} -->
-	<figure class="wp-block-gallery alignwide has-nested-images columns-3 is-cropped">
-		<!-- wp:image {"sizeSlug":"large"} -->
-		<figure class="wp-block-image size-large"><img alt=""/></figure>
-		<!-- /wp:image -->
-	</figure>
-	<!-- /wp:gallery -->
-</div>
-<!-- /wp:group -->
+<!-- wp:gallery {"columns":3,"imageCrop":true,"linkTo":"none","align":"wide"} -->
+<figure class="wp-block-gallery alignwide has-nested-images columns-3 is-cropped">
+	<!-- wp:image {"sizeSlug":"large"} --><figure class="wp-block-image size-large"><img alt=""/></figure><!-- /wp:image -->
+</figure>
+<!-- /wp:gallery -->
 ```
 
 ## A contact section in core WordPress: there is no form block
@@ -1303,24 +1269,15 @@ full-width `core/cover` at 70vh with a dim overlay so text stays legible
 over any image, the largest display size, a one-line lede, and a button
 PAIR — one filled, one outline. Text colour is always base over the
 overlay; never rely on the image staying dark.
+The premium hero section is a full-width cover band: overlay colour for legibility, huge display heading, one-line lede, and a paired call to action — one filled button beside one outline button.
 
 ```html
-<!-- wp:cover {"useFeaturedImage":true,"dimRatio":60,"overlayColor":"contrast","minHeight":70,"minHeightUnit":"vh","align":"full","layout":{"type":"constrained"}} -->
+<!-- wp:cover {"dimRatio":60,"overlayColor":"contrast","minHeight":70,"minHeightUnit":"vh","align":"full","layout":{"type":"constrained"}} -->
 <div class="wp-block-cover alignfull" style="min-height:70vh">
 	<span aria-hidden="true" class="wp-block-cover__background has-contrast-background-color has-background-dim-60 has-background-dim"></span>
 	<div class="wp-block-cover__inner-container">
-		<!-- wp:heading {"level":1,"textColor":"base","fontSize":"huge"} -->
-		<h1 class="wp-block-heading has-base-color has-text-color has-huge-font-size">Notes from the measurement floor</h1>
-		<!-- /wp:heading -->
-		<!-- wp:paragraph {"textColor":"base","fontSize":"large"} -->
-		<p class="has-base-color has-text-color has-large-font-size">Field notes on packs, small machines and honest numbers.</p>
-		<!-- /wp:paragraph -->
-		<!-- wp:buttons -->
-		<div class="wp-block-buttons">
-			<!-- wp:button --><div class="wp-block-button"><a class="wp-block-button__link wp-element-button" href="#latest">Read the latest</a></div><!-- /wp:button -->
-			<!-- wp:button {"className":"is-style-outline","textColor":"base"} --><div class="wp-block-button is-style-outline"><a class="wp-block-button__link has-base-color has-text-color wp-element-button" href="#about">About</a></div><!-- /wp:button -->
-		</div>
-		<!-- /wp:buttons -->
+		<!-- wp:heading {"level":1,"textColor":"base","fontSize":"huge"} --><h1 class="wp-block-heading has-base-color has-text-color has-huge-font-size">Notes from the floor</h1><!-- /wp:heading -->
+		<!-- wp:buttons --><div class="wp-block-buttons"><!-- wp:button --><div class="wp-block-button"><a class="wp-block-button__link wp-element-button" href="#latest">Read the latest</a></div><!-- /wp:button --></div><!-- /wp:buttons -->
 	</div>
 </div>
 <!-- /wp:cover -->
@@ -1332,27 +1289,18 @@ The premium post layout. TWO queries: the first shows only the newest
 post, full width with its featured image; the second offsets by one and
 grids the rest in cards. The offset is what prevents the featured post
 repeating in the grid.
+The magazine layout for a premium front page: the newest featured post large and full width, then a card grid of recent posts — two queries where the second sets offset 1 so the featured post never repeats in the grid.
 
 ```html
 <!-- wp:query {"queryId":10,"query":{"perPage":1,"postType":"post","order":"desc","orderBy":"date"}} -->
-<div class="wp-block-query">
-	<!-- wp:post-template -->
-		<!-- wp:post-featured-image {"aspectRatio":"16/9","style":{"border":{"radius":"4px"}}} /-->
-		<!-- wp:post-date {"format":"j M Y"} /-->
-		<!-- wp:post-title {"level":2,"isLink":true,"fontSize":"xx-large"} /-->
-		<!-- wp:post-excerpt {"excerptLength":32} /-->
-	<!-- /wp:post-template -->
-</div>
+<div class="wp-block-query"><!-- wp:post-template -->
+	<!-- wp:post-featured-image {"aspectRatio":"16/9"} /--><!-- wp:post-title {"level":2,"isLink":true,"fontSize":"xx-large"} /-->
+<!-- /wp:post-template --></div>
 <!-- /wp:query -->
-
 <!-- wp:query {"queryId":11,"query":{"perPage":4,"offset":1,"postType":"post","order":"desc","orderBy":"date"}} -->
-<div class="wp-block-query">
-	<!-- wp:post-template {"layout":{"type":"grid","columnCount":2}} -->
-		<!-- wp:post-featured-image {"aspectRatio":"3/2","style":{"border":{"radius":"4px"}}} /-->
-		<!-- wp:post-date {"format":"j M Y"} /-->
-		<!-- wp:post-title {"level":3,"isLink":true} /-->
-	<!-- /wp:post-template -->
-</div>
+<div class="wp-block-query"><!-- wp:post-template {"layout":{"type":"grid","columnCount":2}} -->
+	<!-- wp:post-featured-image {"aspectRatio":"3/2"} /--><!-- wp:post-title {"level":3,"isLink":true} /-->
+<!-- /wp:post-template --></div>
 <!-- /wp:query -->
 ```
 
@@ -1380,20 +1328,15 @@ in the band. One per page, never more.
 Numbers in the display face at xx-large, labels in the small sans
 underneath, three columns, never four. Dark band variant: contrast
 background with base text set explicitly.
+The stats band section: three numbers in the display face on a dark contrast background, metric labels small underneath — counts, percentages, statistics presented as columns, never four.
 
 ```html
-<!-- wp:group {"align":"full","backgroundColor":"contrast","textColor":"base","style":{"spacing":{"padding":{"top":"var:preset|spacing|60","bottom":"var:preset|spacing|60"}}},"layout":{"type":"constrained"}} -->
-<div class="wp-block-group alignfull has-base-color has-contrast-background-color has-text-color has-background" style="padding-top:var(--wp--preset--spacing--60);padding-bottom:var(--wp--preset--spacing--60)">
-	<!-- wp:columns -->
-	<div class="wp-block-columns">
-		<!-- wp:column -->
-		<div class="wp-block-column">
-			<!-- wp:heading {"level":3,"fontSize":"xx-large","textColor":"base"} --><h3 class="wp-block-heading has-base-color has-text-color has-xx-large-font-size">1,766</h3><!-- /wp:heading -->
-			<!-- wp:paragraph {"fontSize":"small","textColor":"tint"} --><p class="has-tint-color has-text-color has-small-font-size">Tests passing</p><!-- /wp:paragraph -->
-		</div>
-		<!-- /wp:column -->
-	</div>
-	<!-- /wp:columns -->
+<!-- wp:group {"align":"full","backgroundColor":"contrast","textColor":"base","layout":{"type":"constrained"}} -->
+<div class="wp-block-group alignfull has-base-color has-contrast-background-color has-text-color has-background">
+	<!-- wp:columns --><div class="wp-block-columns"><!-- wp:column --><div class="wp-block-column">
+		<!-- wp:heading {"level":3,"fontSize":"xx-large","textColor":"base"} --><h3 class="wp-block-heading has-base-color has-text-color has-xx-large-font-size">1,766</h3><!-- /wp:heading -->
+		<!-- wp:paragraph {"fontSize":"small","textColor":"tint"} --><p class="has-tint-color has-text-color has-small-font-size">Tests passing</p><!-- /wp:paragraph -->
+	</div><!-- /wp:column --></div><!-- /wp:columns -->
 </div>
 <!-- /wp:group -->
 ```

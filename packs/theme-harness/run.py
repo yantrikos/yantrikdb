@@ -428,7 +428,15 @@ class PackHost:
         self.db.mount_pack(str(pack_file))
         self.constitution = self.db.pack_context()
 
-    def reference(self, *queries: str, top_k: int = 5) -> str:
+    def reference(self, *queries: str, top_k: int = 5,
+                  floor: float = MIN_SIMILARITY) -> str:
+        """`floor` defaults to the open-Q&A gate (0.55, measured against
+        attach-harm). Generation stages may pass a lower floor: their
+        queries are deliberately scoped task vocabulary, and the bands
+        measured for this pack's section routes are on-topic 0.435-0.544
+        vs off-topic <= 0.354 — a 0.55 floor was silently rejecting
+        rank-1 on-topic exemplars, which is why small models never saw
+        them."""
         parts = [self.constitution]
         seen: set[str] = set()
         for q in queries:
@@ -440,7 +448,7 @@ class PackHost:
                 # constitution alone. evaluate.py had it right; this file
                 # re-implemented the read from memory instead of copying
                 # the working one, and got it subtly wrong.
-                if h.get("scores", {}).get("similarity", 0.0) < MIN_SIMILARITY:
+                if h.get("scores", {}).get("similarity", 0.0) < floor:
                     continue
                 text = h.get("text", "")
                 if text and text not in seen:

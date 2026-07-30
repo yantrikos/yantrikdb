@@ -344,7 +344,7 @@ def repair(host, ollama, model, path: str, body: str, defects: list[str],
         f"Rewrite {path} completely, fixing every problem listed and changing "
         f"nothing else. Output only the file contents — no explanation, no "
         f"code fences. {size_hint(path)}")
-    out, _ = ask(ollama, model, host.reference(*file_queries(path)) + prompt, SYSTEM)
+    out, _ = ask(ollama, model, host.reference(*file_queries(path), floor=0.42) + prompt, SYSTEM)
     return strip_fences(out)
 
 
@@ -383,7 +383,7 @@ def main() -> int:
     def gen(path: str, prompt_extra: str = "") -> str:
         body, _ = ask(
             ollama, model,
-            host.reference(*file_queries(path))
+            host.reference(*file_queries(path), floor=0.42)
             + f"You are writing {path} for {SPEC}\n\n{prompt_extra}"
             f"Write the full contents of {path} and nothing else. No "
             f"explanation, no code fences. {size_hint(path)}",
@@ -394,7 +394,7 @@ def main() -> int:
 
     # ── 1. manifest ─────────────────────────────────────────────────
     raw, _ = ask(ollama, model,
-                 host.reference("block theme file structure and required files")
+                 host.reference("block theme file structure and required files", floor=0.42)
                  + f"List every file needed for {SPEC}\n\nOutput ONLY the file "
                  f"paths, one per line, relative to the theme directory.",
                  SYSTEM)
@@ -474,7 +474,7 @@ def main() -> int:
     if main_tpl:
         raw, _ = ask(ollama, model,
                      host.reference("composing templates sections in order "
-                                    "band reading column")
+                                    "band reading column", floor=0.42)
                      + "You are planning the front page for " + SPEC
                      + "\n\n" + OUTLINE_BRIEF, SYSTEM)
         outline = parse_outline(raw)
@@ -500,7 +500,7 @@ def main() -> int:
                      f"{defect}\n") if defect else ""
             frag, _ = ask(
                 ollama, model,
-                host.reference(*section_queries(name, blocks, i, total))
+                host.reference(*section_queries(name, blocks, i, total), floor=0.42)
                 + ctx
                 + f'Write ONLY the block markup for one section of the front '
                 f'page: "{name}" containing {blocks}. One complete wp:group '
