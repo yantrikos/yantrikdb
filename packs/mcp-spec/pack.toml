@@ -1,15 +1,20 @@
 [pack]
 name = "mcp-spec"
-version = "0.1.0"
+version = "0.2.0"
 origin = "yantrik/mcp-spec"
 namespace = "mcp_spec"
-description = "The Model Context Protocol specification revision 2026-07-28 — published after every current model's training data, which is exactly why it matters: this revision removes the initialize handshake and protocol sessions, deprecates Roots, Sampling and Logging, replaces server-initiated requests with Multi Round-Trip Requests (MRTR), and replaces resources/subscribe with subscriptions/listen. A model writing MCP code from memory writes the old protocol; this pack carries the delta first, then the full mechanics: per-request _meta, server/discover, Streamable HTTP headers, error-code allocation, and requestState security."
+description = "The complete Model Context Protocol specification, revision 2026-07-28 — published after every current model's training data, which is exactly why it matters: this revision removes the initialize handshake and protocol sessions, deprecates Roots, Sampling and Logging, replaces server-initiated requests with Multi Round-Trip Requests (MRTR), and replaces resources/subscribe with subscriptions/listen. A model writing MCP code from memory writes the old protocol. Covers all 31 specification pages and the official extensions: the migration delta first, then tools, resources, prompts, the OAuth authorization framework with Client ID Metadata Documents, both transports, caching, pagination, completion, and the Tasks and Apps extensions."
 coverage = [
     "MCP protocol revision 2026-07-28 changes and migration from earlier revisions",
     "MCP stateless requests, _meta fields and capability negotiation",
+    "MCP tools: tools/list, tools/call, schemas, annotations and x-mcp-header",
+    "MCP resources, resource templates, prompts and content blocks",
     "MCP Multi Round-Trip Requests, elicitation, sampling and roots",
-    "MCP Streamable HTTP transport, headers and SSE streams",
-    "MCP subscriptions, notifications and server discovery",
+    "MCP Streamable HTTP and stdio transports, headers and SSE streams",
+    "MCP OAuth authorization, Client ID Metadata Documents and token validation",
+    "MCP subscriptions, notifications, server discovery and caching",
+    "MCP pagination, completion, logging and progress utilities",
+    "MCP extensions: tasks, apps, and extension negotiation",
     "MCP error codes, JSON-RPC message rules and JSON Schema usage",
 ]
 
