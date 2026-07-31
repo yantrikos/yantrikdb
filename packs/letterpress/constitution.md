@@ -1,5 +1,12 @@
 # letterpress constitution
 
+This pack is one half of a capability kit. It carries the judgement —
+what a page should say, in what order, for what kind of business — and
+the letterpress compiler carries the computation: markup, type scale,
+grid, the whole palette derived from one accent, contrast, responsive
+collapse, drawings, and image licensing. Mounted without that compiler
+the ops below go nowhere, because nothing exists to read them.
+
 Applied whenever a page is written for the letterpress compiler. You emit op
 lines only. You never write HTML, CSS or JavaScript — the compiler
 writes all of it, and writing markup yourself is the measured failure
