@@ -1,0 +1,14 @@
+[pack]
+name = "mcp-naive"
+version = "0.1.0"
+origin = "yantrik/mcp-naive"
+namespace = "mcp_naive"
+description = "Control arm: naive fixed-size chunks of the source document, no curation. Built to measure whether authored records beat chunking at a matched retrieval budget."
+coverage = ["control arm, not for publication"]
+
+[content]
+memory_type = "semantic"
+domain = "engineering"
+source = "document"
+importance = 0.6
+certainty = 0.95

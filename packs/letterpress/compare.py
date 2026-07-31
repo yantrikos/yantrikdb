@@ -9,7 +9,7 @@ the adjectives directly — how many DISTINCT page structures a model
 produced, how much it wrote, and how often it tried to state something
 the brief never said.
 
-    python packs/webkit/compare.py n4 n9
+    python packs/letterpress/compare.py n4 n9
 """
 
 from __future__ import annotations

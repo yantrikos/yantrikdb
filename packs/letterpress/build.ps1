@@ -11,9 +11,9 @@
 $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent $PSScriptRoot
 $py = Join-Path (Split-Path -Parent $root) ".venv\Scripts\python.exe"
-$webkit = Join-Path $root "webkit"
+$kit = Join-Path $root "letterpress"
 
-Remove-Item (Join-Path $webkit "out\*.html") -ErrorAction SilentlyContinue
+Remove-Item (Join-Path $kit "out\*.html") -ErrorAction SilentlyContinue
 
 # BOTH ops directories. The first version rebuilt only briefs\ and left
 # generated\ pages on disk from an earlier compiler, so a run reported
@@ -21,9 +21,9 @@ Remove-Item (Join-Path $webkit "out\*.html") -ErrorAction SilentlyContinue
 # model's - and the stale ones were the numbers that mattered. Same
 # stale-output failure this script exists to prevent, one directory over.
 $failed = 0
-Get-ChildItem (Join-Path $webkit "briefs\*.ops"), (Join-Path $webkit "generated\*.ops") | ForEach-Object {
-    $out = Join-Path $webkit ("out\" + $_.BaseName + ".html")
-    & $py (Join-Path $webkit "compiler.py") $_.FullName --out $out --strict
+Get-ChildItem (Join-Path $kit "briefs\*.ops"), (Join-Path $kit "generated\*.ops") | ForEach-Object {
+    $out = Join-Path $kit ("out\" + $_.BaseName + ".html")
+    & $py (Join-Path $kit "compiler.py") $_.FullName --out $out --strict
     if ($LASTEXITCODE -ne 0) {
         Write-Host "COMPILE FAILED: $($_.Name)" -ForegroundColor Red
         $failed++
@@ -31,10 +31,10 @@ Get-ChildItem (Join-Path $webkit "briefs\*.ops"), (Join-Path $webkit "generated\
 }
 if ($failed -gt 0) { throw "$failed brief(s) failed to compile; refusing to render stale output" }
 
-& $py (Join-Path $webkit "test_palette.py")
+& $py (Join-Path $kit "test_palette.py")
 if ($LASTEXITCODE -ne 0) { throw "palette invariant violated; refusing to render" }
 
-$pages = Get-ChildItem (Join-Path $webkit "out\*.html") | ForEach-Object { $_.FullName }
+$pages = Get-ChildItem (Join-Path $kit "out\*.html") | ForEach-Object { $_.FullName }
 if (-not $pages) { throw "no pages compiled" }
-& C:\Python313\python.exe (Join-Path $webkit "shoot.py") $pages
-& $py (Join-Path $webkit "gallery.py")
+& C:\Python313\python.exe (Join-Path $kit "shoot.py") $pages
+& $py (Join-Path $kit "gallery.py")

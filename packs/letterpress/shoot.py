@@ -137,7 +137,7 @@ PROBE = """() => {
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("pages", nargs="+")
-    ap.add_argument("--shots", default="packs/webkit/shots")
+    ap.add_argument("--shots", default="packs/letterpress/shots")
     args = ap.parse_args()
 
     from playwright.sync_api import sync_playwright

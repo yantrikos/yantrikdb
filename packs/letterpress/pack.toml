@@ -1,0 +1,23 @@
+[pack]
+name = "letterpress"
+version = "0.1.0"
+origin = "yantrik/letterpress"
+namespace = "letterpress"
+description = "How to drive the letterpress site compiler: a seven-op language a small model can write correctly, with a worked example for every section kind and every drawing. The compiler owns everything computable — type scale, spacing, the whole palette derived from one accent hex, contrast, responsive collapse, SVG — so this pack teaches only the decisions a model is actually good at: what a page should contain, in what order, said how. Measured against the same model writing HTML directly, which failed every render gate on every brief; the failures were all numeric constraints stated plainly in its guidance that a model has no way to evaluate. Also carries the two refusals the kit enforces, because the sections that manufacture credibility — a stats band, a testimonial — are the ones a model with nothing to say will invent."
+coverage = [
+    "letterpress op language: SITE, THEME, SECTION, TEXT, ACTION, MEDIA, ITEM",
+    "letterpress section kinds hero, features, cta, proof, detail, faq, roster, note, quote, gallery",
+    "letterpress planning a page: which sections a brief needs and in what order",
+    "letterpress choosing a typographic family and a single accent colour",
+    "letterpress choosing a motif drawing for a subject",
+    "letterpress writing copy: emphasis brackets, ledes, item bodies, FAQ answers",
+    "letterpress what never to invent: prices, clock times, benchmarks, testimonials",
+    "letterpress common errors and what the compiler rejects",
+]
+
+[content]
+memory_type = "semantic"
+domain = "engineering"
+source = "document"
+importance = 0.6
+certainty = 0.95

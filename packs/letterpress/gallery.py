@@ -51,7 +51,7 @@ def main() -> int:
     html = f"""<!doctype html>
 <html lang=en><head><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>webkit — rendered pages</title>
+<title>letterpress — rendered pages</title>
 <style>
 :root{{color-scheme:light dark}}
 body{{margin:0;padding:2.5rem 1.5rem 5rem;background:#111013;color:#eceaef;
@@ -71,7 +71,7 @@ figure{{margin:0}}
 img{{width:100%;display:block;border:1px solid #2b2830;border-radius:6px}}
 figcaption{{color:#78757f;font-size:.78rem;margin-top:.45rem}}
 </style></head><body><div class=wrap>
-<h1>webkit — six briefs, one compiler</h1>
+<h1>letterpress — every brief, one compiler</h1>
 <p class=lede>Each page was produced from a short operations script: no HTML or CSS
 was written per page. Three visual families, both colour modes. Every page here
 passes the mechanical gates (contrast, overflow, readable size, single H1) at both

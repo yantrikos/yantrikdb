@@ -11,7 +11,7 @@ toward white on a near-white inverted band in dark mode) was invisible
 to every brief in the repo and would have shipped as an emphasised word
 that simply is not there.
 
-    python packs/webkit/test_palette.py
+    python packs/letterpress/test_palette.py
 """
 
 from __future__ import annotations
