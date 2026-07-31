@@ -4,7 +4,7 @@ THEME    family=editorial  accent=#b8442f  mode=light  density=roomy
 
 SECTION  id=s1  kind=hero  layout=split  tone=quiet
 TEXT     sec=s1  slot=eyebrow  text="Ashgrove Architects — est. 2004"
-TEXT     sec=s1  slot=title    text="Buildings that age well"  accent="age"
+TEXT     sec=s1  slot=title    text="Buildings that [age] well"
 TEXT     sec=s1  slot=lede     text="We work in brick, oak and daylight. Twenty years of houses, libraries and one stubborn chapel in the Cotswolds."
 ACTION   sec=s1  slot=primary   label="See the work"  href="#work"
 ACTION   sec=s1  slot=secondary label="Start a project"  href="#contact"

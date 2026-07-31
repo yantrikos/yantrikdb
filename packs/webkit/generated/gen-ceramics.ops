@@ -1,0 +1,19 @@
+SITE     name="Wren & Slip"  nav="Shop,Classes,About"  location="Cornwall"  contact="hello@wrenslipceramics.co.uk"
+THEME    family=studio  accent=#2c3e50  mode=light  density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Hand-thrown stoneware"
+TEXT sec=s1 slot=title text="Wren & Slip [handmade]"
+TEXT sec=s1 slot=lede text="Cornwall. Six students per class."
+ACTION sec=s1 slot=primary label="Shop now" href="#shop"
+ACTION sec=s1 slot=secondary label="Join a class" href="#classes"
+MEDIA sec=s1 slot=figure alt="Stoneware pieces drying on racks" motif=elevation
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT sec=s2 slot=eyebrow text="Wheel throwing"
+TEXT sec=s2 slot=title text="The process [is slow]"
+ITEM sec=s2 slot=item title="Rye bread" body="Baked in the morning oven."
+ITEM sec=s2 slot=item title="Pottery class" body="Six students, Saturday mornings."
+ITEM sec=s2 slot=item title="Cornwall clay" body="Locally sourced from Penzance."
+SECTION  id=s3  kind=cta  layout=stack  tone=inverted
+TEXT sec=s3 slot=title text="Wren & Slip [ceramics]"
+TEXT sec=s3 slot=lede text="Shop stoneware or book a class."
+ACTION sec=s3 slot=primary label="Visit the studio" href="#contact"

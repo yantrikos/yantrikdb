@@ -3,6 +3,8 @@
   "briefs": {
     "bakery": "A sourdough bakery in Bristol called Tide Mill. Two ovens, no cafe, sells out by noon. Wants people to know the collection times and the weekly loaf.",
     "clinic": "A physiotherapy clinic in Leeds called Kestrel. Sports injuries and post-op rehab, two practitioners, no gym contract required.",
-    "devtool": "An open-source CLI called Flint that finds unused database indexes in Postgres. Read-only, runs in CI, MIT licensed."
+    "devtool": "An open-source CLI called Flint that finds unused database indexes in Postgres. Read-only, runs in CI, MIT licensed.",
+    "_comment2": "The three briefs above are deliberately thin, which is what exposed the fabrication: asked for a stats band, the model invented benchmarks. This fourth brief carries real figures, so a proof section can be built from the brief instead of from nothing. Keep both kinds — a kit that only behaves on generous input is not measured.",
+    "archive": "A film archive in Sheffield called Reel North. Holds 12,400 reels of regional television from 1957 to 1994, digitised at 4K. Open to researchers 3 days a week, free of charge. Two archivists on staff."
   }
 }

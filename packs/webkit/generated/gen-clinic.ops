@@ -1,0 +1,19 @@
+SITE     name="Kestrel Physio"  nav="Services,Timetable,Contact"  location="Leeds"  contact="info@kestrelphysio.co.uk"
+THEME    family=editorial  accent=#2c5f78  mode=light  density=roomy
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Physiotherapy Leeds"
+TEXT sec=s1 slot=title text="Rehab without restrictions"
+TEXT sec=s1 slot=lede text="Sports injuries and post-op recovery. Two practitioners, no gym contract required."
+ACTION sec=s1 slot=primary label="Book an assessment" href="#book"
+ACTION sec=s1 slot=secondary label="View timetables" href="#timetable"
+MEDIA sec=s1 slot=figure alt="Clinic reception at morning light" motif=elevation
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT sec=s2 slot=eyebrow text="Our approach"
+TEXT sec=s2 slot=title text="Movement-first rehabilitation"
+ITEM sec=s2 slot=item title="Rice & hamstring" body="Post-ACL surgery recovery for runners."
+ITEM sec=s2 slot=item title="Core stability" body="Manual therapy plus prescribed movement patterns."
+ITEM sec=s2 slot=item title="Return to sport" body="Graduated loading plans with weekly progress checks."
+SECTION  id=s3  kind=cta  layout=stack  tone=inverted
+TEXT sec=s3 slot=title text="Your recovery starts here"
+TEXT sec=s3 slot=lede text="Two practitioners, no gym contract required."
+ACTION sec=s3 slot=primary label="Book an assessment" href="#book"

@@ -1,0 +1,30 @@
+SITE     name="Reel North"  nav="Access,Collections,Contact"  location="Sheffield"  contact="research@reelnorth.ac.uk"
+THEME    family=technical  accent=#0f3d5e  mode=dark  density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Film archive"
+TEXT sec=s1 slot=title text="Reel North [Sheffield]"
+TEXT sec=s1 slot=lede text="Twelve thousand reels. 4K digitised."
+ACTION sec=s1 slot=primary label="Open hours" href="#hours"
+ACTION sec=s1 slot=secondary label="View collection" href="#collection"
+MEDIA sec=s1 slot=figure motif=elevation
+SECTION  id=s2  kind=proof  layout=stack  tone=quiet
+TEXT sec=s2 slot=eyebrow text="Archive"
+TEXT sec=s2 slot=title text="12,400 reels [digitised]"
+ITEM sec=s2 slot=item title="1957" body="Collection start."
+ITEM sec=s2 slot=item title="1994" body="Digitisation complete."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT sec=s3 slot=eyebrow text="Curated access"
+TEXT sec=s3 slot=title text="Two archivists, 4K precision [Sheffield]"
+TEXT sec=s3 slot=lede text="Only hands that know the reel."
+ACTION sec=s3 slot=primary label="Request viewing" href="#request"
+MEDIA sec=s3 slot=figure motif=dial
+SECTION  id=s4  kind=features  layout=list  tone=quiet
+TEXT sec=s4 slot=eyebrow text="Preservation"
+TEXT sec=s4 slot=title text="Every frame [preserved]"
+ITEM sec=s4 slot=item title="1957" body="First regional broadcast recorded."
+ITEM sec=s4 slot=item title="1962" body="Local news coverage begins."
+ITEM sec=s4 slot=item title="1980" body="Industrial documentary series added."
+SECTION  id=s6  kind=cta  layout=stack  tone=quiet
+TEXT sec=s6 slot=title text="Free access"
+TEXT sec=s6 slot=lede text="Request a viewing for any reel."
+ACTION sec=s6 slot=primary label="Book appointment" href="#request"

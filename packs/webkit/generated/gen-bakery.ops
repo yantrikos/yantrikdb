@@ -1,0 +1,19 @@
+SITE     name="Tide Mill"  nav="Bread,Visit,Contact"  location="Bristol"  contact="hello@tidemill.co"
+THEME    family=editorial  accent=#b8442f  mode=light  density=roomy
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Fresh from the oven"
+TEXT sec=s1 slot=title text="Bread [worth the walk]"
+TEXT sec=s1 slot=lede text="Two ovens and no cafe."
+ACTION sec=s1 slot=primary label="Collection times" href="#times"
+ACTION sec=s1 slot=secondary label="Weekly loaf" href="#loaves"
+MEDIA sec=s1 slot=figure alt="The mill at first light" motif=elevation
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT sec=s2 slot=eyebrow text="Our weekly loaf"
+TEXT sec=s2 slot=title text="Rye [and caraway]"
+ITEM sec=s2 slot=item title="Tuesday" body="Rye and caraway, forty loaves."
+ITEM sec=s2 slot=item title="Thursday" body="Whole wheat sourdough, thirty-six loaves."
+ITEM sec=s2 slot=item title="Saturday" body="Multigrain with rosemary, twenty-eight loaves."
+SECTION  id=s3  kind=cta  layout=stack  tone=inverted
+TEXT sec=s3 slot=title text="Bake until sold out"
+TEXT sec=s3 slot=lede text="No cafe. Just bread."
+ACTION sec=s3 slot=primary label="Join the list" href="#join"

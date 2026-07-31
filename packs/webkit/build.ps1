@@ -15,8 +15,13 @@ $webkit = Join-Path $root "webkit"
 
 Remove-Item (Join-Path $webkit "out\*.html") -ErrorAction SilentlyContinue
 
+# BOTH ops directories. The first version rebuilt only briefs\ and left
+# generated\ pages on disk from an earlier compiler, so a run reported
+# six PASS lines for hand-written pages and six stale FAILs for the
+# model's - and the stale ones were the numbers that mattered. Same
+# stale-output failure this script exists to prevent, one directory over.
 $failed = 0
-Get-ChildItem (Join-Path $webkit "briefs\*.ops") | ForEach-Object {
+Get-ChildItem (Join-Path $webkit "briefs\*.ops"), (Join-Path $webkit "generated\*.ops") | ForEach-Object {
     $out = Join-Path $webkit ("out\" + $_.BaseName + ".html")
     & $py (Join-Path $webkit "compiler.py") $_.FullName --out $out --strict
     if ($LASTEXITCODE -ne 0) {
@@ -25,6 +30,9 @@ Get-ChildItem (Join-Path $webkit "briefs\*.ops") | ForEach-Object {
     }
 }
 if ($failed -gt 0) { throw "$failed brief(s) failed to compile; refusing to render stale output" }
+
+& $py (Join-Path $webkit "test_palette.py")
+if ($LASTEXITCODE -ne 0) { throw "palette invariant violated; refusing to render" }
 
 $pages = Get-ChildItem (Join-Path $webkit "out\*.html") | ForEach-Object { $_.FullName }
 if (-not $pages) { throw "no pages compiled" }

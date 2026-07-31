@@ -42,6 +42,23 @@ PROBE = """() => {
     }
     return 'rgb(255,255,255)';
   };
+  const rgb = (c) => {
+    const m = (c.match(/[\\d.]+/g) || ['0','0','0']).map(Number);
+    return [m[0]||0, m[1]||0, m[2]||0, m.length > 3 ? m[3] : 1];
+  };
+  // What the pixel actually shows. The design leans on `opacity:.78` for
+  // secondary text on inverted bands, and reading `color` alone treats
+  // that as fully opaque — so a token could be faded to unreadable and
+  // still be reported at its nominal ratio. Composite the declared
+  // colour over its ground using every opacity between the element and
+  // the body, plus any alpha in the colour itself.
+  const painted = (el, bg) => {
+    let a = rgb(getComputedStyle(el).color)[3];
+    for (let n = el; n && n !== document.documentElement; n = n.parentElement)
+      a *= parseFloat(getComputedStyle(n).opacity);
+    const f = rgb(getComputedStyle(el).color), b = rgb(bg);
+    return 'rgb(' + [0,1,2].map(i => f[i]*a + b[i]*(1-a)).join(',') + ')';
+  };
   // Content hidden behind opacity still counts as innerText, so
   // HAS_CONTENT passed on a page whose last two sections were invisible.
   // Check paint, not markup.
@@ -51,10 +68,41 @@ PROBE = """() => {
     if (t.length > 20 && parseFloat(getComputedStyle(el).opacity) < 0.05)
       out.invisible.push(t.slice(0,40));
   });
-  document.querySelectorAll('p,h1,h2,h3,a,span,li').forEach(el => {
-    const t = (el.innerText||'').trim(); if (!t) return;
+  // Every element that OWNS text, not a hand-listed set of tags. The
+  // list this replaces was `p,h1,h2,h3,a,span,li`, which silently
+  // exempted <cite>, <blockquote>, <figcaption>, <td>, <button> and
+  // <label> — and a <cite> attribution duly shipped at 2.51:1 on an
+  // inverted band with the gate reporting PASS. A gate that misses is
+  // worse than no gate, because it is also a claim.
+  //
+  // Direct text nodes only: measuring containers too would attribute a
+  // child's colour to its parent and report the same defect twice, and
+  // it is the element that SETS the colour we want named in the output.
+  document.querySelectorAll('body *').forEach(el => {
+    let t = '';
+    for (const n of el.childNodes)
+      if (n.nodeType === 3) t += n.nodeValue;
+    t = t.trim();
+    if (!t) return;
     const cs = getComputedStyle(el);
-    const size = parseFloat(cs.fontSize);
+    // Text that never paints cannot have a contrast defect; blanking is
+    // NO_INVISIBLE_TEXT's job, and double-reporting it here would only
+    // bury the real failures.
+    if (cs.display === 'none' || cs.visibility === 'hidden') return;
+    if (!el.getClientRects().length) return;
+    // Inside an <svg>, computed fontSize is in USER units and ignores the
+    // viewBox transform, so an 11-unit dimension label reported 11px at
+    // every viewport while actually rendering near 14px on desktop and
+    // under 10px on mobile. Neither number was the truth. Scale by the
+    // element's own screen CTM to get the size a reader actually sees —
+    // the widened selector only surfaced this because <text> had never
+    // been measured at all.
+    let scale = 1;
+    if (el.ownerSVGElement && el.getScreenCTM) {
+      const m = el.getScreenCTM();
+      if (m) scale = Math.sqrt(Math.abs(m.a * m.d - m.b * m.c)) || 1;
+    }
+    const size = parseFloat(cs.fontSize) * scale;
     // Calibrated against the hand-written reference, which failed this
     // check on 11.5px tracked uppercase nav links. A tracked micro-label
     // is a deliberate editorial convention and reads fine; accidentally
@@ -69,7 +117,8 @@ PROBE = """() => {
     const caps = cs.textTransform === 'uppercase' || t === t.toUpperCase();
     const floor = (tracked && caps) ? 11 : 12;
     if (size < floor) out.tiny.push(t.slice(0,40) + ' @' + size.toFixed(1) + 'px');
-    const l1 = lum(cs.color), l2 = lum(bgOf(el));
+    const ground = bgOf(el);
+    const l1 = lum(painted(el, ground)), l2 = lum(ground);
     const ratio = (Math.max(l1,l2)+0.05)/(Math.min(l1,l2)+0.05);
     const big = size >= 24 || (size >= 18.66 && parseInt(cs.fontWeight) >= 700);
     if (ratio < (big ? 3 : 4.5))

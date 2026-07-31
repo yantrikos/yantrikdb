@@ -4,7 +4,7 @@ THEME    family=studio  accent=#4b3bd6  mode=light  density=normal
 
 SECTION  id=s1  kind=hero  layout=centred  tone=quiet
 TEXT     sec=s1  slot=eyebrow  text="Mira Okonkwo — brand & type"
-TEXT     sec=s1  slot=title    text="I make things look like what they are"  accent="look like"
+TEXT     sec=s1  slot=title    text="I make things [look like] what they are"
 TEXT     sec=s1  slot=lede     text="Identity, typography and packaging for people who have something specific to say. Currently booking from March."
 ACTION   sec=s1  slot=primary   label="Selected work"  href="#work"
 ACTION   sec=s1  slot=secondary label="About me"  href="#about"

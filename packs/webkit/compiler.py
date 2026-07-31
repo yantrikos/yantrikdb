@@ -84,6 +84,19 @@ FAMILIES = {
 
 DENSITY = {"tight": 0.72, "normal": 1.0, "roomy": 1.42}
 
+# Annotation size inside a motif, in viewBox user units.
+#
+# Text in a scaled viewBox has no fixed pixel size: these drawings render
+# at roughly 1.26x on desktop and 0.74x at 390px wide, so the labels must
+# be sized against the SMALLEST scale they will ever appear at, not the
+# one you happen to be looking at. At 11 units they rendered 8.1px on
+# mobile — unreadable — and the size gate could not see it, because
+# getComputedStyle reports user units and dutifully said "11px" at every
+# viewport. 18 units clears the 12px floor at 0.74x while staying
+# proportionate to artwork 420 units wide.
+ANNOT = 18
+
+
 def motif_elevation(pal: str, ink: str, line: str) -> str:
     """A building in elevation — hatched mass, roof, lit windows, and a
     dimension line, which is the detail that makes it read as a drawing
@@ -110,7 +123,7 @@ def motif_elevation(pal: str, ink: str, line: str) -> str:
 <line x1="74" y1="486" x2="262" y2="486"/><line x1="74" y1="480" x2="74" y2="492"/>
 <line x1="262" y1="480" x2="262" y2="492"/></g>
 <text x="168" y="478" text-anchor="middle" fill="{line}"
- font-family="ui-monospace,monospace" font-size="11">9 400</text>"""
+ font-family="ui-monospace,monospace" font-size="{ANNOT}">9 400</text>"""
 
 
 def motif_topography(pal: str, ink: str, line: str) -> str:
@@ -175,10 +188,10 @@ def motif_specimen(pal: str, ink: str, line: str) -> str:
             f'<line x1="40" y1="368" x2="380" y2="368"/>'
             f'<line x1="40" y1="176" x2="380" y2="176"/>'
             f'<line x1="40" y1="252" x2="380" y2="252"/></g>'
-            f'<text x="44" y="166" fill="{pal}" font-family="ui-monospace,monospace"'
-            f' font-size="11">CAP HEIGHT</text>'
-            f'<text x="44" y="242" fill="{pal}" font-family="ui-monospace,monospace"'
-            f' font-size="11">X-HEIGHT</text>')
+            f'<text x="44" y="162" fill="{pal}" font-family="ui-monospace,monospace"'
+            f' font-size="{ANNOT}">CAP HEIGHT</text>'
+            f'<text x="44" y="238" fill="{pal}" font-family="ui-monospace,monospace"'
+            f' font-size="{ANNOT}">X-HEIGHT</text>')
 
 
 MOTIFS = {
@@ -186,13 +199,51 @@ MOTIFS = {
     "schematic": motif_schematic, "dial": motif_dial, "specimen": motif_specimen,
 }
 
-SECTION_KINDS = {"hero", "features", "cta"}
+# What each drawing actually contains, for the caption and the aria
+# label.
+#
+# The model used to write this line, and it wrote it as though the
+# figure were a photograph: "A reel of film on a turntable" captioning
+# a line drawing of a building, "Terminal output" over a gauge. Told
+# explicitly that the artwork is an abstract diagram, told which five
+# diagrams exist and given a worked alt= for each, it carried on
+# describing imagined photographs — the same way it carried on failing
+# contrast after being handed the 4.5:1 rule.
+#
+# So the caption stops being something the model asserts. The compiler
+# drew the picture and is the only party that knows what is in it. The
+# cost is a less specific line than a person would write, which is why
+# a hand-authored `alt=` still wins: a human writing ops knows what the
+# building is called, and is answerable for saying so.
+MOTIF_CAPTION = {
+    "elevation": "Elevation",
+    "topography": "Contour survey",
+    "schematic": "System diagram",
+    "dial": "Instrument face",
+    "specimen": "Type specimen",
+}
+
+# Three kinds made every page the same page. Palette and family varied,
+# the skeleton never did — hero, features, cta — and a fixed skeleton is
+# what reads as generated no matter how well each part is set. These
+# three additions were chosen because each has a DIFFERENT visual
+# rhythm, not because they add more of the same: numerals at display
+# size, a single sentence with no competition, and the artwork returning
+# mirrored at a second scale.
+SECTION_KINDS = {"hero", "features", "cta", "proof", "quote", "detail"}
 LAYOUTS = {"split", "centred", "stack", "grid", "list"}
 TONES = {"quiet", "bold", "inverted"}
 SLOTS = {
     "hero": {"eyebrow", "title", "lede", "primary", "secondary", "figure"},
     "features": {"eyebrow", "title", "lede", "item"},
     "cta": {"eyebrow", "title", "lede", "primary", "secondary"},
+    # A stats band. ITEM title= carries the figure, body= what it counts.
+    "proof": {"eyebrow", "title", "item"},
+    # One sentence, one attribution, nothing else competing with it.
+    "quote": {"quote", "attrib"},
+    # The motif returns mirrored, so the drawing is a running element of
+    # the page rather than a one-off decoration in the hero.
+    "detail": {"eyebrow", "title", "lede", "primary", "figure"},
 }
 
 
@@ -247,8 +298,31 @@ def derive_palette(accent: str, mode: str) -> dict[str, str]:
         ink, muted = "#15120f", "#5d5751"
 
     acc = _rgb_to_hex(*colorsys.hls_to_rgb(h, l_acc, s))
+
+    # A filled button is a background that has to carry a LABEL, so the
+    # accent is itself a contrast constraint and not merely a hue.
+    # Choosing the better of white and ink is NOT the same as clearing
+    # 4.5:1 against either: a mid-green (#1f6f5c) came out at 4.30:1
+    # against both and the old expression shipped the loser of two
+    # failures without noticing. Walk the accent's lightness until one
+    # of the two label colours genuinely clears, then take that one.
+    #
+    # This is the fourth token in this function that needed SOLVING
+    # rather than picking — after accent-text against surface and
+    # accent-inv against ink. The rule the other three should have
+    # taught: any colour pair that carries text is solved in a loop with
+    # a measured exit condition. A conditional expression that selects
+    # between two candidates has no way to report that both were bad.
+    for _ in range(24):
+        if max(contrast(acc, "#ffffff"), contrast(acc, "#15120f")) >= 4.5:
+            break
+        l_acc = (max(0.10, l_acc - 0.02) if mode == "light"
+                 else min(0.90, l_acc + 0.02))
+        acc = _rgb_to_hex(*colorsys.hls_to_rgb(h, l_acc, s))
+
     hover = _rgb_to_hex(*colorsys.hls_to_rgb(h, max(0.2, l_acc - 0.09), s))
-    on_acc = "#ffffff" if contrast(acc, "#ffffff") >= 4.5 else "#15120f"
+    on_acc = ("#ffffff" if contrast(acc, "#ffffff") >= contrast(acc, "#15120f")
+              else "#15120f")
 
     pal = {
         "accent": acc, "accent-hover": hover, "on-accent": on_acc,
@@ -256,28 +330,70 @@ def derive_palette(accent: str, mode: str) -> dict[str, str]:
         "line": _rgb_to_hex(*line), "ink": ink, "muted": muted,
     }
 
+    def solve_on(bg: str, target: float = 4.5) -> str:
+        """The accent hue, lightened or darkened until it reads on `bg`.
+
+        The direction is decided by the BACKGROUND's luminance, not by
+        the page mode. Tying it to mode is the bug this replaces: the
+        old inverted-band loop only ever lightened, which is right in
+        light mode (where `ink` is near-black) and exactly backwards in
+        dark mode, where `ink` is the near-WHITE band colour. A dark
+        accent in dark mode therefore walked toward white and finished
+        at 1.05:1 — an emphasised word invisible on its own band. The
+        hue-space sweep found it; no brief we had ever hit it.
+        """
+        step = -0.03 if _lum(bg) > 0.4 else 0.03
+        li, out = l_acc, acc
+        for _ in range(40):
+            if contrast(out, bg) >= target:
+                return out
+            nxt = li + step
+            if not 0.02 <= nxt <= 0.98:
+                break
+            li = nxt
+            out = _rgb_to_hex(*colorsys.hls_to_rgb(h, li, s))
+        # The hue cannot reach AA on this ground at any lightness (very
+        # low-saturation greys against a mid ground). Fall back to the
+        # ground's own opposite rather than shipping the closest miss.
+        return "#0d0b09" if _lum(bg) > 0.4 else "#ffffff"
+
     # An accent that carries white text is not automatically legible AS
-    # text. A mid-amber passed on-accent and then failed at 3.60:1 as an
-    # outline-button label — one hue, one page, and only because the
-    # gate looked. Walk lightness until the accent clears 4.5:1 against
-    # the lightest thing it will sit on, and keep it as its own token.
-    lo, hi = (0.05, l_acc) if mode == "light" else (l_acc, 0.97)
-    accent_text = acc
-    for _ in range(24):
-        if contrast(accent_text, pal["surface"]) >= 4.5:
-            break
-        if mode == "light":
-            hi = max(0.04, hi - 0.03)
-            accent_text = _rgb_to_hex(*colorsys.hls_to_rgb(h, hi, s))
-        else:
-            lo = min(0.98, lo + 0.03)
-            accent_text = _rgb_to_hex(*colorsys.hls_to_rgb(h, lo, s))
-    pal["accent-text"] = accent_text
+    # text: a mid-amber passed on-accent and then failed at 3.60:1 as an
+    # outline-button label. And the same problem again on the inverted
+    # band, where the accent sits on `ink` rather than on `surface` — a
+    # pale clay accent passed everywhere else and hit 2.49:1 there.
+    # Two grounds means two solved tokens.
+    pal["accent-text"] = solve_on(pal["surface"])
+    pal["accent-inv"] = solve_on(pal["ink"])
     # Last-resort contrast repair: never ship unreadable body text.
     if contrast(pal["ink"], pal["canvas"]) < 7:
         pal["ink"] = "#0d0b09" if mode == "light" else "#ffffff"
     if contrast(pal["muted"], pal["canvas"]) < 4.5:
         pal["muted"] = "#4a453f" if mode == "light" else "#c3bdb6"
+
+    # Four separate contrast bugs shipped from this one function, each
+    # found by rendering a page and looking, each fixed only where it was
+    # found. So state the invariant the four fixes were groping toward
+    # and check it here: every pair in this palette that will carry text
+    # clears AA, for EVERY accent, not just the ones a brief happened to
+    # use. Failing here is loud and immediate; the alternative is a
+    # screenshot gate catching it three hues later, or not at all.
+    for fg, bg, what in (
+        ("on-accent", "accent", "button label on its fill"),
+        ("accent-text", "surface", "accent as text on a panel"),
+        ("accent-text", "canvas", "accent as text on the page"),
+        ("accent-inv", "ink", "accent inside an inverted band"),
+        ("ink", "canvas", "body text"),
+        ("ink", "surface", "body text on a panel"),
+        ("muted", "canvas", "secondary text"),
+        ("muted", "surface", "secondary text on a panel"),
+        ("canvas", "ink", "inverted body text"),
+    ):
+        got = contrast(pal[fg], pal[bg])
+        if got < 4.5:
+            raise AssertionError(
+                f"palette({accent}, {mode}): {what} is {got:.2f}:1 "
+                f"({fg}={pal[fg]} on {bg}={pal[bg]}), needs 4.5:1")
     return pal
 
 
@@ -357,8 +473,16 @@ def parse(text: str) -> Doc:
                 # keeps: a substring of its own text to set apart. One
                 # word in a headline carrying the brand colour is the
                 # cheapest thing that separates typeset from typed.
-                sec["texts"].append((slot, args.get("text", ""),
-                                     args.get("accent", "")))
+                # Emphasis is marked INLINE, with [brackets] inside the
+                # text itself, rather than by a separate argument that
+                # names a substring. Two earlier spellings failed for
+                # the same reason: a separate argument can name
+                # something that is not there. `accent=` collided with
+                # THEME's colour and got a hex; `mark=` got phrases
+                # lifted from the brief instead of from the title
+                # ("Wren & Slip" marked "hand-thrown"). Brackets cannot
+                # miss, because the mark IS part of the string.
+                sec["texts"].append((slot, args.get("text", ""), ""))
             elif op == "ACTION":
                 sec["actions"].append((slot, args.get("label", ""), args.get("href", "#")))
             elif op == "ITEM":
@@ -481,8 +605,12 @@ section:first-of-type{{border-top:0}}
   color:{pal['muted']};margin:0 0 1.4rem}}
 .eyebrow::before{{content:"";display:inline-block;width:1.8rem;height:1px;
   background:{pal['accent']};vertical-align:.3em;margin-right:.7rem}}
-h1 .em,h2 .em{{color:{pal['accent-text']};font-style:italic}}
-.inverted h1 .em,.inverted h2 .em{{color:{pal['accent']}}}
+/* Scoped to h1/h2 originally, which meant the emphasis brackets did
+   NOTHING inside a pullquote — the span rendered, inherited the body
+   colour and looked like ordinary text. Bind emphasis to the mark, not
+   to the two tags that happened to use it first. */
+.em{{color:{pal['accent-text']};font-style:italic}}
+.inverted .em{{color:{pal['accent-inv']}}}
 h1{{font-size:{st['d1']}}} h2{{font-size:{st['d2']}}} h3{{font-size:{st['d3']}}}
 .lede{{font-size:{st['lede']};color:{pal['muted']};margin-top:1.3rem;
   line-height:1.5}}
@@ -552,6 +680,52 @@ h1{{font-size:{st['d1']}}} h2{{font-size:{st['d2']}}} h3{{font-size:{st['d3']}}}
   font-family:{fam['mono']};font-size:{st['small']};letter-spacing:.1em;
   text-transform:uppercase;color:{pal['muted']}}}
 @media(min-width:56rem){{.figure{{height:100%}}}}
+/* The detail band mirrors the hero rather than repeating it: same
+   12-column grid, columns swapped, so art leads on the left and the
+   text block closes on the right. */
+@media(min-width:56rem){{
+  .mirror > .figure{{grid-column:1 / 7;grid-row:1}}
+  .mirror > div:last-child{{grid-column:7 / 13;grid-row:1;z-index:2;
+    position:relative}}
+}}
+/* A pullquote is a pause. One sentence, generous leading, an accent
+   rule instead of quotation marks — decorative glyphs at this size
+   read as clip art. */
+/* The measure belongs on the element that carries the LARGE type. A ch
+   limit on the blockquote is computed against the blockquote's own
+   16px, so `30ch` came out 295px wide and wrapped a 28px quote into
+   four stubby lines in the corner of a full-bleed band. ch units are
+   relative to the font-size of the element they are written on. */
+.pull{{margin:0;border-left:2px solid {pal['accent']};padding-left:2rem}}
+.pull p{{font-family:{fam['display']};font-weight:{fam['weight_display']};
+  letter-spacing:{fam['tracking_display']};font-size:{st['d2']};
+  line-height:1.28;margin:0;max-width:19ch;text-wrap:balance}}
+.pull cite{{display:block;margin-top:1.5rem;font-family:{fam['mono']};
+  font-size:{st['small']};font-style:normal;letter-spacing:.08em;
+  text-transform:uppercase;color:{pal['muted']}}}
+.inverted .pull p{{color:{pal['canvas']}}}
+/* `muted` is solved against `canvas`; on an inverted band its ground is
+   `ink`, where it measured 2.51:1. Every other inverted rule already
+   restated its colour — this one was missed because <cite> was outside
+   the gate's tag list, so nothing objected. */
+.inverted .pull cite{{color:{pal['canvas']};opacity:.72}}
+/* Numerals as the artwork. tabular-nums so the figures line up down
+   the row, and the caption stays small so the figure carries it. */
+.stats{{display:grid;gap:var(--gap) 1.5rem;grid-template-columns:1fr;
+  margin-top:2.8rem}}
+@media(min-width:40rem){{
+  .stats{{grid-template-columns:repeat(min(var(--cols,4),2),1fr)}}}}
+@media(min-width:60rem){{
+  .stats{{grid-template-columns:repeat(var(--cols,4),1fr)}}}}
+.stat{{border-top:{fam['rule']};padding-top:1.2rem}}
+.stat .fig{{display:block;font-family:{fam['display']};font-size:{st['d2']};
+  font-weight:{fam['weight_display']};line-height:1;
+  font-variant-numeric:tabular-nums;color:{pal['accent-text']};
+  letter-spacing:-.01em}}
+.inverted .stat .fig{{color:{pal['accent-inv']}}}
+.stat .cap{{display:block;margin-top:.7rem;font-size:{st['small']};
+  color:{pal['muted']};max-width:22ch;line-height:1.45}}
+.inverted .stat .cap{{color:{pal['canvas']};opacity:.78}}
 
 /* Motion. Two effects only, both cheap and both reversible: strokes
    draw themselves once, and blocks rise as they enter. Anything more
@@ -588,17 +762,19 @@ html.js .rise.in{{opacity:1;transform:none}}
 }}
 """
 
-    def _accented(text: str, sub: str) -> str:
-        """Escape first, then wrap the chosen substring. Escaping after
-        insertion would eat the span; wrapping before escaping would let
-        model text inject markup."""
+    def _accented(text: str, _unused: str = "") -> str:
+        """Turn `Buildings that [age] well` into an emphasised span.
+
+        Escape first, then substitute: escaping afterwards would eat the
+        span, and wrapping before escaping would let model-authored text
+        inject markup.
+        """
         safe = _esc(text)
-        if sub:
-            safe_sub = _esc(sub)
-            if safe_sub in safe:
-                return safe.replace(safe_sub, f'<span class="em">{safe_sub}</span>', 1)
-            doc.fallbacks.append(f"accent={sub!r} not found in title -> plain")
-        return safe
+        if "[" not in safe:
+            return safe
+        return re.sub(r"\[([^\[\]]{1,60})\]",
+                      r'<span class="em">\1</span>', safe, count=1).replace(
+            "[", "").replace("]", "")
 
     body: list[str] = []
     for sec in doc.sections:
@@ -635,19 +811,54 @@ html.js .rise.in{{opacity:1;transform:none}}
 
         col = "\n".join(inner)
         centred = ' class="centred"' if sec["layout"] == "centred" else ""
-        if sec["kind"] == "hero" and sec["layout"] == "split":
-            alt, motif = (sec["media"][0] if sec["media"]
-                          else ("Illustrative drawing", "elevation"))
+
+        def _figure() -> str:
+            alt, motif = (sec["media"][0] if sec["media"] else ("", "elevation"))
             if motif not in MOTIFS:
                 doc.fallbacks.append(f"motif={motif} unknown -> elevation")
                 motif = "elevation"
+            # Derived unless a human wrote one. See MOTIF_CAPTION.
+            label = alt.strip() or " — ".join(
+                x for x in (MOTIF_CAPTION[motif], doc.site.get("name", "")) if x)
             art = MOTIFS[motif](pal["accent"], pal["ink"], pal["muted"])
-            figure = (
+            return (
                 f'<figure class="figure">'
-                f'<svg viewBox="0 0 420 520" role="img" aria-label="{_esc(alt)}">'
+                f'<svg viewBox="0 0 420 520" role="img" aria-label="{_esc(label)}">'
                 f'{art}</svg>'
-                f'<figcaption>{_esc(alt)}</figcaption></figure>')
-            content = f'<div class="split"><div>{col}</div>{figure}</div>'
+                f'<figcaption>{_esc(label)}</figcaption></figure>')
+
+        if sec["kind"] == "quote":
+            # No heading, no eyebrow, no button. The whole effect is one
+            # sentence set large with room around it; adding anything
+            # else to this band is what turns a pause into another slab.
+            said = texts.get("quote", ("", ""))[0]
+            who = texts.get("attrib", ("", ""))[0]
+            cite = f'<cite>{_esc(who)}</cite>' if who else ""
+            content = (f'<blockquote class="pull">'
+                       f'<p>{_accented(said)}</p>{cite}</blockquote>')
+        elif sec["kind"] == "proof":
+            # Figures at display size, tabular so the digits align down
+            # the row. This is the one place numerals are the artwork.
+            stats = "".join(
+                f'<div class="stat"><span class="fig">{_esc(v)}</span>'
+                f'<span class="cap">{_esc(lab)}</span></div>'
+                for v, lab in sec["items"])
+            # Track count follows the item count. A fixed four-column
+            # grid is right for four figures and leaves half the row
+            # visibly empty for two — and two is now the common case,
+            # because ungrounded figures get dropped rather than
+            # invented. The layout has to survive its own honesty.
+            n = max(1, min(len(sec["items"]), 4))
+            content = (f'<div{centred}>{col}</div>'
+                       f'<div class="stats" style="--cols:{n}">{stats}</div>')
+        elif sec["kind"] == "detail":
+            # Mirrored against the hero: art left, text right. Same grid,
+            # reversed columns, so the eye travels the other way and the
+            # page has a rhythm instead of a stack of identical rows.
+            content = (f'<div class="split mirror">{_figure()}'
+                       f'<div>{col}</div></div>')
+        elif sec["kind"] == "hero" and sec["layout"] == "split":
+            content = f'<div class="split"><div>{col}</div>{_figure()}</div>'
         elif sec["items"] and sec["layout"] == "list":
             # A rule-separated numbered list instead of bordered cards.
             # Cards are the safe default and read Bootstrap-generic;

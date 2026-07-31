@@ -1,0 +1,45 @@
+# Exercises every section kind, including the three added after the
+# three-kind skeleton was identified as the reason every page read the
+# same. Compiled by hand first: the compiler has to render these well
+# before it is worth teaching a 4B to ask for them.
+SITE     name="Kestrel"  nav="Treatment,Team,Book"  location="Leeds"  contact="hello@kestrel.physio"
+THEME    family=editorial  accent=#1f6f5c  mode=light  density=roomy
+
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT     sec=s1  slot=eyebrow  text="Physiotherapy in Leeds"
+TEXT     sec=s1  slot=title    text="Rehab that ends with you [back on the pitch]"
+TEXT     sec=s1  slot=lede     text="Two practitioners, forty minutes an appointment, and no gym contract at the end of it."
+ACTION   sec=s1  slot=primary    label="Book an assessment"  href="#book"
+ACTION   sec=s1  slot=secondary  label="What we treat"       href="#treat"
+MEDIA    sec=s1  slot=figure   alt="The treatment room on Great George Street"  motif=elevation
+
+SECTION  id=s2  kind=proof  layout=stack  tone=quiet
+TEXT     sec=s2  slot=eyebrow  text="Since 2019"
+TEXT     sec=s2  slot=title    text="What the caseload looks like"
+ITEM     sec=s2  slot=item  title="40 min"  body="Every appointment, including the first."
+ITEM     sec=s2  slot=item  title="1,840"   body="Courses of treatment completed."
+ITEM     sec=s2  slot=item  title="2"       body="Practitioners. You see the same one throughout."
+ITEM     sec=s2  slot=item  title="0"       body="Gym contracts, packages or minimum terms."
+
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT     sec=s3  slot=eyebrow  text="Post-operative"
+TEXT     sec=s3  slot=title    text="We work from your surgeon's [protocol], not a template"
+TEXT     sec=s3  slot=lede     text="ACL reconstructions, rotator cuff repairs and joint replacements each have a timetable. We follow the one your consultant wrote, and we tell you which week you are in."
+ACTION   sec=s3  slot=primary  label="Post-op pathways"  href="#postop"
+MEDIA    sec=s3  slot=figure   alt="Twelve-week loading schedule"  motif=dial
+
+SECTION  id=s4  kind=features  layout=list  tone=quiet
+TEXT     sec=s4  slot=eyebrow  text="How it runs"
+TEXT     sec=s4  slot=title    text="Three appointments, then a plan you own"
+ITEM     sec=s4  slot=item  title="Assessment"  body="Forty minutes. We test the joint, watch you move, and write down a baseline you can be measured against later."
+ITEM     sec=s4  slot=item  title="Loading"     body="Four to six sessions, spaced to match tissue healing rather than a billing cycle."
+ITEM     sec=s4  slot=item  title="Discharge"   body="You leave with the programme, the progressions and the criteria for returning to sport."
+
+SECTION  id=s5  kind=quote  layout=stack  tone=inverted
+TEXT     sec=s5  slot=quote   text="I came in on crutches in February and ran the [Leeds 10k] in July."
+TEXT     sec=s5  slot=attrib  text="Marcus Adeyemi, ACL reconstruction"
+
+SECTION  id=s6  kind=cta  layout=stack  tone=quiet
+TEXT     sec=s6  slot=title  text="Assessments run Tuesday to Saturday"
+TEXT     sec=s6  slot=lede   text="Great George Street, five minutes from the station."
+ACTION   sec=s6  slot=primary  label="Book an assessment"  href="#book"

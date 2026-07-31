@@ -1,0 +1,19 @@
+SITE     name="Flint"  nav="Docs,GitHub,Licenses"  location="Open Source"  contact="flint@opensource.org"
+THEME    family=technical  accent=#0f4c75  mode=dark  density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Flint"
+TEXT sec=s1 slot=title text="Find unused indexes" mark="[unused]"
+TEXT sec=s1 slot=lede text="A read-only CLI for Postgres."
+ACTION sec=s1 slot=primary label="Read the docs" href="#docs"
+ACTION sec=s1 slot=secondary label="View on GitHub" href="#"
+MEDIA sec=s1 slot=figure alt="Terminal output showing index stats" motif=dial
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT sec=s2 slot=eyebrow text="Performance"
+TEXT sec=s2 slot=title text="Zero runtime overhead on production databases."
+ITEM sec=s2 slot=item title="CI Integration" body="Runs automatically on every pull request without modifying the database."
+ITEM sec=s2 slot=item title="Safe Analysis" body="Scans schema metadata to identify indexes that have zero query hits over six months."
+ITEM sec=s2 slot=item title="Zero Overhead" body="The tool reads only system catalogs and never executes queries against your tables."
+SECTION  id=s3  kind=cta  layout=stack  tone=inverted
+TEXT sec=s3 slot=title text="Find unused indexes" mark="[unused]"
+TEXT sec=s3 slot=lede text="An open-source CLI that finds unused database indexes in Postgres."
+ACTION sec=s3 slot=primary label="Get started" href="#docs"

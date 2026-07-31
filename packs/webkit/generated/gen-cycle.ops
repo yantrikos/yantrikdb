@@ -1,0 +1,19 @@
+SITE     name="Third Cog"  nav="Shop,Builders,Contact"  location="Sheffield"  contact="hello@thirdcog.co.uk"
+THEME    family=editorial  accent=#2d3e50  mode=light  density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Steel touring frames" mark="[made to measure]"
+TEXT sec=s1 slot=title text="Third Cog"
+TEXT sec=s1 slot=lede text="Eighteen-week wait."
+ACTION sec=s1 slot=primary label="Shop now" href="#shop"
+ACTION sec=s1 slot=secondary label="View builders" href="#builders"
+MEDIA sec=s1 slot=figure alt="Steel frame in workshop" motif=elevation
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT sec=s2 slot=eyebrow text="Forged carbon" mark="[lighter than steel]"
+TEXT sec=s2 slot=title text="Why we wait."
+ITEM sec=s2 slot=item title="Custom geometry" body="Every tube is bent to the rider's exact measurements."
+ITEM sec=s2 slot=item title="Hand-finished welds" body="No robotic polish, only visible human marks on every joint."
+ITEM sec=s2 slot=item title="Lifetime warranty" body="We stand by our steel for a lifetime of rides and repairs."
+SECTION  id=s3  kind=cta  layout=stack  tone=inverted
+TEXT sec=s3 slot=title text="Built to last"
+TEXT sec=s3 slot=lede text="Eighteen weeks of steel."
+ACTION sec=s3 slot=primary label="Start your build" href="#shop"

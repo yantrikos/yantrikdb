@@ -1,0 +1,25 @@
+SITE     name="Flint"  nav="Docs,Cheatsheet,Licence"  location="Open Source"  contact="flint@opensource.org"
+THEME    family=technical  accent=#0f9d58  mode=light  density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Find unused indexes"
+TEXT sec=s1 slot=title text="Flint: Postgres index hygiene for CI"
+TEXT sec=s1 slot=lede text="Read-only. Runs in your pipeline."
+ACTION sec=s1 slot=primary label="Run locally" href="#"
+ACTION sec=s1 slot=secondary label="View docs" href="#docs"
+MEDIA sec=s1 slot=figure motif=elevation
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT sec=s3 slot=eyebrow text="The only tool that respects your schema"
+TEXT sec=s3 slot=title text="Flint scans without touching data [read-only]"
+TEXT sec=s3 slot=lede text="It queries metadata, never rows."
+ACTION sec=s3 slot=primary label="Scan now" href="#"
+MEDIA sec=s3 slot=figure motif=dial
+SECTION  id=s4  kind=features  layout=list  tone=quiet
+TEXT sec=s4 slot=eyebrow text="Zero downtime scans"
+TEXT sec=s4 slot=title text="Queries metadata only [no locks]"
+ITEM sec=s4 slot=item title="Legacy migrations" body="Indexes added in v12 that no longer match schema."
+ITEM sec=s4 slot=item title="Orphaned constraints" body="Foreign keys pointing to dropped tables."
+ITEM sec=s4 slot=item title="Stale statistics" body="Index entries out of sync with data distribution."
+SECTION  id=s6  kind=cta  layout=stack  tone=quiet
+TEXT sec=s6 slot=title text="Start by scanning your schema"
+TEXT sec=s6 slot=lede text="Flint runs in minutes and reports unused indexes."
+ACTION sec=s6 slot=primary label="Get started" href="#"

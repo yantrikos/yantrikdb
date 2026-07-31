@@ -4,7 +4,7 @@ THEME    family=technical  accent=#8a7a5c  mode=dark  density=roomy
 
 SECTION  id=s1  kind=hero  layout=split  tone=quiet
 TEXT     sec=s1  slot=eyebrow  text="Halden — Type 4 Field"
-TEXT     sec=s1  slot=title    text="Thirty-eight millimetres, and no date window"  accent="no date window"
+TEXT     sec=s1  slot=title    text="Thirty-eight millimetres, and [no date window]"
 TEXT     sec=s1  slot=lede     text="Hand-wound, 42-hour reserve, sapphire on both sides. Assembled in Glashutte in runs of two hundred."
 ACTION   sec=s1  slot=primary   label="Reserve — £2,400"  href="#reserve"
 ACTION   sec=s1  slot=secondary label="Specification"  href="#spec"
