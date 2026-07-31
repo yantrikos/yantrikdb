@@ -84,7 +84,7 @@ CLOSED VOCABULARIES — any other value is invalid
   family   editorial | studio | technical
   mode     light | dark
   density  tight | normal | roomy
-  kind     hero | features | cta | proof | detail
+  kind     hero | features | cta | proof | detail | faq | roster | note
   layout   split | centred | stack | grid | list
   tone     quiet | bold | inverted
   motif    elevation | topography | schematic | dial | specimen
@@ -131,6 +131,9 @@ RULES
     cta       eyebrow, title, lede, primary, secondary
     proof     eyebrow, title, item
     detail    eyebrow, title, lede, primary, figure
+    faq       eyebrow, title, lede, item
+    roster    eyebrow, title, lede, item
+    note      title, lede
   The closing title must say something the hero did not. Repeating the
     headline at the bottom of the page is the commonest way a site
     reads as filled-in rather than written.
@@ -163,6 +166,45 @@ RULES
 # So the shape becomes a decision, made once, from the brief. hero and
 # cta are the fixed ends — every page opens and closes — and everything
 # between them is planned.
+# What each KIND of site is shaped like.
+#
+# The menu below is generic and a business is not, so a model choosing
+# freely from it converges on the same middle every time: features,
+# detail, faq, for a bakery and a database tool alike. Naming the genre
+# first gives it a reason to prefer one shape over another, and carries
+# the content each genre cannot omit — a restaurant page without hours
+# and an address has failed at the only job it had.
+GENRES = """restaurant, cafe, bar   hero, note, features, detail, faq
+    The note holds hours and street address, high on the page.
+    Features is a few dishes, never the whole menu.
+travel, tours           hero, proof, features, detail, faq
+    Proof is days, group size and what is included. Features is the
+    itinerary, one item per day.
+portfolio               hero, features, detail
+    The shortest page here. Never an FAQ, never a stats band.
+blog, publication       hero, features, detail
+    Features is recent pieces, one sentence making the case for each.
+recipe                  hero, proof, roster, features, faq
+    Proof is serves and times. Roster is INGREDIENTS with quantities.
+    Features is the METHOD, one action per step.
+trade, plumber, builder hero, features, detail, proof, faq
+    Features is services named plainly. Detail is the area covered.
+clinic, practitioner    hero, features, detail, roster, faq
+    Roster is services or disciplines, never named people.
+developer tool          hero, features, detail, faq
+    Hero says the verb and the object, not the category.
+charity, nonprofit      hero, proof, detail, features, note
+    Proof is where the money goes. Note is the reassurance.
+event, conference       hero, proof, features, roster, faq
+    Proof is date, place, venue, ticket. Never invent a date.
+shop, single product    hero, detail, proof, features, faq
+    Proof is the specification. FAQ is shipping and returns.
+studio, agency          hero, features, detail
+property, letting       hero, proof, features, detail
+    Proof is beds, floor area, price. Features is the rooms.
+school, course          hero, features, proof, roster, faq
+    Features is the curriculum: what a student can do afterwards."""
+
 PLAN_MENU = """proof     A band of figures. ONLY if the brief states numbers.
 detail    One thing done differently, explained, with a drawing.
 features  Three to five things offered, each a title and two sentences.
@@ -183,13 +225,84 @@ KIND_LAYOUT = {
     "note": "stack", "hero": "split", "cta": "stack",
 }
 
+# What a section MEANS in a given genre.
+#
+# The genre was chosen at plan time and then forgotten: every section
+# call used the generic prompt, so a recipe's `roster` — which the genre
+# table says is the ingredients — came back as "Monday morning / Fresh
+# loaves ready at eight". The plan was right and the content ignored it,
+# which is worse than not planning by genre at all, because the shape
+# promises something the words do not deliver.
+#
+# Only the cells that genuinely differ are listed. Anything absent keeps
+# the generic prompt, which is correct far more often than not.
+GENRE_NOTES = {
+    ("recipe", "roster"):
+        "In a recipe this section is the INGREDIENTS. One ITEM per "
+        "ingredient: title= is the quantity and the ingredient exactly "
+        "as the brief gives it (\"400g rye flour\"), body= is any "
+        "preparation (\"sifted\", \"at room temperature\"). Do not "
+        "invent an ingredient or a quantity that is not in the brief.",
+    ("recipe", "features"):
+        "In a recipe this section is the METHOD. One ITEM per step, in "
+        "order, each step a SINGLE action. title= names the step "
+        "(\"Autolyse\", \"First fold\"), body= says exactly what to do "
+        "and for how long. Never put two actions in one step.",
+    ("recipe", "proof"):
+        "In a recipe these figures are the ones a cook checks first: "
+        "how many it serves, working time, proving time, baking time "
+        "and oven temperature.",
+    ("travel", "features"):
+        "On a trip page this is the ITINERARY. One ITEM per day or "
+        "stage, in order, each with something concrete: a distance, a "
+        "crossing, where the night is spent.",
+    ("travel", "proof"):
+        "On a trip page these figures are what qualifies a booking: "
+        "days, group size, nights under canvas, months of departure.",
+    ("restaurant", "features"):
+        "On a restaurant page this is a HANDFUL OF DISHES that show the "
+        "kitchen's range — never the whole menu.",
+    ("restaurant", "note"):
+        "On a restaurant page this carries the two facts a reader came "
+        "for: when it is open and where it is.",
+    ("event", "proof"):
+        "For an event these figures are the date, the venue, the city "
+        "and the number of seats. Never write a date the brief does not "
+        "state.",
+    ("blog", "features"):
+        "For a publication this is the RECENT PIECES. title= is the "
+        "piece's title, body= is one sentence making the case for "
+        "reading it — never a truncated opening paragraph.",
+    ("property", "features"):
+        "For a property this is the ROOMS, one ITEM each, with the "
+        "dimensions the brief gives.",
+    ("school", "features"):
+        "For a course this is the CURRICULUM. Each ITEM says what a "
+        "student can DO afterwards, not what is covered.",
+    ("shop", "proof"):
+        "For a product these figures are the specification: "
+        "dimensions, weight, materials, warranty.",
+    ("charity", "proof"):
+        "For a charity these figures are WHERE THE MONEY GOES, which is "
+        "the question a donor actually has.",
+    ("trade", "detail"):
+        "For a trade this section is the AREA COVERED, with the towns "
+        "named.",
+    ("portfolio", "features"):
+        "In a portfolio this is SELECTED WORK. title= is the piece, "
+        "body= is the material, the size and who it was for. No "
+        "services, no process, no selling.",
+}
+
 KIND_PROMPT = {
     "proof": """These are every figure in the brief, extracted for you:
 {figures}
 
 Emit TEXT for slot=eyebrow, TEXT for slot=title, then ONE ITEM line
-with sec={sec} and slot=item FOR EACH figure in that list — and no
-others.
+with sec={sec} and slot=item for each figure in that list THAT BELONGS
+IN THIS SECTION. Leave out any that belong somewhere else — a recipe's
+flour weights belong with the ingredients, not in a band of headline
+figures — and never add a figure that is not listed.
 
 In each ITEM, title= is the figure exactly as the brief gives it, and
 body= is one short line saying what it counts.
@@ -505,19 +618,36 @@ def main() -> int:
 Figures stated in the brief:
 {figures}
 
-Choose which sections this page needs, in order. It opens with a hero
-and closes with a call to action; you are choosing what goes BETWEEN
-them. Choose THREE OR FOUR from this menu, whichever this particular
-business actually needs — a bakery and a database tool do not need the
-same page.
+First decide what KIND of site this is, then use the shape that kind of
+site has. These are the shapes that work:
+
+{GENRES}
+
+Then choose which sections this page needs, in order. It opens with a
+hero and closes with a call to action; you are choosing what goes
+BETWEEN them. Take THREE OR FOUR, following the shape for this genre
+unless the brief clearly wants something else.
 
 {PLAN_MENU}
 
-Answer with three or four of those names, one per line, nothing else.""")
+Answer with the genre on the FIRST line as `genre: <name>`, then three
+or four section names, one per line. Nothing else.""")
     plan = read_plan(plan_raw)
+    # The genre the model named, matched against the ones we have notes
+    # for. An unrecognised genre is not an error — the section prompts
+    # simply stay generic, which is the behaviour before this existed.
+    known = {g for g, _ in GENRE_NOTES}
+    gm = re.search(r"genre\s*[:\-]\s*([a-z ,]+)", plan_raw, re.I)
+    # Asked for `genre: portfolio` the model often writes just
+    # `portfolio` on the first line, which is a reasonable reading of
+    # the instruction and was scoring as "generic". Accept the bare form.
+    said = (gm.group(1) if gm else plan_raw.strip().splitlines()[0]
+            if plan_raw.strip() else "").lower()
+    genre = next((g for g in known if g in said), "")
     if args.debug:
         print(f"      PLAN RAW: {plan_raw.strip()[:300]!r}")
-    print(f"  plan       hero -> {' -> '.join(plan)} -> cta")
+    print(f"  plan       [{genre or 'generic'}] "
+          f"hero -> {' -> '.join(plan)} -> cta")
 
     # (label, kind, section id) for every call after the frame.
     schedule = [("hero", "hero", "s1")]
@@ -538,6 +668,9 @@ Answer with three or four of those names, one per line, nothing else.""")
             sec,
             "Site: {brief}\n\nThe " + kind + " section already exists. "
             + body.replace("{sec}", sec)
+            # What this section means in THIS genre, if it differs.
+            + ("\n\n" + GENRE_NOTES[(genre, kind)]
+               if (genre, kind) in GENRE_NOTES else "")
             + "\nDo NOT emit SECTION. Do NOT emit THEME or SITE again."))
     for label, scaffold, want_sec, template in CALLS:
         # The scaffold is held back until the call has actually produced

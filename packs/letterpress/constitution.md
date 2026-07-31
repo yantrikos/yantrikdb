@@ -42,12 +42,23 @@ separate argument can name a phrase that is not in the line, and did.
 
 An illegal slot is rejected, not coerced.
 
-## Plan the page from the brief
+## Plan the page from the genre, not from the menu
 
 A page opens with `hero` and closes with `cta`. Choose three or four
-sections between them, and choose them for this business: a bakery and
-a database tool do not need the same page. At least one middle section
-must carry a drawing (`detail`), or the page is a column of prose.
+sections between them, and choose them for the KIND of site this is —
+the menu is generic and a business is not, so choosing freely from it
+converges on the same middle every time.
+
+Identify the genre first: restaurant, travel, portfolio, blog, recipe,
+trade, clinic, developer tool, charity, event, shop, studio, property,
+school. Each has a plan that works and content it cannot omit. A
+restaurant lives on hours and address; a portfolio must carry no FAQ; a
+tour is worthless without its duration; a recipe is quantities and a
+numbered method. Omitting those is failing at the only job the page
+had.
+
+At least one middle section must carry a drawing or a photograph, or
+the page is an unbroken column of prose.
 
 ## Never repeat a drawing
 

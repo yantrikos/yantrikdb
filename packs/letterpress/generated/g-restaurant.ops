@@ -1,0 +1,30 @@
+SITE name="Salt Loft" nav="Menu,Booking,Contact" location="Margate" contact="book@saltloft.co"
+THEME family=editorial accent=#d97a56 mode=light density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="The Kitchen"
+TEXT sec=s1 slot=title text="A twelve-cover [set] menu cooked by two owners."
+TEXT sec=s1 slot=lede text="Salt Loft is a Margate restaurant open Thursday to Sunday evenings only. One sitting per night features a weekly set menu prepared entirely in-house."
+ACTION sec=s1 slot=primary label="Book your table" href="#booking"
+ACTION sec=s1 slot=secondary label="View the current week's menu" href="#menu"
+MEDIA sec=s1 slot=figure motif=lattice
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT sec=s2 slot=eyebrow text="The Process"
+TEXT sec=s2 slot=title text="Fish sourced daily and cured in sea salt."
+ITEM sec=s2 slot=item title="Shellfish" body="Mussels are scrubbed by hand every morning and steamed in their own liquor until they just open on a bed of thyme."
+ITEM sec=s2 slot=item title="Vegetables" body="Roots are peeled with the skin still intact to keep sweetness, then roasted slowly over wood embers for three hours."
+ITEM sec=s2 slot=item title="Dessert" body="The final course is always a fruit compote reduced in copper pots until it glazes like honey and sets on cold stone."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT sec=s3 slot=eyebrow text="The Secret"
+TEXT sec=s3 slot=title text="A [twelve-cover] menu that changes weekly."
+TEXT sec=s3 slot=lede text="No other chef in Margate can replicate the exact sequence of ingredients we source from our own garden and local fishermen. The two owners cook every single dish by hand, ensuring nothing is pre-made or frozen for service."
+ACTION sec=s3 slot=primary label="Email to book" href="#booking"
+MEDIA sec=s3 slot=figure motif=strata
+SECTION  id=s4  kind=faq  layout=stack  tone=bold
+TEXT sec=s4 slot=eyebrow text="Frequently Asked Questions"
+TEXT sec=s4 slot=title text="How does the weekly set menu work?"
+ITEM sec=s4 slot=item title="When can I book?" body="Reservations open exactly three weeks before each Thursday service. You must email us to secure a seat; walk-ins are never accepted on busy nights."
+ITEM sec=s4 slot=item title="Do you accommodate allergies?" body="Our two owners prepare every dish from scratch in-house. Please list your restrictions when booking so we can adjust ingredients before anything touches a pan, as our kitchen does not use pre-made mixes."
+ITEM sec=s4 slot=item title="Is there parking nearby?" body="Margate is compact and most visitors arrive by train or bus. If you drive, street parking fills quickly on Friday evenings; the nearest paid lot is two minutes away but requires cash payment at a machine outside."
+SECTION  id=s5  kind=cta  layout=stack  tone=quiet
+TEXT sec=s5 slot=lede text="We serve only one sitting per night to keep the kitchen quiet and the food hot."
+ACTION sec=s5 slot=primary label="Email to reserve" href="#booking"

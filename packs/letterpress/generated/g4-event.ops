@@ -1,0 +1,35 @@
+SITE name="Baseline" nav="Talks,Lunch,Tickets" location="Bristol Old Vic" contact="info@baseline.type"
+THEME family=editorial accent=#2e5c8f mode=light density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Type"
+TEXT sec=s1 slot=title text="A day of [talks] and type at Bristol Old Vic"
+TEXT sec=s1 slot=lede text="Six speakers share their craft in a single track event. Lunch is included for all attendees."
+ACTION sec=s1 slot=primary label="Get tickets now" href="#tickets"
+ACTION sec=s1 slot=secondary label="View the schedule" href="#schedule"
+MEDIA sec=s1 slot=figure motif=strata
+SECTION  id=s2  kind=proof  layout=stack  tone=bold
+TEXT sec=s2 slot=eyebrow text="Capacity"
+TEXT sec=s2 slot=title text="Two hundred seats for [six] speakers"
+ITEM sec=s2 slot=item title="14" body="The date of the event."
+ITEM sec=s2 slot=item title="200" body="Seats available in the hall."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT sec=s3 slot=eyebrow text="The venue"
+TEXT sec=s3 slot=title text="[Bristol Old Vic] is an acoustic [theatre]"
+TEXT sec=s3 slot=lede text="Unlike a standard conference hall, the curved walls and wooden stage create natural resonance that amplifies spoken word without electronic aid. This architecture turns every talk into a performance where silence between sentences carries weight."
+ACTION sec=s3 slot=primary label="Book your seat" href="#tickets"
+MEDIA sec=s3 slot=figure motif=elevation
+SECTION  id=s4  kind=features  layout=list  tone=quiet
+TEXT sec=s4 slot=eyebrow text="The talks"
+TEXT sec=s4 slot=title text="[Foundations] of type design in Bristol"
+ITEM sec=s4 slot=item title="Noon" body="An analysis of kerning pairs used on vintage packaging labels from 1985."
+SECTION  id=s5  kind=faq  layout=stack  tone=quiet
+TEXT sec=s5 slot=eyebrow text="Logistics"
+TEXT sec=s5 slot=title text="[Parking] and [access] for the event day"
+ITEM sec=s5 slot=item title="Lunch break duration" body="There is one hour set aside for the meal between sessions two and three. The menu rotates daily but always includes a vegetarian option alongside meat dishes."
+ITEM sec=s5 slot=item title="Late arrival policy" body="If you miss the start of your talk, please check with reception at the foyer desk. They will direct you to where speakers are currently presenting so you can catch up immediately."
+ITEM sec=s5 slot=item title="Seating arrangement" body="Rows are assigned by ticket type upon entry. Front rows near the stage require a premium pass while rear sections offer unobstructed views of the curved walls for equal acoustics."
+ITEM sec=s5 slot=item title="Rain contingency plan" body="Should heavy rain make the walk from Park Street unsafe, staff will open an overflow room in the basement level. You can wait there until conditions improve or a shuttle bus is arranged to pick you up nearby."
+SECTION  id=s6  kind=cta  layout=stack  tone=quiet
+TEXT sec=s6 slot=title text="Come on 14 March for [six] talks and lunch"
+TEXT sec=s6 slot=lede text="Seats are limited to two hundred, so book your premium pass now."
+ACTION sec=s6 slot=primary label="Buy tickets at baseline.type" href="#tickets"

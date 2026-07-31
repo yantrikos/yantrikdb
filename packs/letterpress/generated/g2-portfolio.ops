@@ -1,0 +1,19 @@
+SITE name="Oak & Steel" nav="Work,Process,Contact" location="Hebden Bridge" contact="studio@oaksteel.co"
+THEME family=editorial accent=#8c705e mode=light density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Oak and steel"
+TEXT sec=s1 slot=title text="Hand-crafted [commissioned] furniture for your home."
+TEXT sec=s1 slot=lede text="We build single pieces in Hebden Bridge, taking ten weeks from initial drawing to final delivery. Each item is made by hand using solid oak frames and polished steel joints."
+ACTION sec=s1 slot=primary label="Start a commission" href="#contact"
+ACTION sec=s1 slot=secondary label="View past work" href="#portfolio"
+MEDIA sec=s1 slot=figure motif=lattice
+SECTION  id=s2  kind=detail  layout=split  tone=quiet
+TEXT sec=s2 slot=eyebrow text="The single-source advantage"
+TEXT sec=s2 slot=title text="We forge our own steel joints in the on-site workshop."
+TEXT sec=s2 slot=lede text="Competitors buy pre-fabricated connectors from suppliers, but we cut and bend every bar ourselves right here. This means no shipping delays for custom angles or waiting weeks for off-the-shelf fittings that don't quite match your wall. The steel is forged to the exact curvature of each oak frame before it ever touches a joint."
+ACTION sec=s2 slot=primary label="Request a quote" href="#contact"
+MEDIA sec=s2 slot=figure motif=strata
+SECTION  id=s3  kind=cta  layout=stack  tone=quiet
+TEXT sec=s3 slot=title text="Lead time is ten weeks; delivery happens on completion."
+TEXT sec=s3 slot=lede text="We accept one commission at a time, so the first step after your drawing is approved is cutting the steel and milling the oak in our Hebden Bridge workshop."
+ACTION sec=s3 slot=primary label="Begin your project" href="#contact"

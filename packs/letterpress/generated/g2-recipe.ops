@@ -1,0 +1,46 @@
+SITE name="Tide Mill" nav="Bread,Visit,Contact" location="Bristol" contact="hello@tidemill.co"
+THEME family=editorial accent=#b8442f mode=light density=roomy
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Seeded rye sourdough"
+TEXT sec=s1 slot=title text="Bread [worth the walk]"
+TEXT sec=s1 slot=lede text="Two ovens and no cafe, but a recipe for seeded rye sourdough that serves twelve. It takes thirty minutes of work followed by eighteen hours proving before baking forty-five minutes at two hundred and thirty degrees."
+ACTION sec=s1 slot=primary label="Collection times" href="#times"
+ACTION sec=s1 slot=secondary label="Ingredients list" href="#ingredients"
+MEDIA sec=s1 slot=figure motif=lattice
+SECTION  id=s2  kind=proof  layout=stack  tone=bold
+TEXT sec=s2 slot=eyebrow text="The numbers on your counter"
+TEXT sec=s2 slot=title text="Time and weight in grams"
+ITEM sec=s2 slot=item title="12" body="People fed by this batch."
+ITEM sec=s2 slot=item title="30 minutes" body="Work before the long wait."
+ITEM sec=s2 slot=item title="18 hours" body="Proving time for wild yeast."
+ITEM sec=s2 slot=item title="45 minutes" body="Baking at high heat."
+ITEM sec=s2 slot=item title="230C" body="Oven temperature set point."
+ITEM sec=s2 slot=item title="400g rye" body="The main grain weight."
+ITEM sec=s2 slot=item title="100g strong" body="White flour for structure."
+ITEM sec=s2 slot=item title="320 water" body="Hydration level in grams."
+ITEM sec=s2 slot=item title="90 starter" body="Active culture added now."
+ITEM sec=s2 slot=item title="10 salt" body="Seasoning and strength."
+ITEM sec=s2 slot=item title="40 seeds" body="Mixed grains for crunch."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT sec=s3 slot=eyebrow text="The secret in the starter"
+TEXT sec=s3 slot=title text="Wild yeast [fed by time]"
+TEXT sec=s3 slot=lede text="We maintain our culture for years, feeding it only when needed to keep that slow, deep fermentation alive. This patience is what gives the rye its complex tang and keeps the crumb open."
+ACTION sec=s3 slot=primary label="Read full method" href="#method"
+MEDIA sec=s3 slot=figure motif=strata
+SECTION  id=s4  kind=roster  layout=stack  tone=bold
+TEXT sec=s4 slot=eyebrow text="What you need to start"
+TEXT sec=s4 slot=title text="Flours and water for feeding"
+ITEM sec=s4 slot=item title="10g salt" body="Dissolved in the warm bath."
+ITEM sec=s4 slot=item title="90 starter" body="Fed yesterday, ready now."
+ITEM sec=s4 slot=item title="320 water" body="Filtered and at room temp."
+SECTION  id=s5  kind=features  layout=list  tone=quiet
+TEXT sec=s5 slot=eyebrow text="Mixing and resting"
+TEXT sec=s5 slot=title text="Build the dough structure"
+ITEM sec=s5 slot=item title="Autolyse" body="Combine rye, strong flour, water and let rest for twenty minutes before adding starter."
+ITEM sec=s5 slot=item title="First fold" body="Gently stretch and fold every thirty minutes until the mixture becomes too stiff to handle."
+ITEM sec=s5 slot=item title="Bulk ferment" body="Cover the bowl and wait eighteen hours while wild yeast builds a deep, sour aroma."
+ITEM sec=s5 slot=item title="Shape and proof" body="Turn out onto floured surface, shape into two loaves, score tops with a razor blade then bake at 230C for forty-five minutes."
+SECTION  id=s6  kind=cta  layout=stack  tone=quiet
+TEXT sec=s6 slot=title text="Come Tuesday morning for your first batch"
+TEXT sec=s6 slot=lede text="Pick up loaves at eight or order ahead to avoid the queue."
+ACTION sec=s6 slot=primary label="Order now" href="#order"

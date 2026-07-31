@@ -5,6 +5,12 @@
     "clinic": "A physiotherapy clinic in Leeds called Kestrel. Sports injuries and post-op rehab, two practitioners, no gym contract required.",
     "devtool": "An open-source CLI called Flint that finds unused database indexes in Postgres. Read-only, runs in CI, MIT licensed.",
     "_comment2": "The three briefs above are deliberately thin, which is what exposed the fabrication: asked for a stats band, the model invented benchmarks. This fourth brief carries real figures, so a proof section can be built from the brief instead of from nothing. Keep both kinds — a kit that only behaves on generous input is not measured.",
-    "archive": "A film archive in Sheffield called Reel North. Holds 12,400 reels of regional television from 1957 to 1994, digitised at 4K. Open to researchers 3 days a week, free of charge. Two archivists on staff."
+    "archive": "A film archive in Sheffield called Reel North. Holds 12,400 reels of regional television from 1957 to 1994, digitised at 4K. Open to researchers 3 days a week, free of charge. Two archivists on staff.",
+    "_comment3": "Briefs across genres, to test whether the genre table actually changes the plan. Each states some figures so proof is earned where the genre wants it, and none states a price or a clock time.",
+    "restaurant": "A twelve-cover restaurant in Margate called Salt Loft, open Thursday to Sunday evenings only. One sitting a night, a set menu that changes weekly, cooked by the two owners. Booking is by email.",
+    "travel": "A walking company called Slow Ridge running 8-day guided treks in the Cairngorms. Groups of 6, wild camping 4 nights and bothies 3, all food and permits included, departures May to September.",
+    "portfolio": "The portfolio of a furniture maker in Hebden Bridge working in oak and steel. Commissions only, one piece at a time, typically 10 weeks from drawing to delivery.",
+    "recipe": "A recipe for seeded rye sourdough. Serves 12, 30 minutes work, 18 hours proving, bakes 45 minutes at 230C. Needs 400g rye flour, 100g strong white, 320g water, 90g starter, 10g salt, 40g mixed seeds.",
+    "event": "A one-day typography conference called Baseline held at the Bristol Old Vic on 14 March. Six talks, 200 seats, one track, lunch included."
   }
 }

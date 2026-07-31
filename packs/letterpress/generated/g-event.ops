@@ -1,0 +1,39 @@
+SITE     name="Baseline"  nav="Talks,Tickets,Lunch"  location="Bristol Old Vic"  contact="info@baseline.type"
+THEME    family=editorial  accent=#2c3e50  mode=light  density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT     sec=s1  slot=eyebrow  text="Type"
+TEXT     sec=s1  slot=title    text="Six talks on [type] and craft at Bristol Old Vic"
+TEXT     sec=s1  slot=lede    text="A one-day conference held March 14 with six speakers, two hundred seats, and lunch included. This event explores the intersection of design theory and practical application in a historic venue."
+ACTION   sec=s1  slot=primary label="Buy tickets" href="#tickets"
+ACTION   sec=s1  slot=secondary label="View schedule" href="#talks"
+MEDIA    sec=s1  slot=figure motif=strata
+SECTION  id=s2  kind=proof  layout=stack  tone=bold
+TEXT     sec=s2  slot=eyebrow  text="Capacity"
+TEXT     sec=s2  slot=title    text="Six speakers and two hundred seats for the day."
+ITEM     sec=s2  slot=item  title="14"  body="The date of the conference in March."
+ITEM     sec=s2  slot=item  title="200"  body="Seats available at Bristol Old Vic."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT     sec=s3  slot=eyebrow  text="Uniqueness"
+TEXT     sec=s3  slot=title    text="The [historic] venue and its acoustic character."
+TEXT     sec=s3  slot=lede    text="No other conference can replicate the resonance of the Bristol Old Vic's auditorium. The architecture itself shapes how every spoken word lands with a specific weight that modern halls cannot match, turning standard presentations into an immersive experience for design theory."
+ACTION   sec=s3  slot=primary label="Read venue guide" href="#venue"
+MEDIA    sec=s3  slot=figure motif=elevation
+SECTION  id=s4  kind=features  layout=list  tone=quiet
+TEXT     sec=s4  slot=eyebrow  text="Talks"
+TEXT     sec=s4  slot=title    text="Type theory meets practical craft."
+ITEM     sec=s4  slot=item  title="Foundations"  body="An introduction to grid systems and modular proportions, starting with the basics of type anatomy at ten in the morning."
+ITEM     sec=s4  slot=item  title="Kinetics"  body="Motion design for variable fonts using bezier curves as a guide, limited strictly to three keyframes per animation sequence."
+ITEM     sec=s4  slot=item  title="Materiality"  body="Printing type on textured paper surfaces with offset inks, focusing on how grain affects legibility under natural light conditions."
+ITEM     sec=s4  slot=item  title="Legacy"  body="Decoding the history of metal punch cutting and hand setting, preserving techniques that predate digital typesetting by over a century."
+SECTION  id=s5  kind=faq  layout=stack  tone=quiet
+TEXT     sec=s5  slot=eyebrow  text="Questions"
+TEXT     sec=s5  slot=title    text="How to register and what happens if you cannot attend."
+ITEM     sec=s5  slot=item  title="When does registration close?"  body="Sign-ups for the conference end at midnight on March 13. If you miss that deadline, your name will not appear on the attendee list and no late entries are accepted after the event begins."
+ITEM     sec=s5  slot=item  title="What if I need to cancel my seat?"  body="Refunds are processed within five working days of receiving a cancellation email before March 14. Requests made closer to the date or on the day itself will be denied as tickets are non-transferable and seats cannot be re-sold."
+ITEM     sec=s5  slot=item  title="How long does each talk last?"  body="Every session runs for exactly forty-five minutes followed by a ten-minute break. The morning block finishes at noon, allowing time to eat lunch before the afternoon sessions start again in the main hall."
+ITEM     sec=s5  slot=item  title="Can I bring my own laptop into the room?"  body="Yes, you may use your personal device for note-taking or following along with digital slides. However, recording audio of any session is prohibited to protect speaker rights and ensure a quiet environment for everyone attending."
+ITEM     sec=s5  slot=item  title="What if I arrive late to start time?"  body="The doors open at nine thirty but the first talk begins promptly at ten o'clock without delay. Latecomers must wait in the foyer until their specific session starts and will be admitted only during breaks or after a question period has ended."
+SECTION  id=s6  kind=cta  layout=stack  tone=quiet
+TEXT     sec=s6  slot=title    text="Registration closes March 13 at midnight"
+TEXT     sec=s6  slot=lede    text="Secure your seat among two hundred others for the full day of talks and lunch."
+ACTION   sec=s6  slot=primary label="Register now" href="#tickets"

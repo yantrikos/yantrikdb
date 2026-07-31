@@ -1,0 +1,46 @@
+SITE name="Rye Lab" nav="Recipe,Times,Batch" location="Kitchen" contact="baker@ryelab.co"
+THEME family=editorial accent=#8c3a2e mode=light density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Seeded rye sourdough"
+TEXT sec=s1 slot=title text="A recipe for [seeded] rye [sourdough]"
+TEXT sec=s1 slot=lede text="This loaf requires forty grams of mixed seeds and a patient eighteen-hour rise. The result is a dense crumb with the sharp tang of fermented grain."
+ACTION sec=s1 slot=primary label="View ingredients" href="#ingredients"
+ACTION sec=s1 slot=secondary label="Start timer" href="#timer"
+MEDIA sec=s1 slot=figure motif=strata
+SECTION  id=s2  kind=proof  layout=stack  tone=bold
+TEXT sec=s2 slot=eyebrow text="The bake"
+TEXT sec=s2 slot=title text="Time and heat for [dense] grain"
+ITEM sec=s2 slot=item title="12" body="Loaves served."
+ITEM sec=s2 slot=item title="30 minutes" body="Work time required."
+ITEM sec=s2 slot=item title="18 hours" body="Proving duration."
+ITEM sec=s2 slot=item title="45 minutes" body="Bake duration."
+ITEM sec=s2 slot=item title="230C" body="Oven temperature."
+ITEM sec=s2 slot=item title="400g rye" body="Flour weight used."
+ITEM sec=s2 slot=item title="100g strong" body="White flour added."
+ITEM sec=s2 slot=item title="320g water" body="Hydration level."
+ITEM sec=s2 slot=item title="90g starter" body="Levain quantity."
+ITEM sec=s2 slot=item title="10g salt" body="Seasoning amount."
+ITEM sec=s2 slot=item title="40g mixed" body="Seeds added to dough."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT sec=s3 slot=eyebrow text="The secret"
+TEXT sec=s3 slot=title text="Why [mixed] seeds make [dense] grain"
+TEXT sec=s3 slot=lede text="Most bakeries skip the hard part: grinding your own rye berries into flour. We do not buy pre-milled powder; we crush whole grains to keep the germ intact, giving every loaf a nutty depth that soft white flour cannot mimic."
+ACTION sec=s3 slot=primary label="Read method" href="#method"
+MEDIA sec=s3 slot=figure motif=lattice
+SECTION  id=s4  kind=roster  layout=stack  tone=bold
+TEXT sec=s4 slot=eyebrow text="Weekly schedule"
+TEXT sec=s4 slot=title text="Batches for [next week]"
+ITEM sec=s4 slot=item title="Monday morning" body="Fresh loaves ready at eight, perfect for breakfast or toast."
+ITEM sec=s4 slot=item title="Wednesday afternoon" body="Half-loaf portions packed and chilled until the weekend arrives."
+ITEM sec=s4 slot=item title="Saturday dawn" body="Full batch proofing begins early to catch the Sunday rush."
+SECTION  id=s5  kind=features  layout=list  tone=quiet
+TEXT sec=s5 slot=eyebrow text="The harvest"
+TEXT sec=s5 slot=title text="Grains that [grow] wild and [tough]"
+ITEM sec=s5 slot=item title="June" body="Harvest begins when the husks turn golden brown, signaling peak ripeness for milling."
+ITEM sec=s5 slot=item title="August" body="Storage bins are sealed tight to keep moisture out before winter frost arrives next month."
+ITEM sec=s5 slot=item title="October" body="Milling runs late at night so the noise does not disturb neighbours sleeping in town houses."
+ITEM sec=s5 slot=item title="December" body="Flour sacks sit on shelves until they are needed for a batch that must rise before Christmas dinner."
+SECTION  id=s6  kind=cta  layout=stack  tone=quiet
+TEXT sec=s6 slot=title text="Come for [breakfast] toast"
+TEXT sec=s6 slot=lede text="First batch arrives Monday morning; bring your own bread knife."
+ACTION sec=s6 slot=primary label="Reserve a loaf" href="#reserve"

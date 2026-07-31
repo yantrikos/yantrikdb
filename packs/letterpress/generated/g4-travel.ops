@@ -1,0 +1,38 @@
+SITE name="Slow Ridge" nav="Trekking,Trips,Contact" location="Cairngorms" contact="hello@slowridge.co"
+THEME family=editorial accent=#5c7a61 mode=light density=roomy
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Wilderness Guides"
+TEXT sec=s1 slot=title text="Eight days in [the Cairngorms]"
+TEXT sec=s1 slot=lede text="We lead small groups of six on eight-day treks through the highlands. All food, permits and accommodation are included."
+ACTION sec=s1 slot=primary label="View Departures" href="#dates"
+ACTION sec=s1 slot=secondary label="Read Our Story" href="#about"
+MEDIA sec=s1 slot=figure motif=topography
+SECTION  id=s2  kind=proof  layout=stack  tone=bold
+TEXT sec=s2 slot=eyebrow text="Trip Stats"
+TEXT sec=s2 slot=title text="Eight days in [the Cairngorms]"
+ITEM sec=s2 slot=item title="8" body="Days on the trail."
+ITEM sec=s2 slot=item title="6," body="People per group."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT sec=s3 slot=eyebrow text="The Unrepeatable Route"
+TEXT sec=s3 slot=title text="Wild camping [four nights] and bothies three."
+TEXT sec=s3 slot=lede text="We navigate the highlands by memory of local landmarks rather than GPS coordinates, ensuring every group follows a path that shifts slightly each season. This method guarantees you never walk exactly where another hiker has stepped before in our lifetime, preserving the solitude of the Cairngorms for future generations."
+ACTION sec=s3 slot=primary label="Book Your Season" href="#bookings"
+MEDIA sec=s3 slot=figure motif=strata
+SECTION  id=s4  kind=features  layout=list  tone=quiet
+TEXT sec=s4 slot=eyebrow text="The Itinerary"
+TEXT sec=s4 slot=title text="Day One to Three [the ascent]"
+ITEM sec=s4 slot=item title="12km" body="We cross the Pass of Brackencloze at dawn, carrying our packs up a steep ridge before wild camping under the stars."
+ITEM sec=s4 slot=item title="8km" body="The trail drops into a glen where we gather water from a spring that runs cold and clear through mossy stones."
+ITEM sec=s4 slot=item title="10km" body="We navigate by memory of old cairns, keeping the wind at our back as we reach the first bothy for dinner."
+ITEM sec=s4 slot=item title="6km" body="The final stage ends with a long walk across heather moorland where silence is broken only by the call of ptarmigan."
+SECTION  id=s5  kind=faq  layout=stack  tone=quiet
+TEXT sec=s5 slot=eyebrow text="Common Questions"
+TEXT sec=s5 slot=title text="[What if I get lost]"  body="Our guides carry detailed paper maps and compasses as backups to our electronics, so we can always find the way back even in thick fog. If you feel unsure at any point, simply stop walking and let us take over navigation while you rest."
+ITEM sec=s5 slot=item title="What is included?"  body="Your fee covers all meals prepared from local ingredients, three nights of wild camping on designated sites, two nights in a bothy with hot water, plus your personal guide's fees. Permits for the highlands are also sorted before you arrive."
+ITEM sec=s5 slot=item title="Can I bring my dog?"  body="Yes, provided it is well-behaved and leashed when near livestock or other groups. We carry a small amount of extra food in case your pet needs to stay behind at an emergency stop while we continue the route alone."
+ITEM sec=s5 slot=item title="What if I am injured?"  body="We travel with a fully stocked first aid kit and satellite phone for immediate contact with mountain rescue services. In minor cases, our guide will treat you on site; serious injuries trigger a helicopter evacuation plan that is pre-arranged before every trip."
+ITEM sec=s5 slot=item title="Is the weather guaranteed?"  body="No, but we prepare for rain or wind by carrying waterproofs and extra layers in your pack. If conditions become too severe to continue safely, we will turn back early rather than risk exposure on a ridge that could change without warning."
+SECTION  id=s6  kind=cta  layout=stack  tone=quiet
+TEXT sec=s6 slot=title text="Departures May to September"
+TEXT sec=s6 slot=lede text="Costs vary by season; groups depart when the snow melts."
+ACTION sec=s6 slot=primary label="Check Availability" href="#dates"

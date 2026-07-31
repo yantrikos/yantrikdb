@@ -1,0 +1,26 @@
+SITE name="Oak & Steel" nav="Work,Process,Contact" location="Hebden Bridge" contact="studio@oaksteel.co.uk"
+THEME family=studio accent=#2c3e50 mode=light density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Furniture"
+TEXT sec=s1 slot=title text="Oak and steel [for] commissions only"
+TEXT sec=s1 slot=lede text="We build one piece at a time in Hebden Bridge, typically taking ten weeks from drawing to delivery."
+ACTION sec=s1 slot=primary label="Start your commission" href="#contact"
+ACTION sec=s1 slot=secondary label="View recent work" href="#work"
+MEDIA sec=s1 slot=figure motif=lattice
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT sec=s2 slot=eyebrow text="Selected pieces"
+TEXT sec=s2 slot=title text="The chair that defines your room"
+ITEM sec=s2 slot=item title="Eames lounge replica" body="A bent plywood shell wrapped in leather, finished with a walnut veneer edge."
+ITEM sec=s2 slot=item title="Industrial stool" body="Cast iron legs welded to an oak seat, limited run of forty units only."
+ITEM sec=s2 slot=item title="Desk lamp unit" body="Adjustable arm mechanism mounted on a steel base, priced by the fixture."
+ITEM sec=s2 slot=item title="Side table model" body="Solid ash construction with brass hardware, available for immediate shipping."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT sec=s3 slot=eyebrow text="The process"
+TEXT sec=s3 slot=title text="Welding [by] hand in our own shop"
+TEXT sec=s3 slot=lede text="While other makers outsource fabrication, we keep the welding bench and powder coat booth inside Hebden Bridge. This means every weld is inspected by us before it leaves the floor."
+ACTION sec=s3 slot=primary label="Discuss your project" href="#contact"
+MEDIA sec=s3 slot=figure motif=topography
+SECTION  id=s4  kind=cta  layout=stack  tone=quiet
+TEXT sec=s4 slot=title text="Lead time [is] ten weeks"
+TEXT sec=s4 slot=lede text="We take deposits before materials are cut."
+ACTION sec=s4 slot=primary label="Request a quote" href="#contact"

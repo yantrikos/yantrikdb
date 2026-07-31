@@ -1,0 +1,19 @@
+SITE name="Oak & Steel" nav="Work,Process,Contact" location="Hebden Bridge" contact="studio@oaksteel.co"
+THEME family=studio accent=#2c3e50 mode=light density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Oak and steel"
+TEXT sec=s1 slot=title text="Custom commissions [crafted by hand]"
+TEXT sec=s1 slot=lede text="We build single pieces to order in Hebden Bridge, starting from a sketch. Each project takes about ten weeks from the initial drawing until final delivery."
+ACTION sec=s1 slot=primary label="Start your commission" href="#contact"
+ACTION sec=s1 slot=secondary label="View past work" href="#portfolio"
+MEDIA sec=s1 slot=figure motif=lattice
+SECTION  id=s2  kind=detail  layout=split  tone=quiet
+TEXT sec=s2 slot=eyebrow text="The uncopyable detail"
+TEXT sec=s2 slot=title text="We forge [welded joints] in our own shop"
+TEXT sec=s2 slot=lede text="Our workshop is a single room with no neighbours, meaning we control the heat and noise of welding ourselves. We do not outsource fabrication to factories; every cut and weld happens under one roof so that the steel matches the grain of your oak perfectly."
+ACTION sec=s2 slot=primary label="Book a consultation" href="#contact"
+MEDIA sec=s2 slot=figure motif=topography
+SECTION  id=s3  kind=cta  layout=stack  tone=quiet
+TEXT sec=s3 slot=title text="Lead time [ten weeks] before delivery"
+TEXT sec=s3 slot=lede text="Sketches accepted by appointment only."
+ACTION sec=s3 slot=primary label="Request a sketch review" href="#contact"

@@ -1,0 +1,33 @@
+SITE name="Slow Ridge" nav="Trekking,Trips,Contact" location="Cairngorms" contact="hello@slowridge.co"
+THEME family=editorial accent=#5e7c68 mode=light density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Wild walking"
+TEXT sec=s1 slot=title text="Eight days in [the Cairngorms]"
+TEXT sec=s1 slot=lede text="Join a group of six for eight guided treks across the high ground. We wild camp four nights and sleep three more in bothies, with all food and permits included."
+ACTION sec=s1 slot=primary label="Book your place" href="#book"
+ACTION sec=s1 slot=secondary label="View routes" href="#routes"
+MEDIA sec=s1 slot=figure motif=topography
+SECTION  id=s2  kind=proof  layout=stack  tone=bold
+TEXT sec=s2 slot=eyebrow text="The numbers"
+TEXT sec=s2 slot=title text="What qualifies your booking"
+ITEM sec=s2 slot=item title="8" body="Days on the high ground."
+ITEM sec=s2 slot=item title="6," body="People in each group, wild."
+ITEM sec=s2 slot=item title="4 nights" body="Under canvas and stars."
+ITEM sec=s2 slot=item title="3" body="Nights inside bothies."
+SECTION  id=s3  kind=features  layout=list  tone=quiet
+TEXT sec=s3 slot=eyebrow text="The itinerary"
+TEXT sec=s3 slot=title text="Stage one to four"
+ITEM sec=s3 slot=item title="Day 1" body="Cross the Pass of Brackencloze, a steep scramble up granite scree that takes two hours and ends with tea at the summit."
+ITEM sec=s3 slot=item title="Day 2" body="Walk twelve miles along the ridge line where the wind is constant but the view opens to Ben Macdui before we pitch under canvas in a sheltered hollow."
+ITEM sec=s3 slot=item title="Day 3" body="Descend into Glen Clova and follow the burn through wet heather, carrying our packs over mossy stones until dusk when we enter bothies for hot water and dry beds."
+ITEM sec=s3 slot=item title="Day 4" body="Hike seven miles to reach Loch Muick, a deep blue pool surrounded by pine trees where we stop at noon to eat rye bread before the final climb back toward Glencoe."
+SECTION  id=s4  kind=detail  layout=split  tone=quiet
+TEXT sec=s4 slot=eyebrow text="The difference"
+TEXT sec=s4 slot=title text="Permits [and] food included"
+TEXT sec=s4 slot=lede text="We handle the red tape and the rations so you can focus on the path. Our logistics team manages every permit application for high ground access, while our kitchen packs hot meals that keep your energy up without adding weight to your pack."
+ACTION sec=s4 slot=primary label="Check availability" href="#book"
+MEDIA sec=s4 slot=figure motif=strata
+SECTION  id=s5  kind=cta  layout=stack  tone=quiet
+TEXT sec=s5 slot=title text="May to September departures"
+TEXT sec=s5 slot=lede text="First day is the Pass of Brackencloze scramble."
+ACTION sec=s5 slot=primary label="Reserve your spot now" href="#book"

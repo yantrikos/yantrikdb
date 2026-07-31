@@ -1,0 +1,26 @@
+SITE name="Oak & Steel" nav="Work,Process,Contact" location="Hebden Bridge" contact="studio@oaksteel.co"
+THEME family=editorial accent=#8c6a4d mode=light density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Handcrafted furniture"
+TEXT sec=s1 slot=title text="Oak and steel [made in Hebden Bridge]"
+TEXT sec=s1 slot=lede text="We build single pieces to order using solid timber and welded frames. Each commission takes ten weeks from the initial sketch until it arrives at your home."
+ACTION sec=s1 slot=primary label="Start a project" href="#contact"
+ACTION sec=s1 slot=secondary label="View past work" href="#gallery"
+MEDIA sec=s1 slot=figure motif=lattice
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT sec=s2 slot=eyebrow text="Selected work"
+TEXT sec=s2 slot=title text="Commissioned pieces for private homes and offices."
+ITEM sec=s2 slot=item title="Dining table, 1970s style" body="Solid oak top with steel legs, finished in matte black varnish. Built to order for a client in Leeds who wanted a piece that could seat eight comfortably without looking heavy."
+ITEM sec=s2 slot=item title="Sideboard, walnut veneer" body="Walnut front panels over an ash carcass, joined by mortise and tenon. The unit was designed specifically to fit under the existing staircase at a house in Hebden Bridge."
+ITEM sec=s2 slot=item title="Office chair, ergonomic steel" body="Powder-coated tubular frame with castor wheels for easy movement. This model is upholstered in durable grey fabric and ordered by an architect based in Manchester who needed it to match his existing desk setup."
+ITEM sec=s2 slot=item title="Bookshelf, open grid" body="Blackened steel rods welded into a rectangular cage pattern. The shelves are adjustable on request and the unit was shipped directly from our workshop floor to a gallery space in London."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT sec=s3 slot=eyebrow text="The process"
+TEXT sec=s3 slot=title text="Ten weeks of [slow] work from sketch to delivery."
+TEXT sec=s3 slot=lede text="We cannot rush the joinery or let the timber settle too quickly. A single commission moves through our workshop floor for two months, allowing the steel frames to cool and the oak grain to stabilise before it leaves Hebden Bridge."
+ACTION sec=s3 slot=primary label="Request a quote" href="#contact"
+MEDIA sec=s3 slot=figure motif=strata
+SECTION  id=s4  kind=cta  layout=stack  tone=quiet
+TEXT sec=s4 slot=title text="Lead time is ten weeks; deposit required before work begins."
+TEXT sec=s4 slot=lede text="We accept one commission at a time to ensure every join and weld meets our standard. Contact us for current availability on the workshop floor."
+ACTION sec=s4 slot=primary label="Check waitlist" href="#contact"

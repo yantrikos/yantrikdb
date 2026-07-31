@@ -1,0 +1,38 @@
+SITE name="Slow Ridge" nav="Trekking,Tours,Contact" location="Cairngorms" contact="hello@slowridge.co"
+THEME family=editorial accent=#5c7a68 mode=light density=roomy
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Wilderness treks"
+TEXT sec=s1 slot=title text="Eight days in [the Cairngorms]"
+TEXT sec=s1 slot=lede text="We guide small groups of six through the highlands for eight full days. You will wild camp four nights and stay three more inside bothies."
+ACTION sec=s1 slot=primary label="View departures" href="#times"
+ACTION sec=s1 slot=secondary label="Download itinerary" href="#"
+MEDIA sec=s1 slot=figure motif=topography
+SECTION  id=s2  kind=proof  layout=stack  tone=bold
+TEXT sec=s2 slot=eyebrow text="The numbers"
+TEXT sec=s2 slot=title text="A record of our eight-day journey"
+ITEM sec=s2 slot=item title="8" body="Days on the ground."
+ITEM sec=s2 slot=item title="6" body="People in each group."
+ITEM sec=s2 slot=item title="4 nights" body="Wild camped under stars."
+ITEM sec=s2 slot=item title="3, all" body="Nights inside bothies."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT sec=s3 slot=eyebrow text="The difference"
+TEXT sec=s3 slot=title text="We know every [hollow] and ridge."
+TEXT sec=s3 slot=lede text="Our guides have walked these paths for twenty years, not just mapped them. We carry the history of the mountain in our boots so you do not need to ask where we are going next or why a certain slope is slippery today."
+ACTION sec=s3 slot=primary label="Meet the team" href="#team"
+MEDIA sec=s3 slot=figure motif=strata
+SECTION  id=s4  kind=features  layout=list  tone=quiet
+TEXT sec=s4 slot=eyebrow text="The routes"
+TEXT sec=s4 slot=title text="From glens to summits and back again."
+ITEM sec=s4 slot=item title="Cruachan Ridge" body="Narrow scree slopes that require careful footing, ending with a view of Ben Macdui at dusk."
+ITEM sec=s4 slot=item title="Lochan Mor Loop" body="A gentle walk along waterlogged peat, passing three distinct bird hides before lunch."
+ITEM sec=s4 slot=item title="The Corrie Traverse" body="Crossing exposed rock bands in high wind, requiring a helmet and steady hands for safety."
+SECTION  id=s5  kind=faq  layout=stack  tone=quiet
+TEXT sec=s5 slot=eyebrow text="Common questions"
+TEXT sec=s5 slot=title text="Everything you need to know before booking."
+ITEM sec=s5 slot=item title="What if I get injured?" body="Our guides carry full first aid kits and satellite phones at all times. In an emergency we will evacuate you to a nearby village immediately using our 4x4 support vehicle, but please note that remote rescue operations are not included in the price."
+ITEM sec=s5 slot=item title="Can I bring my own tent?" body="You may pack your own sleeping bag and matting if you wish, but we do not allow personal tents. We provide high-quality bothies for three nights to ensure everyone stays dry and warm regardless of weather conditions during those specific days."
+ITEM sec=s5 slot=item title="Is the terrain too difficult?" body="The route involves steep ascents on scree slopes and long descents into glens, but we pace the walk carefully. If you have a reasonable level of fitness from regular hiking, you will be fine; however, if you suffer from severe vertigo or knee problems please contact us before booking."
+SECTION  id=s6  kind=cta  layout=stack  tone=quiet
+TEXT sec=s6 slot=title text="Book your place for May through September"
+TEXT sec=s6 slot=lede text="All food and permits included; groups depart every weekend."
+ACTION sec=s6 slot=primary label="Reserve now" href="#book"

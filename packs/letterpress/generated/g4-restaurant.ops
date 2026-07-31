@@ -1,0 +1,37 @@
+SITE name="Salt Loft" nav="Book,Menu,Contact" location="Margate" contact="book@saltloft.co"
+THEME family=editorial accent=#d97a56 mode=light density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="The Twelve"
+TEXT sec=s1 slot=title text="Salt [Loft] dining room"
+TEXT sec=s1 slot=lede text="A twelve-cover restaurant in Margate called Salt Loft, open Thursday to Sunday evenings only. One sitting a night with a set menu that changes weekly."
+ACTION sec=s1 slot=primary label="Book by email" href="#book"
+ACTION sec=s1 slot=secondary label="View the current menu" href="#menu"
+MEDIA sec=s1 slot=figure motif=lattice
+SECTION  id=s2  kind=note  layout=stack  tone=inverted
+TEXT sec=s2 slot=title text="Open Thursday through Sunday"
+TEXT sec=s2 slot=lede text="Located in Margate with one sitting per night."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT sec=s3 slot=eyebrow text="The Kitchen"
+TEXT sec=s3 slot=title text="Two cooks and [no staff]"
+TEXT sec=s3 slot=lede text="This is the only thing you cannot copy: a kitchen run by exactly two people who cook every dish themselves. There are no sous chefs, no runners, just these two owners managing twelve covers alone."
+ACTION sec=s3 slot=primary label="Email to book" href="#book"
+MEDIA sec=s3 slot=figure motif=strata
+SECTION  id=s4  kind=features  layout=list  tone=quiet
+TEXT sec=s4 slot=eyebrow text="The Menu"
+TEXT sec=s4 slot=title text="Starters and [small plates]"
+ITEM sec=s4 slot=item title="Bread bowl soup" body="Served in a hollowed loaf, the broth is made from roasted root vegetables."
+ITEM sec=s4 slot=item title="Smoked mackerel tartare" body="Cured for three days with dill and lemon zest before plating on rye crackers."
+ITEM sec=s4 slot=item title="Roasted beetroot salad" body="Dressed in a vinegar reduction, the beets are peeled by hand to show their skin."
+ITEM sec=s4 slot=item title="Charred endive hearts" body="Grilled over wood embers until blackened at the edges and served with sea salt."
+SECTION  id=s5  kind=faq  layout=stack  tone=quiet
+TEXT sec=s5 slot=eyebrow text="Questions"
+TEXT sec=s5 slot=title text="[How] to book and what happens if you cannot come"
+ITEM sec=s5 slot=item title="Can I reserve a table?" body="Yes, but only by emailing the address on this page. We take bookings for Thursday through Sunday evenings with just one sitting per night."
+ITEM sec=s5 slot=item title="What is the cost to eat here?" body="The menu changes weekly and prices are set by the season's catch. Please check the current sheet before you plan your budget, as we do not list fixed costs online."
+ITEM sec=s5 slot=item title="I have a dietary restriction" body="Our two cooks prepare every dish from scratch in our small kitchen. Tell us what you cannot eat when you email and they will adjust the set menu for that night only."
+ITEM sec=s5 slot=item title="How long does it take to get ready?" body="We open Thursday through Sunday with a single sitting per evening. Arrive on time because we do not have waiting lists or second sittings once our twelve covers are full."
+ITEM sec=s5 slot=item title="What if I cannot make the date" body="Since there is only one night of service each week, cancellations must be made immediately via email so those seats can go to someone else who needs them more than you do."
+SECTION  id=s6  kind=cta  layout=stack  tone=quiet
+TEXT sec=s6 slot=title text="The next sitting begins Thursday"
+TEXT sec=s6 slot=lede text="Arrive on time for one meal only."
+ACTION sec=s6 slot=primary label="Email to reserve a seat" href="#book"

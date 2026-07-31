@@ -122,6 +122,22 @@ contributor to a page looking unfinished.
 
 ## letterpress features: several things offered, as a numbered list
 
+The workhorse section. It holds three to five things the business
+offers, each a short title and a body of two sentences, introduced by
+an eyebrow and a heading of its own.
+
+What it actually contains depends on the genre, and that is worth being
+deliberate about: on a trip page it is the itinerary, one item per day;
+in a recipe it is the method, one action per step; for a publication it
+is the recent pieces; for a course it is the curriculum; for a
+portfolio it is the work itself. The section is the same shape and the
+content is not interchangeable.
+
+Two sentences per item is the rule that matters. The first says what
+the thing is and the second gives one concrete detail — a duration, a
+material, a limit, a step. One-line bodies are the commonest reason a
+finished page still looks like a draft.
+
 ```
 SECTION  id=s4  kind=features  layout=list  tone=quiet
 TEXT     sec=s4  slot=eyebrow  text="How it runs"
@@ -450,3 +466,261 @@ The compiler reports every substitution it makes rather than quietly
 rescuing a malformed script, because a generous compiler produces a
 handsome page from a failed generation and you would be reading the
 compiler's work as the model's.
+
+## letterpress genres: every kind of site wants a different page
+
+The section menu is generic and a business is not. Left to choose
+freely from it, a model plans features, then detail, then faq, for a
+bakery and a database tool alike — the menu offers no reason to prefer
+one shape over another, so it converges on the middle.
+
+Genre supplies that reason. A restaurant page lives or dies on hours
+and address; a portfolio must not carry an FAQ; a tour is worthless
+without its duration and what is included; a recipe is a list of
+ingredients and a numbered method and very little else. These are not
+style preferences. They are what the reader came for, and a page that
+omits them has failed at the only job it had.
+
+Each record below gives a plan that works, the content that genre
+cannot omit, and the mistake it invites. Follow the one that matches
+the brief; they are starting points, not templates, and a brief that
+clearly wants a different shape should get one.
+
+## letterpress genre: restaurant, cafe or bar
+
+    hero  ->  note  ->  features  ->  detail  ->  faq  ->  cta
+    editorial family, photo-led
+
+Someone reading a restaurant site wants three facts quickly: where it
+is, when it opens, and whether they can get a table tonight. Put the
+hours and the street in a `note` directly under the hero rather than in
+the footer, where a phone reader will never scroll to find them.
+
+`features` is a handful of dishes that show the kitchen's range, never
+the full menu — that belongs on its own page. `detail` is the sourcing,
+the room, or the person who cooks. `faq` answers booking, walk-ins,
+dietary requirements and children.
+
+MUST CARRY: street address, opening days and hours, how to book.
+INVITES: invented prices and opening times. Both must come from the
+brief; a reader turns up with the wrong money at the wrong hour.
+PHOTOGRAPHS: the room and the food.
+
+## letterpress genre: travel, tours and guided trips
+
+    hero  ->  proof  ->  features  ->  detail  ->  faq  ->  cta
+    editorial family, photo-led
+
+Nobody books a trip without knowing how long it is, how many people
+come, and what the price includes. `proof` carries exactly that — days,
+group size, departure months, distance covered — and it sits high on
+the page because it is the qualifying information.
+
+`features` is the itinerary, one item per day or per stage, each with a
+concrete detail: a distance, a crossing, a place slept. `detail` is
+what separates this operator from the twenty others running the same
+route. `faq` covers fitness, visas, weather, insurance, and what
+happens when conditions turn.
+
+MUST CARRY: duration, group size, what is and is not included.
+INVITES: a price, a departure date and an altitude that were never in
+the brief.
+MOTIF when there is no photograph: `topography`.
+
+## letterpress genre: personal portfolio
+
+    hero  ->  features  ->  detail  ->  cta
+    studio family, short
+
+A portfolio is the shortest page in this list. The work is the
+argument, so the page gets out of its way: a hero saying plainly who
+you are and what you make, the work itself, one honest paragraph on how
+you approach it, and a way to reach you.
+
+The hero headline is your name and your discipline, not a slogan.
+"Sculptural furniture in oak and steel" beats "Crafting tomorrow's
+experiences" by the distance between a fact and a noise.
+
+MUST CARRY: what you do, examples of it, how to make contact.
+NEVER: an FAQ, a stats band, or a roster of "services" — a portfolio
+with a testimonial section reads as a small agency pretending to be a
+larger one.
+LENGTH: three or four sections. Padding it is the commonest mistake.
+
+## letterpress genre: blog or publication
+
+    hero  ->  features  ->  detail  ->  cta
+    editorial family
+
+The hero states the subject and the point of view: what this publishes
+and why it deserves a reader's attention. `features` is the recent
+pieces, each item a title and one sentence making the case for reading
+it — never a truncated first paragraph. `detail` is who writes it and
+what they know. `cta` is the subscription, and it should say what
+arrives and how often.
+
+MUST CARRY: what the publication covers, recent pieces, how to
+subscribe.
+INVITES: a subscriber count and a publishing frequency the brief never
+stated.
+
+## letterpress genre: recipe
+
+    hero  ->  proof  ->  roster  ->  features  ->  faq  ->  cta
+    editorial family, photo-led
+
+A recipe has the strictest structure of any genre here, because a cook
+reads it standing up with wet hands.
+
+`proof` is the numbers, at the top where they can be found: serves,
+prep time, cook time, oven temperature. `roster` is the INGREDIENTS,
+one item each, quantity in the title and preparation in the body —
+"300g strong white flour" / "sifted, plus extra for dusting".
+`features` is the METHOD, numbered, one step per item, each step a
+single action. `faq` is substitutions, making ahead, and storage.
+
+MUST CARRY: quantities, times, temperature, yield.
+NEVER: a step that does two things. Split it.
+INVITES: quantities and temperatures that were not in the brief — the
+one genre where an invented number does not merely mislead a reader, it
+ruins the dish.
+
+## letterpress genre: local trade — plumber, electrician, builder
+
+    hero  ->  features  ->  detail  ->  proof  ->  faq  ->  cta
+    editorial or technical family
+
+Someone on this page has a problem now. The hero says what you do and
+where you cover, in that order. `features` is the services, plainly
+named — "boiler repairs", not "heating solutions". `detail` is the area
+covered, with the towns named. `proof` is years trading, callout time,
+registration numbers. `faq` answers how quotes work, whether callouts
+are charged, and what counts as an emergency.
+
+MUST CARRY: the services, the area covered, how to make contact.
+INVITES: a response time and a callout fee that were never stated.
+MOTIF: `topography` for the area covered, `orbit` for reach.
+
+## letterpress genre: clinic or practitioner
+
+    hero  ->  features  ->  detail  ->  roster  ->  faq  ->  cta
+    editorial family
+
+A patient wants to know what you treat, what an appointment is like,
+and what it costs them in time. `features` is what you treat. `detail`
+is your method — the thing a competitor could not copy. `roster` is the
+services or disciplines, never named individuals. `faq` is the section
+people actually read: the first visit, session length, referrals,
+confidentiality.
+
+MUST CARRY: what is treated, what a first appointment involves, how to
+book.
+INVITES: session fees and appointment lengths not in the brief.
+
+## letterpress genre: developer tool or open-source project
+
+    hero  ->  features  ->  detail  ->  faq  ->  cta
+    technical family, motif=schematic
+
+The hero says what it does in one line a developer can evaluate — the
+verb and the object, not the category. "Finds unused indexes in
+Postgres" beats "database optimisation platform".
+
+`features` is capabilities, each with a concrete mechanism. `detail` is
+the architectural decision that makes it different: what it reads, what
+it never touches. `faq` is permissions, data handling, CI, and what
+happens when something is unavailable. `cta` is install or docs.
+
+MUST CARRY: what it does, how it is installed, the licence.
+INVITES: benchmarks. "Scans in under ten seconds", "handles 50TB",
+"ninety percent of cases" — every one of those is a measurement that
+nobody took.
+
+## letterpress genre: charity or nonprofit
+
+    hero  ->  proof  ->  detail  ->  features  ->  note  ->  cta
+    editorial or studio family
+
+The hero states the problem, not the organisation. `proof` is where the
+money goes, which is the question every donor has and few charity pages
+answer plainly. `detail` is the work itself, concretely. `features` is
+the ways to help. `note` is the reassurance: no phone calls, cancel
+whenever, the list is never sold.
+
+MUST CARRY: what the money does, how to give, how to stop giving.
+INVITES: percentages, beneficiary counts and overhead ratios that were
+never in the brief. This is the genre where an invented figure does the
+most reputational damage.
+
+## letterpress genre: event or conference
+
+    hero  ->  proof  ->  features  ->  roster  ->  faq  ->  cta
+    studio family
+
+`proof` is the date, the city, the venue and the ticket price, because
+those four decide whether anyone reads further. `features` is the
+programme. `roster` is the sessions or strands — speakers are named
+people, so name them only if the brief does. `faq` is access, travel,
+refunds and what a ticket includes.
+
+MUST CARRY: date, place, how to get a ticket.
+INVITES: dates. Never invent one. A wrong date is the single most
+damaging error this genre can carry.
+
+## letterpress genre: shop or single product
+
+    hero  ->  detail  ->  proof  ->  features  ->  faq  ->  cta
+    studio family, photo-led
+
+`hero` is the product photographed and one line saying what it is.
+`detail` is why it was made this way. `proof` is the specification:
+dimensions, weight, materials, warranty. `features` is what it does or
+what is in the box. `faq` is shipping, returns and sizing, which is
+where most abandoned purchases are lost.
+
+MUST CARRY: what it is, what it costs, how it ships, how to return it.
+INVITES: a price, a delivery window and dimensions from nowhere.
+
+## letterpress genre: studio, agency or practice
+
+    hero  ->  features  ->  detail  ->  cta
+    studio family
+
+`hero` is the positioning: the kind of work you take and who for.
+`features` is the services. `features` is selected work, which for a
+design studio is the whole argument. `detail` is how you work — the
+process, the size of an engagement, what a first month looks like.
+
+MUST CARRY: what you do, examples, how to start a conversation.
+NEVER: a testimonial you invented, or client names you cannot verify.
+
+## letterpress genre: property or a place to let
+
+    hero  ->  proof  ->  features  ->  detail  ->  cta
+    editorial family, photo-led, motif=elevation
+
+`proof` is bedrooms, floor area, price and council tax band. `features`
+is the rooms, one item each with its dimensions. `detail` is the area:
+the schools, the station, how long it takes to walk there. This is the
+one genre where `elevation` is exactly the right drawing, because the
+subject is literally a building.
+
+MUST CARRY: price, size, location, how to arrange a viewing.
+INVITES: every number on the page. Dimensions, prices and distances
+must come from the brief verbatim or not appear.
+
+## letterpress genre: school, course or training
+
+    hero  ->  features  ->  proof  ->  roster  ->  faq  ->  cta
+    editorial family
+
+`features` is the curriculum, one item per module or term, each saying
+what a student can do afterwards rather than what is covered. `proof`
+is duration, contact hours, class size and cost. `roster` is the
+subjects or the departments. `faq` is entry requirements, fees,
+funding, and what happens if someone falls behind.
+
+MUST CARRY: what is taught, how long it takes, what it costs, how to
+apply.
+INVITES: pass rates, employment statistics and class sizes that were
+never stated.
