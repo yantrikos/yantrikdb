@@ -1,0 +1,8 @@
+{
+  "_comment": "The briefs every arm of the experiment is run on. Kept in the repo because a comparison whose inputs live only in shell history is not a result anyone can check, including me later.",
+  "briefs": {
+    "bakery": "A sourdough bakery in Bristol called Tide Mill. Two ovens, no cafe, sells out by noon. Wants people to know the collection times and the weekly loaf.",
+    "clinic": "A physiotherapy clinic in Leeds called Kestrel. Sports injuries and post-op rehab, two practitioners, no gym contract required.",
+    "devtool": "An open-source CLI called Flint that finds unused database indexes in Postgres. Read-only, runs in CI, MIT licensed."
+  }
+}
