@@ -1,0 +1,40 @@
+SITE     name="Reel North"  nav="Archive,Collections,Visit"  location="Sheffield"  contact="research@reelnorth.ac.uk"
+THEME    family=technical  accent=#0f4c75  mode=dark  density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT     sec=s1  slot=eyebrow  text="Reel North"
+TEXT     sec=s1  slot=title    text="A [film] archive in Sheffield."
+TEXT     sec=s1  slot=lede     text="Holds twelve thousand reels of regional television from nineteen fifty-seven to ninety-four, digitised at four K. Open to researchers three days a week for free with two archivists on staff."
+ACTION   sec=s1  slot=primary  label="View the collection"  href="#archive"
+ACTION   sec=s1  slot=secondary label="Visit us in Sheffield"  href="#visit"
+MEDIA    sec=s1  slot=figure  motif=schematic
+SECTION  id=s2  kind=proof  layout=stack  tone=bold
+TEXT     sec=s2  slot=eyebrow    text="Reel North"
+TEXT     sec=s2  slot=title       text="A [film] archive in Sheffield."
+ITEM      sec=s2  slot=item      title="12,400"   body="reels of regional television"
+ITEM      sec=s2  slot=item      title="1957 to"    body="nineteen ninety-four"
+ITEM      sec=s2  slot=item      title="4K"         body="digitised resolution"
+ITEM      sec=s2  slot=item      title="3 days"     body="open to researchers a week"
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT     sec=s3  slot=eyebrow    text="Reel North"
+TEXT     sec=s3  slot=title       text="A [film] archive in Sheffield."
+TEXT     sec=s3  slot=lede       text="The only regional television collection digitised at four K, preserved by two archivists for free access. No other institution holds twelve thousand reels from nineteen fifty-seven to ninety-four under one roof."
+ACTION   sec=s3  slot=primary    label="Request a viewing"  href="#request"
+MEDIA    sec=s3  slot=figure     motif=dial
+SECTION  id=s4  kind=features  layout=list  tone=quiet
+TEXT     sec=s4  slot=item    title="Regional television"   body="Footage from Yorkshire and Lancashire captured on film stock before digital conversion."
+ITEM      sec=s4  slot=item    title="1957 to 1994"           body="The span of regional broadcasting coverage preserved in the collection's core holdings."
+ITEM      sec=s4  slot=item    title="Four K resolution"     body="Digitised at four thousand lines per frame for maximum archival clarity and longevity."
+ITEM      sec=s4  slot=item    title="Two archivists on staff"   body="Curators manage access protocols during the three days each week researchers are permitted to view materials in person or remotely."
+SECTION  id=s5  kind=roster  layout=stack  tone=quiet
+TEXT     sec=s5  slot=eyebrow    text="Reel North"
+TEXT     sec=s5  slot=title       text="A [film] archive in Sheffield."
+ITEM      sec=s5  slot=item      title="Viewing room access"   body="Researchers may view materials on-site or remotely during the three days each week, with protocols managed by two archivists for free of charge."
+ITEM      sec=s5  slot=item      title="Digital catalogue search"    body="The collection's core holdings from nineteen fifty-seven to ninety-four are searchable online at four thousand lines per frame resolution."
+ITEM      sec=s5  slot=item      title="Regional broadcast archive"   body="Footage from Yorkshire and Lancashire captured on film stock before digital conversion is preserved under one roof for maximum archival clarity."
+SECTION  id=s6  kind=note  layout=stack  tone=inverted
+TEXT     sec=s6  slot=title    text="The only regional television collection digitised at four K."
+TEXT     sec=s6  slot=lede      text="Preserved by two archivists for free access to twelve thousand reels from nineteen fifty-seven to ninety-four under one roof."
+SECTION  id=s7  kind=cta  layout=stack  tone=quiet
+TEXT     sec=s7  slot=title    text="Request a viewing"
+TEXT     sec=s7  slot=lede      text="The first step: submit your research proposal to schedule access during one of three weekly sessions."
+ACTION   sec=s7  slot=primary  label="Submit application form"  href="#apply"

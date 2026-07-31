@@ -230,7 +230,8 @@ MOTIF_CAPTION = {
 # rhythm, not because they add more of the same: numerals at display
 # size, a single sentence with no competition, and the artwork returning
 # mirrored at a second scale.
-SECTION_KINDS = {"hero", "features", "cta", "proof", "quote", "detail"}
+SECTION_KINDS = {"hero", "features", "cta", "proof", "quote", "detail",
+                 "faq", "gallery", "note", "roster"}
 LAYOUTS = {"split", "centred", "stack", "grid", "list"}
 TONES = {"quiet", "bold", "inverted"}
 SLOTS = {
@@ -244,6 +245,16 @@ SLOTS = {
     # The motif returns mirrored, so the drawing is a running element of
     # the page rather than a one-off decoration in the hero.
     "detail": {"eyebrow", "title", "lede", "primary", "figure"},
+    # Questions people actually ask. Long-form, no artwork, and the one
+    # kind that carries real paragraphs rather than captions.
+    "faq": {"eyebrow", "title", "lede", "item"},
+    # Several drawings at small scale. ITEM motif= picks each one.
+    "gallery": {"eyebrow", "title", "lede", "item"},
+    # A single wide statement, no art, no buttons. Punctuation between
+    # two dense sections.
+    "note": {"title", "lede"},
+    # People or services: a name, what they do, and one line of detail.
+    "roster": {"eyebrow", "title", "lede", "item"},
 }
 
 
@@ -486,7 +497,8 @@ def parse(text: str) -> Doc:
             elif op == "ACTION":
                 sec["actions"].append((slot, args.get("label", ""), args.get("href", "#")))
             elif op == "ITEM":
-                sec["items"].append((args.get("title", ""), args.get("body", "")))
+                sec["items"].append((args.get("title", ""), args.get("body", ""),
+                                     args.get("motif", "")))
             elif op == "MEDIA":
                 sec["media"].append((args.get("alt", ""),
                                      args.get("motif", "elevation")))
@@ -726,6 +738,46 @@ h1{{font-size:{st['d1']}}} h2{{font-size:{st['d2']}}} h3{{font-size:{st['d3']}}}
 .stat .cap{{display:block;margin-top:.7rem;font-size:{st['small']};
   color:{pal['muted']};max-width:22ch;line-height:1.45}}
 .inverted .stat .cap{{color:{pal['canvas']};opacity:.78}}
+/* Questions and answers. Two columns on wide screens so a long answer
+   does not run the full page width, and the question sits in the
+   display face to separate it from its own answer without a rule. */
+.qas{{display:grid;gap:2.2rem 3rem;grid-template-columns:1fr;
+  margin-top:2.8rem}}
+@media(min-width:56rem){{.qas{{grid-template-columns:repeat(2,1fr)}}}}
+.qa h3{{font-size:{st['lede']};margin:0 0 .6rem}}
+.qa p{{color:{pal['muted']};line-height:1.62;margin:0;max-width:46ch}}
+.inverted .qa p{{color:{pal['canvas']};opacity:.78}}
+/* Several drawings at small scale. 3:4 rather than the hero's 4:5 so a
+   row of them is not taller than the text that introduces it. */
+.tiles{{display:grid;gap:var(--gap);grid-template-columns:1fr;
+  margin-top:2.8rem}}
+@media(min-width:44rem){{.tiles{{grid-template-columns:repeat(2,1fr)}}}}
+@media(min-width:64rem){{.tiles{{grid-template-columns:repeat(3,1fr)}}}}
+.tile{{margin:0}}
+.tile svg{{display:block;width:100%;aspect-ratio:3/4;background:{pal['surface']};
+  border:{fam['rule']};border-radius:{fam['radius']};padding:1rem}}
+.tile figcaption{{margin-top:.9rem}}
+.tile b{{display:block;font-family:{fam['mono']};font-size:{st['small']};
+  letter-spacing:.1em;text-transform:uppercase;font-weight:400;
+  color:{pal['accent-text']}}}
+.tile span{{display:block;margin-top:.4rem;font-size:{st['small']};
+  color:{pal['muted']};line-height:1.5}}
+.inverted .tile b{{color:{pal['accent-inv']}}}
+.inverted .tile span{{color:{pal['canvas']};opacity:.78}}
+/* A single wide statement. No max-width on the heading: this is the one
+   place the type is allowed to run long, which is what makes it read as
+   a break rather than another section. */
+.note h2{{font-size:{st['d2']};max-width:20ch}}
+.note .lede{{max-width:52ch;font-size:{st['lede']}}}
+/* People or services. Names in the display face, roles beneath. */
+.whos{{display:grid;gap:2rem 2.4rem;grid-template-columns:1fr;
+  margin-top:2.6rem}}
+@media(min-width:40rem){{.whos{{grid-template-columns:repeat(2,1fr)}}}}
+@media(min-width:64rem){{.whos{{grid-template-columns:repeat(3,1fr)}}}}
+.who{{border-top:{fam['rule']};padding-top:1.1rem}}
+.who h3{{font-size:{st['lede']};margin:0 0 .45rem}}
+.who p{{color:{pal['muted']};line-height:1.55;margin:0}}
+.inverted .who p{{color:{pal['canvas']};opacity:.78}}
 
 /* Motion. Two effects only, both cheap and both reversible: strokes
    draw themselves once, and blocks rise as they enter. Anything more
@@ -842,7 +894,7 @@ html.js .rise.in{{opacity:1;transform:none}}
             stats = "".join(
                 f'<div class="stat"><span class="fig">{_esc(v)}</span>'
                 f'<span class="cap">{_esc(lab)}</span></div>'
-                for v, lab in sec["items"])
+                for v, lab, _ in sec["items"])
             # Track count follows the item count. A fixed four-column
             # grid is right for four figures and leaves half the row
             # visibly empty for two — and two is now the common case,
@@ -851,6 +903,49 @@ html.js .rise.in{{opacity:1;transform:none}}
             n = max(1, min(len(sec["items"]), 4))
             content = (f'<div{centred}>{col}</div>'
                        f'<div class="stats" style="--cols:{n}">{stats}</div>')
+        elif sec["kind"] == "faq":
+            # The one kind that carries paragraphs. Questions are set in
+            # the display face at body size so the page has somewhere to
+            # put real prose — the rest of the vocabulary is captions and
+            # one-liners, which is a large part of why every page read
+            # thin however many sections it had.
+            rows = "".join(
+                f'<div class="qa"><h3>{_esc(q)}</h3><p>{_esc(a)}</p></div>'
+                for q, a, _ in sec["items"])
+            content = f'<div{centred}>{col}</div><div class="qas">{rows}</div>'
+        elif sec["kind"] == "gallery":
+            tiles = []
+            # `cap, line, motif` — NOT `body`, which is the page-level
+            # accumulator built a few lines below. Unpacking into it
+            # replaced the list of rendered sections with a string and
+            # the compile died on .append two sections later, nowhere
+            # near the cause.
+            for cap, line, motif in sec["items"]:
+                if motif not in MOTIFS:
+                    if motif:
+                        doc.fallbacks.append(f"motif={motif} unknown -> schematic")
+                    motif = "schematic"
+                art = MOTIFS[motif](pal["accent"], pal["ink"], pal["muted"])
+                label = cap or MOTIF_CAPTION[motif]
+                tiles.append(
+                    f'<figure class="tile">'
+                    f'<svg viewBox="0 0 420 520" role="img"'
+                    f' aria-label="{_esc(label)}">{art}</svg>'
+                    f'<figcaption><b>{_esc(label)}</b>'
+                    + (f'<span>{_esc(line)}</span>' if line else "")
+                    + '</figcaption></figure>')
+            content = (f'<div{centred}>{col}</div>'
+                       f'<div class="tiles">{"".join(tiles)}</div>')
+        elif sec["kind"] == "note":
+            # Deliberately the least furnished thing on the page: no
+            # eyebrow, no art, no button. It exists to break two dense
+            # sections apart, and gains nothing from being given more.
+            content = f'<div class="note">{col}</div>'
+        elif sec["kind"] == "roster":
+            rows = "".join(
+                f'<div class="who"><h3>{_esc(n)}</h3><p>{_esc(d)}</p></div>'
+                for n, d, _ in sec["items"])
+            content = f'<div{centred}>{col}</div><div class="whos">{rows}</div>'
         elif sec["kind"] == "detail":
             # Mirrored against the hero: art left, text right. Same grid,
             # reversed columns, so the eye travels the other way and the
@@ -866,12 +961,12 @@ html.js .rise.in{{opacity:1;transform:none}}
             rows = "".join(
                 f'<li><span class="num">{i:02d}</span>'
                 f'<h3>{_esc(t)}</h3><p>{_esc(b)}</p></li>'
-                for i, (t, b) in enumerate(sec["items"], 1))
+                for i, (t, b, _) in enumerate(sec["items"], 1))
             content = f'<div{centred}>{col}</div><ol class="steps">{rows}</ol>'
         elif sec["items"]:
             cards = "".join(
                 f'<div class="card"><h3>{_esc(t)}</h3><p>{_esc(b)}</p></div>'
-                for t, b in sec["items"])
+                for t, b, _ in sec["items"])
             content = f'<div{centred}>{col}</div><div class="grid">{cards}</div>'
         elif sec["kind"] == "cta" and sec["layout"] != "centred":
             content = f'<div class="closing"><div>{col}</div>{actions_html}</div>'

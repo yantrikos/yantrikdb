@@ -1,0 +1,32 @@
+SITE     name="Tide Mill"  nav="Bread,Visit,Contact"  location="Bristol"  contact="hello@tidemill.co"
+THEME    family=editorial  accent=#b8442f  mode=light  density=roomy
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Bristol's sourdough"
+TEXT sec=s1 slot=title text="Tide Mill [worth the walk]"
+TEXT sec=s1 slot=lede text="Two ovens and no cafe, but we bake until noon." TEXT sec=s1 slot=secondary text="The queue starts at 7am sharp." ACTION sec=s1 slot=primary label="Collection times" href="#times" MEDIA sec=s1 slot=figure motif=elevation
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT sec=s2 slot=eyebrow text="The weekly loaf"
+TEXT sec=s2 slot=title text="What we bake this week"
+ITEM sec=s2 slot=item title="Rye and caraway" body="Forty loaves of dark, crust-heavy bread. Shipped at 10am on Tuesday."
+ITEM sec=s2 slot=item title="Sourdough starter" body="A wild culture kept alive in a glass jar since March. Fed twice daily with rye flour."
+ITEM sec=s2 slot=item title="Brioche buns" body="Rich, buttery rolls baked to order at 1pm on Friday. Sold only while the oven is hot."
+ITEM sec=s2 slot=item title="Salted caramel tart" body="Made from house-made sugar and local cream. Ready by noon every Saturday morning."
+SECTION  id=s3  kind=roster  layout=stack  tone=quiet
+TEXT sec=s3 slot=eyebrow text="The team"
+TEXT sec=s3 slot=title text="Who keeps it running"
+ITEM sec=s3 slot=item title="Baker" body="Handles two ovens daily from 6am to noon, managing the sourdough schedule and crust checks."
+ITEM sec=s3 slot=item title="Keeper" body="Maintains the wild starter culture in a glass jar since March, feeding it twice with rye flour every day."
+ITEM sec=s3 slot=item title="Runner" body="Delivers forty loaves of dark bread to local shops by 10am Tuesday and collects sugar for Saturday tarts at noon."
+SECTION  id=s4  kind=faq  layout=stack  tone=bold
+TEXT sec=s4 slot=eyebrow text="Common questions"
+TEXT sec=s4 slot=title text="What you need to know before you come in"
+ITEM sec=s4 slot=item title="Do I have a reservation?" body="No, we don't take reservations. You must be at the door by 7am sharp or your bread will likely already be sold out."
+ITEM sec=s4 slot=item title="Can I pick up online orders?" body="We do not offer curbside pickup or delivery services. All bread must be collected in person at our shop on High Street, Bristol, between 7am and noon daily."
+ITEM sec=s4 slot=item title="What if the oven breaks down?" body="In that rare case we will notify you by email within an hour of any disruption to baking times or stock availability so you can plan accordingly."
+SECTION  id=s5  kind=detail  layout=split  tone=quiet
+TEXT sec=s5 slot=eyebrow text="The secret"
+TEXT sec=s5 slot=title text="Why Tide Mill [never sells out]"
+TEXT sec=s5 slot=lede text="Our sourdough starter is not a culture we buy, but one that has been fed by the same rye flour for over three decades. This single lineage of yeast knows exactly when to slow down and rest during winter months so it can rise perfectly in spring." ACTION sec=s5 slot=primary label="Ask about our starter" href="#starter" MEDIA sec=s5 slot=figure motif=elevation
+SECTION  id=s6  kind=cta  layout=stack  tone=quiet
+TEXT sec=s6 slot=title text="When to come"
+TEXT sec=s6 slot=lede text="Arrive before 7am sharp or your bread will likely already be sold out." ACTION sec=s6 slot=primary label="Collection times" href="#times"

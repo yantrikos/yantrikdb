@@ -63,6 +63,12 @@ not facts about your site, they only show the shape:
 Never write a person's name as a customer, a review or an endorsement.
 You have no way to know what anyone said.
 
+Never write a price or a clock time that is not in the brief. If the
+brief does not say what something costs or when it opens, write around
+it — "priced by the loaf", "opening hours on the door" — because a
+reader acts on those two and turns up with the wrong money at the wrong
+hour. Any line containing one is deleted before it reaches the page.
+
 Note the shape of TEXT: the slot is the VALUE of slot=, and the words
 go in text=. Never write `eyebrow=...` or `title=...` as the key.
 
@@ -135,80 +141,130 @@ RULES
 # Fourth field is the section this call may write to. It used to be
 # derived from the scaffold with a special case for `items`, which was
 # fine while exactly one call emitted ITEMs and wrong the moment two did.
-CALLS = [
-    ("frame", None, None, """Site: {brief}
+# The model chooses which sections the page has.
+#
+# Adding section KINDS did not fix the sameness, because the harness
+# still emitted one hardcoded sequence for every brief: three of four
+# generated pages came out hero/detail/features/cta, identical in
+# structure, differing only in words. Six kinds inside a fixed skeleton
+# is still one skeleton.
+#
+# So the shape becomes a decision, made once, from the brief. hero and
+# cta are the fixed ends — every page opens and closes — and everything
+# between them is planned.
+PLAN_MENU = """proof     A band of figures. ONLY if the brief states numbers.
+detail    One thing done differently, explained, with a drawing.
+features  Three to five things offered, each a title and two sentences.
+faq       Questions a customer actually asks, answered in full sentences.
+          The only section that carries real paragraphs. Use it when
+          people need to know how something works before they commit.
+roster    The people or the services, named, with a line each.
+note      One wide sentence and nothing else. Use it to break two dense
+          sections apart. Never two of these."""
 
-Emit EXACTLY two lines: one SITE and one THEME. Nothing else."""),
-    ("hero", "SECTION  id=s1  kind=hero  layout=split  tone=quiet", "s1",
-     """Site: {brief}
+# Layout and tone are the harness's, not the model's. They are pure
+# presentation with no information in them that the brief supplies, and
+# asking for them back only adds ways to be wrong — the same reason
+# SECTION lines stopped being asked for.
+KIND_LAYOUT = {
+    "proof": "stack", "detail": "split", "features": "list",
+    "faq": "stack", "gallery": "stack", "roster": "stack",
+    "note": "stack", "hero": "split", "cta": "stack",
+}
 
-The hero section already exists. Emit ONLY its contents:
-TEXT for slot=eyebrow, slot=title and slot=lede; two ACTION lines
-(slot=primary, slot=secondary); one MEDIA line with slot=figure and a
-motif. Do NOT emit SECTION. Do NOT emit THEME or SITE again.
-In the title's text, wrap two or three of its own words in [brackets]."""),
-    ("proof", "SECTION  id=s2  kind=proof  layout=stack  tone=quiet", "s2",
-     """Site: {brief}
-
-These are every figure in the brief, extracted for you:
+KIND_PROMPT = {
+    "proof": """These are every figure in the brief, extracted for you:
 {figures}
 
-The proof section already exists. Emit TEXT for slot=eyebrow, TEXT for
-slot=title, then ONE ITEM line with sec=s2 and slot=item FOR EACH
-figure in that list — and no others.
+Emit TEXT for slot=eyebrow, TEXT for slot=title, then ONE ITEM line
+with sec={sec} and slot=item FOR EACH figure in that list — and no
+others.
 
 In each ITEM, title= is the figure exactly as the brief gives it, and
 body= is one short line saying what it counts.
 
-Write each figure exactly as it appears there. Do not estimate,
-benchmark, price or round, and do not add a figure that is not listed.
-If the list is empty, emit NOTHING AT ALL — not the eyebrow, not the
-title. An empty response is the correct answer to a brief with nothing
-to count. Do NOT emit SECTION."""),
-    ("detail", "SECTION  id=s3  kind=detail  layout=split  tone=quiet", "s3",
-     """Site: {brief}
+Do not estimate, benchmark, price or round, and do not add a figure
+that is not listed. If the list is empty, emit NOTHING AT ALL.""",
 
-The detail section already exists. Pick the ONE thing about this
-business that a competitor could not copy, and explain it. Emit TEXT
-for slot=eyebrow, slot=title and slot=lede, one ACTION with
-slot=primary, and one MEDIA with slot=figure and a motif. Wrap two or
-three words of the title in [brackets]. Do NOT emit SECTION."""),
-    ("features", "SECTION  id=s4  kind=features  layout=list  tone=quiet", "s4",
-     """Site: {brief}
+    "detail": """Pick the ONE thing about this business that a competitor could not
+copy, and explain it. Emit TEXT for slot=eyebrow, slot=title and
+slot=lede, one ACTION with slot=primary, and one MEDIA with
+slot=figure and a motif. The lede is two or three full sentences.
+Wrap two or three words of the title in [brackets].""",
 
-The features section already exists. Emit ONLY two lines: TEXT for
-slot=eyebrow and TEXT for slot=title, both with sec=s4.
-Do NOT emit SECTION. Do NOT emit ITEM in this response."""),
-    ("items", None, "s4", """Site: {brief}
+    "features": """Emit TEXT for slot=eyebrow, TEXT for slot=title, then FOUR ITEM lines
+with sec={sec} and slot=item.
 
-Emit EXACTLY three ITEM lines, each `sec=s4  slot=item`, with a short
-title and a body of one or two specific sentences. Nothing else."""),
-    # There is deliberately NO quote call.
+Each ITEM body= is TWO full sentences: what it is, then one concrete
+detail — a time, a material, a step, a limit. One-line bodies are what
+make a page look unfinished.""",
+
+    "faq": """Emit TEXT for slot=eyebrow, TEXT for slot=title, then FIVE ITEM lines
+with sec={sec} and slot=item.
+
+title= is a question a real customer would type, written the way they
+would type it. body= answers it in TWO OR THREE full sentences, with
+the specifics — when, how long, what it costs them, what happens if
+they cannot. This is the section people actually read; do not write
+one-line answers.""",
+
+    # `gallery` is off the menu, for the reason `quote` is.
     #
-    # The compiler supports kind=quote and renders it well, but a model
-    # cannot source a testimonial. Asked for one, this 4B produced
-    # "Sarah Chen, DevOps Lead at RiverScale" — a named person at a
-    # named company, neither of which exists, attesting to a product
-    # they have never used. That is not a copy defect to tune away; it
-    # is a fabricated endorsement, and it would go on a real site under
-    # someone's real business name.
+    # It renders three motifs at small scale, and the model captions
+    # each tile. Given a bakery it produced "TUESDAY MORNING — freshly
+    # stamped loaves stacked on the bench" over a line drawing of a
+    # BUILDING, then "crusts cooling under a single window light" over
+    # contour rings, then a clock face. Five abstract parametric
+    # diagrams are not a picture library, and a gallery is a promise of
+    # photographs. I had just removed exactly this claim from the hero
+    # caption and reintroduced it one section down.
     #
-    # Unlike the invented figures below, there is no computable ground
-    # truth to check a quote against: the brief has no customers in it,
-    # so every possible answer is a fabrication. When a slot cannot be
-    # verified even in principle, the honest move is to keep it out of
-    # the model's reach and let a human supply it. kind=quote stays
-    # available for hand-authored ops, where the words came from a
-    # person who actually said them.
-    ("cta", "SECTION  id=s6  kind=cta  layout=stack  tone=quiet", "s6",
-     """Site: {brief}
+    # kind=gallery stays in the compiler for hand-authored ops, where
+    # someone choosing `schematic` for three stages of a pipeline is
+    # captioning a diagram that really is one.
 
-The closing section already exists. Emit ONLY its contents: TEXT for
-slot=title, TEXT for slot=lede, and one ACTION with slot=primary, all
-with sec=s6. Do NOT emit SECTION.
-The title must NOT repeat the hero headline — say the next thing:
-when to come, what happens first, or what it costs."""),
-]
+    "roster": """Emit TEXT for slot=eyebrow, TEXT for slot=title, then THREE ITEM lines
+with sec={sec} and slot=item.
+
+title= is the name of a service or a role — NOT the name of a person,
+which you have no way to know. body= is two sentences saying what it
+covers and who it is for.""",
+
+    "note": """Emit EXACTLY two lines: TEXT with sec={sec} slot=title, and TEXT with
+sec={sec} slot=lede.
+
+The title is one short sentence stating the single most useful fact in
+the brief — the thing you would tell someone in a doorway. The lede is
+one sentence more. No list, no button, no eyebrow.""",
+}
+
+HERO_PROMPT = """Emit ONLY the hero's contents: TEXT for slot=eyebrow, slot=title and
+slot=lede; two ACTION lines (slot=primary, slot=secondary); one MEDIA
+line with slot=figure and a motif.
+The lede is two full sentences, not a fragment.
+In the title's text, wrap two or three of its own words in [brackets]."""
+
+CTA_PROMPT = """Emit ONLY the closing section's contents: TEXT for slot=title, TEXT for
+slot=lede, and one ACTION with slot=primary, all with sec={sec}.
+The title must NOT repeat the hero headline — say the next thing: when
+to come, what happens first, or what it costs."""
+
+# There is deliberately no quote call, and `quote` is not on the menu.
+#
+# The compiler supports kind=quote and renders it well, but a model
+# cannot source a testimonial. Asked for one, this 4B produced "Sarah
+# Chen, DevOps Lead at RiverScale" — a named person at a named company,
+# neither of which exists, attesting to a product they have never used.
+# That is not a copy defect to tune away; it is a fabricated
+# endorsement, and it would go on a real site under someone's real
+# business name.
+#
+# Unlike the invented figures above, there is no computable ground truth
+# to check a quote against: the brief has no customers in it, so every
+# possible answer is a fabrication. When a slot cannot be verified even
+# in principle, the honest move is to keep it out of the model's reach
+# and let a human supply it. kind=quote stays available for
+# hand-authored ops, where the words came from a person who said them.
 
 OP_LINE = re.compile(r"^\s*(SITE|THEME|SECTION|TEXT|ACTION|MEDIA|ITEM)\b")
 
@@ -218,6 +274,34 @@ NUMERIC = re.compile(r"\d[\d,.]*")
 # word that follows ("12,400 reels"), so the model is labelling a thing
 # rather than a bare integer.
 FIGURE_IN_CONTEXT = re.compile(r"\d[\d,.]*[A-Za-z]*(?:\s+[a-z]+)?")
+
+# Money and clock times, anywhere in any section.
+#
+# The grounding check was written for `proof`, because that is where the
+# fabrication was found — and the FAQ then quietly wrote "£4.20 each",
+# "£3.80 per piece", "a £2.50 charge", "call us before 10:45 AM" and
+# "between 12:30 PM and 4:00 PM" for a bakery whose brief contains no
+# price and no clock time at all. Checking the section where the bug
+# turned up, rather than the class of claim, is the same mistake the
+# palette function made four times.
+#
+# These two classes get enforced rather than reported because they are
+# the ones a reader ACTS on: someone turns up at 10:45 with £4.20. Other
+# invented numbers are surfaced in the run output instead of being
+# stripped, since gutting every sentence with a digit in it would take
+# the specificity out of the copy along with the errors.
+HARD_CLAIM = re.compile(r"[£$€]\s?\d[\d,.]*|\b\d{1,2}:\d{2}\s*(?:[ap]\.?m\.?)?", re.I)
+
+
+def hard_claims(line: str, brief: str) -> list[str]:
+    """Prices and clock times in a line that the brief never stated."""
+    ground = brief.lower().replace(" ", "")
+    out = []
+    for m in HARD_CLAIM.finditer(line):
+        tok = m.group(0).strip()
+        if tok.lower().replace(" ", "") not in ground:
+            out.append(tok)
+    return out
 
 
 def figures_in(brief: str) -> str:
@@ -284,6 +368,68 @@ def ungrounded_figures(line: str, brief: str) -> list[str]:
     return bad
 
 
+def read_plan(raw: str) -> list[str]:
+    """The middle sections the model asked for, cleaned and made legal.
+
+    Validated rather than trusted, because an invalid plan is not a
+    conformance failure worth throwing the run away for — it is one
+    line of output the model got loose about. Unknown words are
+    dropped, an immediate repeat is dropped (two galleries in a row is
+    the same sameness one level up), `note` is capped at one, and the
+    length is bounded so the page cannot degenerate into either a
+    business card or a scroll.
+    """
+    words = re.findall(r"[a-z]+", raw.lower())
+    out: list[str] = []
+    for w in words:
+        if w not in KIND_PROMPT or w == "hero" or w == "cta":
+            continue
+        if out and out[-1] == w:
+            continue
+        if w == "note" and "note" in out:
+            continue
+        if w in out and w != "note":
+            continue
+        out.append(w)
+        if len(out) == 5:
+            break
+    # A page needs a middle. If the model returned nothing usable, fall
+    # back to the shape the fixed harness used to hardcode — reported as
+    # a fallback, not passed off as a choice.
+    if not out:
+        return ["detail", "features"]
+    # At least one section that carries a drawing. Left to itself the
+    # model plans features/faq/roster — all of them text — and the
+    # richer copy turned the pages into unbroken columns of prose with a
+    # single picture at the top. Which section is *appropriate* is the
+    # model's call; that a page needs some artwork below the fold is a
+    # property of pages, so the harness holds it.
+    if not ({"detail", "gallery"} & set(out)):
+        out.insert(1 if len(out) > 1 else 0, "detail")
+        out = out[:5]
+    return out
+
+
+def tone_for(kind: str, index: int, planned: list[str]) -> str:
+    """Alternate the grounds so consecutive bands do not merge.
+
+    Every section came out `quiet` before, which is why a page with six
+    sections still read as one continuous column. Tone is derived rather
+    than asked for: it depends only on what is next to a section, which
+    is something the harness knows and the model, writing one section
+    per call, cannot.
+    """
+    if kind == "note":
+        return "inverted"          # the break should read as a break
+    if kind == "proof":
+        return "bold"
+    # Otherwise lift every other long section onto the panel ground,
+    # unless its neighbour is already lifted.
+    if kind in {"faq", "gallery", "roster"} and index % 2 == 1:
+        return "bold"
+    return "quiet"
+
+
 def ask(model: str, system: str, user: str) -> str:
     payload = json.dumps({
         "model": model,
@@ -325,6 +471,56 @@ def main() -> int:
     noise_total = 0
     raw_log: list[str] = []
     dropped: list[str] = []
+
+    figures = figures_in(args.brief)
+    # A plain system prompt, NOT the op grammar. GRAMMAR opens with
+    # "emit ONLY op lines, no prose", so asking it for a list of section
+    # names underneath that produced `SECTION=features` — the model
+    # obeying the system prompt over the question, correctly. The plan
+    # is not ops and should not be asked for inside the op language.
+    plan_raw = ask(args.model,
+                   "You plan the structure of a small marketing website. "
+                   "You answer with a list of section names and nothing "
+                   "else — no code, no markup, no explanation.",
+                   f"""Site: {args.brief}
+
+Figures stated in the brief:
+{figures}
+
+Choose which sections this page needs, in order. It opens with a hero
+and closes with a call to action; you are choosing what goes BETWEEN
+them. Choose THREE OR FOUR from this menu, whichever this particular
+business actually needs — a bakery and a database tool do not need the
+same page.
+
+{PLAN_MENU}
+
+Answer with three or four of those names, one per line, nothing else.""")
+    plan = read_plan(plan_raw)
+    if args.debug:
+        print(f"      PLAN RAW: {plan_raw.strip()[:300]!r}")
+    print(f"  plan       hero -> {' -> '.join(plan)} -> cta")
+
+    # (label, kind, section id) for every call after the frame.
+    schedule = [("hero", "hero", "s1")]
+    schedule += [(k, k, f"s{i + 2}") for i, k in enumerate(plan)]
+    schedule.append(("cta", "cta", f"s{len(plan) + 2}"))
+
+    CALLS = [("frame", None, None,
+              "Site: {brief}\n\nEmit EXACTLY two lines: one SITE and one "
+              "THEME. Nothing else.")]
+    for i, (label, kind, sec) in enumerate(schedule):
+        body = (HERO_PROMPT if kind == "hero"
+                else CTA_PROMPT if kind == "cta"
+                else KIND_PROMPT[kind])
+        CALLS.append((
+            label,
+            f"SECTION  id={sec}  kind={kind}  "
+            f"layout={KIND_LAYOUT[kind]}  tone={tone_for(kind, i, plan)}",
+            sec,
+            "Site: {brief}\n\nThe " + kind + " section already exists. "
+            + body.replace("{sec}", sec)
+            + "\nDo NOT emit SECTION. Do NOT emit THEME or SITE again."))
     for label, scaffold, want_sec, template in CALLS:
         # The scaffold is held back until the call has actually produced
         # content for it. Emitting it up front is what would leave an
@@ -343,6 +539,19 @@ def main() -> int:
                 f"repeat or modify any of it:\n{prior}\n\n"
                 + template.format(brief=args.brief,
                                   figures=figures_in(args.brief)))
+        # Once THEME is chosen the family is known, and the family
+        # implies the artwork: a site set in the technical family is a
+        # developer tool, and a developer tool is a schematic. Left to
+        # the table alone the model took `elevation` for a Postgres CLI
+        # twice — a drawing of a house — because it is the first row.
+        # Naming the fitting motif at the point of use costs one line.
+        if "motif" in user:
+            fam = re.search(r"family=(\w+)", "\n".join(lines))
+            hint = {"technical": "schematic", "studio": "specimen",
+                    "editorial": "elevation"}.get(fam.group(1) if fam else "", "")
+            if hint:
+                user += (f"\n\nThis site is family={fam.group(1)}. Unless the "
+                         f"brief clearly calls for another, use motif={hint}.")
         raw = ask(args.model, GRAMMAR, user)
         raw_log.append(f"### {label}\n{raw}")
         kept, noise = clean(raw)
@@ -377,6 +586,17 @@ def main() -> int:
         if stray and args.debug:
             for s in stray:
                 print(f"      STRAY: {s[:96]!r}")
+
+        # Prices and times the brief never stated, in ANY section.
+        invented = []
+        for line in kept:
+            bad = hard_claims(line, args.brief)
+            if bad:
+                invented.append((line, bad))
+        if invented:
+            kept = [l for l in kept if l not in {i[0] for i in invented}]
+            for line, bad in invented:
+                print(f"      INVENTED {', '.join(bad)}: {line[:74]!r}")
 
         # Figures the brief never stated are removed, not reported and
         # kept. A fabricated benchmark that survives into the page with

@@ -1,0 +1,39 @@
+SITE     name="Kestrel"  nav="About,Treatments,Contact"  location="Leeds"  contact="info@kestrelphysio.co.uk"
+THEME    family=editorial  accent=#2a5c4e  mode=light  density=roomy
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT     sec=s1  slot=eyebrow  text="Physiotherapy in Leeds"
+TEXT     sec=s1  slot=title    text="Rehab [without contracts]"
+TEXT     sec=s1  slot=lede      text="Two practitioners treating sports injuries and post-op recovery. We work with you, not against your insurance."
+ACTION   sec=s1  slot=primary  label="Book an assessment"  href="#book"
+ACTION   sec=s1  slot=secondary label="Our treatments"  href="#treatments"
+MEDIA    sec=s1  slot=figure  motif=elevation
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT     sec=s2  slot=eyebrow    text="What we do"
+TEXT     sec=s2  slot=title      text="Movement [back on track]"
+ITEM     sec=s2  slot=item       title="Manual therapy" body="Hands-on soft tissue work to restore range of motion. We assess joint mobility every session and adjust pressure accordingly."
+ITEM     sec=s2  slot=item       title="Dry needling" body="Targeted needle insertion for myofascial trigger points. Treatment lasts twenty minutes per point with immediate pain relief reported by most patients."
+ITEM     sec=s2  slot=item       title="Sports massage" body="Deep tissue work focused on active recovery and injury prevention. We schedule sessions every other day to maintain momentum without overloading the muscles."
+ITEM     sec=s2  slot=item       title="Post-op rehab" body="Structured rehabilitation for knee, shoulder, and back surgery patients. Progress is tracked weekly with measurable strength gains as a primary goal."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT     sec=s3  slot=eyebrow    text="Why Kestrel"
+TEXT     sec=s3  slot=title      text="Recovery [without compromise]"
+TEXT     sec=s3  slot=lede       text="We do not prescribe gym memberships or lock you into annual contracts. Our model is built on transparent pricing per session and a direct relationship between practitioner and patient, ensuring your recovery plan adapts to your life rather than the other way around."
+ACTION   sec=s3  slot=primary    label="Speak with our lead therapist"  href="#contact"
+MEDIA    sec=s3  slot=figure     motif=elevation
+SECTION  id=s4  kind=roster  layout=stack  tone=bold
+TEXT     sec=s4  slot=eyebrow    text="Meet your therapists"
+TEXT     sec=s4  slot=title      text="The team [behind the recovery]"
+ITEM     sec=s4  slot=item       title="Sarah Jenkins" body="Sports injury specialist focusing on runners and climbers. She manages acute pain protocols for athletes returning to competition within six weeks."
+ITEM     sec=s4  slot=item       title="David Chen" body="Post-operative rehabilitation expert handling knee, shoulder, and spine cases. He coordinates weekly progress reviews with physiotherapists from partner hospitals in Leeds."
+SECTION  id=s5  kind=faq  layout=stack  tone=quiet
+TEXT     sec=s5  slot=eyebrow    text="Common questions"
+TEXT     sec=s5  slot=title      text="What to expect [before you start]"
+ITEM     sec=s5  slot=item       title="How long is a session?" body="Each treatment lasts between forty and sixty minutes, depending on whether we are assessing your movement or working through specific exercises. We schedule follow-ups every other day for acute injuries but can extend intervals if recovery slows."
+ITEM     sec=s5  slot=item       title="Do I need to pay upfront?" body="You receive a full price list before any treatment begins and do not need to provide funds in advance. If you cannot afford the session, we discuss payment plans rather than cancelling your care immediately."
+ITEM     sec=s5  slot=item       title="What happens if my insurance rejects me?" body="We will document every assessment thoroughly so that insurers have clear evidence of medical necessity before they make a decision. Our team can also refer you to alternative providers who accept their specific policies without losing progress."
+ITEM     sec=s5  slot=item       title="Can I bring someone with me?" body="Yes, we welcome family members or friends for support during recovery sessions if it helps your comfort level. We simply ask that they do not interfere with the hands-on work being performed on you."
+ITEM     sec=s5  slot=item       title="When is the next available time?" body="We typically have openings within two days of booking, though emergency slots are sometimes available for severe pain cases. Please call our office directly to check real-time availability rather than relying on online calendars which often lag behind actual bookings."
+SECTION  id=s6  kind=cta  layout=stack  tone=quiet
+TEXT     sec=s6  slot=title    text="Your next session [starts here]"
+TEXT     sec=s6  slot=lede      text="First step: a twenty-minute consultation to confirm your injury and set expectations."
+ACTION   sec=s6  slot=primary label="Book now" href="#book"
