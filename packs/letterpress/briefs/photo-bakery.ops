@@ -1,0 +1,39 @@
+SITE name="Tide Mill" nav="Bread,Visit,Contact" location="Bristol" contact="hello@tidemill.co"
+THEME family=editorial accent=#b8442f mode=light density=roomy
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Weekly loaf"
+TEXT sec=s1 slot=title text="Bread [worth the walk]"
+TEXT sec=s1 slot=lede text="Two ovens and no cafe." "We sell out by noon so check collection times before you come in."
+ACTION sec=s1 slot=primary label="Collection times" href="#times"
+ACTION sec=s1 slot=secondary label="View weekly loaf" href="#loaf"
+MEDIA sec=s1 slot=figure photo="sourdough bread loaves on a wooden bakery counter"
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT sec=s2 slot=eyebrow text="The weekly loaf"
+TEXT sec=s2 slot=title text="Sourdough [starts at dawn]"
+ITEM sec=s2 slot=item title="Monday" body="Wholemeal starter fed once, baked in the morning oven before noon."
+ITEM sec=s2 slot=item title="Wednesday" body="Rye and caraway mixed by hand, forty loaves rise under a cool draft."
+ITEM sec=s2 slot=item title="Friday" body="Seeded white flour proofed slowly, collected only while still warm from the hearth."
+ITEM sec=s2 slot=item title="Sunday" body="Country loaf with cracked crust and soft crumb, priced by weight not time."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT sec=s3 slot=eyebrow text="The secret"
+TEXT sec=s3 slot=title text="Our [starter] is ten years old."
+TEXT sec=s3 slot=lede text="No other bakery in Bristol has a culture this ancient, fed daily since before the first oven was installed. We do not buy new yeast; we nurture a living organism that remembers every season change and gives our bread its unique tang. This biological history cannot be rushed or replicated by competitors."
+ACTION sec=s3 slot=primary label="Read about our starter" href="#starter"
+MEDIA sec=s3 slot=figure photo="baker hands shaping dough in a bakery"
+SECTION  id=s4  kind=roster  layout=stack  tone=bold
+TEXT sec=s4 slot=eyebrow text="Who we serve"
+TEXT sec=s4 slot=title text="Local [bakers and walkers]"
+ITEM sec=s4 slot=item title="Morning runners" body="Fresh loaves collected before the city wakes, perfect for a quick breakfast or packed lunch on your commute."
+ITEM sec=s4 slot=item title="Weekend hosts" body="Large batches ready for family gatherings, ensuring you have enough crusty slices for the whole table before noon."
+SECTION  id=s5  kind=faq  layout=stack  tone=quiet
+TEXT sec=s5 slot=eyebrow text="Common questions"
+TEXT sec=s5 slot=title text="[How long] must I wait for my bread?"
+ITEM sec=s5 slot=item title="First time buyers" body="If you are new to our collection system, please arrive thirty minutes before your scheduled window. We hold the first loaf of each batch until ten past the hour, so early arrivals will find a warm slice waiting."
+ITEM sec=s5 slot=item title="Late collectors" body="Loaves collected after their assigned time frame go back into the oven to bake again for an extra twenty minutes. This ensures every customer receives fresh bread at no additional cost, though it may alter the crust texture slightly."
+ITEM sec=s5 slot=item title="Weekend rush" body="On Saturdays and Sundays we open our doors one hour earlier than usual due to high demand. If you arrive after noon on a weekend, your order will be held for pickup by Monday morning unless you have pre-ordered online."
+ITEM sec=s5 slot=item title="Missing collection card" body="If you lose the paper note with your time window written on it, simply ask at the counter to check our digital log. We can locate your booking within two minutes using just your name and postcode so there is no need for a replacement fee."
+ITEM sec=s5 slot=item title="Changing your day" body="You may swap your collection day up until Tuesday evening by emailing us directly. Requests made after that deadline will be honoured only if we have excess stock from the previous week, which happens rarely during autumn and winter months."
+SECTION  id=s6  kind=cta  layout=stack  tone=quiet
+TEXT sec=s6 slot=title text="Come before noon for [fresh] bread"
+TEXT sec=s6 slot=lede text="We sell out by midday; arrive early to secure your loaf."
+ACTION sec=s6 slot=primary label="Check collection times" href="#times"

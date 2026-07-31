@@ -3,3 +3,5 @@
 # hand-written reference are source.
 out/
 shots/
+assets/
+briefs/*.photos.json

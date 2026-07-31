@@ -31,6 +31,8 @@ from __future__ import annotations
 import argparse
 import colorsys
 import html
+import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -525,6 +527,16 @@ class Doc:
     sections: list = field(default_factory=list)
     issues: list = field(default_factory=list)
     fallbacks: list = field(default_factory=list)
+    # Resolved photographs, keyed by the query the model wrote. Loaded
+    # from <ops>.photos.json; empty when nothing was resolved, which is
+    # the normal state for a drawings-only page.
+    photos: dict = field(default_factory=dict)
+    # Where the images sit relative to the OUTPUT file, not to the ops
+    # file. Written as "assets/" the first time, the pages 404'd every
+    # image: assets/ is a sibling of out/, so from a page inside out/
+    # the correct prefix is "../assets/". Computed per build rather than
+    # assumed, so a page written anywhere still finds its pictures.
+    asset_base: str = "assets/"
 
 
 KV = re.compile(r"(\w+)=((?:\"[^\"]*\")|(?:\S+))")
@@ -602,7 +614,8 @@ def parse(text: str) -> Doc:
                                      args.get("motif", "")))
             elif op == "MEDIA":
                 sec["media"].append((args.get("alt", ""),
-                                     args.get("motif", "elevation")))
+                                     args.get("motif", "elevation"),
+                                     args.get("photo", "")))
     return doc
 
 
@@ -793,6 +806,24 @@ h1{{font-size:{st['d1']}}} h2{{font-size:{st['d2']}}} h3{{font-size:{st['d3']}}}
   font-family:{fam['mono']};font-size:{st['small']};letter-spacing:.1em;
   text-transform:uppercase;color:{pal['muted']}}}
 @media(min-width:56rem){{.figure{{height:100%}}}}
+/* A photograph is not a drawing and must not wear the drawing's frame.
+   The motif figure is a padded, bordered panel because a line diagram
+   needs a field around it; the same treatment around a photo reads as a
+   slide deck. Photos go edge to edge in their box, keep their own
+   aspect ratio, and carry the credit line underneath rather than
+   floating over the image where it would need its own contrast fix. */
+.figure.photo{{padding:0;border:0;background:transparent;aspect-ratio:auto;
+  display:flex;flex-direction:column;gap:.85rem}}
+.figure.photo img{{display:block;width:100%;height:auto;object-fit:cover;
+  border:{fam['rule']};border-radius:{fam['radius']};background:{pal['surface']};
+  aspect-ratio:4/3}}
+.figure.photo figcaption{{position:static;left:auto;bottom:auto;
+  text-transform:none;letter-spacing:.01em;line-height:1.45;
+  font-family:{fam['body']};max-width:44ch}}
+@media(min-width:56rem){{
+  .figure.photo{{height:100%;justify-content:flex-end}}
+  .figure.photo img{{aspect-ratio:3/4;flex:1;min-height:0}}
+}}
 /* The detail band mirrors the hero rather than repeating it: same
    12-column grid, columns swapped, so art leads on the left and the
    text block closes on the right. */
@@ -966,7 +997,41 @@ html.js .rise.in{{opacity:1;transform:none}}
         centred = ' class="centred"' if sec["layout"] == "centred" else ""
 
         def _figure() -> str:
-            alt, motif = (sec["media"][0] if sec["media"] else ("", "elevation"))
+            media = sec["media"][0] if sec["media"] else ("", "elevation", "")
+            alt, motif, photo = (list(media) + ["", "", ""])[:3]
+
+            # A resolved photograph wins over a drawing. The query is the
+            # model's; the file, its dimensions and its licence come from
+            # the resolver, because none of those are things a model can
+            # know. An unresolved query falls back to the drawing rather
+            # than to a broken <img>: a missing picture must degrade to a
+            # real picture, never to an alt-text box.
+            got = doc.photos.get(photo) if photo else None
+            if photo and not got:
+                doc.fallbacks.append(f'photo="{photo}" unresolved -> motif drawing')
+            if got:
+                w, h = got.get("width") or 1600, got.get("height") or 1000
+                # width/height attributes are not decoration: without the
+                # intrinsic ratio the browser cannot reserve the box and
+                # every photo shoves the page down as it loads.
+                cap = got["credit"] if got.get("needs_credit") else (
+                    alt.strip() or got["credit"])
+                # The first picture on the page is almost always the
+                # largest thing in the viewport, and lazy-loading the
+                # element that decides your LCP is a well-known way to
+                # make a page feel slow. Later figures stay lazy.
+                doc.seen_photo = getattr(doc, "seen_photo", False)
+                first = not doc.seen_photo
+                doc.seen_photo = True
+                load = ('fetchpriority="high" decoding="async"' if first
+                        else 'loading="lazy" decoding="async"')
+                return (
+                    f'<figure class="figure photo">'
+                    f'<img src="{_esc(doc.asset_base)}{_esc(got["file"])}" '
+                    f'alt="{_esc(alt.strip() or photo)}" '
+                    f'width="{w}" height="{h}" {load}>'
+                    f'<figcaption>{_esc(cap)}</figcaption></figure>')
+
             if motif not in MOTIFS:
                 doc.fallbacks.append(f"motif={motif} unknown -> elevation")
                 motif = "elevation"
@@ -1163,7 +1228,19 @@ def main() -> int:
                     help="exit non-zero if any issue or fallback occurred")
     args = ap.parse_args()
 
-    doc = parse(Path(args.ops).read_text(encoding="utf-8"))
+    ops_path = Path(args.ops)
+    doc = parse(ops_path.read_text(encoding="utf-8"))
+    # Photographs resolved by photos.py, if this brief has any. Absent
+    # sidecar is not an error — a drawings-only page is the default, and
+    # any query that failed to resolve is reported as a fallback when it
+    # falls back to a motif.
+    side = ops_path.with_suffix(".photos.json")
+    if side.exists():
+        doc.photos = json.loads(side.read_text(encoding="utf-8"))
+        assets = (ops_path.parent.parent / "assets").resolve()
+        out_dir = Path(args.out).resolve().parent
+        rel = os.path.relpath(assets, out_dir).replace("\\", "/")
+        doc.asset_base = rel.rstrip("/") + "/"
     page, fallbacks = render(doc)
     Path(args.out).write_text(page, encoding="utf-8")
 

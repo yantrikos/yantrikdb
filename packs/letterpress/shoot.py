@@ -160,6 +160,46 @@ def main() -> int:
                 pg = browser.new_page(viewport={"width": w, "height": h},
                                       reduced_motion="reduce")
                 pg.goto(src.as_uri())
+                # Force every lazy image to load before we look.
+                #
+                # A full-page screenshot does not scroll, so an <img
+                # loading="lazy"> below the fold is still unloaded when
+                # the shutter fires: the page had a real, correctly
+                # decoded photograph in it and the capture showed an
+                # empty box. Nothing was wrong with the page — the
+                # instrument was wrong, which is the same class of bug
+                # as measuring SVG text in user units.
+                pg.evaluate("""() => {
+                  document.querySelectorAll('img[loading="lazy"]')
+                          .forEach(i => i.loading = 'eager');
+                  return Promise.all([...document.images]
+                    .filter(i => !i.complete)
+                    .map(i => new Promise(r => {
+                      i.addEventListener('load', r, {once: true});
+                      i.addEventListener('error', r, {once: true});
+                    })));
+                }""")
+                # Then walk the page top to bottom before capturing.
+                #
+                # Chromium's full-page screenshot does not scroll, and a
+                # large image several thousand pixels down composites as
+                # an empty box even when it is decoded and painted — the
+                # DOM probe reported naturalWidth, opacity 1 and a real
+                # bounding box for a photograph the screenshot showed as
+                # grey. The gates were right and the picture a human
+                # looks at was wrong, which is the worse way round: it
+                # cost three wrong hypotheses (lazy loading, the file
+                # format, the relative path) before I screenshotted the
+                # element on its own and saw the photo was fine.
+                pg.evaluate("""async () => {
+                  const step = innerHeight;
+                  for (let y = 0; y < document.body.scrollHeight; y += step) {
+                    scrollTo(0, y);
+                    await new Promise(r => requestAnimationFrame(r));
+                  }
+                  scrollTo(0, 0);
+                  await new Promise(r => requestAnimationFrame(r));
+                }""")
                 pg.wait_for_timeout(250)
                 res = pg.evaluate(PROBE)
                 pg.screenshot(path=str(shots / f"{name}.{label}.png"),
