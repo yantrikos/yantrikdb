@@ -290,7 +290,14 @@ FIGURE_IN_CONTEXT = re.compile(r"\d[\d,.]*[A-Za-z]*(?:\s+[a-z]+)?")
 # invented numbers are surfaced in the run output instead of being
 # stripped, since gutting every sentence with a digit in it would take
 # the specificity out of the copy along with the errors.
-HARD_CLAIM = re.compile(r"[£$€]\s?\d[\d,.]*|\b\d{1,2}:\d{2}\s*(?:[ap]\.?m\.?)?", re.I)
+# The second alternative needs the bare-hour form too. Written as
+# `\d{1,2}:\d{2}` it required minutes, so "we open at 10am" and "until
+# 4pm" went onto a clinic page untouched while "10:45 AM" was stripped —
+# the same claim, the same harm, one colon apart.
+HARD_CLAIM = re.compile(
+    r"[£$€]\s?\d[\d,.]*"
+    r"|\b\d{1,2}:\d{2}\s*(?:[ap]\.?m\.?)?"
+    r"|\b\d{1,2}\s?[ap]\.?m\.?(?=\W|$)", re.I)
 
 
 def hard_claims(line: str, brief: str) -> list[str]:

@@ -1,0 +1,32 @@
+SITE     name="Kestrel"  nav="Injuries,Rehab,Contact"  location="Leeds"  contact="hello@kestrel.co"
+THEME    family=editorial  accent=#2e7d32  mode=light  density=roomy
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT     sec=s1  slot=eyebrow  text="Rehabilitation"
+TEXT     sec=s1  slot=title    text="Kestrel [Physiotherapy] in Leeds."
+TEXT     sec=s1  slot=lede    text="We treat sports injuries and guide you through post-operative recovery. Our two practitioners work without requiring a gym contract to get you moving again."
+ACTION   sec=s1  slot=primary  label="Book an assessment"  href="#contact"
+ACTION   sec=s1  slot=secondary  label="View our services"  href="#services"
+MEDIA    sec=s1  slot=figure  motif=elevation
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT     sec=s2  slot=eyebrow  text="Our treatments"
+TEXT     sec=s2  slot=title    text="Specific protocols for specific injuries."
+ITEM     sec=s2  slot=item  title="Shoulder impingement"  body="We use a manual mobilisation technique to clear the space, performed over three separate sessions in our Leeds clinic."
+ITEM     sec=s2  slot=item  title="Hamstring strain"    body="Recovery begins with isometric holds at room temperature before progressing to dynamic stretching on day four of your plan."
+ITEM     sec=s2  slot=item  title="Post-op knee"      body="Your first appointment includes a gait analysis and we set up the brace for home use immediately after surgery."
+ITEM     sec=s2  slot=item  title="Chronic back pain"  body="We map your movement patterns to find the trigger point, then apply heat packs before starting gentle mobilisation exercises."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT     sec=s3  slot=eyebrow  text="The difference"
+TEXT     sec=s3  slot=title    text="We [own] our own clinic space."
+TEXT     sec=s3  slot=lede    text="Unlike agencies that rent rooms from gyms or hospitals, we operate entirely in-house. This means your treatment room is always ready when you arrive, and the equipment stays calibrated for your specific needs without sharing time with other patients."
+ACTION   sec=s3  slot=primary  label="See our facilities"  href="#location"
+MEDIA    sec=s3  slot=figure  motif=elevation
+SECTION  id=s4  kind=roster  layout=stack  tone=bold
+TEXT     sec=s4  slot=eyebrow  text="Practitioners"
+TEXT     sec=s4  slot=title    text="Who will treat you."
+ITEM     sec=s4  slot=item  title="Sarah Jenkins, Physiotherapist"  body="She specialises in shoulder and elbow injuries for runners. Her sessions focus on restoring full range of motion before returning to sport without pain or instability issues."
+ITEM     sec=s4  slot=item  title="Marcus Thorne, Sports Rehab Lead"  body="He manages post-operative knee recovery cases. His approach combines gait analysis with manual therapy to ensure your brace fits perfectly and you walk correctly from day one of rehab."
+ITEM     sec=s4  slot=item  title="Joint Mobilisation Service"  body="This protocol addresses chronic back pain by mapping movement patterns first. We apply heat packs before starting gentle exercises designed to clear trigger points safely in our Leeds clinic space."
+SECTION  id=s5  kind=cta  layout=stack  tone=quiet
+TEXT     sec=s5  slot=title    text="First appointment: gait analysis and brace fitting."
+TEXT     sec=s5  slot=lede    text="Bring your surgery notes or injury report; we start the plan on arrival."
+ACTION   sec=s5  slot=primary  label="Call to book"  href="#contact"

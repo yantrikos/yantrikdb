@@ -1,0 +1,39 @@
+SITE     name="Flint"  nav="Docs,Cheatsheet,Licence"  location="Open Source"  contact="flint@opensource.org"
+THEME    family=technical  accent=#0f4c75  mode=light  density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Flint"
+TEXT sec=s1 slot=title text="Find [unused] indexes in Postgres"
+TEXT sec=s1 slot=lede text="An open-source CLI that scans your database schema and reports dead weight. It runs silently inside CI pipelines, never touching production data."
+ACTION sec=s1 slot=primary label="Read the docs" href="#docs"
+ACTION sec=s1 slot=secondary label="View on GitHub" href="#"
+MEDIA sec=s1 slot=figure motif=schematic
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT sec=s2 slot=eyebrow text="Dead weight detection"
+TEXT sec=s2 slot=title text="What Flint does in three steps"
+ITEM sec=s2 slot=item title="Scan schema" body="Flint reads the Postgres system catalog and builds a live map of every index without touching production data."
+ITEM sec=s2 slot=item title="Run query plan" body="It executes one lightweight test query per table to measure actual row access patterns, taking less than two seconds on average."
+ITEM sec=s2 slot=item title="Report dead weight" body="The tool flags indexes that show zero or near-zero usage across all recent queries and suggests their removal in the next migration window."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT sec=s3 slot=eyebrow text="Why Flint works"
+TEXT sec=s3 slot=title text="The [Postgres] catalog trick"
+TEXT sec=s3 slot=lede text="Most tools scan tables blindly and waste cycles on indexes that already exist. Flint instead reads the system catalog directly, cross-referencing it against live query logs to find only truly unused structures."
+ACTION sec=s3 slot=primary label="See how it works" href="#how-it-works"
+MEDIA sec=s3 slot=figure motif=schematic
+SECTION  id=s4  kind=faq  layout=stack  tone=bold
+TEXT sec=s4 slot=eyebrow text="Dead indexes explained"
+TEXT sec=s4 slot=title text="Common questions about index detection and removal"
+ITEM sec=s4 slot=item title="How long does it take to scan my database?" body="Flint completes a full schema analysis in under two minutes on standard servers, processing millions of rows without locking tables or requiring downtime."
+ITEM sec=s4 slot=item title="Can I run this tool against production data safely?" body="The scanner operates entirely read-only and never executes destructive queries; it only runs lightweight test plans that measure access patterns while leaving your live data untouched."
+ITEM sec=s4 slot=item title="What happens if Flint recommends removing an index?" body="Removing a flagged index is safe for tables with zero usage, but the tool explicitly warns when an index might still be needed by hidden queries or specific application paths before suggesting removal."
+ITEM sec=s4 slot=item title="Do I need to pay extra licenses to use this feature?" body="All detection and reporting features are included in the free MIT license; there are no per-query fees, API costs, or enterprise add-ons for standard index analysis."
+ITEM sec=s4 slot=item title="How often should I re-run Flint on my schema?" body="We recommend running a full scan every two weeks to catch newly created indexes that may have become unused as your application evolves and query patterns shift over time."
+SECTION  id=s5  kind=roster  layout=stack  tone=quiet
+TEXT sec=s5 slot=eyebrow text="Who builds with Flint"
+TEXT sec=s5 slot=title text="Open-source contributors and their stacks"
+ITEM sec=s5 slot=item title="CI Pipeline Engineer" body="Flint integrates into GitHub Actions to catch dead indexes before they slow down nightly test runs, helping teams maintain fast feedback loops without manual schema audits."
+ITEM sec=s5 slot=item title="Database Architect" body="The tool surfaces hidden performance bottlenecks in complex sharded databases, allowing architects to optimize query plans and reduce storage costs across production clusters."
+ITEM sec=s5 slot=item title="DevOps Platform Team" body="Flint automates index lifecycle management for multi-tenant SaaS platforms, ensuring consistent data access patterns while preventing resource leaks from forgotten indexes.
+SECTION  id=s6  kind=cta  layout=stack  tone=quiet
+TEXT sec=s6 slot=title text="When to run Flint"
+TEXT sec=s6 slot=lede text="Schedule a full scan before your next major migration or whenever you notice query slowdowns."
+ACTION sec=s6 slot=primary label="Start the analysis now" href="#install"
