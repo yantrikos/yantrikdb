@@ -1,0 +1,24 @@
+# Luxury product — technical family, dark, restrained, near-monochrome accent
+SITE     name="Halden"  nav="Collection,Movement,Stockists"  location="Glashutte, Saxony"  contact="+49 3053 000 000"
+THEME    family=technical  accent=#8a7a5c  mode=dark  density=roomy
+
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT     sec=s1  slot=eyebrow  text="Halden — Type 4 Field"
+TEXT     sec=s1  slot=title    text="Thirty-eight millimetres, and no date window"  accent="no date window"
+TEXT     sec=s1  slot=lede     text="Hand-wound, 42-hour reserve, sapphire on both sides. Assembled in Glashutte in runs of two hundred."
+ACTION   sec=s1  slot=primary   label="Reserve — £2,400"  href="#reserve"
+ACTION   sec=s1  slot=secondary label="Specification"  href="#spec"
+MEDIA    sec=s1  slot=figure  alt="Type 4 Field, brushed steel on olive canvas"  motif=dial
+
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT     sec=s2  slot=eyebrow  text="Specification"
+TEXT     sec=s2  slot=title    text="What is actually inside"
+ITEM     sec=s2  slot=item  title="Calibre H-4"      body="Hand-wound, 18,000 vph, 42-hour reserve. Regulated in five positions over ten days."
+ITEM     sec=s2  slot=item  title="Case"             body="38mm brushed 316L, 10.2mm thick, 20mm lugs. 100m, screw-down crown."
+ITEM     sec=s2  slot=item  title="Dial"             body="Matte anthracite, applied numerals, Super-LumiNova on hands and indices only."
+
+SECTION  id=s3  kind=cta  layout=centred  tone=inverted
+TEXT     sec=s3  slot=eyebrow  text="Third run — 200 pieces"
+TEXT     sec=s3  slot=title    text="Reserve without paying"
+TEXT     sec=s3  slot=lede     text="A reservation holds your place for fourteen days once the run is allocated. Nothing is taken until you confirm."
+ACTION   sec=s3  slot=primary  label="Join the third run"  href="#reserve"

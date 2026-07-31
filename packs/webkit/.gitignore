@@ -1,0 +1,5 @@
+# webkit build artefacts. The pages and screenshots regenerate from
+# briefs/*.ops via build.ps1, so only the compiler, the briefs and the
+# hand-written reference are source.
+out/
+shots/

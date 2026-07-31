@@ -1,0 +1,22 @@
+# Designer portfolio — studio family, bold sans, high contrast
+SITE     name="Mira Okonkwo"  nav="Work,Studio,Contact"  location="Lisbon"  contact="mira@example.com"
+THEME    family=studio  accent=#4b3bd6  mode=light  density=normal
+
+SECTION  id=s1  kind=hero  layout=centred  tone=quiet
+TEXT     sec=s1  slot=eyebrow  text="Mira Okonkwo — brand & type"
+TEXT     sec=s1  slot=title    text="I make things look like what they are"  accent="look like"
+TEXT     sec=s1  slot=lede     text="Identity, typography and packaging for people who have something specific to say. Currently booking from March."
+ACTION   sec=s1  slot=primary   label="Selected work"  href="#work"
+ACTION   sec=s1  slot=secondary label="About me"  href="#about"
+
+SECTION  id=s2  kind=features  layout=grid  tone=bold
+TEXT     sec=s2  slot=eyebrow  text="Recent"
+TEXT     sec=s2  slot=title    text="Three from last year"
+ITEM     sec=s2  slot=item  title="Fennel & Ash"   body="Identity and packaging for a small-batch distillery. Letterpress labels, six SKUs."
+ITEM     sec=s2  slot=item  title="Northbound"     body="Wayfinding and signage for a regional rail operator. Two typefaces, forty signs."
+ITEM     sec=s2  slot=item  title="Quarto Press"   body="A variable display face and the book series it was drawn for."
+
+SECTION  id=s3  kind=cta  layout=centred  tone=inverted
+TEXT     sec=s3  slot=title  text="Got something specific?"
+TEXT     sec=s3  slot=lede   text="Send the brief, however rough. I answer everything within two days."
+ACTION   sec=s3  slot=primary  label="mira@example.com"  href="mailto:mira@example.com"

@@ -1,0 +1,24 @@
+# Nonprofit — studio family, amber accent, roomy, plain-spoken
+SITE     name="Bothy Trust"  nav="Bothies,Volunteer,Donate"  location="Registered charity SC000000"  contact="hello@bothytrust.org"
+THEME    family=studio  accent=#b5730f  mode=light  density=roomy
+
+SECTION  id=s1  kind=hero  layout=split  tone=bold
+TEXT     sec=s1  slot=eyebrow  text="The Bothy Trust"
+TEXT     sec=s1  slot=title    text="Repairing shelters nobody owns"
+TEXT     sec=s1  slot=lede     text="Four hundred mountain bothies across Scotland and Wales, kept weathertight by volunteers. Free to use, locked to no one."
+ACTION   sec=s1  slot=primary   label="Give £5 a month"  href="#give"
+ACTION   sec=s1  slot=secondary label="Find a bothy"  href="#map"
+MEDIA    sec=s1  slot=figure  alt="Re-roofing at Glenuig, March work party"  motif=topography
+
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT     sec=s2  slot=eyebrow  text="Where the money goes"
+TEXT     sec=s2  slot=title    text="Materials, mostly"
+ITEM     sec=s2  slot=item  title="Roofing and timber"  body="£61 of every £100. Slate, felt, larch and the boat hire to get it up a loch."
+ITEM     sec=s2  slot=item  title="Work parties"        body="£24. Transport and food for volunteers who give a weekend and their own tools."
+ITEM     sec=s2  slot=item  title="Everything else"     body="£15. Insurance, one part-time coordinator, and a website that costs almost nothing."
+
+SECTION  id=s3  kind=cta  layout=centred  tone=inverted
+TEXT     sec=s3  slot=eyebrow  text="No fundraising calls, ever"
+TEXT     sec=s3  slot=title    text="£5 covers a square metre of roof"
+TEXT     sec=s3  slot=lede     text="Cancel whenever. We will not phone you, and we do not sell the list."
+ACTION   sec=s3  slot=primary  label="Set up a donation"  href="#give"

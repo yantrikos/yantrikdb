@@ -1,0 +1,28 @@
+# Developer infrastructure — technical family, dark, tight
+SITE     name="Rail"  nav="Docs,Pricing,Changelog"  location="Open source, MIT"  contact="hello@rail.dev"
+THEME    family=technical  accent=#3d8f78  mode=dark  density=tight
+
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT     sec=s1  slot=eyebrow  text="Rail — queue infrastructure"
+TEXT     sec=s1  slot=title    text="Jobs that finish, or tell you why"
+TEXT     sec=s1  slot=lede     text="A durable job queue with exactly-once delivery, dead-letter inspection and a CLI that fits in your head. Self-hosted in one binary."
+ACTION   sec=s1  slot=primary   label="Read the docs"  href="#docs"
+ACTION   sec=s1  slot=secondary label="brew install rail"  href="#install"
+MEDIA    sec=s1  slot=figure  alt="rail status --queue=billing  ·  4 workers  ·  0 stuck"  motif=schematic
+
+SECTION  id=s2  kind=features  layout=grid  tone=quiet
+TEXT     sec=s2  slot=eyebrow  text="What it guarantees"
+TEXT     sec=s2  slot=title    text="Boring on purpose"
+ITEM     sec=s2  slot=item  title="Exactly once"      body="Every job is acknowledged or retried. No silent drops, no duplicate charges."
+ITEM     sec=s2  slot=item  title="Dead letters"      body="Failed jobs keep their payload, stack trace and attempt history. Replay one or all."
+ITEM     sec=s2  slot=item  title="One binary"        body="No broker, no coordinator, no operator. Postgres is the only dependency."
+ITEM     sec=s2  slot=item  title="Backpressure"      body="Producers block when consumers fall behind, instead of filling a queue nobody drains."
+ITEM     sec=s2  slot=item  title="Observability"     body="Prometheus metrics and OpenTelemetry spans emitted per job, not per batch."
+ITEM     sec=s2  slot=item  title="Zero-downtime"     body="Rolling upgrades hold in-flight jobs. Schema migrations are online by default."
+
+SECTION  id=s3  kind=cta  layout=centred  tone=bold
+TEXT     sec=s3  slot=eyebrow  text="Free while in beta"
+TEXT     sec=s3  slot=title    text="Run it this afternoon"
+TEXT     sec=s3  slot=lede     text="Single binary, Postgres URL, done. Production checklist included."
+ACTION   sec=s3  slot=primary   label="Get started"  href="#start"
+ACTION   sec=s3  slot=secondary label="See pricing"  href="#pricing"

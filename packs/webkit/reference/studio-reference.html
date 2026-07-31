@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Buildings that age well — Ashgrove Architects</title>
+<!--
+  HAND-WRITTEN REFERENCE. No compiler, no ops script, no constraints.
+
+  This is the ceiling artifact for the webkit: the best page I can make
+  for the studio brief, using exactly the content of briefs/studio.ops
+  so the comparison is fair. Its job is to make the gap concrete —
+  every difference between this and the compiled page is either a
+  recipe to write or a deliberate decision not to.
+
+  What I reached for that the compiler currently cannot:
+    - a masthead, so the page starts like a site and not like a section
+    - a full-bleed asymmetric hero on a 12-column grid, headline
+      crossing the gutter into the image column
+    - real drawn artwork (inline SVG elevation) instead of a colour panel
+    - numbered process entries on a rule-separated list, not cards
+    - a hairline baseline grid: every block on a 4px rhythm
+    - small-caps numerals, hanging punctuation, optical margin on the H1
+    - a footer with real information
+-->
+<style>
+  :root{
+    --ink:#17140f; --canvas:#faf8f4; --paper:#f2eee6;
+    --brick:#a8402c; --brick-deep:#7d2c1c; --line:#ddd5c8;
+    --muted:#6b6259;
+    --measure:33rem;
+    --serif:"Iowan Old Style","Palatino Linotype",Palatino,Georgia,serif;
+    --mono:ui-monospace,"SF Mono",Menlo,monospace;
+  }
+  *,*::before,*::after{box-sizing:border-box}
+  body{margin:0;background:var(--canvas);color:var(--ink);
+    font:400 clamp(1rem,0.97rem + 0.15vw,1.0625rem)/1.62 var(--serif);
+    -webkit-font-smoothing:antialiased}
+  h1,h2,h3{margin:0;font-weight:600;letter-spacing:-0.014em;line-height:1.02}
+  p{margin:0}
+  a{color:inherit}
+  img,svg{display:block;max-width:100%}
+
+  .shell{width:min(100% - 2rem,76rem);margin-inline:auto}
+  .rule{border:0;border-top:1px solid var(--line);margin:0}
+
+  /* ── masthead ─────────────────────────────────────────────── */
+  .masthead{display:flex;justify-content:space-between;align-items:baseline;
+    gap:2rem;padding:1.6rem 0 1.4rem}
+  .wordmark{font-family:var(--mono);font-size:.78rem;letter-spacing:.2em;
+    text-transform:uppercase}
+  .masthead nav{display:flex;gap:1.6rem;font-family:var(--mono);
+    font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--muted)}
+  .masthead nav a{text-decoration:none;padding-bottom:2px;
+    border-bottom:1px solid transparent}
+  .masthead nav a:hover{border-bottom-color:var(--brick)}
+
+  /* ── hero: 12-col, headline crosses the gutter ────────────── */
+  .hero{display:grid;grid-template-columns:repeat(12,1fr);
+    column-gap:1.5rem;align-items:end;padding:clamp(3rem,7vw,7rem) 0
+    clamp(2.5rem,5vw,4.5rem)}
+  .hero__text{grid-column:1 / 8;position:relative;z-index:2}
+  .hero__art{grid-column:7 / 13;grid-row:1;align-self:stretch;
+    min-height:clamp(18rem,34vw,30rem)}
+  @media(max-width:52rem){
+    .hero{grid-template-columns:1fr;row-gap:2.2rem}
+    .hero__text,.hero__art{grid-column:1/-1;grid-row:auto}
+  }
+  .eyebrow{font-family:var(--mono);font-size:.72rem;letter-spacing:.19em;
+    text-transform:uppercase;color:var(--muted);margin-bottom:1.5rem}
+  .eyebrow::before{content:"";display:inline-block;width:1.9rem;height:1px;
+    background:var(--brick);vertical-align:.32em;margin-right:.7rem}
+  h1{font-size:clamp(2.9rem,1.6rem + 5.4vw,5.6rem);
+    /* optical margin: pull the cap-height flush with the column edge */
+    margin-left:-0.055em;text-wrap:balance}
+  h1 em{font-style:italic;color:var(--brick-deep)}
+  .lede{max-width:var(--measure);margin-top:1.6rem;font-size:1.14em;
+    color:var(--muted);line-height:1.55;
+    /* hanging punctuation reads as typeset rather than typed */
+    hanging-punctuation:first last}
+  .actions{display:flex;flex-wrap:wrap;gap:.9rem;margin-top:2.4rem}
+  .btn{font-family:var(--mono);font-size:.76rem;letter-spacing:.1em;
+    text-transform:uppercase;text-decoration:none;padding:.95em 1.7em;
+    border:1px solid var(--brick);transition:background .16s,color .16s}
+  .btn--fill{background:var(--brick);color:#fff}
+  .btn--fill:hover{background:var(--brick-deep)}
+  .btn--line{color:var(--brick-deep)}
+  .btn--line:hover{background:var(--paper)}
+  a:focus-visible{outline:2px solid var(--brick);outline-offset:3px}
+
+  /* ── drawn artwork, not a colour block ────────────────────── */
+  .plate{height:100%;background:var(--paper);border:1px solid var(--line);
+    position:relative;overflow:hidden}
+  .plate svg{width:100%;height:100%}
+  .plate figcaption{position:absolute;left:1.1rem;bottom:.95rem;
+    font-family:var(--mono);font-size:.68rem;letter-spacing:.11em;
+    text-transform:uppercase;color:var(--muted)}
+
+  /* ── process: a rule-separated list with numerals ─────────── */
+  .process{padding:clamp(3rem,6vw,5.5rem) 0}
+  .process__head{display:grid;grid-template-columns:repeat(12,1fr);
+    column-gap:1.5rem;margin-bottom:2.8rem}
+  .process__head .eyebrow{grid-column:1/-1}
+  .process__head h2{grid-column:1 / 8;font-size:clamp(1.9rem,1.1rem + 2.4vw,3rem)}
+  @media(max-width:52rem){.process__head h2{grid-column:1/-1}}
+  .steps{list-style:none;margin:0;padding:0}
+  .steps li{display:grid;grid-template-columns:4.5rem minmax(0,14rem) 1fr;
+    gap:1.5rem;padding:1.9rem 0;border-top:1px solid var(--line);
+    align-items:baseline}
+  .steps li:last-child{border-bottom:1px solid var(--line)}
+  @media(max-width:52rem){
+    .steps li{grid-template-columns:3rem 1fr;gap:.4rem 1rem}
+    .steps li p{grid-column:2}
+  }
+  .num{font-family:var(--mono);font-size:.78rem;color:var(--brick);
+    letter-spacing:.08em}
+  .steps h3{font-size:1.32rem}
+  .steps p{color:var(--muted);max-width:34rem}
+
+  /* ── closing band ─────────────────────────────────────────── */
+  .closing{background:var(--ink);color:var(--canvas);
+    padding:clamp(4rem,8vw,7rem) 0}
+  .closing .shell{display:grid;grid-template-columns:repeat(12,1fr);
+    column-gap:1.5rem;row-gap:1.6rem;align-items:end}
+  .closing h2{grid-column:1 / 8;font-size:clamp(2rem,1.2rem + 2.8vw,3.4rem)}
+  .closing p{grid-column:1 / 6;color:#cfc6ba;max-width:30rem}
+  .closing .actions{grid-column:9 / 13;margin:0;justify-content:flex-end}
+  @media(max-width:52rem){
+    .closing h2,.closing p,.closing .actions{grid-column:1/-1}
+    .closing .actions{justify-content:flex-start}
+  }
+  .closing .btn--fill{background:var(--canvas);color:var(--ink);
+    border-color:var(--canvas)}
+  .closing .btn--fill:hover{background:#fff}
+
+  /* ── footer ───────────────────────────────────────────────── */
+  footer{padding:2.4rem 0 3rem;font-family:var(--mono);font-size:.72rem;
+    letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+  footer .shell{display:flex;justify-content:space-between;flex-wrap:wrap;
+    gap:1rem}
+  @media(prefers-reduced-motion:reduce){*{transition:none!important}}
+</style>
+</head>
+<body>
+
+<header class="masthead shell">
+  <span class="wordmark">Ashgrove</span>
+  <nav>
+    <a href="#work">Work</a>
+    <a href="#practice">Practice</a>
+    <a href="#contact">Contact</a>
+  </nav>
+</header>
+<hr class="rule">
+
+<main>
+  <section class="hero shell">
+    <div class="hero__text">
+      <p class="eyebrow">Ashgrove Architects — est. 2004</p>
+      <h1>Buildings that <em>age</em> well</h1>
+      <p class="lede">We work in brick, oak and daylight. Twenty years of
+        houses, libraries and one stubborn chapel in the Cotswolds.</p>
+      <div class="actions">
+        <a class="btn btn--fill" href="#work">See the work</a>
+        <a class="btn btn--line" href="#contact">Start a project</a>
+      </div>
+    </div>
+    <figure class="hero__art plate">
+      <svg viewBox="0 0 420 520" role="img"
+           aria-label="Line elevation of a courtyard house at dusk">
+        <defs>
+          <pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse"
+                   patternTransform="rotate(38)">
+            <line x1="0" y1="0" x2="0" y2="6" stroke="#a8402c"
+                  stroke-width="1" opacity=".28"/>
+          </pattern>
+        </defs>
+        <!-- ground -->
+        <line x1="20" y1="452" x2="400" y2="452" stroke="#17140f"
+              stroke-width="1.4"/>
+        <!-- main volume -->
+        <rect x="74" y="214" width="188" height="238" fill="url(#hatch)"
+              stroke="#17140f" stroke-width="1.4"/>
+        <!-- roof -->
+        <path d="M60 214 L168 138 L276 214" fill="none" stroke="#17140f"
+              stroke-width="1.4"/>
+        <!-- chimney -->
+        <rect x="212" y="150" width="18" height="42" fill="none"
+              stroke="#17140f" stroke-width="1.4"/>
+        <!-- wing -->
+        <rect x="262" y="300" width="104" height="152" fill="none"
+              stroke="#17140f" stroke-width="1.4"/>
+        <path d="M254 300 L314 262 L374 300" fill="none" stroke="#17140f"
+              stroke-width="1.4"/>
+        <!-- windows, the lit ones filled -->
+        <rect x="104" y="252" width="38" height="52" fill="#a8402c"
+              opacity=".85"/>
+        <rect x="160" y="252" width="38" height="52" fill="none"
+              stroke="#17140f"/>
+        <rect x="104" y="336" width="38" height="52" fill="none"
+              stroke="#17140f"/>
+        <rect x="160" y="336" width="38" height="52" fill="#a8402c"
+              opacity=".85"/>
+        <rect x="292" y="340" width="44" height="60" fill="none"
+              stroke="#17140f"/>
+        <!-- door -->
+        <rect x="212" y="368" width="30" height="84" fill="none"
+              stroke="#17140f" stroke-width="1.4"/>
+        <!-- dimension line, the detail that says 'drawing' -->
+        <line x1="74" y1="486" x2="262" y2="486" stroke="#6b6259"
+              stroke-width="1"/>
+        <line x1="74" y1="480" x2="74" y2="492" stroke="#6b6259"/>
+        <line x1="262" y1="480" x2="262" y2="492" stroke="#6b6259"/>
+        <text x="168" y="478" text-anchor="middle" fill="#6b6259"
+              font-family="ui-monospace,monospace" font-size="11">9 400</text>
+      </svg>
+      <figcaption>Courtyard house — west elevation</figcaption>
+    </figure>
+  </section>
+
+  <hr class="rule">
+
+  <section class="process shell" id="practice">
+    <div class="process__head">
+      <p class="eyebrow">How we work</p>
+      <h2>Slow, then exact</h2>
+    </div>
+    <ol class="steps">
+      <li>
+        <span class="num">01</span>
+        <h3>Survey</h3>
+        <p>We measure the site, the light and the neighbours before we draw
+           anything.</p>
+      </li>
+      <li>
+        <span class="num">02</span>
+        <h3>Drawing</h3>
+        <p>Hand sections first. The model comes later, once the idea has
+           survived a pencil.</p>
+      </li>
+      <li>
+        <span class="num">03</span>
+        <h3>Building</h3>
+        <p>We stay on site weekly. Detail is decided with the people cutting
+           the timber.</p>
+      </li>
+    </ol>
+  </section>
+
+  <section class="closing" id="contact">
+    <div class="shell">
+      <h2>Tell us about the site</h2>
+      <p>We take four projects a year. Early conversations are free and
+         usually useful.</p>
+      <div class="actions">
+        <a class="btn btn--fill" href="mailto:studio@example.com">Write to us</a>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  <div class="shell">
+    <span>Ashgrove Architects</span>
+    <span>Stroud, Gloucestershire</span>
+    <span>+44 1453 000 000</span>
+  </div>
+</footer>
+
+</body>
+</html>

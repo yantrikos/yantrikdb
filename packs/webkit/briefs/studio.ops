@@ -1,0 +1,23 @@
+# Architecture studio — editorial family, warm brick accent, roomy
+SITE     name="Ashgrove"  nav="Work,Practice,Contact"  location="Stroud, Gloucestershire"  contact="+44 1453 000 000"
+THEME    family=editorial  accent=#b8442f  mode=light  density=roomy
+
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT     sec=s1  slot=eyebrow  text="Ashgrove Architects — est. 2004"
+TEXT     sec=s1  slot=title    text="Buildings that age well"  accent="age"
+TEXT     sec=s1  slot=lede     text="We work in brick, oak and daylight. Twenty years of houses, libraries and one stubborn chapel in the Cotswolds."
+ACTION   sec=s1  slot=primary   label="See the work"  href="#work"
+ACTION   sec=s1  slot=secondary label="Start a project"  href="#contact"
+MEDIA    sec=s1  slot=figure  alt="Courtyard house, west elevation at dusk"  motif=elevation
+
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT     sec=s2  slot=eyebrow  text="How we work"
+TEXT     sec=s2  slot=title    text="Slow, then exact"
+ITEM     sec=s2  slot=item  title="Survey"   body="We measure the site, the light and the neighbours before we draw anything."
+ITEM     sec=s2  slot=item  title="Drawing"  body="Hand sections first. The model comes later, once the idea has survived a pencil."
+ITEM     sec=s2  slot=item  title="Building" body="We stay on site weekly. Detail is decided with the people cutting the timber."
+
+SECTION  id=s3  kind=cta  layout=stack  tone=inverted
+TEXT     sec=s3  slot=title  text="Tell us about the site"
+TEXT     sec=s3  slot=lede   text="We take four projects a year. Early conversations are free and usually useful."
+ACTION   sec=s3  slot=primary  label="Write to us"  href="mailto:studio@example.com"

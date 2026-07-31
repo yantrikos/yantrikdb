@@ -1,0 +1,23 @@
+# Neighbourhood restaurant — editorial, deep green, roomy
+SITE     name="Sorrel"  nav="Menu,Book,Find us"  location="Peckham Rye, London"  contact="020 7000 0000"
+THEME    family=editorial  accent=#2f6b4f  mode=light  density=roomy
+
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT     sec=s1  slot=eyebrow  text="Sorrel — Peckham Rye"
+TEXT     sec=s1  slot=title    text="One menu, changed weekly"
+TEXT     sec=s1  slot=lede     text="Whatever the market gave us on Tuesday, cooked over fire. Fourteen seats and a counter. No substitutions, and we mean it kindly."
+ACTION   sec=s1  slot=primary   label="Book a table"  href="#book"
+ACTION   sec=s1  slot=secondary label="This week's menu"  href="#menu"
+MEDIA    sec=s1  slot=figure  alt="Counter seating at service, autumn"  motif=elevation
+
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT     sec=s2  slot=eyebrow  text="Practical things"
+TEXT     sec=s2  slot=title    text="Before you come"
+ITEM     sec=s2  slot=item  title="Wednesday to Saturday"  body="Two sittings, 6pm and 8.30pm. Sunday lunch once a month, announced by post."
+ITEM     sec=s2  slot=item  title="£48 a head"             body="Five courses. Wine pairing is £32 more, and worth it about half the time."
+ITEM     sec=s2  slot=item  title="Tell us early"          body="We can work around most things with a week's notice. Less than that and we may not manage."
+
+SECTION  id=s3  kind=cta  layout=stack  tone=bold
+TEXT     sec=s3  slot=title  text="Tables open on the 1st"
+TEXT     sec=s3  slot=lede   text="The month ahead goes live at 9am. It usually lasts a day."
+ACTION   sec=s3  slot=primary  label="Join the list"  href="#list"
