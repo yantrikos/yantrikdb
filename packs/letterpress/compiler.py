@@ -786,6 +786,103 @@ h1{{font-size:{st['d1']}}} h2{{font-size:{st['d2']}}} h3{{font-size:{st['d3']}}}
 .centred{{text-align:center}}
 .centred p,.centred .actions{{margin-inline:auto}}
 .centred .actions{{justify-content:center}}
+
+/* ── COMPOSITION PER FAMILY ──────────────────────────────────────────
+   Until now `family` changed the typefaces, the scale ratio and the
+   border radius, and nothing else. Every page therefore had the same
+   skeleton — asymmetric split hero, numerals on hairlines, heading-left
+   closing band — and three "typographic worlds" turned out to be one
+   layout in three fonts. That is what a reader sees first and it is why
+   a charity, a bakery and a database tool all looked alike.
+
+   Everything below changes the ARRANGEMENT, not the type. Each family
+   gets a different reading order, a different structural device for its
+   labels, and a different way of listing things. */
+
+/* EDITORIAL — a magazine spread. The default above already is this:
+   text on columns 1–8, art on 7–13 so the headline crosses the gutter,
+   numerals on hairline rules, closing band heading-left. What it adds
+   is the one device a magazine has and a poster does not: a first line
+   that sits tight under a rule. */
+.fam-editorial .eyebrow{{border-bottom:0}}
+.fam-editorial .steps li{{align-items:baseline}}
+
+/* STUDIO — a poster. The picture is a full-width band and the headline
+   sits UNDER it at the largest size the scale allows, spanning the
+   page rather than a column. Nothing crosses a gutter, because a poster
+   has no gutter; the tension comes from scale instead. */
+@media(min-width:56rem){{
+  .fam-studio .split{{grid-template-columns:1fr;align-items:stretch}}
+  .fam-studio .split > .figure{{grid-column:1;grid-row:1;
+    aspect-ratio:21/9;height:auto}}
+  .fam-studio .split > div:first-child{{grid-column:1;grid-row:2;
+    padding-bottom:0}}
+  .fam-studio h1{{font-size:clamp(3rem,7.5vw,6rem);line-height:.96;
+    max-width:16ch}}
+  .fam-studio .closing{{grid-template-columns:1fr;justify-items:center;
+    text-align:center}}
+  .fam-studio .closing > div:first-child{{grid-column:1}}
+  .fam-studio .closing > .actions{{grid-column:1;justify-content:center;
+    margin-top:1.6rem}}
+}}
+/* The eyebrow becomes a filled tag rather than a rule and a word. */
+/* opacity:1 is load-bearing. The inverted band fades secondary text
+   with `.inverted .eyebrow{{opacity:.78}}`, which a plain eyebrow wants
+   and a filled chip must not inherit: the chip's own colours are a
+   solved pair, and fading them composited the label down to 2.96:1 on
+   the charity page. Overriding the colour without the opacity leaves
+   half the rule applying. */
+.fam-studio .eyebrow,
+.fam-studio .inverted .eyebrow{{display:inline-block;background:{pal['accent']};
+  color:{pal['on-accent']};padding:.42em .85em;border-radius:{fam['radius']};
+  letter-spacing:.1em;opacity:1}}
+.fam-studio .eyebrow::before{{display:none}}
+/* Items become cards carrying a large numeral, not rows on rules. */
+.fam-studio .steps{{display:grid;gap:var(--gap);grid-template-columns:1fr;
+  margin-top:2.8rem}}
+@media(min-width:48rem){{
+  .fam-studio .steps{{grid-template-columns:repeat(2,1fr)}}
+}}
+.fam-studio .steps li{{display:block;border:0;padding:1.7rem;
+  background:var(--surface);border-radius:{fam['radius']}}}
+.fam-studio .steps li:last-child{{border-bottom:0}}
+/* A solved colour, NOT opacity. Written `opacity:.32` for a quiet
+   numeral this measured 1.57:1 and the contrast gate caught it
+   immediately — the same gate that was extended to composite opacity
+   after a <cite> shipped at 2.51:1. Fading text is how a decorative
+   number becomes an illegible one. */
+.fam-studio .steps .num{{display:block;font-family:{fam['display']};
+  font-size:{st['d2']};font-weight:{fam['weight_display']};line-height:1;
+  margin-bottom:.7rem;color:{pal['muted']}}}
+.fam-studio .steps p{{max-width:38ch}}
+
+/* TECHNICAL — a specification. No split at all: the text is a document
+   header running the full width, and the figure follows BELOW it as a
+   numbered plate, the way a figure appears in a paper. Lists become a
+   two-column table with dotted leaders. */
+@media(min-width:56rem){{
+  .fam-technical .split{{grid-template-columns:1fr}}
+  .fam-technical .split > div:first-child{{grid-column:1;grid-row:1;
+    padding-bottom:0}}
+  .fam-technical .split > .figure{{grid-column:1;grid-row:2;
+    aspect-ratio:16/7;height:auto}}
+  .fam-technical .closing{{grid-template-columns:1fr}}
+  .fam-technical .closing > div:first-child,
+  .fam-technical .closing > .actions{{grid-column:1;justify-content:flex-start}}
+}}
+/* A bracketed monospace label, the way a spec numbers its sections —
+   replacing the magazine's short rule rather than sitting next to it. */
+.fam-technical .eyebrow{{color:{pal['accent-text']}}}
+.fam-technical .eyebrow::before{{content:"[ ";display:inline;width:auto;
+  height:auto;background:none;margin:0;vertical-align:baseline}}
+.fam-technical .eyebrow::after{{content:" ]"}}
+.fam-technical .steps li{{grid-template-columns:3.2rem minmax(0,14rem) 1fr;
+  padding:1.1rem 0;border-top:{fam['rule']}}}
+.fam-technical .steps h3{{font-family:{fam['mono']};font-size:{st['body']};
+  letter-spacing:-.01em}}
+/* The closing band is a bordered callout rather than an open band. */
+.fam-technical section.inverted .wrap,
+.fam-technical .closing{{position:relative}}
 .grid{{display:grid;gap:var(--gap);grid-template-columns:1fr;margin-top:3rem}}
 @media(min-width:44rem){{.grid{{grid-template-columns:repeat(2,1fr)}}}}
 @media(min-width:64rem){{.grid{{grid-template-columns:repeat(3,1fr)}}}}
@@ -1168,7 +1265,7 @@ html.js .rise.in{{opacity:1;transform:none}}
         if title:
             break
     page = f"""<!doctype html>
-<html lang="en">
+<html lang="en" class="fam-{fam_name}">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">

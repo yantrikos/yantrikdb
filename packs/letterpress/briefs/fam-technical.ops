@@ -1,0 +1,23 @@
+# Identical content in all three, so COMPOSITION is the only variable.
+SITE     name="Kestrel"  nav="Treatment,Team,Book"  location="Leeds"  contact="hello@kestrel.physio"
+THEME    family=technical  accent=#1f6f5c  mode=light  density=normal
+
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT     sec=s1  slot=eyebrow  text="Physiotherapy in Leeds"
+TEXT     sec=s1  slot=title    text="Rehab that ends with you [back on the pitch]"
+TEXT     sec=s1  slot=lede     text="Two practitioners, forty minutes an appointment, and no gym contract at the end of it. You see the same one from assessment through to discharge."
+ACTION   sec=s1  slot=primary    label="Book an assessment"  href="#book"
+ACTION   sec=s1  slot=secondary  label="What we treat"       href="#treat"
+MEDIA    sec=s1  slot=figure  motif=orbit
+
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT     sec=s2  slot=eyebrow  text="How it runs"
+TEXT     sec=s2  slot=title    text="Three appointments, then a plan you own"
+ITEM     sec=s2  slot=item  title="Assessment"  body="Forty minutes. We test the joint, watch you move, and write down a baseline you can be measured against later."
+ITEM     sec=s2  slot=item  title="Loading"     body="Four to six sessions, spaced to match tissue healing rather than a billing cycle."
+ITEM     sec=s2  slot=item  title="Discharge"   body="You leave with the programme and the progressions, and the criteria for returning to sport."
+
+SECTION  id=s3  kind=cta  layout=stack  tone=quiet
+TEXT     sec=s3  slot=title  text="Assessments run Tuesday to Saturday"
+TEXT     sec=s3  slot=lede   text="Great George Street, five minutes from the station."
+ACTION   sec=s3  slot=primary  label="Book an assessment"  href="#book"
