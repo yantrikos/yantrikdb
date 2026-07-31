@@ -1,0 +1,28 @@
+SITE     name="Tide Mill"  nav="Bread,Visit,Contact"  location="Bristol"  contact="hello@tidemill.co"
+THEME    family=editorial  accent=#b8442f  mode=light  density=roomy
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Bristol's only sourdough"
+TEXT sec=s1 slot=title text="Tide Mill [two ovens]"
+TEXT sec=s1 slot=lede text="We bake by noon and sell out before the sun sets. Our loaves are ready for pickup at our door."
+ACTION sec=s1 slot=primary label="Collection times" href="#times"
+ACTION sec=s1 slot=secondary label="Weekly loaf list" href="#loaves"
+MEDIA sec=s1 slot=figure motif=elevation
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT sec=s2 slot=eyebrow text="From starter to slice"
+TEXT sec=s2 slot=title text="What we make [and how]"
+ITEM sec=s2 slot=item title="Sourdough Bun" body="Soft brioche rolls with a tangy crust baked in the second oven. They are wrapped in wax paper on Friday mornings only."
+ITEM sec=s2 slot=item title="Bread Crumb" body="Fine, golden crumbs ground daily for baking or sprinkling. They are weighed out in small bags at the counter until closing time."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT sec=s3 slot=eyebrow text="The secret [in our crust]"
+TEXT sec=s3 slot=title text="Why Tide Mill [keeps the starter warm]"
+TEXT sec=s3 slot=lede text="Our sourdough culture is maintained in a temperature-controlled cellar, never exposed to direct light. This slow fermentation creates a complex acidity that cannot be replicated by industrial starters or commercial yeast."
+ACTION sec=s3 slot=primary label="Ask about our method" href="#method"
+MEDIA sec=s3 slot=figure motif=strata
+SECTION  id=s4  kind=roster  layout=stack  tone=bold
+TEXT sec=s4 slot=eyebrow text="Meet our bakers"
+TEXT sec=s4 slot=title text="The hands [that shape]"
+ITEM sec=s4 slot=item title="Rising Assistant" body="Handles daily weigh-ins and wraps loaves for pickup. Assists with cooling racks until closing time."
+ITEM sec=s4 slot=item title="Starter Keeper" body="Maintains the cellar temperature and feeds the culture weekly. Monitors acidity levels to ensure consistent fermentation."
+SECTION  id=s5  kind=cta  layout=stack  tone=quiet
+TEXT sec=s5 slot=title text="Come [before noon]"
+ACTION sec=s5 slot=primary label="Check the clock" href="#clock"

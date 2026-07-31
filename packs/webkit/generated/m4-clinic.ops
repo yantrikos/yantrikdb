@@ -1,0 +1,40 @@
+SITE     name="Kestrel"  nav="About,Treatments,Contact"  location="Leeds"  contact="info@kestrelphysio.co.uk"
+THEME    family=editorial  accent=#2c5f48  mode=light  density=roomy
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT     sec=s1  slot=eyebrow  text="Sports injuries and post-op rehab"
+TEXT     sec=s1  slot=title    text="Kestrel [physiotherapy] Leeds"
+TEXT     sec=s1  slot=lede      text="Two practitioners. No gym contract required."
+ACTION   sec=s1  slot=primary  label="Book an appointment"  href="#contact"
+ACTION   sec=s1  slot=secondary label="Our treatments"    href="#treatments"
+MEDIA    sec=s1  slot=figure  motif=lattice
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT     sec=s2  slot=eyebrow    text="Movement restored in weeks"
+TEXT     sec=s2  slot=title       text="What we treat and why"
+ITEM      sec=s2  slot=item      title="Acute sprains" body="We immobilise the joint for four hours then retrain balance over three days."
+ITEM      sec=s2  slot=item      title="Post-surgery rehab" body="Manual therapy begins within twenty-four hours to prevent scar tissue from hardening."
+ITEM      sec=s2  slot=item      title="Chronic pain management" body="We combine heat application for forty minutes with targeted stretching twice daily until the nerve fires stop firing erratically."
+ITEM      sec=s2  slot=item      title="Return-to-sport clearance" body="A specialist signs off only after six weeks of graded running and a full range-of-motion test passes without pain spikes."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT     sec=s3  slot=eyebrow    text="The method that won't work on you"
+TEXT     sec=s3  slot=title       text="Kestrel [physiotherapy] Leeds: why we refuse to prescribe painkillers."
+TEXT     sec=s3  slot=lede      text="We do not offer a standard recovery plan. Our protocol requires the patient's own movement pattern as proof of healing, meaning generic treatments are rejected before they begin. This approach has reduced our return-to-sport clearance time by thirty percent compared to national averages."
+ACTION   sec=s3  slot=primary    label="Read the full case study"  href="#case-study"
+MEDIA    sec=s3  slot=figure     motif=strata
+SECTION  id=s4  kind=roster  layout=stack  tone=bold
+TEXT     sec=s4  slot=eyebrow    text="Who we work with"
+TEXT     sec=s4  slot=title       text="Our roster of services and roles"
+ITEM      sec=s4  slot=item      title="Sports physiotherapy" body="We treat runners, climbers, and contact-sport athletes who need rapid return-to-play protocols without gym membership."
+ITEM      sec=s4  slot=item      title="Post-operative rehabilitation" body="We manage knee replacements, ACL repairs, and shoulder surgery recoveries for patients under forty-five with two sessions weekly until full range returns."
+ITEM      sec=s4  slot=item      title="Manual therapy specialists" body="Our senior therapists treat chronic back pain and disc herniations using hands-on mobilisation rather than injections or prescribed medication."
+SECTION  id=s5  kind=faq  layout=stack  tone=quiet
+TEXT     sec=s5  slot=eyebrow    text="Common questions about recovery and costs"
+TEXT     sec=s5  slot=title       text="What our patients ask before they arrive"
+ITEM      sec=s5  slot=item      title="How long does a typical rehab course last?" body="Most runners complete their graded running protocol over six weeks, with balance retraining sessions scheduled twice daily until the specialist signs off on full range of motion."
+ITEM      sec=s5  slot=item      title="Do I need to pay for gym equipment separately?" body="We provide all necessary resistance bands and foam rollers in our clinic at no extra cost, so you only pay a flat fee per session rather than by the hour or membership rate."
+ITEM      sec=s5  slot=item      title="What happens if my injury won't improve after six weeks?" body="If pain persists beyond forty-eight hours of graded exercise, we pause manual therapy and refer you to our partner orthopaedic surgeon for imaging before adjusting your treatment plan."
+ITEM      sec=s5  slot=item      title="Can I bring a physiotherapist from another clinic with me?" body="We welcome second opinions but require all external therapists to submit their notes in advance so we can integrate them into your existing movement pattern without repeating tests."
+ITEM      sec=s5  slot=item      title="Is there any cost if my insurance doesn't cover manual therapy?" body="Our self-pay rates are set at thirty percent below the national average, and we accept most private health schemes with a two-week waiting period for post-surgery cases only."
+SECTION  id=s6  kind=cta  layout=stack  tone=quiet
+TEXT     sec=s6  slot=title    text="When your injury won't respond to standard care"
+TEXT     sec=s6  slot=lede      text="The first step is imaging, then we decide if manual therapy or surgery fits your movement pattern."
+ACTION   sec=s6  slot=primary label="Book an appointment" href="#contact"

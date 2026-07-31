@@ -1,0 +1,39 @@
+SITE     name="Flint"  nav="Docs,Licenses,CI"  location="Open Source"  contact="flint@opensource.org"
+THEME    family=technical  accent=#0f9d58  mode=light  density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT     sec=s1  slot=eyebrow  text="Flint"
+TEXT     sec=s1  slot=title    text="[Find unused indexes]"
+TEXT     sec=s1  slot=lede     text="A read-only CLI that scans Postgres schemas to identify dead database indexes. It runs silently in CI pipelines and reports findings via a simple JSON output."
+ACTION   sec=s1  slot=primary label="Read the docs"    href="#docs"
+ACTION   sec=s1  slot=secondary label="View licenses"     href="#licenses"
+MEDIA    sec=s1  slot=figure  motif=schematic
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT     sec=s2  slot=eyebrow text="Dead indexes"
+TEXT     sec=s2  slot=title    text="[What Flint finds]"
+ITEM      sec=s2  slot=item title="Index pruning" body="Flint scans every table definition and flags any index with zero unique rows. It runs in under two minutes on a standard CI runner."
+ITEM      sec=s2  slot=item title="Query optimization" body="By removing dead indexes, queries that previously scanned millions of rows now execute instantly. The change is applied automatically to the production schema without downtime."
+ITEM      sec=s2  slot=item title="Schema drift detection" body="Flint compares the live database against your git commit and highlights any index added in a branch but never used in main. It reports this as part of its weekly audit log."
+ITEM      sec=s2  slot=item title="Performance baseline" body="The tool measures query latency before and after cleanup to quantify gains. A typical run saves roughly forty percent on read-heavy workloads across the entire cluster."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT     sec=s3  slot=eyebrow text="The edge case"
+TEXT     sec=s3  slot=title    text="[When Flint breaks]"
+TEXT     sec=s3  slot=lede   text="Flint assumes your schema is valid Postgres. It will not guess foreign key constraints or infer composite index rules from partial table definitions, so it may miss dead indexes in complex multi-table joins unless you explicitly define them."
+ACTION   sec=s3  slot=primary label="See the report"    href="#report"
+MEDIA    sec=s3  slot=figure motif=strata
+SECTION  id=s4  kind=faq  layout=stack  tone=bold
+TEXT     sec=s4  slot=eyebrow text="Dead indexes"
+TEXT     sec=s4  slot=title    text="[What Flint finds]"
+ITEM      sec=s4  slot=item title="Index pruning" body="Flint scans every table definition and flags any index with zero unique rows. It runs in under two minutes on a standard CI runner."
+ITEM      sec=s4  slot=item title="Query optimization" body="By removing dead indexes, queries that previously scanned millions of rows now execute instantly. The change is applied automatically to the production schema without downtime."
+ITEM      sec=s4  slot=item title="Schema drift detection" body="Flint compares the live database against your git commit and highlights any index added in a branch but never used in main. It reports this as part of its weekly audit log."
+ITEM      sec=s4  slot=item title="Performance baseline" body="The tool measures query latency before and after cleanup to quantify gains. A typical run saves roughly forty percent on read-heavy workloads across the entire cluster."
+SECTION  id=s5  kind=roster  layout=stack  tone=quiet
+TEXT     sec=s5  slot=eyebrow text="Contributors"
+TEXT     sec=s5  slot=title    text="[Who runs Flint]"
+ITEM      sec=s5  slot=item title="CI Pipeline" body="Automated scans of every Pull Request against the main branch, flagging schema drift before it merges."
+ITEM      sec=s5  slot=item title="Community Audit" body="Weekly reports from independent maintainers who verify index usage across production clusters and open issues for false positives."
+ITEM      sec=s5  slot=item title="Open Source Core" body="The MIT-licensed engine that parses Postgres DDL files, calculates unique row counts, and generates the JSON output used by CI runners."
+SECTION  id=s6  kind=cta  layout=stack  tone=quiet
+TEXT     sec=s6  slot=title    text="[When to come]"
+TEXT     sec=s6  slot=lede   text="Run Flint on your first production commit; the report arrives before you merge."
+ACTION   sec=s6  slot=primary label="Get started" href="#docs"

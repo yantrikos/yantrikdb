@@ -1,0 +1,41 @@
+SITE     name="Reel North"  nav="Archive,Collections,Visit"  location="Sheffield"  contact="research@reelnorth.ac.uk"
+THEME    family=technical  accent=#0f3d7e  mode=light  density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Reel North"
+TEXT sec=s1 slot=title text="Preserving [Sheffield's] television history."
+TEXT sec=s1 slot=lede text="Over 30 years of regional broadcasting, digitised at 4K resolution. Researchers access the collection three days a week without charge."
+ACTION sec=s1 slot=primary label="Browse archive" href="#browse"
+ACTION sec=s1 slot=secondary label="Visit hours" href="#visit"
+MEDIA sec=s1 slot=figure motif=schematic
+SECTION  id=s2  kind=proof  layout=stack  tone=bold
+TEXT sec=s2 slot=eyebrow text="Archive metrics"
+TEXT sec=s2 slot=title text="12,400 [reels]"
+ITEM     sec=s2  slot=item  title="1957"    body="Collection start date."
+ITEM     sec=s2  slot=item  title="1994"    body="Broadcast run end year."
+ITEM     sec=s2  slot=item  title="4K"      body="Digitisation resolution standard."
+ITEM     sec=s2  slot=item  title="3 days"   body="Weekly researcher access window."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT sec=s3 slot=eyebrow text="The archive's edge"
+TEXT sec=s3 slot=title text="Only [Sheffield] footage survives."
+TEXT sec=s3 slot=lede text="While national archives hold the broadcast, Reel North retains every local cut filmed in Sheffield studios between 1962 and 1978. No other institution holds this specific geographic layer of regional television history intact at 4K resolution."
+ACTION sec=s3 slot=primary label="Request access" href="#request"
+MEDIA sec=s3 slot=figure motif=strata
+SECTION  id=s4  kind=features  layout=list  tone=quiet
+TEXT sec=s4 slot=eyebrow text="Technical specifications"
+ITEM     sec=s4  slot=item  title="1957-06-23"    body="First reel digitised, transferred from magnetic tape to glass plates."
+ITEM     sec=s4  slot=item  title="Ultraviolet ink"   body="Faded black-and-white frames preserved on polyester film stock before digital conversion."
+ITEM     sec=s4  slot=item  title="1982-03-15"    body="Final broadcast signal captured, stored in a climate-controlled vault for forty years prior to digitisation."
+ITEM     sec=s4  slot=item  title="4K resolution"   body="Every frame scanned at thirty-two megapixels per second, allowing restoration of lost motion blur and colour saturation."
+SECTION  id=s5  kind=roster  layout=stack  tone=quiet
+TEXT sec=s5 slot=eyebrow text="Access services"
+TEXT sec=s5 slot=title text="Two [archivists] manage retrieval."
+ITEM     sec=s5  slot=item  title="Digital access"    body="Researchers download digitised reels via secure portal, subject to citation requirements and two-day processing lead time for bulk requests. The service covers all Sheffield local broadcasts from 1962 through 1978 in high-resolution format."
+ITEM     sec=s5  slot=item  title="Physical consultation"   body="Staff members scan fragile glass plates on-site within the climate-controlled vault, providing contact lenses and magnification for viewing original film stock. This role serves scholars requiring frame-by-frame analysis of pre-digital broadcast signals captured in Sheffield studios between 1962 and 1978."
+ITEM     sec=s5  slot=item  title="Preservation monitoring"   body="Archivists track reel degradation rates using ultraviolet spectrometry, reporting film stock health to the board quarterly. The service covers polyester film preservation protocols applied to all reels digitised since 2024 at thirty-two megapixels per second."
+SECTION  id=s6  kind=note  layout=stack  tone=inverted
+TEXT sec=s6 slot=title text="Free access for researchers."
+TEXT sec=s6 slot=lede text="No charge applies to digital downloads or on-site viewing of Sheffield local broadcasts from 1957 through 1994, managed by two archivists using climate-controlled vaults and ultraviolet spectrometry protocols."
+SECTION  id=s7  kind=cta  layout=stack  tone=quiet
+TEXT sec=s7 slot=title text="Request your first reel"
+TEXT sec=s7 slot=lede text="Submit an access request to retrieve footage from 1962 through 1978; processing takes two days."
+ACTION sec=s7 slot=primary label="Start application" href="#request"

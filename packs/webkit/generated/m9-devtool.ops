@@ -1,0 +1,34 @@
+SITE name="Flint" nav="Docs,Ci,Licence" location="" contact="issues@flint.dev"
+THEME family=technical accent=#0ea5e9 mode=light density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Flint"
+TEXT sec=s1 slot=title text="Find unused Postgres indexes in your CI pipeline [fast and free]"
+TEXT sec=s1 slot=lede text="This tool scans database schemas to identify wasted storage on large tables. It runs safely as a read-only agent inside your existing continuous integration workflow."
+ACTION sec=s1 slot=primary label="View documentation" href="#docs"
+ACTION sec=s1 slot=secondary label="Read the licence" href="#licence"
+MEDIA sec=s1 slot=figure motif=schematic
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT sec=s2 slot=eyebrow text="Scans"
+TEXT sec=s2 slot=title text="Identifies indexes that never fire in production queries."
+ITEM sec=s2 slot=item title="Query plan analysis" body="It reads the planner output to confirm an index is ignored, then flags it for removal before your next deploy cycle starts."
+ITEM sec=s2 slot=item title="Storage reclamation" body="Once marked as dead, the tool calculates how many gigabytes of disk space you can free up immediately without touching live data files."
+ITEM sec=s2 slot=item title="CI safety check" body="The agent runs in read-only mode inside your existing pipeline so it never modifies tables or risks breaking a build while scanning schemas."
+ITEM sec=s2 slot=item title="Threshold limits" body="You set a maximum age for an index, and the scanner only reports candidates that have not been touched within that specific window of time."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT sec=s3 slot=eyebrow text="The differentiator"
+TEXT sec=s3 slot=title text="Read-only agent [runs inside your CI]"
+TEXT sec=s3 slot=lede text="Competitors require database access to scan schemas, which violates security policies and risks breaking builds. Flint operates strictly as a read-only observer within the existing pipeline, ensuring zero risk of data modification or downtime while identifying wasted storage."
+ACTION sec=s3 slot=primary label="View documentation" href="#docs"
+MEDIA sec=s3 slot=figure motif=dial
+SECTION  id=s4  kind=faq  layout=stack  tone=bold
+TEXT sec=s4 slot=eyebrow text="Common questions"
+TEXT sec=s4 slot=title text="How does this work without database access?"
+ITEM sec=s4 slot=item title="Read-only safety" body="The agent connects to your CI runner, not the live cluster. It parses build logs and artifact metadata to find index usage patterns, so it never needs a connection string or permission to touch data."
+ITEM sec=s4 slot=item title="What if my pipeline changes?" body="Flint re-scans automatically on every new commit that touches schema files. If you add a table or drop an index in your repo, the tool updates its internal map within minutes of the build finishing successfully."
+ITEM sec=s4 slot=item title="Is there a cost to run this?" body="There is no monthly fee and no hidden charges because it runs entirely on your existing CI infrastructure. You only pay for whatever compute resources you already use in GitHub Actions, GitLab CI, or Jenkins while scanning logs."
+ITEM sec=s4 slot=item title="How long does the scan take?" body="The analysis completes in under thirty seconds after a build finishes because it processes plain text output rather than querying live tables. Large repositories with hundreds of builds are still processed faster than you can read your own changelog."
+ITEM sec=s4 slot=item title="What happens to flagged indexes?" body="Flint generates a report listing candidates for removal but does not delete anything automatically. You review the list in your PR or merge queue and decide which ones to drop, ensuring human oversight before any disk space is reclaimed."
+SECTION  id=s5  kind=cta  layout=stack  tone=quiet
+TEXT sec=s5 slot=title text="Start scanning your next build"
+TEXT sec=s5 slot=lede text="No installation required; drop the agent into your runner and watch storage free up on every commit."
+ACTION sec=s5 slot=primary label="Add to pipeline now" href="#docs"

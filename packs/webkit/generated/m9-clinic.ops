@@ -1,0 +1,32 @@
+SITE     name="Kestrel"  nav="Sports Rehab,Sports Injuries,Post-Op"  location="Leeds"  contact="hello@kestrel.co"
+THEME    family=editorial  accent=#2e7d32  mode=light  density=normal
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT     sec=s1  slot=eyebrow  text="Rehabilitation"
+TEXT     sec=s1  slot=title    text="Kestrel [Physiotherapy] in Leeds"
+TEXT     sec=s1  slot=lede    text="We treat sports injuries and guide you through post-operative recovery. Our two practitioners work without requiring a gym contract."
+ACTION   sec=s1  slot=primary  label="Book an appointment"  href="#times"
+ACTION   sec=s1  slot=secondary  label="View our services"  href="#services"
+MEDIA    sec=s1  slot=figure  motif=strata
+SECTION  id=s2  kind=features  layout=list  tone=quiet
+TEXT     sec=s2  slot=eyebrow  text="Our Services"
+TEXT     sec=s2  slot=title    text="Rehabilitation and Injury Care"
+ITEM     sec=s2  slot=item  title="Sports Injuries"  body="We diagnose acute tears in the hamstring, using ultrasound to map the tear before treatment begins."
+ITEM     sec=s2  slot=item  title="Post-Op Recovery"  body="Our protocol for ACL reconstruction includes a six-week brace schedule that ends with full running clearance."
+ITEM     sec=s2  slot=item  title="Manual Therapy"  body="We mobilise the frozen shoulder joint by hand, applying heat packs to relax the capsule before each session."
+ITEM     sec=s2  slot=item  title="Gait Analysis"  body="The treadmill is set at a two-kilometre pace so we can spot asymmetry in your stride pattern immediately."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT     sec=s3  slot=eyebrow  text="The Difference"
+TEXT     sec=s3  slot=title    text="We treat [you] as an athlete, not just a patient."
+TEXT     sec=s3  slot=lede    text="While other clinics focus on generic exercises for the knee or shoulder, our team specialises in restoring your specific movement patterns. We map how you run and jump before we prescribe any treatment plan to ensure you return exactly as you were. This approach means recovery is built around your sport rather than a one-size-fits-all protocol."
+ACTION   sec=s3  slot=primary  label="Meet the team"  href="#team"
+MEDIA    sec=s3  slot=figure  motif=lattice
+SECTION  id=s4  kind=roster  layout=stack  tone=bold
+TEXT     sec=s4  slot=eyebrow  text="Current Schedule"
+TEXT     sec=s4  slot=title    text="Appointments and Availability"
+ITEM     sec=s4  slot=item  title="Sports Injuries"  body="We see new cases for hamstring tears on Tuesdays at ten, mapping the tear with ultrasound before we begin treatment."
+ITEM     sec=s4  slot=item  title="Post-Op Recovery"  body="ACL reconstruction patients return for their brace check every Wednesday morning to review running clearance progress."
+ITEM     sec=s4  slot=item  title="Manual Therapy"  body="Sessions focusing on frozen shoulders are booked for Thursdays, where we apply heat packs before mobilising the joint by hand."
+SECTION  id=s5  kind=cta  layout=stack  tone=quiet
+TEXT     sec=s5  slot=title    text="First visit includes an ultrasound scan and movement mapping."
+TEXT     sec=s5  slot=lede    text="We assess your specific injury mechanics before prescribing treatment, ensuring you return to sport safely without a gym membership."
+ACTION   sec=s5  slot=primary  label="Check opening hours"  href="#times"

@@ -97,7 +97,7 @@ DENSITY = {"tight": 0.72, "normal": 1.0, "roomy": 1.42}
 ANNOT = 18
 
 
-def motif_elevation(pal: str, ink: str, line: str) -> str:
+def motif_elevation(pal: str, ink: str, line: str, surface: str = "#ffffff") -> str:
     """A building in elevation — hatched mass, roof, lit windows, and a
     dimension line, which is the detail that makes it read as a drawing
     rather than an icon."""
@@ -126,7 +126,7 @@ def motif_elevation(pal: str, ink: str, line: str) -> str:
  font-family="ui-monospace,monospace" font-size="{ANNOT}">9 400</text>"""
 
 
-def motif_topography(pal: str, ink: str, line: str) -> str:
+def motif_topography(pal: str, ink: str, line: str, surface: str = "#ffffff") -> str:
     """Nested contour rings — reads as land, maps, terrain."""
     rings = []
     for i in range(9):
@@ -140,7 +140,7 @@ def motif_topography(pal: str, ink: str, line: str) -> str:
             f'<circle cx="232" cy="236" r="7" fill="{pal}" class="lit"/>')
 
 
-def motif_schematic(pal: str, ink: str, line: str) -> str:
+def motif_schematic(pal: str, ink: str, line: str, surface: str = "#ffffff") -> str:
     """A wiring/flow schematic — nodes on a grid joined by orthogonal runs."""
     parts = [f'<g stroke="{line}" stroke-width=".6" opacity=".5">']
     for x in range(60, 401, 40):
@@ -157,7 +157,7 @@ def motif_schematic(pal: str, ink: str, line: str) -> str:
     return "".join(parts)
 
 
-def motif_dial(pal: str, ink: str, line: str) -> str:
+def motif_dial(pal: str, ink: str, line: str, surface: str = "#ffffff") -> str:
     """Concentric dial with index marks — instruments, precision, product."""
     marks = []
     for i in range(60):
@@ -179,7 +179,7 @@ def motif_dial(pal: str, ink: str, line: str) -> str:
             f'<circle cx="210" cy="258" r="6" fill="{pal}" class="lit"/>')
 
 
-def motif_specimen(pal: str, ink: str, line: str) -> str:
+def motif_specimen(pal: str, ink: str, line: str, surface: str = "#ffffff") -> str:
     """A type specimen — the letterform itself as the artwork."""
     return (f'<text x="210" y="368" text-anchor="middle" fill="{ink}"'
             f' font-family="Georgia,serif" font-size="330"'
@@ -188,15 +188,113 @@ def motif_specimen(pal: str, ink: str, line: str) -> str:
             f'<line x1="40" y1="368" x2="380" y2="368"/>'
             f'<line x1="40" y1="176" x2="380" y2="176"/>'
             f'<line x1="40" y1="252" x2="380" y2="252"/></g>'
-            f'<text x="44" y="162" fill="{pal}" font-family="ui-monospace,monospace"'
-            f' font-size="{ANNOT}">CAP HEIGHT</text>'
-            f'<text x="44" y="238" fill="{pal}" font-family="ui-monospace,monospace"'
-            f' font-size="{ANNOT}">X-HEIGHT</text>')
+            # "CAP HEIGHT" and "X-HEIGHT" at 18 units run about 100 units
+            # wide and collided with the letterform's left stem. A
+            # specimen marks these short anyway.
+            f'<text x="44" y="168" fill="{pal}" font-family="ui-monospace,monospace"'
+            f' font-size="{ANNOT}">CAP</text>'
+            f'<text x="44" y="244" fill="{pal}" font-family="ui-monospace,monospace"'
+            f' font-size="{ANNOT}">X-HT</text>')
+
+
+def motif_strata(pal: str, ink: str, line: str, surface: str = "#ffffff") -> str:
+    """Layered horizontal bands, cut through — time, record, sequence.
+
+    For anything with a span: an archive running 1957 to 1994, a back
+    catalogue, a history. The five original motifs had nothing for a
+    subject whose defining property is DURATION, so an archive got a
+    house.
+    """
+    bands, y = [], 96
+    for i, h in enumerate((34, 18, 46, 12, 28, 58, 22, 38, 16, 44)):
+        fill = pal if i in (2, 5) else "none"
+        # class="lit" QUOTED. Written unquoted as `class=lit/>`, the
+        # HTML parser reads the value as "lit/", the rect never
+        # self-closes, and every later band becomes its child — seven of
+        # ten layers silently vanished. Only visible by rendering all
+        # eight motifs side by side; on a real page it just looked like
+        # a slightly plain drawing.
+        cls = ' class="lit"' if fill != "none" else ""
+        bands.append(
+            f'<rect x="58" y="{y}" width="304" height="{h}" fill="{fill}"'
+            f' stroke="{ink}" stroke-width="1"{cls}/>')
+        y += h + 6
+    # A core sample line down the middle, the way a section is marked.
+    return ("".join(bands)
+            + f'<g class="draw" stroke="{line}" stroke-width="1.2" fill="none">'
+              f'<line x1="210" y1="82" x2="210" y2="{y + 8}"/>'
+              f'<line x1="196" y1="82" x2="224" y2="82"/>'
+              f'<line x1="196" y1="{y + 8}" x2="224" y2="{y + 8}"/></g>')
+
+
+def motif_lattice(pal: str, ink: str, line: str, surface: str = "#ffffff") -> str:
+    """An over-under weave — craft, material, things made by hand.
+
+    Food, textile, joinery, print. A bakery is not a building, a gauge
+    or a letterform, and it was getting a building.
+    """
+    # Wide bands with a narrow gap, not thin outlines on a wide pitch —
+    # the first version used 26-wide bars on a 44 pitch and read as
+    # graph paper. A weave has to be mostly band and barely gap, and it
+    # has to actually go over and under: the verticals are drawn, then
+    # the horizontals, then the verticals are RE-drawn where they pass
+    # over, which is what makes the interlacing legible.
+    n, band, gap = 5, 58, 10
+    step = band + gap
+    x0 = y0 = 210 - (n * step - gap) // 2 + 24
+    # The two directions must be told apart or the occlusion is
+    # invisible: filled with the same colour as the ground, a perfect
+    # weave renders as plain graph paper, which is what the first
+    # version did. Warp carries a faint accent wash, weft stays on the
+    # surface colour, so the over-under alternation reads as a checker.
+    verts = "".join(
+        f'<rect x="{x0 + i * step}" y="{y0}" width="{band}"'
+        f' height="{n * step - gap}" fill="{pal}" fill-opacity=".16"'
+        f' stroke="{ink}" stroke-width="1.2"/>' for i in range(n))
+    horzs = "".join(
+        f'<rect x="{x0}" y="{y0 + j * step}" width="{n * step - gap}"'
+        f' height="{band}" fill="{surface}" stroke="{ink}"'
+        f' stroke-width="1.2"/>' for j in range(n))
+    # Redraw the warp wherever it should cross OVER, which is every
+    # other intersection — the checker pattern of a plain weave.
+    over = "".join(
+        f'<rect x="{x0 + i * step}" y="{y0 + j * step}" width="{band}"'
+        f' height="{band}" fill="{pal}" fill-opacity=".16" stroke="{ink}"'
+        f' stroke-width="1.2"/>'
+        for i in range(n) for j in range(n) if (i + j) % 2 == 0)
+    lit = "".join(
+        f'<rect x="{x0 + i * step}" y="{y0 + j * step}" width="{band}"'
+        f' height="{band}" fill="{pal}" class="lit"/>'
+        for i, j in ((1, 2), (3, 1)))
+    return f'<g class="draw">{verts}{horzs}{over}</g>{lit}'
+
+
+def motif_orbit(pal: str, ink: str, line: str, surface: str = "#ffffff") -> str:
+    """Concentric arcs with nodes — reach, network, a body of people.
+
+    For services, membership, coverage, anything organised around a
+    centre. Distinct from `dial`, which reads as a single instrument.
+    """
+    import math
+    parts = [f'<g class="draw" fill="none" stroke="{ink}" stroke-width="1.1">']
+    for r in (58, 104, 150, 196):
+        parts.append(f'<circle cx="210" cy="258" r="{r}"/>')
+    parts.append("</g>")
+    for r, deg in ((58, 200), (104, 42), (104, 300), (150, 128), (196, 8),
+                   (196, 232)):
+        a = math.radians(deg)
+        parts.append(
+            f'<circle cx="{210 + r * math.cos(a):.1f}"'
+            f' cy="{258 + r * math.sin(a):.1f}" r="7" fill="{pal}"'
+            f' class="lit"/>')
+    parts.append(f'<circle cx="210" cy="258" r="9" fill="{ink}"/>')
+    return "".join(parts)
 
 
 MOTIFS = {
     "elevation": motif_elevation, "topography": motif_topography,
     "schematic": motif_schematic, "dial": motif_dial, "specimen": motif_specimen,
+    "strata": motif_strata, "lattice": motif_lattice, "orbit": motif_orbit,
 }
 
 # What each drawing actually contains, for the caption and the aria
@@ -221,6 +319,9 @@ MOTIF_CAPTION = {
     "schematic": "System diagram",
     "dial": "Instrument face",
     "specimen": "Type specimen",
+    "strata": "Section through the record",
+    "lattice": "Weave detail",
+    "orbit": "Reach diagram",
 }
 
 # Three kinds made every page the same page. Palette and family varied,
@@ -872,7 +973,7 @@ html.js .rise.in{{opacity:1;transform:none}}
             # Derived unless a human wrote one. See MOTIF_CAPTION.
             label = alt.strip() or " — ".join(
                 x for x in (MOTIF_CAPTION[motif], doc.site.get("name", "")) if x)
-            art = MOTIFS[motif](pal["accent"], pal["ink"], pal["muted"])
+            art = MOTIFS[motif](pal["accent"], pal["ink"], pal["muted"], pal["surface"])
             return (
                 f'<figure class="figure">'
                 f'<svg viewBox="0 0 420 520" role="img" aria-label="{_esc(label)}">'
@@ -925,7 +1026,7 @@ html.js .rise.in{{opacity:1;transform:none}}
                     if motif:
                         doc.fallbacks.append(f"motif={motif} unknown -> schematic")
                     motif = "schematic"
-                art = MOTIFS[motif](pal["accent"], pal["ink"], pal["muted"])
+                art = MOTIFS[motif](pal["accent"], pal["ink"], pal["muted"], pal["surface"])
                 label = cap or MOTIF_CAPTION[motif]
                 tiles.append(
                     f'<figure class="tile">'

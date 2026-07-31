@@ -1,0 +1,26 @@
+SITE     name="Reel North"  nav="Research,Digitisation,Visit"  location="Sheffield"  contact="info@reelnorth.org"
+THEME    family=editorial  accent=#c92a4e  mode=light  density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT     sec=s1  slot=eyebrow  text="Preserving Sheffield's television history"
+TEXT     sec=s1  slot=title    text="Twelve thousand reels [from] 1957 to 1994 digitised at 4K resolution."
+TEXT     sec=s1  slot=lede    text="Reel North holds a vast collection of regional broadcasts spanning nearly four decades. Researchers can access these preserved tapes free of charge during our open days."
+ACTION   sec=s1  slot=primary  label="View digitised catalogue"  href="#catalogue"
+ACTION   sec=s1  slot=secondary  label="Plan your research visit"  href="#visit"
+MEDIA    sec=s1  slot=figure  motif=strata
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT     sec=s3  slot=eyebrow  text="The only archive with original magnetic tape stock"
+TEXT     sec=s3  slot=title    text="We own the physical reels [not just] their digital copies."
+TEXT     sec=s3  slot=lede    text="While other institutions merely store metadata or low-res scans, Reel North retains ownership of every single master reel. This means we can re-digitise any tape at higher resolutions whenever new technology allows, ensuring the image quality improves over time rather than degrading."
+ACTION   sec=s3  slot=primary  label="Request a specific title"  href="#request"
+MEDIA    sec=s3  slot=figure  motif=lattice
+SECTION  id=s4  kind=features  layout=list  tone=quiet
+TEXT     sec=s4  slot=eyebrow  text="Regional broadcasts preserved on magnetic tape"
+TEXT     sec=s4  slot=title    text="A catalogue of Sheffield television from the [1950s] through to the mid-1980s."
+ITEM      sec=s4  slot=item   title="News at six"        body="The evening bulletin recorded live on two-inch quad, broadcast every weekday between eighteen and nineteen hours."
+ITEM      sec=s4  slot=item   title="Local sport"        body="Coverage of the Hallamshire cricket team filmed in colour using a portable Betacam SP deck carried by one operator."
+ITEM      sec=s4  slot=item   title="Community events"   body="Footage from the annual carnival limited to forty minutes due to tape capacity and storage constraints."
+ITEM      sec=s4  slot=item   title="Weather reports"    body="The forecast segment filmed inside a glass-walled studio with real-time radar data projected on a rear screen."
+SECTION  id=s5  kind=cta  layout=stack  tone=quiet
+TEXT     sec=s5  slot=title    text="Open Tuesdays and Thursdays for research."
+TEXT     sec=s5  slot=lede    text="Arrive with your own drive or request; archivists will load the reel you need onto a player ready to digitise on site."
+ACTION   sec=s5  slot=primary  label="Check open days"  href="#visit

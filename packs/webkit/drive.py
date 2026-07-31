@@ -88,6 +88,7 @@ CLOSED VOCABULARIES — any other value is invalid
   layout   split | centred | stack | grid | list
   tone     quiet | bold | inverted
   motif    elevation | topography | schematic | dial | specimen
+           | strata | lattice | orbit
   slot     eyebrow | title | lede | primary | secondary | figure | item
 
 WHICH FAMILY TO CHOOSE
@@ -100,15 +101,25 @@ The compiler draws an abstract line DIAGRAM — never a photograph and
 never the object itself. Choose the closest one. You do not write a
 caption; the compiler captions the drawing it made.
   elevation   a building drawn face-on with a dimension line.
-              For premises, property, places.
+              ONLY for premises and property — a place someone visits.
+              Not for a business that merely has an address.
   topography  nested contour rings, like a map.
               For land, outdoors, environment, coverage, spread.
-  schematic   boxes joined by routed connectors.
+  schematic   nodes on a grid joined by routed connectors.
               For software, infrastructure, pipelines, systems.
   dial        a graduated circular gauge with a needle.
-              For instruments, precision, time, measurement.
+              For instruments, precision, measurement.
   specimen    a large letterform over baseline rules.
-              For typography, publishing, language, archives of text.
+              For typography, publishing, language.
+  strata      stacked horizontal bands cut by a section line.
+              For a span of time — a record, a back catalogue, a
+              history, anything defined by the years it covers.
+  lattice     an over-under woven grid.
+              For craft and material — food, textile, joinery, print,
+              anything made by hand in batches.
+  orbit       concentric rings with nodes placed around them.
+              For reach and membership — services, a body of people, a
+              community, coverage around a centre.
 
 RULES
   THEME accent must be a 6-digit hex like #b8442f. Choose a hue that
@@ -546,19 +557,38 @@ Answer with three or four of those names, one per line, nothing else.""")
                 f"repeat or modify any of it:\n{prior}\n\n"
                 + template.format(brief=args.brief,
                                   figures=figures_in(args.brief)))
-        # Once THEME is chosen the family is known, and the family
-        # implies the artwork: a site set in the technical family is a
-        # developer tool, and a developer tool is a schematic. Left to
-        # the table alone the model took `elevation` for a Postgres CLI
-        # twice — a drawing of a house — because it is the first row.
-        # Naming the fitting motif at the point of use costs one line.
+        # Naming ONE motif per family fixed a Postgres CLI getting a
+        # drawing of a house and immediately created a worse problem:
+        # the mapping said editorial -> elevation, and a bakery, a
+        # clinic and a film archive are all editorial, so every one of
+        # them got the house instead. Half of all figures across twelve
+        # pages came out `elevation`. A default is not a suggestion to a
+        # small model; it is an instruction.
+        #
+        # So: a shortlist per family rather than a single answer, and
+        # the drawings already on the page are excluded, because the
+        # other half of the problem was that ten of twelve pages used
+        # the SAME motif for both their figures — the hero drawing and
+        # the detail drawing were literally the same picture.
+        free: list[str] = []
         if "motif" in user:
             fam = re.search(r"family=(\w+)", "\n".join(lines))
-            hint = {"technical": "schematic", "studio": "specimen",
-                    "editorial": "elevation"}.get(fam.group(1) if fam else "", "")
-            if hint:
-                user += (f"\n\nThis site is family={fam.group(1)}. Unless the "
-                         f"brief clearly calls for another, use motif={hint}.")
+            fam = fam.group(1) if fam else ""
+            shortlist = {
+                "technical": ["schematic", "orbit", "dial", "strata"],
+                "studio": ["specimen", "lattice", "orbit", "topography"],
+                "editorial": ["strata", "lattice", "elevation", "topography"],
+            }.get(fam, [])
+            used = set(re.findall(r"motif=(\w+)", "\n".join(lines)))
+            free = [m for m in shortlist if m not in used]
+            if free:
+                user += (f"\n\nThis site is family={fam}. Choose the motif "
+                         f"from these, whichever suits the subject: "
+                         f"{', '.join(free)}.")
+                if used:
+                    user += (f" The page already has a "
+                             f"{'/'.join(sorted(used))} drawing — do not "
+                             f"repeat it.")
         raw = ask(args.model, GRAMMAR, user)
         raw_log.append(f"### {label}\n{raw}")
         kept, noise = clean(raw)
@@ -590,6 +620,24 @@ Answer with three or four of those names, one per line, nothing else.""")
         # very claim the derivation exists to prevent.
         kept = [re.sub(r'\s*alt="[^"]*"', "", l) if l.split()[0].upper() == "MEDIA"
                 else l for l in kept]
+
+        # Told which motifs are free and which is already on the page,
+        # the model still reaches for the one it just used. Whether a
+        # drawing is a repeat is something the harness can simply look
+        # up, so it does, and substitutes the first free alternative.
+        if free:
+            already = set(re.findall(r"motif=(\w+)", "\n".join(lines)))
+            fixed = []
+            for line in kept:
+                m = re.search(r"motif=(\w+)", line)
+                if m and m.group(1) in already:
+                    line = line.replace(f"motif={m.group(1)}",
+                                        f"motif={free[0]}")
+                    print(f"      REPEAT motif={m.group(1)} -> {free[0]}")
+                if (m2 := re.search(r"motif=(\w+)", line)):
+                    already.add(m2.group(1))
+                fixed.append(line)
+            kept = fixed
         if stray and args.debug:
             for s in stray:
                 print(f"      STRAY: {s[:96]!r}")

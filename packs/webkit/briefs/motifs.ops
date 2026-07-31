@@ -1,0 +1,25 @@
+# Every motif on one page, so the drawings can be compared side by side
+# rather than one per site. Half of all figures across twelve generated
+# pages came out `elevation` — a house for a bakery, a clinic and a film
+# archive — and nothing made that visible until they were counted.
+SITE     name="Motifs"  nav="Index"  location="Reference"  contact="—"
+THEME    family=editorial  accent=#1f5f8b  mode=light  density=tight
+
+# A hero, so the sheet is a real page and clears ONE_H1 rather than
+# sitting permanently red in the build for being a reference file.
+SECTION  id=s0  kind=hero  layout=stack  tone=quiet
+TEXT     sec=s0  slot=eyebrow  text="Compiler reference"
+TEXT     sec=s0  slot=title  text="Eight drawings, and what each one [is for]"
+TEXT     sec=s0  slot=lede   text="The compiler draws these; the model only chooses between them. Half of all figures across twelve generated pages came out as the building, for a bakery and a clinic as readily as for a set of premises."
+
+SECTION  id=s1  kind=gallery  layout=stack  tone=quiet
+TEXT     sec=s1  slot=eyebrow  text="Reference"
+TEXT     sec=s1  slot=title    text="The eight [drawings]"
+ITEM     sec=s1  slot=item  motif=elevation   title="Elevation"    body="Premises and property. A place someone visits."
+ITEM     sec=s1  slot=item  motif=topography  title="Topography"   body="Land, environment, coverage, spread."
+ITEM     sec=s1  slot=item  motif=schematic   title="Schematic"    body="Software, infrastructure, pipelines."
+ITEM     sec=s1  slot=item  motif=dial        title="Dial"         body="Instruments, precision, measurement."
+ITEM     sec=s1  slot=item  motif=specimen    title="Specimen"     body="Typography, publishing, language."
+ITEM     sec=s1  slot=item  motif=strata      title="Strata"       body="A span of time. A record or a back catalogue."
+ITEM     sec=s1  slot=item  motif=lattice     title="Lattice"      body="Craft and material. Food, textile, print."
+ITEM     sec=s1  slot=item  motif=orbit       title="Orbit"        body="Reach and membership. Services, a community."
