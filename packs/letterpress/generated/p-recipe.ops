@@ -1,0 +1,36 @@
+SITE name="Tide Mill" nav="Recipe,Times,Contact" location="Bristol" contact="hello@tidemill.co"
+THEME family=editorial accent=#b8442f mode=light density=roomy
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Seeded rye sourdough"
+TEXT sec=s1 slot=title text="Bread [worth the walk]"
+TEXT sec=s1 slot=lede text="Two ovens and no cafe." ACTION sec=s1 slot=primary label="Collection times" href="#times" MEDIA sec=s1 slot=figure photo="rye sourdough bread seeds"
+SECTION  id=s2  kind=proof  layout=stack  tone=bold
+TEXT sec=s2 slot=eyebrow text="Yields 12 loaves"
+TEXT sec=s2 slot=title text="Time to bake [45 minutes]"
+ITEM sec=s2 slot=item title="12" body="Loaves served."
+ITEM sec=s2 slot=item title="30 minutes" body="Work time required."
+ITEM sec=s2 slot=item title="18 hours" body="Proving duration."
+ITEM sec=s2 slot=item title="45 minutes" body="Baking duration."
+ITEM sec=s2 slot=item title="230C" body="Oven temperature set."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT sec=s3 slot=eyebrow text="The secret ingredient"
+TEXT sec=s3 slot=title text="Why [mixed seeds] matter"
+TEXT sec=s3 slot=lede text="We add forty grams of caraway and fennel to every batch. This is not a garnish; it changes the crumb structure before you even knead."
+ACTION sec=s3 slot=primary label="Read full recipe" href="#recipe"
+MEDIA sec=s3 slot=figure photo="mixed seeds rye flour bowl"
+SECTION  id=s4  kind=roster  layout=stack  tone=bold
+TEXT sec=s4 slot=eyebrow text="Ingredients"
+TEXT sec=s4 slot=title text="What goes into the loaf"
+ITEM sec=s4 slot=item title="400g rye flour" body="sifted, whole grain."
+ITEM sec=s4 slot=item title="100g strong white" body="at room temperature for crumb lift."
+ITEM sec=s4 slot=item title="320g water" body="filtered or spring if possible."
+SECTION  id=s5  kind=features  layout=list  tone=quiet
+TEXT sec=s5 slot=eyebrow text="Method"
+TEXT sec=s5 slot=title text="Build the crumb [step by step]"
+ITEM sec=s5 slot=item title="Autolyse" body="Mix flour and water only, let rest for thirty minutes."
+ITEM sec=s5 slot=item title="Add starter" body="Stir in ninety grams of active culture until fully incorporated."
+ITEM sec=s5 slot=item title="Knead seeds" body="Fold in forty grams mixed seeds by hand to distribute evenly."
+ITEM sec=s5 slot=item title="Bulk ferment" body="Stretch and fold every thirty minutes for two hours total."
+SECTION  id=s6  kind=cta  layout=stack  tone=quiet
+TEXT sec=s6 slot=lede text="Bring your own bag and pay on the door."
+ACTION sec=s6 slot=primary label="Join the queue" href="#times"

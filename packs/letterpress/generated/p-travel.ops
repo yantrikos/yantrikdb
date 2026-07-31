@@ -1,0 +1,41 @@
+SITE name="Slow Ridge" nav="Trekking,Trips,Contact" location="Cairngorms" contact="hello@slowridge.co"
+THEME family=editorial accent=#5c7a62 mode=light density=roomy
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="Wild walking"
+TEXT sec=s1 slot=title text="Eight days in [the Cairngorms]"
+TEXT sec=s1 slot=lede text="Join a small group of six for eight guided treks across the high ground. We wild camp four nights and stay three more in bothies, with all food and permits included."
+ACTION sec=s1 slot=primary label="View departures" href="#times"
+ACTION sec=s1 slot=secondary label="Contact us" href="#contact"
+MEDIA sec=s1 slot=figure photo="cairngorm mountain landscape"
+SECTION  id=s2  kind=proof  layout=stack  tone=bold
+TEXT sec=s2 slot=eyebrow text="The numbers"
+TEXT sec=s2 slot=title text="What you book for this trip"
+ITEM sec=s2 slot=item title="8" body="Days on the ground."
+ITEM sec=s2 slot=item title="6," body="People in your group, wild camping only."
+ITEM sec=s2 slot=item title="4 nights" body="Under canvas with a tent."
+ITEM sec=s2 slot=item title="3" body="Nights inside bothies."
+SECTION  id=s3  kind=features  layout=list  tone=quiet
+TEXT sec=s3 slot=eyebrow text="The route"
+TEXT sec=s3 slot=title text="Day one to four: The ascent and first ridge"
+ITEM sec=s3 slot=item title="Stage 1" body="We start at the car park, walk six miles up through birch forest before crossing a burn."
+ITEM sec=s3 slot=item title="Stage 2" body="The path steepens on granite slabs; we reach the col by midday and set up camp below the ridge line."
+ITEM sec=s3 slot=item title="Stage 3" body="Morning mist burns off as we traverse a narrow gully, keeping to the north face of the corrie."
+ITEM sec=s3 slot=item title="Stage 4" body="We cross three streams on wooden bridges and descend into a glen where wild camping is permitted."
+SECTION  id=s4  kind=detail  layout=split  tone=quiet
+TEXT sec=s4 slot=eyebrow text="The difference"
+TEXT sec=s4 slot=title text="We know every [granite] crag by name."
+TEXT sec=s4 slot=lede text="Our guides have climbed these ridges since they were children, navigating the high ground when weather turns and paths vanish. We carry no maps that aren't drawn from memory of the rock itself, ensuring you walk with confidence rather than following a printed line on paper."
+ACTION sec=s4 slot=primary label="Meet our team" href="#team"
+MEDIA sec=s4 slot=figure motif=topography
+SECTION  id=s5  kind=faq  layout=stack  tone=quiet
+TEXT sec=s5 slot=eyebrow text="Common questions"
+TEXT sec=s5 slot=title text="What happens if I cannot complete a stage?"
+ITEM sec=s5 slot=item title="Weather delays" body="If the weather closes a pass, we wait for it to clear before continuing. We do not rush you into danger; your safety is always our first priority."
+ITEM sec=s5 slot=item title="Physical limits" body="Our guides will carry extra food and water if needed. If fatigue sets in, we shorten that day's walk so everyone finishes the eight days together."
+ITEM sec=s5 slot=item title="Group size changes" body="We cap groups at six people to keep it intimate. Should someone withdraw early, they can be replaced by a waiting list member from another trip."
+ITEM sec=s5 slot=item title="Bothy availability" body="Some bothies are unstaffed and require booking in advance. We handle all permits for you so you never arrive without a confirmed roof over your head."
+ITEM sec=s5 slot=item title="Food allergies" body="We plan menus around common restrictions like gluten or nuts. Just tell us before we pack, and the kitchen will adjust every meal to suit your needs safely."
+SECTION  id=s6  kind=cta  layout=stack  tone=quiet
+TEXT sec=s6 slot=title text="May to September departures"
+TEXT sec=s6 slot=lede text="Costs vary by season; check the schedule for pricing."
+ACTION sec=s6 slot=primary label="Book your place now" href="#book"

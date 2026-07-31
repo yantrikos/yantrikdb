@@ -724,3 +724,77 @@ MUST CARRY: what is taught, how long it takes, what it costs, how to
 apply.
 INVITES: pass rates, employment statistics and class sizes that were
 never stated.
+
+## letterpress stock images: how to put a photograph on the page
+
+A photograph on a letterpress page comes from a stock image search that
+the compiler runs for you. You describe the picture; you never supply
+an image, an image URL, or a file name.
+
+MEDIA takes either `photo="..."` or `motif=...`, never both. A photo
+query is resolved against a licensed image library, downloaded, and
+embedded by the compiler with its real dimensions and its credit line.
+
+```
+MEDIA  sec=s1  slot=figure  photo="sourdough bread bakery"
+MEDIA  sec=s3  slot=figure  motif=strata
+```
+
+You never write a URL. You cannot know that any particular image
+exists, is licensed for use, or shows what its filename claims — an
+invented address is a broken picture at best and somebody else's
+premises presented as yours at worst. Naming the subject is judgement,
+which is yours. Finding a real file for it is lookup, which is not.
+
+Use a photograph when the subject is something a camera can see: food,
+a room, a landscape, a made object, a place. Use a drawing when it is
+not: software, a service, a span of years, an area covered. A
+restaurant, a trip, a recipe, a property and a product want
+photographs. A developer tool and a coverage map do not.
+
+## letterpress photo query: how many words to use when searching for an image
+
+A photo query is a stock image search. Two to four plain nouns is the
+right length, and a descriptive sentence is the commonest mistake.
+
+The search matches every word at once, so each extra word narrows the
+result set toward nothing.
+
+    RIGHT   photo="sourdough bread bakery"
+    RIGHT   photo="mountain hiking trail"
+    RIGHT   photo="restaurant interior dining"
+    WRONG   photo="sourdough loaves cooling on a wooden counter at dawn"
+    WRONG   photo="warm inviting artisanal atmosphere"
+
+The first wrong one returns nothing at all: "sourdough bread loaves on
+a wooden bakery counter" matched zero images while "sourdough bread
+bakery" matched two hundred and forty. The second returns nothing
+useful, because mood is not a thing anyone tags a photograph with. Name
+the object, the place and the material — the words a person would use
+to describe what is IN the frame, not how it feels.
+
+Two figures on one page should not both be photographs of the same
+thing. A hero showing the room and a detail showing the hands at work
+is a page; two rooms is a repeat.
+
+## letterpress image licensing: which stock photographs may be used
+
+Not every image found by a search may be published on a business site,
+and not every correctly licensed image is a suitable photograph.
+
+It searches a library of openly licensed images and accepts only
+licences that permit commercial use and modification. Where the licence
+requires attribution — CC BY and CC BY-SA — the credit is rendered
+under the picture automatically, so the page stays compliant without
+you doing anything.
+
+It also prefers a contemporary photograph over an archival one, which
+matters more than it sounds. Asked for "restaurant interior dining
+table" the first result was a nineteenth-century stereograph of a
+Shaker dining hall: correctly licensed, lexically perfect, and
+completely wrong for a restaurant opening this year. Museum
+collections sit in the same index as stock photography and are mostly
+engravings and glass plates.
+
+If nothing suitable is found, the compiler draws a motif instead and
+reports the substitution. A page never ships a broken image.

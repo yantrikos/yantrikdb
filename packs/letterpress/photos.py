@@ -160,14 +160,66 @@ def relevant(hit: dict, terms: list[str]) -> bool:
     return any(t in hay for t in terms if len(t) > 3)
 
 
-def pick(results: list[dict], terms: list[str] | None = None) -> dict | None:
-    """The best usable result: licensed, big enough, and on-topic.
+# Where the picture came from matters as much as whether it matches.
+#
+# "restaurant interior dining table" returned, top-ranked and CC0, a
+# 19th-century STEREOGRAPH of a Shaker dining hall from the Getty:
+# lexically perfect, licence-clean, and hopelessly wrong for a Margate
+# restaurant opening this year. Openverse indexes museum collections
+# alongside stock photography, and a museum's holdings are mostly
+# engravings, glass plates and albumen prints.
+#
+# Stock sources carry contemporary photographs and tag them properly.
+# Museum sources are pushed to the back rather than banned, because for
+# a subject like a film archive they may be exactly right — but they
+# have to beat a modern photograph on relevance to get there.
+STOCK_SOURCES = {"stocksnap", "rawpixel", "flickr", "sketchfab", "spacex"}
+ARCHIVE_SOURCES = {"thegetty", "smithsonian", "museumsvictoria", "met",
+                   "statensmuseum", "clevelandmuseum", "brooklynmuseum",
+                   "nypl", "digitaltmuseum", "svgsilh", "bio_diversity"}
 
-    Licence preference is light — a public domain image beats an
-    attributed one at equal relevance, because it puts no obligation on
-    the person whose site this becomes.
+# Words that mean "this is a historical reproduction, not a photograph
+# of the present day", wherever it is hosted.
+ARCHAIC = re.compile(
+    r"\b(stereograph|stereoscop\w*|daguerreotype|albumen|lithograph\w*|"
+    r"engraving|etching|woodcut|lantern slide|glass plate|negative|"
+    r"postcard|circa|c\.\s?1[6-9]\d\d|1[6-8]\d\d|drawing|sketch|"
+    r"illustration|painting|print)\b", re.I)
+
+
+def archaic(hit: dict) -> bool:
+    hay = " ".join([clean_title(hit.get("title", "")),
+                    " ".join(t.get("name", "") for t in (hit.get("tags") or []))])
+    return bool(ARCHAIC.search(hay))
+
+
+def pick(results: list[dict], terms: list[str] | None = None) -> dict | None:
+    """The best usable result: licensed, big enough, on-topic, and modern.
+
+    Ordering, most significant first: a contemporary photograph beats an
+    archival reproduction; a stock source beats a museum; a public
+    domain licence beats an attributed one, because it puts no
+    obligation on the person whose site this becomes; and larger beats
+    smaller.
     """
-    rank = {"cc0": 0, "pdm": 0, "by": 1, "by-sa": 2}
+    lic_rank = {"cc0": 0, "pdm": 0, "by": 1, "by-sa": 2}
+
+    def src_rank(r: dict) -> int:
+        src = (r.get("source") or "").lower()
+        # The CREATOR matters as much as the source. Rawpixel
+        # republishes museum public-domain scans, so the Getty
+        # stereograph arrives with source="rawpixel" — a stock host —
+        # and only `creator` saying "thegetty" to give it away. Ranking
+        # on the host alone left it top of the list twice.
+        who = (r.get("creator") or "").lower().replace(" ", "")
+        if any(a in who for a in ARCHIVE_SOURCES):
+            return 2
+        if src in STOCK_SOURCES:
+            return 0
+        if src in ARCHIVE_SOURCES:
+            return 2
+        return 1
+
     usable = [
         r for r in results
         if r.get("license") in ALLOWED
@@ -177,7 +229,9 @@ def pick(results: list[dict], terms: list[str] | None = None) -> dict | None:
     ]
     if not usable:
         return None
-    usable.sort(key=lambda r: (rank.get(r["license"], 9), -(r.get("width") or 0)))
+    usable.sort(key=lambda r: (archaic(r), src_rank(r),
+                               lic_rank.get(r["license"], 9),
+                               -(r.get("width") or 0)))
     return usable[0]
 
 

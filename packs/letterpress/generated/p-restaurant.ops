@@ -1,0 +1,37 @@
+SITE name="Salt Loft" nav="Menu,Bookings,Contact" location="Margate" contact="book@saltloft.co"
+THEME family=editorial accent=#d96c4e mode=light density=tight
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT sec=s1 slot=eyebrow text="The weekly set menu"
+TEXT sec=s1 slot=title text="Twelve covers [one sitting] a night"
+TEXT sec=s1 slot=lede text="Cooked by the two owners in Margate. Bookings are handled entirely by email."
+ACTION sec=s1 slot=primary label="Check availability" href="#bookings"
+ACTION sec=s1 slot=secondary label="Contact us" href="#contact"
+MEDIA sec=s1 slot=figure photo="restaurant interior dining table"
+SECTION  id=s2  kind=note  layout=stack  tone=inverted
+TEXT sec=s2 slot=title text="Margate only Thursday to Sunday"
+TEXT sec=s2 slot=lede text="Twelve covers, one sitting per night."
+SECTION  id=s3  kind=detail  layout=split  tone=quiet
+TEXT sec=s3 slot=eyebrow text="The secret ingredient"
+TEXT sec=s3 slot=title text="Salt [and patience] in every dish"
+TEXT sec=s3 slot=lede text="We do not sell a menu; we sell the time it takes to cure, ferment and age our own stocks. A competitor can copy your recipe list, but they cannot replicate the three years of cellar space required to build this specific depth of flavour."
+ACTION sec=s3 slot=primary label="Request tasting notes" href="#notes"
+MEDIA sec=s3 slot=figure motif=strata
+SECTION  id=s4  kind=features  layout=list  tone=quiet
+TEXT sec=s4 slot=eyebrow text="The weekly set"
+TEXT sec=s4 slot=title text="Small plates [and long waits]"
+ITEM sec=s4 slot=item title="Cured mackerel" body="Smoked over oak, served with a house-made horseradish cream that takes three weeks to mature."
+ITEM sec=s4 slot=item title="Fermented kale" body="Pickled in brine and vinegar from the cellar, it is dark green and sharp enough to cut through rich fish."
+ITEM sec=s4 slot=item title="Roasted root vegetables" body="Baked until caramelised on a cast-iron tray that has been heated for forty minutes before they go in."
+ITEM sec=s4 slot=item title="Aged stock soup" body="Made from bones simmered overnight, the broth is clear and deep with a flavour built over three years of curing time."
+SECTION  id=s5  kind=faq  layout=stack  tone=quiet
+TEXT sec=s5 slot=eyebrow text="Common questions"
+TEXT sec=s5 slot=title text="[How] long must I wait to book?"
+ITEM sec=s5 slot=item title="Two months ahead" body="We accept reservations exactly two weeks before the week you wish to visit. This allows us time to plan our weekly menu and source ingredients that arrive fresh for your specific night."
+ITEM sec=s5 slot=item title="Cancellations policy" body="Please cancel at least forty-eight hours in advance if plans change. We cannot accommodate last-minute changes because we cook only twelve covers per sitting, so a late cancellation leaves us with unsold food and wasted effort."
+ITEM sec=s5 slot=item title="Dietary requirements" body="Tell us about allergies or restrictions when you email to book. Our owners prepare every dish from scratch in the kitchen behind the dining room, so we can adjust ingredients before cooking begins without affecting other guests."
+ITEM sec=s5 slot=item title="Late arrivals rule" body="If you are more than fifteen minutes late for your reserved time, a new table may be given to someone waiting. We start service on the hour and cannot pause our kitchen work while we wait for stragglers to arrive."
+ITEM sec=s5 slot=item title="Payment method needed" body="A credit card is required when you email us to secure your booking. This holds the deposit against no-shows, which are common in Margate during summer weekends because tourists often forget their reservations until it is too late."
+SECTION  id=s6  kind=cta  layout=stack  tone=quiet
+TEXT sec=s6 slot=title text="Come Thursday evening for your set menu"
+TEXT sec=s6 slot=lede text="Twelve covers only; pay by credit card when you email."
+ACTION sec=s6 slot=primary label="Book now via email" href="#bookings"

@@ -50,7 +50,8 @@ only the values. Every argument is written as KEY=value.
   TEXT     sec=s1  slot=title  text="Bread [worth the walk]"
   TEXT     sec=s1  slot=lede  text="Two ovens and no cafe."
   ACTION   sec=s1  slot=primary  label="Collection times"  href="#times"
-  MEDIA    sec=s1  slot=figure  motif=elevation
+  MEDIA    sec=s1  slot=figure  photo="sourdough bread bakery"
+  MEDIA    sec=s3  slot=figure  motif=lattice
   ITEM     sec=s2  slot=item  title="Tuesday"  body="Rye and caraway, forty loaves."
 
 In a `proof` section, ITEM title= is the FIGURE and body= says what it
@@ -95,6 +96,30 @@ WHICH FAMILY TO CHOOSE
   editorial  serif, magazine feel. Architecture, food, writing, craft.
   studio     heavy sans, poster feel. Design, portfolios, campaigns.
   technical  monospace, schematic feel. Developer tools, hardware, data.
+
+A PHOTOGRAPH OR A DRAWING
+MEDIA takes EITHER `photo="..."` or `motif=...`, never both.
+
+  photo=  a real photograph, searched for and licensed by the compiler.
+          Use it whenever the subject is a THING SOMEONE CAN SEE — food,
+          a room, a landscape, a made object, a place. A restaurant, a
+          trip, a recipe, a property or a product wants photographs.
+
+  motif=  an abstract line diagram the compiler draws. Use it when the
+          subject has nothing to photograph — software, a service, a
+          span of years, an area covered.
+
+HOW TO WRITE photo=
+Two to four plain nouns, and nothing else. The search matches ALL your
+words at once, so a sentence finds nothing at all:
+  RIGHT: photo="sourdough bread bakery"
+  RIGHT: photo="mountain hiking trail"
+  WRONG: photo="sourdough loaves cooling on a wooden counter at dawn"
+         (returns zero results — every word must match)
+  WRONG: photo="https://images.example.com/bread.jpg"
+         (you cannot know that any URL exists; never write one)
+Name the SUBJECT, not the mood. "bakery oven bread" finds bread;
+"warm inviting artisanal atmosphere" finds nothing.
 
 WHICH MOTIF TO CHOOSE
 The compiler draws an abstract line DIAGRAM — never a photograph and
@@ -174,17 +199,17 @@ RULES
 # first gives it a reason to prefer one shape over another, and carries
 # the content each genre cannot omit — a restaurant page without hours
 # and an address has failed at the only job it had.
-GENRES = """restaurant, cafe, bar   hero, note, features, detail, faq
+GENRES = """restaurant, cafe, bar   hero, note, features, detail, faq  PHOTOGRAPHS
     The note holds hours and street address, high on the page.
     Features is a few dishes, never the whole menu.
-travel, tours           hero, proof, features, detail, faq
+travel, tours           hero, proof, features, detail, faq  PHOTOGRAPHS
     Proof is days, group size and what is included. Features is the
     itinerary, one item per day.
-portfolio               hero, features, detail
+portfolio               hero, features, detail  PHOTOGRAPHS
     The shortest page here. Never an FAQ, never a stats band.
 blog, publication       hero, features, detail
     Features is recent pieces, one sentence making the case for each.
-recipe                  hero, proof, roster, features, faq
+recipe                  hero, proof, roster, features, faq  PHOTOGRAPHS
     Proof is serves and times. Roster is INGREDIENTS with quantities.
     Features is the METHOD, one action per step.
 trade, plumber, builder hero, features, detail, proof, faq
@@ -197,10 +222,10 @@ charity, nonprofit      hero, proof, detail, features, note
     Proof is where the money goes. Note is the reassurance.
 event, conference       hero, proof, features, roster, faq
     Proof is date, place, venue, ticket. Never invent a date.
-shop, single product    hero, detail, proof, features, faq
+shop, single product    hero, detail, proof, features, faq  PHOTOGRAPHS
     Proof is the specification. FAQ is shipping and returns.
 studio, agency          hero, features, detail
-property, letting       hero, proof, features, detail
+property, letting       hero, proof, features, detail  PHOTOGRAPHS
     Proof is beds, floor area, price. Features is the rooms.
 school, course          hero, features, proof, roster, faq
     Features is the curriculum: what a student can do afterwards."""
@@ -313,7 +338,9 @@ that is not listed. If the list is empty, emit NOTHING AT ALL.""",
     "detail": """Pick the ONE thing about this business that a competitor could not
 copy, and explain it. Emit TEXT for slot=eyebrow, slot=title and
 slot=lede, one ACTION with slot=primary, and one MEDIA with
-slot=figure and a motif. The lede is two or three full sentences.
+slot=figure carrying either photo="two to four nouns" or motif=... —
+and not a repeat of the picture the hero already used.
+The lede is two or three full sentences.
 Wrap two or three words of the title in [brackets].""",
 
     "features": """Emit TEXT for slot=eyebrow, TEXT for slot=title, then FOUR ITEM lines
@@ -364,7 +391,8 @@ one sentence more. No list, no button, no eyebrow.""",
 
 HERO_PROMPT = """Emit ONLY the hero's contents: TEXT for slot=eyebrow, slot=title and
 slot=lede; two ACTION lines (slot=primary, slot=secondary); one MEDIA
-line with slot=figure and a motif.
+line with slot=figure carrying EITHER photo="two to four nouns" if the
+subject is something a camera can see, OR motif=... if it is not.
 The lede is two full sentences, not a fragment.
 In the title's text, wrap two or three of its own words in [brackets]."""
 
@@ -596,6 +624,8 @@ def main() -> int:
     ap.add_argument("--name", required=True)
     ap.add_argument("--debug", action="store_true",
                     help="print every non-op line the model emitted")
+    ap.add_argument("--photo-python", default=r"C:\Python313\python.exe",
+                    help="interpreter with certifi, for resolving photos")
     args = ap.parse_args()
 
     lines: list[str] = []
@@ -796,6 +826,11 @@ or four section names, one per line. Nothing else.""")
                 if line.split()[0].upper() != "ITEM":
                     surviving.append(line)
                     continue
+                # A figure set at display size shows its punctuation:
+                # the model wrote title="6," and the stats band read
+                # "6," in 40px type. Trailing punctuation is never part
+                # of a figure.
+                line = re.sub(r'title="([^"]*?)[\s,;:.]+"', r'title="\1"', line)
                 bad = ungrounded_figures(line, args.brief)
                 if bad:
                     fabricated += 1
@@ -831,6 +866,23 @@ or four section names, one per line. Nothing else.""")
 
     out = HERE / "out" / f"{args.name}.html"
     py = Path(sys.executable)
+
+    # Resolve any photo= queries BEFORE compiling. Without this the
+    # compiler finds no sidecar, every photo falls back to a drawing,
+    # and the run looks like a success — the pipeline existed for two
+    # commits while nothing generated actually used it.
+    #
+    # Run under args.photo_python: resolving needs a current CA bundle
+    # for hosts whose chain the system store rejects, and certifi lives
+    # in the system interpreter rather than this venv.
+    if 'photo="' in "\n".join(lines):
+        pr = subprocess.run([args.photo_python, str(HERE / "photos.py"),
+                             str(ops_path)], capture_output=True, text=True)
+        for line in (pr.stdout or "").splitlines():
+            print(f"  {line.strip()}")
+        if pr.returncode != 0:
+            print(f"  photo resolver failed: {(pr.stderr or '')[:160]}")
+
     proc = subprocess.run(
         [str(py), str(HERE / "compiler.py"), str(ops_path),
          "--out", str(out), "--strict"],
