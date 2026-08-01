@@ -1,0 +1,105 @@
+{
+  "candidate": "mcp-spec-2026-07-28 (CONTROL — known outcome)",
+  "source": "https://modelcontextprotocol.io/specification/2026-07-28 (llms-full.txt, 40494 lines, fetched 2026-07-30)",
+  "source_snapshot": "local snapshot scratchpad/mcp-llms-full.txt, 2,260,204 bytes, fetched 2026-07-30",
+  "_why_this_file": "This candidate is NOT a candidate. mcp-spec is already built and independently measured at 7/53 -> 44/53 (9B) and 7/53 -> 42/53 (4B), beating equally-gated raw-source RAG by +15. It is run through the gate first to VALIDATE THE GATE. An instrument that says DO NOT BUILD for the best pack we have measured is broken, and finding that out on a control costs nothing, whereas finding it out on a real candidate costs a day of authoring.",
+  "judge_or_compute": "JUDGE. Every constraint here is a protocol decision a model applies by recall — an error code, a field name, a message shape, whether a handshake exists. None of it requires the model to compute anything it cannot compute. No compiler is implied. This is the shape that packs are for, and the contrast with letterpress (whose load-bearing constraints were contrast ratios and layout measurements a model can assert but not evaluate) is the whole point of asking the question.",
+  "probes": [
+    {
+      "id": "resource-not-found-code",
+      "q": "In the Model Context Protocol, what JSON-RPC error code should a server return when a requested resource is not found?",
+      "wrong": ["-32002"],
+      "right": ["-32602"],
+      "span": "required field is rejected with error `-32602` (Invalid params), the same ... `-32002` — resource not found (2025-11-25 and earlier; replaced by `-32602`).",
+      "arbitrary": true
+    },
+    {
+      "id": "initialize-handshake",
+      "q": "How does an MCP client convey its protocol version and capabilities to a server at the start of a connection?",
+      "wrong": ["initialize", "notifications/initialized", "handshake"],
+      "right": ["_meta", "io.modelcontextprotocol/protocolVersion"],
+      "span": "\"io.modelcontextprotocol/protocolVersion\": \"2026-07-28\"",
+      "arbitrary": true
+    },
+    {
+      "id": "session-header",
+      "q": "What is the Mcp-Session-Id header used for in the current MCP Streamable HTTP transport?",
+      "wrong": ["session id", "maintain state", "identify the session", "resume"],
+      "right": ["removed", "no longer", "stateless", "untrusted"],
+      "span": "**Session identifier hardening**. Treat `Mcp-Session-Id` as untrusted input; never tie authorization to it.",
+      "arbitrary": true
+    },
+    {
+      "id": "subscribe-method",
+      "q": "Which MCP method does a client call to receive change notifications from a server?",
+      "wrong": ["resources/subscribe"],
+      "right": ["subscriptions/listen"],
+      "span": "Change notifications are opt-in: the client opens a long-lived [`subscriptions/listen`](/specification/2026-07-28/basic/patterns/subscriptions) stream naming the notification types it wants to receive.",
+      "arbitrary": true
+    },
+    {
+      "id": "roots-status",
+      "q": "What is the current status of Roots in the Model Context Protocol?",
+      "wrong": ["supported", "clients specify", "current", "available"],
+      "right": ["deprecated"],
+      "span": "| **Roots** | Roots allow clients to specify which directories servers should focus on, communicating intended scope through a coordination mechanism. Roots are [deprecated",
+      "arbitrary": true
+    },
+    {
+      "id": "server-initiated-requests",
+      "q": "How does an MCP server ask a client for additional input partway through handling a request?",
+      "wrong": ["server-initiated request", "sampling", "reverse request"],
+      "right": ["mrtr", "multi round-trip", "multi round trip"],
+      "span": "Elicitation requests are delivered through the [Multi Round-Trip Requests](/specification/2026-07-28/basic/patterns/mrtr) pattern",
+      "arbitrary": true
+    },
+    {
+      "id": "tool-error-signalling",
+      "q": "When an MCP tool call fails because the tool itself errored, how should the server signal that — a JSON-RPC error, or something else?",
+      "wrong": ["json-rpc error", "error response", "-32603"],
+      "right": ["iserror"],
+      "span": "[`isError: true`](/specification/2026-07-28/server/tools#error-handling) rather than a transport",
+      "arbitrary": true
+    },
+    {
+      "id": "meta-namespace",
+      "q": "What namespace prefix does the Model Context Protocol reserve for its own fields inside _meta?",
+      "wrong": ["mcp/", "modelcontextprotocol/", "org.mcp"],
+      "right": ["io.modelcontextprotocol/"],
+      "span": "\"io.modelcontextprotocol/protocolVersion\": \"2026-07-28\"",
+      "arbitrary": true
+    },
+    {
+      "id": "capability-declaration",
+      "q": "Where does an MCP client declare its capabilities on each request in the current revision?",
+      "wrong": ["initialize", "capabilities object", "handshake"],
+      "right": ["_meta", "clientcapabilities"],
+      "span": "\"io.modelcontextprotocol/clientCapabilities\"",
+      "arbitrary": true
+    },
+    {
+      "id": "stateless-requests",
+      "q": "Is an MCP server allowed to assume it has memory of earlier requests on the same connection?",
+      "wrong": ["yes", "session state", "maintain", "connection state"],
+      "right": ["stateless", "independently", "no memory", "self-contained"],
+      "span": "Treat `Mcp-Session-Id` as untrusted input; never tie authorization to it. Regenerate on auth changes and validate lifecycle server",
+      "arbitrary": true
+    },
+    {
+      "id": "tools-list-changed",
+      "q": "How does an MCP client learn that a server's tool list has changed in the current revision?",
+      "wrong": ["notifications/tools/list_changed", "push notification", "automatically"],
+      "right": ["subscriptions/listen", "toolslistchanged", "opt-in"],
+      "span": "The server supports the tools primitive and can honor a `toolsListChanged` filter in [`subscriptions/listen`]",
+      "arbitrary": true
+    },
+    {
+      "id": "protocol-version-negotiation",
+      "q": "How does an MCP server tell a client which protocol versions it supports?",
+      "wrong": ["initialize response", "handshake", "capabilities"],
+      "right": ["supportedversions"],
+      "span": "The `io.modelcontextprotocol/protocolVersion` field declares the version the client is speaking on this request, and `supportedVersions` in the response",
+      "arbitrary": true
+    }
+  ]
+}
