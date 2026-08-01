@@ -635,9 +635,22 @@ def _steps(scale: float) -> dict[str, str]:
     the masthead nav. Removed rather than kept as a lucky guess — an
     unverified change is a future mystery for whoever reads this next.
     """
-    def clamp(step: int, travel: float) -> str:
+    def clamp(step: int, travel: float, cap: float = 99.0) -> str:
         base = 1.0 * (scale ** step)
-        small = base / (1 + travel * 0.5)
+        # The SMALL end needs an absolute ceiling, not just a
+        # ratio-relative reduction. Travel of 0.55 takes the studio
+        # family's d1 down only to 3.97rem — 63px — and at 390px wide a
+        # single long word ("commissions") is then 422px, wider than the
+        # 350px column, so the grid track expands to its min-content and
+        # the page scrolls sideways. `overflow-wrap: break-word` does
+        # NOT prevent this: it permits a break when rendering but has no
+        # effect on min-content width, which is what sizes the track.
+        #
+        # This is the same lesson this function already learned in the
+        # other direction, where dividing the DOWN-step by a 1.5 ratio
+        # produced a 10.7px button. A dramatic ratio is wanted on a wide
+        # screen; on a phone it is just text that does not fit.
+        small = min(base / (1 + travel * 0.5), cap)
         return (f"clamp({small:.3f}rem, {small:.3f}rem + "
                 f"{(base - small) * 1.6:.2f}vw, {base:.3f}rem)")
     # The down-step must NOT inherit the display ratio. Dividing by it
@@ -648,7 +661,12 @@ def _steps(scale: float) -> dict[str, str]:
     # text nobody can read. Half the ratio's excess, floored at 0.8rem.
     small = max(0.8, 1 / (1 + (scale - 1) / 2))
     return {
-        "d1": clamp(4, 0.55), "d2": clamp(3, 0.45), "d3": clamp(2, 0.3),
+        # Caps are what a display size may be on the NARROWEST screen.
+        # They bite only the aggressive family: editorial's d1 already
+        # settles at 2.48rem and technical's at 1.92rem, so both are
+        # untouched, while studio drops from 3.97rem to 2.6rem.
+        "d1": clamp(4, 0.55, cap=2.6), "d2": clamp(3, 0.45, cap=2.0),
+        "d3": clamp(2, 0.3, cap=1.5),
         "lede": clamp(1, 0.14), "body": clamp(0, 0.04),
         "small": f"{small:.3f}rem",
     }
@@ -754,6 +772,14 @@ h1{{font-size:{st['d1']}}} h2{{font-size:{st['d2']}}} h3{{font-size:{st['d3']}}}
    sits at 1..8, so the headline crosses the gutter and overlaps the
    art's column. A symmetric 50/50 split with everything vertically
    centred is what made the first version read competent-but-inert. */
+/* min-width:0 on every grid child. A grid track defaults to
+   min-width:auto, which means it refuses to shrink below its content's
+   min-content width — one long word in a headline widens the track,
+   the track widens the page, and the whole layout scrolls sideways.
+   Every grid in this file gets the same guard; it is the standard fix
+   and there is no case here where auto is what we want. */
+.split > *,.grid > *,.steps > *,.qas > *,.tiles > *,.whos > *,
+.stats > *,.closing > *{{min-width:0}}
 .split{{display:grid;gap:var(--gap);grid-template-columns:1fr}}
 @media(min-width:56rem){{
   .split{{grid-template-columns:repeat(12,1fr);column-gap:1.5rem;
