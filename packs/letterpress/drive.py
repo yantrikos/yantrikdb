@@ -420,6 +420,32 @@ to come, what happens first, or what it costs."""
 
 OP_LINE = re.compile(r"^\s*(SITE|THEME|SECTION|TEXT|ACTION|MEDIA|ITEM)\b")
 
+# The compiler's table, mirrored here so the harness can count a
+# malformed line against the run instead of letting the compiler refuse
+# the whole file after the fact.
+LEGAL_ARGS = {
+    "SITE": {"name", "nav", "location", "contact"},
+    "THEME": {"family", "accent", "mode", "density"},
+    "SECTION": {"id", "kind", "layout", "tone"},
+    "TEXT": {"sec", "slot", "text"},
+    "ACTION": {"sec", "slot", "label", "href"},
+    "MEDIA": {"sec", "slot", "motif", "photo", "alt"},
+    "ITEM": {"sec", "slot", "title", "body", "motif"},
+}
+
+ARG_KEY = re.compile(r"(\w+)=")
+
+
+def _unknown_args(line: str) -> list[str]:
+    parts = line.split(None, 1)
+    if len(parts) < 2:
+        return []
+    op = parts[0].upper()
+    if op not in LEGAL_ARGS:
+        return []
+    return sorted(set(ARG_KEY.findall(parts[1])) - LEGAL_ARGS[op])
+
+
 NUMERIC = re.compile(r"\d[\d,.]*")
 
 # A figure plus whatever unit is fused to it ("4K", "12,400") and the
@@ -519,10 +545,19 @@ def ungrounded_figures(line: str, brief: str) -> list[str]:
     for tok in NUMERIC.findall(m.group(1).replace(",", "")):
         if tok in ground:
             continue
-        # A figure the brief states as part of a longer number is still
-        # grounded ("2019" licenses "2019", not "19").
-        if any(tok in g for g in ground):
-            continue
+        # There is deliberately NO substring rule here.
+        #
+        # This line used to read `if any(tok in g for g in ground)` under
+        # a comment claiming it meant '"2019" licenses "2019", not
+        # "19"'. The comment described the behaviour I wanted and the
+        # code did the exact opposite: "19" is a substring of "2019", so
+        # a brief mentioning a year silently licensed a two-digit figure
+        # that appears nowhere in it — an invented statistic passing the
+        # check designed to catch invented statistics. Found by an
+        # independent reviewer reading the source, not by any test.
+        #
+        # Both sides are already comma-normalised, so the exact-match
+        # test above covers every legitimate case ("12,400" -> "12400").
         bad.append(tok)
     return bad
 
@@ -775,6 +810,19 @@ or four section names, one per line. Nothing else.""")
             m = re.search(r"\bsec=\"?(s\d)", line)
             return bool(want_sec and m and m.group(1) != want_sec)
 
+        # An argument the op does not take. The compiler now refuses
+        # these outright, and it should: `TEXT ... body="..."` and a
+        # TEXT carrying href/label/photo were both being emitted by the
+        # model and silently discarded, so two of twenty-five generated
+        # pages had malformed ops that conformance still scored as
+        # clean. Counted against the run like any other noise, and
+        # dropped so the page itself still compiles.
+        bad_arg = [l for l in kept if _unknown_args(l)]
+        if bad_arg and args.debug:
+            for l in bad_arg:
+                print(f"      BAD ARG {','.join(_unknown_args(l))}: {l[:74]!r}")
+        kept = [l for l in kept if l not in bad_arg]
+
         stray = [l for l in kept if _stray(l)]
         kept = [l for l in kept if l not in stray]
         # An alt= the model volunteered anyway would outrank the derived
@@ -851,7 +899,7 @@ or four section names, one per line. Nothing else.""")
                     f"{label} ({n_items} grounded figure(s) in the brief, needs 2)")
                 kept = []
 
-        noise_total += noise + len(stray)
+        noise_total += noise + len(stray) + len(bad_arg)
         if kept and scaffold_pending:
             lines.append(scaffold_pending)
             scaffold_pending = None

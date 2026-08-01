@@ -1,0 +1,10 @@
+# Not a page — a fixture. Every line is legal except the MEDIA, which
+# carries an argument the op does not take. Before the UNKNOWN_ARG
+# check this compiled "cleanly": the url was dropped, the figure fell
+# back to a default drawing, and --strict reported nothing wrong.
+SITE     name="Fixture"  location="Nowhere"  contact="a@b.co"
+THEME    family=editorial  accent=#b8442f  mode=light  density=roomy
+SECTION  id=s1  kind=hero  layout=split  tone=quiet
+TEXT     sec=s1  slot=title  text="A [test] fixture"
+TEXT     sec=s1  slot=lede   text="One sentence here. And a second one to match the rule."
+MEDIA    sec=s1  slot=figure  url="https://example.com/invented.jpg"

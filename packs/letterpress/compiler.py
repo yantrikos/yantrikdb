@@ -39,6 +39,20 @@ from pathlib import Path
 
 OPS = {"SITE", "THEME", "SECTION", "TEXT", "ACTION", "MEDIA", "ITEM"}
 
+# Exactly what each op accepts. Anything else is reported rather than
+# discarded — see the UNKNOWN_ARG check in parse().
+LEGAL_ARGS = {
+    "SITE": {"name", "nav", "location", "contact"},
+    "THEME": {"family", "accent", "mode", "density"},
+    "SECTION": {"id", "kind", "layout", "tone"},
+    "TEXT": {"sec", "slot", "text"},
+    "ACTION": {"sec", "slot", "label", "href"},
+    # `alt` is honoured only for hand-authored ops; the harness strips it
+    # from model output so the compiler captions its own drawings.
+    "MEDIA": {"sec", "slot", "motif", "photo", "alt"},
+    "ITEM": {"sec", "slot", "title", "body", "motif"},
+}
+
 # ── Design system ────────────────────────────────────────────────────
 # Deliberately NOT the house style of generated pages: no cream-and-
 # terracotta, no purple gradient, no Inter. Each family commits to a
@@ -555,6 +569,20 @@ def parse(text: str) -> Doc:
             doc.issues.append(Issue(n, "UNKNOWN_OP", head))
             continue
         args = {k: v.strip('"') for k, v in KV.findall(rest)}
+
+        # An argument this op does not take is an ERROR, not something to
+        # drop quietly. `MEDIA ... url="https://..."` used to parse
+        # "cleanly": the url was discarded, the figure fell back to the
+        # default drawing, and --strict reported no issues at all. The
+        # model had tried to supply an image it invented, the page shipped
+        # a house instead, and nothing anywhere said so. Silent
+        # acceptance of a misunderstanding is exactly what this compiler
+        # is built to refuse — and it catches ordinary typos too.
+        unknown = sorted(set(args) - LEGAL_ARGS.get(op, set()))
+        if unknown:
+            doc.issues.append(
+                Issue(n, "UNKNOWN_ARG", f"{','.join(unknown)} on {op}"))
+            continue
 
         if op == "THEME":
             doc.theme = args

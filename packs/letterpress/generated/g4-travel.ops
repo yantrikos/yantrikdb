@@ -1,38 +1,41 @@
 SITE name="Slow Ridge" nav="Trekking,Trips,Contact" location="Cairngorms" contact="hello@slowridge.co"
-THEME family=editorial accent=#5c7a61 mode=light density=roomy
+THEME family=editorial accent=#5c7a63 mode=light density=tight
 SECTION  id=s1  kind=hero  layout=split  tone=quiet
-TEXT sec=s1 slot=eyebrow text="Wilderness Guides"
+TEXT sec=s1 slot=eyebrow text="Wild walking"
 TEXT sec=s1 slot=title text="Eight days in [the Cairngorms]"
-TEXT sec=s1 slot=lede text="We lead small groups of six on eight-day treks through the highlands. All food, permits and accommodation are included."
-ACTION sec=s1 slot=primary label="View Departures" href="#dates"
-ACTION sec=s1 slot=secondary label="Read Our Story" href="#about"
-MEDIA sec=s1 slot=figure motif=topography
+TEXT sec=s1 slot=lede text="Join a group of six for eight guided treks with all food and permits included. We wild camp four nights, sleep three times in bothies, and depart from May through September."
+ACTION sec=s1 slot=primary label="View the route" href="#route"
+ACTION sec=s1 slot=secondary label="Check availability" href="#dates"
+MEDIA sec=s1 slot=figure photo="mountain hiking boots cairngorms"
 SECTION  id=s2  kind=proof  layout=stack  tone=bold
-TEXT sec=s2 slot=eyebrow text="Trip Stats"
-TEXT sec=s2 slot=title text="Eight days in [the Cairngorms]"
+TEXT sec=s2 slot=eyebrow text="The numbers"
+TEXT sec=s2 slot=title text="What you book for eight days in the wild"
 ITEM sec=s2 slot=item title="8" body="Days on the trail."
-ITEM sec=s2 slot=item title="6," body="People per group."
-SECTION  id=s3  kind=detail  layout=split  tone=quiet
-TEXT sec=s3 slot=eyebrow text="The Unrepeatable Route"
-TEXT sec=s3 slot=title text="Wild camping [four nights] and bothies three."
-TEXT sec=s3 slot=lede text="We navigate the highlands by memory of local landmarks rather than GPS coordinates, ensuring every group follows a path that shifts slightly each season. This method guarantees you never walk exactly where another hiker has stepped before in our lifetime, preserving the solitude of the Cairngorms for future generations."
-ACTION sec=s3 slot=primary label="Book Your Season" href="#bookings"
-MEDIA sec=s3 slot=figure motif=strata
-SECTION  id=s4  kind=features  layout=list  tone=quiet
-TEXT sec=s4 slot=eyebrow text="The Itinerary"
-TEXT sec=s4 slot=title text="Day One to Three [the ascent]"
-ITEM sec=s4 slot=item title="12km" body="We cross the Pass of Brackencloze at dawn, carrying our packs up a steep ridge before wild camping under the stars."
-ITEM sec=s4 slot=item title="8km" body="The trail drops into a glen where we gather water from a spring that runs cold and clear through mossy stones."
-ITEM sec=s4 slot=item title="10km" body="We navigate by memory of old cairns, keeping the wind at our back as we reach the first bothy for dinner."
-ITEM sec=s4 slot=item title="6km" body="The final stage ends with a long walk across heather moorland where silence is broken only by the call of ptarmigan."
+ITEM sec=s2 slot=item title="6" body="People in your group."
+ITEM sec=s2 slot=item title="4 nights" body="Wild camping under canvas."
+ITEM sec=s2 slot=item title="3" body="Nights sleeping in bothies."
+SECTION  id=s3  kind=features  layout=list  tone=quiet
+TEXT sec=s3 slot=eyebrow text="The itinerary"
+TEXT sec=s3 slot=title text="Day one to eight on the trail"
+ITEM sec=s3 slot=item title="Stage 1" body="Crossing the Pass of Bracklinn at dawn, we walk twelve miles and pitch our tent in a sheltered glen."
+ITEM sec=s3 slot=item title="Stage 2" body="The path climbs steeply through heather before descending to Loch Muick for an eight-mile day ending with a hearty stew dinner."
+ITEM sec=s3 slot=item title="Stage 3" body="We traverse the plateau above Glen Clova, carrying our packs over wet stones and sleeping in a bothy by mid-afternoon."
+ITEM sec=s3 slot=item title="Stage 4" body="A long descent into Braemar followed by an ascent of Ben Macdui where we summit at noon before walking back to camp under the stars."
+SECTION  id=s4  kind=detail  layout=split  tone=quiet
+TEXT sec=s4 slot=eyebrow text="The difference"
+TEXT sec=s4 slot=title text="We carry our own weight [and your trust]"
+TEXT sec=s4 slot=lede text="Unlike commercial operators who hire out tents and leave you to find a spot, we pre-book specific wild camps with landowners. We cook over open fires using only permitted wood from the forest floor. This means no plastic bins at dawn, just embers that vanish by morning."
+ACTION sec=s4 slot=primary label="Read our ethics" href="#ethics"
+MEDIA sec=s4 slot=figure motif=topography
 SECTION  id=s5  kind=faq  layout=stack  tone=quiet
-TEXT sec=s5 slot=eyebrow text="Common Questions"
-TEXT sec=s5 slot=title text="[What if I get lost]"  body="Our guides carry detailed paper maps and compasses as backups to our electronics, so we can always find the way back even in thick fog. If you feel unsure at any point, simply stop walking and let us take over navigation while you rest."
-ITEM sec=s5 slot=item title="What is included?"  body="Your fee covers all meals prepared from local ingredients, three nights of wild camping on designated sites, two nights in a bothy with hot water, plus your personal guide's fees. Permits for the highlands are also sorted before you arrive."
-ITEM sec=s5 slot=item title="Can I bring my dog?"  body="Yes, provided it is well-behaved and leashed when near livestock or other groups. We carry a small amount of extra food in case your pet needs to stay behind at an emergency stop while we continue the route alone."
-ITEM sec=s5 slot=item title="What if I am injured?"  body="We travel with a fully stocked first aid kit and satellite phone for immediate contact with mountain rescue services. In minor cases, our guide will treat you on site; serious injuries trigger a helicopter evacuation plan that is pre-arranged before every trip."
-ITEM sec=s5 slot=item title="Is the weather guaranteed?"  body="No, but we prepare for rain or wind by carrying waterproofs and extra layers in your pack. If conditions become too severe to continue safely, we will turn back early rather than risk exposure on a ridge that could change without warning."
+TEXT sec=s5 slot=eyebrow text="Frequently asked questions"
+TEXT sec=s5 slot=title text="Everything you need to know before booking your trek"
+ITEM sec=s5 slot=item title="What if I get injured on the trail?" body="Our guides carry a full first aid kit and satellite phone at all times. If an injury occurs, we stop immediately for treatment or evacuation depending on severity, ensuring no one walks alone in the dark."
+ITEM sec=s5 slot=item title="Can I bring my own tent instead of wild camping?" body="No, to keep our impact low we require everyone to use canvas tents pre-booked with landowners. This rule protects the fragile heather and ensures you have a dry place if rain comes while walking in high winds."
+ITEM sec=s5 slot=item title="Is there parking available near the start point?" body="Yes, there is a large layby on the A93 just past Braemar where coaches can drop off. We also accept walk-ins from nearby villages like Ballater and Glenlivet if you prefer to drive yourself up."
+ITEM sec=s5 slot=item title="What happens if it rains for three days in a row?" body="We carry waterproofs, but we do not cancel the trek due to rain unless conditions become dangerous. We will adjust our route slightly or shorten stages so you still reach your goal without getting soaked and cold."
+ITEM sec=s5 slot=item title="Do I need special hiking boots for this trip?" body="Yes, sturdy ankle-supporting boots are mandatory because we cross wet stones and steep scree slopes daily. Soft trail runners will get waterlogged quickly in the glens and you risk twisting an ankle on loose ground after dark."
 SECTION  id=s6  kind=cta  layout=stack  tone=quiet
-TEXT sec=s6 slot=title text="Departures May to September"
-TEXT sec=s6 slot=lede text="Costs vary by season; groups depart when the snow melts."
-ACTION sec=s6 slot=primary label="Check Availability" href="#dates"
+TEXT sec=s6 slot=title text="Depart May through September"
+TEXT sec=s6 slot=lede text="All food and permits included."
+ACTION sec=s6 slot=primary label="Book now" href="#dates"
