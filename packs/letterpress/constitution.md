@@ -7,6 +7,10 @@ grid, the whole palette derived from one accent, contrast, responsive
 collapse, drawings, and image licensing. Mounted without that compiler
 the ops below go nowhere, because nothing exists to read them.
 
+    pip install letterpress==0.1.0
+    letterpress photos site.ops        # only if the ops use photo=
+    letterpress compile site.ops --out site.html --strict
+
 Applied whenever a page is written for the letterpress compiler. You emit op
 lines only. You never write HTML, CSS or JavaScript — the compiler
 writes all of it, and writing markup yourself is the measured failure

@@ -1,0 +1,57 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "letterpress"
+version = "0.1.0"
+description = "A site compiler a small model can drive: seven ops in, one self-contained page out."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "AGPL-3.0-or-later" }
+authors = [{ name = "YantrikDB" }]
+keywords = ["html", "css", "generation", "compiler", "knowledge-pack"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Text Processing :: Markup :: HTML",
+    "Intended Audience :: Developers",
+]
+
+# Deliberately empty. The compiler and the photo resolver are stdlib
+# only, which is what lets the pack promise an offline, reproducible
+# build. certifi is optional and only improves certificate validation
+# for a few image hosts; verification is never disabled without it.
+dependencies = []
+
+[project.optional-dependencies]
+# Resolving photographs works without certifi; some hosts simply fail
+# to validate against an older system trust store.
+photos = ["certifi>=2024.2.2"]
+# The render gates drive a real browser. Without this, `compile` and
+# `photos` still work and only `shoot` is unavailable.
+verify = ["playwright>=1.40"]
+
+[project.scripts]
+letterpress = "letterpress.cli:main"
+
+[project.urls]
+Homepage = "https://packs.yantrikdb.com"
+Source = "https://github.com/spranab/yantrikdb"
+
+# The package IS this directory. Mapping it rather than moving the
+# modules into a src/ tree keeps every existing path working — the
+# briefs, the build script and the pack files all still sit where they
+# were, and only the .py files are collected into the wheel.
+[tool.setuptools]
+packages = ["letterpress"]
+
+[tool.setuptools.package-dir]
+letterpress = "."
+
+[tool.setuptools.exclude-package-data]
+# The pack itself is distributed separately, through the marketplace,
+# and must not be baked into the wheel: a pack is versioned, signed and
+# revocable on its own cadence, and a copy hiding inside a pip package
+# could never be any of those.
+"*" = ["corpus.md", "constitution.md", "eval.jsonl", "pack.toml",
+       "briefs/*", "out/*", "shots/*", "generated/*", "assets/*"]
