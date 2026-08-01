@@ -502,7 +502,7 @@ the room, or the person who cooks. `faq` answers booking, walk-ins,
 dietary requirements and children.
 
 MUST CARRY: street address, opening days and hours, how to book.
-INVITES: invented prices and opening times. Both must come from the
+NEVER WRITE THESE — the genre tempts you to and you must not: invented prices and opening times. Both must come from the
 brief; a reader turns up with the wrong money at the wrong hour.
 PHOTOGRAPHS: the room and the food.
 
@@ -523,7 +523,7 @@ route. `faq` covers fitness, visas, weather, insurance, and what
 happens when conditions turn.
 
 MUST CARRY: duration, group size, what is and is not included.
-INVITES: a price, a departure date and an altitude that were never in
+NEVER WRITE THESE — the genre tempts you to and you must not: a price, a departure date and an altitude that were never in
 the brief.
 MOTIF when there is no photograph: `topography`.
 
@@ -561,7 +561,7 @@ arrives and how often.
 
 MUST CARRY: what the publication covers, recent pieces, how to
 subscribe.
-INVITES: a subscriber count and a publishing frequency the brief never
+NEVER WRITE THESE — the genre tempts you to and you must not: a subscriber count and a publishing frequency the brief never
 stated.
 
 ## letterpress genre: recipe
@@ -581,7 +581,7 @@ single action. `faq` is substitutions, making ahead, and storage.
 
 MUST CARRY: quantities, times, temperature, yield.
 NEVER: a step that does two things. Split it.
-INVITES: quantities and temperatures that were not in the brief — the
+NEVER WRITE THESE — the genre tempts you to and you must not: quantities and temperatures that were not in the brief — the
 one genre where an invented number does not merely mislead a reader, it
 ruins the dish.
 
@@ -598,7 +598,7 @@ registration numbers. `faq` answers how quotes work, whether callouts
 are charged, and what counts as an emergency.
 
 MUST CARRY: the services, the area covered, how to make contact.
-INVITES: a response time and a callout fee that were never stated.
+NEVER WRITE THESE — the genre tempts you to and you must not: a response time and a callout fee that were never stated.
 MOTIF: `topography` for the area covered, `orbit` for reach.
 
 ## letterpress genre: clinic or practitioner
@@ -615,7 +615,7 @@ confidentiality.
 
 MUST CARRY: what is treated, what a first appointment involves, how to
 book.
-INVITES: session fees and appointment lengths not in the brief.
+NEVER WRITE THESE — the genre tempts you to and you must not: session fees and appointment lengths not in the brief.
 
 ## letterpress genre: developer tool or open-source project
 
@@ -632,7 +632,7 @@ it never touches. `faq` is permissions, data handling, CI, and what
 happens when something is unavailable. `cta` is install or docs.
 
 MUST CARRY: what it does, how it is installed, the licence.
-INVITES: benchmarks. "Scans in under ten seconds", "handles 50TB",
+NEVER WRITE THESE — the genre tempts you to and you must not: benchmarks. "Scans in under ten seconds", "handles 50TB",
 "ninety percent of cases" — every one of those is a measurement that
 nobody took.
 
@@ -648,7 +648,7 @@ the ways to help. `note` is the reassurance: no phone calls, cancel
 whenever, the list is never sold.
 
 MUST CARRY: what the money does, how to give, how to stop giving.
-INVITES: percentages, beneficiary counts and overhead ratios that were
+NEVER WRITE THESE — the genre tempts you to and you must not: percentages, beneficiary counts and overhead ratios that were
 never in the brief. This is the genre where an invented figure does the
 most reputational damage.
 
@@ -664,7 +664,7 @@ people, so name them only if the brief does. `faq` is access, travel,
 refunds and what a ticket includes.
 
 MUST CARRY: date, place, how to get a ticket.
-INVITES: dates. Never invent one. A wrong date is the single most
+NEVER WRITE THESE — the genre tempts you to and you must not: dates. Never invent one. A wrong date is the single most
 damaging error this genre can carry.
 
 ## letterpress genre: shop or single product
@@ -679,7 +679,7 @@ what is in the box. `faq` is shipping, returns and sizing, which is
 where most abandoned purchases are lost.
 
 MUST CARRY: what it is, what it costs, how it ships, how to return it.
-INVITES: a price, a delivery window and dimensions from nowhere.
+NEVER WRITE THESE — the genre tempts you to and you must not: a price, a delivery window and dimensions from nowhere.
 
 ## letterpress genre: studio, agency or practice
 
@@ -706,7 +706,7 @@ one genre where `elevation` is exactly the right drawing, because the
 subject is literally a building.
 
 MUST CARRY: price, size, location, how to arrange a viewing.
-INVITES: every number on the page. Dimensions, prices and distances
+NEVER WRITE THESE — the genre tempts you to and you must not: every number on the page. Dimensions, prices and distances
 must come from the brief verbatim or not appear.
 
 ## letterpress genre: school, course or training
@@ -722,7 +722,7 @@ funding, and what happens if someone falls behind.
 
 MUST CARRY: what is taught, how long it takes, what it costs, how to
 apply.
-INVITES: pass rates, employment statistics and class sizes that were
+NEVER WRITE THESE — the genre tempts you to and you must not: pass rates, employment statistics and class sizes that were
 never stated.
 
 ## letterpress stock images: how to put a photograph on the page

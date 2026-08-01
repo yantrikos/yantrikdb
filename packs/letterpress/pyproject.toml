@@ -3,7 +3,14 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "letterpress"
+# The DISTRIBUTION name is namespaced because `letterpress` on PyPI is
+# already taken — by an unrelated docx generator at 0.0.1. That is worse
+# than an unavailable name: `pip install letterpress` succeeds and
+# installs somebody else's software, so a user following the pack's own
+# instruction would end up with the wrong package and no error. The
+# IMPORT name stays `letterpress`, which is local and collides with
+# nothing.
+name = "yantrik-letterpress"
 version = "0.1.0"
 description = "A site compiler a small model can drive: seven ops in, one self-contained page out."
 readme = "README.md"

@@ -12,7 +12,7 @@ and a dependency note in the description does not fix that. So the
 compiler ships as an installable, version-pinned artifact, and the pack
 declares which version it was written against.
 
-    pip install letterpress
+    pip install yantrik-letterpress
     letterpress compile site.ops --out site.html --strict
 """
 

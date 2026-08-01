@@ -140,8 +140,24 @@ def _alt_matches(alt: str, low: str) -> bool:
     return alt in low
 
 
+# Markdown emphasis, removed before matching.
+#
+# Models answer in markdown. They write "the `note` section" and
+# "**detail** section", and a multi-word alternative is a SUBSTRING
+# test, so "note section" did not match "`note` section" and the answer
+# was scored wrong. Three questions in one held-out run failed this way
+# on answers that were substantively correct.
+#
+# This deflates rather than inflates, which is the direction that hides:
+# a pack looks worse than it is and nothing about the run looks broken.
+# Stripping the characters cannot invent a match, because it removes
+# only punctuation and never joins two words — "`note` section" becomes
+# "note section", not "notesection".
+MARKUP = str.maketrans("", "", "`*_~")
+
+
 def grade(answer: str, expect: list[list[str]]) -> bool:
-    low = answer.lower()
+    low = answer.lower().translate(MARKUP)
     return all(any(_alt_matches(alt.lower(), low) for alt in group) for group in expect)
 
 

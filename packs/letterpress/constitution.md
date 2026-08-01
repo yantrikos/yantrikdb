@@ -7,7 +7,7 @@ grid, the whole palette derived from one accent, contrast, responsive
 collapse, drawings, and image licensing. Mounted without that compiler
 the ops below go nowhere, because nothing exists to read them.
 
-    pip install letterpress==0.1.0
+    pip install yantrik-letterpress==0.1.0
     letterpress photos site.ops        # only if the ops use photo=
     letterpress compile site.ops --out site.html --strict
 

@@ -32,7 +32,7 @@ paired with pack {PACK_CONTRACT}
   letterpress shoot <html>...
       Render each page at desktop and mobile and run the gates:
       content, overflow, contrast, readable size, one h1, visible text.
-      Needs the `verify` extra:  pip install letterpress[verify]
+      Needs the `verify` extra:  pip install yantrik-letterpress[verify]
 
   letterpress version
 """
@@ -65,7 +65,7 @@ def main(argv: list[str] | None = None) -> int:
             from . import shoot
         except ImportError as exc:
             print(f"letterpress shoot needs the verify extra: {exc}\n"
-                  f"    pip install 'letterpress[verify]'\n"
+                  f"    pip install 'yantrik-letterpress[verify]'\n"
                   f"    python -m playwright install chromium",
                   file=sys.stderr)
             return 2

@@ -5,7 +5,7 @@ CSS — it emits lines in a seven-operation language, and this compiler
 turns them into one self-contained page.
 
 ```
-pip install letterpress
+pip install yantrik-letterpress
 letterpress compile site.ops --out site.html --strict
 ```
 
@@ -63,7 +63,7 @@ letterpress compile site.ops --out site.html --strict
 ## Verifying
 
 ```
-pip install 'letterpress[verify]'
+pip install 'yantrik-letterpress[verify]'
 python -m playwright install chromium
 letterpress shoot site.html
 ```
