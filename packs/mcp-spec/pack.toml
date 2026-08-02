@@ -27,7 +27,7 @@ coverage = [
 # injected into "what is 17 multiplied by 23?" and the model answered
 # 409. Noise that clears the floor is enough to break arithmetic.
 recommended_top_k = 16
-recommended_min_similarity = 0.60
+recommended_min_similarity = 0.6
 # How many records a consumer should retrieve per query for THIS pack.
 memory_type = "semantic"
 domain = "engineering"

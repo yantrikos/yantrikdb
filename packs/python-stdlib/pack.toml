@@ -19,6 +19,7 @@ coverage = [
 # a control point, which is where retrieved context starts displacing
 # what the model already knew.
 recommended_top_k = 8
+recommended_min_similarity = 0.55
 memory_type = "semantic"
 domain = "engineering"
 source = "document"

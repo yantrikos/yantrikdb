@@ -21,8 +21,8 @@ coverage = [
 # records does not need a wide k, and a wide k here would inject four
 # near-identical wage bands into every wage question, which is the
 # sibling-confusion failure this pack is most exposed to.
-recommended_top_k = 6
-recommended_min_similarity = 0.55
+recommended_top_k = 4
+recommended_min_similarity = 0.65
 memory_type = "semantic"
 domain = "general"
 source = "document"

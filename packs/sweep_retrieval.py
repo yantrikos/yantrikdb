@@ -134,15 +134,29 @@ def main() -> int:
                   f"(control fell below {ctl_base}/{len(ctl)})")
 
             # Winner: highest score among configs that harm no control.
-            # Ties break toward the SMALLER k and the HIGHER floor —
-            # less injected context for the same answer is strictly
-            # better, and it is the direction that resists attach-harm
-            # on questions the control set does not happen to cover.
+            # Ties break toward the HIGHER FLOOR first, then the smaller
+            # k.
+            #
+            # That order is not arbitrary and it is not what I wrote
+            # first. Both knobs reduce injected context, but they do it
+            # differently: k caps HOW MANY records arrive, while the
+            # floor decides WHAT IS ALLOWED TO BE RELEVANT. Only the
+            # floor discriminates, so only the floor protects against
+            # harm the control set does not happen to cover — and a
+            # control set is always a sample.
+            #
+            # Measured: yantrikdb-engine reaches 18/20 at both
+            # (k=6, floor 0.45) and (k=8, floor 0.60), both clean on 31
+            # controls. The k-first rule picked floor 0.45. The same
+            # pack's 20/20 configs looked clean against 12 controls and
+            # cost a control the moment 19 near-domain questions were
+            # added, which is the concrete demonstration that a low
+            # floor is where the unmeasured risk lives.
             clean = [r for r in results if not r[4]]
             if not clean:
                 print("  every config costs a control — not writing anything")
                 continue
-            best = max(clean, key=lambda r: (r[0], -r[3], r[2]))
+            best = max(clean, key=lambda r: (r[0], r[2], -r[3]))
             s, c, f, k, _ = best
             cur = next((r for r in results if r[2] == cur_f and r[3] == cur_k), None)
             print(f"\n  winner: top_k={k} floor={f}  ->  {s}/{len(qs)}, controls {c}/{len(ctl)}")

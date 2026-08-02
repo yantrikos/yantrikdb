@@ -21,7 +21,8 @@ coverage = [
 # unrelated-topic controls intact. Larger k was either no better or cost
 # a control point, which is where retrieved context starts displacing
 # what the model already knew.
-recommended_top_k = 5
+recommended_top_k = 4
+recommended_min_similarity = 0.65
 memory_type = "procedural"
 domain = "engineering"
 source = "document"

@@ -22,6 +22,7 @@ coverage = [
 # a control point, which is where retrieved context starts displacing
 # what the model already knew.
 recommended_top_k = 16
+recommended_min_similarity = 0.55
 # How many records a consumer should retrieve per query for THIS pack.
 memory_type = "procedural"
 domain = "engineering"

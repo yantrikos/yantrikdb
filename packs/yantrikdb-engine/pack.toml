@@ -22,8 +22,8 @@ description = "How the YantrikDB engine actually behaves: retrieval pipeline, sc
 # 0.62 excludes all three, keeps the score at 12/20, and restores the
 # controls to 12/12. Higher collapses it (9/20 at 0.65), because this
 # pack's genuine hits sit in the low 0.6s.
-recommended_top_k = 16
-recommended_min_similarity = 0.62
+recommended_top_k = 8
+recommended_min_similarity = 0.6
 memory_type = "semantic"
 domain = "engineering"
 source = "document"
