@@ -87,7 +87,9 @@ misbehaves under it has a missing or incorrect cleanup, and it would
 misbehave the same way in production when React interrupts and resumes a
 render. Do not defeat it with a `hasRun` ref.
 
-## Fetching in an effect races itself
+## Two fetches race in an effect: the first resolves last and shows stale results
+
+**The bug**: as a user types, request 1 and request 2 both fire, request 1 resolves LAST, and the UI shows its stale results over the newer ones. **The fix**: an `AbortController` aborted in the effect's cleanup, so a superseded request is cancelled rather than allowed to land late. An ignore-flag in cleanup works too; aborting is better because it also stops the network work.
 
 Fast typing fires request 1, then request 2; if 1 resolves last, the UI
 shows stale results. Guard with an abort in the cleanup:
@@ -258,7 +260,9 @@ passing `children` as a prop so the subtree is not recreated. The React
 Compiler automates much of this and is still maturing — never assume a
 given project has it.
 
-## dangerouslySetInnerHTML is one XSS vector; href is the other
+## The two remaining ways a React component can introduce XSS: dangerouslySetInnerHTML and href
+
+JSX escapes interpolated text, so the two ways XSS still gets in are **dangerouslySetInnerHTML** and a **`href`/`src` URL whose scheme is not validated**.
 
 JSX escapes interpolated text, so `{userInput}` is safe.
 `dangerouslySetInnerHTML` is not — sanitise with DOMPurify at the point
