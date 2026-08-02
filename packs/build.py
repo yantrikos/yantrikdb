@@ -58,7 +58,31 @@ def parse_corpus(path: Path) -> list[tuple[str, str]]:
     return out
 
 
-def build(src: Path, out_dir: Path = DIST) -> Path:
+
+# An external embedder, attached through the engine's public
+# set_embedder(). The bundled default is a static lookup-table
+# distillation: measured against the same corpus and questions it
+# reaches 46/53, where a contextual embedder reaches 50/53, and the
+# potion family does not close that gap at any width (256d 47/53,
+# 512d 45/53). A pack is only as findable as the vectors it ships.
+class OllamaEmbedder:
+    def __init__(self, model: str, host: str):
+        self.model, self.host = model, host
+
+    def encode(self, text):
+        import json as _json, urllib.request as _u
+        payload = _json.dumps({"model": self.model,
+                               "prompt": str(text)[:2000]}).encode()
+        req = _u.Request(f"{self.host}/api/embeddings", data=payload,
+                         headers={"Content-Type": "application/json"})
+        with _u.urlopen(req, timeout=120) as r:
+            return _json.load(r)["embedding"]
+
+
+def build(src: Path, out_dir: Path = DIST, dim: int = 64,
+          embedder_name: str | None = None,
+          ollama_model: str | None = None,
+          ollama_host: str = "http://192.168.4.35:11434") -> Path:
     cfg = tomllib.loads((src / "pack.toml").read_text(encoding="utf-8"))
     pack = cfg["pack"]
     content = cfg.get("content", {})
@@ -114,7 +138,11 @@ def build(src: Path, out_dir: Path = DIST) -> Path:
     # silently ship a pack with every fact duplicated. Windows also keeps
     # the file locked briefly after close, so cleanup errors are ignored.
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
-        db = YantrikDB(str(Path(td) / "staging.db"), 64)
+        db = YantrikDB(str(Path(td) / "staging.db"), dim)
+        if embedder_name:
+            db.set_embedder_named(embedder_name)
+        elif ollama_model:
+            db.set_embedder(OllamaEmbedder(ollama_model, ollama_host))
         for topic, body in facts:
             db.record_text(
                 f"{topic} — {body}",
@@ -153,6 +181,13 @@ def main() -> None:
     ap.add_argument("source", nargs="*", help="pack source directory")
     ap.add_argument("--all", action="store_true", help="build every pack here")
     ap.add_argument("--clean", action="store_true", help="wipe dist/ first")
+    ap.add_argument("--dim", type=int, default=64,
+                    help="vector width; must match the embedder")
+    ap.add_argument("--embedder",
+                    help="downloadable model name, e.g. potion-base-8M")
+    ap.add_argument("--ollama-embedder",
+                    help="ollama model name, e.g. nomic-embed-text")
+    ap.add_argument("--ollama-host", default="http://192.168.4.35:11434")
     args = ap.parse_args()
 
     if args.clean and DIST.exists():
@@ -162,7 +197,8 @@ def main() -> None:
     if args.all or not sources:
         sources = sorted(p.parent for p in HERE.glob("*/pack.toml"))
     for src in sources:
-        build(src)
+        build(src, dim=args.dim, embedder_name=args.embedder,
+              ollama_model=args.ollama_embedder, ollama_host=args.ollama_host)
 
 
 if __name__ == "__main__":

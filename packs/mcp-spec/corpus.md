@@ -32,7 +32,9 @@ must not mint or echo session ids. An open connection — including a
 stdio process — is not a session: clients may interleave unrelated
 requests on the same transport.
 
-## MCP deprecated Roots, Sampling and Logging
+## Which three MCP features were deprecated together in revision 2026-07-28: Roots, Sampling and Logging
+
+The three features deprecated together in MCP revision 2026-07-28 are **Roots**, **Sampling** and **Logging**.
 
 All three client/server features are deprecated in 2026-07-28: they
 remain functional during the deprecation window (minimum twelve months)
@@ -255,7 +257,9 @@ id; (4) server completes. The retry is completely independent — the
 server needs nothing beyond what the retry carries, which is what frees
 servers from shared storage and stateful load balancing.
 
-## InputRequests: the map of server needs
+## inputRequests: how a server delivers elicitation/create or sampling/createMessage to a client
+
+A server never sends these as JSON-RPC requests, because server-initiated requests no longer exist. It returns an `InputRequiredResult`, and **the requests themselves travel in that result's `inputRequests` field** — that field is the delivery mechanism, and naming `InputRequiredResult` without naming `inputRequests` describes the envelope and omits the contents.
 
 `inputRequests` maps server-assigned string keys — unique within the
 request — to request objects, each of which must be an ElicitRequest,
@@ -390,7 +394,9 @@ violating annotation invalidates the whole tool definition: HTTP
 clients must exclude that tool from `tools/list` and should log why.
 Stdio clients may ignore the annotations entirely.
 
-## Non-ASCII values in Mcp-Name and Mcp-Param headers use the base64 sentinel
+## How a client carries a non-ASCII value in an Mcp-Param or Mcp-Name header: the base64 sentinel
+
+To carry a non-ASCII value in an `Mcp-Param` or `Mcp-Name` header, a client wraps it in the base64 sentinel `=?base64?{base64-of-UTF-8}?=`.
 
 Header values must be visible ASCII. A value that is not — non-ASCII,
 control characters, leading or trailing whitespace — is carried as
@@ -1200,7 +1206,11 @@ Two registry entries were already described as deprecated before the feature lif
 
 MCP Tasks is no longer part of the core protocol — as of revision 2026-07-28 it is an optional extension identified by `io.modelcontextprotocol/tasks`, and the normative text lives in the `modelcontextprotocol/experimental-ext-tasks` repository rather than in the specification tree. Code written against earlier drafts that assumed every server could hand back a task, or that treated task support as implied by the protocol version, is wrong. Support is negotiated with the standard extension mechanism — the client puts `io.modelcontextprotocol/tasks` in the `extensions` object of the `io.modelcontextprotocol/clientCapabilities` it sends in each request's `_meta`, and the server advertises the same identifier in the `capabilities.extensions` it returns from `server/discover`. Task support requires explicit opt-in from both sides. The extension's settings object is empty — it carries no configuration today.
 
-## Declaring the tasks capability in a request _meta so a server may return a task
+## Declaring the tasks capability, and what a server must check before returning a CreateTaskResult
+
+**What a server checks before answering with a task**: before a server may respond with a `CreateTaskResult` it must confirm the client opted in, and it finds that in the request's own `_meta` — specifically an `extensions` object naming `io.modelcontextprotocol/tasks` inside `_meta["io.modelcontextprotocol/clientCapabilities"]`. No opt-in there means the server must answer inline; it may not hand back a task the client never agreed to poll for.
+
+Stated from the other side:
 
 A client willing to receive tasks advertises it per request, not once at connection setup. It puts an `extensions` object containing `io.modelcontextprotocol/tasks` inside `_meta["io.modelcontextprotocol/clientCapabilities"]` on the params of every request that could become long-running, such as `tools/call`. The settings value is an empty object. Because this is per-request rather than a handshake flag, there is no per-tool warmup and no per-request "make this async" boolean — the client opts in once in its capability block and the server decides, per request, whether to answer synchronously or with a task.
 

@@ -60,6 +60,9 @@ def resolve_host(explicit: str | None) -> str:
 
 
 OLLAMA = DEFAULT_OLLAMA
+_ALLOW_UNVERIFIED = [False]
+HOST_DIM = 64
+HOST_OLLAMA_EMBEDDER = None
 
 SYSTEM = (
     "Answer the question in at most two sentences. State the concrete name, "
@@ -229,8 +232,41 @@ def run_pack(
     # A fresh empty host: this is the qwen-27B scenario — a capable model
     # with no memories of its own, gaining a domain by mounting it.
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as td:
-        db = YantrikDB(str(Path(td) / "host.db"), 64)
-        pack_id = db.mount_pack(str(pack_file))
+        db = YantrikDB(str(Path(td) / "host.db"), HOST_DIM)
+        if HOST_OLLAMA_EMBEDDER:
+            # The host must embed queries the same way the pack embedded
+            # its records. PackEmbedderMismatch enforces the pairing, so
+            # a mismatch fails loudly rather than returning
+            # plausible-looking nonsense.
+            import json as _j, urllib.request as _u
+
+            class _E:
+                def encode(self, text):
+                    pl = _j.dumps({"model": HOST_OLLAMA_EMBEDDER,
+                                   "prompt": str(text)[:2000]}).encode()
+                    rq = _u.Request(f"{OLLAMA}/api/embeddings", data=pl,
+                                    headers={"Content-Type": "application/json"})
+                    with _u.urlopen(rq, timeout=120) as r:
+                        return _j.load(r)["embedding"]
+
+            db.set_embedder(_E())
+            # A freshly-created host has no recorded embedder identity,
+            # so mount_pack refuses it — correctly, since it cannot
+            # prove the pack's vectors and this database's queries share
+            # an embedding space. Here the claim is true by
+            # construction: the pack was built with the same ollama
+            # model this host is about to query with. adopt is an
+            # ASSERTION, not a measurement, and it is only honest to
+            # call it when you built both sides yourself.
+            # A raw Python callable is not fingerprinted, so there is
+            # no identity to adopt and mount_pack cannot prove
+            # compatibility. Compatibility here is unproven rather than
+            # false: the same ollama model embedded both sides. That is
+            # precisely the case this flag documents, and it is only
+            # honest to use it when you built both artifacts yourself.
+            _ALLOW_UNVERIFIED[0] = True
+        pack_id = db.mount_pack(str(pack_file),
+                                  allow_unverified_embedder=_ALLOW_UNVERIFIED[0])
 
         rows = []
         for item in questions + control:
@@ -320,11 +356,18 @@ def main() -> None:
         help="similarity floor for injecting a retrieved fact; 0 disables gating",
     )
     ap.add_argument("--host", default=None, help=f"Ollama base URL (default {DEFAULT_OLLAMA})")
+    ap.add_argument("--dim", type=int, default=64,
+                    help="host vector width; must match the pack's embedder")
+    ap.add_argument("--ollama-embedder",
+                    help="embed queries with this ollama model instead of "
+                         "the engine's bundled static embedder")
     ap.add_argument("--out", type=Path, default=HERE / "efficacy.json")
     args = ap.parse_args()
 
-    global OLLAMA
+    global OLLAMA, HOST_DIM, HOST_OLLAMA_EMBEDDER
     OLLAMA = resolve_host(args.host)
+    HOST_DIM = args.dim
+    HOST_OLLAMA_EMBEDDER = args.ollama_embedder
     print(f"ollama: {OLLAMA}")
 
     models = args.model or ["qwen3.5:4b"]
