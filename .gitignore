@@ -49,3 +49,9 @@ dist-wheel/
 # can resolve. Findings belong in commit messages; artifacts regenerate.
 *.cert.json
 shots/
+
+# Pack training runs: the split, the epoch log and the sealed-test
+# ledger are per-author working state. The SPLIT in particular must not
+# be shared — a split committed to the repo is a test set everyone has
+# seen, which is the same as not having one.
+packs/training/
