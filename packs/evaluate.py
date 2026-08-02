@@ -153,7 +153,22 @@ def _alt_matches(alt: str, low: str) -> bool:
 # Stripping the characters cannot invent a match, because it removes
 # only punctuation and never joins two words — "`note` section" becomes
 # "note section", not "notesection".
-MARKUP = str.maketrans("", "", "`*_~")
+# ONLY backtick and asterisk. NOT underscore, and not tilde.
+#
+# The first version stripped "`*_~", and underscore is not decoration in
+# any technical domain — it is half the identifiers. Stripping it turned
+# the answer's `_meta` into "meta" while the expected marker stayed
+# `_meta`, so three questions failed on answers that said the exact
+# thing being asked for: "carries its own protocolVersion in `_meta`",
+# "resides in the `_meta` object", "error code insufficient_scope".
+#
+# A grader that mangles snake_case cannot measure a protocol pack, and
+# it fails silently in the direction that hides — the pack looks worse
+# and every run looks clean. This is the second time today that a fix
+# aimed at markdown quietly broke matching; the lesson is that the
+# answer text must be normalised as little as possible, because every
+# character removed is a character an identifier might have needed.
+MARKUP = str.maketrans("", "", "`*")
 
 
 def grade(answer: str, expect: list[list[str]]) -> bool:

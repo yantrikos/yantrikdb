@@ -100,10 +100,21 @@ elicitation required, 2025-11-25 only) is also retired.
 JSON-RPC's server-error range is partitioned: `-32000` to `-32019` is
 legacy implementation-defined space where new codes must not be
 allocated; `-32020` to `-32099` is reserved for the MCP specification.
-Spec-defined codes: `-32020` HeaderMismatch, `-32021`
-MissingRequiredClientCapability, `-32022` UnsupportedProtocolVersion
-(renumbered from -32001, -32003, -32004 in the draft). Application
-errors belong outside the JSON-RPC reserved range `-32768` to `-32000`.
+Three spec-defined codes, each with its OWN trigger — they are not
+interchangeable and the trigger is what selects between them:
+
+- `-32020` HeaderMismatch — the `MCP-Protocol-Version` header does not
+  match the version in the request body.
+- `-32021` MissingRequiredClientCapability — the client did not declare
+  a capability the operation requires.
+- `-32022` UnsupportedProtocolVersion — **the version itself is one the
+  server does not implement.** This is the code for an unsupported
+  version, and its `data.supported` lists the versions the server does
+  implement so the client can retry.
+
+(All three were renumbered from -32001, -32003 and -32004 in the draft.)
+Application errors belong outside the JSON-RPC reserved range `-32768`
+to `-32000`.
 
 ## Dynamic Client Registration deprecated for Client ID Metadata Documents
 
@@ -858,7 +869,9 @@ Clients request autocompletion for prompt arguments and resource template argume
 
 ## CompleteResult fields values, total, and hasMore with the 100-item cap
 
-The result has `resultType: "complete"` and a `completion` object with three fields. `values` is an array of suggestion strings ranked by relevance, capped at 100 items per response. `total` is the optional total number of available matches, which may exceed the returned values. `hasMore` is a boolean indicating whether additional results exist. Servers SHOULD return suggestions sorted by relevance, implement fuzzy matching where appropriate, rate limit requests, and validate all inputs; clients SHOULD debounce rapid requests, cache results where appropriate, and handle missing or partial results gracefully.
+The result has `resultType: "complete"` and a `completion` object with three fields, and the two numeric-sounding ones answer DIFFERENT questions — do not substitute one for the other.
+
+`values` is an array of suggestion strings ranked by relevance, capped at 100 items per response. **`hasMore` is the field that says more results exist**: a boolean, and the only field a client should read to decide whether the list was truncated. `total` is something else — an OPTIONAL count of how many matches exist altogether. It is a size, not a truncation signal, it may be absent entirely, and a client that infers "there are more" from `total` alone is reading the wrong field. Servers SHOULD return suggestions sorted by relevance, implement fuzzy matching where appropriate, rate limit requests, and validate all inputs; clients SHOULD debounce rapid requests, cache results where appropriate, and handle missing or partial results gracefully.
 
 ## completions capability, ref/prompt versus ref/resource, and completion error codes
 
