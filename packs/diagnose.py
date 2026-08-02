@@ -108,8 +108,9 @@ def main() -> int:
 
         verdicts, rows = Counter(), []
         for q in questions:
-            hits = [h for h in db.recall(q["q"], top_k=args.top_k)
-                    if h.get("score", 1.0) >= args.min_similarity]
+            hits = [h for h in db.recall_text(q["q"], top_k=args.top_k)
+                    if h.get("scores", {}).get("similarity", 0.0)
+                    >= args.min_similarity]
 
             texts = [h["text"] for h in hits]
             ctx = "\n\n".join(texts)

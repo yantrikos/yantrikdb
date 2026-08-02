@@ -42,8 +42,8 @@ KS = (5, 8, 12, 16, 24)
 def score_mounted(db, qs, model, k, floor):
     ok = 0
     for q in qs:
-        hits = [h for h in db.recall(q["q"], top_k=k)
-                if h.get("score", 1.0) >= floor]
+        hits = [h for h in db.recall_text(q["q"], top_k=k)
+                if h.get("scores", {}).get("similarity", 0.0) >= floor]
         ans = evaluate.ask(model, q["q"], [h["text"] for h in hits])
         ok += evaluate.grade(ans, q["expect"])
     return ok

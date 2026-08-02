@@ -7,12 +7,6 @@ description = "Control arm: naive fixed-size chunks of the source document, no c
 coverage = ["control arm, not for publication"]
 
 [content]
-# Swept, not guessed. At the old harness default of 5 this pack scored
-# differently; at 16 it reaches 38/53 against a 7/53 baseline with the
-# unrelated-topic controls intact. Larger k was either no better or cost
-# a control point, which is where retrieved context starts displacing
-# what the model already knew.
-recommended_top_k = 16
 memory_type = "semantic"
 domain = "engineering"
 source = "document"

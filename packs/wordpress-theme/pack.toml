@@ -18,12 +18,6 @@ coverage = [
 ]
 
 [content]
-# Swept, not guessed. At the old harness default of 5 this pack scored
-# differently; at 16 it reaches 22/24 against a 7/24 baseline with the
-# unrelated-topic controls intact. Larger k was either no better or cost
-# a control point, which is where retrieved context starts displacing
-# what the model already knew.
-recommended_top_k = 16
 memory_type = "procedural"
 domain = "engineering"
 source = "document"

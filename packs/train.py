@@ -121,8 +121,16 @@ def measure(pack: str, model: str, ids: set[str], top_k: int,
         db = YantrikDB(str(Path(td) / "h.db"), 64)
         db.mount_pack(str(diagnose.newest_pack(pack)))
         for q in qs:
-            hits = [h for h in db.recall(q["q"], top_k=top_k)
-                    if h.get("score", 1.0) >= floor]
+            # recall_text + scores.similarity, NOT recall + score. The
+            # composite score folds in importance and recency, which are
+            # near-uniform across a freshly built pack and carry no
+            # signal about relevance: it runs 0.37-0.91 where similarity
+            # separates cleanly at 0.65-0.79 on-topic against 0.09-0.45
+            # off. Gating the composite at 0.55 filters almost nothing,
+            # so a tool doing that is not measuring what evaluate.py
+            # measures and its controls are not comparable.
+            hits = [h for h in db.recall_text(q["q"], top_k=top_k)
+                    if h.get("scores", {}).get("similarity", 0.0) >= floor]
             texts = [h["text"] for h in hits]
             ans = evaluate.ask(model, q["q"], texts)
             if evaluate.grade(ans, q["expect"]):
