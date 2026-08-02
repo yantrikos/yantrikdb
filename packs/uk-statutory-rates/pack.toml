@@ -1,0 +1,30 @@
+[pack]
+name = "uk-statutory-rates"
+version = "0.1.0"
+origin = "yantrik/uk-statutory-rates"
+namespace = "uk_statutory_rates"
+description = "UK statutory pay and tenancy deposit rules as published on gov.uk, for the rates in force from 1 April 2026: National Minimum Wage and National Living Wage by age band, the apprentice rate and the two-part condition that makes it expire, Statutory Sick Pay as the lower of £123.25 a week and 80% of average weekly earnings, and the England and Wales tenancy deposit regime. These are policy values, not derivable ones — a model without them does not reason its way to £12.71, it recites last year's figure with the same confidence. Every value here was read from the gov.uk page that publishes it on 2 August 2026."
+coverage = [
+    "UK National Minimum Wage and National Living Wage hourly rates by age band",
+    "UK apprentice minimum wage rate and who is actually entitled to it",
+    "when UK minimum wage rates change and how age band boundaries work",
+    "UK Statutory Sick Pay weekly rate, the 80% of earnings comparison and the 8-week averaging",
+    "UK Statutory Sick Pay duration, qualifying days, waiting days and ineligibility",
+    "England and Wales tenancy deposit protection deadlines and approved schemes",
+    "what information a landlord must give a tenant about a protected deposit",
+    "which tenancies and which UK jurisdictions the deposit rules cover",
+]
+
+[content]
+# Not swept yet — 0.1.0 ships the authoring defaults and the sweep runs
+# against the built pack. A small corpus of short, highly distinct
+# records does not need a wide k, and a wide k here would inject four
+# near-identical wage bands into every wage question, which is the
+# sibling-confusion failure this pack is most exposed to.
+recommended_top_k = 6
+recommended_min_similarity = 0.55
+memory_type = "semantic"
+domain = "general"
+source = "document"
+importance = 0.7
+certainty = 0.98

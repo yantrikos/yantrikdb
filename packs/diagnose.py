@@ -138,7 +138,7 @@ def main() -> int:
             texts = [h["text"] for h in hits]
             ctx = "\n\n".join(texts)
             answer = evaluate.ask(args.model, q["q"], texts)
-            passed = evaluate.grade(answer, q["expect"])
+            passed = evaluate.grade(answer, q["expect"], q.get("reject"))
 
             in_retrieved = bool(ctx) and answer_present(q["expect"], ctx)
             if passed:

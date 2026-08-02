@@ -206,8 +206,30 @@ def _alt_matches(alt: str, low: str) -> bool:
 MARKUP = str.maketrans("", "", "`*")
 
 
-def grade(answer: str, expect: list[list[str]]) -> bool:
+def grade(answer: str, expect: list[list[str]], reject: list[str] | None = None) -> bool:
+    """Did the answer say the right thing, and not the wrong thing?
+
+    `reject` exists because numeric domains cannot be graded by presence
+    alone. The UK minimum wage for a worker under 18 is £8, and the
+    superseded 18-to-20 rate is £8.60 — "£8" is a substring of "£8.60",
+    and word boundaries do not help, because in "£8.60" the 8 sits
+    between "£" and ".", which are both non-word characters, so `\\b8\\b`
+    matches it. A model reciting last year's rate would have scored as
+    correct on the exact question the pack exists to fix.
+
+    That is the lenient direction, which is the one that hides: the pack
+    reports a win for reproducing the error it was built to prevent.
+    Every rate, version and date pack has this shape — the wrong answers
+    are not random, they are the previous edition, and the previous
+    edition is usually a numeric prefix or sibling of the right one.
+
+    So a question may name the specific wrong answers it must not
+    contain. This only ever makes the grader stricter: a question
+    without `reject` grades exactly as before.
+    """
     low = answer.lower().translate(MARKUP)
+    if reject and any(_alt_matches(alt.lower(), low) for alt in reject):
+        return False
     return all(any(_alt_matches(alt.lower(), low) for alt in group) for group in expect)
 
 
@@ -320,8 +342,8 @@ def run_pack(
                 {
                     "id": item["id"],
                     "control": is_control,
-                    "baseline": grade(base, item["expect"]),
-                    "mounted": grade(mnt, item["expect"]),
+                    "baseline": grade(base, item["expect"], item.get("reject")),
+                    "mounted": grade(mnt, item["expect"], item.get("reject")),
                     "baseline_answer": base.strip()[:400],
                     "mounted_answer": mnt.strip()[:400],
                     "retrieved": len(context),

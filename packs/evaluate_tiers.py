@@ -107,7 +107,7 @@ def run(model: str, pack_dir: Path, top_k: int, min_similarity: float) -> dict:
                 "corpus": ask(model, BASE_SYSTEM, with_context(t["q"], retrieved)),
                 "constitution": ask(model, const_system, with_context(t["q"], retrieved)),
             }
-            scored = {k: grade(v, t["expect"]) for k, v in answers.items()}
+            scored = {k: grade(v, t["expect"], t.get("reject")) for k, v in answers.items()}
             rows.append({"id": t["id"], "retrieved": len(retrieved), **scored, "answers": answers})
             flags = "".join(
                 "Y" if scored[c] else "." for c in ("baseline", "corpus", "constitution")

@@ -133,7 +133,7 @@ def measure(pack: str, model: str, ids: set[str], top_k: int,
                     if h.get("scores", {}).get("similarity", 0.0) >= floor]
             texts = [h["text"] for h in hits]
             ans = evaluate.ask(model, q["q"], texts)
-            if evaluate.grade(ans, q["expect"]):
+            if evaluate.grade(ans, q["expect"], q.get("reject")):
                 passed += 1
                 continue
             joined = "\n\n".join(texts)

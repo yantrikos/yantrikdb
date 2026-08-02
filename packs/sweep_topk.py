@@ -45,7 +45,7 @@ def score_mounted(db, qs, model, k, floor):
         hits = [h for h in db.recall_text(q["q"], top_k=k)
                 if h.get("scores", {}).get("similarity", 0.0) >= floor]
         ans = evaluate.ask(model, q["q"], [h["text"] for h in hits])
-        ok += evaluate.grade(ans, q["expect"])
+        ok += evaluate.grade(ans, q["expect"], q.get("reject"))
     return ok
 
 
@@ -55,9 +55,9 @@ def sweep(pack: str, model: str, floor: float, ks) -> dict:
     ctl = evaluate.load_jsonl(HERE / "control.jsonl")
 
     # Baseline once: no pack is mounted, so k cannot change it.
-    base = sum(evaluate.grade(evaluate.ask(model, q["q"], None), q["expect"])
+    base = sum(evaluate.grade(evaluate.ask(model, q["q"], None), q["expect"], q.get("reject"))
                for q in qs)
-    ctl_base = sum(evaluate.grade(evaluate.ask(model, q["q"], None), q["expect"])
+    ctl_base = sum(evaluate.grade(evaluate.ask(model, q["q"], None), q["expect"], q.get("reject"))
                    for q in ctl)
 
     rows = []

@@ -83,7 +83,7 @@ def run_certification(
                 evaluate.SYSTEM = saved
             if answer.startswith("<<error"):
                 raise SystemExit(f"model call failed: {answer} — refusing to certify")
-            return grade(answer, item["expect"])
+            return grade(answer, item["expect"], item.get("reject"))
 
         holdout_base = sum(condition(i, False) for i in holdout)
         holdout_mnt = sum(condition(i, True) for i in holdout)

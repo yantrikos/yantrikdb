@@ -58,7 +58,7 @@ def score(db, qs, model, k, floor):
         hits = [h for h in db.recall_text(q["q"], top_k=k)
                 if h.get("scores", {}).get("similarity", 0.0) >= floor]
         ans = evaluate.ask(model, q["q"], [h["text"] for h in hits])
-        ok += evaluate.grade(ans, q["expect"])
+        ok += evaluate.grade(ans, q["expect"], q.get("reject"))
         ranks.append(len(hits))
     return ok, sum(ranks) / len(ranks)
 
