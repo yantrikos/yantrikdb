@@ -6,6 +6,24 @@ namespace = "yantrikdb_engine"
 description = "How the YantrikDB engine actually behaves: retrieval pipeline, scoring constants, write gates, deletion semantics, and pack internals. Grounded in the source at schema v38."
 
 [content]
+# This pack needs BOTH retrieval parameters set, and it is the reason
+# the second one exists.
+#
+# At the default floor of 0.55 it costs a control point at every top_k
+# tested — consistently, not as noise. The mechanism is visible: asked
+# "which SQL statement removes every row faster than DELETE", the
+# engine's own deletion records ("deletion is tombstoning, never a hard
+# DELETE", "no bulk delete") score 0.617, 0.578 and 0.551 on the word
+# `delete` alone. The model notices they are irrelevant, says so, and
+# still fails to answer TRUNCATE. Near-domain material is more
+# dangerous than unrelated material precisely because it clears the
+# floor.
+#
+# 0.62 excludes all three, keeps the score at 12/20, and restores the
+# controls to 12/12. Higher collapses it (9/20 at 0.65), because this
+# pack's genuine hits sit in the low 0.6s.
+recommended_top_k = 16
+recommended_min_similarity = 0.62
 memory_type = "semantic"
 domain = "engineering"
 source = "document"

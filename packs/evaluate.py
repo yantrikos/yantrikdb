@@ -161,6 +161,19 @@ def grade(answer: str, expect: list[list[str]]) -> bool:
     return all(any(_alt_matches(alt.lower(), low) for alt in group) for group in expect)
 
 
+def pack_setting(pack: str, key: str, fallback):
+    """A retrieval parameter the pack declares for itself."""
+    try:
+        import tomllib
+        cfg = tomllib.loads(
+            (Path(__file__).resolve().parent / pack / "pack.toml")
+            .read_text(encoding="utf-8"))
+        v = cfg.get("content", {}).get(key)
+        return type(fallback)(v) if v is not None else fallback
+    except Exception:                                  # noqa: BLE001
+        return fallback
+
+
 def recommended_top_k(pack: str, fallback: int) -> int:
     """The pack's own swept top_k, if it declares one.
 
@@ -177,14 +190,7 @@ def recommended_top_k(pack: str, fallback: int) -> int:
     which is what stops this becoming a dial for inflating a listing,
     because attach-harm climbs with k and the controls show it.
     """
-    try:
-        import tomllib
-        cfg = tomllib.loads(
-            (Path(__file__).resolve().parent / pack / "pack.toml")
-            .read_text(encoding="utf-8"))
-        return int(cfg.get("content", {}).get("recommended_top_k", fallback))
-    except Exception:                                  # noqa: BLE001
-        return fallback
+    return pack_setting(pack, "recommended_top_k", fallback)
 
 
 def load_jsonl(p: Path) -> list[dict]:
@@ -320,8 +326,13 @@ def main() -> None:
             print(f"\n=== {model}  x  {pd.name} ===")
             t0 = time.time()
             k = args.top_k or recommended_top_k(pd.name, 5)
-            res = run_pack(model, pd, k, control, args.min_similarity)
-            res['top_k'] = k
+            # The floor is per-pack too. yantrikdb-engine is the reason:
+            # its own deletion records clear the default 0.55 on the word
+            # "delete" and derail an unrelated SQL question at every k.
+            floor = pack_setting(pd.name, "recommended_min_similarity",
+                                 args.min_similarity)
+            res = run_pack(model, pd, k, control, floor)
+            res["top_k"], res["min_similarity"] = k, floor
             res["seconds"] = round(time.time() - t0, 1)
             results.append(res)
 

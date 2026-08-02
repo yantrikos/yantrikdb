@@ -26,7 +26,7 @@ coverage = [
 # 43/53. Past ~20 the score plateaus and the unrelated-topic
 # controls start flickering, which is where extra context begins
 # displacing what the model already knew.
-recommended_top_k = 16
+recommended_top_k = 24
 memory_type = "semantic"
 domain = "engineering"
 source = "document"
