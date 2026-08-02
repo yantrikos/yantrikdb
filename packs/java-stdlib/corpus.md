@@ -995,3 +995,24 @@ against the local JDK, and may not match its version. The pack was
 generated from a specific JDK; an uncertain claim about another
 version deserves the same caveat. Verification command for any class:
 `javap -public java.util.List` prints its true public signatures.
+
+## java.util.SequencedCollection: first and last element access added in Java 21: getfirst, getlast, reversed
+
+`getFirst()`, `getLast()`, `addFirst()`, `addLast()`, `removeFirst()`,
+`removeLast()` and `reversed()` are declared on `SequencedCollection`,
+an interface introduced in **Java 21** (JEP 431) and retrofitted onto
+`List`, `Deque` and `LinkedHashSet`.
+
+```java
+List<String> names = List.of("ana", "bo", "cy");
+names.getFirst();     // "ana"   — Java 21 and later
+names.getLast();      // "cy"
+names.reversed();     // [cy, bo, ana]  — a view, not a copy
+```
+
+Before Java 21 there is no `getFirst()` on `List`: the equivalents are
+`list.get(0)` and `list.get(list.size() - 1)`. Calling `getFirst()` on a
+`List` while targeting Java 17 or any earlier release does not compile,
+and it is a common invented-API error because the method reads like it
+has always existed. `SequencedMap`, with `firstEntry()`, `lastEntry()`
+and `putFirst()`, arrived in the same release.

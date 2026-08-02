@@ -123,6 +123,31 @@ def ask(
         return f"<<error: {e}>>"
 
 
+# Word boundaries that treat "_" as a SEPARATOR rather than a letter.
+#
+# `\b` uses the regex word class, which includes underscore, so
+# `\bfinfo\b` cannot match "finfo_file" — the boundary after "finfo"
+# fails against "_". php-modern's upload record says exactly the right
+# thing ("Determine the type server-side with `finfo_file`") and the
+# expectation `finfo` scored it as absent, so diagnose.py classified the
+# question MISS_CONTENT: no record contains the answer. I very nearly
+# authored a duplicate record for a fact that was already there, and
+# lint_pack's near-duplicate check is the only reason I did not.
+#
+# In every language this repo has packs for, "_" separates words inside
+# an identifier — it is punctuation that looks like a letter. So the
+# boundary excludes it deliberately, while keeping digits and letters,
+# which is what the anti-leniency guard actually depends on: "no" still
+# cannot match k*no*w, "not" cannot match can*not*, "20" cannot match
+# "2024". Only underscore adjacency changes.
+#
+# Third distinct bug from the same root, after the markup strip and the
+# unmatchable stems. Underscore is not decoration and it is not a
+# letter, and every layer that assumed one or the other was wrong.
+_LEFT = r"(?<![0-9a-z])"
+_RIGHT = r"(?![0-9a-z])"
+
+
 def _alt_matches(alt: str, low: str) -> bool:
     """Match one alternative against a lowercased answer.
 
@@ -155,8 +180,8 @@ def _alt_matches(alt: str, low: str) -> bool:
         # and "not" matched can*not* — two and three characters, which
         # stay whole-word and cannot creep back in.
         if alt.isalpha() and len(alt) >= 6:
-            return re.search(rf"\b{re.escape(alt)}", low) is not None
-        return re.search(rf"\b{re.escape(alt)}\b", low) is not None
+            return re.search(rf"{_LEFT}{re.escape(alt)}", low) is not None
+        return re.search(rf"{_LEFT}{re.escape(alt)}{_RIGHT}", low) is not None
     return alt in low
 
 
