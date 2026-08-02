@@ -83,8 +83,12 @@ def main() -> int:
     args = ap.parse_args()
 
     evaluate.OLLAMA = evaluate.resolve_host(args.host)
+    # A pack.toml alone is not enough — a directory can be a pack source
+    # with no eval set yet (einstein-method), and crashing on it throws
+    # away every result already computed in the same run.
     packs = ([p.name for p in sorted(HERE.iterdir())
-              if (p / "pack.toml").exists()] if args.all else [args.pack])
+              if (p / "pack.toml").exists() and (p / "eval.jsonl").exists()]
+             if args.all else [args.pack])
     ctl = evaluate.load_jsonl(HERE / "control.jsonl")
 
     for pack in packs:
