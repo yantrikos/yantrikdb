@@ -81,8 +81,24 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--pack", required=True)
     ap.add_argument("--model", default="qwen3.5:4b")
-    ap.add_argument("--top-k", type=int, default=5)
-    ap.add_argument("--min-similarity", type=float, default=0.55)
+    # Default to the pack's OWN declared retrieval settings, not to a
+    # number chosen here.
+    #
+    # These were hardcoded to top_k=5 / 0.55, which meant this tool
+    # diagnosed a configuration that nobody ships. mcp-spec declares
+    # top_k=16 and a 0.62 floor and measures 52/53 through evaluate.py;
+    # under the hardcoded defaults it came out 43/53, and the ten
+    # "failures" were a work list for a pack that does not exist. Eight
+    # of them were labelled MISS_RETRIEVAL, which is exactly what
+    # starving retrieval of two thirds of its budget produces — so the
+    # tool was not merely wrong, it was wrong in the direction that
+    # invents the most plausible-looking work.
+    #
+    # This is the third tool in this directory to invent its own gating
+    # and disagree with the trusted path. The rule now: a measurement
+    # tool reads the pack's settings, and any override is explicit.
+    ap.add_argument("--top-k", type=int, default=None)
+    ap.add_argument("--min-similarity", type=float, default=None)
     ap.add_argument("--only-failures", action="store_true")
     ap.add_argument("--host", default=None)
     args = ap.parse_args()
@@ -90,6 +106,13 @@ def main() -> int:
     evaluate.OLLAMA = evaluate.resolve_host(args.host)
     questions = evaluate.load_jsonl(HERE / args.pack / "eval.jsonl")
     pack_file = newest_pack(args.pack)
+
+    top_k = (args.top_k if args.top_k is not None
+             else evaluate.recommended_top_k(args.pack, 16))
+    floor = (args.min_similarity if args.min_similarity is not None
+             else evaluate.pack_setting(args.pack, "recommended_min_similarity", 0.55))
+    print(f"  retrieval: top_k={top_k} floor={floor}"
+          f"{' (declared by the pack)' if args.top_k is None else ' (overridden)'}")
 
     # ignore_cleanup_errors: on Windows the engine still holds the
     # database file when the context manager unwinds, and a
@@ -108,9 +131,9 @@ def main() -> int:
 
         verdicts, rows = Counter(), []
         for q in questions:
-            hits = [h for h in db.recall_text(q["q"], top_k=args.top_k)
+            hits = [h for h in db.recall_text(q["q"], top_k=top_k)
                     if h.get("scores", {}).get("similarity", 0.0)
-                    >= args.min_similarity]
+                    >= floor]
 
             texts = [h["text"] for h in hits]
             ctx = "\n\n".join(texts)
