@@ -1,0 +1,105 @@
+{
+  "candidate": "uk-statutory-rates-2026 (jurisdiction bureaucracy)",
+  "source": "gov.uk — /national-minimum-wage-rates, /statutory-sick-pay, /tenancy-deposit-protection",
+  "source_snapshot": "fetched 2026-08-01; NMW page states 'The rates change on 1 April every year', so this snapshot is the April 2026 set",
+  "_why_this_candidate": "Top-ranked in the non-coding pack strategy: jurisdiction-specific bureaucracy. Statutory values are set by policy rather than derived, they change on a fixed annual date, they are consequential to get wrong (an employer underpaying wages is breaking the law), and they give free deterministic evals because the correct answer is a published number. The privacy story is also the strongest of any candidate — payroll and tenancy questions are exactly what people will not send to a hosted model — which makes a local model the only option and the pack existence rather than optimisation.",
+  "judge_or_compute": "JUDGE, with one caveat worth stating. Every probe here is recall of a published value or a published rule: a rate, a deadline, a scheme name, an eligibility boundary. None requires the model to compute anything. The caveat is that DOWNSTREAM tasks in this domain — 'what redundancy pay is owed to this person' — are arithmetic over these values, and arithmetic is exactly what small models are unreliable at. So the packable half is the VALUES AND RULES; any calculator built on top is a tool, and the pack must not claim to do the sum.",
+  "probes": [
+    {
+      "id": "nmw-21-and-over",
+      "q": "What is the UK National Living Wage hourly rate for someone aged 21 or over?",
+      "wrong": ["11.44", "11.00", "10.42", "12.21"],
+      "right": ["12.71"],
+      "span": "21 and over: £12.71",
+      "arbitrary": true
+    },
+    {
+      "id": "nmw-18-to-20",
+      "q": "What is the UK National Minimum Wage hourly rate for an 18 to 20 year old?",
+      "wrong": ["8.60", "7.49", "10.00", "9.18"],
+      "right": ["10.85"],
+      "span": "18 to 20: £10.85",
+      "arbitrary": true
+    },
+    {
+      "id": "nmw-under-18",
+      "q": "What is the UK National Minimum Wage hourly rate for a worker under 18?",
+      "wrong": ["6.40", "5.28", "7.55"],
+      "right": ["£8", "8.00"],
+      "span": "Under 18: £8",
+      "arbitrary": true
+    },
+    {
+      "id": "nmw-apprentice-rate",
+      "q": "What is the UK apprentice minimum wage hourly rate?",
+      "wrong": ["6.40", "5.28", "7.55"],
+      "right": ["£8", "8.00"],
+      "span": "Apprentice: £8",
+      "arbitrary": true
+    },
+    {
+      "id": "nmw-change-date",
+      "q": "On what date do UK National Minimum Wage rates change each year?",
+      "wrong": ["1 october", "october", "6 april", "1 january"],
+      "right": ["1 april", "april"],
+      "span": "The rates change on 1 April every year.",
+      "arbitrary": true
+    },
+    {
+      "id": "apprentice-eligibility",
+      "q": "A UK apprentice is 22 years old and in the second year of their apprenticeship. Which minimum wage rate applies to them?",
+      "wrong": ["apprentice rate", "£8", "8.00"],
+      "right": ["12.71", "21 and over", "national living wage"],
+      "span": "aged under 19, or aged 19 or over and in the first year of their apprenticeship, receive the apprentice rate",
+      "arbitrary": true
+    },
+    {
+      "id": "ssp-weekly-rate",
+      "q": "What is the UK Statutory Sick Pay weekly rate?",
+      "wrong": ["116.75", "109.40", "99.35", "118.75"],
+      "right": ["123.25"],
+      "span": "You can get up to £123.25 per week Statutory Sick Pay (SSP)",
+      "arbitrary": true
+    },
+    {
+      "id": "ssp-duration",
+      "q": "For how many weeks can UK Statutory Sick Pay be paid?",
+      "wrong": ["26", "52", "12"],
+      "right": ["28"],
+      "span": "It's paid by your employer for up to 28 weeks.",
+      "arbitrary": true
+    },
+    {
+      "id": "deposit-protect-deadline",
+      "q": "How long does a UK landlord have to put a tenancy deposit into a protection scheme?",
+      "wrong": ["14 days", "28 days", "60 days", "immediately"],
+      "right": ["30 days"],
+      "span": "Your landlord or letting agent must put your deposit in the scheme within 30 days of getting it.",
+      "arbitrary": true
+    },
+    {
+      "id": "deposit-return-deadline",
+      "q": "Once a UK landlord and tenant agree how much of the deposit is returned, how long does the landlord have to return it?",
+      "wrong": ["14 days", "30 days", "7 days"],
+      "right": ["10 days"],
+      "span": "Your landlord must return your deposit within 10 days of you both agreeing how much you'll get back.",
+      "arbitrary": true
+    },
+    {
+      "id": "deposit-schemes-named",
+      "q": "Name the government-approved tenancy deposit protection schemes in England and Wales.",
+      "wrong": ["shelter", "citizens advice", "land registry"],
+      "right": ["deposit protection service", "mydeposits", "tenancy deposit scheme"],
+      "span": "Deposit Protection Service; MyDeposits (including deposits held by Capita); Tenancy Deposit Scheme",
+      "arbitrary": true
+    },
+    {
+      "id": "nmw-band-boundary",
+      "q": "A UK worker turns 21 tomorrow. Which National Minimum Wage band are they in today, and what does it pay?",
+      "wrong": ["12.71", "national living wage"],
+      "right": ["10.85", "18 to 20"],
+      "span": "18 to 20: £10.85 ... 21 and over: £12.71",
+      "arbitrary": true
+    }
+  ]
+}
