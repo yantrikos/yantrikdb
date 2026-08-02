@@ -62,7 +62,11 @@ TOO_COMMON = {
 # Suffixes an author silently assumes a stem will cover. It will not:
 # the grader matches whole words.
 INFLECTIONS = ("e", "s", "es", "ed", "ing", "y", "ies", "ion", "ions",
-               "al", "ity", "ies", "er", "ers", "ly")
+               "al", "ity", "ies", "er", "ers", "ly",
+               # "le" and "ility": "visib" -> visible / visibility. Missed
+               # the first time and it cost a near-domain control, which
+               # was scored as a model failure on a correct answer.
+               "le", "les", "ility", "ilities")
 
 
 def stem_suspects(alt: str, context: str, alts: set[str]) -> str | None:
@@ -74,8 +78,37 @@ def stem_suspects(alt: str, context: str, alts: set[str]) -> str | None:
     typing a stem into `expect`. A stem whose inflection is also listed
     as its own alternative is fine, since the group can still match.
     """
-    if not alt.isalpha() or len(alt) < 4:
+    # Six characters and up now WORK as stems: the grader matches a long
+    # alphabetic alternative as a left-bounded prefix, so "optimiz"
+    # covers optimize/optimized/optimisation deliberately. Flagging those
+    # would be flagging the feature.
+    #
+    # Four and five characters are the trap. They fall under the stem
+    # threshold, so they match whole-word only, and an author writing
+    # "visib", "modif", "cach" or "decay" gets an expectation that can
+    # never match visible / modifying / caching / decays. Three of the
+    # near-domain controls were scored as model failures on answers that
+    # were completely correct, and the threshold itself is not the bug —
+    # lowering it to five would let "state" match "statement".
+    if not alt.isalpha() or not (4 <= len(alt) <= 5):
         return None
+
+    # If the alternative appears as a WHOLE WORD in the evidence, it is a
+    # real word and not a truncated stem — leave it alone.
+    #
+    # Without this the check drowns itself. Scanning a whole corpus finds
+    # an inflection of nearly every common word, so "throw" got flagged
+    # because "throws" exists somewhere, and likewise user/users,
+    # path/paths, hook/hooks, link/links, tool/tools. Eighty-two hits,
+    # almost all of them correct expectations, which is how a linter
+    # trains people to ignore it.
+    #
+    # A genuine stem is not a word: "optimiz", "visib", "cach", "modif"
+    # and "eliminat" never appear standalone anywhere, which is exactly
+    # what distinguishes them from "throw".
+    if re.search(rf"\b{re.escape(alt)}\b", context, re.I):
+        return None
+
     for suf in INFLECTIONS:
         cand = alt + suf
         if cand in alts:
@@ -90,6 +123,18 @@ def stem_suspects(alt: str, context: str, alts: set[str]) -> str | None:
 def lint_file(path: Path) -> list[str]:
     problems: list[str] = []
     seen_ids: set[str] = set()
+
+    # The pack's own corpus is evidence too, and it is the evidence that
+    # matters most. A model's answer vocabulary comes from the records
+    # injected into it, so if the corpus says "compilers optimize away"
+    # and the expectation says "optimiz", the corpus is where the proof
+    # lives — not in the question, which is what this check used to read.
+    #
+    # That gap is exactly how 35 unmatchable stems reached publication:
+    # every one appeared in answers and corpus records, and none of them
+    # appeared in the question that was supposed to reveal it.
+    corpus_path = path.parent / "corpus.md"
+    corpus = corpus_path.read_text(encoding="utf-8") if corpus_path.exists() else ""
 
     for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         line = line.strip()
@@ -147,14 +192,19 @@ def lint_file(path: Path) -> list[str]:
                     )
                 # The too-strict direction: a stem the word-boundary
                 # matcher can never match, marking correct answers wrong.
-                ctx = f"{row.get('q', '')} {row.get('note', '')}"
-                inflected = stem_suspects(alt, ctx, set(alts))
+                own = f"{row.get('q', '')} {row.get('note', '')}"
+                inflected = stem_suspects(alt, own, set(alts))
+                where_seen = "this question's own text"
+                if not inflected and corpus:
+                    inflected = stem_suspects(alt, corpus, set(alts))
+                    where_seen = "the pack's corpus"
                 if inflected:
                     problems.append(
-                        f"{where} [{qid}]: group {gi} alternative {alt!r} is a "
-                        f"stem — the grader matches whole words, so it will "
-                        f"NOT match {inflected!r}, which this question's own "
-                        f"text uses. List the full form(s) instead."
+                        f"{where} [{qid}]: group {gi} alternative {alt!r} is "
+                        f"{len(alt)} chars, below the stem threshold, so the "
+                        f"grader matches it whole-word only and it will NOT "
+                        f"match {inflected!r} — which {where_seen} uses. List "
+                        f"the full form(s), or lengthen the stem to 6+ chars."
                     )
 
         for alt in sorted(waived):
