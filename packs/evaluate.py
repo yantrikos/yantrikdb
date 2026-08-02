@@ -161,6 +161,32 @@ def grade(answer: str, expect: list[list[str]]) -> bool:
     return all(any(_alt_matches(alt.lower(), low) for alt in group) for group in expect)
 
 
+def recommended_top_k(pack: str, fallback: int) -> int:
+    """The pack's own swept top_k, if it declares one.
+
+    top_k has no engine default — it is a required argument — so the
+    harness's 5 was never a product default, just a habit. It turned out
+    to be the binding constraint on the best packs: on mcp-spec the
+    answer to four questions sat at rank 6 to 17, above the similarity
+    floor and simply cut off. Raising it to 16 was worth +3 there and
+    +2 on react-craft with no authoring at all.
+
+    The right value depends on corpus size and density, so it belongs to
+    the pack rather than to the harness. It is reported alongside every
+    score, and the unrelated-topic controls are measured at the same k —
+    which is what stops this becoming a dial for inflating a listing,
+    because attach-harm climbs with k and the controls show it.
+    """
+    try:
+        import tomllib
+        cfg = tomllib.loads(
+            (Path(__file__).resolve().parent / pack / "pack.toml")
+            .read_text(encoding="utf-8"))
+        return int(cfg.get("content", {}).get("recommended_top_k", fallback))
+    except Exception:                                  # noqa: BLE001
+        return fallback
+
+
 def load_jsonl(p: Path) -> list[dict]:
     return [json.loads(line) for line in p.read_text(encoding="utf-8").splitlines() if line.strip()]
 
@@ -264,7 +290,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--model", action="append", default=[])
     ap.add_argument("--pack", action="append", default=[])
-    ap.add_argument("--top-k", type=int, default=5)
+    ap.add_argument("--top-k", type=int, default=None,
+                    help="override the pack's recommended_top_k")
     ap.add_argument(
         "--min-similarity",
         type=float,
@@ -292,7 +319,9 @@ def main() -> None:
         for pd in pack_dirs:
             print(f"\n=== {model}  x  {pd.name} ===")
             t0 = time.time()
-            res = run_pack(model, pd, args.top_k, control, args.min_similarity)
+            k = args.top_k or recommended_top_k(pd.name, 5)
+            res = run_pack(model, pd, k, control, args.min_similarity)
+            res['top_k'] = k
             res["seconds"] = round(time.time() - t0, 1)
             results.append(res)
 

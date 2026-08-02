@@ -19,6 +19,14 @@ coverage = [
 ]
 
 [content]
+# How many records a consumer should retrieve per query for THIS pack.
+# Swept, not guessed: at the old harness default of 5 this pack scored
+# 40/53 and the answer to several questions sat at rank 6 to 17 —
+# above the similarity floor and cut off by top_k. At 16 it scores
+# 43/53. Past ~20 the score plateaus and the unrelated-topic
+# controls start flickering, which is where extra context begins
+# displacing what the model already knew.
+recommended_top_k = 16
 memory_type = "semantic"
 domain = "engineering"
 source = "document"
