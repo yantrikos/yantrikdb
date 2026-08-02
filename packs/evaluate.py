@@ -139,6 +139,23 @@ def _alt_matches(alt: str, low: str) -> bool:
     alternatives are long enough not to collide by accident.
     """
     if alt.isalnum():
+        # A LONG alphabetic alternative is treated as a stem: bounded on
+        # the left only, so "optimiz" covers optimize / optimized /
+        # optimisation and "eliminat" covers eliminated / elimination.
+        #
+        # Authors write these deliberately and whole-word matching made
+        # every one unmatchable. c-safety lost points on answers that
+        # said exactly the right thing ("compilers optimize away the
+        # operation") because the expectation read "optimiz". lint_evals
+        # only flags a stem when its inflection appears in the QUESTION,
+        # and these appear only in the answer, so nothing caught them.
+        #
+        # The six-character floor is what keeps this safe. The
+        # anti-leniency guard exists because "no" once matched k*no*w
+        # and "not" matched can*not* — two and three characters, which
+        # stay whole-word and cannot creep back in.
+        if alt.isalpha() and len(alt) >= 6:
+            return re.search(rf"\b{re.escape(alt)}", low) is not None
         return re.search(rf"\b{re.escape(alt)}\b", low) is not None
     return alt in low
 
@@ -171,6 +188,21 @@ def _alt_matches(alt: str, low: str) -> bool:
 # aimed at markdown quietly broke matching; the lesson is that the
 # answer text must be normalised as little as possible, because every
 # character removed is a character an identifier might have needed.
+#
+# Re-measuring the whole line afterwards showed "three questions" was a
+# large understatement, and understated it in a specific way. The cost
+# was not spread evenly — it fell on each pack in proportion to how much
+# snake_case its domain uses. At a fixed top_k, correcting this moved
+# wordpress-expert 6/20 -> 17/20 and yantrikdb-engine 12/20 -> 18/20,
+# while camelCase and prose packs moved by one question or none.
+#
+# So the bug did not merely depress the scores, it REORDERED them, and
+# ordering is what pack decisions are made on: java-stdlib was shelved
+# as net-negative and wordpress-expert written off as content-bound,
+# both on readings of this instrument. A measurement error correlated
+# with the property being measured is more dangerous than a large
+# uncorrelated one, because the averages and the control set both stay
+# clean while the ranking silently goes wrong.
 MARKUP = str.maketrans("", "", "`*")
 
 
