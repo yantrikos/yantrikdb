@@ -215,7 +215,9 @@ In `templates/`: `index.html` (required), then `front-page.html`,
 resolution order mirrors the classic hierarchy — `single-{post-type}.html`
 before `single.html`.
 
-## Template parts live in parts/ and are declared in theme.json
+## Which directory holds template part files: parts/, with their areas declared in theme.json
+
+The directory that holds template part files is `parts/`, NOT `templates/` — `templates/` holds whole templates. Their areas are declared in `theme.json` under `templateParts`.
 
 Files go in `parts/header.html` and `parts/footer.html`. Their areas are
 declared so the editor groups them correctly:
@@ -484,6 +486,16 @@ handling for flex and grid layouts, and `:root :where()` global styles.
 A theme reimplementing a container width, a grid gap or a button reset is
 usually fighting one of these — and the symptom is a rule that "does not
 apply" until it is given `!important`.
+
+## A trailing comma in theme.json: invalid JSON that fails silently
+
+A trailing comma makes `theme.json` INVALID JSON. WordPress does not
+report an error and does not tolerate it — the file fails to parse, and
+every setting in it is silently ignored while the theme falls back to
+default styles. The theme still activates and still renders, which is
+why this is so often missed: nothing announces the failure, the site
+simply looks unstyled. It is the usual culprit when theme.json settings
+appear to have no effect.
 
 ## Debugging a theme that will not activate
 
