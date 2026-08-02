@@ -19,6 +19,15 @@ coverage = [
 ]
 
 [content]
+# Both parameters swept through evaluate.py, which is the path that
+# gates on similarity rather than the composite recall score.
+#
+# The floor is not cosmetic here. At 0.55 three records scoring
+# 0.565-0.569 — task status, capabilities, progress tokens — were being
+# injected into "what is 17 multiplied by 23?" and the model answered
+# 409. Noise that clears the floor is enough to break arithmetic.
+recommended_top_k = 16
+recommended_min_similarity = 0.60
 # How many records a consumer should retrieve per query for THIS pack.
 memory_type = "semantic"
 domain = "engineering"

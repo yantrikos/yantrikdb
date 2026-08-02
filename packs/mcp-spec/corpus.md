@@ -337,10 +337,17 @@ HTTP.
 Every POST to the MCP endpoint carries `MCP-Protocol-Version` matching
 the body's `io.modelcontextprotocol/protocolVersion` exactly; a
 mismatch is 400 + HeaderMismatch (-32020). Unsupported version: 400 +
-UnsupportedProtocolVersionError listing supported versions. Unknown
-method: 404 + JSON-RPC -32601, distinguishing a modern server from a
-legacy HTTP+SSE 404. A server supporting pre-2025-06-18 clients may
-treat a missing header as 2025-03-26; otherwise it rejects.
+UnsupportedProtocolVersionError listing supported versions.
+
+At an MCP endpoint specifically — this is MCP's use of the status code,
+not HTTP's general meaning of it — an unknown METHOD in the JSON-RPC
+body returns 404 together with JSON-RPC -32601. The pairing is what
+distinguishes a modern server from a legacy HTTP+SSE server's 404,
+which carries no JSON-RPC error at all. In plain HTTP, 404 still means
+what it always has: the requested resource does not exist.
+
+A server supporting pre-2025-06-18 clients may treat a missing header
+as 2025-03-26; otherwise it rejects.
 
 ## Mcp-Method and Mcp-Name request headers
 
