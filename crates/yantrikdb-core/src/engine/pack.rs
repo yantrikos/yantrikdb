@@ -191,6 +191,25 @@ pub struct PackManifest {
     /// this; its retrieved material is authoritative here."
     #[serde(default)]
     pub coverage: Vec<String>,
+    /// How a consumer should retrieve from this pack: the `top_k` and
+    /// similarity floor its author measured.
+    ///
+    /// These exist because the author and the consumer are usually not
+    /// the same party. A pack's floor is swept against a control set —
+    /// too low admits near-domain records that corrupt answers about
+    /// neighbouring topics, too high refuses questions the pack can
+    /// answer — and the winning value is a property of *that corpus*,
+    /// not a constant. Without carrying them, a host holding only the
+    /// sealed file has no choice but to guess, and a guessed floor is
+    /// precisely what produces confident answers assembled from records
+    /// that should never have been injected.
+    ///
+    /// `None` means the author did not declare one, and the host should
+    /// fall back to its own default rather than assume a value.
+    #[serde(default)]
+    pub recommended_top_k: Option<u32>,
+    #[serde(default)]
+    pub recommended_min_similarity: Option<f64>,
 }
 
 impl PackManifest {
@@ -235,6 +254,33 @@ pub fn signing_payload(m: &PackManifest) -> Vec<u8> {
     push(&(m.coverage.len() as u64).to_le_bytes());
     for topic in &m.coverage {
         push(topic.as_bytes());
+    }
+    // Retrieval settings are appended ONLY when present, and each is
+    // tagged with its own name.
+    //
+    // Appending only when present is what keeps this backward
+    // compatible: a pack sealed before these fields existed carries
+    // `None` for both, contributes no bytes here, and therefore produces
+    // a payload byte-identical to the one it was signed over. Every
+    // already-published pack keeps verifying, with no re-signing and no
+    // `sig.v2`.
+    //
+    // They ARE signed rather than left as loose metadata. A floor is not
+    // cosmetic like `description`: lowering it changes which records get
+    // injected, so an unsigned floor would let anyone who can rewrite
+    // the file make a pack answer from material its author had
+    // deliberately gated out — without touching a single row of content
+    // or breaking the content digest.
+    //
+    // The name tag disambiguates: with only one of the two set,
+    // a bare value would be positionally ambiguous to a verifier.
+    if let Some(k) = m.recommended_top_k {
+        push(b"recommended_top_k");
+        push(&(k as u64).to_le_bytes());
+    }
+    if let Some(f) = m.recommended_min_similarity {
+        push(b"recommended_min_similarity");
+        push(&f.to_le_bytes());
     }
     out
 }

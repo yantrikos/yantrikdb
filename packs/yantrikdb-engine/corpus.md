@@ -349,3 +349,274 @@ a mounted pack can never be rewritten underneath its own reader.
 `origin_actor`, `idempotency_key` and `confidence_basis` columns to
 `memories` plus the `idempotency_claims` table; version 38 was an oplog
 index fix.
+
+## Starting and ending a YantrikDB session, and what session_end gives back
+
+`session_start(namespace, client_id="default", metadata=None)` returns a
+session id string. `session_end(session_id, summary=None)` needs that id
+back — it does not end "the current session" implicitly, and calling it
+with no argument is a `TypeError`.
+
+```python
+sid = db.session_start(namespace="ops")
+report = db.session_end(sid, "shipped the pack")
+# {"session_id": ..., "duration_secs": 0.0009, "memory_count": 0,
+#  "avg_valence": 0.0, "topics": []}
+```
+
+`session_end` returns a summary dict, not a bool: duration, how many
+memories were written during the session, average valence and the topics
+it touched.
+
+## active_session takes a namespace, and returns None once the session has ended
+
+`active_session(namespace="default")` returns the open session for THAT
+namespace as a dict, or `None` if there is not one. The namespace
+argument is the part that surprises people: a session started in `ops` is
+not visible to `active_session()` with no arguments, because that asks
+about the `default` namespace and correctly answers `None`.
+
+After `session_end`, `active_session` for the same namespace returns
+`None` — the session moves to `session_history`.
+
+## Reading past YantrikDB sessions with session_history
+
+`session_history(namespace="default", client_id="default", limit=10)`
+returns ended sessions as dicts, newest first, each carrying
+`status="ended"`, `started_at`, `ended_at` and the `summary` string that
+was passed to `session_end`.
+
+This is where a session goes after it ends. `active_session` deliberately
+returns only the open one.
+
+## Conversation turns are a ring buffer, verbatim and not embedded
+
+`record_turn(namespace, role, content, max_turns=10)` appends a raw
+conversation turn to the namespace working-memory ring buffer and prunes
+it to the last `max_turns`. The text is stored **verbatim and is not
+embedded**, so turns are not reachable by `recall` — they are recent
+context to prepend to a prompt, not memories.
+
+It returns an **integer sequence number** (1, 2, 3 and so on), not a
+UUID. Every other write in the engine returns a UUID string, so code that
+assumes a rid here is wrong.
+
+## recent_turns takes the namespace FIRST, not a limit
+
+`recent_turns(namespace, limit=10)` returns the last turns for a
+namespace, **oldest-first**, ready to prepend to a prompt.
+
+The first positional argument is the namespace. `recent_turns(5)` raises
+`TypeError: argument 'namespace': 'int' object is not an instance of
+'str'` — it is not a limit, and the mistake fails loudly rather than
+silently returning turns from the wrong namespace.
+
+Oldest-first is also deliberate: the list is meant to be concatenated
+into a prompt in reading order, not reversed by the caller.
+
+## Turns are not memories, and clearing them is separate
+
+Working-memory turns and memories are different stores. Turns are
+verbatim, unembedded, capped by `max_turns` and cleared with
+`clear_turns`; memories are embedded, ranked, tombstoned with `forget`
+and never dropped by a ring buffer.
+
+If something in a conversation matters beyond the current exchange it has
+to be written with `record_text`. Leaving it in the ring buffer means it
+disappears after `max_turns` more turns, with no tombstone and no trace.
+
+## Creating a YantrikDB task, and why namespace comes first
+
+`task_add(namespace, title, priority="medium", parent_id=None)` returns
+the new task id. The namespace is the first positional argument, before
+the title, which reads backwards if you expect `task_add("ship it")` —
+that call is a `TypeError` for a missing `title`.
+
+`parent_id` makes the task a subtask of another.
+
+```python
+tid = db.task_add("ops", "ship the pack", "high")
+```
+
+## Listing and filtering YantrikDB tasks
+
+`task_list(namespace, status=None)` requires the namespace — there is no
+list-everything call — and returns tasks priority-ordered as dicts with
+`id`, `namespace`, `title`, `status`, `priority`, `parent_id`,
+`created_at` and `updated_at`.
+
+A new task has status `"open"`. Passing `status="done"` filters to the
+completed ones.
+
+## Updating a YantrikDB task returns whether it existed
+
+`task_update(id, status=None, priority=None)` returns a **bool**: `True`
+if a task with that id was found and updated, `False` if it was not.
+
+That return value is the only signal. There is no exception for a missing
+id, so a caller that ignores the bool will silently do nothing when the
+id is wrong.
+
+## upcoming() answers what is due, where task_list answers what exists
+
+`upcoming()` returns tasks and reminders that are due, across
+namespaces. It is the read for "what should I be working on", where
+`task_list(namespace)` is the read for "what is in this namespace".
+
+An empty list is the normal answer on a fresh database — it means nothing
+is scheduled, not that the call failed.
+
+## YantrikDB personality traits are a fixed vocabulary, and an unknown one silently returns False
+
+`set_personality_trait(name, score)` returns a **bool**, and it returns
+`False` when `name` is not one of the engine known traits.
+
+```python
+db.set_personality_trait("terse", 0.8)   # -> False. Nothing was stored.
+```
+
+There is no exception and no warning. The known traits are the ones
+`get_personality()` already lists — `attentiveness`, `depth`, `warmth`
+and their siblings — so read that list first, and treat a `False` return
+as "that trait does not exist", never as "it was set".
+
+## get_personality returns every trait, including ones never observed
+
+`get_personality()` returns `{"traits": [...]}` where each entry has
+`trait_name`, `score`, `confidence`, `sample_count` and `updated_at`.
+
+On a fresh database every trait is present with `score` 0.5,
+`confidence` 0.0 and `sample_count` 0. A trait appearing in the output
+therefore does NOT mean it has been observed — `confidence` and
+`sample_count` are what separate a measured trait from a default one.
+
+## derive_personality recomputes traits from stored memories
+
+`derive_personality()` derives trait scores from what is actually in the
+database rather than from what was set by hand, and returns the same
+shape as `get_personality()` with updated `confidence` and
+`sample_count`.
+
+Use it when the traits should reflect the corpus; use
+`set_personality_trait` when a human is asserting one directly.
+
+## run_maintenance_cycle is the sleep cycle, and the engine does not schedule it
+
+`run_maintenance_cycle()` runs one hygiene pass and returns a JSON
+**string** summarising what it did — consolidations, conflicts found,
+triggers expired, entities linked, relations upserted.
+
+The engine owns no timer. A host schedules this; nothing runs it
+automatically, so a database that is never maintained simply accumulates.
+
+The heavier corpus-rewriting passes are opt-in and off by default:
+`split_oversized=False` and `repair_artifacts=False`. Everything else —
+think, conflict burn-down, trigger pruning, importance recalibration,
+entity backfill, auto-relate — runs unless switched off.
+
+## learned_weights exposes the ranking weights currently in use
+
+`learned_weights()` returns the live scoring parameters:
+
+```python
+{"w_sim": 0.5, "w_decay": 0.2, "w_recency": 0.3,
+ "gate_tau": 0.25, "alpha_imp": 0.8, "keyword_boost": 0.31,
+ "generation": 0}
+```
+
+`generation` counts how many times learning has updated them; `0` means
+these are the shipped defaults and nothing has been learned yet. This is
+the read that answers "why did that rank where it did" without guessing.
+
+## YantrikDB ships seeded substitution categories
+
+`substitution_categories()` is not empty on a fresh database. The engine
+seeds categories such as `seed_cloud_providers` and `seed_databases`,
+each with a `conflict_mode` of `"exclusive"`, a `status` of `"active"`
+and a `member_count`.
+
+`exclusive` is what makes them useful: members of an exclusive category
+are treated as alternatives to one another, so a new memory naming one
+can be recognised as contradicting a stored memory naming another.
+
+## Category members are ranked by evidence, and llm_suggested lands as pending
+
+`substitution_members(category_id)` lists a category members.
+`learn_category_members` adds members observed at runtime, and
+`reset_category_to_seed` discards everything learned and restores the
+shipped set.
+
+Members carry a source, ranked `seed` above `user_confirmed` above
+`llm_suggested`. Only `llm_suggested` lands a member as `pending`, which
+makes it invisible to lookups until it is promoted — so a category can
+contain a member that is not yet acting on anything.
+
+## Finding contradictions with scan_conflicts, and reading them with get_conflicts
+
+`scan_conflicts()` looks for contradictions and returns what it found;
+`get_conflicts()` reads the currently open ones. Both return `[]` on a
+database with no contradictions, which is the normal answer and not an
+error.
+
+`get_conflict(conflict_id)` reads one. `stats()` carries
+`open_conflicts` and `resolved_conflicts` counts if all that is needed is
+whether any exist at all.
+
+## Resolving a YantrikDB conflict requires naming a strategy
+
+`resolve_conflict(conflict_id, strategy, winner_rid=None, new_text=None,
+resolution_note=None)` needs a strategy — there is no default
+resolution. `winner_rid` names which side survives, `new_text` replaces
+both with a merged statement, and `resolution_note` records why.
+
+`dismiss_conflict` closes one without picking a winner,
+`reclassify_conflict` changes what kind of conflict it is, and
+`auto_resolve_conflicts` applies the automatic rules in bulk — which is
+also what `run_maintenance_cycle` calls during conflict burn-down.
+
+## Trigger lifecycle: pending, delivered, acknowledged or dismissed
+
+`get_pending_triggers()` returns triggers waiting to fire, and `[]` when
+none are. A trigger is then `deliver_trigger(trigger_id)` when shown to
+the user, `acknowledge_trigger` when they respond, `act_on_trigger` when
+it causes something, and `dismiss_trigger` when it should stop.
+
+`prune_triggers` clears expired ones — `run_maintenance_cycle` does this
+too, bounded by `max_pending_triggers=64`. `get_trigger_history` reads
+the ones already handled.
+
+## stats() is the one call that answers what is in this database
+
+`stats()` returns counts in a single dict rather than requiring a call
+per subsystem:
+
+```python
+{"active_memories": 2, "consolidated_memories": 0,
+ "tombstoned_memories": 0, "archived_memories": 0,
+ "edges": 1, "entities": 2, "operations": 6,
+ "open_conflicts": 0, "resolved_conflicts": 0,
+ "pending_triggers": 0}
+```
+
+`active_memories` excludes tombstoned and archived rows, so it is the
+number that matches what recall can return — not the row count of the
+memories table.
+
+## is_encrypted is a property, not a method
+
+`db.is_encrypted` is a **property**. Calling it as `db.is_encrypted()`
+raises `TypeError: 'bool' object is not callable`, because the property
+has already evaluated to a bool by the time the parentheses are applied.
+
+`has_embedder()` sitting next to it IS a method and does need its
+parentheses, so the two cannot be used the same way.
+
+## The YantrikDB provenance gate defaults to enforce
+
+`provenance_gate_mode()` returns the current mode, and on a fresh
+database it is `"enforce"` — the gate is on by default rather than
+opt-in. `set_provenance_gate_mode(mode)` changes it.
+
+`audit_leak_candidates(max_rids=100)` reports records that look like
+inference laundered as fact, which is the condition the gate exists to
+block.

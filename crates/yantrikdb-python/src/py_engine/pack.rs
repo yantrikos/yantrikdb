@@ -32,7 +32,8 @@ impl PyYantrikDB {
     #[pyo3(signature = (
         dest_path, name, version, origin, namespace=None, description=None,
         embedder_name=None, embedder_digest=None, embedder_dim=None,
-        constitution=None, coverage=None
+        constitution=None, coverage=None,
+        recommended_top_k=None, recommended_min_similarity=None
     ))]
     #[allow(clippy::too_many_arguments)]
     fn seal_pack(
@@ -49,6 +50,8 @@ impl PyYantrikDB {
         embedder_dim: Option<usize>,
         constitution: Option<Vec<String>>,
         coverage: Option<Vec<String>>,
+        recommended_top_k: Option<u32>,
+        recommended_min_similarity: Option<f64>,
     ) -> PyResult<PyObject> {
         let db = self
             .inner
@@ -86,6 +89,11 @@ impl PyYantrikDB {
             signature: None,
             constitution: constitution.unwrap_or_default(),
             coverage: coverage.unwrap_or_default(),
+            // Passed through rather than defaulted: an absent value must
+            // stay absent so the host knows the author did not measure
+            // one, instead of inheriting a number invented here.
+            recommended_top_k,
+            recommended_min_similarity,
         };
 
         let sealed = db
@@ -387,6 +395,8 @@ fn manifest_to_dict(py: Python<'_>, m: &PackManifest, path: &str) -> PyResult<Py
     d.set_item("corpus_rows", m.corpus_rows)?;
     d.set_item("constitution", m.constitution.clone())?;
     d.set_item("coverage", m.coverage.clone())?;
+    d.set_item("recommended_top_k", m.recommended_top_k)?;
+    d.set_item("recommended_min_similarity", m.recommended_min_similarity)?;
     d.set_item("publisher_pubkey", m.publisher_pubkey.clone())?;
     d.set_item("signed", m.signature.is_some())?;
     let e = PyDict::new(py);

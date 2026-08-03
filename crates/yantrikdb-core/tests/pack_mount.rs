@@ -123,6 +123,8 @@ fn manifest(digest: Option<&str>) -> PackManifest {
         signature: None,
         constitution: vec!["Never assert a proton half-life as established fact.".into()],
         coverage: vec!["particle physics".into(), "quark structure".into()],
+        recommended_top_k: None,
+        recommended_min_similarity: None,
     }
 }
 
@@ -1090,4 +1092,75 @@ fn mount_unmount_is_safe_under_concurrent_recall() {
     }
     reader.join().unwrap();
     assert!(db.mounted_packs().is_empty());
+}
+
+/// A pack sealed before `recommended_top_k` / `recommended_min_similarity`
+/// existed must still verify against its original signature.
+///
+/// The retrieval settings are appended to the signing payload only when
+/// present, precisely so that adding them is not a format break. If that
+/// ever regresses — someone appends unconditionally, or writes a default
+/// instead of leaving `None` — every already-published pack stops
+/// verifying, and the symptom is a signature failure on an artifact
+/// nobody touched. This pins the byte-level property directly rather
+/// than waiting to discover it in the field.
+#[test]
+fn signing_payload_is_unchanged_when_retrieval_settings_are_absent() {
+    use yantrikdb::engine::pack::{signing_payload, PackEmbedder, PackManifest};
+
+    let base = PackManifest {
+        name: "demo".into(),
+        version: "1.0.0".into(),
+        origin: "pub/demo".into(),
+        description: Some("cosmetic, deliberately unsigned".into()),
+        embedder: PackEmbedder { name: Some("potion-base-2M".into()),
+                                 digest: Some("deadbeef".into()), dim: 64 },
+        content_digest: Some("abc123".into()),
+        corpus_rows: 7,
+        namespace: Some("demo".into()),
+        publisher_pubkey: None,
+        signature: None,
+        constitution: vec!["one rule".into()],
+        coverage: vec!["one topic".into()],
+        recommended_top_k: None,
+        recommended_min_similarity: None,
+    };
+
+    // The payload an old pack was signed over ends after the coverage
+    // block. Absent settings must contribute nothing at all.
+    let without = signing_payload(&base);
+
+    let with_k = PackManifest { recommended_top_k: Some(8), ..base.clone() };
+    let with_both = PackManifest {
+        recommended_top_k: Some(8),
+        recommended_min_similarity: Some(0.6),
+        ..base.clone()
+    };
+
+    assert_eq!(
+        without,
+        signing_payload(&base),
+        "payload must be deterministic"
+    );
+    assert!(
+        signing_payload(&with_k).starts_with(&without),
+        "declaring a setting must EXTEND the old payload, never rewrite it"
+    );
+    assert!(signing_payload(&with_k).len() > without.len());
+    assert!(
+        signing_payload(&with_both).starts_with(&signing_payload(&with_k)),
+        "the two settings must append in a fixed order"
+    );
+
+    // A different floor must produce a different payload, or the value
+    // is signed in name only and could be swapped without detection.
+    let other_floor = PackManifest {
+        recommended_min_similarity: Some(0.45),
+        ..with_both.clone()
+    };
+    assert_ne!(
+        signing_payload(&with_both),
+        signing_payload(&other_floor),
+        "changing the floor must change the signed bytes"
+    );
 }

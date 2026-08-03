@@ -162,6 +162,15 @@ def build(src: Path, out_dir: Path = DIST, dim: int = 64,
             description=pack.get("description"),
             constitution=constitution or None,
             coverage=coverage or None,
+            # The swept retrieval settings travel INSIDE the sealed pack.
+            # They used to live only here in pack.toml, which was fine
+            # while the author and the consumer were the same party and
+            # useless the moment they are not: a host holding only the
+            # file had to guess a floor for a corpus it had never seen,
+            # and a guessed floor is what injects near-domain records
+            # into questions the pack should have declined.
+            recommended_top_k=content.get("recommended_top_k"),
+            recommended_min_similarity=content.get("recommended_min_similarity"),
         )
         db.close()
 
