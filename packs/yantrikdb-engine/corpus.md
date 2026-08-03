@@ -631,3 +631,104 @@ opt-in. `set_provenance_gate_mode(mode)` changes it.
 `audit_leak_candidates(max_rids=100)` reports records that look like
 inference laundered as fact, which is the condition the gate exists to
 block.
+
+## How do I install YantrikDB
+
+```bash
+pip install yantrikdb
+```
+
+That is the whole installation for the Python library. It needs
+**Python 3.10 or newer**, and it is about 10 MB because the embedder is
+compiled into the wheel — there is no `sentence-transformers` install,
+no first-run model download and no ONNX runtime to set up.
+
+If you are wiring YantrikDB into an AI agent rather than writing Python,
+install the MCP server instead — see the record on installing it for
+Claude, Cursor, Windsurf or Copilot.
+
+## How do I use YantrikDB with Claude, Cursor, Windsurf or Copilot
+
+To use it with Claude, to connect Claude to YantrikDB, or to set
+YantrikDB up inside Cursor, Windsurf or Copilot, you install the MCP
+server. It is a separate package from the Python library:
+
+```bash
+pip install yantrikdb-mcp
+```
+
+Then add it to your MCP client configuration:
+
+```json
+{
+  "mcpServers": {
+    "yantrikdb": {
+      "command": "yantrikdb-mcp"
+    }
+  }
+}
+```
+
+That is the whole setup. The agent then recalls context, records
+decisions and detects contradictions without being prompted to.
+
+Note the two package names: `yantrikdb` is the library you import in
+Python, `yantrikdb-mcp` is the server an agent talks to. Installing the
+first does not give you the second.
+
+## Getting started with YantrikDB: your first database
+
+```python
+import yantrikdb
+
+db = yantrikdb.YantrikDB.with_default("memory.db")
+
+db.record("Alice is the engineering lead", importance=0.8, domain="people")
+db.record("Project deadline is March 30", importance=0.9, domain="work")
+
+results = db.recall("who leads the team?", top_k=3)
+# -> [{"text": "Alice is the engineering lead", "score": 1.0}, ...]
+
+db.close()
+```
+
+`with_default()` opens a database using the bundled embedder at 64
+dimensions, which is the path that needs no configuration. The file is
+created if it does not exist.
+
+Always `close()` when finished — the vector index lives in memory and a
+clean close is what checkpoints the WAL sidecars away.
+
+## What YantrikDB requires to run
+
+Python **3.10 or newer**. Nothing else: no external database server, no
+vector service, no embedding API, no network access at install time or
+at runtime. A YantrikDB database is a single SQLite file on local disk.
+
+The default dependency set is deliberately tiny — the wheel plus two
+small utility packages. The heavy scientific stack is only pulled in if
+you explicitly opt into the bring-your-own-embedder path.
+
+## Optional YantrikDB installs: bigger embedders and bring-your-own
+
+The default install is all most callers need. Three opt-ins exist:
+
+- **A larger bundled embedder.** `db.set_embedder_named("potion-base-8M")`
+  or `"potion-base-32M"` downloads on first call and caches under your
+  user data directory, self-hosted rather than from HuggingFace.
+- **Your own embedder.** `pip install yantrikdb[sentence-transformers]`
+  pulls in sentence-transformers and its torch/transformers closure —
+  roughly 2 GB of disk, which is exactly why it is not the default.
+- **A slim build with no bundled embedder**, for deployments where the
+  ~7 MB bundle is unacceptable. You must then set an embedder yourself.
+
+## Using YantrikDB from Rust
+
+```toml
+yantrikdb = "0.11"
+```
+
+The Rust crate is the same engine the Python wheel wraps. Two feature
+flags matter: `embedder-download` enables `set_embedder_named()` for
+runtime model upgrades, and `default-features = false` gives the slim
+build with no bundled embedder and no network code path.
