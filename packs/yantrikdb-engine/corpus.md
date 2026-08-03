@@ -207,7 +207,10 @@ caller cannot supply a foreign origin. `record_with_rid` does not write it
 at all. It shares a name with the oplog's genuine provenance column but
 not its meaning.
 
-## YantrikDB WriteAdmission has exactly two variants
+## The YantrikDB WriteAdmission enum has exactly two variants: Origin and Admitted
+
+Name both variants of the `WriteAdmission` enum and they are `Origin`
+and `Admitted`. There is no third variant and no default.
 
 `WriteAdmission` is `Origin` or `Admitted`. `Origin` means a fresh write
 that must run the provenance gate; `Admitted` means a consensus-committed
@@ -216,7 +219,11 @@ committed entry would wedge a cluster. It is a required argument, so an
 origin caller who forgets gets a compile error rather than a silent
 bypass.
 
-## YantrikDB ranks category members seed above user_confirmed above llm_suggested
+## The YantrikDB substitution-category member evidence ladder, ranked strongest to weakest
+
+The three source values, ranked from strongest to weakest, are `seed`,
+then `user_confirmed`, then `llm_suggested`. That is the whole ranking:
+strongest is `seed`, weakest is `llm_suggested`.
 
 The member evidence ladder is `seed` (3) > `user_confirmed` (2) >
 `llm_suggested` (1), with unknown runtime sources treated as 2. Only

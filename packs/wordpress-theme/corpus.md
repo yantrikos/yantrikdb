@@ -88,7 +88,15 @@ anywhere in your CSS. The naming is mechanical:
 Hard-coding `#2f5d50` in `style.css` after declaring it in theme.json is
 the most common way a theme's colours drift out of sync with its editor.
 
-## settings.custom is a free-form token namespace
+## A camelCase theme.json settings.custom key becomes a kebab-cased CSS custom property
+
+A `settings.custom` key written as `lineHeight` becomes the CSS custom
+property `--wp--custom--line-height`. The camelCase key is kebab-cased
+in the generated property name — `lineHeight` becomes `line-height`,
+not `lineheight` and not `lineHeight`.
+
+`settings.custom` is otherwise a free-form token namespace: whatever you
+put in it is emitted, nested keys joined by double dashes.
 
 ```json
 { "settings": { "custom": {

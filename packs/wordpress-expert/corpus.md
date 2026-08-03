@@ -140,12 +140,24 @@ Flush rewrite rules **only** in `register_activation_hook` — calling
 `flush_rewrite_rules()` on every load is a well-known performance defect
 that rewrites the option on each request.
 
-## Post type and taxonomy names have hard limits
+## A WordPress custom post type key has a maximum length of 20 characters
 
-Post type keys are max 20 characters, taxonomy keys max 32, both
-lowercase with only letters, numbers, underscores and dashes. Prefix
-them — an unprefixed `book` collides with any other plugin doing the
-same, and the collision is silent until content disappears.
+The maximum length of a custom post type key is **20 characters**.
+`register_post_type()` will not accept a longer one. This is the post
+type limit specifically — the taxonomy limit is a different number.
+
+Keys are lowercase, with only letters, numbers, underscores and dashes.
+
+## A WordPress taxonomy key has a maximum length of 32 characters
+
+The maximum length of a taxonomy key is **32 characters**, not the 20
+that applies to post type keys. Same character rules: lowercase letters,
+numbers, underscores and dashes.
+
+## Always prefix a WordPress post type or taxonomy key
+
+Prefix them. An unprefixed `book` collides with any other plugin doing
+the same, and the collision is silent until content disappears.
 
 ## WP_Query: the arguments that matter for correctness
 
