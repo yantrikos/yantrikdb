@@ -902,6 +902,12 @@ The protocol follows the standard syslog severity levels from RFC 5424 section 6
 
 ## Delivering an elicitation/create request from a server in MCP 2026-07-28
 
+**The field that carries the request is `inputRequests`.** A server
+delivers `elicitation/create` by returning an `InputRequiredResult` and
+putting the request object into its `inputRequests` map. That map is the
+carrier — naming `InputRequiredResult` without naming `inputRequests`
+does not say where the request actually travels.
+
 A server no longer sends `elicitation/create` to the client as a server-initiated JSON-RPC request. Instead, while processing a client request such as `tools/call`, the server returns an `InputRequiredResult` whose `inputRequests` carries the `elicitation/create` request object (a `method` plus `params`); the client gathers the user's answer and replays the original request with the answer in `inputResponses`. Code written against earlier revisions that registers a client-side handler for an inbound `elicitation/create` request, or awaits its JSON-RPC response, no longer matches the protocol. The correlation fields of the older asynchronous design — `elicitationId` and the `notifications/elicitation/complete` notification — are gone; continuation is carried instead by the `requestState` the server echoes through MRTR.
 
 ## Declaring the elicitation client capability with form and url modes

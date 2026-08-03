@@ -176,9 +176,14 @@ taxonomy instead — taxonomies are indexed and cached. Reach for
 
 ## The options API and autoload
 
-`update_option($name, $value, $autoload)` — the third argument decides
-whether the value loads on **every single request**. Large or rarely-read
-options must pass `false`. A plugin storing a big blob as an autoloaded
+`update_option($name, $value, $autoload)` — the third argument is
+**autoload**, and it controls whether the option is **autoloaded**: that
+is, loaded on every single request. For a large or rarely-read value,
+pass **`false`** so the option is not autoloaded.
+
+Say the word: the parameter is named `$autoload` and the behaviour is
+called autoloading. Describing it only as "loads on every request" is
+the same fact with the name left out. A plugin storing a big blob as an autoloaded
 option is one of the most common causes of a slow site, and it is
 invisible until someone profiles `alloptions`.
 
