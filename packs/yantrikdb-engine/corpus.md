@@ -296,7 +296,13 @@ scoring cache. `unmount_pack` drops that handle. The host file is
 byte-identical before and after, which is why mounting is reversible in a
 way that importing rows and later deleting them is not.
 
-## YantrikDB refuses to mount a pack from a different embedding space
+## Why would a pack refuse to mount
+
+A pack will not mount when its vectors are not provably in the host
+database's embedding space. That is the usual reason a mount fails:
+`mount_pack` raises `PackEmbedderMismatch`. The other reasons are a
+tampered file (the content digest is re-verified at mount and will not
+match), an invalid signature, and a pack that is already mounted.
 
 The query is encoded once, by the host's embedder, and searched against
 both indexes — so a pack built by a different model returns confident
@@ -338,7 +344,12 @@ which makes the file self-describing. The content digest is blake3 over
 each `(rid, text)` pair in rid order, length-prefixed, and is
 re-verified at mount — a pack edited after sealing is refused.
 
-## YantrikDB seal_pack refuses to overwrite an existing file
+## A sealed pack cannot be edited, and seal_pack refuses to overwrite an existing file
+
+A pack is read-only once sealed. There is no edit-in-place: changing one
+requires re-sealing from source at a new version, because the content
+digest is recomputed and re-verified at every mount, so any edit to the
+bytes is detected and the mount is refused.
 
 Sealing to a path that already exists raises `PackDestinationExists`, so
 a mounted pack can never be rewritten underneath its own reader.
