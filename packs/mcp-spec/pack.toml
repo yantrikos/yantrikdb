@@ -1,6 +1,6 @@
 [pack]
 name = "mcp-spec"
-version = "0.3.0"
+version = "0.3.1"
 origin = "yantrik/mcp-spec"
 namespace = "mcp_spec"
 description = "The complete Model Context Protocol specification, revision 2026-07-28 — published after every current model's training data, which is exactly why it matters: this revision removes the initialize handshake and protocol sessions, deprecates Roots, Sampling and Logging, replaces server-initiated requests with Multi Round-Trip Requests (MRTR), and replaces resources/subscribe with subscriptions/listen. A model writing MCP code from memory writes the old protocol. Covers all 31 specification pages and the official extensions: the migration delta first, then tools, resources, prompts, the OAuth authorization framework with Client ID Metadata Documents, both transports, caching, pagination, completion, and the Tasks and Apps extensions."

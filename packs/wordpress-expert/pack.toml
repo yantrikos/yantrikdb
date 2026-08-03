@@ -1,6 +1,6 @@
 [pack]
 name = "wordpress-expert"
-version = "0.2.0"
+version = "0.2.1"
 origin = "yantrik/wordpress-expert"
 namespace = "wordpress_expert"
 description = "WordPress plugin and theme engineering: the hook system and load order, WP_Query and the options API, REST routes and blocks, WooCommerce data stores, multisite — and the security discipline (sanitize in, escape out, prepare every query, nonce plus capability) that separates code that runs from code that survives a plugin review."

@@ -1,6 +1,6 @@
 [pack]
 name = "yantrikdb-engine"
-version = "0.1.0"
+version = "0.1.1"
 origin = "yantrik/yantrikdb-engine"
 namespace = "yantrikdb_engine"
 description = "How the YantrikDB engine actually behaves: retrieval pipeline, scoring constants, write gates, deletion semantics, and pack internals. Grounded in the source at schema v38."

@@ -1,6 +1,6 @@
 [pack]
 name = "wordpress-theme"
-version = "0.2.0"
+version = "0.2.1"
 origin = "yantrik/wordpress-theme"
 namespace = "wordpress_theme"
 description = "A complete design system for WordPress block themes, from activation to premium: the required file set and theme.json token discipline, a worked editorial design system with pairing rules (which fonts, colours and spacing go together), section-level exemplars for heroes, magazine layouts, pullquote and stats bands, galleries and contact sections — plus the composition grammar that took a 27B model to full marks on a rendered-craft benchmark and what is NOT a core block (there is no core/contact-form)."

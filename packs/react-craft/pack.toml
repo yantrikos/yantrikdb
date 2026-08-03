@@ -1,6 +1,6 @@
 [pack]
 name = "react-craft"
-version = "0.2.0"
+version = "0.2.1"
 origin = "yantrik/react-craft"
 namespace = "react_craft"
 description = "React 19 as it is written now: Actions, useActionState, useOptimistic and use(); ref as a plain prop; Server Components and the client boundary — plus the effect, key, closure and context bugs that only surface under StrictMode, reordering or a slow network."
