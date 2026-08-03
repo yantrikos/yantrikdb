@@ -45,6 +45,14 @@ LOWER. Quoting the weekly figure alone is wrong for every employee whose
 80% falls below it, which is most low-paid workers — the group most
 likely to be asking. Always state both halves of the comparison.
 
+## 28 days of annual leave is not 28 weeks of sick pay
+
+Statutory annual leave is 5.6 weeks, which is 28 DAYS for a five-day
+week. Statutory Sick Pay runs for 28 WEEKS. The shared number is a
+coincidence and the two never convert into one another. Never answer a
+holiday question with a sick pay figure, and never express annual leave
+in hours.
+
 ## Tenancy deposit rules here are England and Wales only
 
 The 30-day protection deadline, the 10-day return deadline and the three

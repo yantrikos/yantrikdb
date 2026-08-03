@@ -41,9 +41,15 @@ Source: gov.uk/national-minimum-wage-rates
 ## The UK minimum wage for a worker under 18 is £8 an hour
 
 A worker under 18 who is above compulsory school age must be paid at
-least **£8 per hour** from 1 April 2026. Exactly £8, not £8.60 and not
-£6.40, both of which were rates in earlier years and neither of which is
-the under-18 rate now.
+least **£8 per hour** from 1 April 2026. A 16 year old who has left
+school is paid £8 an hour. So is a 17 year old who has left school.
+Exactly £8, not £8.60 and not £6.40, both of which were rates in earlier
+years and neither of which is the under-18 rate now.
+
+"Above compulsory school age" simply means the worker has finished
+school, so a school leaver aged 16 or 17 is in this band. There is no
+separate rate for 16 year olds and no separate rate for school leavers —
+this is the rate.
 
 This band ends on the worker's 18th birthday, after which the 18-to-20
 rate of £10.85 applies.
@@ -189,6 +195,32 @@ To qualify in the first place the person must be classed as an
 been ill for at least one full working day.
 
 Source: gov.uk/statutory-sick-pay/eligibility
+
+## UK statutory annual leave is 5.6 weeks — 28 DAYS, which is not the 28 weeks of sick pay
+
+Almost all workers are entitled to **5.6 weeks** of paid annual leave a
+year. For someone working a five-day week that is **28 days**.
+
+Twenty-eight **days** of annual leave and twenty-eight **weeks** of
+Statutory Sick Pay are different entitlements that happen to share the
+number 28. They are not convertible into one another, and 28 days is not
+280 hours, 5.6 weeks of sick pay, or any figure derived by multiplying
+one by the other. If a question is about holiday or annual leave, the
+answer is 5.6 weeks / 28 days and the SSP records in this pack do not
+apply to it.
+
+Bank and public holidays do **not** have to be given as paid leave,
+though an employer may count them towards the 5.6 weeks.
+
+This record exists because of a measured failure. Asked how many days of
+annual leave a UK worker gets, a model with this pack mounted answered
+"5.6 weeks (280 hours)" while the same model unmounted answered "5.6
+weeks (28 days)" — the pack's sick-pay records were retrieved for a
+holiday question and corrupted a correct answer. A pack that holds one
+statutory number has to name the adjacent one it does not hold, or it
+will be consulted for it anyway.
+
+Source: gov.uk/holiday-entitlement-rights
 
 ## A UK landlord must protect a tenancy deposit within 30 days
 
