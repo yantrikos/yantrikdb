@@ -1,7 +1,7 @@
 {"id": "ctl-capital", "q": "What is the capital city of Japan?", "expect": [["tokyo"]]}
 {"id": "ctl-arith", "q": "What is 17 multiplied by 23? Give just the number.", "expect": [["391"]]}
 {"id": "ctl-rust-kw", "q": "Which of these languages declares a function with the keyword 'fn': Rust or Python?", "expect": [["rust"]]}
-{"id": "ctl-http", "q": "In HTTP, what does status code 404 mean?", "expect": [["not found"]]}
+{"id": "ctl-http", "q": "In HTTP, what does status code 404 mean?", "expect": [["not found", "does not exist", "doesn't exist", "no such resource", "resource was not found", "cannot be found", "nonexistent"]], "note": "Widened: qwen3.6:27b answered 'the requested resource does not exist', which is correct, and the literal marker 'not found' missed it. Scoring a correct answer as attach-harm would have sent me to fix a pack that was behaving properly."}
 {"id": "ctl-sql-truncate", "q": "Which SQL statement removes every row from a table faster than DELETE, without a WHERE clause?", "expect": [["truncate"]]}
 {"id": "ctl-python-list", "q": "In Python, which list method adds a single item to the end of a list?", "expect": [["append"]]}
 {"id": "ctl-boiling", "q": "At standard sea-level pressure, what is the boiling point of water in degrees Celsius?", "expect": [["100"]]}
