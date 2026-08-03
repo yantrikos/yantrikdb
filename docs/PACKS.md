@@ -452,20 +452,27 @@ of private engine internals), against a fresh empty host:
 
 | Model | Baseline | Mounted |
 |---|---|---|
-| qwen3.5:0.8b | 0/20 | **15/20** |
-| granite4:3b | 2/20 | **15/20** |
-| qwen3.5:4b | 2/20 | **15/20** |
-| qwen3.6:27b | 1/20 | **15/20** |
+| qwen3.5:4b | 2/20 | **20/20** |
+| qwen3.6:27b | 1/20 | **20/20** |
 
-(Revised down from 18/20 on 2026-07-29 — the grader was matching
-substrings, so every model lost the same 3 points once matching became
-word-boundary aware. The pack is unchanged.)
+Controls 31/31 on the 4B, and 29/29 on the 27B excluding two questions
+that model fails with nothing mounted.
 
-Three models from 3B to 27B converge on the same mounted score from
-different baselines. Model size predicts almost nothing about knowing a
-private codebase and nothing at all about the mounted result — the pack
-is the capability. That is the inverse-to-model-size positioning holding
-up under measurement rather than assertion.
+(Revised twice. Down from 18/20 on 2026-07-29 when substring matching
+was replaced with word boundaries. Up to 20/20 on 2026-08-02, when three
+further grader bugs were found — all of them underscore: the markdown
+strip removed `_`, regex `` treats `_` as a letter so `finfo` could
+not match `finfo_file`, and short stems could not match their own
+inflections. Two of this pack's remaining failures were then fixed by
+authoring rather than by loosening retrieval. The pack's content is
+unchanged except for two records rewritten to carry the question's
+vocabulary.)
+
+The two models are 6.75x apart in parameters, start at 1 and 2 out of 20,
+and land on the same 20/20. Model size predicts almost nothing about
+knowing a private codebase and nothing at all about the mounted result —
+the pack is the capability. That is the inverse-to-model-size positioning
+holding up under measurement rather than assertion.
 
 ## 5b. Consuming a pack: gate injection on similarity
 
@@ -479,8 +486,12 @@ unconditional top-5 injection took an unrelated control set from 12/12 to
 permitted to answer from the supplied material, and started refusing
 questions like "what is the capital of Japan".
 
-Gating injection on a **similarity floor of 0.55** restored the control
-set to 12/12 with no loss on the pack's own questions (18/20).
+Gating injection on a similarity floor restored the control set with no
+loss on the pack's own questions. The floor is **a per-pack property**,
+declared in `pack.toml` as `recommended_min_similarity` and swept
+jointly with `recommended_top_k` — the two interact, so sweeping either
+alone finds a local optimum on the wrong axis. `yantrikdb-engine` ships
+0.60; `mcp-spec` ships 0.60; `uk-statutory-rates` ships 0.65.
 
 Gate on similarity, not on the composite recall score. Composite folds in
 importance and recency, which are near-uniform across a freshly built
