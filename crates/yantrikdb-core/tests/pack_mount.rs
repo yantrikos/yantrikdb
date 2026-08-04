@@ -1113,8 +1113,11 @@ fn signing_payload_is_unchanged_when_retrieval_settings_are_absent() {
         version: "1.0.0".into(),
         origin: "pub/demo".into(),
         description: Some("cosmetic, deliberately unsigned".into()),
-        embedder: PackEmbedder { name: Some("potion-base-2M".into()),
-                                 digest: Some("deadbeef".into()), dim: 64 },
+        embedder: PackEmbedder {
+            name: Some("potion-base-2M".into()),
+            digest: Some("deadbeef".into()),
+            dim: 64,
+        },
         content_digest: Some("abc123".into()),
         corpus_rows: 7,
         namespace: Some("demo".into()),
@@ -1130,7 +1133,10 @@ fn signing_payload_is_unchanged_when_retrieval_settings_are_absent() {
     // block. Absent settings must contribute nothing at all.
     let without = signing_payload(&base);
 
-    let with_k = PackManifest { recommended_top_k: Some(8), ..base.clone() };
+    let with_k = PackManifest {
+        recommended_top_k: Some(8),
+        ..base.clone()
+    };
     let with_both = PackManifest {
         recommended_top_k: Some(8),
         recommended_min_similarity: Some(0.6),
