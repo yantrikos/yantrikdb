@@ -999,3 +999,28 @@ class TestTenantIsolation:
 
         db_a.close()
         db_b.close()
+
+
+def test_recall_as_of_rolls_back_corrections():
+    """Bitemporal recall: a correction after t must not rewrite what was
+    believed at t."""
+    import time
+
+    db = YantrikDB(":memory:", 256)
+    db.set_embedder_named("potion-base-8M")
+    rid = db.record_text("The deadline is March 1st", importance=0.9)
+    time.sleep(0.03)
+    t_mid = time.time()
+    time.sleep(0.03)
+    db.correct(rid, new_text="The deadline is March 15th", reason="slip")
+
+    now_hits = db.recall_as_of(time.time(), query="deadline", top_k=5)
+    assert any(h["text"] == "The deadline is March 15th" for h in now_hits)
+
+    then_hits = db.recall_as_of(t_mid, query="deadline", top_k=5)
+    assert any(h["text"] == "The deadline is March 1st" for h in then_hits)
+    rolled = [h for h in then_hits if h["text"] == "The deadline is March 1st"]
+    assert any(w.startswith("as_of:") for w in rolled[0]["why_retrieved"])
+
+    before = db.recall_as_of(t_mid - 3600, query="deadline", top_k=5)
+    assert before == []

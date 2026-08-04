@@ -19335,3 +19335,155 @@ fn recall_default_order_is_relevance_unchanged() {
         );
     }
 }
+
+// ── recall_as_of: bitemporal recall over the revision + link ledgers ──
+
+#[test]
+fn recall_as_of_returns_pre_correction_state() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid = db
+        .record(
+            "The deadline is March 1st",
+            "semantic",
+            0.9,
+            0.0,
+            604800.0,
+            &serde_json::json!({"rev": "v1"}),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "work",
+            "user",
+            None,
+        )
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(25));
+    let t_mid = super::now();
+    std::thread::sleep(std::time::Duration::from_millis(25));
+    let generation = db.search_generation();
+    db.correct_with_embedding(
+        &rid,
+        Some("The deadline is March 15th"),
+        &vec_seed(1.0, 8),
+        generation,
+        None,
+        None,
+        None,
+        "slip",
+    )
+    .unwrap();
+
+    // Present-day recall sees the corrected text.
+    let today = db
+        .recall_as_of(&vec_seed(1.0, 8), 5, super::now(), None, None)
+        .unwrap();
+    assert_eq!(today.len(), 1);
+    assert_eq!(today[0].text, "The deadline is March 15th");
+    assert!(
+        !today[0]
+            .why_retrieved
+            .iter()
+            .any(|w| w.starts_with("as_of:")),
+        "no rollback tag when nothing was rolled back"
+    );
+
+    // As of t_mid, the belief was the ORIGINAL text — the correction
+    // archived exactly that state in record_revisions.
+    let then = db
+        .recall_as_of(&vec_seed(1.0, 8), 5, t_mid, None, None)
+        .unwrap();
+    assert_eq!(then.len(), 1);
+    assert_eq!(then[0].text, "The deadline is March 1st");
+    assert!((then[0].importance - 0.9).abs() < 1e-9);
+    assert_eq!(
+        then[0].metadata.get("rev").and_then(|v| v.as_str()),
+        Some("v1")
+    );
+    assert!(
+        then[0]
+            .why_retrieved
+            .iter()
+            .any(|w| w.starts_with("as_of:")),
+        "rolled-back hit is labeled"
+    );
+
+    // Before the record existed there was nothing to believe.
+    let before = db
+        .recall_as_of(&vec_seed(1.0, 8), 5, then[0].created_at - 10.0, None, None)
+        .unwrap();
+    assert!(before.is_empty());
+}
+
+#[test]
+fn recall_as_of_respects_supersede_edge_time() {
+    use crate::types::{LinkType, RecordLink};
+
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let old = db
+        .record(
+            "Use the v1 endpoint",
+            "semantic",
+            0.8,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "work",
+            "user",
+            None,
+        )
+        .unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(25));
+    let t_mid = super::now();
+    std::thread::sleep(std::time::Duration::from_millis(25));
+    let new = db
+        .record(
+            "Use the v2 endpoint",
+            "semantic",
+            0.8,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "work",
+            "user",
+            None,
+        )
+        .unwrap();
+    db.link(
+        &new,
+        &RecordLink {
+            target_rid: old.clone(),
+            link_type: LinkType::Supersedes,
+        },
+    )
+    .unwrap();
+
+    // As of t_mid: the old record was still current (the supersede edge
+    // did not exist yet) and the successor did not exist at all.
+    let then = db
+        .recall_as_of(&vec_seed(1.0, 8), 5, t_mid, None, None)
+        .unwrap();
+    let then_rids: Vec<&str> = then.iter().map(|r| r.rid.as_str()).collect();
+    assert!(
+        then_rids.contains(&old.as_str()),
+        "old was current at t_mid"
+    );
+    assert!(
+        !then_rids.contains(&new.as_str()),
+        "successor did not exist at t_mid"
+    );
+
+    // As of now: the edge exists, so the old record is out and the
+    // successor is in.
+    let today = db
+        .recall_as_of(&vec_seed(1.0, 8), 5, super::now(), None, None)
+        .unwrap();
+    let today_rids: Vec<&str> = today.iter().map(|r| r.rid.as_str()).collect();
+    assert!(today_rids.contains(&new.as_str()));
+    assert!(!today_rids.contains(&old.as_str()));
+}

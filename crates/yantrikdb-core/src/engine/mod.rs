@@ -4,6 +4,7 @@ mod analogy_engine;
 mod audit;
 mod belief;
 mod belief_network_engine;
+mod bitemporal;
 mod cache;
 mod calibration;
 mod causal;

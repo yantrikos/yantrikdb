@@ -183,6 +183,49 @@ impl PyYantrikDB {
             .collect()
     }
 
+    /// Bitemporal recall — what did this database believe at `as_of`
+    /// (epoch seconds)? Records created later are excluded, supersede
+    /// edges created later do not suppress, and corrected records roll
+    /// back to their as-of state via the revision ledger. Ranking is
+    /// present-day (see the module docs on `recall_as_of` in core).
+    #[pyo3(signature = (as_of, query=None, query_embedding=None, top_k=10, namespace=None, memory_type=None))]
+    fn recall_as_of(
+        &self,
+        py: Python<'_>,
+        as_of: f64,
+        query: Option<&str>,
+        query_embedding: Option<Vec<f32>>,
+        top_k: usize,
+        namespace: Option<&str>,
+        memory_type: Option<&str>,
+    ) -> PyResult<Vec<PyObject>> {
+        let db = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+
+        let emb = match query_embedding {
+            Some(e) => e,
+            None => match query {
+                Some(q) => self.embed_text(py, q)?,
+                None => {
+                    return Err(PyValueError::new_err(
+                        "Must provide either query or query_embedding",
+                    ))
+                }
+            },
+        };
+
+        let results = db
+            .recall_as_of(&emb, top_k, as_of, namespace, memory_type)
+            .map_err(map_err)?;
+
+        results
+            .iter()
+            .map(|r| recall_result_to_dict(py, r))
+            .collect()
+    }
+
     /// **v0.7.4** — record a memory, auto-embedding via the engine's
     /// configured embedder.
     ///

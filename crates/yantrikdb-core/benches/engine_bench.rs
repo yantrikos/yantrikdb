@@ -690,6 +690,86 @@ fn bench_record_batch_scaled(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_recall_as_of(c: &mut Criterion) {
+    let dim = 64;
+    let mut group = c.benchmark_group("recall_as_of");
+
+    for &n in &[100, 500, 1000] {
+        let (db, _workers) = open_db_with_workers(dim);
+        seed_db(&db, n, dim);
+        // As-of point sits between seeding and the corrections below, so
+        // one hit in five must roll back — a realistic mixture.
+        std::thread::sleep(Duration::from_millis(5));
+        let as_of = crate_now_minus_epsilon() + 0.001;
+        std::thread::sleep(Duration::from_millis(5));
+        let rids: Vec<String> = db
+            .list_records(None, None, None, None, None, None, n, "asc")
+            .unwrap()
+            .0
+            .into_iter()
+            .map(|m| m.rid)
+            .collect();
+        let generation = db.search_generation();
+        for (i, rid) in rids.iter().enumerate() {
+            if i % 5 == 0 {
+                let emb = vec_seed(i as f32 * 0.37 + 0.01, dim);
+                db.correct_with_embedding(
+                    rid,
+                    Some(&format!("Corrected memory number {i}")),
+                    &emb,
+                    generation,
+                    None,
+                    None,
+                    None,
+                    "bench correction",
+                )
+                .unwrap();
+            }
+        }
+        let query = vec_seed(999.0, dim);
+
+        group.bench_with_input(BenchmarkId::new("top10", n), &n, |b, _| {
+            b.iter(|| {
+                db.recall_as_of(black_box(&query), 10, black_box(as_of), None, None)
+                    .unwrap()
+            })
+        });
+        // Baseline on the same data for direct comparison in the report.
+        group.bench_with_input(BenchmarkId::new("plain_recall_top10", n), &n, |b, _| {
+            b.iter(|| {
+                db.recall(
+                    black_box(&query),
+                    10,
+                    None,
+                    None,
+                    false,
+                    false,
+                    None,
+                    true,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    false,
+                )
+                .unwrap()
+            })
+        });
+    }
+    group.finish();
+}
+
+/// A timestamp just before "now": every seeded record exists, every
+/// correction applied after it must roll back.
+fn crate_now_minus_epsilon() -> f64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64()
+        - 0.001
+}
+
 criterion_group!(
     benches,
     bench_record,
@@ -698,6 +778,7 @@ criterion_group!(
     bench_relate,
     bench_decay,
     bench_recall,
+    bench_recall_as_of,
     bench_bulk_insert,
     bench_record_batch,
     bench_archive,

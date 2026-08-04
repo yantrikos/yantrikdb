@@ -73,6 +73,7 @@ def memory_recall(
     namespace: str | None = None,
     domain: str | None = None,
     source: str | None = None,
+    compact: bool = False,
     ctx: Context = None,
 ) -> str:
     """Search memories by semantic similarity to a natural language query.
@@ -89,6 +90,10 @@ def memory_recall(
         namespace: Filter by namespace. None returns all namespaces.
         domain: Filter by topic domain (work, health, family, etc.). None for all.
         source: Filter by memory source (user, system, document, inference). None for all.
+        compact: Lean payload — per hit only rid, text, score and warning-class
+            why_retrieved tags; envelope keeps count + confidence. The text is
+            what the agent came for; the diagnostics cost context on every
+            call and earn it only when something looks wrong.
 
     Returns matching memories ranked by relevance with score breakdowns.
     """
@@ -104,6 +109,22 @@ def memory_recall(
             domain=domain,
             source=source,
         )
+    if compact:
+        # Warning-class tags survive (superseded/aged hedges change how the
+        # agent should treat a hit); mechanical tags (keyword_match, graph
+        # expansion notes) do not earn their tokens on every call.
+        items = [{
+            "rid": r["rid"],
+            "text": r["text"],
+            "score": round(r["score"], 3),
+            **({"why": [w for w in r["why_retrieved"] if w.startswith("⚠")]}
+               if any(w.startswith("⚠") for w in r["why_retrieved"]) else {}),
+        } for r in response["results"]]
+        return json.dumps({
+            "count": len(items),
+            "results": items,
+            "confidence": round(response["confidence"], 3),
+        }, ensure_ascii=False)
     # Convert PyO3 dicts to plain dicts for JSON serialization
     items = []
     for r in response["results"]:
