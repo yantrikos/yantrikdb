@@ -836,6 +836,16 @@ impl YantrikDB {
                 "DELETE FROM memories WHERE consolidation_status = 'tombstoned'",
                 [],
             )?;
+            // Chunked embeddings: the deletes above orphan the window
+            // rows of every excluded record — drop them in the same
+            // transaction or the sealed pack ships vectors for rows it
+            // deleted. Deliberately NOT in SCRUB_TABLES: surviving
+            // records' chunk rows are part of the pack's value (the
+            // chunk-aware mount indexes them).
+            let _ = tx.execute(
+                "DELETE FROM memory_chunks WHERE rid NOT IN (SELECT rid FROM memories)",
+                [],
+            );
             for table in SCRUB_TABLES {
                 // Tables vary across schema versions; a missing one is
                 // not an error.
@@ -1517,6 +1527,13 @@ impl YantrikDB {
             }
             let tier = pack.trust.tier_multiplier();
             let hits = pack.index.search(query_embedding, pack_fetch_k)?;
+            // Chunked embeddings: a chunk-aware pack's index holds
+            // `{rid}#c{idx}` window keys. This path calls HnswIndex
+            // directly (bypassing DeltaIndex's collapse choke point), so
+            // it folds keys to parents itself — otherwise a window key
+            // misses `pack.scoring` and is SILENTLY dropped, and two
+            // windows of one record would emit duplicate results.
+            let hits = crate::vector::chunk::collapse_to_parents(hits);
             let mut staged: Vec<(String, crate::types::RecallResult)> = Vec::new();
 
             for (rid, distance) in hits {

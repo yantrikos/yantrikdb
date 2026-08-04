@@ -67,6 +67,11 @@ pub(crate) struct ReservationGuard<'a> {
     pending_op_count: Option<&'a AtomicI64>,
     rid: &'a str,
     seq: u64,
+    /// Chunked embeddings: synthetic window keys (`{rid}#c{idx}`) reserved
+    /// at the SAME seq as the parent, owing the same obligation at the same
+    /// moment — a chunked write is ONE write with one commit point. Owned
+    /// because the keys are minted after the guard's parent borrow.
+    chunk_keys: Vec<String>,
     phase: ResPhase,
 }
 
@@ -84,6 +89,7 @@ impl<'a> ReservationGuard<'a> {
             pending_op_count: Some(pending_op_count),
             rid,
             seq,
+            chunk_keys: Vec::new(),
             phase: ResPhase::Reserved,
         }
     }
@@ -97,8 +103,17 @@ impl<'a> ReservationGuard<'a> {
             pending_op_count: None,
             rid,
             seq,
+            chunk_keys: Vec::new(),
             phase: ResPhase::Reserved,
         }
+    }
+
+    /// Track a chunk-window key reserved at this write's seq. Call after
+    /// each successful `append_reserved` of a chunk vector, BEFORE anything
+    /// fallible follows — from that instant the guard owns the entry's
+    /// obligation (removal pre-commit, publish post-commit).
+    pub(crate) fn add_chunk_key(&mut self, key: String) {
+        self.chunk_keys.push(key);
     }
 
     /// The transaction committed: from here the obligation is publish (+count).
@@ -128,8 +143,16 @@ impl<'a> ReservationGuard<'a> {
 
     /// publish + count. Idempotent-by-phase: only ever runs once, either from
     /// `complete()` or from `Drop` on a post-commit unwind.
+    ///
+    /// The PARENT publishes first, then its chunk keys: a chunk hit collapses
+    /// to the parent rid at search time, so the parent must be findable
+    /// before any window is — the other order would be a (momentary) result
+    /// for a record the delta does not yet serve.
     fn discharge_committed(&self) -> bool {
         let published = self.state.vec_index.publish(self.rid, self.seq);
+        for key in &self.chunk_keys {
+            self.state.vec_index.publish(key, self.seq);
+        }
         if let Some(counter) = self.pending_op_count {
             counter.fetch_add(1, Ordering::Relaxed);
         }
@@ -145,6 +168,9 @@ impl Drop for ReservationGuard<'_> {
             // still-valid older vector.
             ResPhase::Reserved => {
                 self.state.vec_index.remove_appended(self.rid, self.seq);
+                for key in &self.chunk_keys {
+                    self.state.vec_index.remove_appended(key, self.seq);
+                }
             }
             // Unwound after commit. The write IS durable, so finish the job
             // rather than strand it.

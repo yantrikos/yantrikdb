@@ -8,6 +8,7 @@ mod bitemporal;
 mod cache;
 mod calibration;
 mod causal;
+mod chunking;
 mod cognition;
 mod coherence;
 pub mod conflict;
@@ -217,6 +218,10 @@ pub struct YantrikDB {
     /// Since-boot count of writes whose text exceeded the detected
     /// window. In-memory by design, like the counters above.
     pub(crate) embedder_truncated_writes: std::sync::atomic::AtomicU64,
+    /// Since-boot count of writes whose overflow was covered by chunk
+    /// vectors instead (`engine::chunking`) — handled, not lost, so
+    /// they deliberately do NOT count as truncated.
+    pub(crate) embedder_chunked_writes: std::sync::atomic::AtomicU64,
     /// **v0.10 Item 4a.4 — anti-laundering gate mode**, cached from
     /// `meta.provenance_gate_mode` (0=off, 1=warn, 2=enforce). Fresh installs
     /// default to enforce; migrated/legacy installs to warn (see open()).
@@ -1078,6 +1083,7 @@ impl YantrikDB {
             superseded_served_since_boot: std::sync::atomic::AtomicU64::new(0),
             embedder_window_chars: std::sync::atomic::AtomicUsize::new(0),
             embedder_truncated_writes: std::sync::atomic::AtomicU64::new(0),
+            embedder_chunked_writes: std::sync::atomic::AtomicU64::new(0),
             provenance_gate_mode: std::sync::atomic::AtomicU8::new(provenance_gate_mode),
             provenance_flagged_since_boot: std::sync::atomic::AtomicU64::new(0),
             correction_epoch: std::sync::atomic::AtomicU64::new(0),
@@ -1699,6 +1705,11 @@ impl YantrikDB {
         // Legacy slot retired post-#41: all reads now route through
         // search_state. Clear it to catch any latent reader.
         self.embedder = None;
+        // Chunked embeddings: a window probed under THIS embedder in a
+        // previous process survives in `meta` — adopt it so chunking
+        // does not silently deactivate across restarts. Digest-guarded
+        // inside: a different embedder's window is never adopted.
+        self.adopt_persisted_window();
         Ok(())
     }
 
@@ -2042,6 +2053,37 @@ impl YantrikDB {
             // its own gate — an external embedder can emit NaN, issue #60).
             crate::validate::validate_embedding("record_text", &embedding, dim_pre)?;
 
+            // Chunked embeddings: when the text overflows the probed
+            // window, embed the remaining windows here — same snapshot
+            // embedder, same slow step, so the step-5 gen/digest
+            // revalidation covers the whole vector SET. (For a
+            // truncating embedder the full-text vector above IS the
+            // head window's vector — chunk 0 costs nothing extra.)
+            let chunks: Vec<(usize, Vec<f32>)> = match self.chunk_plan(text) {
+                Some(ranges) => {
+                    let mut cv = Vec::with_capacity(ranges.len());
+                    for (i, (a, b)) in ranges.iter().enumerate() {
+                        let v = embedder
+                            .embed(&text[*a..*b])
+                            .map_err(|e| YantrikDbError::Inference(e.to_string()))?;
+                        crate::validate::validate_embedding("record_text#chunk", &v, dim_pre)?;
+                        cv.push((i + 1, v));
+                    }
+                    cv
+                }
+                None => Vec::new(),
+            };
+            // The overflow accounting: a chunked write is HANDLED (its
+            // tail is findable), a bare overflow is truncation loss.
+            // record_text bypasses `self.embed()`, so it does its own
+            // counting — the warning would otherwise miss the engine's
+            // primary write path entirely.
+            if !chunks.is_empty() {
+                self.note_chunked_write();
+            } else {
+                self.note_possible_truncation(text.len());
+            }
+
             // Step 3: try to enter sync path.
             let sync_guard = match self.write_router.try_enter_sync_writer() {
                 Some(g) => g,
@@ -2110,6 +2152,7 @@ impl YantrikDB {
                 half_life,
                 metadata,
                 &embedding,
+                &chunks,
                 namespace,
                 certainty,
                 domain,

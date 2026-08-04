@@ -85,6 +85,7 @@ impl YantrikDB {
         if self.suffix_is_seen(PROBE_MAX)? {
             self.embedder_window_chars
                 .store(NO_TRUNCATION, Ordering::Relaxed);
+            self.persist_embedder_window(NO_TRUNCATION);
             return Ok(None);
         }
         // A truncating embedder: binary search the boundary between
@@ -94,6 +95,7 @@ impl YantrikDB {
             // Truncates below even the smallest probe — report the
             // floor rather than pretending to more precision.
             self.embedder_window_chars.store(lo, Ordering::Relaxed);
+            self.persist_embedder_window(lo);
             return Ok(Some(lo));
         }
         while hi - lo > 64 {
@@ -105,6 +107,10 @@ impl YantrikDB {
             }
         }
         self.embedder_window_chars.store(lo, Ordering::Relaxed);
+        // The probe is ~24 embed calls — persist the answer (keyed to
+        // the embedder digest) so a restart neither repays that cost
+        // nor silently deactivates chunking.
+        self.persist_embedder_window(lo);
         Ok(Some(lo))
     }
 

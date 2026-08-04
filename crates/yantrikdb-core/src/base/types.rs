@@ -347,6 +347,17 @@ pub struct Stats {
     /// are unfindable. Non-zero means retrieval is losing content.
     #[serde(default)]
     pub embedder_truncated_writes: u64,
+    /// Writes since boot whose overflow was covered by chunk vectors
+    /// instead (window known ⇒ the text was split, each window embedded
+    /// and indexed, retrieval collapses to the record). Handled, not
+    /// lost — the counterpart to `embedder_truncated_writes`.
+    #[serde(default)]
+    pub embedder_chunked_writes: u64,
+    /// Durable chunk (window) vectors currently stored in
+    /// `memory_chunks`. Explains why `vec_index_entries` can exceed the
+    /// record count on a corpus with long records.
+    #[serde(default)]
+    pub chunk_vectors: u64,
 }
 
 /// A proactive trigger.

@@ -59,6 +59,12 @@ impl YantrikDB {
             |row| row.get(0),
         )?;
         let entities = conn.query_row("SELECT COUNT(*) FROM entities", [], |row| row.get(0))?;
+        let chunk_vectors: u64 = conn
+            .query_row("SELECT COUNT(*) FROM memory_chunks", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .map(|n| n.max(0) as u64)
+            .unwrap_or(0);
         let operations = conn.query_row("SELECT COUNT(*) FROM oplog", [], |row| row.get(0))?;
         let open_conflicts = conn.query_row(
             "SELECT COUNT(*) FROM conflicts WHERE status = 'open'",
@@ -122,6 +128,8 @@ impl YantrikDB {
                 .load(std::sync::atomic::Ordering::Relaxed),
             embedder_window_chars: self.embedder_window(),
             embedder_truncated_writes: self.embedder_truncated_write_count(),
+            embedder_chunked_writes: self.embedder_chunked_write_count(),
+            chunk_vectors,
         })
     }
 
@@ -888,6 +896,42 @@ impl YantrikDB {
             )?;
         }
 
+        // Chunked embeddings: the drain is a re-encode of TEXT under the
+        // post-swap embedder, so it chunks exactly like record_text — a
+        // queued long record must not silently lose its tail just
+        // because it arrived during a reembed cutover. Embedded from the
+        // same string the head embed used, under the same snapshot.
+        let chunk_vecs: Vec<(usize, Vec<f32>)> = match self.chunk_plan(text) {
+            Some(ranges) => {
+                let mut cv = Vec::with_capacity(ranges.len());
+                for (i, (a, b)) in ranges.iter().enumerate() {
+                    let v = embedder.embed(&text[*a..*b]).map_err(|e| {
+                        crate::error::YantrikDbError::Inference(format!(
+                            "Layer 5 record drain: embedder failed on rid {rid:?} chunk {}: {e}",
+                            i + 1
+                        ))
+                    })?;
+                    crate::validate::validate_embedding("record_drain#chunk", &v, state.dim())?;
+                    cv.push((i + 1, v));
+                }
+                cv
+            }
+            None => Vec::new(),
+        };
+        if !chunk_vecs.is_empty() {
+            let conn = self.conn();
+            for (idx, v) in &chunk_vecs {
+                let blob = self.encrypt_embedding(&serialize_f32(v))?;
+                // OR REPLACE: a retried drain overwrites its own prior
+                // partial work rather than erroring on the PK.
+                conn.execute(
+                    "INSERT OR REPLACE INTO memory_chunks (rid, chunk_idx, embedding) \
+                     VALUES (?1, ?2, ?3)",
+                    params![rid, *idx as i64, blob],
+                )?;
+            }
+        }
+
         // Append into the active vec_index. Idempotent: DeltaIndex
         // de-dupes on rid+seq.
         let seq = self
@@ -895,6 +939,15 @@ impl YantrikDB {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
         state.vec_index.append(rid.to_string(), new_emb, seq)?;
+        // Windows after the parent, same seq (a chunk hit collapses to
+        // the parent, which must be findable first).
+        for (idx, v) in &chunk_vecs {
+            let key = crate::vector::chunk::chunk_key(rid, *idx);
+            state.vec_index.append(key, v.clone(), seq)?;
+        }
+        if !chunk_vecs.is_empty() {
+            self.note_chunked_write();
+        }
 
         // Bump visible_seq for RYW. Layer 6 will refine the
         // generation-aware semantics; for now bump under the

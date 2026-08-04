@@ -1260,6 +1260,19 @@ impl YantrikDB {
                      WHERE embedding_new IS NOT NULL",
                     params![next_generation as i64],
                 )?;
+                // Chunked embeddings: window vectors are OLD-generation
+                // by construction (chunk geometry comes from the old
+                // embedder's probed window, the vectors from its space).
+                // Delete them in the same durable unit as the swap —
+                // post-cutover records are head-only until the operator
+                // probes the NEW embedder's window and runs
+                // `rechunk_long_records()`. Head-only is a recall
+                // regression; stale-space vectors would be silent
+                // corruption. There is no chunk staging column on
+                // purpose: chunks are a pure function of (text, window)
+                // and the new window is unknowable before the new
+                // embedder is probed.
+                conn.execute("DELETE FROM memory_chunks", [])?;
                 Ok(n as i64)
             })();
 
@@ -1319,6 +1332,11 @@ impl YantrikDB {
             vec_index: new_delta_index,
         };
         self.try_publish_search_state(new_search_state)?;
+        // Chunked embeddings: the digest just changed, so the probed
+        // window (if any) no longer describes the active embedder —
+        // reset it (and adopt a persisted one only if it was probed
+        // under exactly this digest).
+        self.adopt_persisted_window();
 
         // Cutover step 7: resume sync writes under the new generation.
         // The standalone WriteRouter state flip is observable to any

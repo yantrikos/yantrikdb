@@ -50,6 +50,57 @@ impl YantrikDB {
                 index.insert(&rid, &embedding)?;
             }
         }
+        // Chunked embeddings: window vectors for long records, indexed
+        // under synthetic '{rid}#c{idx}' keys. Without this loop, every
+        // reopen / rebuild / reembed / pack mount would silently drop
+        // them — recall quality would differ before and after a restart,
+        // which is the stored-active-unfindable failure class again.
+        //
+        // The join carries the parent's status/tier filters so a cold or
+        // tombstoned parent's windows never reappear here, and the probe
+        // for the table itself tolerates packs sealed by pre-chunk
+        // engines (structural vetting does not enumerate tables, and a
+        // mounted pack is read-only, so the table cannot be created on
+        // the fly).
+        let have_chunks: bool = conn
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memory_chunks'",
+                [],
+                |_| Ok(true),
+            )
+            .unwrap_or(false);
+        if have_chunks {
+            let mut stmt = conn.prepare(
+                "SELECT c.rid, c.chunk_idx, c.embedding \
+                 FROM memory_chunks c JOIN memories m ON m.rid = c.rid \
+                 WHERE m.consolidation_status IN ('active', 'consolidated') \
+                 AND m.storage_tier = 'hot' \
+                 ORDER BY c.rid, c.chunk_idx",
+            )?;
+            let rows = stmt.query_map([], |row| {
+                let rid: String = row.get(0)?;
+                let idx: i64 = row.get(1)?;
+                let emb_blob: Vec<u8> = row.get(2)?;
+                Ok((rid, idx, emb_blob))
+            })?;
+            for row in rows {
+                let (rid, idx, emb_blob) = row?;
+                let raw_blob = if let Some(e) = enc {
+                    e.decrypt_bytes(&emb_blob)?
+                } else {
+                    emb_blob
+                };
+                let embedding = if crate::compression::is_compressed(&raw_blob) {
+                    crate::compression::decompress_embedding(&raw_blob)
+                } else {
+                    deserialize_f32(&raw_blob)
+                };
+                if embedding.len() == embedding_dim && idx >= 1 {
+                    let key = crate::vector::chunk::chunk_key(&rid, idx as usize);
+                    index.insert(&key, &embedding)?;
+                }
+            }
+        }
         // Distance-only pruning can leave a node with no incoming layer-0
         // edges — stored, active, and unfindable by any search. Found
         // live: a mounted 65-record pack lost a different record per

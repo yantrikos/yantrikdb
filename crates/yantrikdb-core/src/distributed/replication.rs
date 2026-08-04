@@ -430,6 +430,9 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
                 // tombstones land on the active SearchState's
                 // DeltaIndex.
                 db.search_state.load().vec_index.tombstone(rid, _seq);
+                // Chunked embeddings: window keys need their own markers
+                // (exact-string matching), same as the leader's forget.
+                db.purge_chunks(rid, _seq)?;
                 db.graph_index.write().unlink_memory(rid);
             }
         }
@@ -486,6 +489,8 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
                     // **Issue #41 brainstorm-4 §1.** Active-generation
                     // SearchState tombstone.
                     db.search_state.load().vec_index.tombstone(loser, _seq);
+                    // The loser's window keys go with it.
+                    db.purge_chunks(loser, _seq)?;
                 }
             }
         }

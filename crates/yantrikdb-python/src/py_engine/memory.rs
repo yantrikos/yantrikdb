@@ -198,6 +198,23 @@ impl PyYantrikDB {
         db.detect_embedder_window().map_err(map_err)
     }
 
+    /// Backfill chunk (window) vectors for records written before the
+    /// embedder window was known — the deployment step for an existing
+    /// corpus: `detect_embedder_window()` once, then this once.
+    ///
+    /// Every active hot record whose text overflows the window and has
+    /// no chunk vectors yet gets them (embedded window-by-window,
+    /// committed per record, live after one index rebuild at the end).
+    /// Idempotent — an interrupted run continues where it stopped.
+    /// Returns `(records_chunked, chunk_vectors_written)`.
+    fn rechunk_long_records(&self) -> PyResult<(usize, usize)> {
+        let db = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+        db.rechunk_long_records().map_err(map_err)
+    }
+
     /// Bitemporal recall — what did this database believe at `as_of`
     /// (epoch seconds)? Records created later are excluded, supersede
     /// edges created later do not suppress, and corrected records roll

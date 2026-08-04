@@ -229,6 +229,14 @@ pub fn stats_to_dict(py: Python<'_>, s: &yantrikdb_core::Stats) -> PyResult<PyOb
         "provenance_flagged_since_boot",
         s.provenance_flagged_since_boot,
     )?;
+    // Embedder-window truncation surface (detector, commit 043e580) and
+    // its fix half (chunked embeddings): the window in chars once probed,
+    // overflows lost vs overflows chunked, and the durable window-vector
+    // count that explains vec_index_entries > record count.
+    dict.set_item("embedder_window_chars", s.embedder_window_chars)?;
+    dict.set_item("embedder_truncated_writes", s.embedder_truncated_writes)?;
+    dict.set_item("embedder_chunked_writes", s.embedder_chunked_writes)?;
+    dict.set_item("chunk_vectors", s.chunk_vectors)?;
     Ok(dict.into())
 }
 

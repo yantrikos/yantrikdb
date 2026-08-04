@@ -39,12 +39,46 @@ impl YantrikDB {
             ts
         }; // drop conn before acquiring vec_index write lock
 
+        // Chunked embeddings: window vectors follow the parent's tier —
+        // compress the rows (the rebuild's is_compressed defense handles
+        // either format, but cold means compressed by convention) and
+        // remember the idxs so their index keys get tombstoned below.
+        let chunk_idxs: Vec<i64> = {
+            let conn = self.conn();
+            let mut stmt =
+                conn.prepare("SELECT chunk_idx, embedding FROM memory_chunks WHERE rid = ?1")?;
+            let rows: Vec<(i64, Vec<u8>)> = stmt
+                .query_map(params![rid], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?;
+            let mut idxs = Vec::with_capacity(rows.len());
+            for (idx, stored) in rows {
+                let raw = self.decrypt_embedding(&stored)?;
+                if !crate::compression::is_compressed(&raw) {
+                    let emb = crate::serde_helpers::deserialize_f32(&raw);
+                    let stored_c =
+                        self.encrypt_embedding(&crate::compression::compress_embedding(&emb))?;
+                    conn.execute(
+                        "UPDATE memory_chunks SET embedding = ?1 WHERE rid = ?2 AND chunk_idx = ?3",
+                        params![stored_c, rid, idx],
+                    )?;
+                }
+                idxs.push(idx);
+            }
+            idxs
+        };
+
         let seq = self
             .vec_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
         // **Issue #41 brainstorm-4 §1.** Snapshot through SearchState.
         self.search_state.load().vec_index.tombstone(rid, seq);
+        // Exact-string matching: the parent's tombstone does not cover
+        // its window keys.
+        for idx in &chunk_idxs {
+            let key = crate::vector::chunk::chunk_key(rid, *idx as usize);
+            self.search_state.load().vec_index.tombstone(&key, seq);
+        }
 
         self.log_op(
             "archive",
@@ -92,6 +126,34 @@ impl YantrikDB {
             (ts, embedding)
         }; // drop conn before acquiring vec_index write lock
 
+        // Chunked embeddings: decompress the window rows back to hot
+        // format and collect their vectors for re-append.
+        let chunk_vecs: Vec<(i64, Vec<f32>)> = {
+            let conn = self.conn();
+            let mut stmt =
+                conn.prepare("SELECT chunk_idx, embedding FROM memory_chunks WHERE rid = ?1")?;
+            let rows: Vec<(i64, Vec<u8>)> = stmt
+                .query_map(params![rid], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?;
+            let mut out = Vec::with_capacity(rows.len());
+            for (idx, stored) in rows {
+                let raw = self.decrypt_embedding(&stored)?;
+                let emb = if crate::compression::is_compressed(&raw) {
+                    let emb = crate::compression::decompress_embedding(&raw);
+                    let stored_raw = self.encrypt_embedding(&serialize_f32(&emb))?;
+                    conn.execute(
+                        "UPDATE memory_chunks SET embedding = ?1 WHERE rid = ?2 AND chunk_idx = ?3",
+                        params![stored_raw, rid, idx],
+                    )?;
+                    emb
+                } else {
+                    crate::serde_helpers::deserialize_f32(&raw)
+                };
+                out.push((idx, emb));
+            }
+            out
+        };
+
         let seq = self
             .vec_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -102,6 +164,15 @@ impl YantrikDB {
             .load()
             .vec_index
             .append(rid.to_string(), embedding.clone(), seq)?;
+        // Windows re-enter at the same seq, AFTER the parent (a chunk
+        // hit collapses to the parent, which must be findable first).
+        for (idx, emb) in &chunk_vecs {
+            let key = crate::vector::chunk::chunk_key(rid, *idx as usize);
+            self.search_state
+                .load()
+                .vec_index
+                .append(key, emb.clone(), seq)?;
+        }
 
         self.log_op(
             "hydrate",

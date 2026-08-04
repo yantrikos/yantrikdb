@@ -597,6 +597,12 @@ impl YantrikDB {
         // tombstone lands on the active generation's DeltaIndex.
         let seq = self.assign_seq(seq);
         self.search_state.load().vec_index.tombstone(rid, seq);
+        // Chunked embeddings: the index matches keys by exact string, so
+        // tombstoning the parent does NOT cover its `{rid}#c{idx}` window
+        // keys — each needs its own marker or the windows keep serving a
+        // dead record. On the always-emit side for the same reason the
+        // parent marker is; also drops the rows (idempotent on replay).
+        self.purge_chunks(rid, seq)?;
         if let Some(ns) = &ns_to_bump {
             self.bump_visible_seq(ns, seq);
         }
@@ -1267,6 +1273,32 @@ impl YantrikDB {
             };
             crate::validate::validate_embedding("correct", &new_embedding, dim_pre)?;
 
+            // Chunked embeddings for the corrected text. Engine-embedded
+            // path: re-chunk under the same snapshot embedder (the step-5
+            // revalidation covers the whole set). Caller-supplied vector:
+            // the engine cannot chunk text it did not embed — the old
+            // windows are PURGED below and the record becomes head-only
+            // (a recall regression `rechunk_long_records()` can repay;
+            // stale windows would keep serving the pre-correction text,
+            // which is silent corruption).
+            let new_chunks: Vec<(usize, Vec<f32>)> = match (caller_embedding, embedder.as_ref()) {
+                (None, Some(embedder)) => match self.chunk_plan(new_text) {
+                    Some(ranges) => {
+                        let mut cv = Vec::with_capacity(ranges.len());
+                        for (i, (a, b)) in ranges.iter().enumerate() {
+                            let v = embedder
+                                .embed(&new_text[*a..*b])
+                                .map_err(|e| YantrikDbError::Inference(e.to_string()))?;
+                            crate::validate::validate_embedding("correct#chunk", &v, dim_pre)?;
+                            cv.push((i + 1, v));
+                        }
+                        cv
+                    }
+                    None => Vec::new(),
+                },
+                _ => Vec::new(),
+            };
+
             // Step 3: enter the sync path. A reembed SWAP is in flight
             // (router Queueing) → typed, retryable, nothing touched. The
             // Encoding/Rebuilding window does NOT set Queueing; that window
@@ -1317,6 +1349,14 @@ impl YantrikDB {
             let hlc_bytes = self.tick_hlc().to_bytes().to_vec();
             let revision_id = crate::id::new_id();
             let stored_new_emb = self.encrypt_embedding(&serialize_f32(&new_embedding))?;
+            // Chunk blobs + keys prepared before the conn lock (CPU work).
+            let stored_new_chunks: Vec<(usize, String, Vec<u8>)> = new_chunks
+                .iter()
+                .map(|(idx, v)| {
+                    let blob = self.encrypt_embedding(&serialize_f32(v))?;
+                    Ok((*idx, crate::vector::chunk::chunk_key(rid, *idx), blob))
+                })
+                .collect::<Result<_>>()?;
             let new_emb_hash = embedding_hash(&new_embedding).to_vec();
 
             // The conn lock is held across the delta append AND the SQL
@@ -1399,6 +1439,39 @@ impl YantrikDB {
             // other direction.
             let mut reservation = ReservationGuard::publish_only(&state_for_commit, rid, seq_new);
 
+            // Reserve the corrected text's window keys at the SAME seq —
+            // one correction, one commit point, one guard. Highest-seq-wins
+            // means each new window supersedes its old published entry by
+            // key; SURPLUS old keys (new text has fewer windows) are
+            // tombstoned post-commit below.
+            for ((_, v), (_, key, _)) in new_chunks.iter().zip(stored_new_chunks.iter()) {
+                match state_for_commit
+                    .vec_index
+                    .append_reserved(key.clone(), v.clone(), seq_new)
+                {
+                    Ok(crate::vector::delta_index::ReservedAppend::Inserted) => {
+                        reservation.add_chunk_key(key.clone());
+                    }
+                    Ok(crate::vector::delta_index::ReservedAppend::AlreadyPresent) => {
+                        drop(reservation);
+                        drop(_epoch);
+                        drop(conn);
+                        drop(sync_guard);
+                        return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                            "freshly minted seq {seq_new} for chunk key {key} already \
+                             present in the delta — engine invariant violation"
+                        )));
+                    }
+                    Err(e) => {
+                        drop(reservation);
+                        drop(_epoch);
+                        drop(conn);
+                        drop(sync_guard);
+                        return Err(e);
+                    }
+                }
+            }
+
             // SQL transaction. Prior state is re-read HERE (under the
             // serialized conn lock) so it reflects any correction that
             // committed just before us.
@@ -1406,6 +1479,10 @@ impl YantrikDB {
             // 4a.6b: the gate verdict escapes the closure so a warn-mode flag
             // can be counted post-commit. `None` only on a pre-gate error path.
             let mut gate_verdict: Option<crate::provenance::GateVerdict> = None;
+            // The OLD text's window idxs escape the closure too: surplus keys
+            // (old windows the corrected text no longer has) are tombstoned
+            // post-commit, and only a committed tx knows the true prior set.
+            let mut old_chunk_idxs: Vec<i64> = Vec::new();
             let commit_result: Result<i64> =
                 (|| {
                     let tx = conn.unchecked_transaction()?;
@@ -1554,6 +1631,27 @@ impl YantrikDB {
                     // expansion. Drop those stale links IN this tx (atomic with
                     // the text change). Adding links for NEW entities is the
                     // deferrable completeness half, not done here.
+                    // Chunked embeddings: replace the window rows atomically
+                    // with the text they describe. The old idx set is read
+                    // first so the post-commit step can tombstone surplus
+                    // keys — without that, a correction that shrinks the
+                    // window count leaves the trailing old windows serving
+                    // vanished text forever.
+                    {
+                        let mut idx_stmt =
+                            tx.prepare("SELECT chunk_idx FROM memory_chunks WHERE rid = ?1")?;
+                        old_chunk_idxs = idx_stmt
+                            .query_map(params![rid], |r| r.get(0))?
+                            .collect::<std::result::Result<_, _>>()?;
+                    }
+                    tx.execute("DELETE FROM memory_chunks WHERE rid = ?1", params![rid])?;
+                    for (idx, _, blob) in &stored_new_chunks {
+                        tx.execute(
+                            "INSERT INTO memory_chunks (rid, chunk_idx, embedding) \
+                             VALUES (?1, ?2, ?3)",
+                            params![rid, *idx as i64, blob],
+                        )?;
+                    }
                     Self::drop_stale_memory_entity_links_in_tx(&tx, rid, new_text)?;
                     self.insert_correct_op_in_tx(
                         &tx,
@@ -1620,6 +1718,23 @@ impl YantrikDB {
             // publishes rather than stranding a durable row behind an invisible
             // vector (only an index rebuild would have recovered it).
             reservation.complete();
+
+            // Surplus window keys: every old idx the corrected text no longer
+            // produces gets a tombstone at seq_new. (Keys the new text kept
+            // were superseded by their own higher-seq publish above; the
+            // caller-supplied-vector path re-chunks nothing, so ALL old idxs
+            // are surplus there.) Still under the conn lock, matching the
+            // publish-order discipline.
+            {
+                let kept: std::collections::HashSet<usize> =
+                    stored_new_chunks.iter().map(|(i, _, _)| *i).collect();
+                for old in &old_chunk_idxs {
+                    if !kept.contains(&(*old as usize)) {
+                        let key = crate::vector::chunk::chunk_key(rid, *old as usize);
+                        state_for_commit.vec_index.tombstone(&key, seq_new);
+                    }
+                }
+            }
 
             // 4a.6b: durable — a warn-mode flag counts now. Set on every path
             // that reaches the commit (the gate runs before any tx write).
@@ -1759,6 +1874,36 @@ impl YantrikDB {
                 return Err(YantrikDbError::NoEmbedder);
             };
 
+            // Chunked embeddings: chunks are derived state and never ride
+            // the op — the follower re-derives them from new_text under its
+            // OWN embedder and its OWN probed window. This is coherent in
+            // both vector branches (the exact-bytes branch requires the
+            // models to match, so a locally embedded window is in the same
+            // space as the leader's head vector). No embedder / no window /
+            // no text ⇒ empty, and the old windows are purged below.
+            let new_chunks: Vec<(usize, Vec<f32>)> = match (reembedded, new_text, embedder.as_ref())
+            {
+                (true, Some(t), Some(emb)) => match self.chunk_plan(t) {
+                    Some(ranges) => {
+                        let mut cv = Vec::with_capacity(ranges.len());
+                        for (i, (a, b)) in ranges.iter().enumerate() {
+                            let v = emb
+                                .embed(&t[*a..*b])
+                                .map_err(|e| YantrikDbError::Inference(e.to_string()))?;
+                            crate::validate::validate_embedding(
+                                "apply_replicated_correct#chunk",
+                                &v,
+                                dim0,
+                            )?;
+                            cv.push((i + 1, v));
+                        }
+                        cv
+                    }
+                    None => Vec::new(),
+                },
+                _ => Vec::new(),
+            };
+
             // Enter the write router BEFORE loading state / conn (r3 #1):
             // otherwise a reembed cutover can swap SearchState between our
             // state load and our commit, detaching our delta append.
@@ -1885,6 +2030,34 @@ impl YantrikDB {
             // correction and enqueues no pending op.
             let mut reservation = seq_new.map(|s| ReservationGuard::publish_only(&state, rid, s));
 
+            // Window keys ride the same reservation at the same seq (they
+            // exist only when the correction carries a vector, so seq_new
+            // is Some whenever new_chunks is non-empty).
+            let stored_new_chunks: Vec<(usize, String, Vec<u8>)> = new_chunks
+                .iter()
+                .map(|(idx, v)| {
+                    let blob = self.encrypt_embedding(&serialize_f32(v))?;
+                    Ok((*idx, crate::vector::chunk::chunk_key(rid, *idx), blob))
+                })
+                .collect::<Result<_>>()?;
+            if let (Some(s), Some(r)) = (seq_new, reservation.as_mut()) {
+                for ((_, v), (_, key, _)) in new_chunks.iter().zip(stored_new_chunks.iter()) {
+                    match state.vec_index.append_reserved(key.clone(), v.clone(), s) {
+                        Ok(crate::vector::delta_index::ReservedAppend::Inserted) => {
+                            r.add_chunk_key(key.clone());
+                        }
+                        Ok(crate::vector::delta_index::ReservedAppend::AlreadyPresent) => {
+                            return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                                "freshly minted seq {s} for chunk key {key} already \
+                                 present in the delta — engine invariant violation"
+                            )));
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+            }
+
+            let mut old_chunk_idxs: Vec<i64> = Vec::new();
             let commit: Result<()> = (|| {
                 let tx = conn.unchecked_transaction()?;
                 tx.execute(
@@ -1944,6 +2117,27 @@ impl YantrikDB {
                         ],
                     )?;
                 }
+                // Chunked embeddings — mirror the leader: a text-changing
+                // correction replaces the window rows atomically with the
+                // text, and the old idx set escapes for surplus-key
+                // tombstoning post-commit.
+                if reembedded {
+                    {
+                        let mut idx_stmt =
+                            tx.prepare("SELECT chunk_idx FROM memory_chunks WHERE rid = ?1")?;
+                        old_chunk_idxs = idx_stmt
+                            .query_map(params![rid], |r| r.get(0))?
+                            .collect::<std::result::Result<_, _>>()?;
+                    }
+                    tx.execute("DELETE FROM memory_chunks WHERE rid = ?1", params![rid])?;
+                    for (idx, _, blob) in &stored_new_chunks {
+                        tx.execute(
+                            "INSERT INTO memory_chunks (rid, chunk_idx, embedding) \
+                             VALUES (?1, ?2, ?3)",
+                            params![rid, *idx as i64, blob],
+                        )?;
+                    }
+                }
                 // Entity-graph coherence safety half (nuron) — mirror the
                 // leader: on a text-changing correction, drop memory→entity
                 // links whose entity no longer appears in the corrected text,
@@ -1971,6 +2165,19 @@ impl YantrikDB {
                 // Durable — the obligation inverts to publish.
                 r.mark_committed();
                 r.complete();
+            }
+            // Surplus window keys (old idxs the corrected text no longer
+            // produces) — same rule as the leader, at the same seq as the
+            // correction's publish.
+            if let Some(s) = seq_new {
+                let kept: std::collections::HashSet<usize> =
+                    stored_new_chunks.iter().map(|(i, _, _)| *i).collect();
+                for old in &old_chunk_idxs {
+                    if !kept.contains(&(*old as usize)) {
+                        let key = crate::vector::chunk::chunk_key(rid, *old as usize);
+                        state.vec_index.tombstone(&key, s);
+                    }
+                }
             }
             {
                 let mut cache = self.scoring_cache.write();

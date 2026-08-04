@@ -291,6 +291,10 @@ impl YantrikDB {
             half_life,
             metadata,
             embedding,
+            // Caller-supplied vector: the engine cannot know the
+            // text/vector relationship, so it never chunks here —
+            // `record_text()` is the chunking entry.
+            &[],
             namespace,
             certainty,
             domain,
@@ -330,6 +334,7 @@ impl YantrikDB {
         half_life: f64,
         metadata: &serde_json::Value,
         embedding: &[f32],
+        chunks: &[(usize, Vec<f32>)],
         namespace: &str,
         certainty: f64,
         domain: &str,
@@ -342,6 +347,15 @@ impl YantrikDB {
         let ts = now();
         let emb_blob = serialize_f32(embedding);
         let meta_str = serde_json::to_string(metadata)?;
+        // Chunked embeddings: encrypt the window vectors up front (CPU
+        // work outside the conn lock), mint their index keys once.
+        let stored_chunks: Vec<(usize, String, Vec<u8>)> = chunks
+            .iter()
+            .map(|(idx, v)| {
+                let blob = self.encrypt_embedding(&serialize_f32(v))?;
+                Ok((*idx, crate::vector::chunk::chunk_key(&rid, *idx), blob))
+            })
+            .collect::<Result<_>>()?;
         // 4a.6c: the record op's id is minted BEFORE the transaction when a
         // claim rides it — the claim binds to this op as recovery evidence and
         // must be the tx's FIRST statement (the v37 partial unique index on
@@ -522,6 +536,27 @@ impl YantrikDB {
         let mut reservation =
             ReservationGuard::with_pending_op(&state, &self.pending_op_count, &rid, seq);
 
+        // Chunked embeddings: reserve each window key at the SAME seq —
+        // one write, one commit point, one guard. `(key, seq)` pairs are
+        // the delta's uniqueness unit, so the parent and its windows
+        // coexist and are individually addressable. Each key joins the
+        // guard the instant its reservation lands: a failure on window
+        // 3 (Backpressure, dim) unwinds windows 1–2 AND the parent via
+        // the guard's Reserved arm.
+        for ((_, v), (_, key, _)) in chunks.iter().zip(stored_chunks.iter()) {
+            if state
+                .vec_index
+                .append_reserved(key.clone(), v.clone(), seq)?
+                == crate::vector::delta_index::ReservedAppend::AlreadyPresent
+            {
+                return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                    "freshly minted chunk key {key} already present in the delta at \
+                     seq {seq} — engine invariant violation"
+                )));
+            }
+            reservation.add_chunk_key(key.clone());
+        }
+
         // ONE transaction: claim (if keyed) + row + session links + the record
         // op + the post-materialization enqueue. Either all of it is durable or
         // none is. Returns Some(existing_rid) on an idempotent hit, in which
@@ -585,6 +620,19 @@ impl YantrikDB {
                     idem.as_ref().map(|_| self.actor_id.as_str()),
                 ],
             )?;
+
+            // Chunked embeddings: the window rows commit in the SAME
+            // transaction as the memories row — either the record and
+            // all its durable chunk vectors exist, or none do. Without
+            // this, a rebuild (which reads memory_chunks) would differ
+            // from the live delta.
+            for (idx, _, blob) in &stored_chunks {
+                tx.execute(
+                    "INSERT INTO memory_chunks (rid, chunk_idx, embedding) \
+                     VALUES (?1, ?2, ?3)",
+                    params![rid, *idx as i64, blob],
+                )?;
+            }
 
             // Auto-link to active session for this namespace.
             if let Some(session_id) = &session_id {

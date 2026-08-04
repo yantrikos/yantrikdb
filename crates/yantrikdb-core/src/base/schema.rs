@@ -4,7 +4,11 @@
 // unconditionally on every open, so existing databases pick it up. The
 // migration list exists for changes SQL-with-IF-NOT-EXISTS cannot express
 // (ALTER TABLE ADD COLUMN, index replacement, backfills).
-pub const SCHEMA_VERSION: i32 = 39;
+//
+// v40 adds `memory_chunks` (chunked embeddings — one record, N window
+// vectors; docs/chunked_embeddings_design.md). Same v39 shape: a new
+// CREATE TABLE IF NOT EXISTS in SCHEMA_SQL, no migration constant.
+pub const SCHEMA_VERSION: i32 = 40;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -990,6 +994,21 @@ CREATE INDEX IF NOT EXISTS idx_trigger_log_urgency ON trigger_log(urgency DESC);
 CREATE INDEX IF NOT EXISTS idx_patterns_type ON patterns(pattern_type);
 CREATE INDEX IF NOT EXISTS idx_patterns_status ON patterns(status);
 CREATE INDEX IF NOT EXISTS idx_patterns_confidence ON patterns(confidence DESC);
+
+-- v40: chunked embeddings — extra window vectors for records whose text
+-- exceeds the embedder's input window (docs/chunked_embeddings_design.md).
+-- Chunk 0 is memories.embedding under the plain rid; rows here are chunks
+-- 1..N, indexed under synthetic keys '{rid}#c{idx}'. The embedding blob
+-- gets the same field-level encryption (and cold-tier zstd compression)
+-- as memories.embedding. Text is NOT duplicated here: chunks are a pure
+-- function of memories.text + the recorded window geometry, and only the
+-- vectors are what a rebuild needs.
+CREATE TABLE IF NOT EXISTS memory_chunks (
+    rid TEXT NOT NULL,
+    chunk_idx INTEGER NOT NULL,          -- 1-based; 0 lives in memories
+    embedding BLOB NOT NULL,
+    PRIMARY KEY (rid, chunk_idx)
+);
 
 -- Memory-entity join table for graph-augmented recall
 CREATE TABLE IF NOT EXISTS memory_entities (

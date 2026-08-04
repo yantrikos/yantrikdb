@@ -532,32 +532,60 @@ impl DeltaIndex {
             }
         }
 
-        // Search cold for up to k * 2 candidates so we have headroom for
-        // tombstone filtering + delta-shadowing without losing top-k.
-        let cold_fetch = k.saturating_mul(2).max(k);
-        let cold_results = cold.search(query, cold_fetch)?;
-
-        // Merge: cold + delta, drop cold rids that are in delta_live (delta
-        // wins) or tombstoned in delta.
         let delta_rid_set: std::collections::HashSet<&str> =
             delta_live.iter().map(|(e, _)| e.rid.as_str()).collect();
 
-        let mut merged: Vec<(String, f64)> =
-            Vec::with_capacity(cold_results.len() + delta_live.len());
-        for (rid, dist) in &cold_results {
-            if tombstoned.contains(rid.as_str()) || delta_rid_set.contains(rid.as_str()) {
-                continue;
-            }
-            merged.push((rid.clone(), *dist));
-        }
-        for (entry, dist) in &delta_live {
-            merged.push((entry.rid.clone(), *dist));
-        }
+        // Search cold for up to k * 2 candidates so we have headroom for
+        // tombstone filtering + delta-shadowing without losing top-k.
+        //
+        // Chunked embeddings can make that headroom insufficient: when a
+        // neighborhood is chunk-DENSE (the nearest keys are many windows
+        // of the same few records), collapsing to parents can leave
+        // fewer than k records even though the cold tier holds more. So
+        // the fetch widens geometrically and retries — the common path
+        // pays nothing, and the retry is bounded by the worst possible
+        // multiplicity (every record at its chunk cap) plus the "cold
+        // returned fewer than asked" exit.
+        let mut cold_fetch = k.saturating_mul(2).max(k);
+        let cold_fetch_cap = k
+            .saturating_mul(2)
+            .saturating_mul(crate::vector::chunk::MAX_CHUNKS + 1);
+        loop {
+            let cold_results = cold.search(query, cold_fetch)?;
+            let cold_exhausted = cold_results.len() < cold_fetch;
 
-        // Sort by distance ascending, take top-k.
-        merged.sort_by(|a, b| a.1.total_cmp(&b.1));
-        merged.truncate(k);
-        Ok(merged)
+            // Merge: cold + delta, drop cold rids that are in delta_live
+            // (delta wins) or tombstoned in delta.
+            let mut merged: Vec<(String, f64)> =
+                Vec::with_capacity(cold_results.len() + delta_live.len());
+            for (rid, dist) in &cold_results {
+                if tombstoned.contains(rid.as_str()) || delta_rid_set.contains(rid.as_str()) {
+                    continue;
+                }
+                merged.push((rid.clone(), *dist));
+            }
+            for (entry, dist) in &delta_live {
+                merged.push((entry.rid.clone(), *dist));
+            }
+
+            // Sort by distance ascending.
+            merged.sort_by(|a, b| a.1.total_cmp(&b.1));
+            // Chunked embeddings: collapse `rid#c<N>` window keys to
+            // their parent rid, best (lowest-distance) window wins.
+            // This is THE choke point — every engine consumer of this
+            // index funnels through here, so downstream code (scoring-
+            // cache lookups that silently drop unknown keys,
+            // RecallResult.rid, MMR, dedupe sets) only ever sees real
+            // memories rids, and `k` means k DISTINCT RECORDS — a long
+            // record can never crowd the result list with its own
+            // windows.
+            let mut collapsed = crate::vector::chunk::collapse_to_parents(merged);
+            if collapsed.len() >= k || cold_exhausted || cold_fetch >= cold_fetch_cap {
+                collapsed.truncate(k);
+                return Ok(collapsed);
+            }
+            cold_fetch = cold_fetch.saturating_mul(4).min(cold_fetch_cap);
+        }
     }
 
     /// Number of entries in the delta tier (including tombstones).
