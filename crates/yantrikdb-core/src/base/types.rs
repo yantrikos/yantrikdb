@@ -337,6 +337,16 @@ pub struct Stats {
     /// consider `set_provenance_gate_mode(Enforce)` once callers are fixed.
     #[serde(default)]
     pub provenance_flagged_since_boot: u64,
+    /// Detected embedder input window in characters, or `None` if the
+    /// probe has not run (`detect_embedder_window()`) or found no
+    /// truncation. Text beyond it is stored but never embedded.
+    #[serde(default)]
+    pub embedder_window_chars: Option<usize>,
+    /// Writes since boot whose text exceeded that window — records
+    /// stored intact but indexed from their head only, so their tails
+    /// are unfindable. Non-zero means retrieval is losing content.
+    #[serde(default)]
+    pub embedder_truncated_writes: u64,
 }
 
 /// A proactive trigger.

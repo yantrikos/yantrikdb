@@ -183,6 +183,21 @@ impl PyYantrikDB {
             .collect()
     }
 
+    /// Empirically detect the attached embedder's input window, in
+    /// characters. Returns None if no truncation was found.
+    ///
+    /// Text longer than this is stored intact but embedded only from
+    /// its head, so its tail cannot be retrieved. Run once after
+    /// attaching an embedder; `stats()` then reports the window and a
+    /// count of writes that exceeded it.
+    fn detect_embedder_window(&self) -> PyResult<Option<usize>> {
+        let db = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+        db.detect_embedder_window().map_err(map_err)
+    }
+
     /// Bitemporal recall — what did this database believe at `as_of`
     /// (epoch seconds)? Records created later are excluded, supersede
     /// edges created later do not suppress, and corrected records roll

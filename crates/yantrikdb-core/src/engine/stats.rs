@@ -120,6 +120,8 @@ impl YantrikDB {
             provenance_flagged_since_boot: self
                 .provenance_flagged_since_boot
                 .load(std::sync::atomic::Ordering::Relaxed),
+            embedder_window_chars: self.embedder_window(),
+            embedder_truncated_writes: self.embedder_truncated_write_count(),
         })
     }
 

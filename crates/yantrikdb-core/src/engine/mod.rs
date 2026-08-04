@@ -16,6 +16,7 @@ mod counterfactual_engine;
 pub mod demand;
 pub mod digest;
 mod durable_embeddings;
+mod embedder_window;
 mod evaluator;
 mod experimenter;
 mod extractor;
@@ -200,6 +201,22 @@ pub struct YantrikDB {
     /// would have excluded before opting in. In-memory by design — a
     /// durable counter would put a write on the recall hot path.
     pub(crate) superseded_served_since_boot: std::sync::atomic::AtomicU64,
+    /// **Embedder input window, detected empirically** (see
+    /// `engine::embedder_window`). The `Embedder` trait cannot declare a
+    /// window — a BYO or Python-callable embedder is opaque — so the
+    /// engine probes for one: 0 = not probed yet, `usize::MAX` = no
+    /// truncation detected, otherwise the approximate character budget
+    /// beyond which text stops affecting the vector.
+    ///
+    /// This exists because silent truncation is silent retrieval loss:
+    /// a record longer than the window is stored intact and embedded
+    /// only from its head, so its tail becomes unfindable — the same
+    /// stored-active-unfindable shape as the HNSW orphan bug, measured
+    /// at 73% of records on a production install.
+    pub(crate) embedder_window_chars: std::sync::atomic::AtomicUsize,
+    /// Since-boot count of writes whose text exceeded the detected
+    /// window. In-memory by design, like the counters above.
+    pub(crate) embedder_truncated_writes: std::sync::atomic::AtomicU64,
     /// **v0.10 Item 4a.4 — anti-laundering gate mode**, cached from
     /// `meta.provenance_gate_mode` (0=off, 1=warn, 2=enforce). Fresh installs
     /// default to enforce; migrated/legacy installs to warn (see open()).
@@ -1059,6 +1076,8 @@ impl YantrikDB {
             pending_op_count: std::sync::atomic::AtomicI64::new(initial_pending),
             exclude_superseded_reads: std::sync::atomic::AtomicBool::new(exclude_superseded_reads),
             superseded_served_since_boot: std::sync::atomic::AtomicU64::new(0),
+            embedder_window_chars: std::sync::atomic::AtomicUsize::new(0),
+            embedder_truncated_writes: std::sync::atomic::AtomicU64::new(0),
             provenance_gate_mode: std::sync::atomic::AtomicU8::new(provenance_gate_mode),
             provenance_flagged_since_boot: std::sync::atomic::AtomicU64::new(0),
             correction_epoch: std::sync::atomic::AtomicU64::new(0),
@@ -1783,6 +1802,11 @@ impl YantrikDB {
         // user's ONNX mean-pool bug) can emit NaN; catch it here rather
         // than persist it. Covers every engine-side embedding consumer.
         crate::validate::validate_embedding("embed", &out, state.dim())?;
+        // Silent truncation is silent retrieval loss: if this text is
+        // longer than the embedder's detected window, its tail is about
+        // to be stored intact and never embedded. Counted and warned
+        // rather than swallowed. No-op until the window is probed.
+        self.note_possible_truncation(text.len());
         // **Issue #117 / packs.** A vector in this database's space was
         // just produced by the attached embedder — record that identity
         // once. This is the hook that covers the binding path, where

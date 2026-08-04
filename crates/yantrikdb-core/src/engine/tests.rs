@@ -19487,3 +19487,88 @@ fn recall_as_of_respects_supersede_edge_time() {
     assert!(today_rids.contains(&new.as_str()));
     assert!(!today_rids.contains(&old.as_str()));
 }
+
+// ── embedder window detection: silent truncation must not stay silent ──
+
+/// Embeds a bag-of-chars signature of the text, but only of the first
+/// `window` characters — a faithful miniature of what a transformer
+/// does when its input window is exceeded.
+struct TruncatingEmbedder {
+    window: usize,
+    dim: usize,
+}
+
+impl crate::types::Embedder for TruncatingEmbedder {
+    fn embed(
+        &self,
+        text: &str,
+    ) -> std::result::Result<Vec<f32>, Box<dyn std::error::Error + Send + Sync>> {
+        let seen = &text[..self.window.min(text.len())];
+        let mut v = vec![0.0_f32; self.dim];
+        for (i, b) in seen.bytes().enumerate() {
+            v[(b as usize + i % 3) % self.dim] += 1.0;
+        }
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+        if norm > 0.0 {
+            for x in v.iter_mut() {
+                *x /= norm;
+            }
+        }
+        Ok(v)
+    }
+    fn dim(&self) -> usize {
+        self.dim
+    }
+}
+
+#[test]
+fn detects_a_truncating_embedder_and_counts_the_writes_it_silently_clips() {
+    let mut db = YantrikDB::new(":memory:", 32).unwrap();
+    db.set_embedder(Box::new(TruncatingEmbedder {
+        window: 1000,
+        dim: 32,
+    }))
+    .unwrap();
+
+    let found = db.detect_embedder_window().unwrap().expect("truncation");
+    // Binary search resolves to within its 64-char step of the truth.
+    assert!(
+        (900..=1064).contains(&found),
+        "detected window {found} should be near the real 1000"
+    );
+    assert_eq!(db.embedder_window(), Some(found));
+
+    // A record inside the window is silent; one past it is counted.
+    assert_eq!(db.embedder_truncated_write_count(), 0);
+    db.embed(&"x".repeat(500)).unwrap();
+    assert_eq!(db.embedder_truncated_write_count(), 0, "fits, no warning");
+    db.embed(&"y".repeat(5000)).unwrap();
+    assert_eq!(
+        db.embedder_truncated_write_count(),
+        1,
+        "a write whose tail is never embedded must be counted, not swallowed"
+    );
+    let s = db.stats(None).unwrap();
+    assert_eq!(s.embedder_truncated_writes, 1);
+    assert_eq!(s.embedder_window_chars, Some(found));
+}
+
+#[test]
+fn an_embedder_with_no_window_reports_no_truncation() {
+    let mut db = YantrikDB::new(":memory:", 32).unwrap();
+    db.set_embedder(Box::new(TruncatingEmbedder {
+        // Larger than the probe's ceiling: nothing is ever clipped.
+        window: 10_000_000,
+        dim: 32,
+    }))
+    .unwrap();
+    assert_eq!(db.detect_embedder_window().unwrap(), None);
+    assert_eq!(db.embedder_window(), None);
+    db.embed(&"z".repeat(200_000)).unwrap();
+    assert_eq!(
+        db.embedder_truncated_write_count(),
+        0,
+        "no window, no warning"
+    );
+    assert_eq!(db.stats(None).unwrap().embedder_window_chars, None);
+}
