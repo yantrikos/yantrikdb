@@ -1,0 +1,26 @@
+[
+  {
+    "name": "biscuit",
+    "archetype": "dog",
+    "proportions": { "head": 78, "snout": 60, "ears": 85, "body": 55, "limbs": 45, "tail": 45, "chunk": 72 },
+    "palette": { "seed": "#e8b06d", "belly": "light", "nose": "dark" },
+    "face": { "expression": "happy", "brows": true, "tongue": true },
+    "motion": { "energy": 65 }
+  },
+  {
+    "name": "clover",
+    "archetype": "rabbit",
+    "proportions": { "head": 85, "snout": 30, "ears": 95, "body": 45, "limbs": 30, "tail": 60, "chunk": 65 },
+    "palette": { "seed": "#b8a8d8", "belly": "light", "nose": "pink" },
+    "face": { "expression": "alert", "brows": false, "tongue": false },
+    "motion": { "energy": 80 }
+  },
+  {
+    "name": "rusty",
+    "archetype": "fox",
+    "proportions": { "head": 65, "snout": 70, "ears": 75, "body": 60, "limbs": 55, "tail": 90, "chunk": 50 },
+    "palette": { "seed": "#d87840", "belly": "light", "nose": "dark" },
+    "face": { "expression": "determined", "brows": true, "tongue": false },
+    "motion": { "energy": 55 }
+  }
+]
