@@ -265,6 +265,11 @@ class TestStats:
             "superseded_served_since_boot",
             # v0.10 Item 4a.4: anti-laundering gate adoption surface.
             "provenance_gate_mode", "provenance_flagged_since_boot",
+            # v0.12.1: embedder-window truncation surface + chunked
+            # embeddings (window in chars once probed, overflows lost vs
+            # chunked, durable window-vector count).
+            "embedder_window_chars", "embedder_truncated_writes",
+            "embedder_chunked_writes", "chunk_vectors",
         }
         assert set(s.keys()) == expected_keys
         # Fresh databases default to the status-led read path.
@@ -275,6 +280,11 @@ class TestStats:
         # ones default to "warn" (count + nudge, never refuse).
         assert s["provenance_gate_mode"] == "enforce"
         assert s["provenance_flagged_since_boot"] == 0
+        # Chunking surface: fresh DB, nothing probed, nothing chunked.
+        assert s["embedder_window_chars"] is None
+        assert s["embedder_truncated_writes"] == 0
+        assert s["embedder_chunked_writes"] == 0
+        assert s["chunk_vectors"] == 0
 
     def test_stats_tracks_operations(self, db):
         db.record("op1", embedding=_vec(1.0))
