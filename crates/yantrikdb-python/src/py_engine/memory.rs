@@ -115,7 +115,13 @@ impl PyYantrikDB {
         }
     }
 
-    #[pyo3(signature = (query=None, query_embedding=None, top_k=10, time_window=None, memory_type=None, include_consolidated=false, expand_entities=true, skip_reinforce=false, namespace=None, domain=None, source=None, certainty_min=None, order=None, include_superseded=false))]
+    // expand_entities defaults to FALSE as of 2026-08-05: measured on a
+    // 4,297-record production corpus with a paraphrase-labeled set,
+    // graph expansion on-by-default cost 0.24 MRR (0.504 → 0.264) —
+    // entity-linked noise sharing an entity name outranks genuinely
+    // similar records. Neutral even on the synthetic connected corpus.
+    // Opt in per-call for curated, dense entity graphs.
+    #[pyo3(signature = (query=None, query_embedding=None, top_k=10, time_window=None, memory_type=None, include_consolidated=false, expand_entities=false, skip_reinforce=false, namespace=None, domain=None, source=None, certainty_min=None, order=None, include_superseded=false))]
     #[allow(clippy::too_many_arguments)]
     fn recall(
         &self,

@@ -2165,6 +2165,16 @@ impl YantrikDB {
     }
 
     /// Recall memories by text query with automatic embedding.
+    ///
+    /// Graph expansion is OFF by default as of 2026-08-05: measured on a
+    /// 4,297-record production corpus with a paraphrase-labeled query
+    /// set, `expand_entities=true` cost 0.24 MRR (0.504 → 0.264) —
+    /// entity-linked candidates score `0.3·proximity` into the
+    /// relevance core, so proximity-rich noise sharing an entity name
+    /// outranks genuinely similar records. On the synthetic *connected*
+    /// corpus (built to favor the graph) the lift is NEUTRAL
+    /// (+0.000 recall). Callers with curated, dense entity graphs can
+    /// opt in per-call via `recall(..., expand_entities: true, ...)`.
     pub fn recall_text(&self, query: &str, top_k: usize) -> Result<Vec<RecallResult>> {
         let embedding = self.embed(query)?;
         self.recall(
@@ -2173,7 +2183,7 @@ impl YantrikDB {
             None,  // time_window
             None,  // memory_type
             false, // include_consolidated
-            true,  // expand_entities
+            false, // expand_entities — see doc: measured −0.24 MRR on by default
             Some(query),
             false, // skip_reinforce
             None,  // namespace
@@ -2204,7 +2214,7 @@ impl YantrikDB {
             None,  // time_window
             None,  // memory_type
             false, // include_consolidated
-            true,  // expand_entities
+            false, // expand_entities — see recall_text doc (measured −0.24 MRR)
             Some(query),
             false, // skip_reinforce
             None,  // namespace

@@ -1940,7 +1940,17 @@ impl YantrikDB {
                 .collect();
 
             // Greedy MMR: λ * relevance - (1-λ) * max_sim_to_selected
-            const LAMBDA: f64 = 0.7;
+            //
+            // λ = 0.9, raised from 0.7 (2026-08-05): measured on a 4,297-record
+            // production clone with a paraphrase-labeled set, λ=0.7 cost
+            // 0.062 MRR (0.566 → 0.504) by letting the diversity credit pull
+            // far-ranked items over relevant ones; λ=0.9 keeps the
+            // duplicate-flood defense (the 0.98 skip below is untouched) at
+            // 40% of that cost (0.541). The labeled set structurally cannot
+            // reward diversity (one right answer per query), so λ stays
+            // below 1.0 on the strength of the near-duplicate UX case, not
+            // that measurement.
+            const LAMBDA: f64 = 0.9;
             const SIM_THRESHOLD: f64 = 0.98; // skip only near-exact duplicates
 
             let mut selected: Vec<usize> = Vec::with_capacity(top_k);
@@ -4251,7 +4261,9 @@ impl YantrikDB {
                 })
                 .collect();
 
-            const LAMBDA: f64 = 0.7;
+            // λ = 0.9 (2026-08-05): see recall_inner's MMR block for the
+            // production-clone measurement behind the raise from 0.7.
+            const LAMBDA: f64 = 0.9;
             const SIM_THRESHOLD: f64 = 0.98;
 
             let mut selected: Vec<usize> = Vec::with_capacity(top_k);
