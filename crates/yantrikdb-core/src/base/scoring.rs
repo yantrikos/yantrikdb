@@ -153,7 +153,7 @@ pub fn composite_score_with_sentiment(
     valence: f64,
     query_sentiment: f64,
 ) -> f64 {
-    let base_rel = W_SIM * similarity + W_DECAY * decay + W_RECENCY * recency;
+    let base_rel = W_SIM * similarity * freshness_mult(decay, recency, W_DECAY, W_RECENCY);
     let gate = importance_gate(similarity);
     let imp_mult = 1.0 + gate * ALPHA_IMP * importance.min(1.0);
     base_rel * imp_mult * query_valence_boost(valence, query_sentiment)
@@ -170,10 +170,11 @@ pub fn graph_composite_score_with_sentiment(
     query_sentiment: f64,
 ) -> f64 {
     if graph_proximity > 0.0 {
-        let base_rel = GW_SIM * similarity
-            + GW_DECAY * decay
-            + GW_RECENCY * recency
-            + GW_GRAPH * graph_proximity;
+        // Graph proximity is a RELEVANCE signal like similarity — it
+        // stays in the additive relevance core. Freshness multiplies
+        // (same recency-wall rationale as the base composite).
+        let base_rel = (GW_SIM * similarity + GW_GRAPH * graph_proximity)
+            * freshness_mult(decay, recency, GW_DECAY, GW_RECENCY);
         let gate = importance_gate(similarity);
         let imp_mult = 1.0 + gate * GW_ALPHA_IMP * importance.min(1.0);
         base_rel * imp_mult * query_valence_boost(valence, query_sentiment)
@@ -189,25 +190,59 @@ pub fn graph_composite_score_with_sentiment(
     }
 }
 
-/// Relevance-gated multiplicative scoring.
+/// Relevance-first multiplicative scoring.
 ///
-/// Instead of additive importance (which lets high-importance memories dominate
-/// regardless of relevance), importance now acts as a *multiplier* that only
-/// activates when the memory is semantically relevant to the query.
+/// NOTHING may be added to similarity — every other signal multiplies it.
+/// Two walls were torn down to get here, both the same failure shape:
+///
+/// - **Importance** (the original fix): additive importance let imp=1.0,
+///   sim=0.1 beat imp=0.3, sim=0.6. It became a similarity-gated
+///   multiplier.
+/// - **Freshness** (2026-08-05, the recency wall): additive
+///   `W_DECAY*decay + W_RECENCY*recency` handed every fresh record up to
+///   +0.5 free while similarity was worth at most W_SIM=0.5 — so on any
+///   age-spread corpus, EVERY record written this week outranked EVERY
+///   old record regardless of relevance (an old record would need a
+///   similarity advantage > 1.0, which cannot exist). Measured on a
+///   4,297-record production clone with a 40-query paraphrase-labeled
+///   set: exact cosine over the stored vectors scored MRR 0.562 while
+///   this formula scored 0.069 — the formula alone destroyed a 10×
+///   factor. Every earlier eval missed it because fresh test databases
+///   and the synthetic golden set have no age spread (uniform
+///   decay/recency degrade the additive form to pure similarity).
 ///
 /// Formula:
-///   base_rel = W_SIM * similarity + W_DECAY * decay + W_RECENCY * recency
+///   fresh    = 1 + FRESHNESS_SCALE * (W_DECAY * decay + W_RECENCY * recency)
 ///   gate     = sigmoid(GATE_K * (similarity - GATE_TAU))
-///   score    = base_rel * (1 + gate * ALPHA_IMP * importance) * valence_boost
+///   score    = W_SIM * similarity * fresh
+///              * (1 + gate * ALPHA_IMP * importance) * valence_boost
 ///
-/// This ensures that a memory with imp=1.0, sim=0.1 cannot beat a memory
-/// with imp=0.3, sim=0.6 — the gate suppresses the importance boost when
-/// similarity is low.
+/// Freshness is now a bounded TIE-BREAKER (≤ +12.5% at default weights):
+/// it orders near-equals by recency and can never promote an irrelevant
+/// record past a relevant one. Sweeping the scale on the production
+/// clone: 0.0 → MRR 0.583, 0.25 → 0.567, 0.5 → 0.521, 1.0 → 0.455,
+/// 2.0 → 0.315 (the shipped additive form ≈ 0.069). 0.25 keeps ~all of
+/// the ceiling while preserving recency semantics for genuine ties.
 
-/// Base relevance weights (no importance — it's now multiplicative).
+/// Base relevance weights. W_DECAY/W_RECENCY now weight the freshness
+/// MULTIPLIER's interior, not additive terms (see module rationale).
 pub const W_SIM: f64 = 0.50;
 pub const W_DECAY: f64 = 0.20;
 pub const W_RECENCY: f64 = 0.30;
+
+/// How strongly freshness (decay + recency) can multiply a score:
+/// `1 + FRESHNESS_SCALE * (w_decay*decay + w_recency*recency)`, i.e. at
+/// most +12.5% at default weights. Chosen by sweep on the production
+/// clone (values above; larger scales rebuild the recency wall
+/// gradually, and the additive form it replaces was the degenerate
+/// extreme). A tie-breaker must break ties — never build walls.
+pub const FRESHNESS_SCALE: f64 = 0.25;
+
+/// The freshness multiplier shared by every composite variant.
+#[inline]
+pub fn freshness_mult(decay: f64, recency: f64, w_decay: f64, w_recency: f64) -> f64 {
+    1.0 + FRESHNESS_SCALE * (w_decay * decay + w_recency * recency)
+}
 
 /// Importance gate parameters.
 /// GATE_K controls the sharpness of the sigmoid gate.
@@ -245,9 +280,11 @@ pub fn importance_gate(similarity: f64) -> f64 {
     sigmoid(GATE_K * (similarity - GATE_TAU))
 }
 
-/// Compute the composite recall score using relevance-gated multiplicative importance.
+/// Compute the composite recall score: relevance first, everything else
+/// multiplies (see the module rationale — freshness as an additive term
+/// was the recency wall).
 ///
-/// base_rel = W_SIM * similarity + W_DECAY * decay + W_RECENCY * recency
+/// base_rel = W_SIM * similarity * (1 + FRESHNESS_SCALE*(W_DECAY*decay + W_RECENCY*recency))
 /// gate     = sigmoid(K * (similarity - τ))
 /// score    = base_rel * (1 + gate * α * importance) * valence_boost
 pub fn composite_score(
@@ -257,13 +294,17 @@ pub fn composite_score(
     importance: f64,
     valence: f64,
 ) -> f64 {
-    let base_rel = W_SIM * similarity + W_DECAY * decay + W_RECENCY * recency;
+    let base_rel = W_SIM * similarity * freshness_mult(decay, recency, W_DECAY, W_RECENCY);
     let gate = importance_gate(similarity);
     let imp_mult = 1.0 + gate * ALPHA_IMP * importance.min(1.0);
     base_rel * imp_mult * valence_boost(valence)
 }
 
 /// Compute weighted contributions for standard scoring.
+///
+/// Decay/recency report their share of the freshness MULTIPLIER's
+/// interior (scaled), mirroring the score structure: they are fractional
+/// uplifts on relevance now, not standalone additive terms.
 pub fn standard_contributions(
     similarity: f64,
     decay: f64,
@@ -273,8 +314,8 @@ pub fn standard_contributions(
     let gate = importance_gate(similarity);
     ScoreContributions {
         similarity: W_SIM * similarity,
-        decay: W_DECAY * decay,
-        recency: W_RECENCY * recency,
+        decay: FRESHNESS_SCALE * W_DECAY * decay,
+        recency: FRESHNESS_SCALE * W_RECENCY * recency,
         importance: gate * ALPHA_IMP * importance.min(1.0),
         graph_proximity: 0.0,
     }
@@ -295,10 +336,10 @@ pub fn graph_composite_score(
     graph_proximity: f64,
 ) -> f64 {
     if graph_proximity > 0.0 {
-        let base_rel = GW_SIM * similarity
-            + GW_DECAY * decay
-            + GW_RECENCY * recency
-            + GW_GRAPH * graph_proximity;
+        // Proximity joins similarity in the relevance core; freshness
+        // multiplies (recency-wall fix, see module rationale).
+        let base_rel = (GW_SIM * similarity + GW_GRAPH * graph_proximity)
+            * freshness_mult(decay, recency, GW_DECAY, GW_RECENCY);
         let gate = importance_gate(similarity);
         let imp_mult = 1.0 + gate * GW_ALPHA_IMP * importance.min(1.0);
         base_rel * imp_mult * valence_boost(valence)
@@ -319,8 +360,8 @@ pub fn graph_contributions(
         let gate = importance_gate(similarity);
         ScoreContributions {
             similarity: GW_SIM * similarity,
-            decay: GW_DECAY * decay,
-            recency: GW_RECENCY * recency,
+            decay: FRESHNESS_SCALE * GW_DECAY * decay,
+            recency: FRESHNESS_SCALE * GW_RECENCY * recency,
             importance: gate * GW_ALPHA_IMP * importance.min(1.0),
             graph_proximity: GW_GRAPH * graph_proximity,
         }
@@ -382,8 +423,9 @@ pub fn adaptive_composite_score(
     query_sentiment: f64,
     weights: &crate::types::LearnedWeights,
 ) -> f64 {
-    let base_rel =
-        weights.w_sim * similarity + weights.w_decay * decay + weights.w_recency * recency;
+    let base_rel = weights.w_sim
+        * similarity
+        * freshness_mult(decay, recency, weights.w_decay, weights.w_recency);
     let gate = sigmoid(GATE_K * (similarity - weights.gate_tau));
     let imp_mult = 1.0 + gate * weights.alpha_imp * importance.min(1.0);
     base_rel * imp_mult * query_valence_boost(valence, query_sentiment)
@@ -400,8 +442,8 @@ pub fn adaptive_contributions(
     let gate = sigmoid(GATE_K * (similarity - weights.gate_tau));
     ScoreContributions {
         similarity: weights.w_sim * similarity,
-        decay: weights.w_decay * decay,
-        recency: weights.w_recency * recency,
+        decay: FRESHNESS_SCALE * weights.w_decay * decay,
+        recency: FRESHNESS_SCALE * weights.w_recency * recency,
         importance: gate * weights.alpha_imp * importance.min(1.0),
         graph_proximity: 0.0,
     }
@@ -436,10 +478,8 @@ pub fn adaptive_graph_composite_score(
         } else {
             (GW_SIM, GW_DECAY, GW_RECENCY)
         };
-        let base_rel = gw_sim * similarity
-            + gw_decay * decay
-            + gw_recency * recency
-            + graph_weight * graph_proximity;
+        let base_rel = (gw_sim * similarity + graph_weight * graph_proximity)
+            * freshness_mult(decay, recency, gw_decay, gw_recency);
         // Scale alpha_imp by same ratio as hardcoded (GW_ALPHA_IMP / ALPHA_IMP)
         let graph_alpha = weights.alpha_imp * (GW_ALPHA_IMP / ALPHA_IMP);
         let gate = sigmoid(GATE_K * (similarity - weights.gate_tau));
@@ -484,8 +524,8 @@ pub fn adaptive_graph_contributions(
         let gate = sigmoid(GATE_K * (similarity - weights.gate_tau));
         ScoreContributions {
             similarity: gw_sim * similarity,
-            decay: gw_decay * decay,
-            recency: gw_recency * recency,
+            decay: FRESHNESS_SCALE * gw_decay * decay,
+            recency: FRESHNESS_SCALE * gw_recency * recency,
             importance: gate * graph_alpha * importance.min(1.0),
             graph_proximity: graph_weight * graph_proximity,
         }
@@ -603,9 +643,12 @@ mod tests {
 
     #[test]
     fn test_composite_score_basic() {
-        // All signals at 1.0, imp=1.0, valence=0 → base * (1 + gate * α * 1) * 1.0
+        // All signals at 1.0, imp=1.0, valence=0:
+        // W_SIM * sim * freshness * (1 + gate * α * 1) * 1.0
+        // Freshness MULTIPLIES relevance (recency-wall fix) — the old
+        // additive form let fresh-but-irrelevant beat old-but-relevant.
         let score = composite_score(1.0, 1.0, 1.0, 1.0, 0.0);
-        let base = W_SIM + W_DECAY + W_RECENCY;
+        let base = W_SIM * 1.0 * freshness_mult(1.0, 1.0, W_DECAY, W_RECENCY);
         let gate = importance_gate(1.0);
         let expected = base * (1.0 + gate * ALPHA_IMP);
         assert!(
@@ -617,7 +660,7 @@ mod tests {
     #[test]
     fn test_composite_score_with_valence() {
         let score = composite_score(1.0, 1.0, 1.0, 1.0, 1.0);
-        let base = W_SIM + W_DECAY + W_RECENCY;
+        let base = W_SIM * 1.0 * freshness_mult(1.0, 1.0, W_DECAY, W_RECENCY);
         let gate = importance_gate(1.0);
         let expected = base * (1.0 + gate * ALPHA_IMP) * 1.3;
         assert!((score - expected).abs() < 1e-10);
@@ -632,13 +675,33 @@ mod tests {
 
     #[test]
     fn test_graph_composite_with_proximity() {
+        // Proximity joins sim in the relevance core; freshness multiplies.
         let score = graph_composite_score(1.0, 1.0, 1.0, 1.0, 0.0, 1.0);
-        let base = GW_SIM + GW_DECAY + GW_RECENCY + GW_GRAPH;
+        let base = (GW_SIM + GW_GRAPH) * freshness_mult(1.0, 1.0, GW_DECAY, GW_RECENCY);
         let gate = importance_gate(1.0);
         let expected = base * (1.0 + gate * GW_ALPHA_IMP);
         assert!(
             (score - expected).abs() < 1e-10,
             "expected {expected}, got {score}"
+        );
+    }
+
+    #[test]
+    fn the_recency_wall_is_torn_down() {
+        // THE 2026-08-05 production defect, as a pinned regression test:
+        // an OLD, RELEVANT record (sim 0.6, decay/recency ≈ 0) must beat
+        // a FRESH, IRRELEVANT one (sim 0.3, decay/recency ≈ 1). Under
+        // the old additive form the fresh record collected +0.5 free and
+        // won regardless of relevance — measured on a 4,297-record
+        // production clone as MRR 0.562 (exact cosine) collapsing to
+        // 0.069 (the formula). No freshness gap may overturn a real
+        // relevance gap.
+        let old_relevant = composite_score(0.6, 0.0, 0.0, 0.5, 0.0);
+        let fresh_irrelevant = composite_score(0.3, 1.0, 1.0, 0.5, 0.0);
+        assert!(
+            old_relevant > fresh_irrelevant,
+            "an old relevant record must outrank fresh irrelevant noise: \
+             {old_relevant:.4} vs {fresh_irrelevant:.4}"
         );
     }
 

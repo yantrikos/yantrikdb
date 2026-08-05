@@ -856,25 +856,56 @@ mod tests {
     }
 
     /// Inject one synthetic preference-bearing episode straight into the
-    /// ledger: a "good" impression (high similarity) labeled positive and
-    /// a "bad" impression (low similarity, high decay/recency — the kind
-    /// the default weights over-rank) labeled negative. Deterministic
-    /// timestamps so the forward split is stable.
+    /// ledger: a "good" impression (high similarity, no boosts) labeled
+    /// positive and a "bad" impression the DEFAULT weights still
+    /// over-rank, labeled negative.
+    ///
+    /// The bad row's shape moved with the 2026-08-05 recency-wall fix:
+    /// the old shape (low sim, high decay/recency) is now ranked
+    /// correctly by the DEFAULT formula — freshness became a bounded
+    /// multiplier, so there is almost nothing left for the fitter to
+    /// learn from it (Δ-loss fell under the swap margin, which is the
+    /// structural fix working, not a learning regression). The remaining
+    /// ADDITIVE channel the defaults can over-rank is the keyword lane:
+    /// a keyword-boosted, barely-similar, fresh record (sim 0.15 + 0.31
+    /// boost ≈ 0.39) still edges out a plainly relevant one (0.5 · 0.75
+    /// = 0.375). Consistent explicit evidence against that is exactly
+    /// what the fitter can fix inside one MAX_DELTA generation (lower
+    /// keyword_boost / decay / recency interior weights, raise w_sim).
+    /// Deterministic timestamps so the forward split is stable.
     fn inject_episode(db: &YantrikDB, n: usize, source: &str) {
         let conn = db.conn();
         let episode = format!("ep-{n:04}");
         let ts = 1_000_000.0 + n as f64;
-        for (rid, rank, sim, decay, recency, polarity) in [
-            (format!("good-{n}"), 1, 0.9_f64, 0.0_f64, 0.0_f64, 1_i32),
-            (format!("bad-{n}"), 0, 0.1, 0.9, 0.9, -1),
+        for (rid, rank, sim, decay, recency, kw, polarity) in [
+            (
+                format!("good-{n}"),
+                1,
+                0.75_f64,
+                0.0_f64,
+                0.0_f64,
+                0_i64,
+                1_i32,
+            ),
+            (format!("bad-{n}"), 0, 0.15, 0.9, 0.9, 1, -1),
         ] {
             conn.execute(
                 "INSERT INTO recall_impressions \
                  (episode_id, rid, rank, f_similarity, f_decay, f_recency, \
                   f_importance, f_valence, keyword_boosted, score, \
                   weight_generation, namespace, query_hash, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0.0, 0.0, 0, 0.5, 0, 'default', ?7, ?8)",
-                params![episode, rid, rank, sim, decay, recency, format!("q{n}"), ts],
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, 0.0, 0.0, ?7, 0.5, 0, 'default', ?8, ?9)",
+                params![
+                    episode,
+                    rid,
+                    rank,
+                    sim,
+                    decay,
+                    recency,
+                    kw,
+                    format!("q{n}"),
+                    ts
+                ],
             )
             .unwrap();
             conn.execute(
