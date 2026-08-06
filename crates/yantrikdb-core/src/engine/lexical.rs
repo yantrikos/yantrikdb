@@ -99,6 +99,30 @@ pub(crate) fn lexical_strengths(ranked: &[(String, f64)]) -> HashMap<String, f64
     best
 }
 
+/// Quantize a score for COMPARISON: ~1e-6 resolution, far below any
+/// meaningful score difference and far above the cross-open float-
+/// summation jitter (~1e-6 last-bit) measured on every build including
+/// released. Fix (h): every ranking comparison in the recall path —
+/// not just the reserve — must run on quantized scores with rid as the
+/// total tiebreak, or the jitter picks the order (fifth determinism
+/// source: the MMR pre-sort re-sorted raw floats AFTER the reserve's
+/// deterministic order, and MMR's strict-> tie handling then depended
+/// on that order).
+pub(crate) fn quantize_score(s: f64) -> f64 {
+    (s * 1e6).round()
+}
+
+/// THE ranking comparator: quantized score desc, rid asc. The only
+/// comparator any recall-path selection is allowed to use — a raw
+/// float sort anywhere downstream re-introduces jitter sensitivity
+/// (the audit rule: any candidate stream feeding a truncation or tie
+/// band carries a total order, applied BEFORE the truncation).
+pub(crate) fn rank_cmp(a: &RecallResult, b: &RecallResult) -> std::cmp::Ordering {
+    quantize_score(b.score)
+        .total_cmp(&quantize_score(a.score))
+        .then_with(|| a.rid.cmp(&b.rid))
+}
+
 /// The keyword-lane boost: the pre-fusion `keyword_boost * (1 - sim)`
 /// scaled by lexical strength. `lex = 1.0` reproduces the old formula
 /// bit-for-bit, so the measured +0.034 contribution of the lane's
@@ -129,12 +153,8 @@ pub(crate) fn apply_keyword_reserve(
     // top_k=50, instability confined to the band edge). Quantizing at
     // 1e-6 sits far below any meaningful score difference and far
     // above the jitter; rid breaks quantized ties totally.
-    let quant = |s: f64| (s * 1e6).round();
-    scored.sort_by(|a, b| {
-        quant(b.score)
-            .total_cmp(&quant(a.score))
-            .then_with(|| a.rid.cmp(&b.rid))
-    });
+    scored.sort_by(rank_cmp);
+    let quant = quantize_score;
 
     let cutoff_idx = top_k.min(scored.len()).saturating_sub(1);
     let cutoff_score = scored.get(cutoff_idx).map(|r| r.score).unwrap_or(0.0);

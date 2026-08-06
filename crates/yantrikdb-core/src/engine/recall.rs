@@ -1608,7 +1608,7 @@ impl YantrikDB {
             } else if query_text.is_none() {
                 // Embedding-only search (no query text): seed from top results
                 let mut seed_sorted = scored.clone();
-                seed_sorted.sort_by(|a, b| b.score.total_cmp(&a.score));
+                seed_sorted.sort_by(crate::engine::lexical::rank_cmp);
                 let seed_count = 3.min(seed_sorted.len());
                 let seed_rids: Vec<&str> = seed_sorted[..seed_count]
                     .iter()
@@ -1968,7 +1968,7 @@ impl YantrikDB {
         // "Arjun cooked X today" x50) dominate all K result slots. MMR ensures
         // each result adds new information by penalizing candidates too similar
         // to already-selected results.
-        scored.sort_by(|a, b| b.score.total_cmp(&a.score));
+        scored.sort_by(crate::engine::lexical::rank_cmp);
 
         let min_pool_for_mmr = (top_k * 3).max(20);
         if scored.len() > top_k && scored.len() >= min_pool_for_mmr {
@@ -2024,7 +2024,7 @@ impl YantrikDB {
                         continue;
                     }
 
-                    let relevance = result.score;
+                    let relevance = crate::engine::lexical::quantize_score(result.score) / 1e6;
                     let max_sim = if let Some(Some(ref cand_emb)) = pool_embeddings.get(idx) {
                         selected_embeddings
                             .iter()
@@ -4058,7 +4058,7 @@ impl YantrikDB {
             } else if query_text.is_none() {
                 // Embedding-only search (no query text): seed from top results
                 let mut seed_sorted = scored.clone();
-                seed_sorted.sort_by(|a, b| b.score.total_cmp(&a.score));
+                seed_sorted.sort_by(crate::engine::lexical::rank_cmp);
                 let seed_count = 3.min(seed_sorted.len());
                 let seed_rids: Vec<&str> = seed_sorted[..seed_count]
                     .iter()
@@ -4345,7 +4345,7 @@ impl YantrikDB {
 
         // ── Phase 4: MMR diversity selection ──
         let t_sort = Instant::now();
-        scored.sort_by(|a, b| b.score.total_cmp(&a.score));
+        scored.sort_by(crate::engine::lexical::rank_cmp);
 
         let min_pool_for_mmr = (top_k * 3).max(20);
         if scored.len() > top_k && scored.len() >= min_pool_for_mmr {
@@ -4388,7 +4388,7 @@ impl YantrikDB {
                         continue;
                     }
 
-                    let relevance = result.score;
+                    let relevance = crate::engine::lexical::quantize_score(result.score) / 1e6;
                     let max_sim = if let Some(Some(ref cand_emb)) = pool_embeddings.get(idx) {
                         selected_embeddings
                             .iter()

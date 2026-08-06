@@ -153,9 +153,14 @@ fn test_high_confidence_no_hints() {
     // With 5 exact matches and top_k=5: signal_density=1.0, signal_sim~1.0
     // confidence = 0.35*sim + 0.25*gap + 0.20*(1/4) + 0.20*1.0
     // should be >= 0.60
+    // Tolerance of 1e-6 — the engine's own ranking resolution (fix h):
+    // records within the float-summation jitter band now tie under the
+    // quantized comparator and rid picks the order, so the top result
+    // can differ from the raw-float winner by <1e-6 in score. 0.60 was
+    // brushing that band (observed 0.5999999993 vs 0.6000000001).
     assert!(
-        response.confidence >= 0.60,
-        "Confidence should be >= 0.60 for exact match with full density, got {}",
+        response.confidence >= 0.60 - 1e-6,
+        "Confidence should be ~>= 0.60 for exact match with full density, got {}",
         response.confidence,
     );
     assert!(
