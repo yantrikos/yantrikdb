@@ -15,6 +15,7 @@ from yantrikdb._yantrikdb_rust import (
     YantrikDB,
 )
 from yantrikdb.consolidate import consolidate
+from yantrikdb.rerank import recall_reranked, rerank_hits
 from yantrikdb.triggers import check_all_triggers
 
 # Backward-compat alias
@@ -37,6 +38,8 @@ __all__ = [
     "TenantManager",
     "consolidate",
     "check_all_triggers",
+    "recall_reranked",
+    "rerank_hits",
     "Backpressure",
     "BatchDeferredDuringReembed",
     "CorrectionDeferredDuringReembed",
