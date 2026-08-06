@@ -408,7 +408,23 @@ impl PyYantrikDB {
     /// with yantrikdb-hermes-agent v0.3.0 (swarm msg 8994b0a1) on the
     /// "pyo3 surfaces should be Pythonic, not transcriptions of the
     /// Rust signature" principle.
-    #[pyo3(signature = (query, top_k=10, *, namespace=None, domain=None, source=None))]
+    /// v0.13.1 additions, co-iteration wheel 2:
+    /// - `skip_reinforce` (the API gap hermes filed): a gate or probe
+    ///   should observe the store, not mutate `access_count` — without
+    ///   this flag, repeated identical queries see a database mutated by
+    ///   their own predecessors.
+    /// - `explain=True` returns `{"results": [...], "explain": {...}}`
+    ///   where explain carries the candidate pool (post-boost/
+    ///   post-reserve, pre-MMR-truncation — the set that ENTERS final
+    ///   selection), per-row lane-admission sets and stable rids,
+    ///   per-lane ran/never-ran provenance, and the bm25 degeneracy
+    ///   ratio. NOTE: this binding passes `expand_entities=true` (its
+    ///   long-standing behavior) while the Rust-side `recall_text`
+    ///   passes `false` — a known transport divergence, deliberately
+    ///   NOT changed on an instrumentation wheel; the explain lanes
+    ///   report makes it visible instead of silent.
+    #[pyo3(signature = (query, top_k=10, *, namespace=None, domain=None, source=None, skip_reinforce=false, explain=false))]
+    #[allow(clippy::too_many_arguments)]
     fn recall_text(
         &self,
         py: Python<'_>,
@@ -417,7 +433,9 @@ impl PyYantrikDB {
         namespace: Option<&str>,
         domain: Option<&str>,
         source: Option<&str>,
-    ) -> PyResult<Vec<PyObject>> {
+        skip_reinforce: bool,
+        explain: bool,
+    ) -> PyResult<PyObject> {
         let db = self
             .inner
             .as_ref()
@@ -429,9 +447,40 @@ impl PyYantrikDB {
         // args in one call. Engine's recall_text_filtered only takes
         // domain + source (no namespace) and recall_text takes none —
         // recall() is the one with all three positional. Same defaults
-        // as recall_text on the Rust side: time_window=None,
-        // memory_type=None, include_consolidated=false,
-        // expand_entities=true, skip_reinforce=false.
+        // as recall_text on the Rust side EXCEPT expand_entities (see
+        // the transport-divergence note above).
+        if explain {
+            let (results, report) = db
+                .recall_explained(
+                    &emb,
+                    top_k,
+                    None,  // time_window
+                    None,  // memory_type
+                    false, // include_consolidated
+                    true,  // expand_entities — binding behavior, see note
+                    Some(query),
+                    skip_reinforce,
+                    namespace,
+                    domain,
+                    source,
+                    None,  // certainty_min (#46)
+                    None,  // order (#46) — relevance default
+                    false, // include_superseded (v0.10 Item 1)
+                )
+                .map_err(map_err)?;
+            let out = pyo3::types::PyDict::new(py);
+            let results_py: Vec<PyObject> = results
+                .iter()
+                .map(|r| recall_result_to_dict(py, r))
+                .collect::<PyResult<_>>()?;
+            out.set_item("results", results_py)?;
+            let report_json = serde_json::to_value(&report).map_err(|e| {
+                PyRuntimeError::new_err(format!("explain serialization failed: {e}"))
+            })?;
+            out.set_item("explain", crate::py_types::json_to_py(py, &report_json)?)?;
+            return Ok(out.into());
+        }
+
         let results = db
             .recall(
                 &emb,
@@ -439,9 +488,9 @@ impl PyYantrikDB {
                 None,  // time_window
                 None,  // memory_type
                 false, // include_consolidated
-                true,  // expand_entities
+                true,  // expand_entities — binding behavior, see note
                 Some(query),
-                false, // skip_reinforce
+                skip_reinforce,
                 namespace,
                 domain,
                 source,
@@ -451,10 +500,11 @@ impl PyYantrikDB {
             )
             .map_err(map_err)?;
 
-        results
+        let list: Vec<PyObject> = results
             .iter()
             .map(|r| recall_result_to_dict(py, r))
-            .collect()
+            .collect::<PyResult<_>>()?;
+        Ok(pyo3::types::PyList::new(py, list)?.into())
     }
 
     /// Recall with response including confidence scoring and refinement hints.

@@ -17,6 +17,7 @@ mod cognition_gates;
 mod corrections;
 mod dimensions;
 mod encryption;
+mod explain;
 mod idempotency;
 mod interactive_recall;
 mod learning_categories;

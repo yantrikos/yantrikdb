@@ -239,8 +239,69 @@ impl YantrikDB {
                 order,
                 include_superseded,
                 epoch0,
+                None,
             )? {
                 return Ok(results);
+            }
+        }
+        Err(YantrikDbError::RecallContended {
+            attempts: MAX_ATTEMPTS,
+        })
+    }
+
+    /// v0.13.1 — `recall()` with the explain surface attached: the same
+    /// pipeline, plus a [`crate::types::RecallExplain`] whose `pool` is
+    /// the candidate set snapshotted post-boost/post-reserve,
+    /// pre-MMR-truncation — the set that ENTERS final selection.
+    /// Snapshotted earlier it would show a healthy vector lane and tell
+    /// you nothing; later it would only show survivors again (a k=50
+    /// survivors comparison once cleared a defect living at pool
+    /// positions 51–99). Explain is DEFAULT-LANE ONLY: `recall_profiled`
+    /// has no explain parameter, so it cannot silently return less.
+    #[allow(clippy::too_many_arguments)]
+    #[tracing::instrument(skip(self, query_embedding), fields(top_k, expand_entities, namespace))]
+    pub fn recall_explained(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        time_window: Option<(f64, f64)>,
+        memory_type: Option<&str>,
+        include_consolidated: bool,
+        expand_entities: bool,
+        query_text: Option<&str>,
+        skip_reinforce: bool,
+        namespace: Option<&str>,
+        domain: Option<&str>,
+        source: Option<&str>,
+        certainty_min: Option<f64>,
+        order: Option<&str>,
+        include_superseded: bool,
+    ) -> Result<(Vec<RecallResult>, crate::types::RecallExplain)> {
+        const MAX_ATTEMPTS: u32 = 8;
+        let mut explain: Option<crate::types::RecallExplain> = None;
+        for attempt in 0..MAX_ATTEMPTS {
+            let Some(epoch0) = self.correction_epoch_even() else {
+                return Err(YantrikDbError::RecallContended { attempts: attempt });
+            };
+            if let Some(results) = self.recall_inner(
+                query_embedding,
+                top_k,
+                time_window,
+                memory_type,
+                include_consolidated,
+                expand_entities,
+                query_text,
+                skip_reinforce,
+                namespace,
+                domain,
+                source,
+                certainty_min,
+                order,
+                include_superseded,
+                epoch0,
+                Some(&mut explain),
+            )? {
+                return Ok((results, explain.unwrap_or_default()));
             }
         }
         Err(YantrikDbError::RecallContended {
@@ -287,6 +348,10 @@ impl YantrikDB {
         // fence) after hydration. Returns Ok(None) on mismatch → wrapper
         // retries; a result is never returned without a passing recheck.
         epoch0: u64,
+        // v0.13.1 explain surface: when Some, a RecallExplain is written
+        // through on the SUCCESS path only (a retried attempt overwrites,
+        // a discarded one never assigns). None costs nothing.
+        mut explain_sink: Option<&mut Option<crate::types::RecallExplain>>,
     ) -> Result<Option<Vec<RecallResult>>> {
         // Validate `order` upfront so callers get a clear error rather
         // than silently falling back to relevance when they typo a value.
@@ -334,6 +399,16 @@ impl YantrikDB {
             .collect();
 
         let capture_inst = self as *const Self as usize;
+        // v0.13.1 explain: lane-admission tracking. Rows created by lanes
+        // that stamp a why marker (fts_sourced / claims_match /
+        // cold_memory / graph-connected) are attributed from the marker at
+        // snapshot time; the three markerless admission paths (vector,
+        // importance fallback, valence scan) are tracked by rid here.
+        let explain_on = explain_sink.is_some();
+        let mut explain_fallback_rids: std::collections::HashSet<String> = Default::default();
+        let mut explain_valence_rids: std::collections::HashSet<String> = Default::default();
+        let mut explain_pack_rids: std::collections::HashSet<String> = Default::default();
+        let mut explain_fts_ran = false;
         if crate::engine::capture::enabled() {
             crate::engine::capture::emit(
                 capture_inst,
@@ -359,6 +434,27 @@ impl YantrikDB {
             // validates once corrections quiesce.
             if !self.correction_epoch_validate(epoch0) {
                 return Ok(None);
+            }
+            // Explain must not be silently empty on this path: the vector
+            // lane RAN and found nothing, and no pack was mounted — say so.
+            if let Some(sink) = explain_sink.as_deref_mut() {
+                let mut lanes = std::collections::BTreeMap::new();
+                lanes.insert(
+                    "vector".to_string(),
+                    crate::types::ExplainLaneReport {
+                        status: "ran_empty".to_string(),
+                        candidates: 0,
+                        reason: None,
+                    },
+                );
+                *sink = Some(crate::types::RecallExplain {
+                    comparator: "rank_cmp: score quantized at 1e-6 desc, rid asc".to_string(),
+                    score_algebra: "empty index short-circuit — no scoring ran".to_string(),
+                    query_sentiment: 0.0,
+                    bm25_degeneracy_ratio: None,
+                    lanes,
+                    pool: Vec::new(),
+                });
             }
             return Ok(Some(vec![]));
         }
@@ -483,6 +579,7 @@ impl YantrikDB {
             }
         } // drop cache borrow
 
+        let explain_len_before_fallback = scored.len();
         // Step 2.5: High-importance memory fallback (similarity-gated)
         //
         // Anchor memories define the user's life story. HNSW approximate search
@@ -589,6 +686,14 @@ impl YantrikDB {
                     });
                 }
             }
+        }
+
+        if explain_on {
+            explain_fallback_rids.extend(
+                scored[explain_len_before_fallback..]
+                    .iter()
+                    .map(|r| r.rid.clone()),
+            );
         }
 
         // rid → per-query lexical strength from FTS5 bm25 ranks (fusion:
@@ -1083,6 +1188,7 @@ impl YantrikDB {
                         // rows — read by the boost sites below and by the
                         // keyword reserve (see engine/lexical.rs).
                         lex_by_rid = crate::engine::lexical::lexical_strengths(&lex_ranked);
+                        explain_fts_ran = true;
 
                         {
                             let fts_rid_set: std::collections::HashSet<&str> =
@@ -1243,6 +1349,7 @@ impl YantrikDB {
             query_sentiment,
         )?;
 
+        let explain_len_before_valence = scored.len();
         // Step 2.7: Valence-based retrieval for emotional queries
         //
         // For queries with strong sentiment (e.g., "stressful moments", "happiest times"),
@@ -1376,6 +1483,14 @@ impl YantrikDB {
                     });
                 }
             }
+        }
+
+        if explain_on {
+            explain_valence_rids.extend(
+                scored[explain_len_before_valence..]
+                    .iter()
+                    .map(|r| r.rid.clone()),
+            );
         }
 
         // Step 2.9: Cold memory fallback
@@ -1955,6 +2070,9 @@ impl YantrikDB {
             )?;
             if !pack_candidates.is_empty() {
                 tracing::debug!(count = pack_candidates.len(), "merged pack candidates");
+                if explain_on {
+                    explain_pack_rids.extend(pack_candidates.iter().map(|r| r.rid.clone()));
+                }
                 scored.extend(pack_candidates);
             }
         }
@@ -2028,6 +2146,202 @@ impl YantrikDB {
                     .map(|r| (r.rid.as_str(), crate::engine::capture::bits(r.score)))
                     .collect::<Vec<_>>()),
             );
+        }
+
+        // v0.13.1 explain snapshot — post-boost/post-reserve,
+        // pre-MMR-truncation: the set that ENTERS final selection.
+        // Earlier would show a healthy vector lane and tell you nothing;
+        // later would only show survivors again.
+        let mut explain_report: Option<crate::types::RecallExplain> = None;
+        if explain_on {
+            let mut sim_order: Vec<usize> = (0..scored.len()).collect();
+            sim_order.sort_by(|&a, &b| {
+                scored[b]
+                    .scores
+                    .similarity
+                    .total_cmp(&scored[a].scores.similarity)
+                    .then_with(|| scored[a].rid.cmp(&scored[b].rid))
+            });
+            let mut pre_rank = vec![0usize; scored.len()];
+            for (rank, &i) in sim_order.iter().enumerate() {
+                pre_rank[i] = rank;
+            }
+            let pool: Vec<crate::types::ExplainPoolRow> = scored
+                .iter()
+                .enumerate()
+                .map(|(i, r)| {
+                    let why = &r.why_retrieved;
+                    let mut lanes: Vec<String> = Vec::new();
+                    if win_by_rid.contains_key(&r.rid) {
+                        lanes.push("vector".into());
+                    }
+                    if why
+                        .iter()
+                        .any(|w| w == "keyword_match" || w == "fts_sourced")
+                    {
+                        lanes.push("fts".into());
+                    }
+                    if why.iter().any(|w| w.starts_with("claims_match")) {
+                        lanes.push("claims".into());
+                    }
+                    if r.scores.graph_proximity > 0.0
+                        || why.iter().any(|w| w.starts_with("graph-connected"))
+                    {
+                        lanes.push("graph".into());
+                    }
+                    if why.iter().any(|w| w == "cold_memory") {
+                        lanes.push("cold_fallback".into());
+                    }
+                    if why.iter().any(|w| w == "keyword_reserved") {
+                        lanes.push("keyword_reserve".into());
+                    }
+                    if explain_fallback_rids.contains(&r.rid) {
+                        lanes.push("importance_fallback".into());
+                    }
+                    if explain_valence_rids.contains(&r.rid) {
+                        lanes.push("valence_scan".into());
+                    }
+                    if explain_pack_rids.contains(&r.rid) {
+                        lanes.push("pack".into());
+                    }
+                    crate::types::ExplainPoolRow {
+                        rid: r.rid.clone(),
+                        score_q: crate::engine::lexical::quantize_score(r.score) / 1e6,
+                        similarity: r.scores.similarity,
+                        lex: lex_by_rid.get(r.rid.as_str()).copied(),
+                        lanes_admitted: lanes,
+                        rank_pre_fusion: pre_rank[i],
+                        rank_post_fusion: i,
+                        selected: false,
+                    }
+                })
+                .collect();
+
+            let mut lanes = std::collections::BTreeMap::new();
+            let lane = |status: &str, candidates: usize, reason: Option<String>| {
+                crate::types::ExplainLaneReport {
+                    status: status.to_string(),
+                    candidates,
+                    reason,
+                }
+            };
+            lanes.insert("vector".to_string(), lane("ran", win_by_rid.len(), None));
+            lanes.insert(
+                "fts".to_string(),
+                if !explain_fts_ran {
+                    lane(
+                        "never_ran",
+                        0,
+                        Some(if query_text.is_none() {
+                            "no query_text".to_string()
+                        } else {
+                            "no extractable keywords (or FTS unavailable)".to_string()
+                        }),
+                    )
+                } else if lex_by_rid.is_empty() {
+                    lane("ran_empty", 0, None)
+                } else {
+                    lane("ran", lex_by_rid.len(), None)
+                },
+            );
+            let claims_count = pool
+                .iter()
+                .filter(|p| p.lanes_admitted.iter().any(|l| l == "claims"))
+                .count();
+            lanes.insert(
+                "claims".to_string(),
+                if query_text.is_none() {
+                    lane("never_ran", 0, Some("no query_text".to_string()))
+                } else if claims_count == 0 {
+                    lane("ran_empty", 0, None)
+                } else {
+                    lane("ran", claims_count, None)
+                },
+            );
+            let graph_count = pool
+                .iter()
+                .filter(|p| p.lanes_admitted.iter().any(|l| l == "graph"))
+                .count();
+            lanes.insert(
+                "graph".to_string(),
+                if !expand_entities {
+                    lane("never_ran", 0, Some("expand_entities=false".to_string()))
+                } else if graph_count == 0 {
+                    lane("ran_empty", 0, None)
+                } else {
+                    lane("ran", graph_count, None)
+                },
+            );
+            lanes.insert(
+                "valence_scan".to_string(),
+                if query_sentiment.abs() <= 0.5 {
+                    lane(
+                        "never_ran",
+                        0,
+                        Some(format!(
+                            "query_sentiment {query_sentiment:.2} inside neutral band (|s| <= 0.5)"
+                        )),
+                    )
+                } else {
+                    lane(
+                        if explain_valence_rids.is_empty() {
+                            "ran_empty"
+                        } else {
+                            "ran"
+                        },
+                        explain_valence_rids.len(),
+                        None,
+                    )
+                },
+            );
+            lanes.insert(
+                "importance_fallback".to_string(),
+                lane(
+                    if explain_fallback_rids.is_empty() {
+                        "ran_empty"
+                    } else {
+                        "ran"
+                    },
+                    explain_fallback_rids.len(),
+                    None,
+                ),
+            );
+            lanes.insert(
+                "pack".to_string(),
+                lane(
+                    if explain_pack_rids.is_empty() {
+                        "ran_empty"
+                    } else {
+                        "ran"
+                    },
+                    explain_pack_rids.len(),
+                    None,
+                ),
+            );
+
+            let bm25_degeneracy_ratio = if lex_by_rid.is_empty() {
+                None
+            } else {
+                let near_best = lex_by_rid.values().filter(|&&s| s >= 0.9).count();
+                Some(near_best as f64 / lex_by_rid.len() as f64)
+            };
+
+            explain_report = Some(crate::types::RecallExplain {
+                comparator: "rank_cmp: score quantized at 1e-6 desc, rid asc (every recall-path \
+                             selection)"
+                    .to_string(),
+                score_algebra: "score = w_sim*similarity*freshness_mult(decay,recency) * \
+                                importance_mult * valence_multiplier, plus additive lane boosts \
+                                (keyword, graph) and reserve/claims lifts to cutoff+eps. \
+                                scores.contributions are per-signal DIAGNOSTIC MAGNITUDES on \
+                                these mixed terms and do NOT sum to score — do not derive \
+                                arithmetic from them."
+                    .to_string(),
+                query_sentiment,
+                bm25_degeneracy_ratio,
+                lanes,
+                pool,
+            });
         }
 
         let min_pool_for_mmr = (top_k * 3).max(20);
@@ -2257,6 +2571,20 @@ impl YantrikDB {
             if let Some(qt) = query_text {
                 let top = scored.first().map(|r| r.score).unwrap_or(0.0);
                 let _ = self.record_recall_demand(namespace, qt, scored.len(), top);
+            }
+        }
+
+        // v0.13.1 explain: mark survivors and hand the report through the
+        // sink — on the success path only, AFTER the epoch recheck, so a
+        // discarded attempt never leaks a half-built report.
+        if let Some(sink) = explain_sink.as_deref_mut() {
+            if let Some(mut report) = explain_report {
+                let selected: std::collections::HashSet<&str> =
+                    scored.iter().map(|r| r.rid.as_str()).collect();
+                for row in &mut report.pool {
+                    row.selected = selected.contains(row.rid.as_str());
+                }
+                *sink = Some(report);
             }
         }
 

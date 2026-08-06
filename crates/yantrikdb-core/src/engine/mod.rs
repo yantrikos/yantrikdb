@@ -2204,6 +2204,41 @@ impl YantrikDB {
         )
     }
 
+    /// v0.13.1 — `recall_text` with the explain surface: same defaults
+    /// (`expand_entities` follows the caller so the graph lane's
+    /// never-ran provenance is visible rather than hard-coded away),
+    /// plus a [`crate::types::RecallExplain`] carrying the candidate
+    /// pool, per-row lane-admission sets, per-lane ran/never-ran
+    /// status, and the bm25 degeneracy ratio. `skip_reinforce=true` is
+    /// the right choice for gates and probes — an explain call should
+    /// observe the store, not mutate access_count.
+    pub fn recall_text_explained(
+        &self,
+        query: &str,
+        top_k: usize,
+        namespace: Option<&str>,
+        expand_entities: bool,
+        skip_reinforce: bool,
+    ) -> Result<(Vec<RecallResult>, crate::types::RecallExplain)> {
+        let embedding = self.embed(query)?;
+        self.recall_explained(
+            &embedding,
+            top_k,
+            None,  // time_window
+            None,  // memory_type
+            false, // include_consolidated
+            expand_entities,
+            Some(query),
+            skip_reinforce,
+            namespace,
+            None,  // domain
+            None,  // source
+            None,  // certainty_min
+            None,  // order — relevance
+            false, // include_superseded
+        )
+    }
+
     /// Recall memories with domain and source filters.
     ///
     /// Like `recall_text` but restricts results to a specific domain

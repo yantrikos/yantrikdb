@@ -21,6 +21,18 @@
 //! between summation jitter and an unnamed structural order.
 //!
 //! Disabled (the default) this is one OnceLock read per hook site.
+//!
+//! **Status: SUPPORTED, not debug** (hermes objection sustained,
+//! 2026-08-06): this instrument convicted the eleventh AND twelfth
+//! determinism sources when every user-side gate — hash-pinned,
+//! error-barred, determinism-checked — could not see them. It is
+//! load-bearing for anyone gating this engine. The shallow version of
+//! the same fact (the candidate pool) ships in the public API as
+//! `recall_explained` / `explain=True`; capture remains the deep
+//! per-stage, per-MMR-step, bit-level view, and its env-var interface
+//! is a stable contract: `YANTRIKDB_CAPTURE=<dir>` → JSONL per pid,
+//! stage names hnsw_pool / lex_by_rid / scored_pre_reserve /
+//! pool_post_reserve_sorted / mmr_step / final.
 
 use std::fs::OpenOptions;
 use std::io::Write;
