@@ -17,6 +17,10 @@ mod cognition_gates;
 mod corrections;
 mod dimensions;
 mod encryption;
+// The explain suite drives the full text path (record_text/
+// recall_text_explained), which needs the bundled embedder — slim
+// builds (--no-default-features) have no `with_default`.
+#[cfg(feature = "bundled-embedder")]
 mod explain;
 mod idempotency;
 mod interactive_recall;
