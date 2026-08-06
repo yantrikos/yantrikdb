@@ -8,12 +8,64 @@ use crate::error::Result;
 
 // ── Word-boundary entity matching ──
 
-/// Tokenize text into lowercase words, splitting on non-alphanumeric chars.
+/// Tokenize text into lowercase words, splitting on non-alphanumeric
+/// chars — INCLUDING the apostrophe (wheel C5a, 2026-08-06).
+///
+/// The apostrophe was exempted to keep contractions whole. Measured in
+/// production, the exemption did the opposite of its job, twice over:
+/// `Taylor's` survived as one token that never matched entity `taylor`
+/// (a possessive silently disabled entity resolution on the default
+/// path — one apostrophe changed ~77% of top-5 on true minimal pairs),
+/// and contractions became first-class phantom entities (`Don't` at 96
+/// mentions; `Pranab's` held 748 mentions — 35% of that person's
+/// references — mistyped and unreachable). Splitting symmetrically is
+/// safe because entity names pass through this SAME tokenizer:
+/// `O'Brien` becomes `[o, brien]` on both the entity and query side,
+/// so contiguous multi-token matching still holds. The persisted
+/// pollution needs the C5b alias migration; this stops new pollution.
 pub fn tokenize(text: &str) -> Vec<String> {
-    text.split(|c: char| !c.is_alphanumeric() && c != '\'')
+    text.split(|c: char| !c.is_alphanumeric())
         .filter(|s| !s.is_empty())
         .map(|s| s.to_lowercase())
         .collect()
+}
+
+#[cfg(test)]
+mod c5a_tests {
+    use super::*;
+
+    #[test]
+    fn possessive_resolves_to_the_bare_entity() {
+        // The hermes minimal pair: "Taylor's" must yield token "taylor".
+        let toks = tokenize("What is Taylor's role?");
+        assert!(toks.contains(&"taylor".to_string()), "{toks:?}");
+        assert_eq!(
+            tokenize("What is Taylor's role?")
+                .iter()
+                .filter(|t| *t == "taylor")
+                .count(),
+            tokenize("What is Taylor s role?")
+                .iter()
+                .filter(|t| *t == "taylor")
+                .count(),
+            "possessive and plain forms must tokenize alike"
+        );
+    }
+
+    #[test]
+    fn apostrophe_names_match_symmetrically() {
+        // Entity and text pass the same tokenizer, so O'Brien matches
+        // whether or not either side carries the apostrophe intact.
+        let text_tokens = tokenize("A meeting with O'Brien about the launch");
+        assert!(entity_matches_text("O'Brien", &text_tokens));
+        assert!(entity_matches_text("o brien", &text_tokens));
+    }
+
+    #[test]
+    fn contractions_stop_being_coherent_tokens() {
+        // The exemption promoted Don't to a 96-mention phantom entity.
+        assert_eq!(tokenize("Don't"), vec!["don", "t"]);
+    }
 }
 
 /// Check if an entity name appears as whole-word(s) in pre-tokenized text.
@@ -1278,9 +1330,15 @@ mod tests {
     }
 
     #[test]
-    fn test_tokenize_preserves_apostrophes() {
+    fn test_tokenize_splits_apostrophes() {
+        // INVERTED 2026-08-06 (wheel C5a). This test used to pin the
+        // apostrophe exemption — the convicted defect itself: it kept
+        // "daughter's" whole, which meant "Taylor's" never matched
+        // entity "taylor" and possessive queries silently lost entity
+        // resolution on the default path. The possessive must now
+        // yield the bare token so the entity is reachable.
         let tokens = tokenize("daughter's school play");
-        assert_eq!(tokens, vec!["daughter's", "school", "play"]);
+        assert_eq!(tokens, vec!["daughter", "s", "school", "play"]);
     }
 
     #[test]
