@@ -2,25 +2,143 @@
   {
     "name": "biscuit",
     "archetype": "dog",
-    "proportions": { "head": 78, "snout": 60, "ears": 85, "body": 55, "limbs": 45, "tail": 45, "chunk": 72 },
-    "palette": { "seed": "#e8b06d", "belly": "light", "nose": "dark" },
-    "face": { "expression": "happy", "brows": true, "tongue": true },
-    "motion": { "energy": 65 }
+    "proportions": {
+      "head": 78,
+      "snout": 60,
+      "ears": 85,
+      "body": 55,
+      "limbs": 45,
+      "tail": 45,
+      "chunk": 72
+    },
+    "palette": {
+      "seed": "#e8b06d",
+      "belly": "light",
+      "nose": "dark"
+    },
+    "face": {
+      "expression": "happy",
+      "brows": true,
+      "tongue": true
+    },
+    "motion": {
+      "energy": 65
+    }
   },
   {
     "name": "clover",
     "archetype": "rabbit",
-    "proportions": { "head": 85, "snout": 30, "ears": 95, "body": 45, "limbs": 30, "tail": 60, "chunk": 65 },
-    "palette": { "seed": "#b8a8d8", "belly": "light", "nose": "pink" },
-    "face": { "expression": "alert", "brows": false, "tongue": false },
-    "motion": { "energy": 80 }
+    "proportions": {
+      "head": 85,
+      "snout": 30,
+      "ears": 95,
+      "body": 45,
+      "limbs": 30,
+      "tail": 60,
+      "chunk": 65
+    },
+    "palette": {
+      "seed": "#b8a8d8",
+      "belly": "light",
+      "nose": "pink"
+    },
+    "face": {
+      "expression": "alert",
+      "brows": false,
+      "tongue": false
+    },
+    "motion": {
+      "energy": 80
+    }
   },
   {
     "name": "rusty",
     "archetype": "fox",
-    "proportions": { "head": 65, "snout": 70, "ears": 75, "body": 60, "limbs": 55, "tail": 90, "chunk": 50 },
-    "palette": { "seed": "#d87840", "belly": "light", "nose": "dark" },
-    "face": { "expression": "determined", "brows": true, "tongue": false },
-    "motion": { "energy": 55 }
+    "proportions": {
+      "head": 65,
+      "snout": 70,
+      "ears": 75,
+      "body": 60,
+      "limbs": 55,
+      "tail": 90,
+      "chunk": 50
+    },
+    "palette": {
+      "seed": "#d87840",
+      "belly": "light",
+      "nose": "dark"
+    },
+    "face": {
+      "expression": "determined",
+      "brows": true,
+      "tongue": false
+    },
+    "motion": {
+      "energy": 55
+    }
+  },
+  {
+    "name": "pip",
+    "archetype": "kid",
+    "proportions": {
+      "head": 75,
+      "snout": 50,
+      "ears": 50,
+      "body": 50,
+      "limbs": 45,
+      "tail": 50,
+      "chunk": 60
+    },
+    "palette": {
+      "seed": "#4f8fd0",
+      "belly": "light",
+      "nose": "dark"
+    },
+    "face": {
+      "expression": "happy",
+      "brows": true,
+      "tongue": false
+    },
+    "human": {
+      "hair": "spikes",
+      "hairColor": "#3a2a1a",
+      "skin": "tan",
+      "outfit": "tee-shorts"
+    },
+    "motion": {
+      "energy": 70
+    }
+  },
+  {
+    "name": "juno",
+    "archetype": "kid",
+    "proportions": {
+      "head": 80,
+      "snout": 50,
+      "ears": 50,
+      "body": 45,
+      "limbs": 40,
+      "tail": 50,
+      "chunk": 55
+    },
+    "palette": {
+      "seed": "#e0596b",
+      "belly": "light",
+      "nose": "dark"
+    },
+    "face": {
+      "expression": "alert",
+      "brows": true,
+      "tongue": false
+    },
+    "human": {
+      "hair": "pigtails",
+      "hairColor": "#20334d",
+      "skin": "brown",
+      "outfit": "dress"
+    },
+    "motion": {
+      "energy": 60
+    }
   }
 ]

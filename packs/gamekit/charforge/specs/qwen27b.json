@@ -1,18 +1,18 @@
 [
   {
-    "name": "grumble",
+    "name": "brum",
     "archetype": "bear",
     "proportions": {
-      "head": 45,
-      "snout": 70,
+      "head": 55,
+      "snout": 65,
       "ears": 30,
-      "body": 85,
-      "limbs": 60,
+      "body": 80,
+      "limbs": 40,
       "tail": 10,
       "chunk": 90
     },
     "palette": {
-      "seed": "#6b4c3a",
+      "seed": "#5c4033",
       "belly": "none",
       "nose": "dark"
     },
@@ -26,24 +26,24 @@
     }
   },
   {
-    "name": "zip",
+    "name": "bolt",
     "archetype": "fox",
     "proportions": {
       "head": 65,
-      "snout": 70,
-      "ears": 80,
+      "snout": 55,
+      "ears": 90,
       "body": 40,
-      "limbs": 85,
-      "tail": 75,
-      "chunk": 30
+      "limbs": 75,
+      "tail": 80,
+      "chunk": 35
     },
     "palette": {
-      "seed": "#ff7f3f",
+      "seed": "#ff6b35",
       "belly": "light",
       "nose": "dark"
     },
     "face": {
-      "expression": "determined",
+      "expression": "alert",
       "brows": true,
       "tongue": false
     },
@@ -55,16 +55,16 @@
     "name": "luna",
     "archetype": "rabbit",
     "proportions": {
-      "head": 70,
+      "head": 82,
       "snout": 35,
       "ears": 90,
       "body": 45,
       "limbs": 40,
-      "tail": 25,
+      "tail": 15,
       "chunk": 65
     },
     "palette": {
-      "seed": "#b8c1cc",
+      "seed": "#b8c6db",
       "belly": "light",
       "nose": "pink"
     },
@@ -83,15 +83,15 @@
     "proportions": {
       "head": 65,
       "snout": 70,
-      "ears": 55,
+      "ears": 80,
       "body": 75,
-      "limbs": 80,
+      "limbs": 60,
       "tail": 40,
-      "chunk": 70
+      "chunk": 65
     },
     "palette": {
-      "seed": "#8c7a6b",
-      "belly": "light",
+      "seed": "#5a4d41",
+      "belly": "none",
       "nose": "dark"
     },
     "face": {
@@ -100,7 +100,71 @@
       "tongue": false
     },
     "motion": {
-      "energy": 55
+      "energy": 75
+    }
+  },
+  {
+    "name": "zoe",
+    "archetype": "kid",
+    "proportions": {
+      "head": 75,
+      "snout": 0,
+      "ears": 0,
+      "body": 60,
+      "limbs": 70,
+      "tail": 0,
+      "chunk": 40
+    },
+    "palette": {
+      "seed": "#2a9d8f",
+      "belly": "none",
+      "nose": "dark"
+    },
+    "face": {
+      "expression": "determined",
+      "brows": true,
+      "tongue": false
+    },
+    "motion": {
+      "energy": 85
+    },
+    "human": {
+      "hair": "pigtails",
+      "hairColor": "#ff006e",
+      "skin": "tan",
+      "outfit": "tee-shorts"
+    }
+  },
+  {
+    "name": "pippin",
+    "archetype": "kid",
+    "proportions": {
+      "head": 75,
+      "snout": 0,
+      "ears": 0,
+      "body": 50,
+      "limbs": 45,
+      "tail": 0,
+      "chunk": 60
+    },
+    "palette": {
+      "seed": "#8c9eae",
+      "belly": "none",
+      "nose": "dark"
+    },
+    "face": {
+      "expression": "sleepy",
+      "brows": false,
+      "tongue": false
+    },
+    "motion": {
+      "energy": 25
+    },
+    "human": {
+      "hair": "swoop",
+      "hairColor": "#3a2e26",
+      "skin": "fair",
+      "outfit": "tee-shorts"
     }
   }
 ]

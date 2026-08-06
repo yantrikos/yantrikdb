@@ -13,6 +13,8 @@ const BRIEFS = [
   { id: 'zoomfox', text: 'A tiny hyperactive fox kit, the star of an endless-runner game. Built for speed, vibrating with energy.' },
   { id: 'moonbun', text: 'A sleepy moon rabbit mascot for a bedtime puzzle game. Soft, dozy, faintly luminous colors.' },
   { id: 'scrapdog', text: 'A scrappy junkyard guard dog with a heart of gold. Tough posture, friendly eyes.' },
+  { id: 'skategirl', text: 'A fearless nine-year-old skater girl who just landed her first kickflip. Triumphant, a little scuffed up.' },
+  { id: 'libraryboy', text: 'A shy bookish boy who spends recess in the library. Gentle, tidy, quietly pleased with his book fort.' },
 ];
 
 const GRAMMAR = `You design characters for a 3D toy-like game engine by emitting a JSON spec.
@@ -22,7 +24,7 @@ only the spec. Schema (every field required, exactly these fields):
 
 {
   "name": string (short, lowercase),
-  "archetype": "dog" | "cat" | "rabbit" | "bear" | "fox",
+  "archetype": "dog" | "cat" | "rabbit" | "bear" | "fox" | "kid",
   "proportions": {
     "head":  0-100 (bigger = bigger head = cuter/younger),
     "snout": 0-100 (bigger = longer muzzle),
@@ -42,8 +44,17 @@ only the spec. Schema (every field required, exactly these fields):
     "brows": boolean,
     "tongue": boolean
   },
-  "motion": { "energy": 0-100 (animation tempo/amplitude) }
+  "motion": { "energy": 0-100 (animation tempo/amplitude) },
+  "human": ONLY when archetype is "kid": {
+    "hair": "crop" | "bob" | "pigtails" | "buns" | "spikes" | "swoop",
+    "hairColor": "#rrggbb",
+    "skin": "porcelain" | "fair" | "tan" | "brown" | "deep",
+    "outfit": "tee-shorts" | "dress" | "overalls"
+  }
 }
+For "kid": the palette seed colors the OUTFIT (skin comes only from the
+named skin field); snout/ears/tail proportions are ignored; head 70-85
+reads as a young child.
 
 Worked example — brief: "a loyal chunky puppy, tongue out, delighted to see you":
 {"name":"biscuit","archetype":"dog","proportions":{"head":78,"snout":60,"ears":85,"body":55,"limbs":45,"tail":45,"chunk":72},"palette":{"seed":"#e8b06d","belly":"light","nose":"dark"},"face":{"expression":"happy","brows":true,"tongue":true},"motion":{"energy":65}}
@@ -53,7 +64,7 @@ Reply with ONLY the JSON object for the brief. No prose, no markdown fences.`;
 
 // Strict validation — the protocol gate. Violations are recorded, not
 // silently repaired.
-const ARCH = ['dog', 'cat', 'rabbit', 'bear', 'fox'];
+const ARCH = ['dog', 'cat', 'rabbit', 'bear', 'fox', 'kid'];
 const EXPR = ['happy', 'alert', 'sleepy', 'determined'];
 const PROPS = ['head', 'snout', 'ears', 'body', 'limbs', 'tail', 'chunk'];
 function validate(spec) {
@@ -72,6 +83,12 @@ function validate(spec) {
   if (typeof spec.face?.tongue !== 'boolean') v.push('tongue');
   const e = spec.motion?.energy;
   if (!Number.isFinite(e) || e < 0 || e > 100) v.push(`energy=${e}`);
+  if (spec.archetype === 'kid') {
+    if (!['crop', 'bob', 'pigtails', 'buns', 'spikes', 'swoop'].includes(spec.human?.hair)) v.push(`hair=${spec.human?.hair}`);
+    if (!/^#[0-9a-fA-F]{6}$/.test(spec.human?.hairColor ?? '')) v.push(`hairColor=${spec.human?.hairColor}`);
+    if (!['porcelain', 'fair', 'tan', 'brown', 'deep'].includes(spec.human?.skin)) v.push(`skin=${spec.human?.skin}`);
+    if (!['tee-shorts', 'dress', 'overalls'].includes(spec.human?.outfit)) v.push(`outfit=${spec.human?.outfit}`);
+  }
   return v;
 }
 

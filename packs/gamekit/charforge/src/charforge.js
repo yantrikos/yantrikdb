@@ -19,8 +19,16 @@ import * as THREE from 'three';
 // ── spec schema (the grammar a model emits) ──────────────────────────
 // All proportion fields are 0..100 ints; the compiler maps them into safe
 // per-archetype ranges so no legal spec can produce a broken body plan.
-export const ARCHETYPES = ['dog', 'cat', 'rabbit', 'bear', 'fox'];
+export const ARCHETYPES = ['dog', 'cat', 'rabbit', 'bear', 'fox', 'kid'];
 export const EXPRESSIONS = ['happy', 'alert', 'sleepy', 'determined'];
+// Human styling is enums, not a gender switch: "boy or girl" emerges
+// from the model's hair/outfit choices. Skin tones are a NAMED, hand-
+// picked set — never derived from the free seed (the seed colors the
+// OUTFIT); deriving skin from an arbitrary hex is how you ship green
+// children.
+export const HAIR_STYLES = ['crop', 'bob', 'pigtails', 'buns', 'spikes', 'swoop'];
+export const SKIN_TONES = { porcelain: '#f6d7c4', fair: '#eebfa0', tan: '#d29b70', brown: '#a06a45', deep: '#6f4630' };
+export const OUTFITS = ['tee-shorts', 'dress', 'overalls'];
 
 export const SPEC_DEFAULTS = {
   name: 'creature',
@@ -28,6 +36,7 @@ export const SPEC_DEFAULTS = {
   proportions: { head: 60, snout: 50, ears: 60, body: 55, limbs: 40, tail: 50, chunk: 60 },
   palette: { seed: '#e0a868', belly: 'light', nose: 'dark' },
   face: { expression: 'happy', brows: true, tongue: false },
+  human: { hair: 'crop', hairColor: '#5a4030', skin: 'tan', outfit: 'tee-shorts' },
   motion: { energy: 55 },
 };
 
@@ -52,6 +61,10 @@ export function normalizeSpec(raw) {
   if (typeof raw.face?.brows === 'boolean') s.face.brows = raw.face.brows;
   if (typeof raw.face?.tongue === 'boolean') s.face.tongue = raw.face.tongue;
   if (Number.isFinite(raw.motion?.energy)) s.motion.energy = Math.min(100, Math.max(0, raw.motion.energy));
+  if (HAIR_STYLES.includes(raw.human?.hair)) s.human.hair = raw.human.hair;
+  if (/^#[0-9a-fA-F]{6}$/.test(raw.human?.hairColor ?? '')) s.human.hairColor = raw.human.hairColor;
+  if (raw.human?.skin in SKIN_TONES) s.human.skin = raw.human.skin;
+  if (OUTFITS.includes(raw.human?.outfit)) s.human.outfit = raw.human.outfit;
   return s;
 }
 
@@ -106,13 +119,235 @@ function cone(r, h, color) {
   return m;
 }
 
+// ── the biped body plan (archetype: kid) ────────────────────────────
+// Chunky toy proportions: big head, short limbs, soft colors. The seed
+// colors the OUTFIT; skin comes from the named tone table; hair is a
+// style enum built from primitives. Same joints contract as the
+// quadruped where it overlaps (body, neck, pupils), plus arm/leg pairs.
+function buildKid(spec) {
+  const P = spec.proportions;
+  const H = spec.human;
+  const skin = new THREE.Color(SKIN_TONES[H.skin]);
+  const skinDark = skin.clone().multiplyScalar(0.82);
+  const hair = new THREE.Color(H.hairColor);
+  const pal = derivePalette(spec.palette); // outfit family from the seed
+  const outfitMain = pal.base;
+  const outfitDark = pal.baseDark;
+
+  const root = new THREE.Group();
+  root.name = `charforge:${spec.name}`;
+  const joints = {};
+
+  const chunk = knob(P.chunk, 0.8, 1.25);
+  const legLen = knob(P.limbs, 0.55, 0.95);
+  const legR = 0.16 * chunk;
+  const torsoLen = knob(P.body, 0.5, 0.85);
+  const torsoR = 0.34 * chunk;
+  const hipY = legLen + 0.1;
+
+  const bodyGroup = new THREE.Group();
+  bodyGroup.position.y = hipY;
+  root.add(bodyGroup);
+  joints.body = bodyGroup;
+
+  // Legs from the hips; skin below the shorts line, shoes at the feet.
+  for (const side of [-1, 1]) {
+    const hip = new THREE.Group();
+    hip.position.set(side * torsoR * 0.52, 0, 0);
+    bodyGroup.add(hip);
+    joints[side < 0 ? 'legL' : 'legR'] = hip;
+    const leg = capsule(legR, Math.max(0.05, legLen - legR * 1.6), skin);
+    leg.position.y = -legLen / 2;
+    hip.add(leg);
+    const shoe = sphere(legR * 1.4, outfitDark, 1.0, 0.75, 1.35);
+    shoe.position.set(0, -legLen - 0.02 + legR * 0.9, legR * 0.35);
+    hip.add(shoe);
+    if (H.outfit !== 'dress') {
+      // Shorts / overall legs: a darker sleeve over the upper thigh.
+      const short = capsule(legR * 1.25, legLen * 0.22, H.outfit === 'overalls' ? outfitMain : outfitDark);
+      short.position.y = -legLen * 0.18;
+      hip.add(short);
+    }
+  }
+
+  // Torso: the tee (or overall bib / dress bodice).
+  const torso = capsule(torsoR, torsoLen, outfitMain);
+  torso.position.y = torsoLen * 0.55 + torsoR * 0.4;
+  torso.scale.z = 0.85;
+  bodyGroup.add(torso);
+  if (H.outfit === 'overalls') {
+    const bib = sphere(torsoR * 0.72, outfitDark, 1.0, 0.9, 0.45);
+    bib.position.set(0, torsoLen * 0.62 + torsoR * 0.35, torsoR * 0.62);
+    bodyGroup.add(bib);
+    for (const side of [-1, 1]) {
+      const strap = capsule(torsoR * 0.1, torsoLen * 0.45, outfitDark);
+      strap.position.set(side * torsoR * 0.45, torsoLen * 0.85 + torsoR * 0.3, torsoR * 0.4);
+      strap.rotation.x = -0.35;
+      bodyGroup.add(strap);
+    }
+  }
+  if (H.outfit === 'dress') {
+    const skirt = cone(torsoR * 1.65, torsoLen * 0.9, outfitMain);
+    skirt.position.y = torsoLen * 0.18;
+    bodyGroup.add(skirt);
+  }
+
+  // Arms on shoulder joints, hanging with a slight outward relax.
+  const armLen = legLen * 0.8;
+  const shoulderY = torsoLen * 0.95 + torsoR * 0.35;
+  for (const side of [-1, 1]) {
+    const shoulder = new THREE.Group();
+    shoulder.position.set(side * (torsoR * 1.02), shoulderY, 0);
+    shoulder.rotation.z = side * 0.16;
+    bodyGroup.add(shoulder);
+    joints[side < 0 ? 'armL' : 'armR'] = shoulder;
+    // Sleeve then skin: short sleeve for tee/overalls, skin for dress.
+    const sleeve = capsule(legR * 1.05, armLen * 0.2, H.outfit === 'dress' ? skin : outfitMain);
+    sleeve.position.y = -armLen * 0.18;
+    shoulder.add(sleeve);
+    const arm = capsule(legR * 0.8, armLen * 0.5, skin);
+    arm.position.y = -armLen * 0.55;
+    shoulder.add(arm);
+    const hand = sphere(legR * 1.05, skin);
+    hand.position.y = -armLen - legR * 0.2;
+    shoulder.add(hand);
+  }
+
+  // Head: the charm carrier — big skin sphere on the neck joint.
+  const headR = torsoR * knob(P.head, 1.5, 2.1);
+  const neck = new THREE.Group();
+  neck.position.y = torsoLen * 1.05 + torsoR * 0.55;
+  bodyGroup.add(neck);
+  joints.neck = neck;
+  const head = sphere(headR, skin, 1.0, 0.98, 0.95);
+  head.position.y = headR * 0.7;
+  neck.add(head);
+  const headTop = headR * 0.7;
+
+  // Small ears; tiny nose; mouth by expression; blush for warmth.
+  for (const side of [-1, 1]) {
+    const ear = sphere(headR * 0.14, skin, 0.6, 1.0, 0.8);
+    ear.position.set(side * headR * 0.95, headTop - headR * 0.05, 0);
+    neck.add(ear);
+  }
+  const nose = sphere(headR * 0.09, skinDark, 1.0, 0.8, 0.9);
+  nose.position.set(0, headTop - headR * 0.12, headR * 0.92);
+  neck.add(nose);
+  const mouthW = { happy: 1.9, alert: 1.1, sleepy: 1.0, determined: 1.3 }[spec.face.expression];
+  const mouth = sphere(headR * 0.07, new THREE.Color('#8a3f3f'), mouthW, 0.55, 0.5);
+  mouth.position.set(0, headTop - headR * 0.42, headR * 0.86);
+  neck.add(mouth);
+  for (const side of [-1, 1]) {
+    const blush = sphere(headR * 0.11, new THREE.Color('#e78a7a'), 1.2, 0.7, 0.4);
+    blush.material.transparent = true;
+    blush.material.opacity = 0.55;
+    blush.castShadow = false;
+    blush.position.set(side * headR * 0.55, headTop - headR * 0.28, headR * 0.72);
+    neck.add(blush);
+  }
+
+  // Eyes: shared language with the creatures (white, pupil, glint).
+  const eyeSep = headR * 0.38;
+  const eyeY = headTop + headR * 0.05;
+  const eyeZ = headR * 0.82;
+  for (const side of [-1, 1]) {
+    const white = sphere(headR * 0.14, new THREE.Color('#f7f7f7'), 0.8, 1.0, 0.5);
+    white.castShadow = false;
+    white.position.set(side * eyeSep, eyeY, eyeZ);
+    neck.add(white);
+    const pupil = sphere(headR * 0.08, new THREE.Color('#3a2a20'), 0.9, 1.0, 0.55);
+    pupil.castShadow = false;
+    pupil.position.set(side * eyeSep * 0.98, eyeY, eyeZ + headR * 0.05);
+    neck.add(pupil);
+    joints[side < 0 ? 'pupilL' : 'pupilR'] = pupil;
+    const glint = sphere(headR * 0.026, new THREE.Color('#ffffff'));
+    glint.castShadow = false;
+    glint.position.set(side * eyeSep * 0.9 + headR * 0.028, eyeY + headR * 0.045, eyeZ + headR * 0.1);
+    neck.add(glint);
+  }
+  if (spec.face.brows) {
+    const browTilt = { happy: 0.12, alert: 0.04, sleepy: -0.08, determined: -0.3 }[spec.face.expression];
+    for (const side of [-1, 1]) {
+      const brow = sphere(headR * 0.1, hair, 1.5, 0.35, 0.45);
+      brow.castShadow = false;
+      brow.position.set(side * eyeSep, eyeY + headR * 0.24, eyeZ - headR * 0.02);
+      brow.rotation.z = -side * browTilt;
+      neck.add(brow);
+    }
+  }
+
+  // Hair: a cap plus style-specific pieces, all primitives. The cap
+  // stops WELL above the eye line (first kid look pass: a PI*0.55
+  // hemisphere reached below the head's equator and both kids rendered
+  // eyeless under a helmet — the eyes are the charm carrier, nothing
+  // may occlude them).
+  const capMat = mat(hair, 0.7);
+  const cap = new THREE.Mesh(new THREE.SphereGeometry(headR * 1.05, 32, 24, 0, Math.PI * 2, 0, Math.PI * 0.38), capMat);
+  cap.castShadow = true;
+  cap.position.y = headTop + headR * 0.04;
+  neck.add(cap);
+  const fringe = sphere(headR * 0.42, hair, 1.45, 0.38, 0.55);
+  fringe.position.set(0, headTop + headR * 0.68, headR * 0.58);
+  neck.add(fringe);
+  const style = H.hair;
+  if (style === 'bob') {
+    for (const side of [-1, 1]) {
+      const curtain = sphere(headR * 0.42, hair, 0.55, 1.25, 0.8);
+      curtain.position.set(side * headR * 0.88, headTop - headR * 0.25, -headR * 0.05);
+      neck.add(curtain);
+    }
+  } else if (style === 'pigtails' || style === 'buns') {
+    for (const side of [-1, 1]) {
+      const anchor = new THREE.Group();
+      const up = style === 'buns' ? headR * 0.55 : -headR * 0.15;
+      anchor.position.set(side * headR * 0.92, headTop + up, -headR * 0.25);
+      neck.add(anchor);
+      joints[side < 0 ? 'hairL' : 'hairR'] = anchor;
+      const puff = sphere(headR * 0.3, hair);
+      anchor.add(puff);
+      if (style === 'pigtails') {
+        const tail = capsule(headR * 0.16, headR * 0.4, hair);
+        tail.position.y = -headR * 0.38;
+        anchor.add(tail);
+      }
+      const band = new THREE.Mesh(new THREE.TorusGeometry(headR * 0.17, headR * 0.045, 8, 20), mat(pal.collar, 0.5));
+      band.position.y = style === 'buns' ? -headR * 0.24 : headR * 0.24;
+      band.rotation.x = Math.PI / 2;
+      anchor.add(band);
+    }
+  } else if (style === 'spikes') {
+    for (let i = -1; i <= 1; i++) {
+      const spike = cone(headR * 0.18, headR * 0.55, hair);
+      spike.position.set(i * headR * 0.4, headTop + headR * 1.12, -i * headR * 0.08);
+      spike.rotation.z = -i * 0.4;
+      neck.add(spike);
+    }
+  } else if (style === 'swoop') {
+    const swoop = sphere(headR * 0.62, hair, 1.25, 0.5, 0.75);
+    swoop.position.set(headR * 0.25, headTop + headR * 0.72, headR * 0.35);
+    swoop.rotation.z = -0.35;
+    neck.add(swoop);
+  }
+
+  const box = new THREE.Box3().setFromObject(root);
+  return {
+    spec,
+    palette: pal,
+    group: root,
+    joints,
+    dims: { hipY, bodyR: torsoR, headR, totalHeight: box.max.y },
+  };
+}
+
 // ── the body plan ────────────────────────────────────────────────────
-// One parameterized quadruped mammal plan covers the v0 archetypes; the
-// archetype table bends ears/snout/tail/stance rather than forking the
-// skeleton. Returns { group, joints, dims } — joints are what animation
-// drives, dims are what the gates measure.
+// One parameterized quadruped mammal plan covers the creature
+// archetypes; the archetype table bends ears/snout/tail/stance rather
+// than forking the skeleton. `kid` dispatches to the biped plan.
+// Returns { group, joints, dims } — joints are what animation drives,
+// dims are what the gates measure.
 export function buildCharacter(rawSpec) {
   const spec = normalizeSpec(rawSpec);
+  if (spec.archetype === 'kid') return buildKid(spec);
   const P = spec.proportions;
   const pal = derivePalette(spec.palette);
   const arch = {
@@ -345,19 +580,36 @@ export function makeAnimator(character) {
       // Head: gentle counter-bob and tilt.
       joints.neck.rotation.z = s * (mode === 'walk' ? 0.05 : 0.03);
       joints.neck.rotation.x = c * 0.02 - (spec.face.expression === 'sleepy' ? 0.12 : 0);
-      // Legs: diagonal pairs in antiphase when walking, still when idle.
       const swing = mode === 'walk' ? 0.55 : 0.0;
-      joints.legFL.rotation.x = s * swing;
-      joints.legBR.rotation.x = s * swing;
-      joints.legFR.rotation.x = -s * swing;
-      joints.legBL.rotation.x = -s * swing;
-      // Tail: always wagging; happier expressions wag harder.
+      if (joints.legFL) {
+        // Quadruped: diagonal pairs in antiphase.
+        joints.legFL.rotation.x = s * swing;
+        joints.legBR.rotation.x = s * swing;
+        joints.legFR.rotation.x = -s * swing;
+        joints.legBL.rotation.x = -s * swing;
+      } else if (joints.legL) {
+        // Biped: legs in antiphase, arms counter-swing the legs; a soft
+        // arm sway keeps idle alive.
+        joints.legL.rotation.x = s * swing;
+        joints.legR.rotation.x = -s * swing;
+        const armIdle = Math.sin(t * 1.3 * energy) * 0.06;
+        joints.armL.rotation.x = -s * swing * 0.8 + armIdle;
+        joints.armR.rotation.x = s * swing * 0.8 - armIdle;
+      }
+      // Tail wag (creatures) / hair bounce (pigtails, buns): the same
+      // secondary-motion beat, happier expressions move harder.
       const wag = { happy: 1.0, alert: 0.7, sleepy: 0.25, determined: 0.5 }[spec.face.expression];
-      joints.tail.rotation.y = Math.sin(t * 7.5 * energy) * 0.45 * wag;
+      if (joints.tail) joints.tail.rotation.y = Math.sin(t * 7.5 * energy) * 0.45 * wag;
+      if (joints.hairL) {
+        joints.hairL.rotation.z = Math.sin(t * 7.5 * energy) * 0.14 * wag;
+        joints.hairR.rotation.z = Math.sin(t * 7.5 * energy + 0.6) * -0.14 * wag;
+      }
       // Ears: periodic twitch (every ~3.7s, offset per ear).
       const tw = (tt) => Math.max(0, Math.sin(tt)) ** 12;
-      joints.earL.rotation.z = 0.18 + tw(t * 1.7) * 0.2;
-      joints.earR.rotation.z = -0.18 - tw(t * 1.7 + 2.4) * 0.2;
+      if (joints.earL) {
+        joints.earL.rotation.z = 0.18 + tw(t * 1.7) * 0.2;
+        joints.earR.rotation.z = -0.18 - tw(t * 1.7 + 2.4) * 0.2;
+      }
       // Blink: pupils squash briefly on a timer.
       if (blinkT < 0 && Math.random() < 0.008) blinkT = t;
       const blink = blinkT >= 0 ? Math.max(0, 1 - Math.abs(t - blinkT - 0.08) * 18) : 0;

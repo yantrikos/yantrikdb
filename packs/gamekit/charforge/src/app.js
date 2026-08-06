@@ -29,7 +29,12 @@ function mount(specIndex) {
     spec: state.character.spec,
     measure: measureCharacter(state.character),
     frames: () => state.frames,
-    pose: () => state.character.joints.tail.rotation.y,
+    // Animation probe: a joint that moves in BOTH modes for either
+    // skeleton (tail for creatures, arm swing + body bob for kids).
+    pose: () => {
+      const j = state.character.joints;
+      return (j.tail?.rotation.y ?? 0) + (j.armL?.rotation.x ?? 0) + j.body.position.y;
+    },
     setMode: (m) => state.animator.setMode(m),
     mode: () => state.animator.getMode(),
   };
