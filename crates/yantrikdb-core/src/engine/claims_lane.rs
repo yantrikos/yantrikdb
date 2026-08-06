@@ -154,7 +154,14 @@ impl super::YantrikDB {
             .map(|c| (c.rid.as_str(), c.why.as_str()))
             .collect();
 
-        // Members already in the pool: boost + stamp provenance.
+        // Members already in the pool: stamp provenance ONLY. Fix (c),
+        // measured 2026-08-06: the original cut ALSO added a keyword-
+        // magnitude boost here, and the clone gate failed 0.600→0.576 —
+        // entity-anchored claim records displaced labeled answers on
+        // paraphrase queries that mention an entity without asking
+        // about its relations. The `claims_match` why alone grants
+        // keyword-reserve eligibility at lex=1.0, which is admission
+        // (cutoff+ε, still top-5 at small top_k) without magnitude.
         for result in scored.iter_mut() {
             if let Some(why) = by_rid.remove(result.rid.as_str()) {
                 if !result
@@ -162,11 +169,6 @@ impl super::YantrikDB {
                     .iter()
                     .any(|w| w.starts_with("claims_match"))
                 {
-                    result.score += super::lexical::keyword_lane_boost(
-                        learned_weights.keyword_boost,
-                        result.scores.similarity,
-                        1.0,
-                    );
                     result.why_retrieved.push(why.to_string());
                 }
             }
@@ -216,8 +218,6 @@ impl super::YantrikDB {
                 query_sentiment,
                 learned_weights,
             );
-            let boost =
-                super::lexical::keyword_lane_boost(learned_weights.keyword_boost, sim_score, 1.0);
             let mut why = scoring::build_why(sim_score, recency, decay, row.valence);
             why.push(claim_why.to_string());
             let contributions = scoring::adaptive_contributions(
@@ -235,7 +235,7 @@ impl super::YantrikDB {
                 created_at: row.created_at,
                 importance: row.importance,
                 valence: row.valence,
-                score: composite + boost,
+                score: composite,
                 scores: crate::types::ScoreBreakdown {
                     similarity: sim_score,
                     decay,
