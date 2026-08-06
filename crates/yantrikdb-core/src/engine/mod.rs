@@ -7,6 +7,7 @@ mod belief_network_engine;
 mod bitemporal;
 mod cache;
 mod calibration;
+mod capture;
 mod causal;
 mod chunking;
 mod claims_lane;

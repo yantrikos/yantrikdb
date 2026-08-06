@@ -333,6 +333,18 @@ impl YantrikDB {
             .map(|(rid, dist, _)| (rid, dist))
             .collect();
 
+        let capture_inst = self as *const Self as usize;
+        if crate::engine::capture::enabled() {
+            crate::engine::capture::emit(
+                capture_inst,
+                "hnsw_pool",
+                serde_json::json!(vec_results
+                    .iter()
+                    .map(|(rid, d)| (rid.as_str(), crate::engine::capture::bits(*d)))
+                    .collect::<Vec<_>>()),
+            );
+        }
+
         // This short-circuit's premise is that the host index is the only
         // candidate source, which mounting a pack falsifies. Taking it
         // with a pack mounted would make the flagship case — a database
@@ -1960,6 +1972,26 @@ impl YantrikDB {
         // The boost is minimal (just above cutoff). The real benefit comes from
         // step 4 where keyword_reserved items are exempt from MMR diversity
         // penalty, guaranteeing they survive into the final results.
+        if crate::engine::capture::enabled() {
+            let mut lex: Vec<(&str, String)> = lex_by_rid
+                .iter()
+                .map(|(rid, s)| (rid.as_str(), crate::engine::capture::bits(*s)))
+                .collect();
+            lex.sort();
+            crate::engine::capture::emit(capture_inst, "lex_by_rid", serde_json::json!(lex));
+            crate::engine::capture::emit(
+                capture_inst,
+                "scored_pre_reserve",
+                serde_json::json!(scored
+                    .iter()
+                    .map(|r| (
+                        r.rid.as_str(),
+                        crate::engine::capture::bits(r.score),
+                        r.why_retrieved.join("|"),
+                    ))
+                    .collect::<Vec<_>>()),
+            );
+        }
         crate::engine::lexical::apply_keyword_reserve(&mut scored, &lex_by_rid, top_k);
 
         // Step 4: MMR diversity selection
@@ -1969,6 +2001,16 @@ impl YantrikDB {
         // each result adds new information by penalizing candidates too similar
         // to already-selected results.
         scored.sort_by(crate::engine::lexical::rank_cmp);
+        if crate::engine::capture::enabled() {
+            crate::engine::capture::emit(
+                capture_inst,
+                "pool_post_reserve_sorted",
+                serde_json::json!(scored
+                    .iter()
+                    .map(|r| (r.rid.as_str(), crate::engine::capture::bits(r.score)))
+                    .collect::<Vec<_>>()),
+            );
+        }
 
         let min_pool_for_mmr = (top_k * 3).max(20);
         if scored.len() > top_k && scored.len() >= min_pool_for_mmr {
@@ -2050,6 +2092,23 @@ impl YantrikDB {
 
                 match best_idx {
                     Some(idx) => {
+                        if crate::engine::capture::enabled() {
+                            crate::engine::capture::emit(
+                                capture_inst,
+                                "mmr_step",
+                                serde_json::json!({
+                                    "step": selected.len(),
+                                    "chosen": scored[idx].rid.as_str(),
+                                    "relevance_bits":
+                                        crate::engine::capture::bits(scored[idx].score),
+                                    "mmr_bits": crate::engine::capture::bits(best_mmr),
+                                    "has_emb": pool_embeddings
+                                        .get(idx)
+                                        .map(|e| e.is_some())
+                                        .unwrap_or(false),
+                                }),
+                            );
+                        }
                         selected.push(idx);
                         if let Some(Some(ref emb)) = pool_embeddings.get(idx) {
                             selected_embeddings.push(emb);
@@ -2083,6 +2142,17 @@ impl YantrikDB {
             RecallOrder::Recency => {
                 scored.sort_by(|a, b| b.created_at.total_cmp(&a.created_at));
             }
+        }
+
+        if crate::engine::capture::enabled() {
+            crate::engine::capture::emit(
+                capture_inst,
+                "final",
+                serde_json::json!(scored
+                    .iter()
+                    .map(|r| (r.rid.as_str(), crate::engine::capture::bits(r.score)))
+                    .collect::<Vec<_>>()),
+            );
         }
 
         // Step 5: Hydrate final top_k with text + metadata from SQLite
