@@ -1,0 +1,164 @@
+[
+  {
+    "name": "pip",
+    "archetype": "kid",
+    "proportions": {
+      "head": 78,
+      "snout": 0,
+      "ears": 0,
+      "body": 65,
+      "limbs": 50,
+      "tail": 0,
+      "chunk": 80
+    },
+    "palette": {
+      "seed": "#fdf5e6",
+      "belly": "none",
+      "nose": "pink"
+    },
+    "face": {
+      "expression": "determined",
+      "brows": true,
+      "tongue": false
+    },
+    "motion": {
+      "energy": 40
+    },
+    "human": {
+      "hair": "spikes",
+      "hairColor": "#8b4513",
+      "skin": "fair",
+      "outfit": "overalls"
+    }
+  },
+  {
+    "name": "grumble",
+    "archetype": "bear",
+    "proportions": {
+      "head": 65,
+      "snout": 70,
+      "ears": 30,
+      "body": 80,
+      "limbs": 50,
+      "tail": 10,
+      "chunk": 90
+    },
+    "palette": {
+      "seed": "#5c4033",
+      "belly": "light",
+      "nose": "dark"
+    },
+    "face": {
+      "expression": "determined",
+      "brows": true,
+      "tongue": false
+    },
+    "motion": {
+      "energy": 35
+    }
+  },
+  {
+    "name": "biscuit",
+    "archetype": "fox",
+    "proportions": {
+      "head": 75,
+      "snout": 45,
+      "ears": 80,
+      "body": 65,
+      "limbs": 70,
+      "tail": 90,
+      "chunk": 35
+    },
+    "palette": {
+      "seed": "#ffb347",
+      "belly": "light",
+      "nose": "dark"
+    },
+    "face": {
+      "expression": "alert",
+      "brows": true,
+      "tongue": false
+    },
+    "motion": {
+      "energy": 98
+    }
+  },
+  {
+    "name": "moonbeam",
+    "archetype": "rabbit",
+    "proportions": {
+      "head": 65,
+      "snout": 40,
+      "ears": 80,
+      "body": 50,
+      "limbs": 55,
+      "tail": 20,
+      "chunk": 45
+    },
+    "palette": {
+      "seed": "#f0f4f8",
+      "belly": "light",
+      "nose": "pink"
+    },
+    "face": {
+      "expression": "sleepy",
+      "brows": false,
+      "tongue": false
+    },
+    "motion": {
+      "energy": 25
+    }
+  },
+  {
+    "name": "crumble",
+    "archetype": "cat",
+    "proportions": {
+      "head": 75,
+      "snout": 40,
+      "ears": 50,
+      "body": 80,
+      "limbs": 35,
+      "tail": 60,
+      "chunk": 90
+    },
+    "palette": {
+      "seed": "#d97a2f",
+      "belly": "light",
+      "nose": "pink"
+    },
+    "face": {
+      "expression": "sleepy",
+      "brows": false,
+      "tongue": false
+    },
+    "motion": {
+      "energy": 15
+    }
+  },
+  {
+    "name": "daisy",
+    "archetype": "dog",
+    "proportions": {
+      "head": 75,
+      "snout": 60,
+      "ears": 90,
+      "body": 50,
+      "limbs": 45,
+      "tail": 60,
+      "chunk": 65
+    },
+    "palette": {
+      "seed": "#fff2aa",
+      "belly": "light",
+      "nose": "dark"
+    },
+    "face": {
+      "expression": "happy",
+      "brows": true,
+      "tongue": true
+    },
+    "motion": {
+      "energy": 85
+    }
+  }
+]

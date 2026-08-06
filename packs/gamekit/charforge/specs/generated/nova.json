@@ -1,0 +1,34 @@
+[
+  {
+    "name": "nova",
+    "archetype": "kid",
+    "proportions": {
+      "head": 75,
+      "snout": 0,
+      "ears": 0,
+      "body": 60,
+      "limbs": 40,
+      "tail": 0,
+      "chunk": 80
+    },
+    "palette": {
+      "seed": "#ff6b35",
+      "belly": "none",
+      "nose": "pink"
+    },
+    "face": {
+      "expression": "happy",
+      "brows": false,
+      "tongue": false
+    },
+    "motion": {
+      "energy": 70
+    },
+    "human": {
+      "hair": "buns",
+      "hairColor": "#4a3b2c",
+      "skin": "fair",
+      "outfit": "overalls"
+    }
+  }
+]
