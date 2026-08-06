@@ -185,12 +185,16 @@ fn claims_lane_surfaces_the_direction_cosine_destroys() {
 #[cfg(feature = "bundled-embedder")]
 #[test]
 fn recall_is_deterministic_with_claims_in_the_reserve_band() {
-    // Fix (e) regression gate (hermes determinism probe): with several
-    // claims candidates tying in the reserve band, the previous cut
-    // produced 3 distinct top-5 orderings from identical bytes —
-    // HashMap drain order + a shared cutoff+0.001 score. Same query,
-    // same db, many runs: the ranking must be byte-identical.
-    let db = YantrikDB::with_default(":memory:").unwrap();
+    // Fix (e)+(f) regression gate (hermes determinism probes): the (c)
+    // cut produced 3 distinct top-5 orderings from identical bytes
+    // (HashMap drain + shared cutoff+0.001 tie score), and (e) still
+    // oscillated ACROSS FRESH OPENS — equal-mention anchors arrive in
+    // per-instance HashMap seed order (fix f: total anchor order).
+    // Both regimes are probed: repeat recalls on one instance, AND
+    // fresh engine opens on the same file.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("det.db");
+    let db = YantrikDB::with_default(path.to_str().unwrap()).unwrap();
     let rec = |text: &str| {
         db.record_text(
             text,
@@ -257,7 +261,7 @@ fn recall_is_deterministic_with_claims_in_the_reserve_band() {
         .iter()
         .map(|r| r.rid.clone())
         .collect();
-    for run in 1..8 {
+    for run in 1..5 {
         let this: Vec<String> = db
             .recall_with_response(
                 &emb,
@@ -280,6 +284,37 @@ fn recall_is_deterministic_with_claims_in_the_reserve_band() {
         assert_eq!(
             this, baseline,
             "run {run} produced a different ranking from identical inputs"
+        );
+    }
+    db.close().unwrap();
+
+    // The cross-open regime — each open mints fresh HashMap seeds, so
+    // any hash-order dependence left in the pipeline shows up here.
+    for reopen in 0..5 {
+        let db = YantrikDB::with_default(path.to_str().unwrap()).unwrap();
+        let this: Vec<String> = db
+            .recall_with_response(
+                &emb,
+                5,
+                None,
+                None,
+                false,
+                true,
+                Some(query),
+                true,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+            .results
+            .iter()
+            .map(|r| r.rid.clone())
+            .collect();
+        db.close().unwrap();
+        assert_eq!(
+            this, baseline,
+            "fresh open {reopen} produced a different ranking from identical bytes"
         );
     }
 }

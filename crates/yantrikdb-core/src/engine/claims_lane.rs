@@ -54,8 +54,16 @@ pub(crate) fn claims_candidates(
     if anchors.is_empty() {
         return Vec::new();
     }
-    // Strongest anchors first (mention count), bounded.
-    anchors.sort_by(|a, b| b.2.cmp(&a.2));
+    // Strongest anchors first (mention count), bounded — with entity
+    // name as the TOTAL tiebreak. Fix (f), 2026-08-06: without it,
+    // equal-mention anchors arrive in `entity_matches_query`'s HashMap
+    // iteration order, which is seeded PER ENGINE INSTANCE — so every
+    // fresh open could consult a different anchor order (and, via the
+    // truncate below, a different anchor SET). This was the residual
+    // nondeterminism hermes's probe caught surviving fix (e): it
+    // oscillated across runs because each run opened a fresh instance,
+    // and f7c0e2d had masked it downstream with distinct boost scores.
+    anchors.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
     anchors.truncate(MAX_ANCHOR_ENTITIES);
 
     let mut out: Vec<ClaimCandidate> = Vec::new();
