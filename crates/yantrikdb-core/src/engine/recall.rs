@@ -451,7 +451,7 @@ impl YantrikDB {
                     comparator: "rank_cmp: score quantized at 1e-6 desc, rid asc".to_string(),
                     score_algebra: "empty index short-circuit — no scoring ran".to_string(),
                     query_sentiment: 0.0,
-                    bm25_degeneracy_ratio: None,
+                    bm25_near_best_fraction: None,
                     lanes,
                     pool: Vec::new(),
                 });
@@ -2319,7 +2319,7 @@ impl YantrikDB {
                 ),
             );
 
-            let bm25_degeneracy_ratio = if lex_by_rid.is_empty() {
+            let bm25_near_best_fraction = if lex_by_rid.is_empty() {
                 None
             } else {
                 let near_best = lex_by_rid.values().filter(|&&s| s >= 0.9).count();
@@ -2338,7 +2338,7 @@ impl YantrikDB {
                                 arithmetic from them."
                     .to_string(),
                 query_sentiment,
-                bm25_degeneracy_ratio,
+                bm25_near_best_fraction,
                 lanes,
                 pool,
             });

@@ -208,8 +208,14 @@ pub struct ExplainPoolRow {
     pub score_q: f64,
     /// Raw cosine similarity (pre-fusion signal).
     pub similarity: f64,
-    /// Per-query bm25 lexical strength in (0, 1]; None = not an FTS
-    /// match (which is a different fact from lex = 0.0).
+    /// Per-query bm25 lexical strength in (0, 1]. `None` is
+    /// CONDITIONAL and the lane block disambiguates it (finding-1
+    /// rule: a bare null never stands alone): if
+    /// `lanes["fts"].status == "ran"`, None means the FTS lane ran
+    /// and did NOT match this candidate; if `"never_ran"` /
+    /// `"ran_empty"`, no candidate has a strength and the lane's
+    /// reason says why. A present value is always a real match —
+    /// `Some(0.0)` is never emitted as a placeholder.
     pub lex: Option<f64>,
     /// The SET of lanes that admitted or lifted this candidate —
     /// explicitly separate from numeric contributions, because a zero
@@ -236,6 +242,11 @@ pub struct ExplainPoolRow {
 /// eleventh-source class that no survivors-only view can see (a k=50
 /// survivors comparison cleared a defect living at pool positions
 /// 51–99).
+///
+/// Result rows do not repeat `lanes_admitted` — join them to `pool`
+/// by `rid` (stable on both sides; that join is what the stable-rid
+/// promotion exists for). The common-path caveat is deliberate: the
+/// pool is the admission record, results are the selection record.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RecallExplain {
     /// The one ranking comparator (folded item: it no longer varies by
@@ -250,12 +261,19 @@ pub struct RecallExplain {
     /// Query sentiment driving valence multipliers; 0.0 means every
     /// `valence_multiplier` is 1.0 by construction, not by coincidence.
     pub query_sentiment: f64,
-    /// Fraction of FTS matches within 10% of the query's best bm25
-    /// strength. Near 1.0 = bm25 does not discriminate on this query
-    /// (uniform-text degeneracy) and lexical strengths are ~flat.
-    /// None = the FTS lane did not run or matched nothing (see
-    /// `lanes["fts"]` for which).
-    pub bm25_degeneracy_ratio: Option<f64>,
+    /// **Denominator and threshold, stated** (the cross-gate name
+    /// collision: two instruments published ~17×-apart numbers both
+    /// called "degeneracy ratio"): this is the fraction of FTS-MATCHED
+    /// CANDIDATES (the admitted set, not all matching sqlite rows)
+    /// whose per-query normalized strength is >= 0.9 — i.e. within 10%
+    /// of the query's best bm25 match, no rounding. Near 1.0 = bm25
+    /// does not discriminate on this query and lexical strengths are
+    /// ~flat. `None` is CONDITIONAL, not broken — exactly one of:
+    /// the FTS lane never ran (`lanes["fts"].status == "never_ran"`,
+    /// reason attached there) or it ran and matched nothing
+    /// (`"ran_empty"`). The lane block is the disambiguator; a bare
+    /// null never stands alone.
+    pub bm25_near_best_fraction: Option<f64>,
     /// Per-lane status: vector / fts / claims / graph /
     /// importance_fallback / pack.
     pub lanes: std::collections::BTreeMap<String, ExplainLaneReport>,

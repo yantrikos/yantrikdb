@@ -133,7 +133,7 @@ fn never_ran_lanes_name_their_precondition() {
     // The FTS lane ran (query text present, keywords extractable).
     let fts = &explain.lanes["fts"];
     assert_eq!(fts.status, "ran", "keyword query over seeded text: {fts:?}");
-    assert!(explain.bm25_degeneracy_ratio.is_some());
+    assert!(explain.bm25_near_best_fraction.is_some());
 
     // With expand_entities=true the graph lane must not report never_ran.
     let (_, explain2) = db
