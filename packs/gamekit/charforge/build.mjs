@@ -4,7 +4,7 @@
 import { build } from 'esbuild';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 
-const specs = JSON.parse(readFileSync('specs/reference.json', 'utf8'));
+const specs = JSON.parse(readFileSync(process.env.SPECS_FILE ?? 'specs/reference.json', 'utf8'));
 
 const result = await build({
   entryPoints: ['src/app.js'],
@@ -46,9 +46,9 @@ const html = `<!DOCTYPE html>
 </html>`;
 
 mkdirSync('dist', { recursive: true });
-writeFileSync('dist/forge.html', html);
-if (readFileSync('dist/forge.html', 'utf8').length < 100_000) {
+writeFileSync(process.env.OUT_HTML ?? 'dist/forge.html', html);
+if (readFileSync(process.env.OUT_HTML ?? 'dist/forge.html', 'utf8').length < 100_000) {
   console.error('dist/forge.html suspiciously small — three.js missing from bundle?');
   process.exit(1);
 }
-console.log(`BUILD_OK dist/forge.html (${(html.length / 1024).toFixed(0)} KB, ${specs.length} specs)`);
+console.log(`BUILD_OK ${process.env.OUT_HTML ?? 'dist/forge.html'} (${(html.length / 1024).toFixed(0)} KB, ${specs.length} specs)`);

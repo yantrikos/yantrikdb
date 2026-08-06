@@ -13,8 +13,8 @@ import { chromium } from 'playwright-core';
 import { mkdirSync, readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
-const ARTIFACT = resolve('dist/forge.html');
-const specs = JSON.parse(readFileSync('specs/reference.json', 'utf8'));
+const ARTIFACT = resolve(process.env.OUT_HTML ?? 'dist/forge.html');
+const specs = JSON.parse(readFileSync(process.env.SPECS_FILE ?? 'specs/reference.json', 'utf8'));
 mkdirSync('dist/shots', { recursive: true });
 
 const browser = await chromium.launch({ channel: 'msedge', args: ['--use-angle=swiftshader'] });

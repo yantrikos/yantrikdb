@@ -1,0 +1,106 @@
+[
+  {
+    "name": "grumble",
+    "archetype": "bear",
+    "proportions": {
+      "head": 45,
+      "snout": 70,
+      "ears": 30,
+      "body": 85,
+      "limbs": 60,
+      "tail": 10,
+      "chunk": 90
+    },
+    "palette": {
+      "seed": "#6b4c3a",
+      "belly": "none",
+      "nose": "dark"
+    },
+    "face": {
+      "expression": "determined",
+      "brows": true,
+      "tongue": false
+    },
+    "motion": {
+      "energy": 25
+    }
+  },
+  {
+    "name": "zip",
+    "archetype": "fox",
+    "proportions": {
+      "head": 65,
+      "snout": 70,
+      "ears": 80,
+      "body": 40,
+      "limbs": 85,
+      "tail": 75,
+      "chunk": 30
+    },
+    "palette": {
+      "seed": "#ff7f3f",
+      "belly": "light",
+      "nose": "dark"
+    },
+    "face": {
+      "expression": "determined",
+      "brows": true,
+      "tongue": false
+    },
+    "motion": {
+      "energy": 95
+    }
+  },
+  {
+    "name": "luna",
+    "archetype": "rabbit",
+    "proportions": {
+      "head": 70,
+      "snout": 35,
+      "ears": 90,
+      "body": 45,
+      "limbs": 40,
+      "tail": 25,
+      "chunk": 65
+    },
+    "palette": {
+      "seed": "#b8c1cc",
+      "belly": "light",
+      "nose": "pink"
+    },
+    "face": {
+      "expression": "sleepy",
+      "brows": false,
+      "tongue": false
+    },
+    "motion": {
+      "energy": 20
+    }
+  },
+  {
+    "name": "rusty",
+    "archetype": "dog",
+    "proportions": {
+      "head": 65,
+      "snout": 70,
+      "ears": 55,
+      "body": 75,
+      "limbs": 80,
+      "tail": 40,
+      "chunk": 70
+    },
+    "palette": {
+      "seed": "#8c7a6b",
+      "belly": "light",
+      "nose": "dark"
+    },
+    "face": {
+      "expression": "alert",
+      "brows": true,
+      "tongue": false
+    },
+    "motion": {
+      "energy": 55
+    }
+  }
+]
