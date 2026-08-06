@@ -136,8 +136,15 @@ struct HnswNode {
 
 // ── HnswIndex ──
 
-#[derive(Clone)]
+/// Fix (j): the production level-RNG seed. The VALUE is arbitrary — any
+/// constant yields the same expected graph quality as an entropy draw —
+/// what matters is that it never varies across opens of the same file.
+/// Changing it changes every approximate result set by a hair, so it
+/// moves only with a release note, never silently.
+const HNSW_LEVEL_SEED: u64 = 0x11DB_5EED;
+
 /// A Rust-native HNSW vector index.
+#[derive(Clone)]
 pub struct HnswIndex {
     dim: usize,
     m: usize,
@@ -180,11 +187,26 @@ impl HnswIndex {
     ///
     /// **v0.10 Phase 0 determinism seam:** under the NON-DEFAULT `testing`
     /// cargo feature, the `YANTRIKDB_HNSW_SEED` env var (if set) seeds the
-    /// level RNG so graph construction is reproducible for trace tests.
-    /// This check lives HERE — the single constructor every construction
-    /// path funnels through (open rebuild, compaction, reembed) — so seeds
-    /// reach all of them (sol Q6). Production builds always use
-    /// `from_entropy`.
+    /// level RNG so trace tests can vary the draw. This check lives HERE —
+    /// the single constructor every construction path funnels through
+    /// (open rebuild, compaction, reembed) — so seeds reach all of them
+    /// (sol Q6).
+    ///
+    /// **Fix (j), 2026-08-06 — the eleventh determinism source.** The level
+    /// RNG was `from_entropy()` per instance, so every OPEN of the same
+    /// file built a topologically different graph, and approximate search
+    /// returned a different fetch_k pool TAIL (capture: 3 distinct
+    /// 100-pools across 6 drift-free opens, swapped rids at positions
+    /// 51–99 — invisible to the k=50 probe that once refuted this
+    /// suspect; shared candidates bit-identical in distance, so no float
+    /// mechanism at all). Boost/reserve lanes then lifted differing tail
+    /// candidates into top-5: hermes determinism_burst arm B read 2–4
+    /// orderings; with the RNG seeded it reads 1 (3/3 bursts — the
+    /// conviction experiment is this fix's proof). Level randomization
+    /// needs a good DISTRIBUTION, not unpredictability: a fixed seed keeps
+    /// the same expected graph quality and makes same-file → same-graph
+    /// hold, because the open path inserts ORDER BY rid (Phase 0 seam)
+    /// with a fresh constructor RNG.
     pub fn with_params(dim: usize, m: usize, ef_construction: usize, ef_search: usize) -> Self {
         #[cfg(feature = "testing")]
         let rng = match std::env::var("YANTRIKDB_HNSW_SEED")
@@ -192,10 +214,10 @@ impl HnswIndex {
             .and_then(|s| s.parse::<u64>().ok())
         {
             Some(seed) => SmallRng::seed_from_u64(seed),
-            None => SmallRng::from_entropy(),
+            None => SmallRng::seed_from_u64(HNSW_LEVEL_SEED),
         };
         #[cfg(not(feature = "testing"))]
-        let rng = SmallRng::from_entropy();
+        let rng = SmallRng::seed_from_u64(HNSW_LEVEL_SEED);
         Self {
             dim,
             m,
@@ -840,16 +862,47 @@ mod tests {
     }
 
     #[test]
+    fn default_construction_is_deterministic_across_opens() {
+        // Fix (j) regression gate — the eleventh determinism source. Two
+        // independently constructed DEFAULT indices over the same
+        // insertion sequence must agree on the ENTIRE result pool, tail
+        // included: the convicted defect lived at pool positions 51–99,
+        // where per-open entropy levels swapped 3–4 approximate
+        // neighbors and the k=50 comparison that once cleared this
+        // suspect could not see it.
+        let build = || {
+            let mut idx = HnswIndex::new(16);
+            for i in 0..200 {
+                idx.insert(&format!("rid-{i:03}"), &vec_seed(i as f32, 16))
+                    .unwrap();
+            }
+            idx
+        };
+        let (a, b) = (build(), build());
+        for q in 0..8 {
+            let qa = a.search(&vec_seed(q as f32 * 3.7, 16), 100).unwrap();
+            let qb = b.search(&vec_seed(q as f32 * 3.7, 16), 100).unwrap();
+            assert_eq!(
+                qa, qb,
+                "query {q}: fresh default constructions disagree — the \
+                 level RNG is drawing per-instance entropy again"
+            );
+        }
+    }
+
+    #[test]
     fn every_insert_is_reachable_by_its_own_vector() {
         // The mount-drop bug: pure-distance pruning in a dense cluster
         // removed every incoming layer-0 edge of some node, making it
         // present-but-unfindable — a 65-record pack lost a different
         // record per mount (RNG-dependent), and a 377-record pack lost 2.
         // The invariant: searching a stored vector itself must return its
-        // rid. Run several unseeded builds so the entropy-seeded level
-        // RNG cannot mask an orphan-producing construction.
+        // rid. Fix (j) pinned the production level RNG, so varied draws
+        // now come from explicit per-round seeds — the coverage this test
+        // wants (no orphan-producing construction across level layouts)
+        // is preserved, not inherited from entropy.
         for round in 0..5u64 {
-            let mut idx = HnswIndex::new(16);
+            let mut idx = HnswIndex::with_params_seeded(16, 16, 200, 200, round * 7919 + 1);
             // A dense cluster (tiny perturbations of one direction) plus
             // scattered outliers — the shape that saturates max_m and
             // makes distance-only pruning drop backlinks.
