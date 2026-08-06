@@ -181,6 +181,88 @@ pub struct RecallResult {
     pub best_span: Option<(usize, usize)>,
 }
 
+/// v0.13.1 explain surface — per-lane status with the never-ran /
+/// ran-found-nothing distinction made explicit (the ambiguous-zero
+/// audit: `graph_proximity = 0.0` spent a release meaning both "the
+/// lane found nothing" and "the lane never executed", and the two are
+/// different facts with different remedies).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExplainLaneReport {
+    /// "ran" | "ran_empty" | "never_ran".
+    pub status: String,
+    /// Candidates this lane admitted or touched in this call.
+    pub candidates: usize,
+    /// For "never_ran": the precondition that kept it off (e.g.
+    /// "expand_entities=false", "no query_text").
+    pub reason: Option<String>,
+}
+
+/// One candidate of the explain pool. Every row carries the stable
+/// `rid` — cross-run joins on text substrings are the fragility this
+/// field retires.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExplainPoolRow {
+    pub rid: String,
+    /// Final score at the snapshot, quantized at the engine's own
+    /// ranking resolution (1e-6) — the exact value `rank_cmp` compares.
+    pub score_q: f64,
+    /// Raw cosine similarity (pre-fusion signal).
+    pub similarity: f64,
+    /// Per-query bm25 lexical strength in (0, 1]; None = not an FTS
+    /// match (which is a different fact from lex = 0.0).
+    pub lex: Option<f64>,
+    /// The SET of lanes that admitted or lifted this candidate —
+    /// explicitly separate from numeric contributions, because a zero
+    /// contribution and a lane-that-never-admitted are different facts.
+    pub lanes_admitted: Vec<String>,
+    /// Rank within this pool by similarity alone (desc, rid asc) —
+    /// "before fusion".
+    pub rank_pre_fusion: usize,
+    /// Rank in the pool's final comparator order — "after fusion".
+    pub rank_post_fusion: usize,
+    /// Whether this candidate survived MMR/truncation into the results.
+    pub selected: bool,
+}
+
+/// v0.13.1 — the recall explain surface (co-iteration wheel 2, spec
+/// locked with hermes 2026-08-06).
+///
+/// The load-bearing field is `pool`: the full candidate set snapshotted
+/// **post-boost/post-reserve, pre-MMR-truncation** — the set that
+/// ENTERS final selection. Snapshotted earlier it would show a healthy
+/// vector lane and tell you nothing; later it would only show
+/// survivors again. A user-side gate holding nothing but this surface
+/// can detect admission-set instability across opens — the
+/// eleventh-source class that no survivors-only view can see (a k=50
+/// survivors comparison cleared a defect living at pool positions
+/// 51–99).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct RecallExplain {
+    /// The one ranking comparator (folded item: it no longer varies by
+    /// site, so it is named once per response, not per row).
+    pub comparator: String,
+    /// How `score` is actually composed. Named here because the
+    /// per-signal `contributions` are DIAGNOSTIC MAGNITUDES on mixed
+    /// multiplicative/additive terms and do NOT sum to `score` —
+    /// deriving arithmetic from them silently is the round-7 defect
+    /// this field exists to refuse.
+    pub score_algebra: String,
+    /// Query sentiment driving valence multipliers; 0.0 means every
+    /// `valence_multiplier` is 1.0 by construction, not by coincidence.
+    pub query_sentiment: f64,
+    /// Fraction of FTS matches within 10% of the query's best bm25
+    /// strength. Near 1.0 = bm25 does not discriminate on this query
+    /// (uniform-text degeneracy) and lexical strengths are ~flat.
+    /// None = the FTS lane did not run or matched nothing (see
+    /// `lanes["fts"]` for which).
+    pub bm25_degeneracy_ratio: Option<f64>,
+    /// Per-lane status: vector / fts / claims / graph /
+    /// importance_fallback / pack.
+    pub lanes: std::collections::BTreeMap<String, ExplainLaneReport>,
+    /// The candidate pool in comparator order at the snapshot boundary.
+    pub pool: Vec<ExplainPoolRow>,
+}
+
 /// Response from recall with confidence and hints for interactive retrieval.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecallResponse {

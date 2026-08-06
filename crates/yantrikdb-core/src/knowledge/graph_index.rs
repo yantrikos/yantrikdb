@@ -319,7 +319,19 @@ impl GraphIndex {
     }
 
     /// Get all memory RIDs linked to any of the given entities.
-    pub fn memories_for_entities(&self, entity_names: &[&str]) -> HashSet<String> {
+    /// Fix (k), 2026-08-06 — the TWELFTH determinism source. This
+    /// returned a `HashSet`, and the graph-only candidate lane iterated
+    /// it into a tie-heavy rank sort feeding `.take(preselect_pool)`:
+    /// per-instance hash seeding → per-open-random iteration order →
+    /// stable sort preserved it through the ties → the truncation
+    /// admitted a DIFFERENT SUBSET of an entity's memories per open
+    /// (capture: identical hnsw pools, candidate sets differing only in
+    /// `graph-connected via Jack` rows, 10/10 bursts). The audit rule
+    /// fixes (e)/(f) wrote — any candidate stream feeding a truncation
+    /// or tie band carries a total order — applied at the SOURCE so
+    /// every consumer inherits it, instead of at one call site per
+    /// lane copy.
+    pub fn memories_for_entities(&self, entity_names: &[&str]) -> Vec<String> {
         let mut result: HashSet<String> = HashSet::new();
         for name in entity_names {
             if let Some(&eid) = self.entity_to_id.get(*name) {
@@ -328,6 +340,8 @@ impl GraphIndex {
                 }
             }
         }
+        let mut result: Vec<String> = result.into_iter().collect();
+        result.sort_unstable();
         result
     }
 
@@ -644,7 +658,28 @@ mod tests {
         assert_eq!(entities, vec!["Alice"]);
 
         let rids = idx.memories_for_entities(&["Alice"]);
-        assert!(rids.contains("mem1"));
+        assert!(rids.iter().any(|r| r == "mem1"));
+    }
+
+    #[test]
+    fn memories_for_entities_is_deterministic_across_instances() {
+        // Fix (k) contract pin: the graph-only candidate stream feeds a
+        // rank-and-truncate, so its order must be identical across
+        // independently built instances — a HashSet return here is how
+        // the twelfth determinism source happened.
+        let build = || {
+            let mut idx = GraphIndex::new();
+            idx.add_entity("Jack", "person");
+            for i in 0..40 {
+                idx.link_memory(&format!("mem-{i:02}"), "Jack");
+            }
+            idx.memories_for_entities(&["Jack"])
+        };
+        let (a, b) = (build(), build());
+        assert_eq!(a, b, "order must not depend on per-instance hash state");
+        let mut sorted = a.clone();
+        sorted.sort_unstable();
+        assert_eq!(a, sorted, "contract: rid-ascending total order");
     }
 
     #[test]

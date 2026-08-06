@@ -1281,7 +1281,16 @@ impl YantrikDB {
                         (rid.clone(), rank)
                     })
                     .collect();
-                candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
+                // Fix (k): this rank feeds a truncation, and on uniform
+                // corpora it is a massive tie — the total order (quantized
+                // rank desc, rid asc) is what keeps the admitted subset
+                // identical across opens (the audit rule from fixes (e)/(f),
+                // applied to every remaining rank-and-take site at once).
+                candidates.sort_by(|a, b| {
+                    crate::engine::lexical::quantize_score(b.1)
+                        .total_cmp(&crate::engine::lexical::quantize_score(a.1))
+                        .then_with(|| a.0.cmp(&b.0))
+                });
                 candidates
                     .into_iter()
                     .take(VALENCE_SCAN_MAX)
@@ -1801,7 +1810,16 @@ impl YantrikDB {
                             Some((rid, rank))
                         })
                         .collect();
-                    candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    // Fix (k): this rank feeds a truncation, and on uniform
+                    // corpora it is a massive tie — the total order (quantized
+                    // rank desc, rid asc) is what keeps the admitted subset
+                    // identical across opens (the audit rule from fixes (e)/(f),
+                    // applied to every remaining rank-and-take site at once).
+                    candidates.sort_by(|a, b| {
+                        crate::engine::lexical::quantize_score(b.1)
+                            .total_cmp(&crate::engine::lexical::quantize_score(a.1))
+                            .then_with(|| a.0.cmp(&b.0))
+                    });
                     candidates
                         .into_iter()
                         .take(preselect_pool)
@@ -3801,7 +3819,16 @@ impl YantrikDB {
                         (rid.clone(), rank)
                     })
                     .collect();
-                candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
+                // Fix (k): this rank feeds a truncation, and on uniform
+                // corpora it is a massive tie — the total order (quantized
+                // rank desc, rid asc) is what keeps the admitted subset
+                // identical across opens (the audit rule from fixes (e)/(f),
+                // applied to every remaining rank-and-take site at once).
+                candidates.sort_by(|a, b| {
+                    crate::engine::lexical::quantize_score(b.1)
+                        .total_cmp(&crate::engine::lexical::quantize_score(a.1))
+                        .then_with(|| a.0.cmp(&b.0))
+                });
                 candidates
                     .into_iter()
                     .take(VALENCE_SCAN_MAX)
@@ -4296,7 +4323,16 @@ impl YantrikDB {
                             Some((r, rank))
                         })
                         .collect();
-                    candidates.sort_by(|a, b| b.1.total_cmp(&a.1));
+                    // Fix (k): this rank feeds a truncation, and on uniform
+                    // corpora it is a massive tie — the total order (quantized
+                    // rank desc, rid asc) is what keeps the admitted subset
+                    // identical across opens (the audit rule from fixes (e)/(f),
+                    // applied to every remaining rank-and-take site at once).
+                    candidates.sort_by(|a, b| {
+                        crate::engine::lexical::quantize_score(b.1)
+                            .total_cmp(&crate::engine::lexical::quantize_score(a.1))
+                            .then_with(|| a.0.cmp(&b.0))
+                    });
                     candidates
                         .into_iter()
                         .take(preselect_pool)

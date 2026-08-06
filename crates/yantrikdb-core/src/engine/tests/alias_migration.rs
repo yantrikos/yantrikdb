@@ -88,7 +88,7 @@ fn possessive_phantoms_fold_into_their_canonicals() {
         2,
         "rid-x once (deduped) + rid-y (repointed): {mems:?}"
     );
-    assert!(mems.contains("rid-x") && mems.contains("rid-y"));
+    assert!(mems.iter().any(|r| r == "rid-x") && mems.iter().any(|r| r == "rid-y"));
     drop(gi);
 
     // Idempotent: a second rebuild writes nothing new and folds the same.
