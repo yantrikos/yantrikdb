@@ -3411,15 +3411,19 @@ impl YantrikDB {
                             };
 
                             // Run AND first, fall back to OR if too few results.
-                            let mut imp_rids = run_fts_phase2(fts_query);
-                            if imp_rids.len() < 10 && fts_query_and.is_some() {
-                                let or_rids = run_fts_phase2(&fts_query_or);
+                            let mut imp_hits = run_fts_phase2(fts_query);
+                            if imp_hits.len() < 10 && fts_query_and.is_some() {
+                                let or_hits = run_fts_phase2(&fts_query_or);
                                 let existing: std::collections::HashSet<String> =
-                                    imp_rids.iter().cloned().collect();
-                                imp_rids
-                                    .extend(or_rids.into_iter().filter(|r| !existing.contains(r)));
+                                    imp_hits.iter().map(|(rid, _)| rid.clone()).collect();
+                                imp_hits.extend(
+                                    or_hits
+                                        .into_iter()
+                                        .filter(|(rid, _)| !existing.contains(rid)),
+                                );
                             }
 
+                            lex_ranked.extend(imp_hits.iter().cloned());
                             // Own the set so it doesn't borrow `fts_rids` —
                             // we push into `fts_rids` below, which requires
                             // a mutable borrow that conflicts with any live
@@ -3427,7 +3431,7 @@ impl YantrikDB {
                             // --all-features in CI 2026-05-14.)
                             let existing_set: std::collections::HashSet<String> =
                                 fts_rids.iter().cloned().collect();
-                            for rid in imp_rids {
+                            for (rid, _) in imp_hits {
                                 if !existing_set.contains(&rid) {
                                     fts_rids.push(rid);
                                 }
@@ -4404,6 +4408,11 @@ impl YantrikDB {
         {
             let final_rids: Vec<&str> = scored.iter().map(|r| r.rid.as_str()).collect();
             let text_map = self.fetch_text_metadata_by_rids(&final_rids)?;
+            // Chunk lookup BEFORE the mutable hydration loop — final_rids
+            // borrows `scored`, and using it after `&mut scored` is the
+            // E0502 that only clippy --all-features compiles (this whole
+            // function is feature-gated; same trap as 2026-05-14).
+            let chunked = self.rids_with_chunks(&final_rids);
             for result in &mut scored {
                 if let Some(tm) = text_map.get(result.rid.as_str()) {
                     result.text = tm.text.clone();
@@ -4412,7 +4421,6 @@ impl YantrikDB {
                 }
             }
             // Snippet spans (mirrors recall() Step 5.5).
-            let chunked = self.rids_with_chunks(&final_rids);
             win_by_rid.retain(|rid, _| chunked.contains(rid));
             crate::engine::snippet::stamp_best_spans(
                 &mut scored,
