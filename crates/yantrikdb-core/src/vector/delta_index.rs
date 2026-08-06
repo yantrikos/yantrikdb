@@ -474,6 +474,18 @@ impl DeltaIndex {
     /// If the same rid appears in both tiers, the delta entry wins (it's
     /// strictly newer; cold gets the corresponding update at compaction).
     pub fn search(&self, query: &[f32], k: usize) -> Result<Vec<(String, f64)>> {
+        Ok(self
+            .search_with_windows(query, k)?
+            .into_iter()
+            .map(|(rid, dist, _)| (rid, dist))
+            .collect())
+    }
+
+    /// [`Self::search`] that also reports which chunk window won per
+    /// record: `(rid, distance, winning_chunk_idx)` with 0 = the head
+    /// window. Recall uses the winner to surface the matched window of
+    /// a long record (snippet projection) instead of the whole text.
+    pub fn search_with_windows(&self, query: &[f32], k: usize) -> Result<Vec<(String, f64, u32)>> {
         if query.len() != self.dim {
             return Err(YantrikDbError::InvalidInput(format!(
                 "query dimension mismatch: expected {}, got {}",
@@ -579,7 +591,7 @@ impl DeltaIndex {
             // memories rids, and `k` means k DISTINCT RECORDS — a long
             // record can never crowd the result list with its own
             // windows.
-            let mut collapsed = crate::vector::chunk::collapse_to_parents(merged);
+            let mut collapsed = crate::vector::chunk::collapse_to_parents_indexed(merged);
             if collapsed.len() >= k || cold_exhausted || cold_fetch >= cold_fetch_cap {
                 collapsed.truncate(k);
                 return Ok(collapsed);

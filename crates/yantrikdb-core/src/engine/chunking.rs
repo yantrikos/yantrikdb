@@ -121,6 +121,39 @@ impl YantrikDB {
         }
     }
 
+    /// The window used for snippet-span geometry (engine/snippet.rs):
+    /// the probed embedder window when one is known, else the measured
+    /// default. Snippets only need "a screenful of the right region",
+    /// so an unprobed install still gets useful spans.
+    pub(crate) fn snippet_window(&self) -> usize {
+        match self.embedder_window_chars.load(Ordering::Relaxed) {
+            0 | NO_TRUNCATION => super::snippet::DEFAULT_SNIPPET_WINDOW,
+            n => n,
+        }
+    }
+
+    /// Which of `rids` have chunk vectors — the set for which the
+    /// vector layer's winning-window ordinal is meaningful. Infallible
+    /// by design: an old database without the `memory_chunks` table
+    /// (or any read error) yields the empty set, and span stamping
+    /// falls back to the query-term scan.
+    pub(crate) fn rids_with_chunks(&self, rids: &[&str]) -> std::collections::HashSet<String> {
+        if rids.is_empty() {
+            return Default::default();
+        }
+        let conn = self.read_conn();
+        let placeholders = vec!["?"; rids.len()].join(",");
+        let sql = format!("SELECT DISTINCT rid FROM memory_chunks WHERE rid IN ({placeholders})");
+        let Ok(mut stmt) = conn.prepare_cached(&sql) else {
+            return Default::default();
+        };
+        stmt.query_map(rusqlite::params_from_iter(rids.iter()), |row| {
+            row.get::<_, String>(0)
+        })
+        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        .unwrap_or_default()
+    }
+
     /// Count a write that overflowed the window and was CHUNKED — the
     /// overflow is handled, not lost, so it must not inflate the
     /// truncation warning. Surfaced in `stats()`.

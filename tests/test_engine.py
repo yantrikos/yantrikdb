@@ -1034,3 +1034,76 @@ def test_recall_as_of_rolls_back_corrections():
 
     before = db.recall_as_of(t_mid - 3600, query="deadline", top_k=5)
     assert before == []
+
+
+# ── token diet: best_span / snippets / min_score_ratio (0.13) ──────
+
+
+class TestTokenDiet:
+    LONG = (
+        "filler sentence padding out the head of the record. " * 25
+        + "the ZEPHYR-KEY rotates through the northern vault every solstice. "
+        + "trailing filler about entirely unrelated matters. " * 15
+    )
+
+    def test_best_span_reported_for_long_records(self, db):
+        db.record(self.LONG, embedding=_vec(1.0))
+        db.record("short record", embedding=_vec(2.0))
+
+        hits = db.recall(
+            query="ZEPHYR-KEY northern vault solstice",
+            query_embedding=_vec(1.0),
+            top_k=2,
+        )
+        long_hit = next(h for h in hits if "ZEPHYR-KEY" in h["text"])
+        span = long_hit["best_span"]
+        assert span is not None, "long record must carry a span"
+        a, b = span
+        assert "ZEPHYR-KEY" in self.LONG[a:b], "span must cover the matched phrase"
+        assert a > 0, "the phrase is not in the head window"
+
+        short_hit = next(h for h in hits if h["text"] == "short record")
+        assert short_hit["best_span"] is None
+
+    def test_snippets_replace_text_with_matched_window(self, db):
+        db.record(self.LONG, embedding=_vec(1.0))
+        hits = db.recall(
+            query="ZEPHYR-KEY northern vault solstice",
+            query_embedding=_vec(1.0),
+            top_k=1,
+            snippets=True,
+        )
+        h = hits[0]
+        assert "ZEPHYR-KEY" in h["text"], "snippet must contain the match"
+        assert len(h["text"]) < len(self.LONG) // 2, "snippet must actually trim"
+        assert h["text"].startswith("…"), "mid-text slice is marked"
+        assert any(w.startswith("snippet ") for w in h["why_retrieved"])
+        # best_span still carries ORIGINAL text coordinates.
+        a, b = h["best_span"]
+        assert "ZEPHYR-KEY" in self.LONG[a:b]
+
+    def test_min_score_ratio_trims_the_tail(self, db):
+        # Exactly orthogonal vectors so the score gap is deterministic
+        # (a hash-spread _vec pair can land at any cosine).
+        e0 = [1.0] + [0.0] * (DIM - 1)
+        e1 = [0.0, 1.0] + [0.0] * (DIM - 2)
+        e2 = [0.0, 0.0, 1.0] + [0.0] * (DIM - 3)
+        db.record("the exact thing asked about", embedding=e0)
+        db.record("unrelated one", embedding=e1)
+        db.record("unrelated two", embedding=e2)
+
+        full = db.recall(query_embedding=e0, top_k=10)
+        assert len(full) == 3
+
+        trimmed = db.recall(query_embedding=e0, top_k=10, min_score_ratio=0.8)
+        assert 1 <= len(trimmed) < 3, f"cliff must trim noise, kept {len(trimmed)}"
+        assert trimmed[0]["text"] == "the exact thing asked about"
+
+        # The best result always survives its own floor, even at 1.0.
+        keeps_best = db.recall(query_embedding=e0, top_k=10, min_score_ratio=1.0)
+        assert keeps_best[0]["text"] == "the exact thing asked about"
+
+    def test_min_score_ratio_validates_range(self, db):
+        db.record("anything", embedding=_vec(1.0))
+        with pytest.raises(ValueError):
+            db.recall(query_embedding=_vec(1.0), top_k=5, min_score_ratio=1.5)

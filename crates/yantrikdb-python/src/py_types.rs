@@ -85,6 +85,10 @@ pub fn recall_result_to_dict(
     let disputed: Vec<&str> = r.disputed_with.iter().map(|s| s.as_str()).collect();
     dict.set_item("disputed_with", disputed)?;
     dict.set_item("aged_last_verified", r.aged_last_verified)?;
+    // 0.13: byte span of `text` the retrieval actually matched (winning
+    // chunk window, or best query-term window). None = text fits one
+    // window. Consumers trim by this; recall(snippets=True) applies it.
+    dict.set_item("best_span", r.best_span)?;
 
     Ok(dict.into())
 }

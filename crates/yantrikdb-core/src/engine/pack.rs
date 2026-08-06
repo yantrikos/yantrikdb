@@ -1604,6 +1604,7 @@ impl YantrikDB {
                         superseded_by: None,
                         disputed_with: Vec::new(),
                         aged_last_verified: None,
+                        best_span: None,
                     },
                 ));
             }

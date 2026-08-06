@@ -121,7 +121,7 @@ impl PyYantrikDB {
     // entity-linked noise sharing an entity name outranks genuinely
     // similar records. Neutral even on the synthetic connected corpus.
     // Opt in per-call for curated, dense entity graphs.
-    #[pyo3(signature = (query=None, query_embedding=None, top_k=10, time_window=None, memory_type=None, include_consolidated=false, expand_entities=false, skip_reinforce=false, namespace=None, domain=None, source=None, certainty_min=None, order=None, include_superseded=false))]
+    #[pyo3(signature = (query=None, query_embedding=None, top_k=10, time_window=None, memory_type=None, include_consolidated=false, expand_entities=false, skip_reinforce=false, namespace=None, domain=None, source=None, certainty_min=None, order=None, include_superseded=false, snippets=false, min_score_ratio=None))]
     #[allow(clippy::too_many_arguments)]
     fn recall(
         &self,
@@ -146,6 +146,16 @@ impl PyYantrikDB {
         // current_status="superseded" + superseded_by) for history /
         // archaeology queries. No-op on legacy-policy databases.
         include_superseded: bool,
+        // 0.13 token diet. `snippets=True` replaces each long result's
+        // text with its matched window (engine-computed `best_span`),
+        // with `…` markers and a why_retrieved stamp carrying the
+        // original coordinates. `min_score_ratio=r` drops trailing
+        // results scoring below `r * top_score` — top_k becomes a
+        // ceiling, not a quota, so agents stop paying for
+        // below-the-cliff noise. Both default OFF (byte-identical
+        // behavior for existing callers).
+        snippets: bool,
+        min_score_ratio: Option<f64>,
     ) -> PyResult<Vec<PyObject>> {
         let db = self
             .inner
@@ -164,7 +174,7 @@ impl PyYantrikDB {
             },
         };
 
-        let results = db
+        let mut results = db
             .recall(
                 &emb,
                 top_k,
@@ -182,6 +192,45 @@ impl PyYantrikDB {
                 include_superseded,
             )
             .map_err(map_err)?;
+
+        if let Some(ratio) = min_score_ratio {
+            if !(0.0..=1.0).contains(&ratio) {
+                return Err(PyValueError::new_err(
+                    "min_score_ratio must be in [0.0, 1.0]",
+                ));
+            }
+            if !results.is_empty() {
+                // Cut against the MAX score, not results[0] —
+                // order="certainty"/"recency" re-sorts the list. The
+                // max-scoring result passes its own floor whenever
+                // scores are non-negative (the practical case); if the
+                // floor would somehow orphan everything, trim nothing.
+                let max_score = results
+                    .iter()
+                    .map(|r| r.score)
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let floor = max_score * ratio;
+                if results.iter().any(|r| r.score >= floor) {
+                    results.retain(|r| r.score >= floor);
+                }
+            }
+        }
+
+        if snippets {
+            for r in &mut results {
+                if let Some((a, b)) = r.best_span {
+                    if a < b && b <= r.text.len() {
+                        let total = r.text.len();
+                        let head = if a > 0 { "…" } else { "" };
+                        let tail = if b < total { "…" } else { "" };
+                        let sliced = format!("{head}{}{tail}", &r.text[a..b]);
+                        r.why_retrieved
+                            .push(format!("snippet {a}..{b} of {total} chars"));
+                        r.text = sliced;
+                    }
+                }
+            }
+        }
 
         results
             .iter()

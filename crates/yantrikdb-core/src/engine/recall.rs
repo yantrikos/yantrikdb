@@ -41,6 +41,14 @@ pub(crate) fn parse_recall_order(order: Option<&str>) -> Result<RecallOrder> {
     }
 }
 
+/// Row mapper shared by every FTS phase: `(rid, bm25 rank)`. The raw
+/// (negative) rank FTS5 already computes for the ORDER BY now also
+/// ships to `lexical::lexical_strengths`, so the keyword lane can tell
+/// a rare-term exact match from common-term noise.
+fn rid_rank_row(row: &rusqlite::Row) -> rusqlite::Result<(String, f64)> {
+    Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?))
+}
+
 /// Simple English suffix stripping for FTS5 query expansion.
 ///
 /// Returns a stem suitable for FTS5 prefix matching (e.g., "reading" → "read",
@@ -308,8 +316,22 @@ impl YantrikDB {
         crate::validate::validate_embedding("recall", query_embedding, state.dim())?;
         let vec_results = {
             let _span = tracing::debug_span!("hnsw_search", fetch_k).entered();
-            state.vec_index.search(query_embedding, fetch_k)?
+            state
+                .vec_index
+                .search_with_windows(query_embedding, fetch_k)?
         };
+        // Winning chunk window per candidate — consumed by snippet-span
+        // stamping after hydration (engine/snippet.rs). Only trusted for
+        // records that actually have chunk vectors (filtered there).
+        let mut win_by_rid: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::with_capacity(vec_results.len());
+        for (rid, _, w) in &vec_results {
+            win_by_rid.insert(rid.clone(), *w);
+        }
+        let vec_results: Vec<(String, f64)> = vec_results
+            .into_iter()
+            .map(|(rid, dist, _)| (rid, dist))
+            .collect();
 
         // This short-circuit's premise is that the host index is the only
         // candidate source, which mounting a pack falsifies. Taking it
@@ -444,6 +466,7 @@ impl YantrikDB {
                     superseded_by: None,
                     disputed_with: Vec::new(),
                     aged_last_verified: None,
+                    best_span: None,
                 });
             }
         } // drop cache borrow
@@ -550,10 +573,17 @@ impl YantrikDB {
                         superseded_by: None,
                         disputed_with: Vec::new(),
                         aged_last_verified: None,
+                        best_span: None,
                     });
                 }
             }
         }
+
+        // rid → per-query lexical strength from FTS5 bm25 ranks (fusion:
+        // see engine/lexical.rs). Filled by the keyword lane below, read
+        // by the boost sites and the keyword reserve (step 3.5).
+        let mut lex_by_rid: std::collections::HashMap<String, f64> =
+            std::collections::HashMap::new();
 
         // Step 1.5: FTS5 keyword fallback
         //
@@ -758,7 +788,7 @@ impl YantrikDB {
                         // more negative → sort higher.
                         let fts_sql = if memory_type.is_some() {
                             format!(
-                                "SELECT m.rid FROM memories m \
+                                "SELECT m.rid, memories_fts.rank FROM memories m \
                                  JOIN memories_fts ON memories_fts.rowid = m.rowid \
                                  WHERE memories_fts MATCH ?1 \
                                  AND m.consolidation_status = 'active' \
@@ -775,7 +805,7 @@ impl YantrikDB {
                             )
                         } else {
                             format!(
-                                "SELECT m.rid FROM memories m \
+                                "SELECT m.rid, memories_fts.rank FROM memories m \
                                  JOIN memories_fts ON memories_fts.rowid = m.rowid \
                                  WHERE memories_fts MATCH ?1 \
                                  AND m.consolidation_status = 'active' \
@@ -792,31 +822,26 @@ impl YantrikDB {
                         };
 
                         // Helper closure to run an FTS query and collect RIDs.
-                        let run_fts_phase1 = |q: &str| -> Vec<String> {
+                        let run_fts_phase1 = |q: &str| -> Vec<(String, f64)> {
                             let conn = self.read_conn();
                             let mut stmt = conn.prepare_cached(&fts_sql).ok();
                             if let Some(ref mut stmt) = stmt {
-                                let result: std::result::Result<Vec<String>, _> = if let Some(mt) =
-                                    memory_type
-                                {
-                                    if let Some(ns) = namespace {
-                                        stmt.query_map(params![q, mt, ns], |row| {
-                                            row.get::<_, String>(0)
-                                        })
-                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                let result: std::result::Result<Vec<(String, f64)>, _> =
+                                    if let Some(mt) = memory_type {
+                                        if let Some(ns) = namespace {
+                                            stmt.query_map(params![q, mt, ns], rid_rank_row)
+                                                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                        } else {
+                                            stmt.query_map(params![q, mt], rid_rank_row)
+                                                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                        }
+                                    } else if let Some(ns) = namespace {
+                                        stmt.query_map(params![q, ns], rid_rank_row)
+                                            .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                     } else {
-                                        stmt.query_map(params![q, mt], |row| {
-                                            row.get::<_, String>(0)
-                                        })
-                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                                    }
-                                } else if let Some(ns) = namespace {
-                                    stmt.query_map(params![q, ns], |row| row.get::<_, String>(0))
-                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                                } else {
-                                    stmt.query_map(params![q], |row| row.get::<_, String>(0))
-                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                                };
+                                        stmt.query_map(params![q], rid_rank_row)
+                                            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                    };
                                 result.unwrap_or_default()
                             } else {
                                 vec![]
@@ -825,10 +850,15 @@ impl YantrikDB {
 
                         // Run AND query first (more selective), fall back to OR
                         // if AND returns too few results.
-                        let mut fts_rids = run_fts_phase1(fts_query);
-                        if fts_rids.len() < 5 && fts_query_and.is_some() {
-                            fts_rids = run_fts_phase1(&fts_query_or);
+                        let mut fts_hits = run_fts_phase1(fts_query);
+                        if fts_hits.len() < 5 && fts_query_and.is_some() {
+                            fts_hits = run_fts_phase1(&fts_query_or);
                         }
+                        // (rid, bm25 rank) rows feeding the per-query lexical
+                        // strengths; every later FTS phase appends its rows.
+                        let mut lex_ranked: Vec<(String, f64)> = fts_hits.clone();
+                        let mut fts_rids: Vec<String> =
+                            fts_hits.into_iter().map(|(rid, _)| rid).collect();
 
                         // Phase 2: Importance-filtered FTS.
                         // Phase 1's BM25-ranked LIMIT can be exhausted by noise
@@ -843,7 +873,7 @@ impl YantrikDB {
                         {
                             let imp_fts_sql = if memory_type.is_some() {
                                 format!(
-                                    "SELECT m.rid FROM memories m \
+                                    "SELECT m.rid, memories_fts.rank FROM memories m \
                                      JOIN memories_fts ON memories_fts.rowid = m.rowid \
                                      WHERE memories_fts MATCH ?1 \
                                      AND m.consolidation_status = 'active' \
@@ -860,7 +890,7 @@ impl YantrikDB {
                                 )
                             } else {
                                 format!(
-                                    "SELECT m.rid FROM memories m \
+                                    "SELECT m.rid, memories_fts.rank FROM memories m \
                                      JOIN memories_fts ON memories_fts.rowid = m.rowid \
                                      WHERE memories_fts MATCH ?1 \
                                      AND m.consolidation_status = 'active' \
@@ -877,34 +907,36 @@ impl YantrikDB {
                             };
 
                             // Helper to run Phase 2 with a given FTS query string.
-                            let run_fts_phase2 = |q: &str| -> Vec<String> {
+                            let run_fts_phase2 = |q: &str| -> Vec<(String, f64)> {
                                 let conn = self.read_conn();
                                 let mut stmt = conn.prepare_cached(&imp_fts_sql).ok();
                                 if let Some(ref mut stmt) = stmt {
-                                    let result: std::result::Result<Vec<String>, _> =
+                                    let result: std::result::Result<Vec<(String, f64)>, _> =
                                         if let Some(mt) = memory_type {
                                             if let Some(ns) = namespace {
                                                 stmt.query_map(
                                                     params![q, mean_importance, mt, ns],
-                                                    |row| row.get::<_, String>(0),
+                                                    rid_rank_row,
                                                 )
                                                 .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                             } else {
                                                 stmt.query_map(
                                                     params![q, mean_importance, mt],
-                                                    |row| row.get::<_, String>(0),
+                                                    rid_rank_row,
                                                 )
                                                 .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                             }
                                         } else if let Some(ns) = namespace {
-                                            stmt.query_map(params![q, mean_importance, ns], |row| {
-                                                row.get::<_, String>(0)
-                                            })
+                                            stmt.query_map(
+                                                params![q, mean_importance, ns],
+                                                rid_rank_row,
+                                            )
                                             .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                         } else {
-                                            stmt.query_map(params![q, mean_importance], |row| {
-                                                row.get::<_, String>(0)
-                                            })
+                                            stmt.query_map(
+                                                params![q, mean_importance],
+                                                rid_rank_row,
+                                            )
                                             .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                         };
                                     result.unwrap_or_default()
@@ -914,23 +946,28 @@ impl YantrikDB {
                             };
 
                             // Run AND first (selective), fall back to OR if too few results.
-                            let mut imp_rids = run_fts_phase2(fts_query);
-                            if imp_rids.len() < 10 && fts_query_and.is_some() {
-                                let or_rids = run_fts_phase2(&fts_query_or);
+                            let mut imp_hits = run_fts_phase2(fts_query);
+                            if imp_hits.len() < 10 && fts_query_and.is_some() {
+                                let or_hits = run_fts_phase2(&fts_query_or);
                                 let existing: std::collections::HashSet<String> =
-                                    imp_rids.iter().cloned().collect();
-                                imp_rids
-                                    .extend(or_rids.into_iter().filter(|r| !existing.contains(r)));
+                                    imp_hits.iter().map(|(rid, _)| rid.clone()).collect();
+                                imp_hits.extend(
+                                    or_hits
+                                        .into_iter()
+                                        .filter(|(rid, _)| !existing.contains(rid)),
+                                );
                             }
 
                             // Merge Phase 2 into Phase 1 results (dedup).
+                            lex_ranked.extend(imp_hits.iter().cloned());
                             let existing_set: std::collections::HashSet<String> =
                                 fts_rids.iter().cloned().collect();
-                            let new_imp: Vec<String> = imp_rids
-                                .into_iter()
-                                .filter(|r| !existing_set.contains(r))
-                                .collect();
-                            fts_rids.extend(new_imp);
+                            fts_rids.extend(
+                                imp_hits
+                                    .into_iter()
+                                    .map(|(rid, _)| rid)
+                                    .filter(|rid| !existing_set.contains(rid)),
+                            );
                         }
 
                         // Phase 2.5: Per-keyword anchor scan.
@@ -945,7 +982,7 @@ impl YantrikDB {
                         if keyword_groups.len() >= 2 {
                             let anchor_fts_sql = if memory_type.is_some() {
                                 format!(
-                                    "SELECT m.rid FROM memories m \
+                                    "SELECT m.rid, memories_fts.rank FROM memories m \
                                      JOIN memories_fts ON memories_fts.rowid = m.rowid \
                                      WHERE memories_fts MATCH ?1 \
                                      AND m.consolidation_status = 'active' \
@@ -962,7 +999,7 @@ impl YantrikDB {
                                 )
                             } else {
                                 format!(
-                                    "SELECT m.rid FROM memories m \
+                                    "SELECT m.rid, memories_fts.rank FROM memories m \
                                      JOIN memories_fts ON memories_fts.rowid = m.rowid \
                                      WHERE memories_fts MATCH ?1 \
                                      AND m.consolidation_status = 'active' \
@@ -982,37 +1019,35 @@ impl YantrikDB {
                                 fts_rids.iter().cloned().collect();
 
                             for group in &keyword_groups {
-                                let anchor_rids: Vec<String> = {
+                                let anchor_hits: Vec<(String, f64)> = {
                                     let conn = self.read_conn();
                                     let mut stmt = conn.prepare_cached(&anchor_fts_sql).ok();
                                     if let Some(ref mut stmt) = stmt {
-                                        let result: std::result::Result<Vec<String>, _> =
+                                        let result: std::result::Result<Vec<(String, f64)>, _> =
                                             if let Some(mt) = memory_type {
                                                 if let Some(ns) = namespace {
-                                                    stmt.query_map(params![group, mt, ns], |row| {
-                                                        row.get::<_, String>(0)
-                                                    })
+                                                    stmt.query_map(
+                                                        params![group, mt, ns],
+                                                        rid_rank_row,
+                                                    )
                                                     .map(|rows| {
                                                         rows.filter_map(|r| r.ok()).collect()
                                                     })
                                                 } else {
-                                                    stmt.query_map(params![group, mt], |row| {
-                                                        row.get::<_, String>(0)
-                                                    })
+                                                    stmt.query_map(params![group, mt], rid_rank_row)
+                                                        .map(|rows| {
+                                                            rows.filter_map(|r| r.ok()).collect()
+                                                        })
+                                                }
+                                            } else if let Some(ns) = namespace {
+                                                stmt.query_map(params![group, ns], rid_rank_row)
                                                     .map(|rows| {
                                                         rows.filter_map(|r| r.ok()).collect()
                                                     })
-                                                }
-                                            } else if let Some(ns) = namespace {
-                                                stmt.query_map(params![group, ns], |row| {
-                                                    row.get::<_, String>(0)
-                                                })
-                                                .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                             } else {
-                                                stmt.query_map(params![group], |row| {
-                                                    row.get::<_, String>(0)
-                                                })
-                                                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                                stmt.query_map(params![group], rid_rank_row).map(
+                                                    |rows| rows.filter_map(|r| r.ok()).collect(),
+                                                )
                                             };
                                         result.unwrap_or_default()
                                     } else {
@@ -1020,7 +1055,8 @@ impl YantrikDB {
                                     }
                                 };
 
-                                for rid in anchor_rids {
+                                for (rid, rank) in anchor_hits {
+                                    lex_ranked.push((rid.clone(), rank));
                                     if !existing_fts.contains(&rid) {
                                         fts_rids.push(rid);
                                     }
@@ -1031,6 +1067,11 @@ impl YantrikDB {
                         // Boost existing candidates that matched FTS5 keywords.
                         // Scale boost inversely with similarity: memories where vector
                         // search failed but keywords matched get more boost.
+                        // Per-query lexical strengths from every phase's bm25
+                        // rows — read by the boost sites below and by the
+                        // keyword reserve (see engine/lexical.rs).
+                        lex_by_rid = crate::engine::lexical::lexical_strengths(&lex_ranked);
+
                         {
                             let fts_rid_set: std::collections::HashSet<&str> =
                                 fts_rids.iter().map(|r| r.as_str()).collect();
@@ -1039,8 +1080,13 @@ impl YantrikDB {
                                     && !result.why_retrieved.iter().any(|w| w == "keyword_match")
                                 {
                                     let sim = result.scores.similarity;
-                                    let boost =
-                                        learned_weights.keyword_boost * (1.0 - sim).max(0.2);
+                                    let lex =
+                                        lex_by_rid.get(result.rid.as_str()).copied().unwrap_or(1.0);
+                                    let boost = crate::engine::lexical::keyword_lane_boost(
+                                        learned_weights.keyword_boost,
+                                        sim,
+                                        lex,
+                                    );
                                     result.score += boost;
                                     result.why_retrieved.push("keyword_match".to_string());
                                 }
@@ -1088,7 +1134,14 @@ impl YantrikDB {
                                     &mem_emb,
                                 ) as f64;
 
-                                if sim_score < FTS_MIN_SIM {
+                                let lex = lex_by_rid.get(rid.as_str()).copied().unwrap_or(0.0);
+                                if sim_score < FTS_MIN_SIM
+                                    && lex < crate::engine::lexical::LEX_STRONG
+                                {
+                                    // Below the cosine noise floor AND not a
+                                    // near-best lexical match — noise. A top
+                                    // bm25 match passes regardless: dilution
+                                    // parks exact-phrase records at any sim.
                                     continue;
                                 }
 
@@ -1106,8 +1159,11 @@ impl YantrikDB {
                                     query_sentiment,
                                     &learned_weights,
                                 );
-                                let kw_boost =
-                                    learned_weights.keyword_boost * (1.0 - sim_score).max(0.2);
+                                let kw_boost = crate::engine::lexical::keyword_lane_boost(
+                                    learned_weights.keyword_boost,
+                                    sim_score,
+                                    lex,
+                                );
                                 let mut why =
                                     scoring::build_why(sim_score, recency, decay, row.valence);
                                 why.push("keyword_match".to_string());
@@ -1150,6 +1206,7 @@ impl YantrikDB {
                                     superseded_by: None,
                                     disputed_with: Vec::new(),
                                     aged_last_verified: None,
+                                    best_span: None,
                                 });
                             }
                         }
@@ -1278,6 +1335,7 @@ impl YantrikDB {
                         superseded_by: None,
                         disputed_with: Vec::new(),
                         aged_last_verified: None,
+                        best_span: None,
                     });
                 }
             }
@@ -1489,6 +1547,7 @@ impl YantrikDB {
                                     superseded_by: None,
                                     disputed_with: Vec::new(),
                                     aged_last_verified: None,
+                                    best_span: None,
                                 });
                             }
                         }
@@ -1807,6 +1866,7 @@ impl YantrikDB {
                             superseded_by: None,
                             disputed_with: Vec::new(),
                             aged_last_verified: None,
+                            best_span: None,
                         });
                     }
                     drop(cache);
@@ -1877,40 +1937,14 @@ impl YantrikDB {
         // Topic-relevant keyword matches (e.g., "yoga", "reading") often have
         // moderate importance (0.30-0.40) that can't compete with high-importance
         // memories (0.70-1.00) in the composite score formula. Reserve up to 3
-        // top_k slots for the best keyword-matched candidates (by similarity).
+        // top_k slots for the best keyword-matched candidates — admitted and
+        // ranked by bm25 lexical strength with cosine as the fallback door
+        // (engine/lexical.rs; the sim-only door starved exact-phrase matches).
         //
         // The boost is minimal (just above cutoff). The real benefit comes from
         // step 4 where keyword_reserved items are exempt from MMR diversity
         // penalty, guaranteeing they survive into the final results.
-        {
-            scored.sort_by(|a, b| b.score.total_cmp(&a.score));
-
-            let cutoff_idx = top_k.min(scored.len()).saturating_sub(1);
-            let cutoff_score = scored.get(cutoff_idx).map(|r| r.score).unwrap_or(0.0);
-
-            const KEYWORD_RESERVE_SLOTS: usize = 3;
-            const KEYWORD_RESERVE_MIN_SIM: f64 = 0.25;
-            // Find keyword-matched candidates ranked below cutoff, sorted by similarity
-            let mut kw_below: Vec<(usize, f64)> = scored
-                .iter()
-                .enumerate()
-                .filter(|(_, r)| {
-                    r.why_retrieved.iter().any(|w| w == "keyword_match")
-                        && r.scores.similarity >= KEYWORD_RESERVE_MIN_SIM
-                        && r.score < cutoff_score
-                })
-                .map(|(i, r)| (i, r.scores.similarity))
-                .collect();
-            kw_below.sort_by(|a, b| b.1.total_cmp(&a.1));
-
-            // Boost best keyword candidates just above the cutoff
-            for (idx, _) in kw_below.into_iter().take(KEYWORD_RESERVE_SLOTS) {
-                scored[idx].score = cutoff_score + 0.001;
-                scored[idx]
-                    .why_retrieved
-                    .push("keyword_reserved".to_string());
-            }
-        }
+        crate::engine::lexical::apply_keyword_reserve(&mut scored, &lex_by_rid, top_k);
 
         // Step 4: MMR diversity selection
         //
@@ -2047,6 +2081,26 @@ impl YantrikDB {
                 result.metadata = serde_json::from_str(&tm.metadata)
                     .unwrap_or(serde_json::Value::Object(Default::default()));
             }
+        }
+
+        // Step 5.5: snippet spans — report WHERE in each long record the
+        // match lives. The vector layer's winning window is trusted only
+        // for records with chunk vectors; everything else (FTS-sourced,
+        // graph-expanded, never-chunked installs) gets the query-term
+        // scan inside stamp_best_spans.
+        {
+            let chunked = {
+                let owned: Vec<String> = scored.iter().map(|r| r.rid.clone()).collect();
+                let refs: Vec<&str> = owned.iter().map(|s| s.as_str()).collect();
+                self.rids_with_chunks(&refs)
+            };
+            win_by_rid.retain(|rid, _| chunked.contains(rid));
+            crate::engine::snippet::stamp_best_spans(
+                &mut scored,
+                &win_by_rid,
+                query_text,
+                self.snippet_window(),
+            );
         }
 
         // **v0.10 Item 3 seqlock recheck (sol r4).** Vector candidate
@@ -2807,7 +2861,20 @@ impl YantrikDB {
         let state = self.search_state.load_full();
         // v0.9.3 contract gate — same as `recall` (profiled duplicate).
         crate::validate::validate_embedding("recall_profiled", query_embedding, state.dim())?;
-        let vec_results = state.vec_index.search(query_embedding, fetch_k)?;
+        let vec_results = state
+            .vec_index
+            .search_with_windows(query_embedding, fetch_k)?;
+        // Mirrors recall(): winning chunk window per candidate for
+        // snippet-span stamping after hydration.
+        let mut win_by_rid: std::collections::HashMap<String, u32> =
+            std::collections::HashMap::with_capacity(vec_results.len());
+        for (rid, _, w) in &vec_results {
+            win_by_rid.insert(rid.clone(), *w);
+        }
+        let vec_results: Vec<(String, f64)> = vec_results
+            .into_iter()
+            .map(|(rid, dist, _)| (rid, dist))
+            .collect();
         let vec_search_ms = t_vec.elapsed().as_secs_f64() * 1000.0;
         let candidate_count = vec_results.len();
 
@@ -2930,6 +2997,7 @@ impl YantrikDB {
                     superseded_by: None,
                     disputed_with: Vec::new(),
                     aged_last_verified: None,
+                    best_span: None,
                 });
             }
         }
@@ -3030,6 +3098,7 @@ impl YantrikDB {
                         superseded_by: None,
                         disputed_with: Vec::new(),
                         aged_last_verified: None,
+                        best_span: None,
                     });
                 }
             }
@@ -3038,6 +3107,8 @@ impl YantrikDB {
 
         // ── Phase 1.5: FTS5 keyword fallback ──
         // (mirrors recall() Step 1.5 — see comments there for full rationale)
+        let mut lex_by_rid: std::collections::HashMap<String, f64> =
+            std::collections::HashMap::new();
         let t_fts = Instant::now();
         if !self.is_encrypted() {
             const FTS_MIN_SIM: f64 = 0.05;
@@ -3194,7 +3265,7 @@ impl YantrikDB {
 
                         let fts_sql = if memory_type.is_some() {
                             format!(
-                                "SELECT m.rid FROM memories m \
+                                "SELECT m.rid, memories_fts.rank FROM memories m \
                                  JOIN memories_fts ON memories_fts.rowid = m.rowid \
                                  WHERE memories_fts MATCH ?1 \
                                  AND m.consolidation_status = 'active' \
@@ -3211,7 +3282,7 @@ impl YantrikDB {
                             )
                         } else {
                             format!(
-                                "SELECT m.rid FROM memories m \
+                                "SELECT m.rid, memories_fts.rank FROM memories m \
                                  JOIN memories_fts ON memories_fts.rowid = m.rowid \
                                  WHERE memories_fts MATCH ?1 \
                                  AND m.consolidation_status = 'active' \
@@ -3227,48 +3298,48 @@ impl YantrikDB {
                             )
                         };
 
-                        let run_fts_phase1 = |q: &str| -> Vec<String> {
+                        let run_fts_phase1 = |q: &str| -> Vec<(String, f64)> {
                             let conn = self.read_conn();
                             let mut stmt = conn.prepare_cached(&fts_sql).ok();
                             if let Some(ref mut stmt) = stmt {
-                                let result: std::result::Result<Vec<String>, _> = if let Some(mt) =
-                                    memory_type
-                                {
-                                    if let Some(ns) = namespace {
-                                        stmt.query_map(params![q, mt, ns], |row| {
-                                            row.get::<_, String>(0)
-                                        })
-                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                let result: std::result::Result<Vec<(String, f64)>, _> =
+                                    if let Some(mt) = memory_type {
+                                        if let Some(ns) = namespace {
+                                            stmt.query_map(params![q, mt, ns], rid_rank_row)
+                                                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                        } else {
+                                            stmt.query_map(params![q, mt], rid_rank_row)
+                                                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                        }
+                                    } else if let Some(ns) = namespace {
+                                        stmt.query_map(params![q, ns], rid_rank_row)
+                                            .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                     } else {
-                                        stmt.query_map(params![q, mt], |row| {
-                                            row.get::<_, String>(0)
-                                        })
-                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                                    }
-                                } else if let Some(ns) = namespace {
-                                    stmt.query_map(params![q, ns], |row| row.get::<_, String>(0))
-                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                                } else {
-                                    stmt.query_map(params![q], |row| row.get::<_, String>(0))
-                                        .map(|rows| rows.filter_map(|r| r.ok()).collect())
-                                };
+                                        stmt.query_map(params![q], rid_rank_row)
+                                            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                    };
                                 result.unwrap_or_default()
                             } else {
                                 vec![]
                             }
                         };
 
-                        let mut fts_rids = run_fts_phase1(fts_query);
-                        if fts_rids.len() < 5 && fts_query_and.is_some() {
-                            fts_rids = run_fts_phase1(&fts_query_or);
+                        let mut fts_hits = run_fts_phase1(fts_query);
+                        if fts_hits.len() < 5 && fts_query_and.is_some() {
+                            fts_hits = run_fts_phase1(&fts_query_or);
                         }
+                        // (rid, bm25 rank) rows feeding the per-query lexical
+                        // strengths; every later FTS phase appends its rows.
+                        let mut lex_ranked: Vec<(String, f64)> = fts_hits.clone();
+                        let mut fts_rids: Vec<String> =
+                            fts_hits.into_iter().map(|(rid, _)| rid).collect();
 
                         // Phase 2: Importance-filtered FTS (mirrors recall())
                         // Uses AND first, falls back to OR when AND is too strict.
                         {
                             let imp_fts_sql = if memory_type.is_some() {
                                 format!(
-                                    "SELECT m.rid FROM memories m \
+                                    "SELECT m.rid, memories_fts.rank FROM memories m \
                                      JOIN memories_fts ON memories_fts.rowid = m.rowid \
                                      WHERE memories_fts MATCH ?1 \
                                      AND m.consolidation_status = 'active' \
@@ -3285,7 +3356,7 @@ impl YantrikDB {
                                 )
                             } else {
                                 format!(
-                                    "SELECT m.rid FROM memories m \
+                                    "SELECT m.rid, memories_fts.rank FROM memories m \
                                      JOIN memories_fts ON memories_fts.rowid = m.rowid \
                                      WHERE memories_fts MATCH ?1 \
                                      AND m.consolidation_status = 'active' \
@@ -3301,34 +3372,36 @@ impl YantrikDB {
                                 )
                             };
 
-                            let run_fts_phase2 = |q: &str| -> Vec<String> {
+                            let run_fts_phase2 = |q: &str| -> Vec<(String, f64)> {
                                 let conn = self.read_conn();
                                 let mut stmt = conn.prepare_cached(&imp_fts_sql).ok();
                                 if let Some(ref mut stmt) = stmt {
-                                    let result: std::result::Result<Vec<String>, _> =
+                                    let result: std::result::Result<Vec<(String, f64)>, _> =
                                         if let Some(mt) = memory_type {
                                             if let Some(ns) = namespace {
                                                 stmt.query_map(
                                                     params![q, mean_importance, mt, ns],
-                                                    |row| row.get::<_, String>(0),
+                                                    rid_rank_row,
                                                 )
                                                 .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                             } else {
                                                 stmt.query_map(
                                                     params![q, mean_importance, mt],
-                                                    |row| row.get::<_, String>(0),
+                                                    rid_rank_row,
                                                 )
                                                 .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                             }
                                         } else if let Some(ns) = namespace {
-                                            stmt.query_map(params![q, mean_importance, ns], |row| {
-                                                row.get::<_, String>(0)
-                                            })
+                                            stmt.query_map(
+                                                params![q, mean_importance, ns],
+                                                rid_rank_row,
+                                            )
                                             .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                         } else {
-                                            stmt.query_map(params![q, mean_importance], |row| {
-                                                row.get::<_, String>(0)
-                                            })
+                                            stmt.query_map(
+                                                params![q, mean_importance],
+                                                rid_rank_row,
+                                            )
                                             .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                         };
                                     result.unwrap_or_default()
@@ -3365,7 +3438,7 @@ impl YantrikDB {
                         if keyword_groups.len() >= 2 {
                             let anchor_fts_sql = if memory_type.is_some() {
                                 format!(
-                                    "SELECT m.rid FROM memories m \
+                                    "SELECT m.rid, memories_fts.rank FROM memories m \
                                      JOIN memories_fts ON memories_fts.rowid = m.rowid \
                                      WHERE memories_fts MATCH ?1 \
                                      AND m.consolidation_status = 'active' \
@@ -3382,7 +3455,7 @@ impl YantrikDB {
                                 )
                             } else {
                                 format!(
-                                    "SELECT m.rid FROM memories m \
+                                    "SELECT m.rid, memories_fts.rank FROM memories m \
                                      JOIN memories_fts ON memories_fts.rowid = m.rowid \
                                      WHERE memories_fts MATCH ?1 \
                                      AND m.consolidation_status = 'active' \
@@ -3402,37 +3475,35 @@ impl YantrikDB {
                                 fts_rids.iter().cloned().collect();
 
                             for group in &keyword_groups {
-                                let anchor_rids: Vec<String> = {
+                                let anchor_hits: Vec<(String, f64)> = {
                                     let conn = self.read_conn();
                                     let mut stmt = conn.prepare_cached(&anchor_fts_sql).ok();
                                     if let Some(ref mut stmt) = stmt {
-                                        let result: std::result::Result<Vec<String>, _> =
+                                        let result: std::result::Result<Vec<(String, f64)>, _> =
                                             if let Some(mt) = memory_type {
                                                 if let Some(ns) = namespace {
-                                                    stmt.query_map(params![group, mt, ns], |row| {
-                                                        row.get::<_, String>(0)
-                                                    })
+                                                    stmt.query_map(
+                                                        params![group, mt, ns],
+                                                        rid_rank_row,
+                                                    )
                                                     .map(|rows| {
                                                         rows.filter_map(|r| r.ok()).collect()
                                                     })
                                                 } else {
-                                                    stmt.query_map(params![group, mt], |row| {
-                                                        row.get::<_, String>(0)
-                                                    })
+                                                    stmt.query_map(params![group, mt], rid_rank_row)
+                                                        .map(|rows| {
+                                                            rows.filter_map(|r| r.ok()).collect()
+                                                        })
+                                                }
+                                            } else if let Some(ns) = namespace {
+                                                stmt.query_map(params![group, ns], rid_rank_row)
                                                     .map(|rows| {
                                                         rows.filter_map(|r| r.ok()).collect()
                                                     })
-                                                }
-                                            } else if let Some(ns) = namespace {
-                                                stmt.query_map(params![group, ns], |row| {
-                                                    row.get::<_, String>(0)
-                                                })
-                                                .map(|rows| rows.filter_map(|r| r.ok()).collect())
                                             } else {
-                                                stmt.query_map(params![group], |row| {
-                                                    row.get::<_, String>(0)
-                                                })
-                                                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+                                                stmt.query_map(params![group], rid_rank_row).map(
+                                                    |rows| rows.filter_map(|r| r.ok()).collect(),
+                                                )
                                             };
                                         result.unwrap_or_default()
                                     } else {
@@ -3440,13 +3511,19 @@ impl YantrikDB {
                                     }
                                 };
 
-                                for rid in anchor_rids {
+                                for (rid, rank) in anchor_hits {
+                                    lex_ranked.push((rid.clone(), rank));
                                     if !existing_fts.contains(&rid) {
                                         fts_rids.push(rid);
                                     }
                                 }
                             }
                         }
+
+                        // Per-query lexical strengths from every phase's bm25
+                        // rows — read by the boost sites below and by the
+                        // keyword reserve (see engine/lexical.rs).
+                        lex_by_rid = crate::engine::lexical::lexical_strengths(&lex_ranked);
 
                         {
                             let fts_rid_set: std::collections::HashSet<&str> =
@@ -3456,8 +3533,13 @@ impl YantrikDB {
                                     && !result.why_retrieved.iter().any(|w| w == "keyword_match")
                                 {
                                     let sim = result.scores.similarity;
-                                    let boost =
-                                        learned_weights.keyword_boost * (1.0 - sim).max(0.2);
+                                    let lex =
+                                        lex_by_rid.get(result.rid.as_str()).copied().unwrap_or(1.0);
+                                    let boost = crate::engine::lexical::keyword_lane_boost(
+                                        learned_weights.keyword_boost,
+                                        sim,
+                                        lex,
+                                    );
                                     result.score += boost;
                                     result.why_retrieved.push("keyword_match".to_string());
                                 }
@@ -3503,7 +3585,14 @@ impl YantrikDB {
                                     &mem_emb,
                                 ) as f64;
 
-                                if sim_score < FTS_MIN_SIM {
+                                let lex = lex_by_rid.get(rid.as_str()).copied().unwrap_or(0.0);
+                                if sim_score < FTS_MIN_SIM
+                                    && lex < crate::engine::lexical::LEX_STRONG
+                                {
+                                    // Below the cosine noise floor AND not a
+                                    // near-best lexical match — noise. A top
+                                    // bm25 match passes regardless: dilution
+                                    // parks exact-phrase records at any sim.
                                     continue;
                                 }
 
@@ -3521,8 +3610,11 @@ impl YantrikDB {
                                     query_sentiment,
                                     &learned_weights,
                                 );
-                                let kw_boost =
-                                    learned_weights.keyword_boost * (1.0 - sim_score).max(0.2);
+                                let kw_boost = crate::engine::lexical::keyword_lane_boost(
+                                    learned_weights.keyword_boost,
+                                    sim_score,
+                                    lex,
+                                );
                                 let mut why =
                                     scoring::build_why(sim_score, recency, decay, row.valence);
                                 why.push("keyword_match".to_string());
@@ -3565,6 +3657,7 @@ impl YantrikDB {
                                     superseded_by: None,
                                     disputed_with: Vec::new(),
                                     aged_last_verified: None,
+                                    best_span: None,
                                 });
                             }
                         }
@@ -3684,6 +3777,7 @@ impl YantrikDB {
                         superseded_by: None,
                         disputed_with: Vec::new(),
                         aged_last_verified: None,
+                        best_span: None,
                     });
                 }
             }
@@ -3885,6 +3979,7 @@ impl YantrikDB {
                                     superseded_by: None,
                                     disputed_with: Vec::new(),
                                     aged_last_verified: None,
+                                    best_span: None,
                                 });
                             }
                         }
@@ -4191,6 +4286,7 @@ impl YantrikDB {
                                 superseded_by: None,
                                 disputed_with: Vec::new(),
                                 aged_last_verified: None,
+                                best_span: None,
                             });
                         }
                     }
@@ -4212,33 +4308,7 @@ impl YantrikDB {
         }
 
         // ── Phase 3.5: Keyword slot reservation (mirrors recall()) ──
-        {
-            scored.sort_by(|a, b| b.score.total_cmp(&a.score));
-            let cutoff_idx = top_k.min(scored.len()).saturating_sub(1);
-            let cutoff_score = scored.get(cutoff_idx).map(|r| r.score).unwrap_or(0.0);
-
-            const KEYWORD_RESERVE_SLOTS: usize = 3;
-            const KEYWORD_RESERVE_MIN_SIM: f64 = 0.25;
-
-            let mut kw_below: Vec<(usize, f64)> = scored
-                .iter()
-                .enumerate()
-                .filter(|(_, r)| {
-                    r.why_retrieved.iter().any(|w| w == "keyword_match")
-                        && r.scores.similarity >= KEYWORD_RESERVE_MIN_SIM
-                        && r.score < cutoff_score
-                })
-                .map(|(i, r)| (i, r.scores.similarity))
-                .collect();
-            kw_below.sort_by(|a, b| b.1.total_cmp(&a.1));
-
-            for (idx, _) in kw_below.into_iter().take(KEYWORD_RESERVE_SLOTS) {
-                scored[idx].score = cutoff_score + 0.001;
-                scored[idx]
-                    .why_retrieved
-                    .push("keyword_reserved".to_string());
-            }
-        }
+        crate::engine::lexical::apply_keyword_reserve(&mut scored, &lex_by_rid, top_k);
 
         // ── Phase 4: MMR diversity selection ──
         let t_sort = Instant::now();
@@ -4341,6 +4411,15 @@ impl YantrikDB {
                         .unwrap_or(serde_json::Value::Object(Default::default()));
                 }
             }
+            // Snippet spans (mirrors recall() Step 5.5).
+            let chunked = self.rids_with_chunks(&final_rids);
+            win_by_rid.retain(|rid, _| chunked.contains(rid));
+            crate::engine::snippet::stamp_best_spans(
+                &mut scored,
+                &win_by_rid,
+                query_text,
+                self.snippet_window(),
+            );
         }
         let fetch_ms = t_fetch.elapsed().as_secs_f64() * 1000.0;
 

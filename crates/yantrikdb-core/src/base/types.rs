@@ -170,6 +170,15 @@ pub struct RecallResult {
     /// verified/updated. None = not aged.
     #[serde(default)]
     pub aged_last_verified: Option<f64>,
+    /// Byte span `[start, end)` of `text` that the retrieval actually
+    /// matched — the winning chunk window for records that entered via
+    /// the vector index, or the best query-term window as a fallback.
+    /// `None` when the whole text fits one embedder window (nothing to
+    /// trim). Consumers use this to surface a snippet instead of the
+    /// full text; the span is always aligned to `char` boundaries so
+    /// slicing is safe.
+    #[serde(default)]
+    pub best_span: Option<(usize, usize)>,
 }
 
 /// Response from recall with confidence and hints for interactive retrieval.

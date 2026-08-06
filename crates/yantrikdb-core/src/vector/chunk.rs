@@ -44,13 +44,22 @@ pub fn chunk_key(rid: &str, idx: usize) -> String {
 /// hypothetical user key containing `#c` mid-string is not mangled —
 /// collapse must never merge two records that are actually distinct.
 pub fn parent_of(key: &str) -> &str {
+    parent_and_idx(key).0
+}
+
+/// The parent rid AND chunk ordinal of an index key: `("rid", 3)` for
+/// `rid#c3`, `("rid", 0)` for a plain rid (chunk 0 is the head window,
+/// stored under the plain rid). Same strictness as [`parent_of`].
+pub fn parent_and_idx(key: &str) -> (&str, u32) {
     if let Some(pos) = key.rfind(CHUNK_SEP) {
         let suffix = &key[pos + CHUNK_SEP.len()..];
         if !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit()) {
-            return &key[..pos];
+            if let Ok(idx) = suffix.parse::<u32>() {
+                return (&key[..pos], idx);
+            }
         }
     }
-    key
+    (key, 0)
 }
 
 /// Collapse `(key, distance)` search results to at most one entry per
@@ -60,12 +69,23 @@ pub fn parent_of(key: &str) -> &str {
 /// the first occurrence of a parent is its best window and later ones
 /// drop — one pass, no re-sort.
 pub fn collapse_to_parents(results: Vec<(String, f64)>) -> Vec<(String, f64)> {
+    collapse_to_parents_indexed(results)
+        .into_iter()
+        .map(|(rid, dist, _)| (rid, dist))
+        .collect()
+}
+
+/// [`collapse_to_parents`] that also reports WHICH window won: the
+/// third element is the winning chunk ordinal (0 = the head window /
+/// plain rid). This is what lets recall surface the matched window of
+/// a long record as a snippet instead of shipping the whole text.
+pub fn collapse_to_parents_indexed(results: Vec<(String, f64)>) -> Vec<(String, f64, u32)> {
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut out: Vec<(String, f64)> = Vec::with_capacity(results.len());
+    let mut out: Vec<(String, f64, u32)> = Vec::with_capacity(results.len());
     for (key, dist) in results {
-        let parent = parent_of(&key);
+        let (parent, idx) = parent_and_idx(&key);
         if seen.insert(parent.to_string()) {
-            out.push((parent.to_string(), dist));
+            out.push((parent.to_string(), dist, idx));
         }
     }
     out
