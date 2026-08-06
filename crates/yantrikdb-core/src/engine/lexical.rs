@@ -150,10 +150,25 @@ pub(crate) fn apply_keyword_reserve(
         })
         .filter(|(_, lex, sim)| *lex >= KEYWORD_RESERVE_MIN_LEX || *sim >= KEYWORD_RESERVE_MIN_SIM)
         .collect();
-    kw_below.sort_by(|a, b| b.1.total_cmp(&a.1).then(b.2.total_cmp(&a.2)));
+    // Fully deterministic order: lex desc, sim desc, rid as the total
+    // tiebreak. Fix (e), 2026-08-06: without the rid tiebreak, equal
+    // (lex, sim) candidates — every claims candidate is lex=1.0 — kept
+    // whatever order upstream hash iteration produced, and the shared
+    // +0.001 score below preserved it through the stable sort: same
+    // bytes in, three different top-5s out (hermes determinism probe).
+    {
+        let snapshot: &[RecallResult] = scored;
+        kw_below.sort_by(|a, b| {
+            b.1.total_cmp(&a.1)
+                .then(b.2.total_cmp(&a.2))
+                .then_with(|| snapshot[a.0].rid.cmp(&snapshot[b.0].rid))
+        });
+    }
 
-    for (idx, _, _) in kw_below.into_iter().take(KEYWORD_RESERVE_SLOTS) {
-        scored[idx].score = cutoff_score + 0.001;
+    // Distinct, descending epsilons — reserve rank becomes score rank,
+    // so downstream sorting never faces a tie inside the band.
+    for (pos, (idx, _, _)) in kw_below.into_iter().take(KEYWORD_RESERVE_SLOTS).enumerate() {
+        scored[idx].score = cutoff_score + 0.001 * (KEYWORD_RESERVE_SLOTS - pos) as f64;
         scored[idx]
             .why_retrieved
             .push("keyword_reserved".to_string());

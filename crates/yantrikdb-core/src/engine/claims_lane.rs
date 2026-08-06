@@ -149,6 +149,13 @@ impl super::YantrikDB {
             return Ok(());
         }
 
+        // Deterministic admission order — fix (e): the previous cut
+        // drained a HashMap here, so hash-random iteration set the
+        // insertion order of tie-band candidates and retrieval became
+        // non-deterministic (hermes probe: 3 distinct top-5s from
+        // identical bytes). `cands` order is deterministic by
+        // construction (anchors by mention count, claims by created_at
+        // DESC); keep it.
         let mut by_rid: std::collections::HashMap<&str, &str> = cands
             .iter()
             .map(|c| (c.rid.as_str(), c.why.as_str()))
@@ -174,11 +181,16 @@ impl super::YantrikDB {
             }
         }
 
-        // Source records no lane admitted: score them in. No cosine
+        // Source records no lane admitted: score them in, in `cands`
+        // order (deterministic), NOT HashMap drain order. No cosine
         // floor here — the lane's whole point is that the record's
         // embedding may be arbitrarily far from the query while the
         // claim is exact.
-        let new_rids: Vec<(&str, &str)> = by_rid.into_iter().collect();
+        let new_rids: Vec<(&str, &str)> = cands
+            .iter()
+            .filter(|c| by_rid.contains_key(c.rid.as_str()))
+            .map(|c| (c.rid.as_str(), c.why.as_str()))
+            .collect();
         if new_rids.is_empty() {
             return Ok(());
         }

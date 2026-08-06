@@ -182,6 +182,108 @@ fn claims_lane_surfaces_the_direction_cosine_destroys() {
     );
 }
 
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn recall_is_deterministic_with_claims_in_the_reserve_band() {
+    // Fix (e) regression gate (hermes determinism probe): with several
+    // claims candidates tying in the reserve band, the previous cut
+    // produced 3 distinct top-5 orderings from identical bytes —
+    // HashMap drain order + a shared cutoff+0.001 score. Same query,
+    // same db, many runs: the ranking must be byte-identical.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let rec = |text: &str| {
+        db.record_text(
+            text,
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap()
+    };
+    for name in ["Pat", "Sam", "Alex", "Jo", "Max", "Kim", "Lee", "Ada"] {
+        rec(&format!("{name} reports to Taylor."));
+    }
+    // Several Taylor-as-subject records → several claims candidates
+    // competing for reserve slots at near-identical scores.
+    let mut claim_rids = Vec::new();
+    for (i, dst) in ["Carol", "Quinn", "Liam", "Grace"].iter().enumerate() {
+        let rid = rec(&format!("Taylor reports to {dst} on project {i}."));
+        claim_rids.push((rid, dst.to_string()));
+    }
+    {
+        let conn = db.conn.lock();
+        conn.execute(
+            "INSERT INTO entities (name, entity_type, mention_count, first_seen, last_seen) \
+             VALUES ('Taylor', 'person', 12, 1.0, 1.0)",
+            [],
+        )
+        .unwrap();
+        for (i, (rid, dst)) in claim_rids.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO claims (claim_id, src, dst, rel_type, weight, created_at, \
+                 source_memory_rid) VALUES (?1, 'Taylor', ?2, 'reports_to', 1.0, ?3, ?4)",
+                params![format!("c{i}"), dst, 1.0 + i as f64, rid],
+            )
+            .unwrap();
+        }
+    }
+    db.rebuild_graph_index().unwrap();
+
+    let query = "What is Taylor's role?";
+    let emb = db.embed(query).unwrap();
+    let baseline: Vec<String> = db
+        .recall_with_response(
+            &emb,
+            5,
+            None,
+            None,
+            false,
+            true,
+            Some(query),
+            true,
+            None,
+            None,
+            None,
+        )
+        .unwrap()
+        .results
+        .iter()
+        .map(|r| r.rid.clone())
+        .collect();
+    for run in 1..8 {
+        let this: Vec<String> = db
+            .recall_with_response(
+                &emb,
+                5,
+                None,
+                None,
+                false,
+                true,
+                Some(query),
+                true,
+                None,
+                None,
+                None,
+            )
+            .unwrap()
+            .results
+            .iter()
+            .map(|r| r.rid.clone())
+            .collect();
+        assert_eq!(
+            this, baseline,
+            "run {run} produced a different ranking from identical inputs"
+        );
+    }
+}
+
 #[test]
 fn fold_reverses_when_alias_rows_are_deleted() {
     // The reversibility contract: persisted rows are untouched, so
