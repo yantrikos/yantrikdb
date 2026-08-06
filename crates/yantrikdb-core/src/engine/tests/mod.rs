@@ -8,6 +8,7 @@ use super::YantrikDB;
 mod helpers;
 use self::helpers::*;
 
+mod alias_migration;
 mod backpressure_lifecycle;
 mod basics;
 mod bundled_embedder;

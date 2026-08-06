@@ -270,6 +270,9 @@ class TestStats:
             # chunked, durable window-vector count).
             "embedder_window_chars", "embedder_truncated_writes",
             "embedder_chunked_writes", "chunk_vectors",
+            # 0.13.1 C5b: possessive-pollution census — apostrophe
+            # entities remaining vs migration aliases written.
+            "apostrophe_entities", "possessive_aliases",
         }
         assert set(s.keys()) == expected_keys
         # Fresh databases default to the status-led read path.

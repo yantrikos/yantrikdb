@@ -241,6 +241,9 @@ pub fn stats_to_dict(py: Python<'_>, s: &yantrikdb_core::Stats) -> PyResult<PyOb
     dict.set_item("embedder_truncated_writes", s.embedder_truncated_writes)?;
     dict.set_item("embedder_chunked_writes", s.embedder_chunked_writes)?;
     dict.set_item("chunk_vectors", s.chunk_vectors)?;
+    // C5b pollution census (0.13.1): the migration's success metric.
+    dict.set_item("apostrophe_entities", s.apostrophe_entities)?;
+    dict.set_item("possessive_aliases", s.possessive_aliases)?;
     Ok(dict.into())
 }
 

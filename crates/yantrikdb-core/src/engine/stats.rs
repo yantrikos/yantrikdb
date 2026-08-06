@@ -95,6 +95,28 @@ impl YantrikDB {
             [],
             |row| row.get(0),
         )?;
+        // C5b pollution census: apostrophe-bearing entities (phantom
+        // possessives + contraction entities minted by the pre-C5a
+        // tokenizer) and how many the migration has aliased to their
+        // canonicals. before/after on these two IS the migration's
+        // success metric. Best-effort on old schemas.
+        let apostrophe_entities: u64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entities WHERE name LIKE '%''%'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|n| n.max(0) as u64)
+            .unwrap_or(0);
+        let possessive_aliases: u64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM entity_aliases \
+                 WHERE source = 'possessive_migration_v1'",
+                [],
+                |row| row.get::<_, i64>(0),
+            )
+            .map(|n| n.max(0) as u64)
+            .unwrap_or(0);
         drop(conn);
 
         Ok(Stats {
@@ -130,6 +152,8 @@ impl YantrikDB {
             embedder_truncated_writes: self.embedder_truncated_write_count(),
             embedder_chunked_writes: self.embedder_chunked_write_count(),
             chunk_vectors,
+            apostrophe_entities,
+            possessive_aliases,
         })
     }
 

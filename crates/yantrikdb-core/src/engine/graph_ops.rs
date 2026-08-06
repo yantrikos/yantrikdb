@@ -5,6 +5,87 @@ use crate::types::{Edge, Entity};
 
 use super::{now, YantrikDB};
 
+/// C5b (wheel piece 2) — heal the possessive pollution the tokenizer
+/// exemption persisted. For every entity whose name carries a terminal
+/// possessive clitic (`Taylor's`, `Hermes'`, `Hermes's`) and whose bare
+/// form already exists as an entity, write a REVERSIBLE alias row
+/// (`entity_aliases`, source `possessive_migration_v1`). The alias is
+/// consumed by [`crate::graph_index::GraphIndex::build_from_db`], which
+/// folds aliased entities into their canonical at load — persisted rows
+/// are never rewritten, so deleting the alias rows reverses the merge.
+///
+/// Deliberately conservative, per the agreed migration design:
+/// - only TERMINAL `'s` / `'` are stripped (repeatedly, so `Hermes's` →
+///   `Hermes'` → `Hermes`), because those are possessives; contractions
+///   (`Don't`, `I'm`, `GC'd`) do not match the rule and are left as
+///   unreachable dead nodes for a later prune — aliasing `Don't` to a
+///   real entity named `Don` would be a false merge.
+/// - the canonical must ALREADY exist (case-insensitive match, exact-
+///   case row wins ties); we never mint entities here.
+/// - type conflicts resolve to the canonical row's type by construction
+///   (the fold keeps the canonical's metadata; the phantom's type was
+///   an artifact of misparsing possessive contexts).
+///
+/// Idempotent (upsert) and cheap (one pass over apostrophe entities),
+/// so it runs on every open, healing databases written by pre-C5a
+/// engines. Returns `(aliases_written, apostrophe_entities_total)` —
+/// the pollution census before/after is the migration's success metric.
+pub(crate) fn migrate_possessive_aliases(conn: &Connection) -> Result<(usize, usize)> {
+    let names: Vec<String> = {
+        let mut stmt = conn.prepare("SELECT name FROM entities")?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        rows
+    };
+    let mut by_lower: std::collections::HashMap<String, &str> =
+        std::collections::HashMap::with_capacity(names.len());
+    for n in &names {
+        // Exact-case rows win ties: insert lowercase key only if absent,
+        // then let an exact-case duplicate overwrite (same value anyway).
+        by_lower.entry(n.to_lowercase()).or_insert(n.as_str());
+    }
+
+    let ts = now();
+    let mut written = 0usize;
+    let mut apostrophes = 0usize;
+    for name in &names {
+        if !name.contains('\'') {
+            continue;
+        }
+        apostrophes += 1;
+        let mut stripped = name.as_str();
+        loop {
+            if let Some(s) = stripped.strip_suffix("'s").or_else(|| {
+                stripped
+                    .strip_suffix("'S")
+                    .or_else(|| stripped.strip_suffix('\''))
+            }) {
+                stripped = s;
+            } else {
+                break;
+            }
+        }
+        if stripped.is_empty() || stripped == name || stripped.contains('\'') {
+            continue; // not a terminal possessive (contraction, mid-name quote)
+        }
+        let Some(&canonical) = by_lower.get(&stripped.to_lowercase()) else {
+            continue; // no existing canonical — never mint one here
+        };
+        if canonical.eq_ignore_ascii_case(name) {
+            continue;
+        }
+        let changes = conn.execute(
+            "INSERT INTO entity_aliases (alias, canonical_name, namespace, source, created_at) \
+             VALUES (?1, ?2, 'default', 'possessive_migration_v1', ?3) \
+             ON CONFLICT(alias, namespace) DO NOTHING",
+            params![name, canonical, ts],
+        )?;
+        written += changes;
+    }
+    Ok((written, apostrophes))
+}
+
 /// Outcome of a [`YantrikDB::auto_relate`] pass (task 44).
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct AutoRelateReport {

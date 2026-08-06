@@ -43,10 +43,36 @@ impl GraphIndex {
     }
 
     /// Build the graph index from SQLite tables (entities, edges, memory_entities).
+    ///
+    /// **C5b alias fold:** every name is canonicalized through
+    /// `entity_aliases` before insertion, so a phantom possessive entity
+    /// (`Pranab's`, 748 stranded mentions in the production census) folds
+    /// into its canonical — mention counts merge, edges and memory links
+    /// repoint, and the canonical row's type wins (the phantom's type was
+    /// a misparse artifact). The fold is a READ-TIME projection: persisted
+    /// rows are untouched, so deleting the alias rows reverses it.
     pub fn build_from_db(conn: &Connection) -> Result<Self> {
         let mut idx = Self::new();
 
-        // Load entities
+        // Aliases first — the fold map for everything below. Tolerate a
+        // missing table (pre-V15 databases) as "no aliases".
+        let alias_map: HashMap<String, String> = conn
+            .prepare("SELECT alias, canonical_name FROM entity_aliases")
+            .and_then(|mut stmt| {
+                stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                    .collect::<std::result::Result<HashMap<_, _>, _>>()
+            })
+            .unwrap_or_default();
+        let canon = |name: &str| -> String {
+            alias_map
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| name.to_string())
+        };
+
+        // Load entities: canonical (non-aliased) rows first so their type
+        // and identity are established, then fold aliased rows in — their
+        // mentions merge additively, their type is discarded.
         let mut stmt = conn.prepare("SELECT name, entity_type, mention_count FROM entities")?;
         let entities: Vec<(String, String, u32)> = stmt
             .query_map([], |row| {
@@ -55,10 +81,20 @@ impl GraphIndex {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         for (name, etype, mc) in &entities {
-            idx.ensure_entity(name, etype, *mc);
+            if !alias_map.contains_key(name) {
+                idx.ensure_entity(name, etype, *mc);
+            }
+        }
+        for (name, _etype, mc) in &entities {
+            if alias_map.contains_key(name) {
+                let target = canon(name);
+                idx.ensure_entity(&target, "unknown", 0);
+                let id = idx.entity_to_id[&target] as usize;
+                idx.mention_counts[id] += *mc;
+            }
         }
 
-        // Load non-tombstoned edges
+        // Load non-tombstoned edges (folded through aliases)
         let mut stmt = conn.prepare("SELECT src, dst, weight FROM edges WHERE tombstoned = 0")?;
         let edges: Vec<(String, String, f32)> = stmt
             .query_map([], |row| {
@@ -67,29 +103,33 @@ impl GraphIndex {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         for (src, dst, weight) in &edges {
+            let src = canon(src);
+            let dst = canon(dst);
             // Ensure both entities exist (edges may reference entities not yet in entities table)
-            idx.ensure_entity(src, "unknown", 0);
-            idx.ensure_entity(dst, "unknown", 0);
-            let src_id = idx.entity_to_id[src];
-            let dst_id = idx.entity_to_id[dst];
+            idx.ensure_entity(&src, "unknown", 0);
+            idx.ensure_entity(&dst, "unknown", 0);
+            let src_id = idx.entity_to_id[&src];
+            let dst_id = idx.entity_to_id[&dst];
             // Bidirectional
             idx.adjacency[src_id as usize].push((dst_id, *weight));
             idx.adjacency[dst_id as usize].push((src_id, *weight));
         }
 
-        // Load memory-entity links
+        // Load memory-entity links (folded through aliases, deduped so a
+        // record linked to both `Pranab` and `Pranab's` counts once)
         let mut stmt = conn.prepare("SELECT memory_rid, entity_name FROM memory_entities")?;
         let links: Vec<(String, String)> = stmt
             .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         for (rid, entity_name) in &links {
-            if let Some(&eid) = idx.entity_to_id.get(entity_name) {
-                idx.memory_to_entities
-                    .entry(rid.clone())
-                    .or_default()
-                    .push(eid);
-                idx.entity_to_memories[eid as usize].push(rid.clone());
+            let entity_name = canon(entity_name);
+            if let Some(&eid) = idx.entity_to_id.get(&entity_name) {
+                let mems = idx.memory_to_entities.entry(rid.clone()).or_default();
+                if !mems.contains(&eid) {
+                    mems.push(eid);
+                    idx.entity_to_memories[eid as usize].push(rid.clone());
+                }
             }
         }
 

@@ -136,6 +136,10 @@ impl YantrikDB {
 
     pub fn rebuild_graph_index(&self) -> Result<usize> {
         let conn = self.conn.lock();
+        // C5b: entities written since open may include possessive forms
+        // from pre-C5a replicas — re-run the (idempotent) alias healing
+        // so every rebuild folds them too.
+        let _ = super::graph_ops::migrate_possessive_aliases(&conn);
         let new_index = crate::graph_index::GraphIndex::build_from_db(&conn)?;
         let count = new_index.entity_count();
         drop(conn);

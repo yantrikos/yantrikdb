@@ -1215,6 +1215,22 @@ impl YantrikDB {
             }
         }
 
+        // Step 1.6 (C4): the claims lane — retrieval reads the one store
+        // that knows relation DIRECTION (engine/claims_lane.rs). Runs on
+        // encrypted databases too; needs only query text + the graph
+        // index (post-C5a, alias-folded).
+        self.apply_claims_lane(
+            &mut scored,
+            query_embedding,
+            query_text,
+            namespace,
+            time_window,
+            include_consolidated,
+            &learned_weights,
+            ts,
+            query_sentiment,
+        )?;
+
         // Step 2.7: Valence-based retrieval for emotional queries
         //
         // For queries with strong sentiment (e.g., "stressful moments", "happiest times"),
@@ -3670,6 +3686,19 @@ impl YantrikDB {
             }
         }
         let fts_ms = t_fts.elapsed().as_secs_f64() * 1000.0;
+
+        // ── Phase 1.6 (C4): claims lane (mirrors recall() Step 1.6) ──
+        self.apply_claims_lane(
+            &mut scored,
+            query_embedding,
+            query_text,
+            namespace,
+            time_window,
+            include_consolidated,
+            &learned_weights,
+            ts,
+            query_sentiment,
+        )?;
 
         // ── Phase 2.7: Valence-based retrieval for emotional queries ──
         // (mirrors recall() Step 2.7)

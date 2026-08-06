@@ -367,6 +367,17 @@ pub struct Stats {
     /// record count on a corpus with long records.
     #[serde(default)]
     pub chunk_vectors: u64,
+    /// C5b pollution census: entities whose name contains an apostrophe
+    /// — phantom possessives (`Pranab's`) and contraction entities
+    /// (`Don't`) minted by the pre-C5a tokenizer. Production measured
+    /// 748 mentions stranded on one phantom; this count is the
+    /// migration's before/after success metric.
+    #[serde(default)]
+    pub apostrophe_entities: u64,
+    /// Alias rows written by the possessive migration (reversible fold
+    /// of phantom entities into their canonicals at index build).
+    #[serde(default)]
+    pub possessive_aliases: u64,
 }
 
 /// A proactive trigger.

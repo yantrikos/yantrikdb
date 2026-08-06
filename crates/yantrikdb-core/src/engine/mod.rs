@@ -9,6 +9,7 @@ mod cache;
 mod calibration;
 mod causal;
 mod chunking;
+mod claims_lane;
 mod cognition;
 mod coherence;
 pub mod conflict;
@@ -940,6 +941,11 @@ impl YantrikDB {
 
         let scoring_cache = Self::load_scoring_cache(&conn)?;
         let vec_index = Self::build_vec_index_with_enc(&conn, embedding_dim, enc.as_ref())?;
+        // C5b: heal possessive-pollution BEFORE the graph index builds,
+        // so the very first build folds phantom entities into their
+        // canonicals. Idempotent and cheap; best-effort by design (a
+        // failed census must never fail an open).
+        let _ = graph_ops::migrate_possessive_aliases(&conn);
         let graph_index = GraphIndex::build_from_db(&conn)?;
 
         // Load active sessions from DB

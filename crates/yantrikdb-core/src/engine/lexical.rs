@@ -128,10 +128,24 @@ pub(crate) fn apply_keyword_reserve(
         .iter()
         .enumerate()
         .filter(|(_, r)| {
-            r.why_retrieved.iter().any(|w| w == "keyword_match") && r.score < cutoff_score
+            r.why_retrieved
+                .iter()
+                .any(|w| w == "keyword_match" || w.starts_with("claims_match"))
+                && r.score < cutoff_score
         })
         .map(|(i, r)| {
-            let lex = lex_by_rid.get(r.rid.as_str()).copied().unwrap_or(0.0);
+            // C4: a claims-lane candidate is EXACT evidence — it enters
+            // the contest at full lexical strength regardless of any
+            // term statistic (its embedding may be arbitrarily far).
+            let claims = r
+                .why_retrieved
+                .iter()
+                .any(|w| w.starts_with("claims_match"));
+            let lex = if claims {
+                1.0
+            } else {
+                lex_by_rid.get(r.rid.as_str()).copied().unwrap_or(0.0)
+            };
             (i, lex, r.scores.similarity)
         })
         .filter(|(_, lex, sim)| *lex >= KEYWORD_RESERVE_MIN_LEX || *sim >= KEYWORD_RESERVE_MIN_SIM)
