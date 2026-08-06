@@ -119,7 +119,22 @@ pub(crate) fn apply_keyword_reserve(
     lex_by_rid: &HashMap<String, f64>,
     top_k: usize,
 ) {
-    scored.sort_by(|a, b| b.score.total_cmp(&a.score));
+    // Fix (g), 2026-08-06: sort AND band-edge membership run on
+    // QUANTIZED scores. A benign ~1e-6 float-summation jitter exists
+    // across engine opens on every build including released; it never
+    // mattered until the reserve made a raw-float comparison at the
+    // top_k boundary decide SET MEMBERSHIP — a last-bit flip moved the
+    // cutoff, and every lifted score (cutoff+ε) moved as a block
+    // (hermes k-widening probe: candidate generation measured clean at
+    // top_k=50, instability confined to the band edge). Quantizing at
+    // 1e-6 sits far below any meaningful score difference and far
+    // above the jitter; rid breaks quantized ties totally.
+    let quant = |s: f64| (s * 1e6).round();
+    scored.sort_by(|a, b| {
+        quant(b.score)
+            .total_cmp(&quant(a.score))
+            .then_with(|| a.rid.cmp(&b.rid))
+    });
 
     let cutoff_idx = top_k.min(scored.len()).saturating_sub(1);
     let cutoff_score = scored.get(cutoff_idx).map(|r| r.score).unwrap_or(0.0);
@@ -131,7 +146,7 @@ pub(crate) fn apply_keyword_reserve(
             r.why_retrieved
                 .iter()
                 .any(|w| w == "keyword_match" || w.starts_with("claims_match"))
-                && r.score < cutoff_score
+                && quant(r.score) < quant(cutoff_score)
         })
         .map(|(i, r)| {
             // C4: a claims-lane candidate is EXACT evidence — it enters
