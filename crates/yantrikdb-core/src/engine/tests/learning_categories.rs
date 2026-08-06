@@ -345,12 +345,12 @@ fn test_conflict_entity_substitution_tech() {
 
     let conflicts = crate::conflict::scan_conflicts(&db).unwrap();
     // Should detect entity-based semantic conflict with tech substitution
-    let entity_based = conflicts
+    let _entity_based = conflicts
         .iter()
         .filter(|c| c.detection_reason.contains("contradict"))
         .collect::<Vec<_>>();
-    // May or may not detect depending on similarity threshold — just ensure no panics
-    assert!(conflicts.len() >= 0);
+    // May or may not detect depending on similarity threshold — the scan
+    // not panicking is the assertion.
 }
 
 /// sol #83 finding 2: reclassify's provisional-category branch minted a FRESH

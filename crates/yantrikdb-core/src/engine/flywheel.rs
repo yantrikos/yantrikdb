@@ -280,8 +280,9 @@ mod tests {
         let temporal = db
             .get_beliefs_by_category(BeliefCategory::Temporal)
             .unwrap();
-        // May or may not have temporal beliefs depending on histogram
-        assert!(temporal.len() <= behavioral.len() || true); // Just verify it doesn't panic
+        // May or may not have temporal beliefs depending on histogram —
+        // the call not panicking is the assertion.
+        let _ = temporal.len();
     }
 
     #[test]

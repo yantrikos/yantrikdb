@@ -27,7 +27,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip() {
-        let embedding = vec![1.0f32, -2.5, 0.0, 3.14159, 42.0, -0.001];
+        let embedding = vec![1.0f32, -2.5, 0.0, 3.75, 42.0, -0.001];
         let compressed = compress_embedding(&embedding);
         let decompressed = decompress_embedding(&compressed);
         assert_eq!(embedding, decompressed);

@@ -43,7 +43,7 @@ mod tests {
 
     #[test]
     fn test_roundtrip() {
-        let v = vec![1.0f32, -2.5, 0.0, 3.14159, f32::MAX, f32::MIN];
+        let v = vec![1.0f32, -2.5, 0.0, 3.75, f32::MAX, f32::MIN];
         let blob = serialize_f32(&v);
         let back = deserialize_f32(&blob);
         assert_eq!(v, back);
