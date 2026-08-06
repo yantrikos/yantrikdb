@@ -2024,7 +2024,7 @@ impl YantrikDB {
                         continue;
                     }
 
-                    let relevance = crate::engine::lexical::quantize_score(result.score) / 1e6;
+                    let relevance = result.score;
                     let max_sim = if let Some(Some(ref cand_emb)) = pool_embeddings.get(idx) {
                         selected_embeddings
                             .iter()
@@ -4388,7 +4388,7 @@ impl YantrikDB {
                         continue;
                     }
 
-                    let relevance = crate::engine::lexical::quantize_score(result.score) / 1e6;
+                    let relevance = result.score;
                     let max_sim = if let Some(Some(ref cand_emb)) = pool_embeddings.get(idx) {
                         selected_embeddings
                             .iter()
