@@ -1,0 +1,31 @@
+[pack]
+name = "asset-craft"
+version = "0.1.0"
+origin = "yantrik/asset-craft"
+namespace = "asset_craft"
+description = "What makes frontier-model web and UI assets look frontier: typography scale and measure, spacing as structure, neutral-first color with honest dark mode, component states, SVG-first imagery, chart form, accessibility as craft — and the specific defaults that make output read as AI-generated, named so they can be refused."
+coverage = [
+    "building single-page sites, dashboards and UI components from scratch",
+    "choosing type scale, line-height, measure and font stacks",
+    "spacing systems, layout grids and responsive behavior without breakpoint sprawl",
+    "color palettes, dark mode, contrast and theming with CSS custom properties",
+    "button, form and card states; focus, hover, disabled",
+    "SVG icons, favicons and imagery for interfaces",
+    "chart and data-visualization form, color and labeling",
+    "microcopy and text inside interfaces",
+    "reviewing or critiquing a page or component design",
+    "why generated interfaces look generic or AI-made, and how to avoid it",
+]
+
+[content]
+# PROVISIONAL — not yet swept. These are the authoring defaults; the real
+# values come from sweep_topk.py against the control set before any
+# release, per the pack laws (top_k was the binding constraint on three
+# earlier packs, and settings belong to the pack, measured, not guessed).
+recommended_top_k = 12
+recommended_min_similarity = 0.55
+memory_type = "procedural"
+domain = "design"
+source = "document"
+importance = 0.6
+certainty = 0.85
