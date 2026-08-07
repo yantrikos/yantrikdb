@@ -2073,7 +2073,8 @@ impl YantrikDB {
         use rusqlite::params;
         use std::sync::atomic::Ordering;
 
-        let payload_str = serde_json::to_string(payload)?;
+        // 0.13.2: sealed on encrypted databases (see encode_oplog_payload).
+        let payload_str = self.encode_oplog_payload(&serde_json::to_string(payload)?)?;
 
         // Advisory fast reject (unlocked); the AUTHORITATIVE check is under the
         // lock below. Same TOCTOU, same fix as log_op_pending (sol 4a.6a r2

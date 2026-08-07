@@ -17,6 +17,10 @@ mod cognition_gates;
 mod corrections;
 mod dimensions;
 mod encryption;
+// 0.13.2: 'encrypted means encrypted', verified against the raw file
+// bytes rather than against the engine's own claim.
+#[cfg(feature = "bundled-embedder")]
+mod encryption_canary;
 // The explain suite drives the full text path (record_text/
 // recall_text_explained), which needs the bundled embedder — slim
 // builds (--no-default-features) have no `with_default`.

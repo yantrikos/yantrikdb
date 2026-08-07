@@ -498,6 +498,21 @@ impl YantrikDB {
     fn finish_construction(db: &mut Self) {
         Self::auto_attach_bundled_embedder(db);
         db.remount_installed();
+        // 0.13.2 security migration: seal oplog payloads written before
+        // the fix. Runs on every open of an encrypted database, is a
+        // no-op once healed (the WHERE clause skips marked rows) and a
+        // no-op on plaintext databases. Best-effort at the call site
+        // for the same reason every other open-time migration is —
+        // a failure must not make an existing database unopenable —
+        // but it warns loudly, and `oplog_plaintext_rows()` lets an
+        // operator check rather than assume.
+        if let Err(e) = db.migrate_oplog_payload_encryption() {
+            tracing::error!(
+                error = %e,
+                "oplog payload encryption migration FAILED — pre-0.13.2 plaintext \
+                 may remain on disk; see oplog_plaintext_rows()"
+            );
+        }
     }
 
     fn auto_attach_bundled_embedder(db: &mut Self) {
@@ -1573,6 +1588,113 @@ impl YantrikDB {
             Some(e) => e.decrypt_bytes(stored),
             None => Ok(stored.to_vec()),
         }
+    }
+
+    // ── Oplog payload encryption (0.13.2 security fix) ──
+    //
+    // The oplog carries the COMPLETE record payload — text, metadata,
+    // and embedding — as JSON, and applied rows are retained because
+    // the oplog doubles as the replication stream. Encryption was drawn
+    // around the `memories` table, so on an encrypted database every
+    // record's plaintext sat on disk in `oplog.payload` while
+    // `is_encrypted()` reported true. Found by a canary byte-scan of a
+    // raw db file (the scan is now a permanent test); the seam rule
+    // again — a value crossed the encryption boundary in a
+    // write-ahead projection without declaring which side it was on.
+    //
+    // Ciphertext is marked so a row can be classified without a key:
+    // rows written before this fix are bare JSON (`{`), rows written
+    // after are `ENCv1:` + base64. Decode tolerates both so a
+    // mixed-vintage oplog reads correctly during and after migration.
+
+    /// Prefix marking an encrypted oplog payload. Chosen so it can
+    /// never collide with serde_json output, which always starts `{`.
+    pub(crate) const OPLOG_ENC_PREFIX: &'static str = "ENCv1:";
+
+    /// Encrypt an oplog payload string when the database is encrypted.
+    /// Plaintext databases pass through unchanged (byte-identical
+    /// oplog rows, so replication and digests are unaffected).
+    pub(crate) fn encode_oplog_payload(&self, payload_json: &str) -> Result<String> {
+        match &self.enc {
+            Some(e) => Ok(format!(
+                "{}{}",
+                Self::OPLOG_ENC_PREFIX,
+                e.encrypt_string(payload_json)?
+            )),
+            None => Ok(payload_json.to_string()),
+        }
+    }
+
+    /// Decode a stored oplog payload. Marked rows are decrypted;
+    /// unmarked rows pass through so pre-fix rows still parse (they
+    /// are rewritten by the migration, but a reader must never fail on
+    /// one it meets first).
+    pub(crate) fn decode_oplog_payload(&self, stored: &str) -> Result<String> {
+        match stored.strip_prefix(Self::OPLOG_ENC_PREFIX) {
+            Some(b64) => match &self.enc {
+                Some(e) => e.decrypt_string(b64),
+                // An encrypted payload with no key: the caller cannot
+                // proceed, and saying so beats handing back a marker
+                // string that would parse as garbage downstream.
+                None => Err(YantrikDbError::Encryption(
+                    "oplog payload is encrypted but this database was opened without a key".into(),
+                )),
+            },
+            None => Ok(stored.to_string()),
+        }
+    }
+
+    /// How many oplog rows still hold UNSEALED payloads.
+    ///
+    /// On an encrypted database this must be 0 after open; anything
+    /// else means the migration failed and plaintext remains at rest.
+    /// Exposed so an operator can verify rather than assume — the
+    /// number declares which side of the seal it was read from.
+    pub fn oplog_plaintext_rows(&self) -> Result<usize> {
+        let conn = self.conn.lock();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM oplog WHERE payload NOT LIKE 'ENCv1:%'",
+            [],
+            |r| r.get(0),
+        )?;
+        Ok(n as usize)
+    }
+
+    /// Rewrite pre-fix plaintext oplog payloads as ciphertext.
+    ///
+    /// Runs on open for encrypted databases only. Idempotent (already
+    /// marked rows are skipped by the WHERE clause), bounded by one
+    /// pass over unmarked rows, and best-effort in the sense that it
+    /// reports how many rows it healed — but a failure propagates,
+    /// because silently leaving plaintext behind is the defect this
+    /// exists to remove.
+    pub(crate) fn migrate_oplog_payload_encryption(&self) -> Result<usize> {
+        if self.enc.is_none() {
+            return Ok(0);
+        }
+        let conn = self.conn.lock();
+        let rows: Vec<(String, String)> = {
+            let mut stmt =
+                conn.prepare("SELECT op_id, payload FROM oplog WHERE payload NOT LIKE 'ENCv1:%'")?;
+            let mapped = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
+            mapped.collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let n = rows.len();
+        for (op_id, plain) in rows {
+            let sealed = self.encode_oplog_payload(&plain)?;
+            conn.execute(
+                "UPDATE oplog SET payload = ?1 WHERE op_id = ?2",
+                rusqlite::params![sealed, op_id],
+            )?;
+        }
+        tracing::warn!(
+            rows = n,
+            "oplog payload encryption migration: sealed pre-0.13.2 plaintext rows"
+        );
+        Ok(n)
     }
 
     /// Close the database connection. After this, the engine cannot be used.

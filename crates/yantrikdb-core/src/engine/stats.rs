@@ -180,7 +180,8 @@ impl YantrikDB {
         let op_id = crate::id::new_id();
         let hlc_ts = self.tick_hlc();
         let hlc_bytes = hlc_ts.to_bytes().to_vec();
-        let payload_str = serde_json::to_string(payload)?;
+        // 0.13.2: sealed on encrypted databases (see encode_oplog_payload).
+        let payload_str = self.encode_oplog_payload(&serde_json::to_string(payload)?)?;
         let applied_generation: i64 = self.search_state.load().generation as i64;
 
         let conn = self.conn.lock();
@@ -245,7 +246,8 @@ impl YantrikDB {
             None => crate::id::new_id(),
         };
         let hlc_bytes = self.tick_hlc().to_bytes().to_vec();
-        let payload_str = serde_json::to_string(payload)?;
+        // 0.13.2: sealed on encrypted databases (see encode_oplog_payload).
+        let payload_str = self.encode_oplog_payload(&serde_json::to_string(payload)?)?;
         tx.execute(
             "INSERT INTO oplog \
              (op_id, op_type, timestamp, target_rid, payload, actor_id, hlc, \
@@ -327,7 +329,8 @@ impl YantrikDB {
     ) -> Result<String> {
         let op_id = crate::id::new_id();
         let hlc_bytes = self.tick_hlc().to_bytes().to_vec();
-        let payload_str = serde_json::to_string(payload)?;
+        // 0.13.2: sealed on encrypted databases (see encode_oplog_payload).
+        let payload_str = self.encode_oplog_payload(&serde_json::to_string(payload)?)?;
         tx.execute(
             "INSERT INTO oplog \
              (op_id, op_type, timestamp, target_rid, payload, actor_id, hlc, \
@@ -420,7 +423,8 @@ impl YantrikDB {
         let op_id = crate::id::new_id();
         let hlc_ts = self.tick_hlc();
         let hlc_bytes = hlc_ts.to_bytes().to_vec();
-        let payload_str = serde_json::to_string(payload)?;
+        // 0.13.2: sealed on encrypted databases (see encode_oplog_payload).
+        let payload_str = self.encode_oplog_payload(&serde_json::to_string(payload)?)?;
 
         // **v0.7.1 perf hotfix.** Backpressure check is now an atomic
         // load against `pending_op_count` instead of `SELECT COUNT(*) FROM
@@ -606,6 +610,17 @@ impl YantrikDB {
             })?;
             rows.collect::<std::result::Result<Vec<_>, _>>()?
         };
+        // 0.13.2: payloads are sealed on encrypted databases. Decode HERE,
+        // at the single point every apply_* dispatch flows through, so the
+        // materializers keep taking plaintext JSON and no future op type
+        // can be added that forgets to unseal (the copy-a-pattern class).
+        let pending: Vec<(String, String, String, Option<String>)> = pending
+            .into_iter()
+            .map(|(op_id, op_type, payload, model)| {
+                self.decode_oplog_payload(&payload)
+                    .map(|p| (op_id, op_type, p, model))
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         let mut applied = 0usize;
         for (op_id, op_type, payload, embedding_model) in &pending {

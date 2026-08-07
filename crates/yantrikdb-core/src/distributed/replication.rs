@@ -12,6 +12,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::engine::YantrikDB;
 use crate::error::Result;
+
+/// Unseal a stored oplog payload given a provider (0.13.2). Mirrors
+/// `YantrikDB::decode_oplog_payload` for the free-function readers that
+/// hold a `Connection` rather than an engine.
+pub(crate) fn decode_oplog_payload_with(
+    enc: Option<&crate::encryption::EncryptionProvider>,
+    stored: &str,
+) -> Result<String> {
+    match stored.strip_prefix(YantrikDB::OPLOG_ENC_PREFIX) {
+        Some(b64) => match enc {
+            Some(e) => e.decrypt_string(b64),
+            None => Err(crate::error::YantrikDbError::Encryption(
+                "oplog payload is encrypted but no key was provided".into(),
+            )),
+        },
+        None => Ok(stored.to_string()),
+    }
+}
 use crate::hlc::HLCTimestamp;
 use crate::types::ScoringRow;
 
@@ -63,6 +81,25 @@ pub struct SyncStats {
 /// with no boundary clause.
 pub fn extract_ops_since(
     conn: &Connection,
+    since_hlc: Option<&[u8]>,
+    since_op_id: Option<&str>,
+    exclude_actor: Option<&str>,
+    limit: usize,
+) -> Result<Vec<OplogEntry>> {
+    extract_ops_since_enc(conn, None, since_hlc, since_op_id, exclude_actor, limit)
+}
+
+/// 0.13.2 — `extract_ops_since` for encrypted databases.
+///
+/// Oplog payloads are sealed at rest when the database has a key, so a
+/// reader must present the provider to get JSON back. Callers on
+/// plaintext databases pass `None` and get byte-identical behavior to
+/// before. Replication peers of an encrypted database share the DEK,
+/// so the shipped payload is plaintext JSON on the wire exactly as it
+/// was — the seal is an at-rest property, not a transport change.
+pub fn extract_ops_since_enc(
+    conn: &Connection,
+    enc: Option<&crate::encryption::EncryptionProvider>,
     since_hlc: Option<&[u8]>,
     since_op_id: Option<&str>,
     exclude_actor: Option<&str>,
@@ -161,6 +198,17 @@ pub fn extract_ops_since(
     let entries = stmt
         .query_map(params_ref.as_slice(), |row| {
             let payload_str: String = row.get("payload")?;
+            // 0.13.2: oplog payloads are sealed on encrypted databases.
+            // Unsealing here matters for CORRECTNESS as much as for
+            // readability — the parse below falls back to `{}`, so a
+            // sealed row read raw would replicate an EMPTY payload and
+            // lose the record silently. `enc` is None on plaintext
+            // databases and the row passes through unchanged.
+            let payload_str = match enc {
+                Some(e) => decode_oplog_payload_with(Some(e), &payload_str)
+                    .unwrap_or_else(|_| payload_str.clone()),
+                None => payload_str,
+            };
             let payload: serde_json::Value =
                 serde_json::from_str(&payload_str).unwrap_or(serde_json::json!({}));
 

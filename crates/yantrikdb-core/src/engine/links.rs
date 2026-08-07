@@ -304,7 +304,8 @@ impl YantrikDB {
             "edge_hlc_hex": hex_lower(&hlc_bytes),
             "selection_state": "selected",
         });
-        let payload_str = serde_json::to_string(&payload)?;
+        // 0.13.2: sealed on encrypted databases (see encode_oplog_payload).
+        let payload_str = self.encode_oplog_payload(&serde_json::to_string(&payload)?)?;
 
         conn.execute_batch("SAVEPOINT link_core_txn")?;
         let txn: Result<()> = (|| {

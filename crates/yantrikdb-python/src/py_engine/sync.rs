@@ -53,8 +53,12 @@ impl PyYantrikDB {
         limit: usize,
     ) -> PyResult<Vec<PyObject>> {
         let db = self.get_inner()?;
-        let ops = yantrikdb_core::replication::extract_ops_since(
+        // 0.13.2: pass the provider so sealed payloads unseal — without
+        // it a sealed row would parse to an EMPTY payload and the op
+        // would replicate as a no-op.
+        let ops = yantrikdb_core::replication::extract_ops_since_enc(
             &*db.conn(),
+            db.encryption(),
             since_hlc.as_deref(),
             since_op_id,
             exclude_actor,

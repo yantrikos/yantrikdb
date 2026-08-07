@@ -1514,7 +1514,8 @@ impl YantrikDB {
         payload: &serde_json::Value,
     ) -> Result<()> {
         use rusqlite::params;
-        let payload_str = serde_json::to_string(payload)?;
+        // 0.13.2: sealed on encrypted databases (see encode_oplog_payload).
+        let payload_str = self.encode_oplog_payload(&serde_json::to_string(payload)?)?;
         let conn = self.conn();
         conn.execute(
             "INSERT INTO reembed_events (generation, phase, timestamp, payload_json) \
