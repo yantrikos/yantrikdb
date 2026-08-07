@@ -1,0 +1,423 @@
+{
+  "model": "qwen3.8-max",
+  "date": "2026-08-07",
+  "rows": [
+    {
+      "arm": "bare",
+      "i": 0,
+      "passed": 10,
+      "total": 14,
+      "parsed": true,
+      "checks": {
+        "valid-version": true,
+        "fluid-typography": false,
+        "type-scale": true,
+        "styles-apply-presets": true,
+        "root-line-height": true,
+        "display-line-height": false,
+        "link-color": true,
+        "block-gap": false,
+        "content-size-measure": true,
+        "wide-size": true,
+        "palette-roles": false,
+        "no-extreme-colours": true,
+        "root-padding-aware": true,
+        "spacing-scale": true
+      }
+    },
+    {
+      "arm": "bare",
+      "i": 1,
+      "passed": 13,
+      "total": 14,
+      "parsed": true,
+      "checks": {
+        "valid-version": true,
+        "fluid-typography": true,
+        "type-scale": true,
+        "styles-apply-presets": true,
+        "root-line-height": true,
+        "display-line-height": true,
+        "link-color": true,
+        "block-gap": true,
+        "content-size-measure": true,
+        "wide-size": true,
+        "palette-roles": false,
+        "no-extreme-colours": true,
+        "root-padding-aware": true,
+        "spacing-scale": true
+      }
+    },
+    {
+      "arm": "bare",
+      "i": 2,
+      "passed": 11,
+      "total": 14,
+      "parsed": true,
+      "checks": {
+        "valid-version": true,
+        "fluid-typography": false,
+        "type-scale": true,
+        "styles-apply-presets": true,
+        "root-line-height": true,
+        "display-line-height": false,
+        "link-color": true,
+        "block-gap": true,
+        "content-size-measure": true,
+        "wide-size": true,
+        "palette-roles": false,
+        "no-extreme-colours": true,
+        "root-padding-aware": true,
+        "spacing-scale": true
+      }
+    },
+    {
+      "arm": "bare",
+      "i": 3,
+      "passed": 12,
+      "total": 14,
+      "parsed": true,
+      "checks": {
+        "valid-version": true,
+        "fluid-typography": false,
+        "type-scale": true,
+        "styles-apply-presets": true,
+        "root-line-height": true,
+        "display-line-height": true,
+        "link-color": true,
+        "block-gap": true,
+        "content-size-measure": true,
+        "wide-size": true,
+        "palette-roles": false,
+        "no-extreme-colours": true,
+        "root-padding-aware": true,
+        "spacing-scale": true
+      }
+    },
+    {
+      "arm": "bare",
+      "i": 4,
+      "passed": 11,
+      "total": 14,
+      "parsed": true,
+      "checks": {
+        "valid-version": true,
+        "fluid-typography": true,
+        "type-scale": true,
+        "styles-apply-presets": true,
+        "root-line-height": true,
+        "display-line-height": false,
+        "link-color": true,
+        "block-gap": true,
+        "content-size-measure": true,
+        "wide-size": true,
+        "palette-roles": false,
+        "no-extreme-colours": true,
+        "root-padding-aware": false,
+        "spacing-scale": true
+      }
+    },
+    {
+      "arm": "bare",
+      "i": 5,
+      "passed": 12,
+      "total": 14,
+      "parsed": true,
+      "checks": {
+        "valid-version": true,
+        "fluid-typography": true,
+        "type-scale": true,
+        "styles-apply-presets": true,
+        "root-line-height": true,
+        "display-line-height": false,
+        "link-color": true,
+        "block-gap": true,
+        "content-size-measure": true,
+        "wide-size": true,
+        "palette-roles": false,
+        "no-extreme-colours": true,
+        "root-padding-aware": true,
+        "spacing-scale": true
+      }
+    },
+    {
+      "arm": "bare",
+      "i": 6,
+      "passed": 0,
+      "total": 14,
+      "parsed": false,
+      "checks": {}
+    },
+    {
+      "arm": "bare",
+      "i": 7,
+      "passed": 10,
+      "total": 14,
+      "parsed": true,
+      "checks": {
+        "valid-version": true,
+        "fluid-typography": false,
+        "type-scale": true,
+        "styles-apply-presets": true,
+        "root-line-height": true,
+        "display-line-height": false,
+        "link-color": true,
+        "block-gap": false,
+        "content-size-measure": true,
+        "wide-size": true,
+        "palette-roles": false,
+        "no-extreme-colours": true,
+        "root-padding-aware": true,
+        "spacing-scale": true
+      }
+    },
+    {
+      "arm": "bare",
+      "i": 8,
+      "passed": 0,
+      "total": 14,
+      "parsed": false,
+      "checks": {}
+    },
+    {
+      "arm": "bare",
+      "i": 9,
+      "passed": 0,
+      "total": 14,
+      "parsed": false,
+      "checks": {}
+    },
+    {
+      "arm": "bare",
+      "i": 10,
+      "passed": 10,
+      "total": 14,
+      "parsed": true,
+      "checks": {
+        "valid-version": true,
+        "fluid-typography": false,
+        "type-scale": true,
+        "styles-apply-presets": true,
+        "root-line-height": false,
+        "display-line-height": false,
+        "link-color": true,
+        "block-gap": true,
+        "content-size-measure": true,
+        "wide-size": true,
+        "palette-roles": false,
+        "no-extreme-colours": true,
+        "root-padding-aware": true,
+        "spacing-scale": true
+      }
+    },
+    {
+      "arm": "bare",
+      "i": 11,
+      "passed": 12,
+      "total": 14,
+      "parsed": true,
+      "checks": {
+        "valid-version": true,
+        "fluid-typography": true,
+        "type-scale": true,
+        "styles-apply-presets": true,
+        "root-line-height": true,
+        "display-line-height": false,
+        "link-color": true,
+        "block-gap": true,
+        "content-size-measure": true,
+        "wide-size": true,
+        "palette-roles": false,
+        "no-extreme-colours": true,
+        "root-padding-aware": true,
+        "spacing-scale": true
+      }
+    },
+    {
+      "arm": "rulebook",
+      "i": 0,
+      "passed": 0,
+      "total": 14,
+      "parsed": false,
+      "checks": {}
+    },
+    {
+      "arm": "rulebook",
+      "i": 1,
+      "passed": 0,
+      "total": 14,
+      "parsed": false,
+      "checks": {}
+    },
+    {
+      "arm": "rulebook",
+      "i": 2,
+      "passed": 0,
+      "total": 14,
+      "parsed": false,
+      "checks": {}
+    },
+    {
+      "arm": "rulebook",
+      "i": 3,
+      "passed": 0,
+      "total": 14,
+      "parsed": false,
+      "checks": {}
+    },
+    {
+      "arm": "rulebook",
+      "i": 4,
+      "passed": 14,
+      "total": 14,
+      "parsed": true,
+      "checks": {
+        "valid-version": true,
+        "fluid-typography": true,
+        "type-scale": true,
+        "styles-apply-presets": true,
+        "root-line-height": true,
+        "display-line-height": true,
+        "link-color": true,
+        "block-gap": true,
+        "content-size-measure": true,
+        "wide-size": true,
+        "palette-roles": true,
+        "no-extreme-colours": true,
+        "root-padding-aware": true,
+        "spacing-scale": true
+      }
+    },
+    {
+      "arm": "rulebook",
+      "i": 5,
+      "passed": 13,
+      "total": 14,
+      "parsed": true,
+      "checks": {
+        "valid-version": true,
+        "fluid-typography": true,
+        "type-scale": true,
+        "styles-apply-presets": true,
+        "root-line-height": true,
+        "display-line-height": true,
+        "link-color": true,
+        "block-gap": true,
+        "content-size-measure": true,
+        "wide-size": true,
+        "palette-roles": false,
+        "no-extreme-colours": true,
+        "root-padding-aware": true,
+        "spacing-scale": true
+      }
+    },
+    {
+      "arm": "rulebook",
+      "i": 6,
+      "passed": 0,
+      "total": 14,
+      "parsed": false,
+      "checks": {}
+    },
+    {
+      "arm": "rulebook",
+      "i": 7,
+      "passed": 14,
+      "total": 14,
+      "parsed": true,
+      "checks": {
+        "valid-version": true,
+        "fluid-typography": true,
+        "type-scale": true,
+        "styles-apply-presets": true,
+        "root-line-height": true,
+        "display-line-height": true,
+        "link-color": true,
+        "block-gap": true,
+        "content-size-measure": true,
+        "wide-size": true,
+        "palette-roles": true,
+        "no-extreme-colours": true,
+        "root-padding-aware": true,
+        "spacing-scale": true
+      }
+    },
+    {
+      "arm": "rulebook",
+      "i": 8,
+      "passed": 14,
+      "total": 14,
+      "parsed": true,
+      "checks": {
+        "valid-version": true,
+        "fluid-typography": true,
+        "type-scale": true,
+        "styles-apply-presets": true,
+        "root-line-height": true,
+        "display-line-height": true,
+        "link-color": true,
+        "block-gap": true,
+        "content-size-measure": true,
+        "wide-size": true,
+        "palette-roles": true,
+        "no-extreme-colours": true,
+        "root-padding-aware": true,
+        "spacing-scale": true
+      }
+    },
+    {
+      "arm": "rulebook",
+      "i": 9,
+      "passed": 14,
+      "total": 14,
+      "parsed": true,
+      "checks": {
+        "valid-version": true,
+        "fluid-typography": true,
+        "type-scale": true,
+        "styles-apply-presets": true,
+        "root-line-height": true,
+        "display-line-height": true,
+        "link-color": true,
+        "block-gap": true,
+        "content-size-measure": true,
+        "wide-size": true,
+        "palette-roles": true,
+        "no-extreme-colours": true,
+        "root-padding-aware": true,
+        "spacing-scale": true
+      }
+    },
+    {
+      "arm": "rulebook",
+      "i": 10,
+      "passed": 12,
+      "total": 14,
+      "parsed": true,
+      "checks": {
+        "valid-version": true,
+        "fluid-typography": true,
+        "type-scale": true,
+        "styles-apply-presets": true,
+        "root-line-height": false,
+        "display-line-height": false,
+        "link-color": true,
+        "block-gap": true,
+        "content-size-measure": true,
+        "wide-size": true,
+        "palette-roles": true,
+        "no-extreme-colours": true,
+        "root-padding-aware": true,
+        "spacing-scale": true
+      }
+    },
+    {
+      "arm": "rulebook",
+      "i": 11,
+      "passed": 0,
+      "total": 14,
+      "parsed": false,
+      "checks": {}
+    }
+  ]
+}
