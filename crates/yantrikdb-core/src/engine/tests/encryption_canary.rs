@@ -159,6 +159,52 @@ fn sealed_oplog_still_replicates_and_materializes() {
 }
 
 #[test]
+fn migration_erases_freed_pages_not_merely_live_rows() {
+    // 0.13.4. The 0.13.2 migration sealed every row and left the
+    // plaintext in the pages those rows used to occupy:
+    // `oplog_plaintext_rows()` read 0 while a raw byte scan still found
+    // the canary. Rows are not bytes, and a count that reports the
+    // former while claiming the latter is the same defect the migration
+    // was written to fix.
+    //
+    // Enough rows that the seal cannot fit in the original pages, so the
+    // old ones are genuinely freed rather than overwritten in place.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("freed.db");
+    let k = key();
+    const LEAK: &str = "ZANZIBAR-FALCON-7731-FREED-PAGE-CANARY";
+    {
+        let db = YantrikDB::new_encrypted(path.to_str().unwrap(), 64, &k).unwrap();
+        write_canaries(&db);
+        let conn = db.conn();
+        for i in 0..2000 {
+            conn.execute(
+                "INSERT INTO oplog (op_id, op_type, timestamp, target_rid, payload, applied) \
+                 VALUES (?1, 'record', 0.0, ?2, ?3, 1)",
+                rusqlite::params![
+                    format!("legacy-{i}"),
+                    format!("rid-{i}"),
+                    format!(r#"{{"rid":"rid-{i}","text":"{LEAK}"}}"#)
+                ],
+            )
+            .unwrap();
+        }
+    }
+
+    let db = YantrikDB::new_encrypted(path.to_str().unwrap(), 64, &k).unwrap();
+    assert_eq!(db.oplog_plaintext_rows().unwrap(), 0, "rows must be sealed");
+    drop(db);
+
+    let blob = raw_bytes(&path);
+    assert!(
+        !contains(&blob, LEAK),
+        "PLAINTEXT SURVIVES IN FREED PAGES: every oplog row was sealed and \
+         the count read 0, but the bytes are still in the file. Sealing is \
+         not erasing — the migration must rewrite the file."
+    );
+}
+
+#[test]
 fn pre_fix_plaintext_rows_are_healed_on_open() {
     // The migration. Simulates a database written by 0.13.1 or earlier
     // by writing a bare-JSON payload directly, then proves that opening

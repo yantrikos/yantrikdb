@@ -1650,6 +1650,17 @@ impl YantrikDB {
     /// else means the migration failed and plaintext remains at rest.
     /// Exposed so an operator can verify rather than assume — the
     /// number declares which side of the seal it was read from.
+    ///
+    /// **This counts ROWS, not BYTES** (0.13.4). Sealing a row with
+    /// `UPDATE` does not erase the page that held the old value:
+    /// SQLite frees the page and the plaintext survives in the file
+    /// until it is reused or the file is rewritten. Reading `0` here
+    /// therefore says "no live row holds plaintext" — it did NOT, in
+    /// 0.13.2/0.13.3, say "no plaintext is on disk", and that gap was
+    /// the same defect as the bug it was reporting on. Since 0.13.4
+    /// the migration rewrites the file (VACUUM + WAL truncate) so the
+    /// two statements coincide again; the honest check for any
+    /// database is still a raw byte scan.
     pub fn oplog_plaintext_rows(&self) -> Result<usize> {
         let conn = self.conn.lock();
         let n: i64 = conn.query_row(
@@ -1683,6 +1694,15 @@ impl YantrikDB {
             return Ok(0);
         }
         let n = rows.len();
+        tracing::warn!(
+            rows = n,
+            "oplog payload encryption migration STARTING — sealing pre-0.13.2 \
+             plaintext rows, then rewriting the file to erase freed pages. \
+             The database is unavailable until this completes (measured ~8s \
+             per 100k rows plus the VACUUM); this message exists so a long \
+             pause reads as progress rather than as a hang."
+        );
+        let started = std::time::Instant::now();
         for (op_id, plain) in rows {
             let sealed = self.encode_oplog_payload(&plain)?;
             conn.execute(
@@ -1690,9 +1710,30 @@ impl YantrikDB {
                 rusqlite::params![sealed, op_id],
             )?;
         }
+
+        // 0.13.4 — THE SEAL IS NOT THE ERASURE.
+        //
+        // `UPDATE` writes the ciphertext to a new page and frees the old
+        // one; the plaintext survives in the file until that page is
+        // reused. Measured on a 111,590-row oplog at CT128 scale: after
+        // the loop above, `oplog_plaintext_rows()` read 0 while a raw
+        // byte scan still found the canary — a verification surface
+        // reporting a guarantee the storage did not provide, which is
+        // precisely the defect this migration exists to remove. The
+        // migration had the shape of the bug.
+        //
+        // VACUUM rewrites the database without the freed pages;
+        // truncating the WAL afterwards drops the copies the rewrite
+        // itself journalled. ORDER MATTERS and the reverse does not
+        // work — checkpointing first then vacuuming leaves the residue
+        // in the main file (measured both ways).
+        conn.execute_batch("VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
+
         tracing::warn!(
             rows = n,
-            "oplog payload encryption migration: sealed pre-0.13.2 plaintext rows"
+            elapsed_s = started.elapsed().as_secs_f64(),
+            "oplog payload encryption migration COMPLETE — rows sealed and \
+             freed pages erased"
         );
         Ok(n)
     }
