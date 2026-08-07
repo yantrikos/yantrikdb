@@ -1,0 +1,196 @@
+{
+  "version": 3,
+  "settings": {
+    "appearanceTools": true,
+    "color": {
+      "palette": [
+        {
+          "name": "White",
+          "slug": "white",
+          "color": "#ffffff"
+        },
+        {
+          "name": "Off-White",
+          "slug": "off-white",
+          "color": "#f4f4f0"
+        },
+        {
+          "name": "Sand",
+          "slug": "sand",
+          "color": "#e6e2d8"
+        },
+        {
+          "name": "Pale Blue",
+          "slug": "pale-blue",
+          "color": "#eef2f5"
+        },
+        {
+          "name": "Muted Sage",
+          "slug": "muted-sage",
+          "color": "#d8e2dc"
+        },
+        {
+          "name": "Charcoal",
+          "slug": "charcoal",
+          "color": "#2a2a2a"
+        }
+      ],
+      "defaultPalette": [
+        "white",
+        "off-white",
+        "sand",
+        "pale-blue",
+        "muted-sage",
+        "charcoal"
+      ]
+    },
+    "spacing": {
+      "units": [
+        4,
+        8,
+        16,
+        24,
+        32,
+        48,
+        64
+      ],
+      "default": 24
+    },
+    "typography": {
+      "fontFamilies": [
+        {
+          "name": "Slab Display",
+          "slug": "slab-display",
+          "fontFamily": "slab",
+          "fontWeights": [
+            400,
+            500,
+            600,
+            700
+          ],
+          "fontStyles": [
+            "normal",
+            "italic"
+          ],
+          "textTransform": "none"
+        },
+        {
+          "name": "Neutral Grotesque",
+          "slug": "neutral-grotesque",
+          "fontFamily": "sans-serif",
+          "fontWeights": [
+            300,
+            400,
+            500,
+            600
+          ],
+          "fontStyles": [
+            "normal",
+            "italic"
+          ],
+          "textTransform": "none"
+        }
+      ],
+      "defaultFontFamily": "neutral-grotesque"
+    },
+    "layout": {
+      "contentSize": 64,
+      "wideSize": 96,
+      "largeSize": 128
+    }
+  },
+  "types": {
+    "core/heading": {
+      "style": {
+        "size": {
+          "large": {
+            "fontFamily": "slab-display",
+            "fontWeight": 600,
+            "fontSize": "48px",
+            "lineHeight": 1.1,
+            "letterSpacing": "-0.02em"
+          },
+          "medium": {
+            "fontFamily": "slab-display",
+            "fontWeight": 500,
+            "fontSize": "32px",
+            "lineHeight": 1.2,
+            "letterSpacing": "-0.01em"
+          },
+          "small": {
+            "fontFamily": "slab-display",
+            "fontWeight": 400,
+            "fontSize": "24px",
+            "lineHeight": 1.3,
+            "letterSpacing": "0"
+          }
+        },
+        "textStyle": {
+          "normal": {
+            "fontFamily": "slab-display",
+            "fontWeight": 400,
+            "fontSize": "16px",
+            "lineHeight": 1.6,
+            "letterSpacing": "0"
+          }
+        }
+      }
+    },
+    "core/paragraph": {
+      "style": {
+        "size": {
+          "large": {
+            "fontFamily": "neutral-grotesque",
+            "fontWeight": 300,
+            "fontSize": "24px",
+            "lineHeight": 1.5,
+            "letterSpacing": "0"
+          },
+          "medium": {
+            "fontFamily": "neutral-grotesque",
+            "fontWeight": 400,
+            "fontSize": "18px",
+            "lineHeight": 1.6,
+            "letterSpacing": "0"
+          },
+          "small": {
+            "fontFamily": "neutral-grotesque",
+            "fontWeight": 400,
+            "fontSize": "16px",
+            "lineHeight": 1.6,
+            "letterSpacing": "0"
+          }
+        },
+        "textStyle": {
+          "normal": {
+            "fontFamily": "neutral-grotesque",
+            "fontWeight": 300,
+            "fontSize": "16px",
+            "lineHeight": 1.6,
+            "letterSpacing": "0"
+          }
+        }
+      }
+    },
+    "core/button": {
+      "style": {
+        "borderRadius": 0,
+        "spacing": {
+          "padding": {
+            "top": "12px",
+            "right": "24px",
+            "bottom": "12px",
+            "left": "24px"
+          }
+        },
+        "typography": {
+          "fontFamily": "neutral-grotesque",
+          "fontWeight": 500,
+          "fontSize": "14px",
+          "textTransform": "uppercase",
+          "letterSpacing": "0.05em"
+        }
+      }
+    }
+  }
+}
