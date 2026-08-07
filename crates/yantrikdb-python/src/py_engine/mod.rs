@@ -318,10 +318,27 @@ impl PyYantrikDB {
     }
 
     /// Whether this instance has encryption enabled.
+    ///
+    /// **Not a sufficient check on versions < 0.13.2** (GHSA-84vx-5fgq-5p59):
+    /// this returned `True` while record payloads sat in plaintext in
+    /// `oplog.payload`. Pair it with `oplog_plaintext_rows()`.
     #[getter]
     fn is_encrypted(&self) -> PyResult<bool> {
         let db = self.get_inner()?;
         Ok(db.is_encrypted())
+    }
+
+    /// Unsealed oplog rows — the "am I affected?" number from
+    /// GHSA-84vx-5fgq-5p59, exposed so the answer is a count rather
+    /// than a judgement.
+    ///
+    /// On an encrypted 0.13.2+ database this must be `0` after open
+    /// (the migration seals pre-0.13.2 rows). On an UNencrypted
+    /// database it counts every row, because nothing is sealed there
+    /// and nothing should be — read it together with `is_encrypted`.
+    fn oplog_plaintext_rows(&self) -> PyResult<usize> {
+        let db = self.get_inner()?;
+        db.oplog_plaintext_rows().map_err(map_err)
     }
 
     /// Whether ANY embedder is configured (Rust-native or Python-side).
