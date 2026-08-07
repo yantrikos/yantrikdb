@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Capability verbs: mount and unmount compiled packs, same as knowledge.
+"""Capability verbs for ONE operator at a terminal.
 
     python packs/cap.py status
     python packs/cap.py mount motion-craft
@@ -9,8 +9,24 @@
 `mount` loads the pack's adapter into the resident model (~2s the first
 time, instant after) and routes every model="current" request through
 it. `unmount` restores the exact base weights — the adapter never
-modified them, it sat beside them. The serving daemon is
-serve_compiled.py; start it once with --base Qwen/Qwen3.5-4B.
+modified them, it sat beside them.
+
+NOT FOR MEASUREMENT, AND NOT FOR MORE THAN ONE CALLER. Mount state
+lives on the SERVER, so two clients sharing a daemon each read a flag
+the other is setting. That produced byte-identical "compiled" and
+"bare" artifacts here once, with nothing in either output looking
+wrong, and llama.cpp's POST /lora-adapters has the same global shape —
+so at fleet scale one agent mounting changes every other agent's
+weights mid-session.
+
+Anything that produces a number, or serves more than one caller, must
+name its adapter per request instead:
+
+    {"model": "motion-craft-craft"}   adapter applied
+    {"model": "base"}                 adapter disabled
+
+That is what every measured result in this repo uses, and what vLLM
+exposes natively by serving each adapter as its own model id.
 """
 from __future__ import annotations
 

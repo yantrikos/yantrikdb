@@ -1,0 +1,379 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Train Timetable Kiosk</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'SF Mono', 'Fira Code', monospace;
+    background: #0f1117;
+    color: #e2e4e9;
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    padding: 2rem 1rem;
+  }
+
+  .kiosk {
+    width: 100%;
+    max-width: 420px;
+    display: flex;
+    flex-direction: column;
+    gap: 1.25rem;
+  }
+
+  .header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding-bottom: 0.75rem;
+    border-bottom: 1px solid #1e2230;
+  }
+
+  .header h1 {
+    font-size: 1.1rem;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+  }
+
+  .route-indicator {
+    font-size: 0.8rem;
+    color: #5a5f7a;
+    letter-spacing: 0.06em;
+  }
+
+  /* ── Activity Feed ─────────────────────────────── */
+
+  .activity-feed {
+    display: flex;
+    flex-direction: column;
+    gap: 0.6rem;
+    flex: 1;
+  }
+
+  .feed-item {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    padding: 0.85rem 1rem;
+    background: #161a26;
+    border-radius: 8px;
+    border: 1px solid #1e2230;
+    opacity: 0;
+    transform: translateY(18px);
+    animation: feed-in 350ms ease-out forwards;
+  }
+
+  .feed-item:nth-child(1) { animation-delay: 0ms; }
+  .feed-item:nth-child(2) { animation-delay: 50ms; }
+  .feed-item:nth-child(3) { animation-delay: 100ms; }
+  .feed-item:nth-child(4) { animation-delay: 150ms; }
+  .feed-item:nth-child(5) { animation-delay: 200ms; }
+  .feed-item:nth-child(6) { animation-delay: 250ms; }
+
+  .status-dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    flex-shrink: 0;
+  }
+
+  .status-dot.on-time { background: #064e3b; box-shadow: 0 0 0 2px #065f46; }
+  .status-dot.delayed { background: #7c2d12; box-shadow: 0 0 0 2px #9a3412; }
+  .status-dot.cancelled { background: #1e1b4b; box-shadow: 0 0 0 2px #3b31d9; }
+
+  .train-info { flex: 1; min-width: 0; }
+  .train-info .number { font-weight: 700; font-size: 1rem; }
+  .train-info .route { color: #8b8fa9; font-size: 0.78rem; margin-top: 0.15rem; }
+  .train-info .gate { color: #c4c6d4; font-size: 0.75rem; margin-top: 0.1rem; }
+
+  .departure-time {
+    font-weight: 600;
+    font-size: 0.9rem;
+    color: #e2e4e9;
+  }
+
+  .arrival-time {
+    font-size: 0.78rem;
+    color: #6b7280;
+  }
+
+  @keyframes feed-in {
+    from { opacity: 0; transform: translateY(18px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+
+  /* ── Toast Notification ────────────────────────── */
+
+  .toast-overlay {
+    position: fixed;
+    bottom: 1.5rem;
+    left: 50%;
+    transform: translateX(-50%);
+    z-index: 100;
+    width: min(90vw, 360px);
+  }
+
+  .toast {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    padding: 0.75rem 1rem;
+    background: #1e2230;
+    border: 1px solid #3a3f5a;
+    border-radius: 99px;
+    box-shadow: 0 8px 30px rgba(0,0,0,0.4);
+    opacity: 0;
+    transform: translateY(16px) scale(0.96);
+    animation: toast-enter 300ms ease-out forwards;
+  }
+
+  .toast.toast-exit {
+    animation: toast-exit 180ms ease-in forwards;
+  }
+
+  .toast-icon {
+    width: 20px;
+    height: 20px;
+    border-radius: 50%;
+    background: #064e3b;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    font-size: 0.7rem;
+    color: #6ee7b7;
+  }
+
+  .toast-body { flex: 1; }
+  .toast-body .title { font-weight: 600; font-size: 0.85rem; }
+  .toast-body .msg { font-size: 0.75rem; color: #9ca3af; margin-top: 0.05rem; }
+
+  .toast-dismiss {
+    background: none;
+    border: none;
+    color: #6b7280;
+    cursor: pointer;
+    font-size: 1rem;
+    line-height: 1;
+    padding: 0.25rem;
+    border-radius: 4px;
+    transition: color 150ms ease-out, background-color 150ms ease-out;
+  }
+
+  .toast-dismiss:hover {
+    color: #e2e4e9;
+    background-color: #2a2f4a;
+  }
+
+  @keyframes toast-enter {
+    from { opacity: 0; transform: translateY(16px) scale(0.96); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
+
+  @keyframes toast-exit {
+    from { opacity: 1; transform: translateY(0) scale(1); }
+    to   { opacity: 0; transform: translateY(8px) scale(0.96); }
+  }
+
+  /* ── Favorite Toggle ───────────────────────────── */
+
+  .fav-section {
+    display: flex;
+    justify-content: center;
+    padding-top: 0.5rem;
+    border-top: 1px solid #1e2230;
+  }
+
+  .fav-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    background: none;
+    border: 1px solid #2a2f4a;
+    border-radius: 99px;
+    padding: 0.5rem 1.25rem;
+    color: #6b7280;
+    font-size: 0.8rem;
+    letter-spacing: 0.02em;
+    cursor: pointer;
+    transition: color 150ms ease-out, border-color 150ms ease-out, background-color 150ms ease-out, transform 150ms ease-out;
+    transform-origin: center center;
+  }
+
+  .fav-toggle:hover {
+    color: #fbbf24;
+    border-color: #f59e0b;
+    background-color: #1a160a;
+  }
+
+  .fav-toggle:focus-visible {
+    outline: 2px solid #fbbf24;
+    outline-offset: 2px;
+  }
+
+  .fav-toggle:active {
+    transform: scale(0.94);
+  }
+
+  .fav-toggle.saved {
+    color: #fbbf24;
+    border-color: #f59e0b;
+    background-color: #2a1f0a;
+  }
+
+  .fav-toggle .heart {
+    font-size: 1rem;
+    line-height: 1;
+    transition: transform 150ms ease-out;
+  }
+
+  .fav-toggle:hover .heart {
+    transform: scale(1.15);
+  }
+
+  .fav-toggle:active .heart {
+    transform: scale(0.85);
+  }
+
+  /* ── Reduced Motion ────────────────────────────── */
+
+  @media (prefers-reduced-motion: reduce) {
+    .feed-item {
+      animation: none;
+      opacity: 1;
+      transform: none;
+    }
+
+    .toast {
+      animation: none;
+      opacity: 1;
+      transform: none;
+    }
+
+    .toast.toast-exit {
+      animation: none;
+      opacity: 0;
+    }
+
+    .fav-toggle,
+    .toast-dismiss,
+    .fav-toggle .heart {
+      transition: none;
+    }
+  }
+</style>
+</head>
+<body>
+
+<div class="kiosk">
+  <div class="header">
+    <h1>Departures</h1>
+    <span class="route-indicator">SHL → LHR</span>
+  </div>
+
+  <div class="activity-feed">
+    <div class="feed-item">
+      <span class="status-dot on-time"></span>
+      <div class="train-info">
+        <div class="number">TS 1042</div>
+        <div class="route">Thames Valley</div>
+        <div class="gate">Gate B4</div>
+      </div>
+      <div>
+        <div class="departure-time">14:32</div>
+        <div class="arrival-time">→ 16:45 LHR</div>
+      </div>
+    </div>
+
+    <div class="feed-item">
+      <span class="status-dot delayed"></span>
+      <div class="train-info">
+        <div class="number">TS 1038</div>
+        <div class="route">Great Central</div>
+        <div class="gate">Gate A12</div>
+      </div>
+      <div>
+        <div class="departure-time">14:47</div>
+        <div class="arrival-time">→ 17:00 LHR</div>
+      </div>
+    </div>
+
+    <div class="feed-item">
+      <span class="status-dot on-time"></span>
+      <div class="train-info">
+        <div class="number">TS 1044</div>
+        <div class="route">Thames Valley</div>
+        <div class="gate">Gate B6</div>
+      </div>
+      <div>
+        <div class="departure-time">15:02</div>
+        <div class="arrival-time">→ 17:15 LHR</div>
+      </div>
+    </div>
+
+    <div class="feed-item">
+      <span class="status-dot cancelled"></span>
+      <div class="train-info">
+        <div class="number">TS 1050</div>
+        <div class="route">Chiltern</div>
+        <div class="gate">Gate C3</div>
+      </div>
+      <div>
+        <div class="departure-time">15:17</div>
+        <div class="arrival-time">→ Cancelled</div>
+      </div>
+    </div>
+
+    <div class="feed-item">
+      <span class="status-dot on-time"></span>
+      <div class="train-info">
+        <div class="number">TS 1046</div>
+        <div class="route">Thames Valley</div>
+        <div class="gate">Gate B2</div>
+      </div>
+      <div>
+        <div class="departure-time">15:32</div>
+        <div class="arrival-time">→ 17:45 LHR</div>
+      </div>
+    </div>
+
+    <div class="feed-item">
+      <span class="status-dot delayed"></span>
+      <div class="train-info">
+        <div class="number">TS 1052</div>
+        <div class="route">Great Central</div>
+        <div class="gate">Gate A8</div>
+      </div>
+      <div>
+        <div class="departure-time">15:47</div>
+        <div class="arrival-time">→ 18:00 LHR</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="fav-section">
+    <button class="fav-toggle" aria-label="Save this departure">
+      <span class="heart">♥</span>
+      <span>Save Route</span>
+    </button>
+  </div>
+</div>
+
+<div class="toast-overlay">
+  <div class="toast">
+    <span class="toast-icon">✓</span>
+    <div class="toast-body">
+      <div class="title">Gate Changed</div>
+      <div class="msg">TS 1042 moved to Gate B8</div>
+    </div>
+    <button class="toast-dismiss" aria-label="Dismiss">&times;</button>
+  </div>
+</div>
+
+</body>
+</html>

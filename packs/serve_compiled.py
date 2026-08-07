@@ -135,8 +135,18 @@ def generate(model_name: str, messages: list[dict], num_predict: int,
             # arm.
             lora = model.base_model
             if model_name == "current":
-                # The mount verbs' view: whatever is mounted right now,
-                # base when nothing is.
+                # `current` reads GLOBAL mount state, so it is only
+                # meaningful to ONE client at a time. Two scripts sharing
+                # this daemon produced byte-identical "compiled" and
+                # "bare" artifacts once — each was toggling a flag the
+                # other was reading, and nothing in the output looked
+                # wrong. Measurement code must name its adapter
+                # explicitly; `current` is for interactive use.
+                if STATE.get("clients", 0) > 1:
+                    raise RuntimeError(
+                        "model='current' is unsafe while more than one client "
+                        "is using this daemon: mount state is global. Name the "
+                        "adapter (or 'base') explicitly instead.")
                 if STATE.get("mounted"):
                     model.set_adapter(STATE["mounted"])
                     lora.enable_adapter_layers()
@@ -209,20 +219,44 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send(404, {"error": "not found"})
 
+    def _note_client(self):
+        """Distinct peers seen this process. Cheap, and it is the signal
+        the `current` guard needs to refuse an ambiguous request."""
+        seen = STATE.setdefault("client_addrs", set())
+        seen.add(self.client_address[0] + ":" + str(self.headers.get("User-Agent", ""))[:40])
+        STATE["clients"] = len(seen)
+
     def do_POST(self):
-        # The pack verbs, at the serving layer. mount_pack gives a model
-        # knowledge and unmount gives it back; these two give it a
-        # CAPABILITY and take it back — same contract, same
-        # reversibility: unmount restores the exact base weights because
-        # the adapter never touched them, only sat beside them.
+        self._note_client()
+        # SECONDARY INTERFACE — single operator only. Read this before
+        # using it for anything that produces a number or serves more
+        # than one caller.
+        #
+        # The primary interface is naming the adapter PER REQUEST:
+        #
+        #   {"model": "motion-craft-craft", ...}   adapter applied
+        #   {"model": "base", ...}                 adapter disabled
+        #
+        # That is the shape every measured result in this repo uses, and
+        # it is the shape vLLM exposes natively (an adapter is a model
+        # id). A request that names its adapter cannot be answered by
+        # whatever the previous request left mounted.
+        #
+        # The mount/unmount pair below is a convenience for a human at a
+        # terminal. It sets state on the SERVER, which llama.cpp's
+        # POST /lora-adapters does too — and that is a production hazard
+        # rather than a nicety: with N agents against one serving
+        # process, one agent mounting changes every other agent's
+        # weights mid-session and nothing in any output looks wrong.
+        # This exact failure already cost a measurement here, where two
+        # scripts sharing this daemon produced byte-identical "compiled"
+        # and "bare" artifacts.
         #
         #   POST /api/caps/mount   {"pack": "motion-craft", "tag": "v1"}
         #   POST /api/caps/unmount {}
         #
-        # A request with model="current" generates through whatever is
-        # mounted right now (base when nothing is). Loading a new
-        # adapter takes ~2s once; after that, mount/unmount is a flag
-        # flip on resident tensors — milliseconds.
+        # Loading a new adapter costs ~2s once; the flag flip afterwards
+        # is milliseconds.
         if self.path.startswith("/api/caps/"):
             n = int(self.headers.get("Content-Length", 0))
             try:

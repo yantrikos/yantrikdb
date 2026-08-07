@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Book Club</title>
+<style>
+  :root {
+    --bg: #fdf6e3;
+    --text: #4a3b32;
+    --accent: #c47a5a;
+    --accent-hover: #a86b4a;
+    --surface: #ffffff;
+    --shadow: rgba(74, 59, 50, 0.08);
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Georgia', serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    padding: 2rem;
+  }
+
+  .toolbar {
+    display: flex;
+    align-items: center;
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+
+  .primary-btn {
+    background: var(--accent);
+    color: var(--surface);
+    border: none;
+    padding: 0.75rem 1.5rem;
+    font-size: 1rem;
+    font-family: inherit;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: transform 150ms ease-out, background-color 200ms ease-out;
+    transform-origin: center center;
+  }
+
+  .primary-btn:hover {
+    background: var(--accent-hover);
+    transform: translateY(-1px) scale(1.02);
+  }
+
+  .primary-btn:active {
+    transform: scale(0.97);
+  }
+
+  .dropdown-toggle {
+    position: relative;
+    background: none;
+    border: 2px solid var(--accent);
+    padding: 0.5rem 1rem;
+    font-size: 0.9rem;
+    font-family: inherit;
+    border-radius: 6px;
+    cursor: pointer;
+    color: var(--accent);
+    transition: transform 150ms ease-out, box-shadow 200ms ease-out;
+    transform-origin: center center;
+  }
+
+  .dropdown-toggle:hover {
+    box-shadow: 0 4px 12px var(--shadow);
+    transform: translateY(-1px);
+  }
+
+  .dropdown-toggle:active {
+    transform: scale(0.96);
+  }
+
+  .dropdown-menu {
+    position: absolute;
+    top: calc(100% + 0.5rem);
+    left: 0;
+    background: var(--surface);
+    border: 1px solid rgba(74, 59, 50, 0.1);
+    border-radius: 8px;
+    box-shadow: 0 8px 24px var(--shadow);
+    padding: 0.5rem 0;
+    min-width: 180px;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-8px) scale(0.95);
+    transform-origin: top left;
+    animation: dropdown-exit 150ms ease-in forwards;
+    z-index: 100;
+  }
+
+  .dropdown-toggle.is-open .dropdown-menu {
+    animation: dropdown-enter 300ms ease-out forwards;
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0) scale(1);
+  }
+
+  .dropdown-toggle.is-open {
+    animation: dropdown-toggle-exit 150ms ease-in forwards;
+  }
+
+  .dropdown-toggle:not(.is-open) {
+    animation: dropdown-toggle-enter 300ms ease-out forwards;
+  }
+
+  @keyframes dropdown-enter {
+    from { opacity: 0; visibility: hidden; transform: translateY(-8px) scale(0.95); }
+    to { opacity: 1; visibility: visible; transform: translateY(0) scale(1); }
+  }
+
+  @keyframes dropdown-exit {
+    from { opacity: 1; visibility: visible; transform: translateY(0) scale(1); }
+    to { opacity: 0; visibility: hidden; transform: translateY(-8px) scale(0.95); }
+  }
+
+  @keyframes dropdown-toggle-enter {
+    from { transform: scale(0.92); }
+    to { transform: scale(1); }
+  }
+
+  @keyframes dropdown-toggle-exit {
+    from { transform: scale(1); }
+    to { transform: scale(0.92); }
+  }
+
+  .dropdown-menu a {
+    display: block;
+    padding: 0.5rem 1rem;
+    color: var(--text);
+    text-decoration: none;
+    transition: background-color 150ms ease-out, color 150ms ease-out;
+  }
+
+  .dropdown-menu a:hover {
+    background-color: rgba(196, 122, 90, 0.1);
+    color: var(--accent);
+  }
+
+  .card-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+    gap: 1.5rem;
+  }
+
+  .card {
+    background: var(--surface);
+    border-radius: 12px;
+    box-shadow: 0 2px 8px var(--shadow);
+    padding: 1rem;
+    opacity: 0;
+    transform: translateY(24px);
+    animation: card-enter 350ms ease-out forwards;
+  }
+
+  .card:nth-child(1) { animation-delay: 0ms; }
+  .card:nth-child(2) { animation-delay: 50ms; }
+  .card:nth-child(3) { animation-delay: 100ms; }
+  .card:nth-child(4) { animation-delay: 150ms; }
+  .card:nth-child(5) { animation-delay: 200ms; }
+  .card:nth-child(6) { animation-delay: 250ms; }
+  .card:nth-child(7) { animation-delay: 300ms; }
+  .card:nth-child(8) { animation-delay: 350ms; }
+
+  @keyframes card-enter {
+    from { opacity: 0; transform: translateY(24px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .card-header {
+    display: flex;
+    gap: 0.75rem;
+    margin-bottom: 0.75rem;
+  }
+
+  .card-img {
+    width: 64px;
+    height: 64px;
+    border-radius: 6px;
+    object-fit: cover;
+    background: #eee;
+  }
+
+  .card-title {
+    font-size: 1rem;
+    font-weight: bold;
+  }
+
+  .card-author {
+    font-size: 0.85rem;
+    color: #8a7b70;
+  }
+
+  .card-status {
+    display: inline-block;
+    padding: 0.25rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.75rem;
+    font-weight: bold;
+    margin-top: 0.5rem;
+  }
+
+  .card-status.read {
+    background: #d4e5f7;
+    color: #3a6ea5;
+  }
+
+  .card-status.current {
+    background: #fdf6e3;
+    color: var(--accent);
+    border: 1px solid var(--accent);
+  }
+
+  .card-status.to-do {
+    background: #f7e5d4;
+    color: #c47a5a;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+    .card {
+      opacity: 1;
+      transform: none;
+    }
+    .dropdown-menu {
+      opacity: 1;
+      visibility: visible;
+      transform: none;
+    }
+    .dropdown-toggle.is-open .dropdown-menu {
+      animation: none;
+    }
+    .dropdown-toggle.is-open {
+      animation: none;
+    }
+    .dropdown-toggle:not(.is-open) {
+      animation: none;
+    }
+  }
+</style>
+</head>
+<body>
+
+<div class="toolbar">
+  <button class="primary-btn">+ Add Book</button>
+  <label class="dropdown-toggle" aria-haspopup="true">
+    Filter ▾
+    <div class="dropdown-menu">
+      <a href="#">All Books</a>
+      <a href="#">Reading</a>
+      <a href="#">Completed</a>
+      <a href="#">Want to Read</a>
+    </div>
+  </label>
+</div>
+
+<div class="card-grid">
+  <div class="card">
+    <div class="card-header">
+      <img src="https://via.placeholder.com/64" alt="Book cover" class="card-img">
+      <div>
+        <div class="card-title">The Great Gatsby</div>
+        <div class="card-author">F. Scott Fitzgerald</div>
+      </div>
+    </div>
+    <span class="card-status completed">Completed</span>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <img src="https://via.placeholder.com/64" alt="Book cover" class="card-img">
+      <div>
+        <div class="card-title">Pride & Prejudice</div>
+        <div class="card-author">Jane Austen</div>
+      </div>
+    </div>
+    <span class="card-status current">Current</span>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <img src="https://via.placeholder.com/64" alt="Book cover" class="card-img">
+      <div>
+        <div class="card-title">1984</div>
+        <div class="card-author">George Orwell</div>
+      </div>
+    </div>
+    <span class="card-status to-do">To Read</span>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <img src="https://via.placeholder.com/64" alt="Book cover" class="card-img">
+      <div>
+        <div class="card-title">To Kill a Mockingbird</div>
+        <div class="card-author">Harper Lee</div>
+      </div>
+    </div>
+    <span class="card-status completed">Completed</span>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <img src="https://via.placeholder.com/64" alt="Book cover" class="card-img">
+      <div>
+        <div class="card-title">The Catcher in the Rye</div>
+        <div class="card-author">J.D. Salinger</div>
+      </div>
+    </div>
+    <span class="card-status to-do">To Read</span>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <img src="https://via.placeholder.com/64" alt="Book cover" class="card-img">
+      <div>
+        <div class="card-title">Jane Eyre</div>
+        <div class="card-author">Charlotte Brontë</div>
+      </div>
+    </div>
+    <span class="card-status current">Current</span>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <img src="https://via.placeholder.com/64" alt="Book cover" class="card-img">
+      <div>
+        <div class="card-title">Wuthering Heights</div>
+        <div class="card-author">Emily Brontë</div>
+      </div>
+    </div>
+    <span class="card-status to-do">To Read</span>
+  </div>
+  <div class="card">
+    <div class="card-header">
+      <img src="https://via.placeholder.com/64" alt="Book cover" class="card-img">
+      <div>
+        <div class="card-title">Moby Dick</div>
+        <div class="card-author">Herman Melville</div>
+      </div>
+    </div>
+    <span class="card-status completed">Completed</span>
+  </div>
+</div>
+
+</body>
+</html>

@@ -163,7 +163,22 @@ Capabilities install **beside the database**, mirroring packs: a
 database plus its knowledge plus its capabilities copy and back up as
 one unit.
 
-## 8. Mount
+## 8. Serve
+
+**Name the adapter per request.** This is the only shape that is safe
+for measurement or for more than one caller:
+
+```json
+{"model": "motion-craft-craft", "messages": [...]}   // adapter applied
+{"model": "base",               "messages": [...]}   // adapter disabled
+```
+
+Every measured number in this repo uses it, and it is what vLLM exposes
+natively — an adapter is served as its own model id, so "use this
+capability for this agent" is a field in the request rather than a
+state change on the server.
+
+For a single operator at a terminal there is also a stateful pair:
 
 ```bash
 python packs/cap.py status
@@ -172,10 +187,19 @@ python packs/cap.py ask "..."
 python packs/cap.py unmount
 ```
 
-Mounting is a flag flip on resident tensors. Unmounting restores the
-base exactly — the adapter sat beside the weights and never modified
-them, the weights-tier form of the guarantee that unmounting a pack
-leaves the host byte-identical.
+Convenient, and **wrong for anything else**. Mount state lives on the
+server. Two clients sharing a daemon each read a flag the other is
+setting — that produced byte-identical "compiled" and "bare" artifacts
+here once, with nothing in either output looking wrong. llama.cpp's
+`POST /lora-adapters` sets scale globally too, so with N agents against
+one serving process, one agent mounting changes every other agent's
+weights mid-session. A request that names its adapter cannot be
+answered by whatever the last request left mounted.
+
+Mounting is otherwise a flag flip on resident tensors, and unmounting
+restores the base exactly — the adapter sat beside the weights and
+never modified them, the weights-tier form of the guarantee that
+unmounting a pack leaves the host byte-identical.
 
 A capability compiled against a different base **revision** is refused,
 not mounted. A LoRA is a delta against specific weights; applied to

@@ -71,20 +71,29 @@ python packs/bundle.py list    --db mem.db
     --base Qwen/Qwen3.5-4B --db mem.db --port 11555 &
 ```
 
-Then mount, use, unmount:
+Then ask the same question twice, naming the adapter each time:
 
 ```bash
-python packs/cap.py status
-python packs/cap.py mount motion-craft
-python packs/cap.py ask "Write CSS for a modal that fades and scales in. CSS only."
-python packs/cap.py unmount
+Q='Write CSS for a modal that fades and scales in. CSS only.'
+for M in base motion-craft-craft; do
+  curl -s localhost:11555/api/chat -H 'Content-Type: application/json' \
+    -d "{\"model\":\"$M\",\"messages\":[{\"role\":\"user\",\"content\":\"$Q\"}],
+         \"options\":{\"temperature\":0,\"num_predict\":300}}"
+done
 ```
 
-Ask the same question either side of `mount` and diff the answers. On our
-run the unmounted model wrote `transition: all 0.3s ease` and the mounted
-one wrote `transition: opacity 300ms ease-out, transform 300ms ease-out`
-— then unmounting returned the first answer exactly, because the adapter
-sits beside the base weights and never modifies them.
+On our run `base` wrote `transition: all 0.3s ease` and
+`motion-craft-craft` wrote
+`transition: opacity 300ms ease-out, transform 300ms ease-out`. Same
+weights, same process — the adapter sits beside the base and never
+modifies it.
+
+There is also a stateful convenience for one operator at a terminal
+(`cap.py status | mount | unmount`), but **name the adapter per request
+for anything you intend to believe**: mount state lives on the server,
+so two clients sharing a daemon read a flag the other is setting. That
+produced byte-identical "compiled" and "bare" artifacts here once, and
+nothing in either output looked wrong.
 
 ---
 

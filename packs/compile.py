@@ -641,7 +641,7 @@ def do_train(pack: str, base: str, rank: int, alpha: int, epochs: int,
              lr: float, seed: int, max_len: int, tag: str,
              batch: int, accum: int, checkpointing: bool,
              vram_fraction: float, quant4: bool = False,
-             multi_gpu: bool = False) -> int:
+             multi_gpu: bool = False, early_stop_loss: float = 0.0) -> int:
     # Set BEFORE torch initialises CUDA, which is why the import is
     # below it rather than at module scope.
     #
@@ -783,9 +783,40 @@ def do_train(pack: str, base: str, rank: int, alpha: int, epochs: int,
         report_to=[],
         seed=seed,
     )
+    from transformers import TrainerCallback
+
+    class StopWhenLearned(TrainerCallback):
+        """Stop once the loss says the material is learned.
+
+        Measured on motion-craft: 0.243 -> 0.160 -> 0.109 -> 0.074 by
+        epoch 4 of 20, and the remaining sixteen epochs bought nothing
+        but wall-clock. A fixed epoch count is a guess about a curve we
+        can simply read, and on a fleet that guess is paid for on every
+        pack.
+
+        Deliberately conservative — it needs the threshold met twice in
+        a row, because a single low step can be one easy batch rather
+        than a converged model.
+        """
+
+        def __init__(self, floor: float):
+            self.floor, self.hits = floor, 0
+
+        def on_log(self, args, state, control, logs=None, **kw):
+            loss = (logs or {}).get("loss")
+            if loss is None:
+                return
+            self.hits = self.hits + 1 if loss <= self.floor else 0
+            if self.hits >= 2:
+                print(f"\n  early stop: loss {loss:.4f} <= {self.floor} twice "
+                      f"at step {state.global_step} of {state.max_steps}",
+                      flush=True)
+                control.should_training_stop = True
+
     trainer = Trainer(
         model=model, args=args, train_dataset=ds,
         data_collator=DataCollatorForSeq2Seq(tok, padding=True, label_pad_token_id=-100),
+        callbacks=[StopWhenLearned(early_stop_loss)] if early_stop_loss else [],
     )
     result = trainer.train()
 
@@ -951,6 +982,10 @@ def main() -> int:
     ap.set_defaults(checkpointing=True)
     ap.add_argument("--quant4", action="store_true",
                     help="QLoRA: nf4 base for long-sequence training on 24 GB")
+    ap.add_argument("--early-stop-loss", type=float, default=0.08,
+                    help="stop once training loss holds at/below this for two "
+                         "logs; 0 disables. The loss curve is readable, so a "
+                         "fixed epoch count is a guess paid for on every pack")
     ap.add_argument("--multi-gpu", action="store_true",
                     help="split base layers across all visible GPUs")
     ap.add_argument("--vram-fraction", type=float, default=0.92,
@@ -978,7 +1013,7 @@ def main() -> int:
         return do_train(a.pack, a.base, a.rank, a.alpha, a.epochs, a.lr,
                         a.seed, a.max_len, a.tag, a.batch, a.accum,
                         a.checkpointing, a.vram_fraction, a.quant4,
-                        a.multi_gpu)
+                        a.multi_gpu, a.early_stop_loss)
     if a.forgetting:
         return do_forgetting(a.pack, a.base, a.tag, a.n_control)
     ap.print_help()
