@@ -55,6 +55,7 @@ DIST = HERE / "dist"
 MANIFEST = "capability.json"
 ADAPTER_FILES = ("adapter_model.safetensors", "adapter_config.json")
 GGUF_NAME = "adapter.gguf"
+DATASET_NAME = "training-data.jsonl"
 def _ollama_url() -> str:
     """Where to DIAL Ollama.
 
@@ -281,6 +282,10 @@ def do_build(pack: str, tag: str, key: str | None, version: str) -> int:
         gguf_err = to_gguf(run_dir, manifest["base"]["repo"], gguf)
     if gguf.exists():
         manifest["adapter"]["gguf_bytes"] = gguf.stat().st_size
+    data_src = run_dir.parent / "dataset.jsonl"
+    if data_src.exists():
+        manifest["training"]["examples_included"] = sum(
+            1 for line in data_src.read_text(encoding="utf-8").splitlines() if line.strip())
 
     if key:
         from yantrikdb import YantrikDB
@@ -301,6 +306,14 @@ def do_build(pack: str, tag: str, key: str | None, version: str) -> int:
             # The whole reason install can be one command on a machine
             # with nothing but Ollama.
             z.write(gguf, GGUF_NAME)
+        data = run_dir.parent / "dataset.jsonl"
+        if data.exists():
+            # The weights are a delta against ONE checkpoint; the
+            # verified examples that produced them are model-neutral.
+            # Shipping them is what lets somebody with their own GPU
+            # recompile this capability for their own base instead of
+            # being limited to the one we happened to train against.
+            z.write(data, DATASET_NAME)
         con = HERE / src_pack / "constitution.md"
         if con.exists():
             # The source of the compiled behaviour ships with it. A
@@ -445,6 +458,64 @@ def install_into_ollama(dest: Path, man: dict) -> int:
     return 0
 
 
+def do_recompile(cap: Path, base: str, tag: str, epochs: int, rank: int,
+                 extra: list[str]) -> int:
+    """Retrain this capability for a base of your choosing.
+
+    The weights inside a .ycap are a delta against one checkpoint, so a
+    published capability only fits the base it was compiled for. The
+    VERIFIED EXAMPLES that produced those weights are model-neutral, and
+    they ship in the same file — which means anyone with a GPU is not
+    limited to the base we happened to pick.
+
+    This is the honest form of "portable capability". Nothing about a
+    LoRA transfers across models; the training set does. Roughly half an
+    hour on a consumer card, and the result is a capability for YOUR
+    model, gradeable with the same checker that produced the number on
+    the listing.
+    """
+    import subprocess
+
+    man = load_manifest(cap)
+    with zipfile.ZipFile(cap) as z:
+        if DATASET_NAME not in z.namelist():
+            print(f"{man['name']}@{man['version']} predates dataset shipping and "
+                  f"carries no training examples — it can only be used on "
+                  f"{man['base']['repo']}.", file=sys.stderr)
+            return 2
+        pack = f"{man['name']}-craft"
+        out = RUNS / pack
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "dataset.jsonl").write_bytes(z.read(DATASET_NAME))
+        n = sum(1 for line in (out / "dataset.jsonl").read_text(encoding="utf-8")
+                .splitlines() if line.strip())
+
+    print(f"{man['name']}@{man['version']}: {n} verified examples "
+          f"(originally compiled for {man['base']['repo']})")
+    print(f"recompiling for {base} — rank {rank}, up to {epochs} epochs, tag {tag}\n")
+
+    py = os.environ.get("YANTRIK_CONVERT_PYTHON")
+    if not py:
+        c1 = HERE.parent / ".venv-compile" / "Scripts" / "python.exe"
+        c2 = HERE.parent / ".venv-compile" / "bin" / "python"
+        py = str(c1 if c1.exists() else c2 if c2.exists() else sys.executable)
+
+    cmd = [py, str(HERE / "compile.py"), "--pack", pack, "--train",
+           "--base", base, "--rank", str(rank), "--alpha", str(rank * 2),
+           "--epochs", str(epochs), "--tag", tag, *extra]
+    r = subprocess.run(cmd)
+    if r.returncode != 0:
+        return r.returncode
+
+    print(f"\n  Trained. Package it as your own capability:")
+    print(f"    python packs/bundle.py build {man['name']} --tag {tag} "
+          f"--version <yours> [--key <your secret>]")
+    print(f"\n  Then measure it before believing it — the grader that produced")
+    print(f"  the published number is packs/{man['name']}/craft.py:")
+    print(f"    python packs/evaluate_craft.py --pack {man['name']} --adapter {pack}")
+    return 0
+
+
 def do_install(cap: Path, db_path: str, ollama: bool = True) -> int:
     if do_verify(cap, None) != 0:
         print("refusing to install an artifact that does not verify", file=sys.stderr)
@@ -505,6 +576,14 @@ def main() -> int:
     l = sub.add_parser("list")
     l.add_argument("--db", required=True)
 
+    c = sub.add_parser("recompile", help="retrain this capability for your own base")
+    c.add_argument("cap", type=Path)
+    c.add_argument("--base", required=True, help="HF repo id of YOUR base model")
+    c.add_argument("--tag", default="mine")
+    c.add_argument("--epochs", type=int, default=20)
+    c.add_argument("--rank", type=int, default=16)
+    c.add_argument("rest", nargs="*", help="extra flags passed to compile.py --train")
+
     a = ap.parse_args()
     if a.cmd == "build":
         return do_build(a.pack, a.tag, a.key, a.version)
@@ -514,6 +593,8 @@ def main() -> int:
         return do_install(a.cap, a.db, ollama=not a.no_ollama)
     if a.cmd == "list":
         return do_list(a.db)
+    if a.cmd == "recompile":
+        return do_recompile(a.cap, a.base, a.tag, a.epochs, a.rank, a.rest)
     return 2
 
 
