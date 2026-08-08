@@ -200,7 +200,16 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(body)
 
     def do_GET(self):
-        if self.path.startswith("/api/tags"):
+        if self.path.startswith("/v1/models"):
+            # OpenAI-compatible listing. Every adapter is its own model
+            # id, which is how vLLM exposes them and how a client picks
+            # a capability — no mount call, no server state, just the
+            # name in the request.
+            names = ["base"] + STATE.get("adapters", [])
+            self._send(200, {"object": "list",
+                             "data": [{"id": n, "object": "model",
+                                       "owned_by": "yantrikdb"} for n in names]})
+        elif self.path.startswith("/api/tags"):
             names = ["base"] + STATE.get("adapters", [])
             self._send(200, {"models": [{"name": n} for n in names]})
         elif self.path.startswith("/api/caps"):
@@ -293,8 +302,46 @@ class Handler(BaseHTTPRequestHandler):
                     was, STATE["mounted"] = STATE.get("mounted"), None
                     self._send(200, {"unmounted": was})
             return
+        if self.path.startswith("/v1/chat/completions"):
+            # The surface every OpenAI-compatible client speaks —
+            # Hermes, and most other harnesses, have no inference
+            # runtime of their own and are HTTP clients pointed at
+            # something like this. Serving it means a capability is
+            # selectable by any of them with no plugin and no
+            # integration: the model field IS the choice.
+            n = int(self.headers.get("Content-Length", 0))
+            try:
+                req = json.loads(self.rfile.read(n) or b"{}")
+            except json.JSONDecodeError:
+                self._send(400, {"error": {"message": "bad json"}})
+                return
+            model = req.get("model", "base")
+            try:
+                answer = generate(
+                    model,
+                    req.get("messages", []),
+                    int(req.get("max_tokens") or req.get("max_completion_tokens") or 2048),
+                    float(req.get("temperature", 0.0)),
+                )
+            except Exception as e:                             # noqa: BLE001
+                self._send(500, {"error": {"message": str(e), "type": "server_error"}})
+                return
+            self._send(200, {
+                "id": "chatcmpl-yantrik", "object": "chat.completion",
+                "created": 0, "model": model,
+                "choices": [{"index": 0, "finish_reason": "stop",
+                             "message": {"role": "assistant", "content": answer}}],
+                # Clients display these; reporting zeros would be a lie
+                # about cost, so give a character-based estimate and do
+                # not dress it up as a real token count.
+                "usage": {"prompt_tokens": sum(len(m.get("content") or "")
+                                               for m in req.get("messages", [])) // 4,
+                          "completion_tokens": len(answer) // 4,
+                          "total_tokens": 0},
+            })
+            return
         if not self.path.startswith("/api/chat"):
-            self._send(404, {"error": "only /api/chat and /api/caps/*"})
+            self._send(404, {"error": "only /api/chat, /v1/chat/completions and /api/caps/*"})
             return
         n = int(self.headers.get("Content-Length", 0))
         try:

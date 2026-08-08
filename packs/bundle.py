@@ -40,6 +40,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
+import re
 import sys
 import zipfile
 from datetime import datetime, timezone
@@ -52,6 +54,107 @@ DIST = HERE / "dist"
 
 MANIFEST = "capability.json"
 ADAPTER_FILES = ("adapter_model.safetensors", "adapter_config.json")
+GGUF_NAME = "adapter.gguf"
+def _ollama_url() -> str:
+    """Where to DIAL Ollama.
+
+    Not plain OLLAMA_HOST. That variable is conventionally a *bind*
+    address — `0.0.0.0` on a machine that serves — and dialling it fails
+    while looking like Ollama is simply absent. evaluate.py carries the
+    same warning after the same bug; I inherited OLLAMA_HOST anyway and
+    got "not reachable at http://0.0.0.0:11434" on a machine where
+    Ollama was running the whole time.
+
+    So: an explicit YANTRIK_OLLAMA wins, OLLAMA_HOST is used only when
+    it names a real host, and the wildcard falls back to loopback.
+    """
+    raw = (os.environ.get("YANTRIK_OLLAMA")
+           or os.environ.get("OLLAMA_HOST") or "").strip()
+    if not raw:
+        raw = "127.0.0.1:11434"
+    host = raw.split("://")[-1]
+    if host.split(":")[0] in ("0.0.0.0", "::", "[::]", ""):
+        host = "127.0.0.1" + (":" + host.split(":", 1)[1] if ":" in host else ":11434")
+    if ":" not in host:
+        host += ":11434"
+    return f"http://{host}".rstrip("/")
+
+
+OLLAMA = _ollama_url()
+
+
+def ollama_up(timeout: int = 3) -> bool:
+    import urllib.request
+    try:
+        urllib.request.urlopen(f"{OLLAMA}/api/tags", timeout=timeout).read()
+        return True
+    except Exception:                                          # noqa: BLE001
+        return False
+
+
+def ollama_models() -> list[str]:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"{OLLAMA}/api/tags", timeout=10) as r:
+            return [m["name"] for m in json.load(r).get("models", [])]
+    except Exception:                                          # noqa: BLE001
+        return []
+
+
+def to_gguf(adapter_dir: Path, base_repo: str, out: Path) -> str | None:
+    """Convert a peft adapter to a GGUF LoRA, publisher-side.
+
+    Done at BUILD time on purpose. The conversion needs llama.cpp's
+    `conversion` package — a sparse clone, not a pip install — and
+    asking every consumer to set that up would put a toolchain between
+    someone and a working local model. The publisher pays it once and
+    ships the result inside the .ycap.
+
+    Returns a reason string on failure rather than raising: a capability
+    without a GGUF is still perfectly usable through a Python serving
+    process, so this is a missing convenience, not a broken build.
+    """
+    import subprocess
+
+    conv = os.environ.get("LLAMA_CPP_DIR")
+    cands = [Path(conv)] if conv else []
+    cands += [HERE.parent / "vendor" / "llama.cpp", Path.home() / "llama.cpp"]
+    repo = next((c for c in cands if (c / "convert_lora_to_gguf.py").exists()), None)
+    if repo is None:
+        return ("no llama.cpp checkout found — set LLAMA_CPP_DIR to one with "
+                "convert_lora_to_gguf.py and its conversion/ package")
+
+    # The converter reads config.json off the base, so it needs the
+    # resolved snapshot on disk. A bare repo id is treated as a path and
+    # fails with a confusing FileNotFoundError.
+    cache = (Path.home() / ".cache" / "huggingface" / "hub" /
+             f"models--{base_repo.replace('/', '--')}")
+    ref = cache / "refs" / "main"
+    if not ref.exists():
+        return f"base {base_repo} is not in the local HF cache; cannot resolve its config"
+    snap = cache / "snapshots" / ref.read_text(encoding="utf-8").strip()
+
+    # The converter needs transformers and gguf. Prefer the training
+    # venv, which by construction has both — bundle.py itself is run
+    # from the light pack venv and must not require them.
+    py = os.environ.get("YANTRIK_CONVERT_PYTHON")
+    if not py:
+        cand = HERE.parent / ".venv-compile" / "Scripts" / "python.exe"
+        cand2 = HERE.parent / ".venv-compile" / "bin" / "python"
+        py = str(cand if cand.exists() else cand2 if cand2.exists() else sys.executable)
+
+    try:
+        r = subprocess.run(
+            [py, str(repo / "convert_lora_to_gguf.py"),
+             "--base", str(snap), "--outfile", str(out), "--outtype", "f16",
+             str(adapter_dir)],
+            capture_output=True, text=True, timeout=900)
+    except Exception as e:                                     # noqa: BLE001
+        return f"converter failed to run: {e}"
+    if r.returncode != 0 or not out.exists():
+        tail = (r.stderr or r.stdout or "").strip().splitlines()[-1:] or ["unknown"]
+        return f"conversion failed: {tail[0][:160]}"
+    return None
 
 
 def digest_of(paths: list[Path]) -> str:
@@ -171,19 +274,33 @@ def do_build(pack: str, tag: str, key: str | None, version: str) -> int:
         },
     }
 
+    DIST.mkdir(parents=True, exist_ok=True)
+    gguf = run_dir / GGUF_NAME
+    gguf_err = None
+    if not gguf.exists():
+        gguf_err = to_gguf(run_dir, manifest["base"]["repo"], gguf)
+    if gguf.exists():
+        manifest["adapter"]["gguf_bytes"] = gguf.stat().st_size
+
     if key:
         from yantrikdb import YantrikDB
         manifest["signature"] = {
             "publisher_pubkey": YantrikDB.pubkey_of(key),
             "value": YantrikDB.sign_bytes(key, canonical_bytes(manifest)),
         }
+    # NOTHING may mutate `manifest` past this point. Adding a field after
+    # signing is how the marketplace validator came to report every
+    # genuine capability as forged, and how this build did the same.
 
-    DIST.mkdir(parents=True, exist_ok=True)
     out = DIST / f"{src_pack}-{version}.ycap"
     with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         z.writestr(MANIFEST, json.dumps(manifest, indent=2))
         for f in files:
             z.write(f, f.name)
+        if gguf.exists():
+            # The whole reason install can be one command on a machine
+            # with nothing but Ollama.
+            z.write(gguf, GGUF_NAME)
         con = HERE / src_pack / "constitution.md"
         if con.exists():
             # The source of the compiled behaviour ships with it. A
@@ -199,6 +316,11 @@ def do_build(pack: str, tag: str, key: str | None, version: str) -> int:
         for arm, v in manifest["efficacy"]["arms"].items():
             print(f"  {arm:<16} {v['mean']}/{v['checks']}  full-pass {v['full_pass']}/{v['n']}")
     print(f"  signed    {'yes' if key else 'NO — unsigned, installs at lowest trust'}")
+    if gguf.exists():
+        print(f"  gguf      {gguf.stat().st_size / 1e6:.1f} MB — installs straight into Ollama")
+    else:
+        print(f"  gguf      not included: {gguf_err}")
+        print("            (still usable through a Python serving process)")
     return 0
 
 
@@ -247,7 +369,83 @@ def cap_dir(db_path: str) -> Path:
     return p.with_name(p.stem + ".caps")
 
 
-def do_install(cap: Path, db_path: str) -> int:
+def base_tag(base_repo: str) -> str:
+    """The Ollama tag most likely to hold this base.
+
+    A guess, and it is reported as one. Ollama names models by family
+    and size, HuggingFace by org and repo; there is no registry mapping
+    the two, so anything here is a heuristic and the user is shown what
+    was tried when it misses.
+    """
+    name = base_repo.split("/")[-1].lower()          # qwen3.5-4b
+    m = re.match(r"([a-z]+[\d.]*)-([\d.]+b)", name)
+    return f"{m.group(1)}:{m.group(2)}" if m else name
+
+
+def install_into_ollama(dest: Path, man: dict) -> int:
+    """Make the capability an ordinary local model.
+
+    This is the shape that matters: afterwards there is no daemon to
+    run, no mount call, and no plugin. `ollama list` shows it, Ollama's
+    OpenAI-compatible /v1 serves it, and any harness that speaks that
+    API selects it by name. Ollama also stores the base once and layers
+    the adapter on top, so a second capability on the same base costs
+    only its adapter, not another copy of the model.
+    """
+    import subprocess
+
+    gguf = dest / GGUF_NAME
+    if not gguf.exists():
+        print("  ollama: this build ships no GGUF adapter, so it cannot become "
+              "an Ollama model.\n          Serve it with packs/serve_compiled.py instead.")
+        return 0
+    if not ollama_up():
+        print(f"  ollama: not reachable at {OLLAMA} — skipped.\n"
+              f"          Start it and re-run, or serve with packs/serve_compiled.py.")
+        return 0
+
+    have = ollama_models()
+    want = base_tag(man["base"]["repo"])
+    match = next((m for m in have if m.split(":")[0] == want.split(":")[0]
+                  and want.split(":")[1] in m), None)
+    if not match:
+        near = [m for m in have if m.split(":")[0] == want.split(":")[0]]
+        print(f"  ollama: base not found. This capability was compiled against "
+              f"{man['base']['repo']}.")
+        print(f"          Tried to match `{want}`."
+              + (f" You have: {', '.join(near[:4])}" if near else ""))
+        print(f"          Pull a matching base, then re-run install.")
+        return 0
+
+    name = man["name"]
+    (dest / "Modelfile").write_text(f"FROM {match}\nADAPTER ./{GGUF_NAME}\n",
+                                    encoding="utf-8")
+    r = subprocess.run(["ollama", "create", name, "-f", str(dest / "Modelfile")],
+                       capture_output=True, text=True, cwd=str(dest), timeout=900)
+    if r.returncode != 0:
+        print(f"  ollama: create failed — {(r.stderr or '').strip().splitlines()[-1:] or ['?']}")
+        return 0
+
+    print(f"\n  Ready. `{name}` is now a local model on top of {match}.")
+    print(f"    ollama run {name}")
+    print(f"    curl {OLLAMA}/v1/chat/completions -d '{{\"model\":\"{name}\", ...}}'")
+    print(f"\n  Point any agent at {OLLAMA}/v1 and pick `{name}` as the model.")
+    print(f"  Nothing else to run — no daemon, no mount call.")
+    # Measured, not assumed. This base reasons by default and the
+    # reasoning spends the whole token budget: on /v1 a request came
+    # back with 13,347 characters of reasoning and 809 of content, and
+    # an earlier one was empty with done_reason=stop. Sending
+    # chat_template_kwargs {"enable_thinking": false} on /v1 did NOT
+    # suppress it; "think": false on /api/chat did, and the same brief
+    # then scored 13/15 against the base model's 8/15.
+    print(f"\n  Thinking mode matters on this base. Send \"think\": false on")
+    print(f"  {OLLAMA}/api/chat. On /v1, chat_template_kwargs did not")
+    print(f"  suppress it here — reasoning ate the budget and answers came back")
+    print(f"  short or empty. Hermes sets think=false itself.")
+    return 0
+
+
+def do_install(cap: Path, db_path: str, ollama: bool = True) -> int:
     if do_verify(cap, None) != 0:
         print("refusing to install an artifact that does not verify", file=sys.stderr)
         return 1
@@ -257,7 +455,8 @@ def do_install(cap: Path, db_path: str) -> int:
     with zipfile.ZipFile(cap) as z:
         z.extractall(dest)
     print(f"installed {man['name']}@{man['version']} -> {dest}")
-    print(f"  mount with: python packs/cap.py mount {man['name']}")
+    if ollama:
+        return install_into_ollama(dest, man)
     return 0
 
 
@@ -300,6 +499,8 @@ def main() -> int:
     i = sub.add_parser("install")
     i.add_argument("cap", type=Path)
     i.add_argument("--db", required=True)
+    i.add_argument("--no-ollama", action="store_true",
+                   help="install the files only; do not create a local model")
 
     l = sub.add_parser("list")
     l.add_argument("--db", required=True)
@@ -310,7 +511,7 @@ def main() -> int:
     if a.cmd == "verify":
         return do_verify(a.cap, a.pubkey)
     if a.cmd == "install":
-        return do_install(a.cap, a.db)
+        return do_install(a.cap, a.db, ollama=not a.no_ollama)
     if a.cmd == "list":
         return do_list(a.db)
     return 2
