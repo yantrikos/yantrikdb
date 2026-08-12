@@ -1016,11 +1016,24 @@ class TestTenantIsolation:
 
 def test_recall_as_of_rolls_back_corrections():
     """Bitemporal recall: a correction after t must not rewrite what was
-    believed at t."""
+    believed at t.
+
+    Uses the BUNDLED embedder, deliberately. This previously called
+    ``set_embedder_named("potion-base-8M")``, which downloads a 28 MB
+    artifact from GitHub Releases — so a test of ``recall_as_of``
+    semantics failed whenever CI could not complete that download. On
+    GitHub runners that is often: it failed FOUR CONSECUTIVE retries on
+    two different runner architectures, while succeeding at 5 MB/s from
+    a developer machine. Retrying is not the remedy when the environment
+    cannot complete the transfer at all.
+
+    The download path has its own retry and its own coverage. What this
+    test needs is *an* embedder, not a *particular* one — so it takes the
+    one compiled into the binary and touches no network.
+    """
     import time
 
-    db = YantrikDB(":memory:", 256)
-    db.set_embedder_named("potion-base-8M")
+    db = YantrikDB.with_default(":memory:")
     rid = db.record_text("The deadline is March 1st", importance=0.9)
     time.sleep(0.03)
     t_mid = time.time()
