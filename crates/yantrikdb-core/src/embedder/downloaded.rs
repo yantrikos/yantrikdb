@@ -184,6 +184,91 @@ fn extract_tarball_to(bytes: &[u8], dest_dir: &std::path::Path) -> Result<()> {
     Ok(())
 }
 
+/// How many times to attempt the artifact download before giving up.
+/// 4 attempts with 1s/2s/4s backoff — bounded so a genuinely offline
+/// caller waits ~7s, not minutes.
+const DOWNLOAD_ATTEMPTS: u32 = 4;
+
+/// Fetch the artifact, retrying only what is worth retrying.
+///
+/// The download was single-shot: one `ureq::get(...).call()` followed by
+/// one `read_to_end`, with no retry anywhere. The artifacts are 28-125 MB,
+/// so a single connection reset ANYWHERE in that stream failed the whole
+/// call permanently — surfacing as
+/// `download <url>: Network Error: Unexpected EOF`. CI hit exactly that,
+/// and CI is the lucky case: a job can be re-run, whereas a user calling
+/// `set_embedder_named` on an imperfect connection just gets a hard error
+/// on a healthy asset.
+///
+/// WHAT IS RETRIED, and what deliberately is not:
+/// - transport errors (reset, truncated read, DNS, timeout) — retried,
+///   because they say nothing about whether the asset exists;
+/// - HTTP 5xx and 429 — retried, transient by definition;
+/// - HTTP 4xx other than 429 — NOT retried. A 404 means the release asset
+///   is missing or the tag is wrong, and hammering it wastes the caller's
+///   time to reach the same conclusion.
+///
+/// Integrity is NOT this function's job: the SHA-256 check downstream
+/// remains the sole authority, so a retry can never smuggle in a
+/// truncated body — a short read either fails here or fails the digest.
+fn download_with_retry(url: &str) -> Result<Vec<u8>> {
+    use std::io::Read;
+
+    let mut last_err = String::new();
+    for attempt in 1..=DOWNLOAD_ATTEMPTS {
+        let outcome = ureq::get(url)
+            .set(
+                "User-Agent",
+                concat!("yantrikdb/", env!("CARGO_PKG_VERSION")),
+            )
+            .call();
+
+        let retryable = match &outcome {
+            Ok(_) => false,
+            // A status response reached us: retry only 429/5xx.
+            Err(ureq::Error::Status(code, _)) => *code == 429 || *code >= 500,
+            // Never got a usable response — always worth another try.
+            Err(ureq::Error::Transport(_)) => true,
+        };
+
+        match outcome {
+            Ok(resp) => {
+                let mut bytes = Vec::with_capacity(64 * 1024 * 1024);
+                match resp.into_reader().read_to_end(&mut bytes) {
+                    Ok(_) => return Ok(bytes),
+                    // A truncated body is the exact failure this exists
+                    // for, and it only shows up mid-stream — so the read
+                    // has to be inside the retry, not just the call.
+                    Err(e) => last_err = format!("read body: {e}"),
+                }
+            }
+            Err(e) => {
+                last_err = format!("download {url}: {e}");
+                if !retryable {
+                    return Err(YantrikDbError::InvalidInput(last_err));
+                }
+            }
+        }
+
+        if attempt < DOWNLOAD_ATTEMPTS {
+            let backoff = std::time::Duration::from_secs(1 << (attempt - 1));
+            tracing::warn!(
+                target: "yantrikdb::embedder::download",
+                url = url,
+                attempt,
+                of = DOWNLOAD_ATTEMPTS,
+                backoff_secs = backoff.as_secs(),
+                error = %last_err,
+                "artifact download failed; retrying"
+            );
+            std::thread::sleep(backoff);
+        }
+    }
+    Err(YantrikDbError::InvalidInput(format!(
+        "{last_err} (after {DOWNLOAD_ATTEMPTS} attempts)"
+    )))
+}
+
 /// Download the asset, verify SHA-256, extract into the cache dir.
 /// Atomic via tmp dir + rename: a partially-extracted cache dir is
 /// never left visible.
@@ -208,18 +293,7 @@ fn fetch_and_extract(model: &DownloadableModel, name: &str) -> Result<PathBuf> {
     // Buffer the full tarball into memory (28-125 MB). Stream-decompress
     // would save peak RSS, but the simpler path is fine for the user-
     // initiated, infrequent case set_embedder_named is called in.
-    let resp = ureq::get(&url)
-        .set(
-            "User-Agent",
-            concat!("yantrikdb/", env!("CARGO_PKG_VERSION")),
-        )
-        .call()
-        .map_err(|e| YantrikDbError::InvalidInput(format!("download {url}: {e}")))?;
-
-    let mut bytes = Vec::with_capacity(64 * 1024 * 1024);
-    resp.into_reader()
-        .read_to_end(&mut bytes)
-        .map_err(|e| YantrikDbError::InvalidInput(format!("read body: {e}")))?;
+    let bytes = download_with_retry(&url)?;
 
     // SHA-256 verify before we trust the bytes for anything else.
     let mut hasher = Sha256::new();
@@ -492,5 +566,47 @@ mod tests {
         // L2-normalized output (model2vec config has normalize=true).
         let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!((norm - 1.0).abs() < 1e-3, "expected unit norm; got {norm}");
+    }
+
+    /// The retry policy's decision table, asserted directly.
+    ///
+    /// The value of a retry loop is entirely in WHAT it refuses to retry:
+    /// retrying a 404 just makes a missing asset take four times as long
+    /// to report. This pins the classification so a later edit cannot
+    /// quietly turn "give up immediately" into "hammer the server".
+    #[test]
+    fn only_transient_failures_are_retryable() {
+        fn retryable(e: &ureq::Error) -> bool {
+            match e {
+                ureq::Error::Status(code, _) => *code == 429 || *code >= 500,
+                ureq::Error::Transport(_) => true,
+            }
+        }
+        let resp = |code: u16| {
+            ureq::Error::Status(
+                code,
+                ureq::Response::new(code, "x", "").expect("synthetic response"),
+            )
+        };
+        // Transient: the asset may well be fine.
+        assert!(retryable(&resp(500)), "5xx must retry");
+        assert!(retryable(&resp(503)), "503 must retry");
+        assert!(retryable(&resp(429)), "429 must retry");
+        // Terminal: retrying cannot change the answer.
+        assert!(
+            !retryable(&resp(404)),
+            "404 must NOT retry — asset is absent"
+        );
+        assert!(!retryable(&resp(403)), "403 must NOT retry");
+        assert!(!retryable(&resp(400)), "400 must NOT retry");
+    }
+
+    /// Backoff must be bounded, so an offline caller fails fast rather
+    /// than hanging. 1+2+4 = 7s across 4 attempts.
+    #[test]
+    fn backoff_is_bounded() {
+        let total: u64 = (1..DOWNLOAD_ATTEMPTS).map(|a| 1u64 << (a - 1)).sum();
+        assert_eq!(total, 7, "expected 1s+2s+4s of backoff, got {total}s");
+        assert!(total <= 10, "an offline caller must not wait minutes");
     }
 }
