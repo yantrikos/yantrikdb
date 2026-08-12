@@ -1,0 +1,24 @@
+[pack]
+name = "web-craft"
+version = "0.3.1"
+origin = "yantrik/web-craft"
+namespace = "web_craft"
+description = "Design guidance for writing a genuinely good self-contained web page by hand: no build step, no CDN, no webfonts, no remote assets, renders with the network unplugged. 14 constitution rules plus 25 corpus facts covering page ground and card surfaces, an oklch colour system with one accent and separate semantics, type scale with distinct display and body settings, measure, spacing rhythm, section separation, elevation, dark mode as a second design, motion choreography, focus and selection detail, real copy, and the specific default looks that read as machine-made. WRITTEN AS FLOORS, NOT ONLY CEILINGS. The previous version was written the way you brief a human designer, mostly restraint, and a small model applied every prohibition absolutely and produced a stripped page: pure black ground, no card surfaces, hero missing. So every do-less rule here is paired with a concrete minimum stated first, and prefers a checkable number to an adjective. PROVENANCE: authored by qwen/qwen3.8-max against that brief, for consumption by a smaller local model. MEASURED, and the honest limits: on one clean run against qwen3.6:35b-a3b the pack took the same prompt from a generic page to an 18k-character complete one -- oklch used 25 times, card radius present, no pure black. That is N=1, the pack is unsigned, and two of its own floors (focus-visible rings and tabular figures) were NOT adopted in that run. Scope is one hand-written page; it says nothing about frameworks or bundlers and is not a substitute for a designer."
+coverage = [
+    "web-craft writing a complete self-contained HTML page with no network dependencies",
+    "web-craft colour tokens and supporting light and dark themes correctly",
+    "web-craft type scale, line length and typographic hierarchy",
+    "web-craft spacing systems and responsive layout with grid and flex",
+    "web-craft overflow: letting wide tables and code scroll without the page scrolling sideways",
+    "web-craft hover, focus and motion states",
+    "web-craft inline SVG and CSS gradients instead of photographs",
+    "web-craft what never to put on a page: lorem ipsum, invented facts, the generic AI look",
+]
+
+[content]
+recommended_top_k = 12
+memory_type = "semantic"
+domain = "engineering"
+source = "document"
+importance = 0.6
+certainty = 0.9
