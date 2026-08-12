@@ -71,6 +71,27 @@ jobs:
           # v0.7.0/0.7.1/0.7.2 all hit the same CI failure.
           CFLAGS_aarch64_unknown_linux_gnu: "-D__ARM_ARCH=8 -march=armv8-a"
         with:
+          # **Pinned, not "latest".** Unpinned, the action resolves the
+          # newest maturin at run time and fetches it inside the manylinux
+          # container. On the v0.14.0 publish that fetch failed twice in a
+          # row on x86_64 linux — and only there, because it is the one
+          # target built inside Docker. Two different symptoms, seven
+          # minutes apart:
+          #
+          #   attempt 1  curl: (52) Empty reply from server   (0 bytes)
+          #   attempt 2  gzip: stdin: not in gzip format      (107 bytes)
+          #
+          # 107 bytes is an API error body, not a tarball, so the second
+          # attempt got a well-formed HTTP response carrying the wrong
+          # content. GitHub was fully operational throughout and the
+          # release endpoint answered 200 from outside CI, which rules out
+          # an outage and points at the run-time resolution itself.
+          #
+          # Pinning removes that lookup: the version is a constant, so the
+          # download is a direct asset URL. It also makes the wheel
+          # reproducible — an unpinned build tool silently changes what
+          # produced a published artifact.
+          maturin-version: v1.14.1
           target: ${{ matrix.target }}
           manylinux: ${{ matrix.manylinux }}
           # **abi3.** One wheel per platform, not one per interpreter.
@@ -99,6 +120,10 @@ jobs:
       - name: Build sdist
         uses: PyO3/maturin-action@v1
         with:
+          # Pinned for the same reason as the wheel build above. This job
+          # does not run in a container and did not fail, but an unpinned
+          # build tool is a moving part in a published artifact either way.
+          maturin-version: v1.14.1
           command: sdist
           args: --out dist
 
@@ -144,6 +169,17 @@ jobs:
   publish-crates:
     name: Publish to crates.io
     runs-on: ubuntu-latest
+    # **The irreversible surface must not publish ahead of the recoverable
+    # one.** This job used to have no `needs:` at all, while publish-pypi
+    # waited on the full wheel matrix. On v0.14.0 one wheel failed to build:
+    # publish-pypi was skipped by its own `needs:`, and this job published
+    # anyway. The result was a split release — crates.io on 0.14.0, PyPI
+    # still on 0.13.4 — and crates.io versions are permanent, so the half
+    # that could never be taken back was the half that shipped.
+    #
+    # Same prerequisites as publish-pypi now, so a wheel failure blocks
+    # BOTH registries and the release can be retried as a whole.
+    needs: [build-wheels, build-sdist]
     steps:
       - uses: actions/checkout@v4
 
