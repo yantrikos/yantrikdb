@@ -503,6 +503,14 @@ pub struct PackInfo {
     pub trust: PackTrust,
     pub rows: usize,
     pub tier_multiplier: f64,
+    /// The namespace the pack's rows live under, from its manifest.
+    ///
+    /// Exposed because a consumer whose recall is namespace-scoped CANNOT REACH a mounted pack's
+    /// knowledge without it — it gets the constitution and none of the corpus, while every surface
+    /// (mount returns an id, the pack lists as mounted, rows is non-zero) looks healthy. The Python
+    /// binding hit exactly this and had to work around it via `read_pack_manifest(path)`; a Rust
+    /// embedder had no equivalent escape hatch.
+    pub namespace: Option<String>,
 }
 
 /// The subset of recall's filters that applies to pack candidates.
@@ -1377,6 +1385,7 @@ impl YantrikDB {
                 trust: p.trust,
                 rows: p.index.len(),
                 tier_multiplier: p.trust.tier_multiplier(),
+                namespace: p.manifest.namespace.clone(),
             })
             .collect()
     }
