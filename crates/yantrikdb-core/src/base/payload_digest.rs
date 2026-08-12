@@ -52,9 +52,20 @@
 //!   different matter and IS included: it round-trips exactly, and two writes
 //!   with the same text but different vectors recall differently, so they are
 //!   different writes.
-//! - `rid`, `op_id`, `created_at`, `updated_at`, HLC — per-attempt values. Any
-//!   of them in the digest would make EVERY retry a fresh payload and defeat the
-//!   whole mechanism.
+//! - `rid`, `op_id`, ENGINE-STAMPED `created_at`/`updated_at`, HLC — per-attempt
+//!   values. Any of them in the digest would make EVERY retry a fresh payload
+//!   and defeat the whole mechanism. The CALLER-SUPPLIED `created_at` (the
+//!   historical-import event time on `record`/`record_text`/`record_batch`) is
+//!   the opposite case and IS included when present: it round-trips exactly
+//!   over JSON/PyO3 like every other caller scalar, and two writes differing
+//!   only in event time decay and `recall_as_of` differently — they are
+//!   different writes. It is fed ONLY when `Some`, appended after every v1
+//!   field, so an absent `created_at` digests byte-for-byte as v1 did —
+//!   pre-upgrade claims keep matching their retries with no version bump.
+//!   (Unambiguous despite the module's presence-tag style: every prior field
+//!   is self-delimiting, so a stream either ends after the embedding or
+//!   continues with the created_at tag — no two field assignments collide.
+//!   `absent_created_at_digest_is_byte_identical_to_v1` pins the claim.)
 //! - `route` ('sync' | 'queued') — tracked as its own column on the claim, so
 //!   the same logical write does not conflict with itself for being queued.
 //! - `kind` — a generated column derived from metadata, already covered.
@@ -124,6 +135,10 @@ pub struct PayloadView<'a> {
     /// The CALLER-SUPPLIED embedding. `None` for `record_text`, where the engine
     /// generates the vector and idempotency must be decided before embedding.
     pub embedding: Option<&'a [f32]>,
+    /// The CALLER-SUPPLIED event time (historical import). `None` = the engine
+    /// stamps `now()` per attempt, which must stay OUT of the digest — see the
+    /// module docs for both halves of that rule and the v1-compat feed order.
+    pub created_at: Option<f64>,
 }
 
 impl<'a> PayloadView<'a> {
@@ -151,6 +166,7 @@ impl<'a> PayloadView<'a> {
                 PayloadVariant::Record => Some(&input.embedding),
                 PayloadVariant::RecordText => None,
             },
+            created_at: input.created_at,
         }
     }
 }
@@ -161,6 +177,10 @@ const T_NONE: u8 = 0;
 const T_SOME: u8 = 1;
 const T_NUM: u8 = 10;
 const T_NAN: u8 = 11;
+/// Tag for the trailing caller-supplied `created_at` — fed ONLY when present
+/// (v1 byte-compat for the absent case; module docs). Distinct from every
+/// other tag so the suffix can never read as a continuation of a prior field.
+const T_CREATED_AT: u8 = 30;
 const J_NULL: u8 = 20;
 const J_BOOL: u8 = 21;
 const J_NUM_I64: u8 = 22;
@@ -313,6 +333,13 @@ pub fn payload_digest(v: &PayloadView<'_>) -> [u8; 32] {
     feed_opt_str(&mut h, v.emotional_state);
     feed_json(&mut h, v.metadata);
     feed_embedding(&mut h, v.embedding);
+    // Caller-supplied event time: fed ONLY when present, so an absent
+    // created_at digests byte-for-byte as v1 — the deliberate deviation from
+    // the module's always-tag-presence style, argued in the module docs.
+    if let Some(ts) = v.created_at {
+        h.update(&[T_CREATED_AT]);
+        feed_f64(&mut h, ts);
+    }
     *h.finalize().as_bytes()
 }
 
@@ -336,7 +363,44 @@ mod tests {
             emotional_state: None,
             metadata,
             embedding: None,
+            created_at: None,
         }
+    }
+
+    #[test]
+    fn absent_created_at_digest_is_byte_identical_to_v1() {
+        // THE compat pin for the conditional created_at feed (module docs):
+        // this hex was computed by the v1 construction BEFORE the created_at
+        // field existed. If a refactor ever makes an absent created_at feed
+        // bytes (e.g. "cleaning up" the conditional into a presence tag),
+        // every stored pre-upgrade claim stops matching its retries — this
+        // fails loudly instead.
+        let m = json!({"a": 1});
+        let d = payload_digest(&view("golden pin text", &m));
+        let hex: String = d.iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(
+            hex, "b66864879e42df48f1622f57d7c8b6bcef643357fb0deb318252e176fee1500c",
+            "absent created_at no longer digests as v1 — stored claims from \
+             pre-created_at engines would conflict on honest retries"
+        );
+    }
+
+    #[test]
+    fn created_at_is_digested_when_present() {
+        let m = json!({});
+        let base = payload_digest(&view("t", &m));
+        let mut with_ts = view("t", &m);
+        with_ts.created_at = Some(1_700_000_000.0);
+        let d1 = payload_digest(&with_ts);
+        assert_ne!(base, d1, "created_at not covered");
+        let mut other_ts = view("t", &m);
+        other_ts.created_at = Some(1_700_000_001.0);
+        assert_ne!(
+            d1,
+            payload_digest(&other_ts),
+            "two event times digested equal — a re-dated write would be \
+             swallowed as a retry"
+        );
     }
 
     #[test]
@@ -554,6 +618,7 @@ mod tests {
             domain: "general".to_string(),
             source: "user".to_string(),
             emotional_state: None,
+            created_at: None,
         };
         let a = mk(vec![1.0, 0.0]);
         let b = mk(vec![0.0, 1.0]);

@@ -89,6 +89,7 @@ fn test_record_batch_auto_extracts_entities() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let inputs = vec![
         RecordInput {
+            created_at: None,
             idempotency_key: None,
             text: "Alice Chen is the CEO of Acme Corp".to_string(),
             memory_type: "semantic".to_string(),
@@ -104,6 +105,7 @@ fn test_record_batch_auto_extracts_entities() {
             emotional_state: None,
         },
         RecordInput {
+            created_at: None,
             idempotency_key: None,
             text: "Sarah Kim is the CTO of Acme Corp".to_string(),
             memory_type: "semantic".to_string(),
@@ -708,6 +710,7 @@ fn contract_gate_rejects_invalid_writes() {
     // (no earlier element half-committed), and the error names the position.
     let batch = vec![
         crate::types::RecordInput {
+            created_at: None,
             idempotency_key: None,
             text: "good".into(),
             memory_type: "episodic".into(),
@@ -723,6 +726,7 @@ fn contract_gate_rejects_invalid_writes() {
             emotional_state: None,
         },
         crate::types::RecordInput {
+            created_at: None,
             idempotency_key: None,
             text: "bad".into(),
             memory_type: "episodic".into(),

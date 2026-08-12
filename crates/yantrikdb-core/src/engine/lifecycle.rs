@@ -297,6 +297,84 @@ impl YantrikDB {
         Ok((memories, total))
     }
 
+    /// Fetch one memory by rid, decrypted, or `None` if it does not exist.
+    ///
+    /// The store had no rid point-read: `list_memories` pages and `recall`
+    /// is semantic, so a caller holding a rid — which is what `get_conflicts`,
+    /// `get_edges`, `record_links` and the consolidation APIs all hand back —
+    /// could only resolve it to text by paging the whole namespace. Found
+    /// while wiring LLM conflict resolution, where the conflict record gives
+    /// `memory_a`/`memory_b` as bare rids and the reconciler needs both texts.
+    ///
+    /// Returns the memory regardless of `consolidation_status`: a caller
+    /// naming a specific rid wants that record, not a currency judgement.
+    pub fn get_memory(&self, rid: &str) -> Result<Option<Memory>> {
+        let conn = self.conn();
+        let row = conn
+            .query_row(
+                "SELECT rid, type, text, created_at, importance, valence, half_life, \
+                 last_access, access_count, consolidation_status, storage_tier, \
+                 consolidated_into, metadata, namespace, certainty, domain, source, \
+                 emotional_state, session_id, due_at, temporal_kind \
+                 FROM memories WHERE rid = ?1",
+                rusqlite::params![rid],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, f64>(3)?,
+                        row.get::<_, f64>(4)?,
+                        row.get::<_, f64>(5)?,
+                        row.get::<_, f64>(6)?,
+                        row.get::<_, f64>(7)?,
+                        row.get::<_, i64>(8)?,
+                        row.get::<_, String>(9)?,
+                        row.get::<_, String>(10)?,
+                        row.get::<_, Option<String>>(11)?,
+                        row.get::<_, String>(12)?,
+                        row.get::<_, String>(13)?,
+                        row.get::<_, f64>(14)?,
+                        row.get::<_, String>(15)?,
+                        row.get::<_, String>(16)?,
+                        row.get::<_, Option<String>>(17)?,
+                        row.get::<_, Option<String>>(18)?,
+                        row.get::<_, Option<f64>>(19)?,
+                        row.get::<_, Option<String>>(20)?,
+                    ))
+                },
+            )
+            .optional()?;
+        drop(conn); // decrypt_* must not run under the conn lock (CONCURRENCY.md Rule 4)
+        let Some(row) = row else { return Ok(None) };
+        let text = self.decrypt_text(&row.2)?;
+        let meta_str = self.decrypt_text(&row.12)?;
+        Ok(Some(Memory {
+            rid: row.0,
+            memory_type: row.1,
+            text,
+            created_at: row.3,
+            importance: row.4,
+            valence: row.5,
+            half_life: row.6,
+            last_access: row.7,
+            access_count: row.8 as u32,
+            consolidation_status: row.9,
+            storage_tier: row.10,
+            consolidated_into: row.11,
+            metadata: serde_json::from_str(&meta_str)
+                .unwrap_or(serde_json::Value::Object(Default::default())),
+            namespace: row.13,
+            certainty: row.14,
+            domain: row.15,
+            source: row.16,
+            emotional_state: row.17,
+            session_id: row.18,
+            due_at: row.19,
+            temporal_kind: row.20,
+        }))
+    }
+
     /// Return the head of a chain-shaped namespace — its most recent entry.
     ///
     /// Identity / narrative chains (e.g. a `claude_self_narrative` namespace

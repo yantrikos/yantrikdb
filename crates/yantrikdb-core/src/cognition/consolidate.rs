@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
+use rusqlite::OptionalExtension;
+
 use crate::engine::YantrikDB;
 use crate::error::Result;
 use crate::serde_helpers::{deserialize_f32, serialize_f32};
@@ -142,6 +144,128 @@ pub fn extractive_summary(memories: &[MemoryWithEmbedding]) -> String {
         parts.extend(additional);
         parts.join(" | ")
     }
+}
+
+/// Consolidate an explicit cluster using CALLER-SUPPLIED text.
+///
+/// The default [`consolidate`] path writes [`extractive_summary`] (every
+/// cluster text joined with `" | "`) carrying [`mean_embedding`] — the mean
+/// of the members' vectors. Measured on BEAM (2026-08-11): that costs
+/// accuracy, and the mechanism is EMBEDDING DILUTION rather than lost
+/// content. Nothing is dropped — all N texts survive in the join — but N
+/// precise vectors collapse into one average that matches no specific query
+/// well, and when it does hit it drags N chunks of text into the answerer's
+/// context budget.
+///
+/// This path exists so a caller can supply a real synthesis (e.g. from a
+/// small local model) instead. The crucial difference is not the prose: it
+/// is that the new memory is embedded FROM ITS OWN TEXT via the engine's
+/// embedder, so the vector describes what the record actually says.
+///
+/// Bookkeeping is identical to [`consolidate`] — the same entity transfer,
+/// `consolidation_members` CRDT rows, source marking, and oplog entry — so
+/// the two paths cannot drift. The caller owns only the text.
+///
+/// `embedding`: `None` embeds `text` with the ENGINE's embedder. Callers
+/// whose embedder lives outside the engine (the Python binding's
+/// `set_embedder` path, where the engine itself has none) pass the vector
+/// they computed for `text`. Either way the vector describes THIS TEXT —
+/// that is the contract, and it is what distinguishes this path from the
+/// cluster-mean default.
+///
+/// Refuses an empty cluster, unknown rids, and members already consolidated
+/// (double-consolidating would orphan the first consolidation's members).
+pub fn consolidate_cluster(
+    db: &YantrikDB,
+    source_rids: &[String],
+    text: &str,
+    embedding: Option<&[f32]>,
+) -> Result<serde_json::Value> {
+    if source_rids.is_empty() {
+        return Err(crate::error::YantrikDbError::InvalidInput(
+            "consolidate_cluster: source_rids is empty".into(),
+        ));
+    }
+    if text.trim().is_empty() {
+        return Err(crate::error::YantrikDbError::InvalidInput(
+            "consolidate_cluster: text is empty — the caller owns the synthesis".into(),
+        ));
+    }
+    if let Some(v) = embedding {
+        crate::validate::validate_embedding("consolidate_cluster", v, db.embedding_dim())?;
+    }
+    let members = load_cluster_members(db, source_rids)?;
+    commit_consolidation(db, &members, text, embedding.map(|v| v.to_vec()))
+}
+
+/// Load the named memories, refusing anything that would make the
+/// consolidation incoherent. Shared by [`consolidate_cluster`].
+fn load_cluster_members(
+    db: &YantrikDB,
+    source_rids: &[String],
+) -> Result<Vec<MemoryWithEmbedding>> {
+    let mut out = Vec::with_capacity(source_rids.len());
+    for rid in source_rids {
+        let row: Option<(String, String, f64, f64, f64, f64, String, String, String)> = {
+            let conn = db.conn();
+            conn.query_row(
+                "SELECT type, text, created_at, importance, valence, half_life, \
+                 metadata, namespace, consolidation_status \
+                 FROM memories WHERE rid = ?1",
+                rusqlite::params![rid],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                        r.get(8)?,
+                    ))
+                },
+            )
+            .optional()?
+        };
+        let (
+            memory_type,
+            stored_text,
+            created_at,
+            importance,
+            valence,
+            half_life,
+            meta,
+            ns,
+            status,
+        ) = row.ok_or_else(|| {
+            crate::error::YantrikDbError::NotFound(format!(
+                "consolidate_cluster: memory {rid} not found"
+            ))
+        })?;
+        if status != "active" {
+            return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                "consolidate_cluster: memory {rid} is '{status}', not active — \
+                 consolidating it again would orphan the first consolidation's members"
+            )));
+        }
+        out.push(MemoryWithEmbedding {
+            rid: rid.clone(),
+            memory_type,
+            text: db.decrypt_text(&stored_text)?,
+            embedding: Vec::new(), // unused on this path: the text is re-embedded
+            created_at,
+            importance,
+            valence,
+            half_life,
+            last_access: created_at,
+            metadata: serde_json::from_str(&db.decrypt_text(&meta)?)
+                .unwrap_or_else(|_| serde_json::json!({})),
+            namespace: ns,
+        });
+    }
+    Ok(out)
 }
 
 /// Compute the mean embedding of a set of memories.
@@ -359,16 +483,44 @@ pub fn consolidate(
     }
 
     let mut results = Vec::new();
-    let ts = crate::time::now_secs();
-
     for cluster in &clusters {
-        let source_rids: Vec<String> = cluster.iter().map(|m| m.rid.clone()).collect();
-
-        // 1. Generate summary
+        // The default path keeps its historical behaviour: extractive join
+        // carrying the cluster's MEAN embedding. `consolidate_cluster` is the
+        // opt-in alternative for callers supplying their own synthesis.
         let summary_text = extractive_summary(cluster);
-
-        // 2. Compute mean embedding
         let mean_emb = mean_embedding(cluster);
+        results.push(commit_consolidation(
+            db,
+            cluster,
+            &summary_text,
+            Some(mean_emb),
+        )?);
+    }
+
+    Ok(results)
+}
+
+/// Write one consolidated memory for `cluster` and retire its members.
+///
+/// THE single place consolidation bookkeeping lives, so the default
+/// (extractive + mean-embedding) and caller-supplied paths cannot drift:
+/// entity transfer, `consolidation_members` CRDT rows, source marking with
+/// importance decay, scoring-cache invalidation, and the oplog entry.
+///
+/// `embedding`: `Some(v)` uses the caller's vector (the default path passes
+/// the cluster mean, preserving historical behaviour). `None` embeds
+/// `summary_text` with the engine's embedder — which is the point of the
+/// caller-supplied path, since a vector derived from the actual text
+/// retrieves for what the record says rather than for a cluster average.
+fn commit_consolidation(
+    db: &YantrikDB,
+    cluster: &[MemoryWithEmbedding],
+    summary_text: &str,
+    embedding: Option<Vec<f32>>,
+) -> Result<serde_json::Value> {
+    let ts = crate::time::now_secs();
+    {
+        let source_rids: Vec<String> = cluster.iter().map(|m| m.rid.clone()).collect();
 
         // 3. Aggregate importance
         let max_importance = cluster.iter().map(|m| m.importance).fold(0.0f64, f64::max);
@@ -393,20 +545,36 @@ pub fn consolidate(
             .first()
             .map(|m| m.namespace.as_str())
             .unwrap_or("default");
-        let consolidated_rid = db.record(
-            &summary_text,
-            "semantic",
-            consolidated_importance,
-            mean_valence,
-            consolidated_half_life,
-            &meta,
-            &mean_emb,
-            cluster_namespace,
-            0.8,
-            "general",
-            "user",
-            None,
-        )?;
+        let consolidated_rid = match &embedding {
+            Some(emb) => db.record(
+                summary_text,
+                "semantic",
+                consolidated_importance,
+                mean_valence,
+                consolidated_half_life,
+                &meta,
+                emb,
+                cluster_namespace,
+                0.8,
+                "general",
+                "user",
+                None,
+            )?,
+            // Engine-embedded: the vector comes from the synthesis itself.
+            None => db.record_text(
+                summary_text,
+                "semantic",
+                consolidated_importance,
+                mean_valence,
+                consolidated_half_life,
+                &meta,
+                cluster_namespace,
+                0.8,
+                "general",
+                "user",
+                None,
+            )?,
+        };
 
         // 5. Transfer entity relationships
         let mut all_entities = std::collections::HashSet::new();
@@ -453,7 +621,15 @@ pub fn consolidate(
         } // conn lock released before log_op
 
         // 7. Log the operation
-        let emb_hash = blake3::hash(&serialize_f32(&mean_emb)).as_bytes().to_vec();
+        let logged_emb = match &embedding {
+            Some(v) => v.clone(),
+            // Engine-embedded path: hash the stored vector so the oplog entry
+            // still identifies what was written.
+            None => db.embed(summary_text).unwrap_or_default(),
+        };
+        let emb_hash = blake3::hash(&serialize_f32(&logged_emb))
+            .as_bytes()
+            .to_vec();
         db.log_op(
             "consolidate",
             Some(&consolidated_rid),
@@ -471,17 +647,16 @@ pub fn consolidate(
             Some(&emb_hash),
         )?;
 
-        results.push(serde_json::json!({
+        Ok(serde_json::json!({
             "consolidated_rid": consolidated_rid,
             "source_rids": source_rids,
             "cluster_size": cluster.len(),
             "summary": summary_text,
             "importance": consolidated_importance,
             "entities_linked": all_entities.len(),
-        }));
+            "embedded_from_text": embedding.is_none(),
+        }))
     }
-
-    Ok(results)
 }
 
 #[cfg(test)]

@@ -197,3 +197,40 @@ fn mem_with_emb_to_dict(py: Python<'_>, m: &MemoryWithEmbedding) -> PyResult<PyO
     dict.set_item("metadata", json_to_py(py, &m.metadata)?)?;
     Ok(dict.into())
 }
+
+/// Consolidate an explicit cluster with CALLER-SUPPLIED text.
+///
+/// The default `consolidate()` writes an extractive join of the cluster's
+/// texts carrying the MEAN of their embeddings. Measured on BEAM
+/// (2026-08-11), that costs accuracy through embedding dilution: no content
+/// is lost, but N precise vectors collapse into one average that matches no
+/// specific query well. This entry point lets the caller supply a real
+/// synthesis — e.g. from a small local model — whose vector describes the
+/// text that was actually written.
+///
+/// `embedding`: omit to let the ENGINE embed `text` (requires an engine
+/// embedder). Callers whose embedder is Python-side — `YantrikDB(embedder=…)`
+/// / `set_embedder()`, where the engine itself has none — must pass the
+/// vector they computed for `text`.
+///
+/// Returns the same dict shape as `consolidate()`'s elements, plus
+/// `embedded_from_text` reporting which path produced the vector.
+#[pyfunction]
+#[pyo3(name = "consolidate_cluster", signature = (db, source_rids, text, embedding=None))]
+pub fn py_consolidate_cluster(
+    py: Python<'_>,
+    db: &PyYantrikDB,
+    source_rids: Vec<String>,
+    text: &str,
+    embedding: Option<Vec<f32>>,
+) -> PyResult<PyObject> {
+    let inner = db.get_inner()?;
+    let out = yantrikdb_core::consolidate::consolidate_cluster(
+        inner,
+        &source_rids,
+        text,
+        embedding.as_deref(),
+    )
+    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    json_to_py(py, &out)
+}

@@ -2063,6 +2063,7 @@ impl YantrikDB {
             source,
             emotional_state,
             None,
+            None,
         )
     }
 
@@ -2083,6 +2084,12 @@ impl YantrikDB {
     /// a cross-surface retry is not the same write.
     ///
     /// `None` is byte-for-byte `record_text()`.
+    ///
+    /// `created_at`: caller-supplied event time in epoch seconds (historical
+    /// import — `RecordInput::created_at` has the full contract). `None`
+    /// stamps `now()`. When `Some`, it joins the RecordText digest: a
+    /// re-dated write decays and `recall_as_of`s differently, so it is a
+    /// different write even under the embedding-excluded variant.
     #[allow(clippy::too_many_arguments)]
     pub fn record_text_with_idempotency(
         &self,
@@ -2098,6 +2105,7 @@ impl YantrikDB {
         source: &str,
         emotional_state: Option<&str>,
         idempotency_key: Option<&str>,
+        created_at: Option<f64>,
     ) -> Result<String> {
         // v0.9.3 contract gate: scalars validated BEFORE calibration mutates
         // the namespace's running distribution. (The embedding is engine-
@@ -2111,6 +2119,11 @@ impl YantrikDB {
                 ("half_life", half_life),
             ],
         )?;
+        // Caller-supplied event time: finite or refused, before the digest,
+        // the probe, and the (slow) embed — record()'s gate, same rationale.
+        if let Some(ts) = created_at {
+            crate::validate::validate_scalars("record_text", &[("created_at", ts)])?;
+        }
         // v0.10 Item 4a.4 anti-laundering gate — before the (slow) embed and
         // any side effect. `record_text` bypasses `record()`, so it gates here
         // too (T06 coverage). A warn-mode Flagged verdict is carried to the
@@ -2180,6 +2193,7 @@ impl YantrikDB {
                     emotional_state,
                     metadata,
                     embedding: None,
+                    created_at,
                 };
                 Some((key, crate::payload_digest::payload_digest(&view)))
             }
@@ -2282,6 +2296,7 @@ impl YantrikDB {
                         emotional_state,
                         gate_verdict,
                         idem,
+                        created_at,
                     );
                 }
             };
@@ -2332,6 +2347,7 @@ impl YantrikDB {
                 emotional_state,
                 gate_verdict,
                 idem,
+                created_at,
             );
         }
     }

@@ -583,6 +583,17 @@ pub struct RecordInput {
     /// the same key with a DIFFERENT payload fails the WHOLE batch with a
     /// typed `IdempotencyConflict` — batches stay all-or-nothing on failure.
     pub idempotency_key: Option<String>,
+    /// Caller-supplied event time in epoch seconds (historical import).
+    /// `None` = the engine stamps `now()` — byte-for-byte the pre-field
+    /// behavior. When `Some`, the value lands in `created_at`, `updated_at`,
+    /// AND `last_access` (an imported record was last touched at its event
+    /// time, so decay runs from then, not from the import), feeds the
+    /// replicated op payload verbatim, participates in the idempotency
+    /// digest (a re-dated write is a different write — payload_digest docs),
+    /// and makes `recall_as_of`/`time_window` meaningful on bulk-loaded
+    /// corpora. Precedent: `record_with_rid`'s `created_at_unix_micros` has
+    /// always been caller-supplied on the replication path.
+    pub created_at: Option<f64>,
 }
 
 // ── Conflict types (V2) ──

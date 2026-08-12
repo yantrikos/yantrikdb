@@ -627,6 +627,7 @@ fn record_batch_defers_during_reembed_instead_of_writing_a_doomed_generation() {
     // its own comment claimed every append lands on one anchored generation.
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let inputs = vec![RecordInput {
+        created_at: None,
         idempotency_key: None,
         text: "written during a cutover".to_string(),
         memory_type: "semantic".to_string(),
@@ -756,6 +757,7 @@ fn record_batch_replicates_to_a_peer() {
     let follower = YantrikDB::new(":memory:", 8).unwrap();
 
     let mk = |text: &str, seed: f32| RecordInput {
+        created_at: None,
         idempotency_key: None,
         text: text.to_string(),
         memory_type: "semantic".to_string(),

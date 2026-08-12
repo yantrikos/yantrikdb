@@ -368,6 +368,22 @@ db.stale(days=14)    # high-importance memories not accessed recently
 db.upcoming(days=7)  # memories with approaching deadlines
 ```
 
+**Importing history.** `created_at` (epoch seconds) records an event at the
+time it *happened* rather than the time it was loaded — so a bulk import
+keeps its real timeline and every temporal surface stays meaningful:
+
+```python
+db.record("joined the observatory team", created_at=1_600_000_000.0)
+db.record_batch([{"text": "...", "created_at": ts} for ts in anchors])
+
+db.recall_as_of(march, query="where do they work")  # what was true then
+```
+
+Without it, every imported record shares the ingest wall-clock: decay and
+recency become insertion-order noise, and `recall_as_of` / `time_window`
+filter on a timeline that never existed. Omit it and the engine stamps
+`now()`, exactly as before.
+
 ## Full API
 
 | Operation | Methods |

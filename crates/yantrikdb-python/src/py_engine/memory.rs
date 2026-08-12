@@ -13,7 +13,15 @@ impl PyYantrikDB {
     /// key + same payload returns the ORIGINAL rid with nothing re-written;
     /// same key + different payload raises an idempotency-conflict error. The
     /// trailing kwarg default keeps every existing Python caller unchanged.
-    #[pyo3(signature = (text, memory_type="episodic", importance=0.5, valence=0.0, half_life=604800.0, metadata=None, embedding=None, namespace="default", certainty=0.8, domain="general", source="user", emotional_state=None, idempotency_key=None))]
+    ///
+    /// `created_at` (0.14): caller-supplied event time in epoch seconds, for
+    /// historical import — a bulk-loaded corpus keeps its real timeline, so
+    /// decay/recency, `time_window`, and `recall_as_of` are meaningful instead
+    /// of collapsing onto the ingest wall-clock. `None` stamps now(), the
+    /// prior behavior byte-for-byte. Lands in created_at, updated_at, AND
+    /// last_access (decay runs from the event, not the import), and joins the
+    /// idempotency digest — a re-dated retry is a different write.
+    #[pyo3(signature = (text, memory_type="episodic", importance=0.5, valence=0.0, half_life=604800.0, metadata=None, embedding=None, namespace="default", certainty=0.8, domain="general", source="user", emotional_state=None, idempotency_key=None, created_at=None))]
     #[allow(clippy::too_many_arguments)]
     fn record(
         &self,
@@ -31,6 +39,7 @@ impl PyYantrikDB {
         source: &str,
         emotional_state: Option<&str>,
         idempotency_key: Option<&str>,
+        created_at: Option<f64>,
     ) -> PyResult<String> {
         let db = self
             .inner
@@ -67,6 +76,7 @@ impl PyYantrikDB {
                     source,
                     emotional_state,
                     idempotency_key,
+                    created_at,
                 )
                 .map_err(map_err),
             None if db.has_embedder() => db
@@ -83,6 +93,7 @@ impl PyYantrikDB {
                     source,
                     emotional_state,
                     idempotency_key,
+                    created_at,
                 )
                 .map_err(map_err),
             None => {
@@ -96,7 +107,10 @@ impl PyYantrikDB {
                     ));
                 }
                 let emb = self.embed_text(py, text)?;
-                db.record(
+                // Unkeyed, so the idempotency variant is byte-for-byte
+                // record() — used here only because it is the surface that
+                // carries `created_at`.
+                db.record_with_idempotency(
                     text,
                     memory_type,
                     importance,
@@ -109,6 +123,8 @@ impl PyYantrikDB {
                     domain,
                     source,
                     emotional_state,
+                    None,
+                    created_at,
                 )
                 .map_err(map_err)
             }
@@ -326,7 +342,8 @@ impl PyYantrikDB {
     /// Identical semantics to `record(text=..., embedding=None)` when an
     /// embedder is attached; provided as an explicit surface that mirrors
     /// the engine's `record_text` for users coming from the Rust API.
-    #[pyo3(signature = (text, memory_type="episodic", importance=0.5, valence=0.0, half_life=604800.0, metadata=None, namespace="default", certainty=0.8, domain="general", source="user", emotional_state=None))]
+    #[pyo3(signature = (text, memory_type="episodic", importance=0.5, valence=0.0, half_life=604800.0, metadata=None, namespace="default", certainty=0.8, domain="general", source="user", emotional_state=None, created_at=None))]
+    #[allow(clippy::too_many_arguments)]
     fn record_text(
         &self,
         py: Python<'_>,
@@ -341,6 +358,7 @@ impl PyYantrikDB {
         domain: &str,
         source: &str,
         emotional_state: Option<&str>,
+        created_at: Option<f64>,
     ) -> PyResult<String> {
         let db = self
             .inner
@@ -354,7 +372,10 @@ impl PyYantrikDB {
             None => serde_json::json!({}),
         };
 
-        db.record(
+        // Unkeyed, so the idempotency variant is byte-for-byte record() —
+        // used here only because it is the surface that carries `created_at`
+        // (see record()'s docstring for the historical-import contract).
+        db.record_with_idempotency(
             text,
             memory_type,
             importance,
@@ -367,6 +388,8 @@ impl PyYantrikDB {
             domain,
             source,
             emotional_state,
+            None,
+            created_at,
         )
         .map_err(map_err)
     }
@@ -688,6 +711,21 @@ impl PyYantrikDB {
     fn forget(&self, rid: &str) -> PyResult<bool> {
         let db = self.get_inner()?;
         db.forget(rid).map_err(map_err)
+    }
+
+    /// Fetch one memory by rid, or None.
+    ///
+    /// The binding had no rid point-read: `list_memories` pages and
+    /// `recall` is semantic, so a caller holding a rid — which is what
+    /// `get_conflicts`, `get_edges` and the consolidation APIs all return —
+    /// had to page a namespace to resolve it. Returns the memory whatever
+    /// its consolidation_status: naming a rid asks for THAT record.
+    fn get_memory(&self, py: Python<'_>, rid: &str) -> PyResult<Option<PyObject>> {
+        let db = self.get_inner()?;
+        match db.get_memory(rid).map_err(map_err)? {
+            Some(m) => Ok(Some(memory_to_dict(py, &m)?)),
+            None => Ok(None),
+        }
     }
 
     #[pyo3(signature = (limit=50, offset=0, domain=None, memory_type=None, namespace=None, sort_by="created_at"))]
@@ -1280,6 +1318,14 @@ impl PyYantrikDB {
                 .transpose()?
                 .flatten();
 
+            // Optional per-item event time, same contract as
+            // record(created_at=...) — the historical-import surface.
+            let created_at: Option<f64> = d
+                .get_item("created_at")?
+                .map(|v| v.extract::<Option<f64>>())
+                .transpose()?
+                .flatten();
+
             record_inputs.push(yantrikdb_core::RecordInput {
                 text,
                 memory_type,
@@ -1294,6 +1340,7 @@ impl PyYantrikDB {
                 source,
                 emotional_state,
                 idempotency_key,
+                created_at,
             });
         }
 
