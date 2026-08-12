@@ -69,6 +69,7 @@ fn _yantrikdb_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
         py_consolidate::find_consolidation_candidates,
         m
     )?)?;
+    m.add_function(wrap_pyfunction!(py_consolidate::py_consolidate_cluster, m)?)?;
     m.add_function(wrap_pyfunction!(py_consolidate::py_cosine_similarity, m)?)?;
     m.add_function(wrap_pyfunction!(py_consolidate::py_extractive_summary, m)?)?;
     m.add_function(wrap_pyfunction!(py_consolidate::py_find_clusters, m)?)?;

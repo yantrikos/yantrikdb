@@ -98,6 +98,7 @@ fn t06_anti_laundering_chokepoint() {
     // 4) Bypass path: batch. One inconsistent element refuses the WHOLE
     //    batch before any side effect.
     let mk = |source: &str, meta: serde_json::Value, seed: f32| RecordInput {
+        created_at: None,
         idempotency_key: None,
         text: "t06 batch probe".into(),
         memory_type: "semantic".into(),
@@ -252,6 +253,7 @@ fn t07_repetition_is_not_corroboration() {
             "user",
             None,
             key,
+            None,
         )
     };
 

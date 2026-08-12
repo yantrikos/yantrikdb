@@ -172,6 +172,7 @@ fn test_encrypted_record_batch() {
 
     let inputs: Vec<RecordInput> = (0..5)
         .map(|i| RecordInput {
+            created_at: None,
             idempotency_key: None,
             text: format!("encrypted batch {i}"),
             memory_type: "episodic".to_string(),

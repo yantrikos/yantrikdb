@@ -376,6 +376,7 @@ fn test_batch_record_with_dimensions() {
 
     let inputs: Vec<RecordInput> = vec![
         RecordInput {
+            created_at: None,
             idempotency_key: None,
             text: "batch work meeting".to_string(),
             memory_type: "episodic".to_string(),
@@ -391,6 +392,7 @@ fn test_batch_record_with_dimensions() {
             emotional_state: Some("focus".to_string()),
         },
         RecordInput {
+            created_at: None,
             idempotency_key: None,
             text: "batch health jog".to_string(),
             memory_type: "episodic".to_string(),
@@ -406,6 +408,7 @@ fn test_batch_record_with_dimensions() {
             emotional_state: None,
         },
         RecordInput {
+            created_at: None,
             idempotency_key: None,
             text: "batch personal diary".to_string(),
             memory_type: "semantic".to_string(),

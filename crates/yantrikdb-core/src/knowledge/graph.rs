@@ -98,10 +98,86 @@ const ENTITY_STOPWORDS: &[&str] = &[
     "With", "From", "By", "As", "Than", "Then", "Also", "Just", "Only", "Very", "Much",
 ];
 
+/// Strip fenced code blocks and inline code spans before entity extraction.
+///
+/// The capitalized-chunk heuristic below cannot tell `String`, `User` or
+/// `GET` in a code sample from `Alice`, `Anthropic` or `NASA` in prose — both
+/// are capitalized or all-caps tokens. Measured on a code-bearing
+/// conversation corpus (BEAM, 2026-08-11): ~360 records produced **5,550
+/// entities**, roughly 15 per record, and every conflict the detector then
+/// raised was a false positive keyed on the entity `GET` — pairing two
+/// adjacent chunks of the same turn because both quoted a Flask route.
+/// Garbage entities do not merely add noise: they invent `entity`-scoped
+/// conflicts, inflate `mention_count`, and give graph expansion spurious
+/// bridges between unrelated records.
+///
+/// Prose is the right domain for a proper-noun heuristic; code is not. This
+/// removes ``` fences and `inline spans` (keeping a space so word chunks do
+/// not weld across the removal) and leaves everything else untouched, so
+/// entities named in the surrounding narrative are still captured.
+///
+/// KNOWN LIMITS, deliberate rather than overlooked (adversarial review,
+/// 2026-08-11). This is a heuristic guard on a heuristic extractor; the
+/// failure it prevents (fabricated entities) is worse than the failure it
+/// allows (a missed entity), so every ambiguous case resolves toward
+/// dropping:
+/// - An UNTERMINATED fence drops the remaining text. This case is COMMON,
+///   not exotic: callers chunk long documents, and a chunk routinely begins
+///   inside a fenced block or ends with one open — so the tail genuinely is
+///   code more often than it is prose. Keeping it would readmit exactly the
+///   identifiers this function exists to remove.
+/// - Escaped backticks (``\` ``) are treated as delimiters, so a span
+///   between two of them is dropped. Costs a missed entity, never a false
+///   one.
+/// - Tilde fences and 4-space indented blocks are NOT recognised; code in
+///   those forms still reaches the extractor. Fixing that needs a markdown
+///   parser, which this deliberately is not.
+fn strip_code(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains('`') {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    // Always act on the EARLIEST marker. Checking for a fence first is wrong:
+    // in "`GET` text ```block```" the fence is found at 11 and the inline tick
+    // at 0, so a fence-first branch emits "`GET` text " verbatim as prose and
+    // the identifier this function exists to remove survives.
+    while let Some(t) = rest.find('`') {
+        out.push_str(&rest[..t]);
+        out.push(' ');
+        let after = &rest[t..];
+        if let Some(body) = after.strip_prefix("```") {
+            // A fenced region may contain single backticks; consume it whole
+            // so they cannot be mis-paired as inline spans.
+            match body.find("```") {
+                Some(end) => rest = &body[end + 3..],
+                None => return std::borrow::Cow::Owned(out), // unterminated: drop the tail
+            }
+        } else {
+            let body = &after[1..];
+            match body.find('`') {
+                Some(end) => rest = &body[end + 1..],
+                None => {
+                    // Unterminated single backtick: keep the remainder as
+                    // prose rather than discarding real text.
+                    out.push_str(body);
+                    return std::borrow::Cow::Owned(out);
+                }
+            }
+        }
+    }
+    out.push_str(rest);
+    std::borrow::Cow::Owned(out)
+}
+
 /// Extract candidate proper-noun entities from free-form text using a
 /// capitalized-chunk heuristic. Groups consecutive capitalized words into
 /// multi-word entities ("Alice Chen", "San Francisco", "Acme Corp") and
 /// strips leading/trailing English stopwords.
+///
+/// Code spans and fenced blocks are removed first (see [`strip_code`]) —
+/// identifiers are not proper nouns, and treating them as entities poisons
+/// conflict detection and graph expansion.
 ///
 /// This is intentionally not a full NER — it captures the common case of
 /// people, companies, places, and products well enough that conflict
@@ -109,6 +185,11 @@ const ENTITY_STOPWORDS: &[&str] = &[
 /// entity. Acronyms, lowercase entities, and ambiguous mentions still need
 /// explicit `relate()` calls to enter the graph.
 pub fn extract_heuristic_entities(text: &str) -> Vec<String> {
+    let stripped = strip_code(text);
+    extract_heuristic_entities_inner(stripped.as_ref())
+}
+
+fn extract_heuristic_entities_inner(text: &str) -> Vec<String> {
     let mut entities: Vec<String> = Vec::new();
     let mut chunk: Vec<String> = Vec::new();
 
@@ -1467,5 +1548,91 @@ mod tests {
         let (s, d) = classify_with_relationship("FAISS", "data pipeline", "related_to");
         assert_eq!(s, "tech");
         assert_eq!(d, "unknown");
+    }
+}
+
+#[cfg(test)]
+mod code_stripping_tests {
+    use super::*;
+
+    #[test]
+    fn code_identifiers_do_not_become_entities() {
+        // The BEAM failure, reduced: a Flask route in a fenced block made
+        // GET/POST/String entities, and the conflict detector then paired
+        // unrelated chunks that merely both quoted a route.
+        let text = "Alice deployed the service.\n\n```python\n\
+                    @app.route('/login', methods=['GET', 'POST'])\n\
+                    def login():\n    data = LoginSchema(String)\n```\n\
+                    She reported it to Acme Corp.";
+        let got = extract_heuristic_entities(text);
+        for bad in ["GET", "POST", "String", "LoginSchema"] {
+            assert!(
+                !got.iter().any(|e| e.contains(bad)),
+                "code identifier {bad:?} leaked into entities: {got:?}"
+            );
+        }
+        // Prose entities on both sides of the block survive.
+        assert!(
+            got.iter().any(|e| e == "Alice"),
+            "lost prose entity: {got:?}"
+        );
+        assert!(
+            got.iter().any(|e| e.contains("Acme")),
+            "lost prose entity after the block: {got:?}"
+        );
+    }
+
+    #[test]
+    fn inline_spans_are_stripped_without_welding_neighbours() {
+        let got = extract_heuristic_entities("Bob set `MAX_RETRIES` Carol reviewed it");
+        assert!(!got.iter().any(|e| e.contains("MAX_RETRIES")), "{got:?}");
+        // The space substituted for the span must keep Bob and Carol apart
+        // rather than producing a single "Bob Carol" chunk.
+        assert!(got.iter().any(|e| e == "Bob"), "{got:?}");
+        assert!(got.iter().any(|e| e == "Carol"), "{got:?}");
+        assert!(!got.iter().any(|e| e == "Bob Carol"), "welded: {got:?}");
+    }
+
+    #[test]
+    fn inline_span_before_a_fence_is_still_stripped() {
+        // Regression: a fence-first branch emitted everything preceding the
+        // fence verbatim, so an inline `GET` earlier in the same text
+        // survived — the exact identifier this function exists to remove.
+        let text = "`GET` Alice then
+```python
+class User: pass
+```
+done";
+        let got = extract_heuristic_entities(text);
+        assert!(
+            !got.iter().any(|e| e.contains("GET")),
+            "inline span leaked: {got:?}"
+        );
+        assert!(
+            !got.iter().any(|e| e.contains("User")),
+            "fence leaked: {got:?}"
+        );
+        assert!(got.iter().any(|e| e == "Alice"), "prose lost: {got:?}");
+    }
+
+    #[test]
+    fn text_without_backticks_is_unchanged() {
+        let plain = "Alice Chen is the CEO of Acme Corp";
+        assert_eq!(
+            extract_heuristic_entities(plain),
+            extract_heuristic_entities_inner(plain),
+            "no-backtick path must be byte-identical to the pre-change behavior"
+        );
+        assert!(matches!(strip_code(plain), std::borrow::Cow::Borrowed(_)));
+    }
+
+    #[test]
+    fn unterminated_markers_do_not_drop_prose() {
+        // A stray single backtick must not swallow the rest of the memory.
+        let got = extract_heuristic_entities("Dave noted ` then Erin shipped it");
+        assert!(
+            got.iter().any(|e| e == "Erin"),
+            "prose lost after stray tick: {got:?}"
+        );
     }
 }

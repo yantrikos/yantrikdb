@@ -1170,3 +1170,59 @@ fn signing_payload_is_unchanged_when_retrieval_settings_are_absent() {
         "changing the floor must change the signed bytes"
     );
 }
+
+/// `PackInfo.namespace` — without it a namespace-scoped consumer cannot
+/// reach a mounted pack's corpus.
+///
+/// The failure this prevents is silent: every surface looks healthy —
+/// `mount_pack` returns an id, the pack lists as mounted, `rows` is
+/// non-zero — while a caller whose recall is namespace-scoped gets the
+/// constitution and none of the corpus, because it has no way to learn
+/// which namespace to scope to. The Python binding worked around it by
+/// re-reading the manifest off disk; a Rust embedder had no escape hatch.
+#[test]
+fn mounted_pack_reports_its_namespace() {
+    let dir = tempfile::tempdir().unwrap();
+    let digest = "sha256:namespace-probe";
+    let pack = dir.path().join("physics.ydbpack");
+    build_pack(
+        dir.path(),
+        pack.to_str().unwrap(),
+        digest,
+        &[("quarks bind via gluons", 1)],
+    );
+
+    let db = host(dir.path(), digest);
+    db.mount_pack(pack.to_str().unwrap()).unwrap();
+
+    let info = &db.mounted_packs()[0];
+    assert_eq!(
+        info.namespace.as_deref(),
+        Some("physics"),
+        "mounted pack must report the namespace its rows live under"
+    );
+    // The value must be usable as a recall scope, not merely present.
+    let scoped = db
+        .recall(
+            &vec_on(1, 0.05),
+            5,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            info.namespace.as_deref(),
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+    assert!(
+        scoped.iter().any(|r| r.text.contains("gluons")),
+        "namespace from PackInfo did not scope to the pack's corpus: {:?}",
+        scoped.iter().map(|r| &r.text).collect::<Vec<_>>()
+    );
+}

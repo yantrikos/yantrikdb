@@ -81,6 +81,7 @@ impl YantrikDB {
             source,
             emotional_state,
             None,
+            None,
         )
     }
 
@@ -110,6 +111,13 @@ impl YantrikDB {
     /// false conflict.
     ///
     /// `None` is byte-for-byte `record()`.
+    ///
+    /// `created_at`: caller-supplied event time in epoch seconds (historical
+    /// import — see `RecordInput::created_at` for the full contract). `None`
+    /// stamps `now()`, byte-for-byte the prior behavior. When `Some`, it
+    /// participates in the idempotency digest: a re-dated write decays and
+    /// `recall_as_of`s differently, so it is a different write, exactly like
+    /// a re-vectored one (payload_digest module docs).
     #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(skip(self, metadata, embedding), fields(memory_type, namespace))]
     pub fn record_with_idempotency(
@@ -127,6 +135,7 @@ impl YantrikDB {
         source: &str,
         emotional_state: Option<&str>,
         idempotency_key: Option<&str>,
+        created_at: Option<f64>,
     ) -> Result<String> {
         // v0.9.3 contract gate: validate before anything else. (Historically
         // "before any side effect" because importance calibration used to
@@ -142,6 +151,13 @@ impl YantrikDB {
                 ("half_life", half_life),
             ],
         )?;
+        // Caller-supplied event time must be finite before it reaches the
+        // digest, the row, or the replicated payload. Any finite value is
+        // legal — pre-1970 history and future-dated plans both exist; scoring
+        // clamps negative elapsed rather than validation refusing it.
+        if let Some(ts) = created_at {
+            crate::validate::validate_scalars("record", &[("created_at", ts)])?;
+        }
         // v0.10 Item 4a.4 anti-laundering gate: refuse (enforce) / flag (warn)
         // a record whose declared provenance is internally inconsistent (e.g.
         // source=inference claiming metadata.kind=fact), BEFORE any side effect.
@@ -211,6 +227,7 @@ impl YantrikDB {
                     emotional_state,
                     metadata,
                     embedding: Some(embedding),
+                    created_at,
                 };
                 Some((key, crate::payload_digest::payload_digest(&view)))
             }
@@ -263,6 +280,7 @@ impl YantrikDB {
                 emotional_state,
                 gate_verdict,
                 idem,
+                created_at,
             );
         }
         // guard is held; RAII Drop at function exit decrements inflight.
@@ -302,6 +320,7 @@ impl YantrikDB {
             emotional_state,
             gate_verdict,
             idem,
+            created_at,
         )
     }
 
@@ -342,9 +361,16 @@ impl YantrikDB {
         emotional_state: Option<&str>,
         gate_verdict: crate::provenance::GateVerdict,
         idem: Option<(&str, [u8; 32])>,
+        created_at: Option<f64>,
     ) -> Result<String> {
         let rid = crate::id::new_id();
-        let ts = now();
+        // Caller-supplied event time (validated finite at entry) or the
+        // engine's clock. `ts` feeds created_at, updated_at, AND last_access
+        // below — an imported record was last touched at its event time, so
+        // decay runs from then (RecordInput::created_at contract) — plus the
+        // replicated op payload, whose created_at both replication's
+        // materialize_record and its scoring-cache arm already read.
+        let ts = created_at.unwrap_or_else(now);
         let emb_blob = serialize_f32(embedding);
         let meta_str = serde_json::to_string(metadata)?;
         // Chunked embeddings: encrypt the window vectors up front (CPU
@@ -847,6 +873,13 @@ impl YantrikDB {
                     ("half_life", input.half_life),
                 ],
             )?;
+            // Caller-supplied event time: finite or refused, in the batch
+            // prevalidation loop like every other scalar, so a bad element
+            // late in the batch rejects the whole batch before any side
+            // effect (`record_with_idempotency` has the same gate).
+            if let Some(ts) = input.created_at {
+                crate::validate::validate_scalars("record_batch", &[("created_at", ts)])?;
+            }
             // v0.10 Item 4a.4b — anti-laundering gate (T06 fan-out). Runs in
             // the batch PREVALIDATION loop, so an inconsistent element late in
             // the batch rejects the whole batch before any side effect rather
@@ -1240,7 +1273,11 @@ impl YantrikDB {
                     continue;
                 }
                 let rid = rid_slots[idx].as_ref().expect("write items have rids");
-                let ts = now();
+                // Caller-supplied event time (prevalidated finite above) or
+                // the engine's clock — the same `ts` feeds the row's
+                // created_at/updated_at/last_access and the replicated op
+                // payload, exactly as record() routes it.
+                let ts = input.created_at.unwrap_or_else(now);
                 let emb_blob = serialize_f32(&input.embedding);
                 let meta_str = serde_json::to_string(&input.metadata)?;
 
@@ -1509,7 +1546,13 @@ impl YantrikDB {
                 let Some(rid) = rid_slots[idx].as_ref() else {
                     continue;
                 };
-                let ts = now();
+                // The ITEM's event time, not now() — recall scores from this
+                // cache, not from the memories row, so a now() here makes an
+                // imported record's row say 2020 while every decay/recency/
+                // as-of computation sees today. `record_with_rid` (the older
+                // caller-supplied-timestamp path) has always used its
+                // `ts_secs` here for exactly this reason.
+                let ts = input.created_at.unwrap_or_else(now);
                 cache.insert(
                     rid.clone(),
                     ScoringRow {
@@ -1951,9 +1994,15 @@ impl YantrikDB {
         emotional_state: Option<&str>,
         gate_verdict: crate::provenance::GateVerdict,
         idem: Option<(&str, [u8; 32])>,
+        created_at: Option<f64>,
     ) -> Result<String> {
         let rid = crate::id::new_id();
-        let ts = now();
+        // Caller-supplied event time or the engine's clock — the payload's
+        // created_at is what the post-swap materializer
+        // (apply_queued_reembed_record) stamps on the row, so the queued
+        // route preserves an imported record's event time exactly as the
+        // sync route does.
+        let ts = created_at.unwrap_or_else(now);
 
         // Capture the current runtime embedder name (the one active
         // before reembed flipped the router). The post-swap materializer

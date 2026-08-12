@@ -3,17 +3,27 @@
 /// Matches the Python implementation exactly (engine.py:246-263).
 
 /// Compute the decay score: I(t) = importance * 2^(-t / half_life)
+///
+/// Negative `elapsed` clamps to 0 (score = full `importance`). Reachable
+/// since caller-supplied `created_at`/event time (historical import): a
+/// future-dated record must score as "brand new", not as `2^(+x)` — an
+/// unbounded amplifier that would rebuild the recency wall in the other
+/// direction. Same clamp `cognition::temporal::recency_relevance` has
+/// always applied to its age.
 pub fn decay_score(importance: f64, half_life: f64, elapsed: f64) -> f64 {
     if half_life > 0.0 {
-        importance * f64::powf(2.0, -elapsed / half_life)
+        importance * f64::powf(2.0, -elapsed.max(0.0) / half_life)
     } else {
         0.0
     }
 }
 
 /// Compute the recency score: exp(-age / (7 * 86400))
+///
+/// Negative `age` clamps to 0 (score = 1.0, the maximum) — see
+/// `decay_score` for why a future-dated record is "new", never amplified.
 pub fn recency_score(age: f64) -> f64 {
-    f64::exp(-age / (7.0 * 86400.0))
+    f64::exp(-age.max(0.0) / (7.0 * 86400.0))
 }
 
 /// Compute the valence boost: 1.0 + 0.3 * |valence|

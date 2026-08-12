@@ -272,6 +272,7 @@ fn bench_record_batch(c: &mut Criterion) {
             let (db, _workers) = open_db_with_workers(dim);
             let inputs: Vec<RecordInput> = (0..500)
                 .map(|i| RecordInput {
+                    created_at: None,
                     idempotency_key: None,
                     text: format!("batch memory {i}"),
                     memory_type: "episodic".to_string(),
@@ -667,6 +668,7 @@ fn bench_record_batch_scaled(c: &mut Criterion) {
                     let (db, _workers) = open_db_with_workers(dim);
                     let inputs: Vec<RecordInput> = (0..bs)
                         .map(|i| RecordInput {
+                            created_at: None,
                             idempotency_key: None,
                             text: format!("batch memory {i}"),
                             memory_type: "episodic".to_string(),

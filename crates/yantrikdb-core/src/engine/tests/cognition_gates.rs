@@ -304,6 +304,7 @@ fn gate_batch_rejects_inconsistent_element_atomically() {
     // side effect — earlier elements must not be half-committed.
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let mk = |text: &str, source: &str, meta: serde_json::Value| RecordInput {
+        created_at: None,
         idempotency_key: None,
         text: text.to_string(),
         memory_type: "semantic".to_string(),

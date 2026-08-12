@@ -297,6 +297,7 @@ fn flagged_committed_writes_tick_the_nudge_counter_exactly_once() {
 
     // record_batch(): two flagged inputs, one clean.
     let mk = |text: &str, meta: serde_json::Value, source: &str| RecordInput {
+        created_at: None,
         idempotency_key: None,
         text: text.into(),
         memory_type: "semantic".into(),
@@ -360,6 +361,7 @@ fn deferred_batch_leaves_importance_stats_untouched() {
 
     let err = db
         .record_batch(&[RecordInput {
+            created_at: None,
             idempotency_key: None,
             text: "deferred".into(),
             memory_type: "semantic".into(),
@@ -580,6 +582,7 @@ fn batch_append_failure_leaves_importance_stats_untouched() {
     // stats assertions below are what this test pins.
     let err = db
         .record_batch(&[RecordInput {
+            created_at: None,
             idempotency_key: None,
             text: "batch after saturation".into(),
             memory_type: "semantic".into(),

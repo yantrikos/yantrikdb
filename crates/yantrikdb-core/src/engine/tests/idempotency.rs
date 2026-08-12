@@ -21,6 +21,7 @@ fn idempotent_retry_returns_original_rid_and_writes_nothing() {
             "user",
             None,
             Some("client-req-001"),
+            None,
         )
     };
     let rid1 = write(&db).unwrap();
@@ -115,6 +116,7 @@ fn idempotency_conflict_on_different_payload() {
             "user",
             None,
             Some("key-x"),
+            None,
         )
     };
     let rid1 = write(&db, 0.7).unwrap();
@@ -169,6 +171,7 @@ fn idempotency_holds_on_and_across_the_queued_route() {
             "user",
             None,
             Some(key),
+            None,
         )
     };
 
@@ -249,6 +252,7 @@ fn idempotency_digest_uses_raw_importance_not_calibrated() {
             "user",
             None,
             Some("sat-key"),
+            None,
         )
     };
     let rid1 = write(&db).unwrap();
@@ -291,6 +295,7 @@ fn invalid_idempotency_keys_are_rejected() {
                 "user",
                 None,
                 Some(bad),
+                None,
             )
             .expect_err("bad key must be refused");
         assert!(
@@ -335,6 +340,7 @@ fn keyed_duplicate_resolves_even_under_backpressure() {
             "user",
             None,
             Some("bp-key"),
+            None,
         )
     };
     let rid = keyed(&db).unwrap();
@@ -391,6 +397,7 @@ fn keyed_duplicate_resolves_even_under_backpressure() {
             "user",
             None,
             Some("bp-key-new"),
+            None,
         )
         .expect_err("a NEW keyed write under saturation must still backpressure");
     assert!(
@@ -436,6 +443,7 @@ fn keyed_duplicate_resolves_under_pending_queue_saturation() {
             "user",
             None,
             Some(key),
+            None,
         )
     };
     // The keyed write lands while there is capacity.
@@ -525,6 +533,7 @@ fn record_text_keyed_retry_hits_without_embedding_again() {
             "user",
             None,
             Some("rt-key"),
+            None,
         )
     };
     let rid = write(&db).unwrap();
@@ -589,6 +598,7 @@ fn same_key_across_record_and_record_text_is_a_conflict() {
         "user",
         None,
         Some("xs-key"),
+        None,
     )
     .unwrap();
 
@@ -608,6 +618,7 @@ fn same_key_across_record_and_record_text_is_a_conflict() {
             "user",
             None,
             Some("xs-key"),
+            None,
         )
         .expect_err("cross-surface same-key must conflict");
     assert!(
@@ -658,6 +669,7 @@ fn record_text_normalizes_blank_namespace_like_record() {
             "user",
             None,
             Some("ns-key"),
+            None,
         )
         .unwrap();
 
@@ -699,6 +711,7 @@ fn record_text_normalizes_blank_namespace_like_record() {
             "user",
             None,
             Some("ns-key"),
+            None,
         )
         .unwrap();
     assert_eq!(
@@ -726,6 +739,7 @@ fn batch_append_failure_writes_nothing_at_all() {
     // absence assertions below are meaningful rather than vacuously true. A
     // regression test whose branch never fires is decoration (#83 lesson).
     db.record_batch(&[RecordInput {
+        created_at: None,
         idempotency_key: None,
         text: "Quarterly sync with Klaxonberg about the roadmap".into(),
         memory_type: "episodic".into(),
@@ -791,6 +805,7 @@ fn batch_append_failure_writes_nothing_at_all() {
     // The doomed batch: same text shape, a DIFFERENT unique entity.
     let err = db
         .record_batch(&[RecordInput {
+            created_at: None,
             idempotency_key: None,
             text: "Quarterly sync with Quorvexia about the roadmap".into(),
             memory_type: "episodic".into(),
@@ -891,6 +906,7 @@ fn record_batch_normalizes_blank_namespace_like_record() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
 
     let mk = |text: &str, ns: &str, emb: f32| RecordInput {
+        created_at: None,
         idempotency_key: None,
         text: text.into(),
         memory_type: "semantic".into(),
@@ -976,6 +992,7 @@ fn record_batch_normalizes_blank_namespace_like_record() {
 /// always caller-supplied vectors -> PayloadVariant::Record digest).
 fn keyed_input(text: &str, ns: &str, emb: f32, key: Option<&str>) -> RecordInput {
     RecordInput {
+        created_at: None,
         idempotency_key: key.map(|k| k.to_string()),
         text: text.into(),
         memory_type: "semantic".into(),
@@ -1188,6 +1205,7 @@ fn same_key_across_record_and_record_batch_hits_on_identical_payload() {
             &input.source,
             input.emotional_state.as_deref(),
             Some("xb-key"),
+            None,
         )
         .unwrap();
 

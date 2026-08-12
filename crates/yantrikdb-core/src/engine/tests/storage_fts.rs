@@ -298,6 +298,7 @@ fn test_record_batch() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let inputs: Vec<RecordInput> = (0..10)
         .map(|i| RecordInput {
+            created_at: None,
             idempotency_key: None,
             text: format!("batch memory {i}"),
             memory_type: "episodic".to_string(),
