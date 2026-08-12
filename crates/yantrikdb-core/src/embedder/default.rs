@@ -87,25 +87,44 @@ mod once_cell_lite {
     use model2vec_rs::model::StaticModel;
     use std::sync::OnceLock;
 
-    pub struct Lazy {
-        // OnceLock<Result<StaticModel, String>> so a load failure is
-        // also memoized — we don't retry forever on a broken bundle.
-        cell: OnceLock<Result<StaticModel, String>>,
-    }
+    /// PROCESS-GLOBAL, not per-instance. This is load-bearing.
+    ///
+    /// It was a per-instance `OnceLock`, so N `BundledEmbedder`s in one
+    /// process meant N independent locks running `init_model()`
+    /// concurrently — while the extraction path is keyed only on
+    /// `process::id()`, i.e. SHARED by all of them. `File::create`
+    /// truncates, so one thread could truncate `tokenizer.json` while
+    /// another was reading it, and `from_pretrained` failed with
+    /// "EOF while parsing a value at line 1 column 0". The `need_write`
+    /// length check made it worse rather than better: check-then-act, so
+    /// a thread seeing a half-written file truncated and rewrote it under
+    /// a concurrent reader.
+    ///
+    /// Caught by CI on one runner where four tests each built their own
+    /// embedder: three passed, one hit the window. A corrupt bundle would
+    /// have failed all four — that asymmetry is what identified it as a
+    /// race rather than a bad artifact. Latent on every platform; it is
+    /// scheduling, not architecture, that decides whether you see it.
+    /// The multi-tenant server (an engine per tenant, built concurrently)
+    /// is the real-world shape of the same pattern.
+    static MODEL: OnceLock<Result<StaticModel, String>> = OnceLock::new();
+
+    pub struct Lazy;
 
     impl Lazy {
         pub fn new() -> Self {
-            Self {
-                cell: OnceLock::new(),
-            }
+            Self
         }
 
         /// Get-or-init the model. Extracts the bundled bytes to a
         /// process-local temp directory on first call, then loads via
         /// `model2vec_rs::StaticModel::from_pretrained`.
-        pub fn get(&self) -> Result<&StaticModel, &str> {
-            let result = self.cell.get_or_init(|| init_model());
-            match result {
+        ///
+        /// Every instance shares one initialization, so the extraction
+        /// runs exactly once per process no matter how many embedders
+        /// exist or how many threads construct them at once.
+        pub fn get(&self) -> Result<&'static StaticModel, &'static str> {
+            match MODEL.get_or_init(init_model) {
                 Ok(m) => Ok(m),
                 Err(e) => Err(e.as_str()),
             }
@@ -132,19 +151,35 @@ mod once_cell_lite {
             ("modules.json", super::POTION_2M_MODULES),
         ] {
             let path = temp.join(name);
-            // Write only if the file doesn't exist with the right
-            // length already — covers re-init within the same process
-            // (shouldn't happen with OnceLock but is cheap insurance).
-            let need_write = match std::fs::metadata(&path) {
-                Ok(m) => m.len() != bytes.len() as u64,
-                Err(_) => true,
-            };
-            if need_write {
-                let mut f = std::fs::File::create(&path)
-                    .map_err(|e| format!("create {}: {e}", path.display()))?;
-                f.write_all(bytes)
-                    .map_err(|e| format!("write {}: {e}", path.display()))?;
+            // Skip only when the file is already complete. Unlike the
+            // previous version this is not the concurrency guard — the
+            // process-global OnceLock is (see MODEL) — it just avoids
+            // rewriting ~8MB on a re-init.
+            if matches!(std::fs::metadata(&path), Ok(m) if m.len() == bytes.len() as u64) {
+                continue;
             }
+            // WRITE-THEN-RENAME, never write in place. `File::create`
+            // truncates, so writing directly to `path` publishes an
+            // empty file the instant it opens and only fills it in
+            // afterwards — any reader in that window sees a truncated
+            // file, which is exactly the "EOF while parsing a value at
+            // line 1 column 0" this module used to produce. `rename` is
+            // atomic on POSIX and on Windows for same-directory moves,
+            // so a reader sees either no file or the complete one.
+            // Defense in depth: the OnceLock already serializes this
+            // today, but the failure mode is silent corruption and the
+            // cost of not relying on that is one rename.
+            let staging = temp.join(format!("{name}.{}.partial", std::process::id()));
+            {
+                let mut f = std::fs::File::create(&staging)
+                    .map_err(|e| format!("create {}: {e}", staging.display()))?;
+                f.write_all(bytes)
+                    .map_err(|e| format!("write {}: {e}", staging.display()))?;
+                f.sync_all()
+                    .map_err(|e| format!("sync {}: {e}", staging.display()))?;
+            }
+            std::fs::rename(&staging, &path)
+                .map_err(|e| format!("publish {}: {e}", path.display()))?;
         }
 
         StaticModel::from_pretrained(&temp, None, None, None)
@@ -326,6 +361,44 @@ mod tests {
         let a = e.embed("Acme Corporation").unwrap();
         let b = e.embed("Acme Corporation").unwrap();
         assert_eq!(a, b, "same input must yield same vector");
+    }
+
+    /// THE CI FAILURE, reproduced.
+    ///
+    /// Many threads each constructing their OWN `BundledEmbedder` and
+    /// embedding immediately. Before the fix each instance carried a
+    /// private `OnceLock`, so every thread ran `init_model()` against a
+    /// SHARED per-pid extraction directory; `File::create` truncates, so
+    /// one thread could blank `tokenizer.json` while another read it and
+    /// `from_pretrained` failed with "EOF while parsing a value at line 1
+    /// column 0". CI hit exactly that with four independent tests.
+    ///
+    /// The assertion is not merely "no panic": every thread must get the
+    /// SAME vector, since a torn load could also yield a silently
+    /// different model rather than an error.
+    #[test]
+    fn concurrent_construction_loads_one_consistent_model() {
+        const THREADS: usize = 16;
+        let reference = BundledEmbedder::new().embed("consistency probe").unwrap();
+        let vectors: Vec<Vec<f32>> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..THREADS)
+                .map(|_| {
+                    s.spawn(|| {
+                        // A fresh embedder per thread — the shape that raced.
+                        BundledEmbedder::new()
+                            .embed("consistency probe")
+                            .expect("concurrent construction must not tear the model load")
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        for (i, v) in vectors.iter().enumerate() {
+            assert_eq!(
+                v, &reference,
+                "thread {i} loaded a different model than the reference — torn extraction"
+            );
+        }
     }
 
     #[test]
