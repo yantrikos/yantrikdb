@@ -1,6 +1,6 @@
 # BEAM: isolating memory quality from answerer quality
 
-**Date:** 2026-08-12 · **Engine:** yantrikdb 0.14.0-dev · **Harness:** [vectorize-io/agent-memory-benchmark](https://github.com/vectorize-io/agent-memory-benchmark) · **Dataset:** BEAM-100K, all 400 queries
+**Date:** 2026-08-12 · **Engine:** yantrikdb 0.14.0 · **Harness:** [vectorize-io/agent-memory-benchmark](https://github.com/vectorize-io/agent-memory-benchmark) · **Dataset:** BEAM-100K, all 400 queries
 
 ---
 
