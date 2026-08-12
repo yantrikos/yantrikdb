@@ -314,7 +314,7 @@ repository, so conditions R and E need no access to their system.
    (2K/4K/8K/12K/16K) and plot rubric against context tokens. Removes the
    length objection entirely and yields quality-per-token rather than a single
    point. This is now the most valuable remaining experiment, because parity
-   at 42% of the tokens is a claim about the *curve*, and we have measured one
+   on 42% fewer tokens is a claim about the *curve*, and we have measured one
    point on it.
 2. **Matched-answerer end-to-end** — our context through
    `gemini-3.1-pro-preview`, completing the 2×2. This is the direct test of
