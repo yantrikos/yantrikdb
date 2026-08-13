@@ -262,6 +262,47 @@ fn is_entity_stopword(tok: &str) -> bool {
             .any(|s| s.eq_ignore_ascii_case(tok))
 }
 
+/// A name is at most this many words. Beyond it, a "capitalized chunk" is a
+/// run of prose, not an entity — the heuristic groups CONSECUTIVE capitalized
+/// words with no upper bound, so a heading becomes one long entity.
+const MAX_ENTITY_TOKENS: usize = 6;
+
+/// Three or more ALL-CAPS words in a row is emphasis or a heading, not a name.
+/// Genuine all-caps names are short: `NASA`, `IBM`, `HNSW`, `IBM WATSON`.
+const MAX_ALLCAPS_TOKENS: usize = 2;
+
+fn is_all_caps_token(tok: &str) -> bool {
+    tok.chars().any(|c| c.is_alphabetic())
+        && tok.chars().all(|c| !c.is_alphabetic() || c.is_uppercase())
+}
+
+/// Does this capitalized run read as prose rather than a name?
+///
+/// Found by censusing a live store after fixing the stoplist. The extractor
+/// had no length bound, so entire ALL-CAPS sentences became single entities:
+///
+///   "THINGS I MISSED THAT CODEX FOUND BY READING THE CODE"
+///   "USER MUST UPDATE MCP CONFIG"
+///   "HERMES REMOTE DESKTOP LIVE VERIFICATION PASSED 2026 08 13"
+///   "REAL ESTATE TAX ANALYSIS"
+///
+/// Every one of those is a node in the knowledge graph, and three came from
+/// memories written that same day — an agent that writes ALL-CAPS headings
+/// pollutes its own graph, which is a self-reinforcing failure a human author
+/// would never trigger.
+///
+/// Two bounds, deliberately kept separate because they catch different shapes:
+/// a token cap for runaway mixed-case runs, and an all-caps cap for headings.
+/// Both err toward keeping short candidates, since a missed entity costs one
+/// retrieval path while a phantom entity costs precision on EVERY query that
+/// happens to share one of its words.
+fn is_prose_run(chunk: &[String]) -> bool {
+    if chunk.len() > MAX_ENTITY_TOKENS {
+        return true;
+    }
+    chunk.iter().filter(|t| is_all_caps_token(t)).count() > MAX_ALLCAPS_TOKENS
+}
+
 /// Strip fenced code blocks and inline code spans before entity extraction.
 ///
 /// The capitalized-chunk heuristic below cannot tell `String`, `User` or
@@ -371,7 +412,7 @@ fn extract_heuristic_entities_inner(text: &str) -> Vec<String> {
                 break;
             }
         }
-        if !chunk.is_empty() {
+        if !chunk.is_empty() && !is_prose_run(chunk) {
             let candidate = chunk.join(" ");
             let alpha_chars = candidate.chars().filter(|c| c.is_alphanumeric()).count();
             if alpha_chars >= 2 {
@@ -1894,6 +1935,78 @@ mod stopword_hygiene_tests {
         assert!(
             ents.iter().any(|e| e.contains("NASA")),
             "NASA was stripped as if it were a function word -> {ents:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod prose_run_tests {
+    use super::*;
+
+    /// The census that motivated this: real entity names taken verbatim from a
+    /// live store, every one of them a graph node joining unrelated records.
+    #[test]
+    fn all_caps_headings_are_not_entities() {
+        for text in [
+            "THINGS I MISSED THAT CODEX FOUND BY READING THE CODE follow.",
+            "USER MUST UPDATE MCP CONFIG before restarting.",
+            "REAL ESTATE TAX ANALYSIS was attached.",
+            "HERMES REMOTE DESKTOP LIVE VERIFICATION PASSED today.",
+        ] {
+            for e in extract_heuristic_entities(text) {
+                let caps = e
+                    .split_whitespace()
+                    .filter(|t| is_all_caps_token(t))
+                    .count();
+                assert!(
+                    caps <= MAX_ALLCAPS_TOKENS,
+                    "heading became entity {e:?} from {text:?}"
+                );
+            }
+        }
+    }
+
+    /// A runaway mixed-case run is prose too.
+    #[test]
+    fn overlong_capitalized_runs_are_not_entities() {
+        let ents =
+            extract_heuristic_entities("Recall Return Unrelated Records Root Cause Found Today");
+        assert!(
+            ents.iter()
+                .all(|e| e.split_whitespace().count() <= MAX_ENTITY_TOKENS),
+            "overlong run survived -> {ents:?}"
+        );
+    }
+
+    /// THE OTHER DIRECTION. Short acronyms and ordinary names are the whole
+    /// point of the extractor and must be untouched.
+    #[test]
+    fn short_acronyms_and_names_survive() {
+        let ents = extract_heuristic_entities(
+            "NASA and IBM Watson met Alice Chen at Yantrik Systems in San Francisco.",
+        );
+        for good in [
+            "NASA",
+            "IBM Watson",
+            "Alice Chen",
+            "Yantrik Systems",
+            "San Francisco",
+        ] {
+            assert!(
+                ents.iter().any(|e| e.contains(good)),
+                "real entity {good:?} lost -> {ents:?}"
+            );
+        }
+    }
+
+    /// Two all-caps tokens is a name, not a heading — the boundary must not
+    /// slide down and start eating them.
+    #[test]
+    fn two_token_all_caps_names_survive() {
+        let ents = extract_heuristic_entities("The NASA JPL team shipped it.");
+        assert!(
+            ents.iter().any(|e| e.contains("NASA JPL")),
+            "two-token acronym name lost -> {ents:?}"
         );
     }
 }
