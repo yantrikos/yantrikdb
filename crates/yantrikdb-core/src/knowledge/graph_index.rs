@@ -70,6 +70,38 @@ impl GraphIndex {
                 .unwrap_or_else(|| name.to_string())
         };
 
+        // PHANTOM SUPPRESSION. A store written by an older engine holds
+        // entities today's extractor would never mint: `AT` (10 mentions in a
+        // live store), `June`, `REAL ESTATE TAX ANALYSIS`, `USER MUST UPDATE
+        // MCP CONFIG`. A stopword or heading node connects everything to
+        // everything, so graph proximity stops being evidence — measured, a
+        // real-estate tax memo was returned for "encryption at rest and key
+        // rotation", joined via anchor `AT`.
+        //
+        // Healed at LOAD rather than by a destructive migration, matching the
+        // C5b alias fold above: persisted rows are untouched, so reverting the
+        // rules restores the previous behaviour exactly, and a store heals by
+        // being opened.
+        //
+        // Entities a caller deliberately created through `relate()` are
+        // exempt. `claims.extractor` is the only provenance we have —
+        // `'manual'` is what `relate()` writes — so an explicit relation
+        // protects its endpoints even if they look like prose. Tolerate a
+        // missing table as "nothing protected".
+        let protected: HashSet<String> = conn
+            .prepare(
+                "SELECT src FROM claims WHERE extractor = 'manual' \
+                 UNION SELECT dst FROM claims WHERE extractor = 'manual'",
+            )
+            .and_then(|mut stmt| {
+                stmt.query_map([], |row| row.get::<_, String>(0))?
+                    .collect::<std::result::Result<HashSet<_>, _>>()
+            })
+            .unwrap_or_default();
+        let suppressed = |name: &str| -> bool {
+            !protected.contains(name) && crate::graph::is_rejected_entity_name(name)
+        };
+
         // Load entities: canonical (non-aliased) rows first so their type
         // and identity are established, then fold aliased rows in — their
         // mentions merge additively, their type is discarded.
@@ -81,7 +113,7 @@ impl GraphIndex {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         for (name, etype, mc) in &entities {
-            if !alias_map.contains_key(name) {
+            if !alias_map.contains_key(name) && !suppressed(name) {
                 idx.ensure_entity(name, etype, *mc);
             }
         }
@@ -105,6 +137,14 @@ impl GraphIndex {
         for (src, dst, weight) in &edges {
             let src = canon(src);
             let dst = canon(dst);
+            // An edge would otherwise resurrect a suppressed node, because
+            // ensure_entity mints entities the entities table never held.
+            // Dropping the whole edge is right: an edge to a phantom is not
+            // half-valid, it is the bridge that made graph proximity
+            // meaningless in the first place.
+            if suppressed(&src) || suppressed(&dst) {
+                continue;
+            }
             // Ensure both entities exist (edges may reference entities not yet in entities table)
             idx.ensure_entity(&src, "unknown", 0);
             idx.ensure_entity(&dst, "unknown", 0);
@@ -726,5 +766,104 @@ mod tests {
         idx.link_memory("mem1", "Alice");
         idx.link_memory("mem1", "Alice"); // duplicate
         assert_eq!(idx.link_count(), 1); // still 1
+    }
+}
+
+#[cfg(test)]
+mod phantom_suppression_tests {
+    use super::*;
+    use rusqlite::params;
+
+    fn db_with_entities(rows: &[(&str, &str)], claims: &[(&str, &str, &str)]) -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE entities (name TEXT PRIMARY KEY, entity_type TEXT, \
+                 first_seen REAL, last_seen REAL, mention_count INTEGER, metadata TEXT);
+             CREATE TABLE edges (src TEXT, dst TEXT, weight REAL, tombstoned INTEGER DEFAULT 0);
+             CREATE TABLE memory_entities (memory_rid TEXT, entity_name TEXT);
+             CREATE TABLE claims (src TEXT, dst TEXT, extractor TEXT);",
+        )
+        .unwrap();
+        for (name, etype) in rows {
+            conn.execute(
+                "INSERT INTO entities (name, entity_type, first_seen, last_seen, mention_count) \
+                 VALUES (?1, ?2, 0.0, 0.0, 5)",
+                params![name, etype],
+            )
+            .unwrap();
+        }
+        for (src, dst, extractor) in claims {
+            conn.execute(
+                "INSERT INTO claims (src, dst, extractor) VALUES (?1, ?2, ?3)",
+                params![src, dst, extractor],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    /// The live census, as a test: these were real nodes in a production store.
+    #[test]
+    fn phantom_entities_are_not_loaded() {
+        let conn = db_with_entities(
+            &[
+                ("AT", "tech"),
+                ("June", "unknown"),
+                ("REAL ESTATE TAX ANALYSIS", "tech"),
+                ("USER MUST UPDATE MCP CONFIG", "tech"),
+                ("Alice Chen", "person"),
+                ("NASA", "org"),
+            ],
+            &[],
+        );
+        let idx = GraphIndex::build_from_db(&conn).unwrap();
+        for phantom in [
+            "AT",
+            "June",
+            "REAL ESTATE TAX ANALYSIS",
+            "USER MUST UPDATE MCP CONFIG",
+        ] {
+            assert!(
+                !idx.entity_to_id.contains_key(phantom),
+                "phantom {phantom:?} was loaded into the index"
+            );
+        }
+        for real in ["Alice Chen", "NASA"] {
+            assert!(
+                idx.entity_to_id.contains_key(real),
+                "real entity {real:?} was suppressed"
+            );
+        }
+    }
+
+    /// Provenance beats the heuristic. If a caller deliberately related a name,
+    /// it stays — the rules describe what the EXTRACTOR should mint, not what a
+    /// user is allowed to assert.
+    #[test]
+    fn explicitly_related_names_are_protected() {
+        let conn = db_with_entities(
+            &[("AT", "tech"), ("Alice Chen", "person")],
+            &[("AT", "Alice Chen", "manual")],
+        );
+        let idx = GraphIndex::build_from_db(&conn).unwrap();
+        assert!(
+            idx.entity_to_id.contains_key("AT"),
+            "an explicitly related name must survive suppression"
+        );
+    }
+
+    /// A heuristic claim does NOT protect — otherwise auto-relate would
+    /// immunise every phantom it ever touched, which is most of them.
+    #[test]
+    fn heuristic_claims_do_not_protect() {
+        let conn = db_with_entities(
+            &[("AT", "tech"), ("Alice Chen", "person")],
+            &[("AT", "Alice Chen", "heuristic_v1")],
+        );
+        let idx = GraphIndex::build_from_db(&conn).unwrap();
+        assert!(
+            !idx.entity_to_id.contains_key("AT"),
+            "a heuristic claim must not protect a phantom"
+        );
     }
 }

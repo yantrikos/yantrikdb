@@ -303,6 +303,31 @@ fn is_prose_run(chunk: &[String]) -> bool {
     chunk.iter().filter(|t| is_all_caps_token(t)).count() > MAX_ALLCAPS_TOKENS
 }
 
+/// Would today's extractor refuse to mint this entity name?
+///
+/// The rules above stop NEW pollution, but a store written by an older engine
+/// still holds the phantoms — `AT` with 10 mentions, `REAL ESTATE TAX
+/// ANALYSIS`, `USER MUST UPDATE MCP CONFIG` — and they keep degrading recall
+/// until something removes them. [`crate::graph_index::GraphIndex`] applies
+/// this at load, so a store heals by being opened rather than by running a
+/// destructive migration: nothing is deleted, and reverting the rules restores
+/// the old behaviour exactly.
+///
+/// Names a caller deliberately created via `relate()` are NEVER judged by this
+/// — that check lives at the call site, which is the only place that knows
+/// provenance.
+pub fn is_rejected_entity_name(name: &str) -> bool {
+    let toks: Vec<String> = name.split_whitespace().map(|s| s.to_string()).collect();
+    if toks.is_empty() {
+        return true;
+    }
+    // Wholly made of function words / bare months: "AT", "June", "THE Most".
+    if toks.iter().all(|t| is_entity_stopword(t)) {
+        return true;
+    }
+    is_prose_run(&toks)
+}
+
 /// Strip fenced code blocks and inline code spans before entity extraction.
 ///
 /// The capitalized-chunk heuristic below cannot tell `String`, `User` or
