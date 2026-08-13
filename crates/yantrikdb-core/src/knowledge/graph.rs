@@ -91,12 +91,176 @@ pub fn entity_matches_text(entity: &str, text_tokens: &[String]) -> bool {
 /// start or end of a capitalized chunk. A sentence-initial "The" or "Our" is
 /// capitalized by position, not because it names an entity.
 const ENTITY_STOPWORDS: &[&str] = &[
-    "The", "A", "An", "I", "We", "You", "He", "She", "It", "They", "This", "That", "These",
-    "Those", "My", "Your", "His", "Her", "Its", "Our", "Their", "But", "And", "Or", "So", "If",
-    "When", "Where", "What", "Who", "Why", "How", "Is", "Are", "Was", "Were", "Be", "Been",
-    "Being", "Have", "Has", "Had", "Do", "Does", "Did", "Of", "In", "On", "At", "To", "For",
-    "With", "From", "By", "As", "Than", "Then", "Also", "Just", "Only", "Very", "Much",
+    "The",
+    "A",
+    "An",
+    "I",
+    "We",
+    "You",
+    "He",
+    "She",
+    "It",
+    "They",
+    "This",
+    "That",
+    "These",
+    "Those",
+    "My",
+    "Your",
+    "His",
+    "Her",
+    "Its",
+    "Our",
+    "Their",
+    "But",
+    "And",
+    "Or",
+    "So",
+    "If",
+    "When",
+    "Where",
+    "What",
+    "Who",
+    "Why",
+    "How",
+    "Is",
+    "Are",
+    "Was",
+    "Were",
+    "Be",
+    "Been",
+    "Being",
+    "Have",
+    "Has",
+    "Had",
+    "Do",
+    "Does",
+    "Did",
+    "Of",
+    "In",
+    "On",
+    "At",
+    "To",
+    "For",
+    "With",
+    "From",
+    "By",
+    "As",
+    "Than",
+    "Then",
+    "Also",
+    "Just",
+    "Only",
+    "Very",
+    "Much",
+    // Added 2026-08-13 with the case fix below. These were absent in EVERY
+    // case, so they became entities regardless of the comparison bug.
+    "Not",
+    "No",
+    "Nor",
+    "Most",
+    "More",
+    "Less",
+    "Some",
+    "Any",
+    "All",
+    "Each",
+    "Every",
+    "Both",
+    "Such",
+    "Same",
+    "Other",
+    "Another",
+    "Yet",
+    "Still",
+    "Because",
+    "While",
+    "After",
+    "Before",
+    "During",
+    "Since",
+    "Until",
+    "Between",
+    "Through",
+    "About",
+    "Into",
+    "Over",
+    "Under",
+    "Again",
+    "Once",
+    "Here",
+    "There",
+    "Now",
+    "Thus",
+    "However",
+    "Therefore",
+    "Note",
+    "See",
+    "Can",
+    "Could",
+    "Will",
+    "Would",
+    "Should",
+    "May",
+    "Might",
+    "Must",
+    "Let",
+    "Get",
+    "Got",
 ];
+
+/// Bare month names. Not function words — a different class, and stoplisted
+/// for a different reason: a month alone is not the thing a sentence is about,
+/// but it appears in nearly every dated record, so as a graph node it links
+/// everything to everything. Observed doing exactly that: a query for
+/// "encryption at rest and key rotation" retrieved an unrelated record whose
+/// stated join was `graph-connected via June`.
+///
+/// This is a blunt instrument. The principled fix for entities that are real
+/// but uselessly common is inverse-document-frequency node weighting plus a
+/// hub-degree penalty, so a node's retrieval weight falls as it connects more
+/// of the corpus. Until that exists, a month is more noise than signal.
+const AMBIGUOUS_COMMON_ENTITIES: &[&str] = &[
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+    "Monday",
+    "Tuesday",
+    "Wednesday",
+    "Thursday",
+    "Friday",
+    "Saturday",
+    "Sunday",
+];
+
+/// Is this token unusable as an entity?
+///
+/// **Case-INSENSITIVE, and that is the whole point.** This compared with
+/// `ENTITY_STOPWORDS.contains(&tok)` — an exact string match against the
+/// capitalized forms — so `"At"` was stripped while `"AT"` sailed through and
+/// became an entity. `tokenize()` then lowercases it to `"at"`, and
+/// `entity_matches_text` compares lowercased tokens, so the phantom entity
+/// `AT` matched EVERY query containing the word "at".
+///
+/// Measured consequence on a ~900-record production store: the query
+/// "encryption at rest and key rotation" returned a real-estate tax analysis
+/// in the top 3, joined by `claims_match: AT -acquired-> 25 (anchor AT)`.
+/// Anchors `NOT`, `THE`, `DID`, `Most` and `June` were seen the same way.
+fn is_entity_stopword(tok: &str) -> bool {
+    ENTITY_STOPWORDS.iter().any(|s| s.eq_ignore_ascii_case(tok))
+        || AMBIGUOUS_COMMON_ENTITIES
+            .iter()
+            .any(|s| s.eq_ignore_ascii_case(tok))
+}
 
 /// Strip fenced code blocks and inline code spans before entity extraction.
 ///
@@ -194,14 +358,14 @@ fn extract_heuristic_entities_inner(text: &str) -> Vec<String> {
     let mut chunk: Vec<String> = Vec::new();
 
     let flush = |chunk: &mut Vec<String>, out: &mut Vec<String>| {
-        while !chunk.is_empty() && ENTITY_STOPWORDS.contains(&chunk[0].as_str()) {
+        while !chunk.is_empty() && is_entity_stopword(&chunk[0]) {
             chunk.remove(0);
         }
         // Trailing-stopword strip skips single-character tokens so multi-word
         // entities like "Series A" or "Version B" keep their letter suffix
         // (A is a stopword but is also a valid version designator when trailing).
         while let Some(last) = chunk.last() {
-            if ENTITY_STOPWORDS.contains(&last.as_str()) && last.chars().count() > 1 {
+            if is_entity_stopword(last) && last.chars().count() > 1 {
                 chunk.pop();
             } else {
                 break;
@@ -1633,6 +1797,103 @@ done";
         assert!(
             got.iter().any(|e| e == "Erin"),
             "prose lost after stray tick: {got:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod stopword_hygiene_tests {
+    use super::*;
+
+    /// The bug, stated as a test.
+    ///
+    /// `ENTITY_STOPWORDS.contains(&tok)` is an exact match against the
+    /// capitalized forms, so ALL-CAPS function words were never stripped.
+    /// They then tokenize to lowercase and match every query containing that
+    /// ordinary word, which is how `AT` became a graph anchor joining
+    /// unrelated records.
+    #[test]
+    fn all_caps_function_words_are_not_entities() {
+        for text in [
+            "AT the meeting we shipped it",
+            "THE release went out",
+            "DID the migration finish",
+            "NOT a real entity here",
+        ] {
+            let ents = extract_heuristic_entities(text);
+            for bad in ["AT", "THE", "DID", "NOT"] {
+                assert!(
+                    !ents.iter().any(|e| e == bad),
+                    "{bad:?} became an entity from {text:?} -> {ents:?}"
+                );
+            }
+        }
+    }
+
+    /// Mixed case must not smuggle them either.
+    #[test]
+    fn mixed_case_function_words_are_not_entities() {
+        let ents = extract_heuristic_entities("aT tHe meeting, dId anything ship");
+        assert!(
+            !ents.iter().any(|e| e.eq_ignore_ascii_case("at")
+                || e.eq_ignore_ascii_case("the")
+                || e.eq_ignore_ascii_case("did")),
+            "mixed-case function word survived: {ents:?}"
+        );
+    }
+
+    /// Words absent from the list in EVERY case, found the same way.
+    #[test]
+    fn newly_listed_function_words_are_not_entities() {
+        let ents = extract_heuristic_entities("Most of it shipped. Not all. More later.");
+        for bad in ["Most", "Not", "More"] {
+            assert!(
+                !ents.iter().any(|e| e == bad),
+                "{bad:?} became an entity -> {ents:?}"
+            );
+        }
+    }
+
+    /// A bare month is in nearly every dated record, so as a node it links
+    /// everything to everything. Observed as `graph-connected via June`.
+    #[test]
+    fn bare_month_names_are_not_entities() {
+        let ents = extract_heuristic_entities("June was busy. We shipped in March.");
+        for bad in ["June", "March"] {
+            assert!(
+                !ents.iter().any(|e| e == bad),
+                "{bad:?} became an entity -> {ents:?}"
+            );
+        }
+    }
+
+    /// THE OTHER DIRECTION, which is what makes this a real gate rather than a
+    /// blanket suppressor: real entities must still be extracted, including
+    /// ones that merely CONTAIN a stopword, and ones that are legitimately
+    /// capitalized after a stripped leading stopword.
+    #[test]
+    fn real_entities_still_extracted() {
+        let ents = extract_heuristic_entities(
+            "At Yantrik Systems we met Alice Chen about the Boston office.",
+        );
+        for good in ["Yantrik Systems", "Alice Chen", "Boston"] {
+            assert!(
+                ents.iter()
+                    .any(|e| e.contains(good) || good.contains(e.as_str())),
+                "real entity {good:?} was lost -> {ents:?}"
+            );
+        }
+    }
+
+    /// An all-caps token that is NOT a function word is still an entity —
+    /// otherwise the fix would eat acronyms, which are exactly the kind of
+    /// short high-signal name a memory system must keep.
+    #[test]
+    fn all_caps_acronyms_survive() {
+        let ents = extract_heuristic_entities("The NASA contract and the HNSW index shipped.");
+        assert!(
+            ents.iter().any(|e| e.contains("NASA")),
+            "NASA was stripped as if it were a function word -> {ents:?}"
         );
     }
 }
