@@ -1,6 +1,6 @@
 # BEAM: isolating memory quality from answerer quality
 
-**Date:** 2026-08-12 · **Engine:** yantrikdb 0.14.0 · **Harness:** [vectorize-io/agent-memory-benchmark](https://github.com/vectorize-io/agent-memory-benchmark) · **Dataset:** BEAM-100K, all 400 queries
+**Date:** 2026-08-12 · **Engine:** yantrikdb 0.13.4 · **Harness:** [vectorize-io/agent-memory-benchmark](https://github.com/vectorize-io/agent-memory-benchmark) · **Dataset:** BEAM-100K, all 400 queries
 
 ---
 
@@ -65,6 +65,20 @@ what their answerer received, not one round of several.
 | ingest | **241 s** for 170 documents, **no LLM, no network** |
 | retrieval | **80 ms** mean, 44 ms p50, 258 ms p95 |
 | context | 13,673 tokens/query |
+
+> **Engine version, corrected 2026-08-13.** This page briefly claimed 0.14.0.
+> It is wrong: the benchmark's virtualenv holds `yantrikdb-0.13.4.dist-info`,
+> installed 2026-08-11 21:05, before the run. The number was never verified —
+> it was changed from `0.14.0-dev` to `0.14.0` on the reasoning that 0.14.0 was
+> "the release the code corresponds to", which is an assumption, not a
+> measurement. Nothing else on this page is affected: every result was produced
+> by that same 0.13.4 build, so the comparisons remain internally consistent.
+> A 0.14.1 run is pending and will be reported separately rather than folded
+> into these numbers.
+>
+> The run files record no engine version at all, which is why this was
+> undetectable from the outputs. That is now a gap worth closing in the
+> provider.
 
 Configuration: turn-aware chunking, `k=40`, bundled 7 MB static embedder
 (potion-base-2M, 64-dim, in-process), HNSW + BM25 fusion. Answerer and judge
