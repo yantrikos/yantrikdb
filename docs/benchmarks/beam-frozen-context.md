@@ -173,6 +173,25 @@ difference that reads, in a leaderboard, as a decisive result.
   we cannot rule out that their larger context cost them something a
   budget-matched test would recover. The result favours us on
   quality-per-token; it does not isolate content selection from context length.
+- **The contexts are not information-matched, and part of our token advantage
+  is a capability we are not exercising.** Measured after publication: their
+  rag contexts carry a **median of 117 dates each**; ours carry **5**. Ours
+  have any only because BEAM's own `[March-15-2024 | Turn 0]` turn headers
+  survive in the minority of chunks that span a turn boundary — the engine
+  stores `created_at` for every chunk and the provider discards it. So the
+  42% token saving is partly the cost of *not carrying event time*, which is
+  not a free efficiency: it is a difference in what each memory layer emits.
+  On any question requiring relative sequence, their answerer has the
+  timestamps and ours largely does not.
+
+  This does not obviously explain the category results — we lose
+  `event_ordering` but win `temporal_reasoning` and `knowledge_update`, all
+  date-dependent — which suggests ordering needs relative sequence across
+  many units while the others need a single anchor. A dated,
+  chronologically-ordered variant exists (`yantrikdb-temporal`) and measured
+  no effect at n=80, but that null sits inside a ~0.039 noise floor and is
+  underpowered. It is being re-run at full scale; this page will be updated
+  with the result either way.
 - **Their context was produced for a frontier reader** and may be
   disadvantaged by a mid-tier one in ways not characterised here. This cuts
   against us, and is the most likely way the equivalence finding is wrong.
