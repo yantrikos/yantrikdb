@@ -169,7 +169,54 @@ pub fn composite_score_with_sentiment(
     base_rel * imp_mult * query_valence_boost(valence, query_sentiment)
 }
 
+/// How strongly graph proximity may multiply a score: `1 + GRAPH_SCALE * p`,
+/// i.e. at most +12.5% — deliberately identical to the freshness ceiling.
+///
+/// Chosen by INVERSION BUDGET, not taste. A maximally-connected record can
+/// overtake an unconnected one only when `s_high / s_low < 1 + GRAPH_SCALE`,
+/// so 0.125 lets graph evidence reverse at most a 12.5% similarity gap. It
+/// breaks ties among near-equals and cannot promote an irrelevant record,
+/// which is exactly the guarantee freshness was rebuilt to provide.
+pub const GRAPH_SCALE: f64 = 0.125;
+
+/// The bounded graph multiplier. `p = 0` yields exactly 1.0, so a record with
+/// no edges scores identically on the graph and non-graph paths — there is no
+/// discontinuity at zero to fall off.
+#[inline]
+pub fn graph_mult(graph_proximity: f64) -> f64 {
+    1.0 + GRAPH_SCALE * graph_proximity.clamp(0.0, 1.0)
+}
+
 /// Graph composite score with query-aware valence.
+///
+/// **THE THIRD WALL.** The module law above says nothing may be added to
+/// similarity, and this function used to break it:
+///
+/// ```text
+/// base_rel = (GW_SIM * similarity + GW_GRAPH * graph_proximity) * freshness
+/// ```
+///
+/// That is the same additive shape as the importance wall and the recency
+/// wall, and it fails the same way. At the old constants a record with
+/// `similarity = 0.0026` and `graph_proximity = 1.0` scored **0.340** while a
+/// genuinely relevant record at `similarity = 0.309` with no edge scored
+/// **0.267** — the irrelevant one won, because `GW_GRAPH * 1.0 = 0.30` is a
+/// floor no similarity below 0.86 can cross. Measured in a live store, where
+/// a real-estate tax memo came back for "encryption at rest and key rotation"
+/// through a phantom `AT` node.
+///
+/// Two bugs died here:
+///
+/// 1. the additive term itself, now a bounded multiplier;
+/// 2. a DISCONTINUITY AT ZERO. The old branch reallocated weights the moment
+///    `p > 0` — similarity's coefficient dropped 0.50 → 0.35 and the
+///    importance cap 0.80 → 0.60 — so an infinitesimal edge cut a record's
+///    score by 30–40%, and it needed `p ≈ 0.5s` merely to break even. Graph
+///    evidence PENALISED the records it touched. There is no branch now: the
+///    multiplier is 1.0 at `p = 0`.
+///
+/// Diagnosed with gpt-5.6-sol and qwen3.8-max, 2026-08-13; the discontinuity
+/// was codex's find.
 pub fn graph_composite_score_with_sentiment(
     similarity: f64,
     decay: f64,
@@ -179,25 +226,14 @@ pub fn graph_composite_score_with_sentiment(
     graph_proximity: f64,
     query_sentiment: f64,
 ) -> f64 {
-    if graph_proximity > 0.0 {
-        // Graph proximity is a RELEVANCE signal like similarity — it
-        // stays in the additive relevance core. Freshness multiplies
-        // (same recency-wall rationale as the base composite).
-        let base_rel = (GW_SIM * similarity + GW_GRAPH * graph_proximity)
-            * freshness_mult(decay, recency, GW_DECAY, GW_RECENCY);
-        let gate = importance_gate(similarity);
-        let imp_mult = 1.0 + gate * GW_ALPHA_IMP * importance.min(1.0);
-        base_rel * imp_mult * query_valence_boost(valence, query_sentiment)
-    } else {
-        composite_score_with_sentiment(
-            similarity,
-            decay,
-            recency,
-            importance,
-            valence,
-            query_sentiment,
-        )
-    }
+    composite_score_with_sentiment(
+        similarity,
+        decay,
+        recency,
+        importance,
+        valence,
+        query_sentiment,
+    ) * graph_mult(graph_proximity)
 }
 
 /// Relevance-first multiplicative scoring.
@@ -473,39 +509,21 @@ pub fn adaptive_graph_composite_score(
     query_sentiment: f64,
     weights: &crate::types::LearnedWeights,
 ) -> f64 {
-    if graph_proximity > 0.0 {
-        // Derive graph weights: allocate GW_GRAPH (0.30) to graph, scale remaining
-        // base weights proportionally to fill the rest.
-        let graph_weight = GW_GRAPH;
-        let remaining = 1.0 - graph_weight;
-        let base_sum = weights.w_sim + weights.w_decay + weights.w_recency;
-        let (gw_sim, gw_decay, gw_recency) = if base_sum > 0.0 {
-            (
-                weights.w_sim / base_sum * remaining,
-                weights.w_decay / base_sum * remaining,
-                weights.w_recency / base_sum * remaining,
-            )
-        } else {
-            (GW_SIM, GW_DECAY, GW_RECENCY)
-        };
-        let base_rel = (gw_sim * similarity + graph_weight * graph_proximity)
-            * freshness_mult(decay, recency, gw_decay, gw_recency);
-        // Scale alpha_imp by same ratio as hardcoded (GW_ALPHA_IMP / ALPHA_IMP)
-        let graph_alpha = weights.alpha_imp * (GW_ALPHA_IMP / ALPHA_IMP);
-        let gate = sigmoid(GATE_K * (similarity - weights.gate_tau));
-        let imp_mult = 1.0 + gate * graph_alpha * importance.min(1.0);
-        base_rel * imp_mult * query_valence_boost(valence, query_sentiment)
-    } else {
-        adaptive_composite_score(
-            similarity,
-            decay,
-            recency,
-            importance,
-            valence,
-            query_sentiment,
-            weights,
-        )
-    }
+    // Same shape as the const version: one base formula for every candidate,
+    // then a bounded graph multiplier. The learned weights are NOT
+    // reallocated when an edge exists — that reallocation was the
+    // discontinuity at zero, and it also treated decay/recency weights as
+    // additive relevance mass, which the freshness refactor had already
+    // established they are not.
+    adaptive_composite_score(
+        similarity,
+        decay,
+        recency,
+        importance,
+        valence,
+        query_sentiment,
+        weights,
+    ) * graph_mult(graph_proximity)
 }
 
 /// Adaptive graph contributions using learned weights.
@@ -517,31 +535,13 @@ pub fn adaptive_graph_contributions(
     graph_proximity: f64,
     weights: &crate::types::LearnedWeights,
 ) -> ScoreContributions {
-    if graph_proximity > 0.0 {
-        let graph_weight = GW_GRAPH;
-        let remaining = 1.0 - graph_weight;
-        let base_sum = weights.w_sim + weights.w_decay + weights.w_recency;
-        let (gw_sim, gw_decay, gw_recency) = if base_sum > 0.0 {
-            (
-                weights.w_sim / base_sum * remaining,
-                weights.w_decay / base_sum * remaining,
-                weights.w_recency / base_sum * remaining,
-            )
-        } else {
-            (GW_SIM, GW_DECAY, GW_RECENCY)
-        };
-        let graph_alpha = weights.alpha_imp * (GW_ALPHA_IMP / ALPHA_IMP);
-        let gate = sigmoid(GATE_K * (similarity - weights.gate_tau));
-        ScoreContributions {
-            similarity: gw_sim * similarity,
-            decay: FRESHNESS_SCALE * gw_decay * decay,
-            recency: FRESHNESS_SCALE * gw_recency * recency,
-            importance: gate * graph_alpha * importance.min(1.0),
-            graph_proximity: graph_weight * graph_proximity,
-        }
-    } else {
-        adaptive_contributions(similarity, decay, recency, importance, weights)
-    }
+    // The base contributions are unchanged by the presence of an edge — the
+    // weights no longer reallocate — so the graph term is reported as what it
+    // now is: a bounded uplift on the whole score, on the same scale as the
+    // freshness terms beside it.
+    let mut c = adaptive_contributions(similarity, decay, recency, importance, weights);
+    c.graph_proximity = GRAPH_SCALE * graph_proximity.clamp(0.0, 1.0);
+    c
 }
 
 #[cfg(test)]
@@ -995,5 +995,127 @@ mod tests {
         // Also verify the gate itself at sim=0.08 is still small
         let gate = importance_gate(0.08);
         assert!(gate < 0.2, "gate at sim=0.08 should be small, got {gate}");
+    }
+}
+
+#[cfg(test)]
+mod graph_wall_tests {
+    use super::*;
+    use crate::types::LearnedWeights;
+
+    /// THE REGRESSION, with the numbers that exposed it.
+    ///
+    /// Under the old additive form `(GW_SIM*sim + GW_GRAPH*prox)`, a record at
+    /// similarity 0.0026 with a maximal graph edge scored 0.340 while a
+    /// genuinely relevant record at similarity 0.309 with no edge scored
+    /// 0.267. Measured in a live store, where a phantom `AT` node returned a
+    /// real-estate tax memo for "encryption at rest and key rotation".
+    #[test]
+    fn maximal_graph_edge_cannot_beat_a_relevant_record() {
+        let irrelevant = graph_composite_score_with_sentiment(0.0026, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0);
+        let relevant = graph_composite_score_with_sentiment(0.309, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0);
+        assert!(
+            relevant > irrelevant,
+            "graph wall rebuilt: irrelevant+connected {irrelevant:.4} beat relevant {relevant:.4}"
+        );
+    }
+
+    /// The bound, stated as arithmetic rather than taste: graph evidence may
+    /// reverse at most a GRAPH_SCALE similarity gap. A record more than 12.5%
+    /// less similar cannot be promoted no matter how connected it is.
+    #[test]
+    fn graph_uplift_is_bounded_by_graph_scale() {
+        let s_low = 0.50;
+        let s_high = s_low * (1.0 + GRAPH_SCALE) * 1.001; // just outside the budget
+        let connected = graph_composite_score_with_sentiment(s_low, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0);
+        let plain = graph_composite_score_with_sentiment(s_high, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(
+            plain > connected,
+            "a gap wider than GRAPH_SCALE was reversed: {plain:.6} vs {connected:.6}"
+        );
+    }
+
+    /// NO DISCONTINUITY AT ZERO. The old branch reallocated weights the moment
+    /// proximity became positive — similarity 0.50 -> 0.35, importance cap
+    /// 0.80 -> 0.60 — so an infinitesimal edge CUT a record's score by 30-40%.
+    /// Graph evidence penalised the records it touched.
+    #[test]
+    fn an_infinitesimal_edge_does_not_penalise() {
+        let no_edge = graph_composite_score_with_sentiment(0.4, 0.5, 0.5, 0.8, 0.0, 0.0, 0.0);
+        let tiny_edge = graph_composite_score_with_sentiment(0.4, 0.5, 0.5, 0.8, 0.0, 1e-9, 0.0);
+        assert!(
+            tiny_edge >= no_edge,
+            "a tiny edge reduced the score: {tiny_edge:.6} < {no_edge:.6}"
+        );
+        assert!((tiny_edge - no_edge).abs() < 1e-6, "discontinuity at zero");
+    }
+
+    /// Zero similarity still means zero score, edge or not — the invariant the
+    /// whole multiplicative design exists to preserve.
+    #[test]
+    fn zero_similarity_scores_zero_even_when_connected() {
+        let s = graph_composite_score_with_sentiment(0.0, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0);
+        assert_eq!(s, 0.0, "a connected but irrelevant record scored {s}");
+    }
+
+    /// The adaptive path must obey the same law; it had its own copy of the
+    /// additive form and its own weight reallocation.
+    #[test]
+    fn adaptive_path_obeys_the_same_wall() {
+        let w = LearnedWeights::default();
+        let irrelevant = adaptive_graph_composite_score(0.0026, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0, &w);
+        let relevant = adaptive_graph_composite_score(0.309, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, &w);
+        assert!(
+            relevant > irrelevant,
+            "adaptive graph wall: {irrelevant:.4} beat {relevant:.4}"
+        );
+        let no_edge = adaptive_graph_composite_score(0.4, 0.5, 0.5, 0.8, 0.0, 0.0, 0.0, &w);
+        let tiny = adaptive_graph_composite_score(0.4, 0.5, 0.5, 0.8, 0.0, 1e-9, 0.0, &w);
+        assert!(
+            (tiny - no_edge).abs() < 1e-6,
+            "adaptive discontinuity at zero"
+        );
+    }
+
+    /// EXECUTABLE HISTORY. Reproduces the old additive formula from the
+    /// retained GW_* constants and shows it inverting the ranking, then shows
+    /// the current formula refusing to. Without this the regression above is
+    /// just a pair of numbers that pass; with it, the bug is demonstrable on
+    /// demand and the constants have a reason to still exist.
+    #[test]
+    fn the_old_additive_form_inverted_the_ranking() {
+        let old = |sim: f64, prox: f64| {
+            let base_rel =
+                (GW_SIM * sim + GW_GRAPH * prox) * freshness_mult(1.0, 1.0, GW_DECAY, GW_RECENCY);
+            let imp_mult = 1.0 + importance_gate(sim) * GW_ALPHA_IMP * 1.0;
+            base_rel * imp_mult
+        };
+        let old_irrelevant = old(0.0026, 1.0);
+        let old_relevant = old(0.309, 0.0);
+        assert!(
+            old_irrelevant > old_relevant,
+            "history not reproduced: {old_irrelevant:.4} vs {old_relevant:.4}"
+        );
+
+        let now_irrelevant =
+            graph_composite_score_with_sentiment(0.0026, 1.0, 1.0, 1.0, 0.0, 1.0, 0.0);
+        let now_relevant =
+            graph_composite_score_with_sentiment(0.309, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0);
+        assert!(
+            now_relevant > now_irrelevant,
+            "the fix does not fix it: {now_relevant:.4} vs {now_irrelevant:.4}"
+        );
+    }
+
+    /// A genuine tie-break still works — the fix must not make graph evidence
+    /// inert, only bounded.
+    #[test]
+    fn graph_still_breaks_ties_among_near_equals() {
+        let connected = graph_composite_score_with_sentiment(0.40, 0.5, 0.5, 0.5, 0.0, 1.0, 0.0);
+        let alone = graph_composite_score_with_sentiment(0.40, 0.5, 0.5, 0.5, 0.0, 0.0, 0.0);
+        assert!(
+            connected > alone,
+            "graph evidence became inert: {connected:.6} vs {alone:.6}"
+        );
     }
 }

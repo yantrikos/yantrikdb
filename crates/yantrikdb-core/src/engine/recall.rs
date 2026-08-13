@@ -1861,10 +1861,28 @@ impl YantrikDB {
                             .unwrap_or(1.0);
                         drop(cache);
 
-                        let boost = (base_boost * prox * best_idf * consolidation_factor)
-                            .min(MAX_BOOST_PER_MEMORY);
+                        // MULTIPLICATIVE, not additive. This was
+                        // `result.score += boost` with boost capped at 0.25 —
+                        // on composites that typically run 0.2-0.6, a flat
+                        // +0.25 could nearly double a weak score, so a graph
+                        // edge promoted records relevance had ranked below
+                        // them. Same wall as importance, freshness and the
+                        // graph composite; this was the last additive site.
+                        //
+                        // The quality modifiers are kept and now shape the
+                        // EVIDENCE rather than the magnitude: proximity,
+                        // discounted by the connecting entity's inverse
+                        // document frequency (a hub entity is weak evidence)
+                        // and by the consolidation penalty, scaled by the
+                        // expansion strength. GRAPH_SCALE alone sets the
+                        // ceiling, so the uplift is at most +12.5%.
+                        let evidence = ((base_boost / MAX_BOOST_PER_MEMORY)
+                            * prox
+                            * best_idf
+                            * consolidation_factor)
+                            .clamp(0.0, 1.0);
                         result.scores.graph_proximity = prox;
-                        result.score += boost;
+                        result.score *= scoring::graph_mult(evidence);
                         if !connecting_entity.is_empty() {
                             result
                                 .why_retrieved
@@ -4595,10 +4613,28 @@ impl YantrikDB {
                                 })
                                 .unwrap_or(1.0)
                         };
-                        let boost = (base_boost * prox * best_idf * consolidation_factor)
-                            .min(MAX_BOOST_PER_MEMORY);
+                        // MULTIPLICATIVE, not additive. This was
+                        // `result.score += boost` with boost capped at 0.25 —
+                        // on composites that typically run 0.2-0.6, a flat
+                        // +0.25 could nearly double a weak score, so a graph
+                        // edge promoted records relevance had ranked below
+                        // them. Same wall as importance, freshness and the
+                        // graph composite; this was the last additive site.
+                        //
+                        // The quality modifiers are kept and now shape the
+                        // EVIDENCE rather than the magnitude: proximity,
+                        // discounted by the connecting entity's inverse
+                        // document frequency (a hub entity is weak evidence)
+                        // and by the consolidation penalty, scaled by the
+                        // expansion strength. GRAPH_SCALE alone sets the
+                        // ceiling, so the uplift is at most +12.5%.
+                        let evidence = ((base_boost / MAX_BOOST_PER_MEMORY)
+                            * prox
+                            * best_idf
+                            * consolidation_factor)
+                            .clamp(0.0, 1.0);
                         result.scores.graph_proximity = prox;
-                        result.score += boost;
+                        result.score *= scoring::graph_mult(evidence);
                         if !connecting_entity.is_empty() {
                             result
                                 .why_retrieved
