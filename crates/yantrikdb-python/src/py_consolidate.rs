@@ -215,6 +215,40 @@ fn mem_with_emb_to_dict(py: Python<'_>, m: &MemoryWithEmbedding) -> PyResult<PyO
 ///
 /// Returns the same dict shape as `consolidate()`'s elements, plus
 /// `embedded_from_text` reporting which path produced the vector.
+/// Store a synthesis of `source_rids` BESIDE them, leaving every source live.
+///
+/// The difference from `consolidate_cluster` is the whole point: that one
+/// retires its sources (`consolidation_status = 'consolidated'`, which the
+/// default recall filter excludes, plus a 0.3x importance cut), this one does
+/// not. Use it to add an ABSTRACTION over a cluster without losing the
+/// verbatim detail underneath.
+///
+/// Motivation, measured: 26% of all points lost on BEAM sit on abstract topic
+/// labels ('Initial project setup', 'Integration test coverage') that appear
+/// NOWHERE in 12.4M characters of the stored conversations. Retrieval cannot
+/// surface a phrase nobody wrote — it has to be synthesised and stored. The
+/// replacing form was tried and cost -21.6pp on summarization and -17.5pp on
+/// preference_following by hiding the detail those categories need.
+#[pyfunction]
+#[pyo3(name = "summarize_cluster", signature = (db, source_rids, text, embedding=None))]
+pub fn py_summarize_cluster(
+    py: Python<'_>,
+    db: &PyYantrikDB,
+    source_rids: Vec<String>,
+    text: &str,
+    embedding: Option<Vec<f32>>,
+) -> PyResult<PyObject> {
+    let inner = db.get_inner()?;
+    let out = yantrikdb_core::consolidate::summarize_cluster(
+        inner,
+        &source_rids,
+        text,
+        embedding.as_deref(),
+    )
+    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    json_to_py(py, &out)
+}
+
 #[pyfunction]
 #[pyo3(name = "consolidate_cluster", signature = (db, source_rids, text, embedding=None))]
 pub fn py_consolidate_cluster(

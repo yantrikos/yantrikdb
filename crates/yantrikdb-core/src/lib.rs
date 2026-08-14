@@ -33,7 +33,7 @@ pub use conflict::{
     create_conflict, detect_edge_conflicts, scan_claim_conflicts, scan_conflicts,
     scan_conflicts_limited,
 };
-pub use consolidate::{consolidate, find_consolidation_candidates};
+pub use consolidate::{consolidate, find_consolidation_candidates, summarize_cluster};
 pub use engine::conflict::ConflictBurndownReport;
 pub use engine::conversation::{Turn, DEFAULT_TURN_WINDOW};
 pub use engine::demand::KnowledgeGap;

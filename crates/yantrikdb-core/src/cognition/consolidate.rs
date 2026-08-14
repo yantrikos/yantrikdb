@@ -195,7 +195,55 @@ pub fn consolidate_cluster(
         crate::validate::validate_embedding("consolidate_cluster", v, db.embedding_dim())?;
     }
     let members = load_cluster_members(db, source_rids)?;
-    commit_consolidation(db, &members, text, embedding.map(|v| v.to_vec()))
+    commit_consolidation(db, &members, text, embedding.map(|v| v.to_vec()), false)
+}
+
+/// Store a synthesis of `source_rids` BESIDE them, leaving every source live.
+///
+/// # Why this exists
+///
+/// `consolidate_cluster` retires its sources: it sets
+/// `consolidation_status = 'consolidated'` (which the default recall filter
+/// excludes) and multiplies their importance by 0.3. That is correct when the
+/// synthesis is meant to REPLACE detail, and destructive when it is not.
+///
+/// Measured on BEAM 100k, the replacing form bought +18.8pp on abstention and
+/// +16.8pp on temporal_reasoning — the two categories where noise hurts — and
+/// cost -21.6 on summarization and -17.5 on preference_following, because the
+/// verbatim detail those need had been hidden. Net -6.2pp, which is why the
+/// whole mechanism was written off as churn rather than as mis-scoped.
+///
+/// # Why an ADDITIVE synthesis is worth storing at all
+///
+/// Reading BEAM's per-nugget judgments shows 26% of all lost points sit on
+/// abstract topic labels — 'Initial project setup', 'Integration test
+/// coverage' — and NONE of those strings occurs anywhere in 12.4M characters
+/// of the stored conversations. They are abstractions over a span of turns,
+/// not quotes. No retrieval policy can ever surface a phrase that was never
+/// written; the abstraction has to be SYNTHESISED and stored. This is the
+/// write-side half of that, and keeping the sources live is what separates it
+/// from the version that already failed.
+pub fn summarize_cluster(
+    db: &YantrikDB,
+    source_rids: &[String],
+    text: &str,
+    embedding: Option<&[f32]>,
+) -> Result<serde_json::Value> {
+    if source_rids.is_empty() {
+        return Err(crate::error::YantrikDbError::InvalidInput(
+            "summarize_cluster: source_rids is empty".into(),
+        ));
+    }
+    if text.trim().is_empty() {
+        return Err(crate::error::YantrikDbError::InvalidInput(
+            "summarize_cluster: text is empty — the caller owns the synthesis".into(),
+        ));
+    }
+    if let Some(v) = embedding {
+        crate::validate::validate_embedding("summarize_cluster", v, db.embedding_dim())?;
+    }
+    let members = load_cluster_members(db, source_rids)?;
+    commit_consolidation(db, &members, text, embedding.map(|v| v.to_vec()), true)
 }
 
 /// Load the named memories, refusing anything that would make the
@@ -494,6 +542,7 @@ pub fn consolidate(
             cluster,
             &summary_text,
             Some(mean_emb),
+            false,
         )?);
     }
 
@@ -517,6 +566,9 @@ fn commit_consolidation(
     cluster: &[MemoryWithEmbedding],
     summary_text: &str,
     embedding: Option<Vec<f32>>,
+    // ADDITIVE mode keeps the sources fully live: the synthesis is stored
+    // beside them rather than over them. See `summarize_cluster`.
+    additive: bool,
 ) -> Result<serde_json::Value> {
     let ts = crate::time::now_secs();
     {
@@ -606,6 +658,20 @@ fn commit_consolidation(
                     rusqlite::params![consolidated_rid, source_rid, hlc_bytes, actor_id],
                 )?;
 
+                // ADDITIVE mode stops here: membership is recorded for
+                // provenance, but the source keeps its status and its
+                // importance. Marking it 'consolidated' would remove it from
+                // every default recall (the filter admits only 'active'
+                // unless include_consolidated), and the 0.3x importance
+                // demotes it even when it is included. That pair is what made
+                // consolidation destructive: measured on BEAM it bought
+                // +18.8pp on abstention and +16.8pp on temporal_reasoning
+                // while costing -21.6 on summarization and -17.5 on
+                // preference_following, because the verbatim detail those
+                // categories need had been hidden.
+                if additive {
+                    continue;
+                }
                 conn.execute(
                     "UPDATE memories \
                      SET consolidation_status = 'consolidated', \
@@ -836,5 +902,95 @@ mod tests {
         ];
         let mean = mean_embedding(&mems);
         assert_eq!(mean, vec![2.0, 3.0, 4.0]);
+    }
+}
+
+#[cfg(test)]
+mod additive_summary_tests {
+    use crate::YantrikDB;
+
+    fn seed(db: &YantrikDB, texts: &[&str]) -> Vec<String> {
+        texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let mut v = vec![0.0f32; 8];
+                v[i % 8] = 1.0;
+                db.record_with_idempotency(
+                    t,
+                    "episodic",
+                    0.8,
+                    0.0,
+                    604800.0,
+                    &serde_json::json!({}),
+                    &v,
+                    "default",
+                    0.8,
+                    "work",
+                    "user",
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+            })
+            .collect()
+    }
+
+    /// THE POINT OF THE WHOLE THING. `consolidate_cluster` retires its
+    /// sources; `summarize_cluster` must not. If the sources stop being
+    /// 'active' the default recall filter drops them, which is exactly what
+    /// cost -21.6pp on summarization and -17.5pp on preference_following.
+    #[test]
+    fn additive_summary_leaves_every_source_live() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let rids = seed(
+            &db,
+            &["set up the database schema", "configured the local server"],
+        );
+        super::summarize_cluster(&db, &rids, "Initial project setup", Some(&vec![0.5f32; 8]))
+            .unwrap();
+        for r in &rids {
+            let m = db.get_memory(r).unwrap().unwrap();
+            assert_eq!(m.consolidation_status, "active", "source {r} was retired");
+            assert!((m.importance - 0.8).abs() < 1e-6, "source {r} was demoted");
+        }
+    }
+
+    /// The contrast case: the replacing form still retires sources, so the
+    /// two behaviours cannot silently converge.
+    #[test]
+    fn replacing_consolidation_still_retires_sources() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let rids = seed(
+            &db,
+            &["set up the database schema", "configured the local server"],
+        );
+        super::consolidate_cluster(&db, &rids, "Initial project setup", Some(&vec![0.5f32; 8]))
+            .unwrap();
+        let m = db.get_memory(&rids[0]).unwrap().unwrap();
+        assert_eq!(m.consolidation_status, "consolidated");
+        assert!(m.importance < 0.8);
+    }
+
+    /// The synthesis must be a first-class, retrievable memory — an
+    /// abstraction nobody can retrieve is the problem this exists to fix.
+    #[test]
+    fn the_abstraction_itself_is_stored_and_findable() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let rids = seed(
+            &db,
+            &["set up the database schema", "configured the local server"],
+        );
+        let out =
+            super::summarize_cluster(&db, &rids, "Initial project setup", Some(&vec![0.5f32; 8]))
+                .unwrap();
+        let new_rid = out["consolidated_rid"]
+            .as_str()
+            .or_else(|| out["rid"].as_str())
+            .expect("summary rid in result");
+        let m = db.get_memory(new_rid).unwrap().unwrap();
+        assert_eq!(m.text, "Initial project setup");
+        assert_eq!(m.consolidation_status, "active");
     }
 }
