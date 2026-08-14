@@ -175,55 +175,12 @@ impl YantrikDB {
         let text = sanitized.as_ref();
 
         // EVENT TIME. `created_at` records when this memory was WRITTEN; the
-        // time the memory *describes* lives only in its prose. The two
-        // disagree constantly and the gap is not small: in a measured
-        // conversation corpus 9.3% of records carried at least one written
-        // date, and a record written 2024-03-14 mentioned events from
-        // December 2023 to April 2024 — its own timestamp outside the entire
-        // range it describes. Asked "how long between shipping and the
-        // deadline", no structured field could answer, because both operands
-        // were text.
-        //
-        // So unambiguous dates are lifted into metadata at write time, under
-        // `event_dates` (ISO strings) plus `event_time_min`/`event_time_max`
-        // for range use. Deterministic and model-free: an inference call on
-        // the write path of an embedded database would betray the engine's
-        // core proposition that remembering costs no inference.
-        //
-        // ADDITIVE ONLY. A caller that already supplied these keys is
-        // authoritative and is never overwritten — explicit knowledge beats
-        // anything inferred from prose.
-        let metadata_owned: serde_json::Value = {
-            let dates = crate::base::datetext::extract_event_dates(text);
-            if dates.is_empty() {
-                metadata.clone()
-            } else {
-                let mut m = metadata.clone();
-                if let Some(obj) = m.as_object_mut() {
-                    if !obj.contains_key("event_dates") {
-                        obj.insert(
-                            "event_dates".to_string(),
-                            serde_json::Value::Array(
-                                dates
-                                    .iter()
-                                    .map(|d| serde_json::Value::String(d.iso.clone()))
-                                    .collect(),
-                            ),
-                        );
-                    }
-                    if !obj.contains_key("event_time_min") {
-                        obj.insert("event_time_min".to_string(), dates[0].epoch.into());
-                    }
-                    if !obj.contains_key("event_time_max") {
-                        obj.insert(
-                            "event_time_max".to_string(),
-                            dates[dates.len() - 1].epoch.into(),
-                        );
-                    }
-                }
-                m
-            }
-        };
+        // time it DESCRIBES lives only in its prose, and the two disagree
+        // constantly — a measured corpus had a record written 2024-03-14
+        // describing events from December 2023 to April 2024. See
+        // base::datetext for why extraction is deterministic and what it
+        // deliberately refuses to parse.
+        let metadata_owned = crate::base::datetext::merge_event_dates(metadata, text);
         let metadata = &metadata_owned;
         // v0.7.23: coerce a blank namespace to the canonical default so no
         // consumer persists an unscoped "" partition. Shadows the param so
@@ -2338,6 +2295,39 @@ mod event_time_tests {
             serde_json::json!({"event_dates": ["1999-12-31"]}),
         );
         assert_eq!(md["event_dates"], serde_json::json!(["1999-12-31"]));
+    }
+
+    /// BOTH write paths must extract. `record_with_idempotency` (caller
+    /// supplies the embedding) and `record_text_with_idempotency` (engine
+    /// embeds) are separate implementations, not delegates — extraction was
+    /// first wired into only the former, which passed every Rust test while
+    /// doing nothing through the Python binding, because the binding uses the
+    /// latter. This pins the pair so the next divergence fails loudly.
+    #[test]
+    #[cfg(feature = "bundled-embedder")]
+    fn engine_embeds_path_extracts_too() {
+        let db = YantrikDB::with_default(":memory:").unwrap();
+        let rid = db
+            .record_text(
+                "start January 15, 2024 and deadline March 15, 2024",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                "default",
+                0.8,
+                "work",
+                "user",
+                None,
+            )
+            .unwrap();
+        let md = db.get_memory(&rid).unwrap().unwrap().metadata;
+        assert_eq!(
+            md["event_dates"],
+            serde_json::json!(["2024-01-15", "2024-03-15"]),
+            "the engine-embeds path must extract exactly like the supplied-embedding one"
+        );
     }
 
     /// Text with no date must not gain the keys at all: an absent field and an

@@ -2332,6 +2332,13 @@ impl YantrikDB {
         // artifact. Borrowed (no allocation) on the clean path.
         let sanitized = sanitize::sanitize_tool_call_artifacts(text);
         let text = sanitized.as_ref();
+
+        // EVENT TIME — same merge as the supplied-embedding path. These two
+        // write paths are separate implementations rather than delegates, so
+        // anything added to one and not the other silently applies to half of
+        // all writes; this path is the one the Python binding uses.
+        let metadata_owned = crate::base::datetext::merge_event_dates(metadata, text);
+        let metadata = &metadata_owned;
         // v0.7.23 normalization, APPLIED HERE for the first time (sol 4a.6d-1
         // finding): record_text never normalized blank namespaces — a
         // pre-existing divergence from record(), which coerces ""/whitespace to

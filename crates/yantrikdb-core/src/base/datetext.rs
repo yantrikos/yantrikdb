@@ -209,6 +209,54 @@ pub fn extract_event_dates(text: &str) -> Vec<EventDate> {
     found
 }
 
+/// Merge event dates found in `text` into `metadata`, without overwriting.
+///
+/// Lives here rather than at a call site because the engine has TWO write
+/// paths — `record_with_idempotency` (caller supplies the embedding) and
+/// `record_text_with_idempotency` (engine embeds) — and they are separate
+/// implementations, not delegates. Wiring extraction into only one shipped a
+/// feature that worked in Rust tests and did nothing through the Python
+/// binding, which uses the other. One helper, called twice, is the fix for
+/// the category rather than the instance.
+///
+/// ADDITIVE: keys the caller already set are authoritative and left alone —
+/// explicit knowledge beats anything inferred from prose. Text with no date
+/// gains no keys at all, since an absent field and an empty one mean
+/// different things to a consumer.
+pub fn merge_event_dates(metadata: &serde_json::Value, text: &str) -> serde_json::Value {
+    let dates = extract_event_dates(text);
+    if dates.is_empty() {
+        return metadata.clone();
+    }
+    let mut m = metadata.clone();
+    if !m.is_object() {
+        m = serde_json::Value::Object(Default::default());
+    }
+    if let Some(obj) = m.as_object_mut() {
+        if !obj.contains_key("event_dates") {
+            obj.insert(
+                "event_dates".to_string(),
+                serde_json::Value::Array(
+                    dates
+                        .iter()
+                        .map(|d| serde_json::Value::String(d.iso.clone()))
+                        .collect(),
+                ),
+            );
+        }
+        if !obj.contains_key("event_time_min") {
+            obj.insert("event_time_min".to_string(), dates[0].epoch.into());
+        }
+        if !obj.contains_key("event_time_max") {
+            obj.insert(
+                "event_time_max".to_string(),
+                dates[dates.len() - 1].epoch.into(),
+            );
+        }
+    }
+    m
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
