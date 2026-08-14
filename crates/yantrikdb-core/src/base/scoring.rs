@@ -176,30 +176,6 @@ pub fn composite_score_with_sentiment(
         * query_valence_boost(valence, query_sentiment)
 }
 
-/// Policy-layer multiplier for the full recall path, where graph proximity
-/// and cross-lane agreement are also available.
-///
-/// Kept separate from [`composite_score_with_sentiment`] only because the
-/// callers differ; the budget is the same one.
-#[inline]
-pub fn policy_mult_for_recall(
-    similarity: f64,
-    decay: f64,
-    recency: f64,
-    importance: f64,
-    graph_proximity: f64,
-    extra_lanes: usize,
-    usage: f64,
-) -> f64 {
-    policy_mult(
-        freshness_z(decay, recency),
-        importance_gate(similarity) * importance.clamp(0.0, 1.0),
-        graph_proximity,
-        (extra_lanes.min(2) as f64) / 2.0,
-        usage,
-    )
-}
-
 // ─────────────────────────────────────────────────────────────────────
 // THE POLICY LAYER — one shared inversion budget for every prior
 // ─────────────────────────────────────────────────────────────────────
@@ -286,6 +262,16 @@ pub fn freshness_z(decay: f64, recency: f64) -> f64 {
 ///
 /// It orders equally-relevant records by proven usefulness. It cannot
 /// resurrect an irrelevant one.
+/// **NOT YET WIRED INTO RECALL.** `adaptive_composite_score` — the function
+/// recall actually calls — takes no `access_count`, so this prior currently
+/// contributes nothing to ranking. `PW_USAGE` therefore reserves a share of
+/// the budget that nobody spends, which is deliberate: it keeps the weight
+/// table honest about what the design intends, and the partition invariant
+/// already accounts for it, so wiring it later cannot widen the ceiling.
+///
+/// The companion helper that DID accept it was removed rather than left
+/// looking wired — an unreachable function that appears to implement a
+/// feature is worse than an absent one, because it reads as done.
 #[inline]
 pub fn usage_z(access_count: u32) -> f64 {
     ((access_count as f64).ln_1p() / (ACCESS_SATURATION as f64).ln_1p()).min(1.0)
