@@ -1295,6 +1295,53 @@ impl Default for LearnedWeights {
     }
 }
 
+impl LearnedWeights {
+    /// Force every weight into a sane range.
+    ///
+    /// **Weights arrive from the database, and the database is not a trusted
+    /// oracle.** They are written by the online-learning loop, but a row can
+    /// also be edited by hand, restored from an old schema, corrupted, or
+    /// carried across a version that meant something different by the same
+    /// column. Until 2026-08-13 they were loaded and used verbatim: a
+    /// `keyword_boost` of 50 would have made the lexical side-boost dwarf
+    /// every semantic score in the store, and the only symptom would be
+    /// "recall got strange".
+    ///
+    /// `keyword_boost` is the one that most needs this. It is applied as an
+    /// ADDITIVE term (lexical evidence deliberately counts for more when
+    /// cosine is weak), so unlike the multiplicative priors it has no
+    /// similarity-relative ceiling of its own — its bound has to come from
+    /// here.
+    ///
+    /// Clamping rather than rejecting is deliberate: a database must still
+    /// open with a bad weights row. The values are a tuning artifact, not
+    /// user data, so the safe response is to fall back into range and carry
+    /// on rather than refuse to serve recall.
+    pub fn clamped(mut self) -> Self {
+        let fix = |v: f64, lo: f64, hi: f64, fallback: f64| {
+            if v.is_finite() {
+                v.clamp(lo, hi)
+            } else {
+                fallback
+            }
+        };
+        let d = Self::default();
+        self.w_sim = fix(self.w_sim, 0.05, 1.0, d.w_sim);
+        self.w_decay = fix(self.w_decay, 0.0, 1.0, d.w_decay);
+        self.w_recency = fix(self.w_recency, 0.0, 1.0, d.w_recency);
+        // Below ~0.05 the importance gate opens for everything; above ~0.9
+        // it never opens at all.
+        self.gate_tau = fix(self.gate_tau, 0.05, 0.90, d.gate_tau);
+        // The policy budget already caps what importance can DO; this keeps
+        // the weight itself interpretable.
+        self.alpha_imp = fix(self.alpha_imp, 0.0, 1.5, d.alpha_imp);
+        // Hard ceiling: at 1.0 a perfect lexical match is worth as much as a
+        // perfect semantic one, which is the most it can defensibly mean.
+        self.keyword_boost = fix(self.keyword_boost, 0.0, 1.0, d.keyword_boost);
+        self
+    }
+}
+
 // ── Personality types (V11) ──
 
 /// A single personality trait with its current score and derivation metadata.

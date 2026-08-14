@@ -81,7 +81,11 @@ impl YantrikDB {
         );
 
         match result {
-            Ok(w) => Ok(w),
+            // Clamped on the way OUT of the database, not on the way in:
+            // rows predating the clamp, hand-edited rows and restored
+            // backups all flow through here, and none of them were
+            // validated when written.
+            Ok(w) => Ok(w.clamped()),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(LearnedWeights::default()),
             Err(e) => Err(e.into()),
         }

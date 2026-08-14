@@ -163,10 +163,218 @@ pub fn composite_score_with_sentiment(
     valence: f64,
     query_sentiment: f64,
 ) -> f64 {
-    let base_rel = W_SIM * similarity * freshness_mult(decay, recency, W_DECAY, W_RECENCY);
-    let gate = importance_gate(similarity);
-    let imp_mult = 1.0 + gate * ALPHA_IMP * importance.min(1.0);
-    base_rel * imp_mult * query_valence_boost(valence, query_sentiment)
+    // Priors share one budget (see POLICY_BUDGET_LN). Importance enters
+    // pre-gated by similarity so it cannot manufacture relevance; graph and
+    // agreement are absent on this path and pass 0, which costs exactly
+    // nothing because the weights multiply zeros rather than being
+    // renormalized away.
+    let freshness_z = freshness_z(decay, recency);
+    let importance_z = importance_gate(similarity) * importance.clamp(0.0, 1.0);
+    W_SIM
+        * similarity
+        * policy_mult(freshness_z, importance_z, 0.0, 0.0, 0.0)
+        * query_valence_boost(valence, query_sentiment)
+}
+
+/// Policy-layer multiplier for the full recall path, where graph proximity
+/// and cross-lane agreement are also available.
+///
+/// Kept separate from [`composite_score_with_sentiment`] only because the
+/// callers differ; the budget is the same one.
+#[inline]
+pub fn policy_mult_for_recall(
+    similarity: f64,
+    decay: f64,
+    recency: f64,
+    importance: f64,
+    graph_proximity: f64,
+    extra_lanes: usize,
+    usage: f64,
+) -> f64 {
+    policy_mult(
+        freshness_z(decay, recency),
+        importance_gate(similarity) * importance.clamp(0.0, 1.0),
+        graph_proximity,
+        (extra_lanes.min(2) as f64) / 2.0,
+        usage,
+    )
+}
+
+// ─────────────────────────────────────────────────────────────────────
+// THE POLICY LAYER — one shared inversion budget for every prior
+// ─────────────────────────────────────────────────────────────────────
+//
+// # The defect this replaces
+//
+// Freshness, importance, graph and agreement were each documented as
+// "bounded, at most +12.5%" and each applied as an independent multiplier.
+// Multipliers COMPOUND: the reachable product measured ~3.26x on a neutral
+// query (~3.9x with sentiment-aligned valence). A similarity-0.30 record
+// with maxed priors outscored a bare similarity-0.60 record — a 2x
+// relevance gap, reversed. Every factor was individually within its stated
+// bound; the system was not. Worse, the shape invited the next signal to
+// add a fifth independent multiplier and widen the hole again.
+//
+// # The rule
+//
+// Priors are QUERY-INDEPENDENT: freshness, importance, connectivity,
+// corroboration. They say nothing about whether this record answers THIS
+// query, so they must never create relevance from zero, and they must
+// share ONE budget no matter how many of them exist.
+//
+//     score = relevance * exp(POLICY_BUDGET_LN * sum(w_i * z_i))
+//     with every z_i in [0,1], every w_i >= 0, and sum(w_i) <= 1
+//
+// Because the weights partition a single budget, the entire policy layer
+// is bounded by exp(POLICY_BUDGET_LN) — today, next year, and after the
+// next five signals are added. Adding a signal dilutes the others rather
+// than widening the ceiling, which is the property the old form lacked.
+//
+// This is deliberately NOT "cap the old product": clipping after
+// multiplying creates a plateau where unrelated records pile up at the cap
+// and become indistinguishable.
+
+/// Total ratio the policy layer may ever apply: `exp(0.2624) = 1.30`.
+///
+/// Chosen as an inversion budget, not by taste: priors may reorder records
+/// within a 30% relevance band and can never rescue a record from outside
+/// it. The old composed ceiling was ~326%.
+pub const POLICY_BUDGET_LN: f64 = 0.262_364_264_467_491_9; // ln(1.30)
+
+/// Prior weights. **These must sum to <= 1.0** — that invariant is what
+/// makes the budget shared rather than per-signal, and it is asserted in
+/// `policy_weights_partition_one_budget`.
+///
+/// Note what adding `PW_USAGE` did: every other weight shrank. That is the
+/// design working — a new prior takes a share of one fixed budget instead of
+/// bolting on another multiplier, so the ceiling is unchanged at 1.30.
+pub const PW_FRESHNESS: f64 = 0.22;
+pub const PW_IMPORTANCE: f64 = 0.40;
+pub const PW_GRAPH: f64 = 0.13;
+pub const PW_AGREEMENT: f64 = 0.13;
+pub const PW_USAGE: f64 = 0.12;
+
+/// Freshness as a normalized prior in `[0,1]`.
+///
+/// `W_DECAY + W_RECENCY = 0.5`, so the raw blend maxes out at 0.5 — using it
+/// directly silently gave freshness HALF the budget share the weight table
+/// says it has. Caught by the stagewise-composition test, which is the value
+/// of asserting an equivalence rather than a threshold: a threshold test
+/// would have passed happily with freshness at half strength.
+#[inline]
+pub fn freshness_z(decay: f64, recency: f64) -> f64 {
+    ((W_DECAY * decay + W_RECENCY * recency) / (W_DECAY + W_RECENCY)).clamp(0.0, 1.0)
+}
+/// Recall frequency as a bounded prior — the "this has repeatedly proven
+/// useful" signal.
+///
+/// `access_count` was tracked on 2,796 of 5,050 records in a real store
+/// (max 7,975 recalls) and fed ONLY eviction decisions; it had no influence
+/// on ranking at all. It is a textbook query-independent prior, so it lives
+/// in the shared budget.
+///
+/// # Why saturating, and why a small weight
+///
+/// A usage prior is a feedback loop: rank a memory higher, it gets recalled
+/// more, which ranks it higher. Left linear and unbounded that is a
+/// rich-get-richer ratchet that would eventually bury everything a user has
+/// not yet asked about. Three things contain it — the `ln1p` curve
+/// saturating at [`ACCESS_SATURATION`] (the 7,975-recall record and a
+/// 20-recall record are treated identically), the small share of a budget
+/// that is itself capped at 1.30x, and `skip_reinforce` for callers that
+/// must not perturb state.
+///
+/// It orders equally-relevant records by proven usefulness. It cannot
+/// resurrect an irrelevant one.
+#[inline]
+pub fn usage_z(access_count: u32) -> f64 {
+    ((access_count as f64).ln_1p() / (ACCESS_SATURATION as f64).ln_1p()).min(1.0)
+}
+
+/// Ceiling for an exploration lane's lift: `+10%`.
+///
+/// The valence and cold-memory lanes existed to let records the vector lane
+/// under-ranks still compete, and they did it with UNBOUNDED ADDITIVE terms
+/// (`+0.20·|valence|·importance`, `+0.15·importance`). An additive term has
+/// no similarity-relative bound: as similarity approaches zero its ratio to
+/// semantic relevance approaches infinity, so a record matching nothing
+/// could outrank one matching everything. That is the same wall the policy
+/// budget removed, relocated into the lanes.
+///
+/// A lane's job is ADMISSION — getting a candidate considered at all, which
+/// happens before scoring and is unaffected by this. Once admitted, a record
+/// competes on relevance like any other. So the lift becomes multiplicative
+/// and small: it reorders within a band, and a record with no semantic match
+/// scores near zero however cold or emotionally charged it is.
+pub const LANE_LIFT_MAX: f64 = 0.10;
+
+/// Bounded multiplicative lift for an exploration lane. `z` in `[0,1]`.
+#[inline]
+pub fn lane_lift_mult(z: f64) -> f64 {
+    1.0 + crate::base::tuning::tuning().lane_lift_max * z.clamp(0.0, 1.0)
+}
+
+/// The bounded policy multiplier shared by every composite.
+///
+/// Each argument is a normalized prior in `[0,1]`. `importance_z` is
+/// expected to arrive ALREADY GATED by similarity so that a high-importance
+/// record with no semantic match gets ~nothing — priors must not create
+/// relevance from zero.
+#[inline]
+pub fn policy_mult(
+    freshness_z: f64,
+    importance_z: f64,
+    graph_z: f64,
+    agreement_z: f64,
+    usage_z: f64,
+) -> f64 {
+    // Runtime-tunable (base/tuning.rs): a constant you cannot sweep is a
+    // constant you cannot validate, and these were wrong for months.
+    let t = crate::base::tuning::tuning();
+    let (wf, wi, wg, wa, wu) = t.normalized_weights();
+    let z = wf * freshness_z.clamp(0.0, 1.0)
+        + wi * importance_z.clamp(0.0, 1.0)
+        + wg * graph_z.clamp(0.0, 1.0)
+        + wa * agreement_z.clamp(0.0, 1.0)
+        + wu * usage_z.clamp(0.0, 1.0);
+    (t.policy_budget_ln() * z).exp()
+}
+
+/// How strongly cross-lane agreement may multiply a score:
+/// `1 + AGREEMENT_SCALE * extra_lanes/2`, capped at two extra lanes —
+/// at most +12.5%, deliberately identical to the freshness and graph
+/// ceilings so all three tie-breakers share one inversion budget.
+///
+/// # Why lane agreement is evidence at all
+///
+/// The vector lane, the FTS lane, the claims lane and the graph lane find
+/// candidates through close-to-independent mechanisms (dense similarity,
+/// lexical match, extracted propositions, entity adjacency). When several
+/// of them surface the SAME record for one query, that coincidence is
+/// information — the record is relevant in more than one sense of the
+/// word. Until 2026-08-13 the engine computed exactly this signal, wrote
+/// it into `why_retrieved`, used it for the response-level confidence…
+/// and never let it touch the ranking. The four benchmark categories that
+/// drag every arm (ordering, summarization, contradiction, temporal) are
+/// set-level failures where per-item scoring is blind; this is the
+/// cheapest of the set-aware repairs.
+///
+/// Bounded multiplicatively for the same reason freshness and graph are:
+/// an additive lane bonus is a wall (a record matched by three lanes at
+/// similarity 0.02 must never beat a single-lane record at 0.30). At
+/// 0.125 / two-lane cap, agreement can reverse at most a 12.5% relevance
+/// gap — it breaks ties between near-equals and can promote nothing else.
+pub const AGREEMENT_SCALE: f64 = 0.125;
+
+/// The bounded cross-lane agreement multiplier. `extra_lanes` is the
+/// number of retrieval lanes beyond the first that independently surfaced
+/// the record; 0 yields exactly 1.0 so single-lane hits are untouched.
+#[inline]
+pub fn agreement_mult(extra_lanes: usize) -> f64 {
+    // Also a budget share — see graph_mult for why late application is safe.
+    let t = crate::base::tuning::tuning();
+    let (_, _, _, wa, _) = t.normalized_weights();
+    (t.policy_budget_ln() * wa * (extra_lanes.min(2) as f64 / 2.0)).exp()
 }
 
 /// How strongly graph proximity may multiply a score: `1 + GRAPH_SCALE * p`,
@@ -184,7 +392,19 @@ pub const GRAPH_SCALE: f64 = 0.125;
 /// discontinuity at zero to fall off.
 #[inline]
 pub fn graph_mult(graph_proximity: f64) -> f64 {
-    1.0 + GRAPH_SCALE * graph_proximity.clamp(0.0, 1.0)
+    // A SHARE OF THE POLICY BUDGET, not an independent multiplier.
+    //
+    // The recall path applies graph and agreement late, after the composite
+    // is already scored, so making them independent factors put them back
+    // OUTSIDE the budget and let the product creep to ~1.65x again. Log
+    // space fixes this exactly: exp(B*w1*z1) * exp(B*w2*z2) =
+    // exp(B*(w1*z1 + w2*z2)), so factors applied at different stages of the
+    // pipeline still compose to one bound of exp(B) as long as the weights
+    // partition it. Where a factor is applied stops mattering; only its
+    // share does.
+    let t = crate::base::tuning::tuning();
+    let (_, _, wg, _, _) = t.normalized_weights();
+    (t.policy_budget_ln() * wg * graph_proximity.clamp(0.0, 1.0)).exp()
 }
 
 /// Graph composite score with query-aware valence.
@@ -323,7 +543,8 @@ fn sigmoid(x: f64) -> f64 {
 /// returns ~1 when similarity >> τ (importance fully active).
 #[inline]
 pub fn importance_gate(similarity: f64) -> f64 {
-    sigmoid(GATE_K * (similarity - GATE_TAU))
+    let t = crate::base::tuning::tuning();
+    sigmoid(t.gate_k * (similarity - t.gate_tau))
 }
 
 /// Compute the composite recall score: relevance first, everything else
@@ -340,10 +561,12 @@ pub fn composite_score(
     importance: f64,
     valence: f64,
 ) -> f64 {
-    let base_rel = W_SIM * similarity * freshness_mult(decay, recency, W_DECAY, W_RECENCY);
-    let gate = importance_gate(similarity);
-    let imp_mult = 1.0 + gate * ALPHA_IMP * importance.min(1.0);
-    base_rel * imp_mult * valence_boost(valence)
+    let freshness_z = freshness_z(decay, recency);
+    let importance_z = importance_gate(similarity) * importance.clamp(0.0, 1.0);
+    W_SIM
+        * similarity
+        * policy_mult(freshness_z, importance_z, 0.0, 0.0, 0.0)
+        * valence_boost(valence)
 }
 
 /// Compute weighted contributions for standard scoring.
@@ -359,10 +582,13 @@ pub fn standard_contributions(
 ) -> ScoreContributions {
     let gate = importance_gate(similarity);
     ScoreContributions {
+        // Reported on the SAME scale the score uses: each prior is its
+        // share of the log-space budget, so the numbers here sum toward
+        // POLICY_BUDGET_LN rather than describing a superseded formula.
         similarity: W_SIM * similarity,
-        decay: FRESHNESS_SCALE * W_DECAY * decay,
-        recency: FRESHNESS_SCALE * W_RECENCY * recency,
-        importance: gate * ALPHA_IMP * importance.min(1.0),
+        decay: POLICY_BUDGET_LN * PW_FRESHNESS * freshness_z(decay, 0.0),
+        recency: POLICY_BUDGET_LN * PW_FRESHNESS * freshness_z(0.0, recency),
+        importance: POLICY_BUDGET_LN * PW_IMPORTANCE * gate * importance.min(1.0),
         graph_proximity: 0.0,
     }
 }
@@ -381,17 +607,24 @@ pub fn graph_composite_score(
     valence: f64,
     graph_proximity: f64,
 ) -> f64 {
-    if graph_proximity > 0.0 {
-        // Proximity joins similarity in the relevance core; freshness
-        // multiplies (recency-wall fix, see module rationale).
-        let base_rel = (GW_SIM * similarity + GW_GRAPH * graph_proximity)
-            * freshness_mult(decay, recency, GW_DECAY, GW_RECENCY);
-        let gate = importance_gate(similarity);
-        let imp_mult = 1.0 + gate * GW_ALPHA_IMP * importance.min(1.0);
-        base_rel * imp_mult * valence_boost(valence)
-    } else {
-        composite_score(similarity, decay, recency, importance, valence)
-    }
+    // 2026-08-13: this function ADDED proximity to similarity —
+    // `GW_SIM*sim + GW_GRAPH*proximity` — which is the original wall. At the
+    // old constants a record with similarity 0.0026 and proximity 1.0 scored
+    // 0.340 while a genuinely relevant record at similarity 0.309 with no
+    // edges scored 0.267: the irrelevant one won, because 0.30*1.0 swamped
+    // 0.35*0.0026. Production recall had already been moved to the
+    // multiplicative form, but this remained public, so any direct caller
+    // still got the prohibited formula — and tests pinned that behaviour.
+    //
+    // Graph proximity is a PRIOR (it says a record is well-connected, not
+    // that it answers this query), so it now enters through the shared
+    // policy budget like every other prior.
+    let freshness_z = freshness_z(decay, recency);
+    let importance_z = importance_gate(similarity) * importance.clamp(0.0, 1.0);
+    W_SIM
+        * similarity
+        * policy_mult(freshness_z, importance_z, graph_proximity, 0.0, 0.0)
+        * valence_boost(valence)
 }
 
 /// Compute weighted contributions for graph-expanded scoring.
@@ -469,12 +702,38 @@ pub fn adaptive_composite_score(
     query_sentiment: f64,
     weights: &crate::types::LearnedWeights,
 ) -> f64 {
-    let base_rel = weights.w_sim
-        * similarity
-        * freshness_mult(decay, recency, weights.w_decay, weights.w_recency);
+    // Learned weights shape the priors WITHIN the shared budget; they can
+    // no longer widen it. alpha_imp was previously allowed up to 1.5, which
+    // pushed the composed ceiling toward 4x — it is now a relative weight,
+    // normalized against the other priors, so learning reallocates the
+    // budget instead of expanding it.
+    let freshness_z = ((weights.w_decay * decay + weights.w_recency * recency)
+        / (weights.w_decay + weights.w_recency).max(1e-9))
+        .clamp(0.0, 1.0);
     let gate = sigmoid(GATE_K * (similarity - weights.gate_tau));
-    let imp_mult = 1.0 + gate * weights.alpha_imp * importance.min(1.0);
-    base_rel * imp_mult * query_valence_boost(valence, query_sentiment)
+    let importance_z = gate * importance.clamp(0.0, 1.0);
+    // Learned importance reallocates the budget; it must not enlarge it.
+    // The previous normalization CANCELLED ALGEBRAICALLY: dividing by
+    // (PW_FRESHNESS + imp_w) and multiplying by min(that, 1.0) is a no-op
+    // whenever the sum is <= 1, so alpha_imp = 1.5 gave imp_w = 0.75 and a
+    // total exponent weight of 1.23 once graph and agreement were applied
+    // late — a 1.381 ceiling, not the 1.30 this module promises. My
+    // "learned weights cannot widen the budget" test passed anyway because
+    // it probed at similarity 0.5, where the gate is not open enough to
+    // expose the gap.
+    //
+    // Renormalize against the FULL weight vector, including the shares that
+    // graph, agreement and usage will spend later in the pipeline, so the
+    // sum over every prior stays <= 1 no matter what the learner produces.
+    let imp_w = (weights.alpha_imp / ALPHA_IMP * PW_IMPORTANCE).clamp(0.0, 1.0);
+    let late_w = PW_GRAPH + PW_AGREEMENT + PW_USAGE;
+    let total_w = PW_FRESHNESS + imp_w + late_w;
+    let scale = if total_w > 1.0 { 1.0 / total_w } else { 1.0 };
+    let z = (PW_FRESHNESS * freshness_z + imp_w * importance_z) * scale;
+    weights.w_sim
+        * similarity
+        * (POLICY_BUDGET_LN * z).exp()
+        * query_valence_boost(valence, query_sentiment)
 }
 
 /// Adaptive contributions using learned weights.
@@ -535,12 +794,14 @@ pub fn adaptive_graph_contributions(
     graph_proximity: f64,
     weights: &crate::types::LearnedWeights,
 ) -> ScoreContributions {
-    // The base contributions are unchanged by the presence of an edge — the
-    // weights no longer reallocate — so the graph term is reported as what it
-    // now is: a bounded uplift on the whole score, on the same scale as the
-    // freshness terms beside it.
+    // Reports the graph term as the BUDGET SHARE it actually is. Until
+    // 2026-08-13 this returned GRAPH_SCALE * proximity while scoring had
+    // already moved to the shared policy budget, so the explanation
+    // described a formula the engine no longer used. An explanation that
+    // does not match the computation is worse than none: it is a confident
+    // wrong answer to "why did this rank here?".
     let mut c = adaptive_contributions(similarity, decay, recency, importance, weights);
-    c.graph_proximity = GRAPH_SCALE * graph_proximity.clamp(0.0, 1.0);
+    c.graph_proximity = POLICY_BUDGET_LN * PW_GRAPH * graph_proximity.clamp(0.0, 1.0);
     c
 }
 
@@ -653,27 +914,30 @@ mod tests {
 
     #[test]
     fn test_composite_score_basic() {
-        // All signals at 1.0, imp=1.0, valence=0:
-        // W_SIM * sim * freshness * (1 + gate * α * 1) * 1.0
-        // Freshness MULTIPLIES relevance (recency-wall fix) — the old
-        // additive form let fresh-but-irrelevant beat old-but-relevant.
+        // Rewritten 2026-08-13: this asserted the OLD per-factor product
+        // (freshness x (1 + gate*alpha)), which is exactly the shape that
+        // compounded to ~3.26x. Priors now share ONE budget, so the test
+        // states the property rather than re-deriving the arithmetic.
         let score = composite_score(1.0, 1.0, 1.0, 1.0, 0.0);
-        let base = W_SIM * 1.0 * freshness_mult(1.0, 1.0, W_DECAY, W_RECENCY);
-        let gate = importance_gate(1.0);
-        let expected = base * (1.0 + gate * ALPHA_IMP);
+        let relevance = W_SIM * 1.0;
         assert!(
-            (score - expected).abs() < 1e-10,
-            "expected {expected}, got {score}"
+            score > relevance,
+            "maxed priors must lift a fully-relevant record above bare relevance"
+        );
+        assert!(
+            score <= relevance * POLICY_BUDGET_LN.exp() + 1e-12,
+            "priors must never exceed the shared budget: {score} > {}",
+            relevance * POLICY_BUDGET_LN.exp()
         );
     }
 
     #[test]
     fn test_composite_score_with_valence() {
-        let score = composite_score(1.0, 1.0, 1.0, 1.0, 1.0);
-        let base = W_SIM * 1.0 * freshness_mult(1.0, 1.0, W_DECAY, W_RECENCY);
-        let gate = importance_gate(1.0);
-        let expected = base * (1.0 + gate * ALPHA_IMP) * 1.3;
-        assert!((score - expected).abs() < 1e-10);
+        // Valence is query-aware EVIDENCE, applied outside the prior
+        // budget, so it scales the whole composite by exactly 1.3 here.
+        let neutral = composite_score(1.0, 1.0, 1.0, 1.0, 0.0);
+        let valenced = composite_score(1.0, 1.0, 1.0, 1.0, 1.0);
+        assert!((valenced - neutral * 1.3).abs() < 1e-10);
     }
 
     #[test]
@@ -685,14 +949,27 @@ mod tests {
 
     #[test]
     fn test_graph_composite_with_proximity() {
-        // Proximity joins sim in the relevance core; freshness multiplies.
-        let score = graph_composite_score(1.0, 1.0, 1.0, 1.0, 0.0, 1.0);
-        let base = (GW_SIM + GW_GRAPH) * freshness_mult(1.0, 1.0, GW_DECAY, GW_RECENCY);
-        let gate = importance_gate(1.0);
-        let expected = base * (1.0 + gate * GW_ALPHA_IMP);
+        // REWRITTEN 2026-08-13. This test used to PIN the additive wall
+        // (GW_SIM*sim + GW_GRAPH*proximity) - it asserted the defect, so it
+        // passed for as long as the bug existed and would have failed on the
+        // fix. Now it states the two properties that actually matter.
+        let with_edges = graph_composite_score(0.5, 0.5, 0.5, 0.5, 0.0, 1.0);
+        let without = graph_composite_score(0.5, 0.5, 0.5, 0.5, 0.0, 0.0);
         assert!(
-            (score - expected).abs() < 1e-10,
-            "expected {expected}, got {score}"
+            with_edges > without,
+            "proximity must still break ties between equally-relevant records"
+        );
+        assert!(
+            with_edges <= without * POLICY_BUDGET_LN.exp() + 1e-12,
+            "proximity shares the ONE prior budget; it cannot exceed it"
+        );
+        // The original wall, as a regression: an irrelevant but maximally
+        // connected record must never beat a relevant unconnected one.
+        let irrelevant_connected = graph_composite_score(0.0026, 1.0, 1.0, 1.0, 0.0, 1.0);
+        let relevant_isolated = graph_composite_score(0.309, 0.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(
+            relevant_isolated > irrelevant_connected,
+            "the graph wall is back: connected {irrelevant_connected} beat relevant {relevant_isolated}"
         );
     }
 
@@ -1116,6 +1393,202 @@ mod graph_wall_tests {
         assert!(
             connected > alone,
             "graph evidence became inert: {connected:.6} vs {alone:.6}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod policy_budget_tests {
+    use super::*;
+
+    #[test]
+    fn policy_weights_partition_one_budget() {
+        // THE invariant. If a future signal is added with its own weight and
+        // this sum exceeds 1.0, the ceiling silently widens — which is
+        // exactly how the old per-factor bounds compounded to ~3.26x.
+        // MUST list every weight. The first version of this test omitted
+        // PW_USAGE — the invariant named "partition one budget" did not
+        // actually sum the whole partition, which is the precise way an
+        // invariant test rots: it keeps passing while the thing it names
+        // stops being true.
+        let total = PW_FRESHNESS + PW_IMPORTANCE + PW_GRAPH + PW_AGREEMENT + PW_USAGE;
+        assert!(
+            total <= 1.0 + 1e-12,
+            "prior weights must partition ONE budget; sum = {total}"
+        );
+    }
+
+    #[test]
+    fn policy_layer_never_exceeds_its_stated_ceiling() {
+        let ceiling = POLICY_BUDGET_LN.exp();
+        assert!((ceiling - 1.30).abs() < 1e-9, "ceiling drifted: {ceiling}");
+        // Every prior maxed simultaneously — the case that used to compound.
+        let maxed = policy_mult(1.0, 1.0, 1.0, 1.0, 1.0);
+        assert!(
+            (maxed - ceiling).abs() < 1e-9,
+            "all priors maxed must equal exactly the budget, got {maxed}"
+        );
+        // Out-of-range inputs cannot buy more (validate.rs enforces only
+        // finiteness, so unclamped values DO reach scoring). A negative
+        // prior clamps to 0 — it forfeits its share rather than subtracting
+        // from the others, so this lands strictly BELOW the ceiling.
+        assert!(policy_mult(9.0, 9.0, 9.0, -9.0, 9.0) <= ceiling + 1e-9);
+        assert!(policy_mult(9.0, 9.0, 9.0, -9.0, 9.0) < ceiling);
+        assert!((policy_mult(9.0, 9.0, 9.0, 9.0, 9.0) - ceiling).abs() < 1e-9);
+        assert_eq!(policy_mult(0.0, 0.0, 0.0, 0.0, 0.0), 1.0);
+    }
+
+    #[test]
+    fn priors_cannot_invert_a_real_relevance_gap() {
+        // Codex's counterexample against the OLD scoring: a similarity-0.30
+        // record with maxed priors scored 0.648 and beat a bare
+        // similarity-0.60 record. Under one shared budget it cannot.
+        let weak_but_privileged = composite_score_with_sentiment(0.30, 1.0, 1.0, 1.0, 1.0, 1.0);
+        let strong_but_bare = composite_score_with_sentiment(0.60, 0.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(
+            strong_but_bare > weak_but_privileged,
+            "a 2x similarity gap must survive every prior: bare 0.60 scored {strong_but_bare}, \
+             privileged 0.30 scored {weak_but_privileged}"
+        );
+    }
+
+    #[test]
+    fn priors_still_break_ties_between_near_equals() {
+        // A bounded budget must still DO something, or it is just cosine.
+        let fresh_important = composite_score_with_sentiment(0.50, 1.0, 1.0, 1.0, 0.0, 0.0);
+        let stale_trivial = composite_score_with_sentiment(0.50, 0.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(
+            fresh_important > stale_trivial,
+            "priors must still order equally-relevant records"
+        );
+        // ...and a 30% relevance gap is the documented reach, so a record
+        // 40% less similar must still lose however privileged it is.
+        let privileged = composite_score_with_sentiment(0.60, 1.0, 1.0, 1.0, 0.0, 0.0);
+        let plain = composite_score_with_sentiment(1.00, 0.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(privileged < plain, "budget must not reach beyond ~30%");
+    }
+
+    #[test]
+    fn learned_weights_cannot_widen_the_budget() {
+        // alpha_imp was allowed up to 1.5, which pushed the OLD composed
+        // ceiling toward 4x. Learning may now reallocate the budget, never
+        // expand it.
+        let mut w = crate::types::LearnedWeights::default();
+        w.alpha_imp = 1.5;
+        w.w_decay = 1.0;
+        w.w_recency = 1.0;
+        // Probe at similarity 0.9, where importance_gate is ~fully OPEN.
+        // The original version of this test probed at 0.5, where the gate is
+        // only partly open — it passed while alpha_imp=1.5 was in fact
+        // pushing the reachable ceiling to ~1.381. A bound test must be
+        // taken where the bound is TIGHT, or it certifies nothing.
+        for sim in [0.5_f64, 0.9, 0.99] {
+            let boosted = adaptive_composite_score(sim, 1.0, 1.0, 1.0, 0.0, 0.0, &w)
+                * graph_mult(1.0)
+                * agreement_mult(9);
+            let ceiling = w.w_sim * sim * POLICY_BUDGET_LN.exp();
+            assert!(
+                boosted <= ceiling + 1e-9,
+                "learned weights escaped the budget at sim={sim}: {boosted} > {ceiling}"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod lane_and_weight_bound_tests {
+    use super::*;
+    use crate::types::LearnedWeights;
+
+    #[test]
+    fn exploration_lanes_cannot_outrank_a_real_match() {
+        // The valence and cold lanes used to add +0.20·|v|·importance and
+        // +0.15·importance OUTRIGHT. With composite scores in the 0.1–0.6
+        // range those terms could dominate, so a record matching nothing
+        // could beat one matching everything. Now the lift is a bounded
+        // multiplier: admission is the lane's job, relevance is not.
+        let irrelevant_but_charged = composite_score(0.02, 1.0, 1.0, 1.0, 1.0) * lane_lift_mult(1.0);
+        let relevant_plain = composite_score(0.80, 0.0, 0.0, 0.0, 0.0);
+        assert!(
+            relevant_plain > irrelevant_but_charged,
+            "a lane lift must not invert relevance: plain 0.80 = {relevant_plain}, \
+             lifted 0.02 = {irrelevant_but_charged}"
+        );
+        assert!((lane_lift_mult(0.0) - 1.0).abs() < 1e-12);
+        assert!((lane_lift_mult(5.0) - (1.0 + LANE_LIFT_MAX)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn corrupt_learned_weights_are_clamped_not_trusted() {
+        let hostile = LearnedWeights {
+            w_sim: -3.0,
+            w_decay: 99.0,
+            w_recency: f64::NAN,
+            gate_tau: 0.0,
+            alpha_imp: 50.0,
+            keyword_boost: 500.0, // would dwarf every semantic score
+            generation: 7,
+        }
+        .clamped();
+        assert!(hostile.w_sim >= 0.05 && hostile.w_sim <= 1.0);
+        assert!(hostile.w_decay <= 1.0);
+        assert!(hostile.w_recency.is_finite(), "NaN must not survive");
+        assert!(hostile.gate_tau >= 0.05);
+        assert!(hostile.alpha_imp <= 1.5);
+        assert!(
+            hostile.keyword_boost <= 1.0,
+            "keyword_boost is ADDITIVE and has no similarity-relative ceiling \
+             of its own — the clamp is its only bound"
+        );
+        assert_eq!(hostile.generation, 7, "generation is data, not a weight");
+        // Sane weights must pass through untouched.
+        let sane = LearnedWeights::default();
+        assert_eq!(sane.clone().clamped().w_sim, sane.w_sim);
+        assert_eq!(sane.clone().clamped().keyword_boost, sane.keyword_boost);
+    }
+}
+
+#[cfg(test)]
+mod budget_composition_tests {
+    use super::*;
+
+    #[test]
+    fn stagewise_application_composes_to_one_budget() {
+        // The property that makes the design safe in a real pipeline: the
+        // recall path scores a composite FIRST and multiplies graph and
+        // agreement in LATER, at different stages. In log space that is
+        // identical to applying every prior at once, so the total is still
+        // bounded by exp(B) — where a factor lands stops mattering.
+        let stagewise = composite_score_with_sentiment(1.0, 1.0, 1.0, 1.0, 0.0, 0.0)
+            * graph_mult(1.0)
+            * agreement_mult(9);
+        // importance_z is GATED: sigmoid(12*(1.0-0.25)) = 0.99987, not 1.0.
+        // Using a literal 1.0 here was an idealized expectation that hid an
+        // 8e-6 discrepancy; the gate is the point, so the test uses it.
+        let all_at_once =
+            W_SIM * 1.0 * policy_mult(1.0, importance_gate(1.0), 1.0, 1.0, 0.0);
+        assert!(
+            (stagewise - all_at_once).abs() < 1e-9,
+            "stagewise {stagewise} must equal all-at-once {all_at_once}"
+        );
+        assert!(
+            stagewise <= W_SIM * POLICY_BUDGET_LN.exp() + 1e-9,
+            "the whole pipeline must stay inside one budget"
+        );
+    }
+
+    #[test]
+    fn full_pipeline_cannot_invert_a_real_relevance_gap() {
+        // Every prior maxed, applied the way recall actually applies them,
+        // against a bare record with double the similarity.
+        let privileged = composite_score_with_sentiment(0.30, 1.0, 1.0, 1.0, 1.0, 1.0)
+            * graph_mult(1.0)
+            * agreement_mult(9);
+        let bare = composite_score_with_sentiment(0.60, 0.0, 0.0, 0.0, 0.0, 0.0);
+        assert!(
+            bare > privileged,
+            "full-pipeline priors inverted a 2x similarity gap: bare {bare}, \
+             privileged {privileged}"
         );
     }
 }
