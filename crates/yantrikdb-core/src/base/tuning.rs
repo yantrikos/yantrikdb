@@ -75,6 +75,43 @@ pub struct Tuning {
 
     /// MMR relevance/diversity trade-off.
     pub mmr_lambda: f64,
+
+    // ── Lane slot quotas ────────────────────────────────────────────
+    //
+    // The maximum FRACTION of `top_k` any one lane may claim.
+    //
+    // # Why counts and not ratios
+    //
+    // Every other bound in this struct is a raw-cosine ratio, and that unit
+    // is not portable: measured on 5,035 real memories, the whole top 100
+    // spanned 1.286x, so a "1.30x budget" could reorder 120-252 records. A
+    // quota is a COUNT. "At most 2 of 8 slots" means the same thing in a
+    // compressed space as a spread one, in any embedder, at any dimension.
+    // It is immune to the defect by construction.
+    //
+    // # Ceilings, never floors
+    //
+    // A quota caps a lane; it never guarantees it slots. A floor would force
+    // mediocre records in whenever a lane had nothing good to offer, which
+    // is a new failure mode rather than a fix for the old one.
+    //
+    // # What this bounds
+    //
+    // Measured demotions where the pipeline moved records the embedding had
+    // already found: cosine rank 4 -> recall 42, 8 -> 89, 36 -> >100. A
+    // record is demoted because something else floods the slots above it.
+    // With per-lane ceilings the vector lane keeps its share and cannot be
+    // crowded out, while the lanes that legitimately RESCUED other probes
+    // (60 -> 4, 20 -> 9 in the same measurement) keep their best candidates.
+    // A global constant cannot separate those two behaviours; a quota can.
+    //
+    // 1.0 = unlimited, which is today's behaviour and the default, so
+    // enabling quotas is an explicit act rather than a silent change.
+    pub quota_vector: f64,
+    pub quota_lexical: f64,
+    pub quota_claims: f64,
+    pub quota_graph: f64,
+    pub quota_exploration: f64,
 }
 
 impl Default for Tuning {
@@ -93,6 +130,11 @@ impl Default for Tuning {
             cold_min_sim: 0.10,
             valence_min_sim: 0.02,
             mmr_lambda: 0.9,
+            quota_vector: 1.0,
+            quota_lexical: 1.0,
+            quota_claims: 1.0,
+            quota_graph: 1.0,
+            quota_exploration: 1.0,
         }
     }
 }
@@ -125,6 +167,12 @@ impl Tuning {
             cold_min_sim: env_f64("YANTRIKDB_COLD_MIN_SIM", d.cold_min_sim),
             valence_min_sim: env_f64("YANTRIKDB_VALENCE_MIN_SIM", d.valence_min_sim),
             mmr_lambda: env_f64("YANTRIKDB_MMR_LAMBDA", d.mmr_lambda).clamp(0.0, 1.0),
+            quota_vector: env_f64("YANTRIKDB_QUOTA_VECTOR", d.quota_vector).clamp(0.0, 1.0),
+            quota_lexical: env_f64("YANTRIKDB_QUOTA_LEXICAL", d.quota_lexical).clamp(0.0, 1.0),
+            quota_claims: env_f64("YANTRIKDB_QUOTA_CLAIMS", d.quota_claims).clamp(0.0, 1.0),
+            quota_graph: env_f64("YANTRIKDB_QUOTA_GRAPH", d.quota_graph).clamp(0.0, 1.0),
+            quota_exploration: env_f64("YANTRIKDB_QUOTA_EXPLORATION", d.quota_exploration)
+                .clamp(0.0, 1.0),
         }
     }
 
@@ -176,6 +224,95 @@ impl Tuning {
             self.valence_min_sim,
             self.mmr_lambda,
         )
+    }
+}
+
+/// A named retrieval profile for a KIND of namespace.
+///
+/// # The gap this fills
+///
+/// `learned_weights` is declared `id INTEGER PRIMARY KEY CHECK (id = 1)` — one
+/// global row. Every namespace in a database therefore shares one set of
+/// ranking weights, even though a `code` namespace (identifiers, error
+/// strings, exact phrases) and a `personal` namespace (paraphrase, sentiment)
+/// want opposite behaviour. Packs already carry `recommended_top_k` and
+/// `recommended_min_similarity` — per-corpus retrieval settings that travel
+/// with the artifact — and we never gave the same courtesy to the user's own
+/// namespaces.
+///
+/// Namespace is also the calibration level missing from the hierarchy
+/// embedder -> store -> query: it is the best available proxy for "this is a
+/// different kind of corpus" without needing per-query statistics.
+///
+/// # Shipped profiles, not learned ones
+///
+/// These are DEFAULTS, deliberately. Learning per-namespace weights would
+/// split an already-starved label supply: production has 12 labelled episodes
+/// against a gate of 20 for a SINGLE global weight set, so per-namespace
+/// learning would make the scarcity worse, not better. Profiles are safe now;
+/// learned per-namespace weights wait for the labelling pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NamespaceProfile {
+    /// Balanced — the shipped defaults.
+    General,
+    /// Identifiers, error strings, file paths. Exact match matters more than
+    /// paraphrase, so the lexical lane gets a larger share of the slots.
+    Code,
+    /// Conversational memory: paraphrase-heavy, sentiment-bearing, and where
+    /// recency genuinely signals what is true now.
+    Personal,
+    /// Reference material that does not go stale. Freshness is close to
+    /// meaningless; corroboration across lanes matters more.
+    Reference,
+}
+
+impl NamespaceProfile {
+    /// Parse a profile name, case-insensitively. Unknown names fall back to
+    /// `General` rather than failing: a typo in configuration must not take
+    /// retrieval down.
+    pub fn parse(name: &str) -> Self {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "code" => Self::Code,
+            "personal" => Self::Personal,
+            "reference" => Self::Reference,
+            _ => Self::General,
+        }
+    }
+
+    /// Apply this profile on top of a base tuning.
+    ///
+    /// Profiles adjust WEIGHTS and QUOTAS — never the eligibility filters, and
+    /// never the budget ceiling. A namespace may express what it values; it
+    /// may not buy itself a wider inversion budget than any other namespace.
+    pub fn apply(self, base: &Tuning) -> Tuning {
+        let mut t = base.clone();
+        match self {
+            Self::General => {}
+            Self::Code => {
+                // Exact tokens carry the meaning; freshness rarely does.
+                t.pw_freshness = 0.10;
+                t.pw_importance = 0.35;
+                t.pw_agreement = 0.20;
+                t.quota_lexical = 0.50;
+                t.quota_exploration = 0.15;
+            }
+            Self::Personal => {
+                // What is true NOW matters, and the exploration lanes exist
+                // for exactly this kind of half-remembered recall.
+                t.pw_freshness = 0.35;
+                t.pw_importance = 0.35;
+                t.quota_lexical = 0.25;
+                t.quota_exploration = 0.35;
+            }
+            Self::Reference => {
+                // Nothing goes stale; corroboration is the useful signal.
+                t.pw_freshness = 0.05;
+                t.pw_importance = 0.35;
+                t.pw_agreement = 0.30;
+                t.quota_exploration = 0.10;
+            }
+        }
+        t
     }
 }
 
@@ -234,5 +371,73 @@ mod tests {
         let s = Tuning::default().fingerprint();
         assert!(s.contains("budget=1.300"));
         assert!(s.contains("gate=(0.250,12.0)"));
+    }
+}
+
+#[cfg(test)]
+mod namespace_profile_tests {
+    use super::*;
+
+    #[test]
+    fn profiles_cannot_buy_a_wider_budget() {
+        // A namespace may express WHAT IT VALUES. It may not grant itself a
+        // larger inversion budget than any other namespace — otherwise
+        // "profiles" become a back door around the one bound that keeps
+        // priors honest.
+        let base = Tuning::default();
+        for p in [
+            NamespaceProfile::General,
+            NamespaceProfile::Code,
+            NamespaceProfile::Personal,
+            NamespaceProfile::Reference,
+        ] {
+            let t = p.apply(&base);
+            assert_eq!(
+                t.policy_budget, base.policy_budget,
+                "{p:?} changed the budget ceiling"
+            );
+            let (f, i, g, a, u) = t.normalized_weights();
+            assert!(
+                f + i + g + a + u <= 1.0 + 1e-12,
+                "{p:?} weights escape the partition"
+            );
+        }
+    }
+
+    #[test]
+    fn profiles_cannot_touch_eligibility() {
+        // Filters are a correctness boundary, not a preference. A profile
+        // that could relax certainty_min or a lane floor would reintroduce
+        // the filter-bypass class of bug through the front door.
+        let base = Tuning::default();
+        for p in [NamespaceProfile::Code, NamespaceProfile::Personal, NamespaceProfile::Reference] {
+            let t = p.apply(&base);
+            assert_eq!(t.fts_min_sim, base.fts_min_sim, "{p:?} moved a lane floor");
+            assert_eq!(t.cold_min_sim, base.cold_min_sim, "{p:?} moved a lane floor");
+            assert_eq!(t.valence_min_sim, base.valence_min_sim, "{p:?} moved a lane floor");
+        }
+    }
+
+    #[test]
+    fn profiles_differ_where_they_claim_to() {
+        // A profile set that does not actually differentiate is decoration.
+        let base = Tuning::default();
+        let code = NamespaceProfile::Code.apply(&base);
+        let personal = NamespaceProfile::Personal.apply(&base);
+        assert!(
+            code.quota_lexical > personal.quota_lexical,
+            "code should give the lexical lane more slots than personal"
+        );
+        assert!(
+            personal.pw_freshness > code.pw_freshness,
+            "personal should weight recency more than code"
+        );
+        assert_eq!(NamespaceProfile::General.apply(&base), base);
+    }
+
+    #[test]
+    fn an_unknown_profile_name_falls_back_rather_than_failing() {
+        assert_eq!(NamespaceProfile::parse("cdoe"), NamespaceProfile::General);
+        assert_eq!(NamespaceProfile::parse("  CODE "), NamespaceProfile::Code);
     }
 }

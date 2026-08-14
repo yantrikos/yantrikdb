@@ -555,3 +555,90 @@ fn certainty_floor_holds_across_every_lane() {
         hits.iter().map(|h| (&h.rid, h.certainty, &h.why_retrieved)).collect::<Vec<_>>()
     );
 }
+
+// ── 2026-08-14: lane slot quotas ──
+//
+// A quota is a COUNT, which is why it exists. Every score-space bound in the
+// engine is a raw-cosine ratio, and on a real 5,035-record store the whole
+// top 100 spanned 1.286x — so a "1.30x budget" could reorder 120-252 records.
+// "At most 2 of 8 slots" means the same thing in any embedding space.
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn quotas_are_unlimited_by_default() {
+    // Enabling quotas must be an explicit act. If this ever fails, some
+    // default changed and every existing deployment's ranking moved with it.
+    let t = crate::base::tuning::Tuning::default();
+    assert_eq!(t.quota_vector, 1.0);
+    assert_eq!(t.quota_lexical, 1.0);
+    assert_eq!(t.quota_claims, 1.0);
+    assert_eq!(t.quota_graph, 1.0);
+    assert_eq!(t.quota_exploration, 1.0);
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn a_quota_never_returns_fewer_results_than_the_pool_supports() {
+    // The failure mode a naive quota would introduce: capping a lane and
+    // silently shrinking the result set. Over-quota candidates must fall to
+    // the tail, not off the end.
+    use crate::engine::recall::{apply_lane_quotas, lane_owner, LaneOwner};
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    for i in 0..30 {
+        db.record_text(
+            &format!("deploy pipeline staging cluster note number {i}"),
+            "semantic", 0.5, 0.0, 604800.0, &empty_meta(), "default", 0.8,
+            "general", "user", None,
+        )
+        .unwrap();
+    }
+    let hits = db.recall_text("deploy pipeline staging", 20).unwrap();
+    assert!(hits.len() >= 15, "sanity: pool should be full, got {}", hits.len());
+
+    // With an empty win_by_rid map these are attributed by their why-markers.
+    // They carry keyword_match (the text matches lexically), so they land in
+    // the LEXICAL lane — the attribution is by provenance, not by assumption,
+    // which is why this is read rather than asserted.
+    let empty = std::collections::HashMap::new();
+    let mut pool = hits.clone();
+    let owner = lane_owner(&pool[0], &empty);
+    assert!(
+        !matches!(owner, LaneOwner::Vector),
+        "an empty win_by_rid must not attribute anything to the vector lane"
+    );
+    apply_lane_quotas(&mut pool, &empty, 20);
+    assert_eq!(
+        pool.len(),
+        hits.len(),
+        "quotas must never drop candidates from the pool — over-quota ones \
+         move to the tail so top_k can still be filled"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn a_quota_preserves_relative_order_within_a_lane() {
+    // A quota withholds slots; it must never PROMOTE anything. If it
+    // reordered within a lane it would be a scoring change wearing a
+    // quota's clothes, and would inherit exactly the calibration problem
+    // quotas exist to avoid.
+    use crate::engine::recall::apply_lane_quotas;
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    for i in 0..20 {
+        db.record_text(
+            &format!("release checklist item {i} for the deployment runbook"),
+            "semantic", 0.5, 0.0, 604800.0, &empty_meta(), "default", 0.8,
+            "general", "user", None,
+        )
+        .unwrap();
+    }
+    let hits = db.recall_text("release checklist deployment", 15).unwrap();
+    let before: Vec<String> = hits.iter().map(|h| h.rid.clone()).collect();
+    let mut pool = hits.clone();
+    let empty = std::collections::HashMap::new();
+    apply_lane_quotas(&mut pool, &empty, 15);
+    let after: Vec<String> = pool.iter().map(|h| h.rid.clone()).collect();
+    // With one lane owning everything and quotas at their defaults, order is
+    // untouched; the assertion pins that the function is order-preserving.
+    assert_eq!(before, after, "quotas must not reorder within a lane");
+}

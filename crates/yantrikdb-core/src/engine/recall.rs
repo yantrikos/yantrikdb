@@ -252,6 +252,131 @@ pub(crate) fn passes_recall_filters(
     true
 }
 
+/// Which lane a candidate is ATTRIBUTED to for quota purposes.
+///
+/// A record can be found by several lanes; quotas need one owner per slot, so
+/// attribution is by PROVENANCE PRIORITY: the vector lane owns anything it
+/// found, because that is the lane whose ordering the quota exists to protect.
+/// Everything else is attributed to the strongest non-vector signal that
+/// surfaced it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum LaneOwner {
+    Vector,
+    Lexical,
+    Claims,
+    Graph,
+    Exploration,
+}
+
+pub(crate) fn lane_owner(
+    r: &crate::types::RecallResult,
+    win_by_rid: &std::collections::HashMap<String, u32>,
+) -> LaneOwner {
+    if win_by_rid.contains_key(&r.rid) {
+        return LaneOwner::Vector;
+    }
+    let why = &r.why_retrieved;
+    if why.iter().any(|w| w == "keyword_match" || w == "fts_sourced") {
+        return LaneOwner::Lexical;
+    }
+    if why.iter().any(|w| w.starts_with("claims_match")) {
+        return LaneOwner::Claims;
+    }
+    if r.scores.graph_proximity > 0.0 || why.iter().any(|w| w.starts_with("graph-connected")) {
+        return LaneOwner::Graph;
+    }
+    LaneOwner::Exploration
+}
+
+/// Cap how many of `top_k` any one lane may claim.
+///
+/// # Why a count and not a score adjustment
+///
+/// Every score-space bound in this engine is a raw-cosine ratio, and that unit
+/// is not portable: on a real 5,035-record store the entire top 100 spanned
+/// 1.286x, so a "1.30x budget" could reorder 120-252 records. A quota is a
+/// COUNT — "at most 2 of 8 slots" means the same thing in any embedding space,
+/// at any dimension, in any corpus.
+///
+/// # What it fixes
+///
+/// Measured on that store: records the embedding ranked 4, 8 and 36 came back
+/// from recall at 42, 89 and >100, displaced by whatever else flooded the
+/// slots above them. A ceiling stops a lane flooding. Crucially it does NOT
+/// stop a lane helping: the same measurement showed other probes RESCUED from
+/// cosine rank 60 to 4 and 20 to 9. A global constant must trade one for the
+/// other; a per-lane ceiling keeps both.
+///
+/// Ceilings only. A lane with nothing good to offer contributes nothing rather
+/// than being guaranteed a slot — a floor would manufacture mediocre results,
+/// which is a new failure mode rather than a fix for the old one.
+///
+/// Runs on the already-ranked pool and preserves relative order within every
+/// lane, so it never promotes anything; it only withholds slots from a lane
+/// that has already taken its share. Anything displaced stays available to
+/// fill the tail, so `top_k` is still filled whenever the pool can fill it.
+pub(crate) fn apply_lane_quotas(
+    scored: &mut Vec<crate::types::RecallResult>,
+    win_by_rid: &std::collections::HashMap<String, u32>,
+    top_k: usize,
+) {
+    let t = crate::base::tuning::tuning();
+    // Fast path: quotas are unlimited by default, so an untuned engine pays
+    // one comparison and nothing else.
+    if t.quota_vector >= 1.0
+        && t.quota_lexical >= 1.0
+        && t.quota_claims >= 1.0
+        && t.quota_graph >= 1.0
+        && t.quota_exploration >= 1.0
+    {
+        return;
+    }
+    if scored.len() <= top_k {
+        return;
+    }
+    let cap = |frac: f64| -> usize {
+        if frac >= 1.0 {
+            usize::MAX
+        } else {
+            // At least one slot for any lane with a nonzero quota: a fraction
+            // that rounds to zero would silently DISABLE a lane, which is a
+            // different decision from limiting it.
+            ((frac * top_k as f64).floor() as usize).max(if frac > 0.0 { 1 } else { 0 })
+        }
+    };
+    let (mut nv, mut nl_, mut nc, mut ng, mut ne) = (0usize, 0usize, 0usize, 0usize, 0usize);
+    let (cv, cl, cc, cg, ce) = (
+        cap(t.quota_vector),
+        cap(t.quota_lexical),
+        cap(t.quota_claims),
+        cap(t.quota_graph),
+        cap(t.quota_exploration),
+    );
+    let mut kept: Vec<crate::types::RecallResult> = Vec::with_capacity(scored.len());
+    let mut deferred: Vec<crate::types::RecallResult> = Vec::new();
+    for r in scored.drain(..) {
+        let owner = lane_owner(&r, win_by_rid);
+        let (used, limit) = match owner {
+            LaneOwner::Vector => (&mut nv, cv),
+            LaneOwner::Lexical => (&mut nl_, cl),
+            LaneOwner::Claims => (&mut nc, cc),
+            LaneOwner::Graph => (&mut ng, cg),
+            LaneOwner::Exploration => (&mut ne, ce),
+        };
+        if kept.len() < top_k && *used < limit {
+            *used += 1;
+            kept.push(r);
+        } else {
+            deferred.push(r);
+        }
+    }
+    // Over-quota candidates are not discarded — they fill the tail in their
+    // original order, so a restrictive quota can never return fewer results
+    // than the pool supports.
+    kept.extend(deferred);
+    *scored = kept;
+}
+
 /// The ranking half of `why_retrieved` (2026-08-13).
 ///
 /// Counts the distinct retrieval lanes that independently surfaced each
@@ -2300,6 +2425,7 @@ impl YantrikDB {
         }
         apply_lane_agreement(&mut scored, &win_by_rid);
         crate::engine::lexical::apply_keyword_reserve(&mut scored, &lex_by_rid, top_k);
+        apply_lane_quotas(&mut scored, &win_by_rid, top_k);
 
         // Step 4: MMR diversity selection
         //
@@ -4993,6 +5119,7 @@ impl YantrikDB {
         // ── Phase 3.5: Keyword slot reservation (mirrors recall()) ──
         apply_lane_agreement(&mut scored, &win_by_rid);
         crate::engine::lexical::apply_keyword_reserve(&mut scored, &lex_by_rid, top_k);
+        apply_lane_quotas(&mut scored, &win_by_rid, top_k);
 
         // ── Phase 4: MMR diversity selection ──
         let t_sort = Instant::now();
