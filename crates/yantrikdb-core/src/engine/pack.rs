@@ -2004,9 +2004,9 @@ impl YantrikDB {
             let rows = {
                 let src_conn = Connection::open_with_flags(src, OpenFlags::SQLITE_OPEN_READ_ONLY)
                     .map_err(|e| YantrikDbError::PackUnreadable {
-                        path: src.to_string(),
-                        reason: e.to_string(),
-                    })?;
+                    path: src.to_string(),
+                    reason: e.to_string(),
+                })?;
                 let mut stmt = src_conn.prepare(
                     "SELECT rid, text, type, importance, valence, half_life, \
                             metadata, namespace, certainty, domain, source, emotional_state, \

@@ -1,5 +1,6 @@
 pub mod bench_utils;
 pub mod compression;
+pub mod datetext;
 pub mod encryption;
 pub mod error;
 pub mod fitting;

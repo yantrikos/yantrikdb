@@ -2039,8 +2039,19 @@ fn a_64_dim_pack_converts_and_mounts_into_a_256_dim_host() {
         "a correction preserves history where a second remember does not",
     ] {
         author
-            .record_text(text, "semantic", 0.6, 0.0, 604800.0, &empty_meta(),
-                         "default", 0.9, "general", "document", None)
+            .record_text(
+                text,
+                "semantic",
+                0.6,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                "default",
+                0.9,
+                "general",
+                "document",
+                None,
+            )
             .unwrap();
     }
     let identity = author.embedder_identity().unwrap().unwrap();
@@ -2082,9 +2093,12 @@ fn a_64_dim_pack_converts_and_mounts_into_a_256_dim_host() {
     );
 
     // Convert, then mount.
-    let converted =
-        YantrikDB::convert_pack(pack64.to_str().unwrap(), pack256.to_str().unwrap(), "potion-base-8M")
-            .expect("conversion must succeed");
+    let converted = YantrikDB::convert_pack(
+        pack64.to_str().unwrap(),
+        pack256.to_str().unwrap(),
+        "potion-base-8M",
+    )
+    .expect("conversion must succeed");
     assert_eq!(converted.embedder.dim, dim256);
     assert_eq!(converted.embedder.name.as_deref(), Some("potion-base-8M"));
     assert_eq!(
@@ -2092,8 +2106,7 @@ fn a_64_dim_pack_converts_and_mounts_into_a_256_dim_host() {
         "conversion must not change the content digest — the rows are still the publisher's,          only the vectors are ours"
     );
     assert_eq!(
-        converted.reembedded_from,
-        sealed.embedder.digest,
+        converted.reembedded_from, sealed.embedder.digest,
         "the original embedder digest must be recorded so the conversion is visible"
     );
     assert!(
@@ -2114,7 +2127,8 @@ fn a_64_dim_pack_converts_and_mounts_into_a_256_dim_host() {
         .recall_text("which ssh key deploys the website", 5)
         .unwrap();
     assert!(
-        hits.iter().any(|h| h.text.contains("id_yantrikdb_web_deploy")),
+        hits.iter()
+            .any(|h| h.text.contains("id_yantrikdb_web_deploy")),
         "the converted pack's rows must be retrievable in the host's space; got {:?}",
         hits.iter().map(|h| &h.text).collect::<Vec<_>>()
     );
@@ -2141,8 +2155,16 @@ fn install_pack_converts_a_foreign_dimension_pack_automatically() {
     author
         .record_text(
             "the deploy key for the website is id_yantrikdb_web_deploy",
-            "semantic", 0.6, 0.0, 604800.0, &empty_meta(), "default", 0.9,
-            "general", "document", None,
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.9,
+            "general",
+            "document",
+            None,
         )
         .unwrap();
     let ident = author.embedder_identity().unwrap().unwrap();
@@ -2182,8 +2204,17 @@ fn install_pack_converts_a_foreign_dimension_pack_automatically() {
     // Give the host an identity to convert INTO — conversion needs to
     // name the target space.
     host.record_text(
-        "host's own memory", "semantic", 0.5, 0.0, 604800.0, &empty_meta(),
-        "default", 0.8, "general", "user", None,
+        "host's own memory",
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
     )
     .unwrap();
 
@@ -2194,7 +2225,8 @@ fn install_pack_converts_a_foreign_dimension_pack_automatically() {
         .recall_text("which ssh key deploys the website", 5)
         .unwrap();
     assert!(
-        hits.iter().any(|h| h.text.contains("id_yantrikdb_web_deploy")),
+        hits.iter()
+            .any(|h| h.text.contains("id_yantrikdb_web_deploy")),
         "the auto-converted pack's rows must be retrievable; got {:?}",
         hits.iter().map(|h| &h.text).collect::<Vec<_>>()
     );
@@ -2209,7 +2241,9 @@ fn install_pack_converts_a_foreign_dimension_pack_automatically() {
         .recall_text("which ssh key deploys the website", 5)
         .unwrap();
     assert!(
-        after.iter().any(|h| h.text.contains("id_yantrikdb_web_deploy")),
+        after
+            .iter()
+            .any(|h| h.text.contains("id_yantrikdb_web_deploy")),
         "the converted pack must remount on reopen; got {:?}",
         after.iter().map(|h| &h.text).collect::<Vec<_>>()
     );

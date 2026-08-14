@@ -173,6 +173,58 @@ impl YantrikDB {
         // (`record_text`, MCP/HTTP) embed engine-side on the cleaned text.
         let sanitized = sanitize::sanitize_tool_call_artifacts(text);
         let text = sanitized.as_ref();
+
+        // EVENT TIME. `created_at` records when this memory was WRITTEN; the
+        // time the memory *describes* lives only in its prose. The two
+        // disagree constantly and the gap is not small: in a measured
+        // conversation corpus 9.3% of records carried at least one written
+        // date, and a record written 2024-03-14 mentioned events from
+        // December 2023 to April 2024 — its own timestamp outside the entire
+        // range it describes. Asked "how long between shipping and the
+        // deadline", no structured field could answer, because both operands
+        // were text.
+        //
+        // So unambiguous dates are lifted into metadata at write time, under
+        // `event_dates` (ISO strings) plus `event_time_min`/`event_time_max`
+        // for range use. Deterministic and model-free: an inference call on
+        // the write path of an embedded database would betray the engine's
+        // core proposition that remembering costs no inference.
+        //
+        // ADDITIVE ONLY. A caller that already supplied these keys is
+        // authoritative and is never overwritten — explicit knowledge beats
+        // anything inferred from prose.
+        let metadata_owned: serde_json::Value = {
+            let dates = crate::base::datetext::extract_event_dates(text);
+            if dates.is_empty() {
+                metadata.clone()
+            } else {
+                let mut m = metadata.clone();
+                if let Some(obj) = m.as_object_mut() {
+                    if !obj.contains_key("event_dates") {
+                        obj.insert(
+                            "event_dates".to_string(),
+                            serde_json::Value::Array(
+                                dates
+                                    .iter()
+                                    .map(|d| serde_json::Value::String(d.iso.clone()))
+                                    .collect(),
+                            ),
+                        );
+                    }
+                    if !obj.contains_key("event_time_min") {
+                        obj.insert("event_time_min".to_string(), dates[0].epoch.into());
+                    }
+                    if !obj.contains_key("event_time_max") {
+                        obj.insert(
+                            "event_time_max".to_string(),
+                            dates[dates.len() - 1].epoch.into(),
+                        );
+                    }
+                }
+                m
+            }
+        };
+        let metadata = &metadata_owned;
         // v0.7.23: coerce a blank namespace to the canonical default so no
         // consumer persists an unscoped "" partition. Shadows the param so
         // both the sync and queued paths below see the normalized value.
@@ -2226,5 +2278,74 @@ impl YantrikDB {
         self.pending_op_count.fetch_add(1, Ordering::Relaxed);
         let _ = op_id; // the op is bound to the claim; callers get the hit signal
         Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod event_time_tests {
+    use crate::YantrikDB;
+
+    /// Supplies its own embedding so the test does not need a bundled
+    /// embedder (slim builds have none) — the write path under test is the
+    /// metadata merge, not embedding.
+    fn write(text: &str, md: serde_json::Value) -> serde_json::Value {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let rid = db
+            .record_with_idempotency(
+                text,
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &md,
+                &vec![0.1f32; 8],
+                "default",
+                0.8,
+                "work",
+                "user",
+                None,
+                None,
+                None,
+            )
+            .unwrap();
+        db.get_memory(&rid).unwrap().unwrap().metadata
+    }
+
+    /// A memory whose text describes events at times unrelated to when it was
+    /// written must carry those times as DATA, not just prose. Measured
+    /// motivation: a record written 2024-03-14 describing events from December
+    /// 2023 to April 2024 — its own timestamp outside the range it describes.
+    #[test]
+    fn write_path_lifts_written_dates_into_metadata() {
+        let md = write(
+            "Shipped the transaction work on January 15, 2024; the deployment \
+             deadline is March 15, 2024.",
+            serde_json::json!({}),
+        );
+        assert_eq!(
+            md["event_dates"],
+            serde_json::json!(["2024-01-15", "2024-03-15"])
+        );
+        assert!(md["event_time_min"].as_f64().unwrap() < md["event_time_max"].as_f64().unwrap());
+    }
+
+    /// Caller-supplied event data is authoritative: something inferred from
+    /// prose must never overwrite what the caller explicitly stated.
+    #[test]
+    fn caller_supplied_event_dates_are_never_overwritten() {
+        let md = write(
+            "mentions March 15, 2024 in passing",
+            serde_json::json!({"event_dates": ["1999-12-31"]}),
+        );
+        assert_eq!(md["event_dates"], serde_json::json!(["1999-12-31"]));
+    }
+
+    /// Text with no date must not gain the keys at all: an absent field and an
+    /// empty one mean different things to a consumer.
+    #[test]
+    fn no_dates_means_no_keys() {
+        let md = write("no dates here at all", serde_json::json!({}));
+        assert!(md.get("event_dates").is_none());
+        assert!(md.get("event_time_min").is_none());
     }
 }

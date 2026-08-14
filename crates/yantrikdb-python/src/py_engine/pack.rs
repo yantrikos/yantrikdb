@@ -280,9 +280,14 @@ impl PyYantrikDB {
     /// Raises `RuntimeError` if `dest` exists, if the embedder name is
     /// unknown, or if the pack is already in that space.
     #[staticmethod]
-    fn convert_pack(py: Python<'_>, src: &str, dest: &str, embedder_name: &str) -> PyResult<PyObject> {
-        let m = yantrikdb_core::YantrikDB::convert_pack(src, dest, embedder_name)
-            .map_err(map_err)?;
+    fn convert_pack(
+        py: Python<'_>,
+        src: &str,
+        dest: &str,
+        embedder_name: &str,
+    ) -> PyResult<PyObject> {
+        let m =
+            yantrikdb_core::YantrikDB::convert_pack(src, dest, embedder_name).map_err(map_err)?;
         manifest_to_dict(py, &m, dest)
     }
 
