@@ -178,6 +178,124 @@ fn irregular_verb_forms(word: &str) -> Option<&'static [&'static str]> {
     None
 }
 
+/// Every filter the caller asked for, in ONE place.
+///
+/// # Why this exists (2026-08-13, found by external code review)
+///
+/// `recall()` takes `memory_type`, `namespace`, `domain`, `source`,
+/// `certainty_min`, `time_window` and consolidation-status filters. The
+/// vector lane applied all of them. The secondary lanes did not: the FTS
+/// re-admission path rechecked only status and time, the claims lane
+/// omitted type/domain/source/certainty, and graph-only admission checked
+/// status/type/time/namespace. Any record excluded by the caller could
+/// therefore be put back by a different lane.
+///
+/// That is not a ranking nit. Reproduced on a fresh store: a recall with
+/// `domain="work"` returned a `domain="health"` record, and one with
+/// `certainty_min=0.8` returned a `certainty=0.2` record. A caller who
+/// separates sensitive domains was being handed the rows they excluded.
+/// (Namespace happened to hold, because most lanes did check it — but by
+/// coincidence of each site remembering, which is exactly the fragility
+/// this function removes.)
+///
+/// Filtering is a property of the REQUEST, not of the lane that happened
+/// to find the row, so there is one predicate and every lane calls it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn passes_recall_filters(
+    row: &crate::types::ScoringRow,
+    include_consolidated: bool,
+    memory_type: Option<&str>,
+    time_window: Option<(f64, f64)>,
+    namespace: Option<&str>,
+    domain: Option<&str>,
+    source: Option<&str>,
+    certainty_min: Option<f64>,
+) -> bool {
+    let status_ok = if include_consolidated {
+        row.consolidation_status == "active" || row.consolidation_status == "consolidated"
+    } else {
+        row.consolidation_status == "active"
+    };
+    if !status_ok {
+        return false;
+    }
+    if let Some(mt) = memory_type {
+        if row.memory_type != mt {
+            return false;
+        }
+    }
+    if let Some((start, end)) = time_window {
+        if row.created_at < start || row.created_at > end {
+            return false;
+        }
+    }
+    if let Some(ns) = namespace {
+        if row.namespace != ns {
+            return false;
+        }
+    }
+    if let Some(d) = domain {
+        if row.domain != d {
+            return false;
+        }
+    }
+    if let Some(s) = source {
+        if row.source != s {
+            return false;
+        }
+    }
+    if let Some(min_cert) = certainty_min {
+        if row.certainty < min_cert {
+            return false;
+        }
+    }
+    true
+}
+
+/// The ranking half of `why_retrieved` (2026-08-13).
+///
+/// Counts the distinct retrieval lanes that independently surfaced each
+/// candidate — vector (`win_by_rid` membership), lexical (`keyword_match` /
+/// `fts_sourced`), claims (`claims_match…`), graph (proximity or
+/// `graph-connected…`) — the same classification the explain path has
+/// always shown, now allowed to touch the score through the bounded
+/// [`agreement_mult`](scoring::agreement_mult) (max +12.5%, shared
+/// inversion budget with freshness and graph). Runs before keyword-slot
+/// reservation in BOTH recall paths so the reserve cutoff sees final
+/// scores; tags boosted rows so the boost itself is explainable.
+fn apply_lane_agreement(
+    scored: &mut [crate::types::RecallResult],
+    win_by_rid: &std::collections::HashMap<String, u32>,
+) {
+    for r in scored.iter_mut() {
+        let why = &r.why_retrieved;
+        let mut lanes = 0usize;
+        if win_by_rid.contains_key(&r.rid) {
+            lanes += 1;
+        }
+        if why
+            .iter()
+            .any(|w| w == "keyword_match" || w == "fts_sourced")
+        {
+            lanes += 1;
+        }
+        if why.iter().any(|w| w.starts_with("claims_match")) {
+            lanes += 1;
+        }
+        if r.scores.graph_proximity > 0.0
+            || why.iter().any(|w| w.starts_with("graph-connected"))
+        {
+            lanes += 1;
+        }
+        let extra = lanes.saturating_sub(1);
+        if extra > 0 {
+            r.score *= scoring::agreement_mult(extra);
+            r.why_retrieved
+                .push(format!("multi-lane agreement ({lanes} lanes)"));
+        }
+    }
+}
+
 impl YantrikDB {
     /// Retrieve memories using multi-signal fusion scoring.
     /// When `expand_entities` is true, graph edges are followed to pull in
@@ -599,15 +717,23 @@ impl YantrikDB {
                 cache
                     .iter()
                     .filter(|(rid, row)| {
+                        // EIGHTH admission path. It listed most filters by hand
+                        // and omitted certainty_min, so a high-importance,
+                        // low-certainty row the vector pool missed could be
+                        // re-admitted against an explicit certainty floor.
+                        // One predicate, like every other lane.
                         row.importance >= high_imp_threshold
-                            && row.consolidation_status == "active"
                             && !existing_rids.contains(rid.as_str())
-                            && memory_type.map_or(true, |mt| row.memory_type == mt)
-                            && time_window
-                                .map_or(true, |(s, e)| row.created_at >= s && row.created_at <= e)
-                            && namespace.map_or(true, |ns| row.namespace == ns)
-                            && domain.map_or(true, |d| row.domain == d)
-                            && source.map_or(true, |s| row.source == s)
+                            && passes_recall_filters(
+                                row,
+                                include_consolidated,
+                                memory_type,
+                                time_window,
+                                namespace,
+                                domain,
+                                source,
+                                certainty_min,
+                            )
                     })
                     .map(|(rid, _)| rid.clone())
                     .collect()
@@ -1228,19 +1354,21 @@ impl YantrikDB {
                             for rid in &new_fts_rids {
                                 let Some(row) = cache.get(rid) else { continue };
 
-                                let status_ok = if include_consolidated {
-                                    row.consolidation_status == "active"
-                                        || row.consolidation_status == "consolidated"
-                                } else {
-                                    row.consolidation_status == "active"
-                                };
-                                if !status_ok {
+                                // ONE predicate, same as the vector lane. This
+                                // path used to check only status and time, so a
+                                // record the caller excluded by domain, source or
+                                // certainty could be re-admitted here.
+                                if !passes_recall_filters(
+                                    row,
+                                    include_consolidated,
+                                    memory_type,
+                                    time_window,
+                                    namespace,
+                                    domain,
+                                    source,
+                                    certainty_min,
+                                ) {
                                     continue;
-                                }
-                                if let Some((start, end)) = time_window {
-                                    if row.created_at < start || row.created_at > end {
-                                        continue;
-                                    }
                                 }
 
                                 let Some(emb_blob) = emb_map.get(rid.as_str()) else {
@@ -1344,6 +1472,10 @@ impl YantrikDB {
             namespace,
             time_window,
             include_consolidated,
+            memory_type,
+            domain,
+            source,
+            certainty_min,
             &learned_weights,
             ts,
             query_sentiment,
@@ -1376,11 +1508,18 @@ impl YantrikDB {
                             && (query_sentiment * row.valence > 0.0
                                 || (query_sentiment < 0.0 && row.valence < -0.2))
                             && row.importance >= 0.5 // only important memories
-                            && memory_type.map_or(true, |mt| row.memory_type == mt)
-                            && time_window.map_or(true, |(s, e)| {
-                                row.created_at >= s && row.created_at <= e
-                            })
-                            && namespace.map_or(true, |ns| row.namespace == ns)
+                            // Same predicate as every other lane: this one
+                            // used to omit domain, source and certainty.
+                            && passes_recall_filters(
+                                row,
+                                include_consolidated,
+                                memory_type,
+                                time_window,
+                                namespace,
+                                domain,
+                                source,
+                                certainty_min,
+                            )
                     })
                     .map(|(rid, row)| {
                         // Rank by |valence| * importance
@@ -1438,7 +1577,11 @@ impl YantrikDB {
                     // Additive valence boost: helps valence-matched memories compete
                     // when cosine similarity is low. Scaled by |valence| * importance
                     // so only strongly-valenced important memories get meaningful lift.
-                    let valence_additive = 0.20 * row.valence.abs() * row.importance;
+                    // Bounded multiplicative lift, not an unbounded add:
+                    // a strongly-valenced record still competes, but one
+                    // with no semantic match cannot outrank a real answer.
+                    let valence_lift =
+                        scoring::lane_lift_mult(row.valence.abs() * row.importance);
                     let mut why = scoring::build_why(sim_score, recency, decay, row.valence);
                     why.push("valence_match".to_string());
                     let contributions = scoring::adaptive_contributions(
@@ -1458,7 +1601,7 @@ impl YantrikDB {
                         created_at: row.created_at,
                         importance: row.importance,
                         valence: row.valence,
-                        score: composite + valence_additive,
+                        score: composite * valence_lift,
                         scores: ScoreBreakdown {
                             similarity: sim_score,
                             decay,
@@ -1629,6 +1772,21 @@ impl YantrikDB {
 
                             for rid in &new_cold {
                                 let Some(row) = cache.get(rid) else { continue };
+                                // The cold-lane SQL filters only status,
+                                // access_count, type and namespace, so domain,
+                                // source and certainty must be enforced here.
+                                if !passes_recall_filters(
+                                    row,
+                                    include_consolidated,
+                                    memory_type,
+                                    time_window,
+                                    namespace,
+                                    domain,
+                                    source,
+                                    certainty_min,
+                                ) {
+                                    continue;
+                                }
                                 let Some(emb_blob) = emb_map.get(rid.as_str()) else {
                                     continue;
                                 };
@@ -1657,7 +1815,11 @@ impl YantrikDB {
                                     &learned_weights,
                                 );
                                 // Cold memory bonus: these haven't been surfaced before
-                                let cold_boost = 0.15 * row.importance;
+                                // Bounded multiplicative lift (see
+                                // LANE_LIFT_MAX): admission is the lane's
+                                // job; it does not buy relevance.
+                                let cold_lift =
+                                    scoring::lane_lift_mult(row.importance);
                                 let mut why =
                                     scoring::build_why(sim_score, recency, decay, row.valence);
                                 why.push("cold_memory".to_string());
@@ -1678,7 +1840,7 @@ impl YantrikDB {
                                     created_at: row.created_at,
                                     importance: row.importance,
                                     valence: row.valence,
-                                    score: composite + cold_boost,
+                                    score: composite * cold_lift,
                                     scores: ScoreBreakdown {
                                         similarity: sim_score,
                                         decay,
@@ -1914,29 +2076,19 @@ impl YantrikDB {
                         .into_iter()
                         .filter_map(|rid| {
                             let row = cache.get(&rid)?;
-                            let status_ok = if include_consolidated {
-                                row.consolidation_status == "active"
-                                    || row.consolidation_status == "consolidated"
-                            } else {
-                                row.consolidation_status == "active"
-                            };
-                            if !status_ok {
+                            // Graph-only admission used to skip domain,
+                            // source and certainty; one predicate now.
+                            if !passes_recall_filters(
+                                row,
+                                include_consolidated,
+                                memory_type,
+                                time_window,
+                                namespace,
+                                domain,
+                                source,
+                                certainty_min,
+                            ) {
                                 return None;
-                            }
-                            if let Some(mt) = memory_type {
-                                if row.memory_type != mt {
-                                    return None;
-                                }
-                            }
-                            if let Some((start, end)) = time_window {
-                                if row.created_at < start || row.created_at > end {
-                                    return None;
-                                }
-                            }
-                            if let Some(ns) = namespace {
-                                if row.namespace != ns {
-                                    return None;
-                                }
                             }
                             let prox = gi.graph_proximity(&rid, &expanded_map);
                             let rank = row.importance * (0.3 + 0.7 * prox);
@@ -2146,6 +2298,7 @@ impl YantrikDB {
                     .collect::<Vec<_>>()),
             );
         }
+        apply_lane_agreement(&mut scored, &win_by_rid);
         crate::engine::lexical::apply_keyword_reserve(&mut scored, &lex_by_rid, top_k);
 
         // Step 4: MMR diversity selection
@@ -3466,15 +3619,23 @@ impl YantrikDB {
                 cache
                     .iter()
                     .filter(|(rid, row)| {
+                        // EIGHTH admission path. It listed most filters by hand
+                        // and omitted certainty_min, so a high-importance,
+                        // low-certainty row the vector pool missed could be
+                        // re-admitted against an explicit certainty floor.
+                        // One predicate, like every other lane.
                         row.importance >= high_imp_threshold
-                            && row.consolidation_status == "active"
                             && !existing_rids.contains(rid.as_str())
-                            && memory_type.map_or(true, |mt| row.memory_type == mt)
-                            && time_window
-                                .map_or(true, |(s, e)| row.created_at >= s && row.created_at <= e)
-                            && namespace.map_or(true, |ns| row.namespace == ns)
-                            && domain.map_or(true, |d| row.domain == d)
-                            && source.map_or(true, |s| row.source == s)
+                            && passes_recall_filters(
+                                row,
+                                include_consolidated,
+                                memory_type,
+                                time_window,
+                                namespace,
+                                domain,
+                                source,
+                                certainty_min,
+                            )
                     })
                     .map(|(rid, _)| rid.clone())
                     .collect()
@@ -4015,19 +4176,21 @@ impl YantrikDB {
                             let cache = self.scoring_cache.read();
                             for rid in &new_fts_rids {
                                 let Some(row) = cache.get(rid) else { continue };
-                                let status_ok = if include_consolidated {
-                                    row.consolidation_status == "active"
-                                        || row.consolidation_status == "consolidated"
-                                } else {
-                                    row.consolidation_status == "active"
-                                };
-                                if !status_ok {
+                                // ONE predicate, same as the vector lane. This
+                                // path used to check only status and time, so a
+                                // record the caller excluded by domain, source or
+                                // certainty could be re-admitted here.
+                                if !passes_recall_filters(
+                                    row,
+                                    include_consolidated,
+                                    memory_type,
+                                    time_window,
+                                    namespace,
+                                    domain,
+                                    source,
+                                    certainty_min,
+                                ) {
                                     continue;
-                                }
-                                if let Some((start, end)) = time_window {
-                                    if row.created_at < start || row.created_at > end {
-                                        continue;
-                                    }
                                 }
 
                                 let Some(emb_blob) = emb_map.get(rid.as_str()) else {
@@ -4129,6 +4292,10 @@ impl YantrikDB {
             namespace,
             time_window,
             include_consolidated,
+            memory_type,
+            domain,
+            source,
+            certainty_min,
             &learned_weights,
             ts,
             query_sentiment,
@@ -4212,7 +4379,11 @@ impl YantrikDB {
                         query_sentiment,
                         &learned_weights,
                     );
-                    let valence_additive = 0.20 * row.valence.abs() * row.importance;
+                    // Bounded multiplicative lift, not an unbounded add:
+                    // a strongly-valenced record still competes, but one
+                    // with no semantic match cannot outrank a real answer.
+                    let valence_lift =
+                        scoring::lane_lift_mult(row.valence.abs() * row.importance);
                     let mut why = scoring::build_why(sim_score, recency, decay, row.valence);
                     why.push("valence_match".to_string());
                     let contributions = scoring::adaptive_contributions(
@@ -4232,7 +4403,7 @@ impl YantrikDB {
                         created_at: row.created_at,
                         importance: row.importance,
                         valence: row.valence,
-                        score: composite + valence_additive,
+                        score: composite * valence_lift,
                         scores: ScoreBreakdown {
                             similarity: sim_score,
                             decay,
@@ -4386,6 +4557,21 @@ impl YantrikDB {
 
                             for rid in &new_cold {
                                 let Some(row) = cache.get(rid) else { continue };
+                                // The cold-lane SQL filters only status,
+                                // access_count, type and namespace, so domain,
+                                // source and certainty must be enforced here.
+                                if !passes_recall_filters(
+                                    row,
+                                    include_consolidated,
+                                    memory_type,
+                                    time_window,
+                                    namespace,
+                                    domain,
+                                    source,
+                                    certainty_min,
+                                ) {
+                                    continue;
+                                }
                                 let Some(emb_blob) = emb_map.get(rid.as_str()) else {
                                     continue;
                                 };
@@ -4413,7 +4599,11 @@ impl YantrikDB {
                                     query_sentiment,
                                     &learned_weights,
                                 );
-                                let cold_boost = 0.15 * row.importance;
+                                // Bounded multiplicative lift (see
+                                // LANE_LIFT_MAX): admission is the lane's
+                                // job; it does not buy relevance.
+                                let cold_lift =
+                                    scoring::lane_lift_mult(row.importance);
                                 let mut why =
                                     scoring::build_why(sim_score, recency, decay, row.valence);
                                 why.push("cold_memory".to_string());
@@ -4434,7 +4624,7 @@ impl YantrikDB {
                                     created_at: row.created_at,
                                     importance: row.importance,
                                     valence: row.valence,
-                                    score: composite + cold_boost,
+                                    score: composite * cold_lift,
                                     scores: ScoreBreakdown {
                                         similarity: sim_score,
                                         decay,
@@ -4658,29 +4848,19 @@ impl YantrikDB {
                         .filter(|r| !existing_rids.contains(r.as_str()))
                         .filter_map(|r| {
                             let row = cache.get(r.as_str())?;
-                            let status_ok = if include_consolidated {
-                                row.consolidation_status == "active"
-                                    || row.consolidation_status == "consolidated"
-                            } else {
-                                row.consolidation_status == "active"
-                            };
-                            if !status_ok {
+                            // Graph-only admission used to skip domain,
+                            // source and certainty; one predicate now.
+                            if !passes_recall_filters(
+                                row,
+                                include_consolidated,
+                                memory_type,
+                                time_window,
+                                namespace,
+                                domain,
+                                source,
+                                certainty_min,
+                            ) {
                                 return None;
-                            }
-                            if let Some(mt) = memory_type {
-                                if row.memory_type != mt {
-                                    return None;
-                                }
-                            }
-                            if let Some((start, end)) = time_window {
-                                if row.created_at < start || row.created_at > end {
-                                    return None;
-                                }
-                            }
-                            if let Some(ns) = namespace {
-                                if row.namespace != ns {
-                                    return None;
-                                }
                             }
                             let prox = gi.graph_proximity(&r, &expanded_map);
                             let rank = row.importance * (0.3 + 0.7 * prox);
@@ -4811,6 +4991,7 @@ impl YantrikDB {
         }
 
         // ── Phase 3.5: Keyword slot reservation (mirrors recall()) ──
+        apply_lane_agreement(&mut scored, &win_by_rid);
         crate::engine::lexical::apply_keyword_reserve(&mut scored, &lex_by_rid, top_k);
 
         // ── Phase 4: MMR diversity selection ──

@@ -420,3 +420,138 @@ fn diag_materializer_drains_single_write_entities() {
     let n1: i64 = db.conn().query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0)).unwrap();
     println!("after drain:       entities={n1}");
 }
+
+// ── 2026-08-13: cross-lane agreement (the ranking half of why_retrieved) ──
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn lane_agreement_breaks_ties_between_near_equals() {
+    // Two records nearly indistinguishable to the vector lane; the query
+    // shares literal vocabulary with only one of them, so the lexical
+    // lane surfaces that one too. Agreement must break the tie in its
+    // favor — that is the entire job of the multiplier.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let rec = |t: &str| {
+        db.record_text(t, "semantic", 0.5, 0.0, 604800.0, &empty_meta(),
+                       "default", 0.8, "general", "user", None).unwrap()
+    };
+    let both_lanes = rec("the deploy pipeline pushes to the staging cluster nightly");
+    let _vector_only = rec("the release automation ships builds to the test environment each evening");
+    let hits = db.recall_text("deploy pipeline staging", 2).unwrap();
+    assert_eq!(
+        hits[0].rid, both_lanes,
+        "the record surfaced by BOTH vector and lexical lanes must outrank a \
+         vector-only near-equal; got {:?}",
+        hits.iter().map(|h| (&h.rid, h.score)).collect::<Vec<_>>()
+    );
+    assert!(
+        hits[0].why_retrieved.iter().any(|w| w.contains("multi-lane agreement")),
+        "the boost must be explainable in why_retrieved; got {:?}",
+        hits[0].why_retrieved
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn lane_agreement_cannot_promote_an_irrelevant_record() {
+    // The inversion budget, asserted: a record whose only virtue is
+    // matching query KEYWORDS must not overtake a semantically on-topic
+    // record with a similarity lead beyond 12.5%. This is the exact
+    // failure the old additive graph form had (similarity 0.0026 beating
+    // 0.309), rebuilt as a guard for the agreement multiplier.
+    // Rewritten 2026-08-13: agreement is no longer an independent
+    // multiplier with its own +12.5% ceiling — it is a SHARE of the one
+    // policy budget, so the property to pin is that it stays inside that
+    // budget and still saturates at two extra lanes.
+    use crate::base::scoring::{agreement_mult, POLICY_BUDGET_LN, PW_AGREEMENT};
+    assert!((agreement_mult(0) - 1.0).abs() < 1e-12);
+    assert!(
+        (agreement_mult(2) - (POLICY_BUDGET_LN * PW_AGREEMENT).exp()).abs() < 1e-12,
+        "agreement must spend exactly its budget share, no more"
+    );
+    assert_eq!(agreement_mult(2), agreement_mult(9), "cap at two extra lanes");
+    assert!(
+        agreement_mult(9) < POLICY_BUDGET_LN.exp(),
+        "one prior alone must never consume the whole budget"
+    );
+
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let rec = |t: &str| {
+        db.record_text(t, "semantic", 0.5, 0.0, 604800.0, &empty_meta(),
+                       "default", 0.8, "general", "user", None).unwrap()
+    };
+    let on_topic = rec("the quarterly budget review moved to the first Monday of the month");
+    // Shares the literal words "deploy" and "staging" with nothing —
+    // build a keyword-bait record for a DIFFERENT query's vocabulary:
+    let _bait = rec("deploy staging deploy staging unrelated grocery list apples");
+    let hits = db.recall_text("when is the quarterly budget review", 2).unwrap();
+    assert_eq!(
+        hits[0].rid, on_topic,
+        "keyword bait with no semantic relevance must not overtake the on-topic \
+         record, whatever lanes it matched; got {:?}",
+        hits.iter().map(|h| (&h.rid, h.score)).collect::<Vec<_>>()
+    );
+}
+
+// ── 2026-08-13: filter integrity across ALL retrieval lanes ──
+//
+// Found by external code review, then reproduced on a fresh store: a
+// recall with domain="work" returned a domain="health" record, and one
+// with certainty_min=0.8 returned a certainty=0.2 record. The vector lane
+// applied the caller's filters; the FTS, claims and graph lanes
+// re-admitted candidates checking only a subset. Filtering is a property
+// of the REQUEST, not of the lane that happened to find the row.
+//
+// These use text that MATCHES LEXICALLY so the FTS lane genuinely fires —
+// a test whose excluded record is semantically distant would pass even
+// with the bug present.
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn domain_filter_holds_across_every_lane() {
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let rec = |text: &str, domain: &str| {
+        db.record_text(text, "semantic", 0.6, 0.0, 604800.0, &empty_meta(),
+                       "default", 0.9, domain, "user", None).unwrap()
+    };
+    let _work = rec("the postgres migration runs on the staging cluster", "work");
+    let health = rec("the postgres migration runs on the staging cluster nightly", "health");
+
+    let hits = db
+        .recall_text_filtered("postgres migration staging cluster", 20, Some("work"), None)
+        .unwrap();
+    assert!(
+        !hits.iter().any(|h| h.rid == health),
+        "a domain='work' recall returned a domain='health' record — the caller's \
+         filter was bypassed by a secondary lane; got {:?}",
+        hits.iter().map(|h| (&h.rid, &h.domain)).collect::<Vec<_>>()
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn certainty_floor_holds_across_every_lane() {
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    // importance 0.9 is ABOVE the high-importance fallback threshold (0.7 for
+    // small databases), so this row is eligible for the fallback lane as well as
+    // the vector/FTS lanes. The first version of this test used importance 0.6 and
+    // could never reach that path — it passed while the bypass was still live.
+    let low = db
+        .record_text("the postgres migration runs on the staging cluster", "semantic",
+                     0.9, 0.0, 604800.0, &empty_meta(), "default", 0.2, "general", "user", None)
+        .unwrap();
+    db.record_text("unrelated grocery list apples bananas", "semantic",
+                   0.6, 0.0, 604800.0, &empty_meta(), "default", 0.95, "general", "user", None)
+        .unwrap();
+
+    let emb = db.embed("postgres migration staging cluster").unwrap();
+    let hits = db
+        .recall(&emb, 20, None, None, false, false, Some("postgres migration staging cluster"),
+                true, None, None, None, Some(0.8), None, false)
+        .unwrap();
+    assert!(
+        !hits.iter().any(|h| h.rid == low),
+        "a certainty_min=0.8 recall returned a certainty=0.2 record; got {:?}",
+        hits.iter().map(|h| (&h.rid, h.certainty, &h.why_retrieved)).collect::<Vec<_>>()
+    );
+}

@@ -130,6 +130,7 @@ impl super::YantrikDB {
     /// Shared by `recall_inner` and `recall_profiled_inner` — one
     /// definition, two callers.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn apply_claims_lane(
         &self,
         scored: &mut Vec<crate::types::RecallResult>,
@@ -138,6 +139,14 @@ impl super::YantrikDB {
         namespace: Option<&str>,
         time_window: Option<(f64, f64)>,
         include_consolidated: bool,
+        // 2026-08-13: this lane could re-admit records the caller had
+        // filtered out — it never received these at all, so it could not
+        // have honoured them. Threaded through so one predicate governs
+        // every lane.
+        memory_type: Option<&str>,
+        domain: Option<&str>,
+        source: Option<&str>,
+        certainty_min: Option<f64>,
         learned_weights: &crate::types::LearnedWeights,
         ts: f64,
         query_sentiment: f64,
@@ -207,18 +216,17 @@ impl super::YantrikDB {
         let cache = self.scoring_cache.read();
         for (rid, claim_why) in new_rids {
             let Some(row) = cache.get(rid) else { continue };
-            let status_ok = if include_consolidated {
-                row.consolidation_status == "active" || row.consolidation_status == "consolidated"
-            } else {
-                row.consolidation_status == "active"
-            };
-            if !status_ok {
+            if !crate::engine::recall::passes_recall_filters(
+                row,
+                include_consolidated,
+                memory_type,
+                time_window,
+                namespace,
+                domain,
+                source,
+                certainty_min,
+            ) {
                 continue;
-            }
-            if let Some((start, end)) = time_window {
-                if row.created_at < start || row.created_at > end {
-                    continue;
-                }
             }
             let Some(emb_blob) = emb_map.get(rid) else {
                 continue;
