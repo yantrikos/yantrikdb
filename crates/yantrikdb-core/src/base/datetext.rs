@@ -134,28 +134,30 @@ pub fn extract_event_dates(text: &str) -> Vec<EventDate> {
     let mut found: Vec<EventDate> = Vec::new();
     let bytes = text.as_bytes();
 
-    // ISO `YYYY-MM-DD`, scanned over ASCII digit runs.
+    // ISO `YYYY-MM-DD`. Operates on BYTES ONLY and never slices the &str by
+    // byte offset: `&text[i..i + 10]` panics when `i` lands inside a
+    // multi-byte character, and it did — a single curly quote in a stored
+    // conversation took the whole write path down with
+    // "byte index 587 is not a char boundary". A date is pure ASCII, so the
+    // digits can be read straight out of the byte slice and the panic
+    // surface disappears entirely.
+    let d = |k: usize| -> i64 { (bytes[k] - b'0') as i64 };
     let mut i = 0usize;
     while i + 10 <= bytes.len() {
-        let w = &text[i..i + 10];
-        let b = w.as_bytes();
-        if b[4] == b'-'
-            && b[7] == b'-'
-            && b[..4].iter().all(u8::is_ascii_digit)
-            && b[5..7].iter().all(u8::is_ascii_digit)
-            && b[8..10].iter().all(u8::is_ascii_digit)
-        {
+        let ok = bytes[i + 4] == b'-'
+            && bytes[i + 7] == b'-'
+            && bytes[i..i + 4].iter().all(u8::is_ascii_digit)
+            && bytes[i + 5..i + 7].iter().all(u8::is_ascii_digit)
+            && bytes[i + 8..i + 10].iter().all(u8::is_ascii_digit)
             // Reject when glued to more digits (a longer number, not a date).
-            let before_ok = i == 0 || !bytes[i - 1].is_ascii_digit();
-            let after_ok = i + 10 >= bytes.len() || !bytes[i + 10].is_ascii_digit();
-            if before_ok && after_ok {
-                if let (Some(y), Some(m), Some(d)) =
-                    (parse_u(&w[0..4]), parse_u(&w[5..7]), parse_u(&w[8..10]))
-                {
-                    if let Some(e) = to_event(y, m as u32, d as u32) {
-                        found.push(e);
-                    }
-                }
+            && (i == 0 || !bytes[i - 1].is_ascii_digit())
+            && (i + 10 >= bytes.len() || !bytes[i + 10].is_ascii_digit());
+        if ok {
+            let y = d(i) * 1000 + d(i + 1) * 100 + d(i + 2) * 10 + d(i + 3);
+            let m = d(i + 5) * 10 + d(i + 6);
+            let day = d(i + 8) * 10 + d(i + 9);
+            if let Some(e) = to_event(y, m as u32, day as u32) {
+                found.push(e);
             }
         }
         i += 1;
@@ -323,6 +325,43 @@ mod tests {
     fn deduplicates_and_sorts() {
         let t = "March 15, 2024 and again March 15, 2024, plus January 2, 2024";
         assert_eq!(isos(t), vec!["2024-01-02", "2024-03-15"]);
+    }
+
+    /// REGRESSION. The first implementation hunted for ISO dates by slicing
+    /// the &str at byte offsets (`&text[i..i + 10]`), which panics the moment
+    /// an offset lands inside a multi-byte character. One curly quote in a
+    /// stored conversation took the entire write path down with "byte index
+    /// 587 is not a char boundary". Memory text is arbitrary user content: it
+    /// WILL contain smart quotes, dashes, accents and emoji, and a panic on
+    /// the write path loses the memory being saved.
+    #[test]
+    fn never_panics_on_multibyte_text() {
+        let cases = [
+            "he said \u{201c}the deadline is 2024-03-15\u{201d} and left",
+            "caf\u{e9} meeting \u{2014} 2024-03-15 \u{2014} confirmed",
+            "\u{1f389} shipping 2024-03-15",
+            "\u{4e2d}\u{6587} 2024-03-15 \u{7ed3}",
+            "\u{201c}\u{201d}\u{2014}\u{1f600}",
+        ];
+        for c in cases {
+            let got = extract_event_dates(c);
+            if c.contains("2024-03-15") {
+                assert_eq!(got.len(), 1, "should still find the date in {c:?}");
+                assert_eq!(got[0].iso, "2024-03-15");
+            }
+        }
+    }
+
+    /// Multi-byte characters at every offset around a date, so an off-by-one
+    /// in the boundary handling fails rather than only the happy case passing.
+    #[test]
+    fn multibyte_at_every_offset_is_safe() {
+        for pad in 0..12 {
+            let lead = format!("{}{}", "\u{201c}".repeat(pad), "2024-03-15");
+            assert_eq!(extract_event_dates(&lead).len(), 1, "leading pad={pad}");
+            let trail = format!("{}{}", "2024-03-15", "\u{2014}".repeat(pad));
+            assert_eq!(extract_event_dates(&trail).len(), 1, "trailing pad={pad}");
+        }
     }
 
     #[test]
