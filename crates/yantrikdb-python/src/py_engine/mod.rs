@@ -299,14 +299,32 @@ impl PyYantrikDB {
         Ok(Self::from_engine(inner, embedder))
     }
 
-    /// **v0.7.4** — open with the engine's bundled embedder pre-attached.
+    /// **v0.7.4** — open with a default embedder pre-attached.
     ///
-    /// Mirrors `YantrikDB::with_default` on the Rust side: opens the DB at
-    /// the bundled embedder's dimension (currently 64 for `potion-base-2M`)
-    /// and auto-attaches the bundled embedder so `record(text=...)`,
-    /// `recall(query=...)`, `record_text()`, and `recall_text()` work
-    /// without any external sentence-transformers install or first-run
-    /// model download. This is the "Just Works" entry point for Python.
+    /// Mirrors `YantrikDB::with_default` on the Rust side, so `record(
+    /// text=...)`, `recall(query=...)`, `record_text()` and `recall_text()`
+    /// work with no external sentence-transformers install. This is the
+    /// "Just Works" entry point for Python.
+    ///
+    /// **Which model you get (changed 2026-08-13).** A NEW file-backed
+    /// store opens at 256 dims on `potion-base-8M`, downloaded once
+    /// (~28 MB, SHA-256 pinned, cached under your cache dir). Measured on
+    /// 5,035 real agent memories through the engine's own recall, it
+    /// leaves the correct record outside the top 100 on 1 question in 12
+    /// where the bundled 64-dim `potion-base-2M` misses 4 in 12 — the
+    /// difference between a memory that answers and one that appears
+    /// empty.
+    ///
+    /// If the model cannot be fetched (offline), the store is created on
+    /// the bundled `potion-base-2M` instead and a warning is logged. That
+    /// choice is permanent for that store: a database's dimension is fixed
+    /// at creation, so switching later means re-embedding.
+    ///
+    /// An EXISTING store always reopens at the dimension it already holds,
+    /// so upgrading the library never strands a database. In-memory
+    /// (`":memory:"`) stores stay on the bundled model deliberately — they
+    /// are ephemeral, and defaulting them to a download would make every
+    /// test suite that uses one require the network.
     ///
     /// Slim wheels built with `--no-default-features` will raise at the
     /// engine level (the bundled embedder is feature-gated). Default PyPI
@@ -434,12 +452,19 @@ impl PyYantrikDB {
     /// cache and skip the network.
     ///
     /// **Dimension contract.** The engine's `embedding_dim` (set at
-    /// construction) must match the named model's output dim. Use
-    /// `YantrikDB.with_default(...)` (dim=64 for bundled potion-2M) and
-    /// then call `set_embedder_named` only with another 64-dim model
-    /// (none currently published) — OR construct with the matching dim:
+    /// construction) must match the named model's output dim, and a store's
+    /// dimension is fixed when it is created. So `set_embedder_named` can
+    /// only ever swap in a model of the dimension the store already has —
+    /// to use a different one, construct at that dim:
     /// `YantrikDB(":memory:", embedding_dim=256)` then
     /// `db.set_embedder_named("potion-base-8M")`.
+    ///
+    /// Since 2026-08-13 `with_default(path)` already picks the right dim
+    /// for you: a NEW file-backed store opens at 256 on `potion-base-8M`
+    /// (downloaded once, ~28 MB), falling back to the bundled 64-dim
+    /// `potion-base-2M` when it cannot be fetched. An EXISTING store always
+    /// reopens at the dimension it already holds, so this never strands
+    /// data. In-memory stores stay on the bundled model deliberately.
     ///
     /// Raises `RuntimeError` if the wheel was built with
     /// `--no-default-features` (the `embedder-download` Cargo feature is

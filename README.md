@@ -34,15 +34,24 @@ That's it. The agent auto-recalls context, auto-remembers decisions, and auto-de
 pip install yantrikdb
 ```
 
-The engine ships a default embedder (`potion-base-2M`, ~7 MB, distilled
-from BGE-base-en-v1.5) — `record_text()` / `recall_text()` work out of
-the box. **No `sentence-transformers` install. No first-run model
-download. No ONNX runtime.** Just one `pip install`.
+`record_text()` / `recall_text()` work out of the box — **no
+`sentence-transformers` install, no ONNX runtime.** Just one
+`pip install`.
+
+A new file-backed store opens on `potion-base-8M` (256-dim), fetched
+once (~28 MB, SHA-256 pinned, cached under your user cache dir) and
+self-hosted from `yantrikos/yantrikdb-models` — no HuggingFace
+dependency. If it cannot be fetched (offline), the store is created on
+the bundled `potion-base-2M` (64-dim, ~7 MB, no download ever) and a
+warning is logged. **An existing database always reopens at the
+dimension it already holds**, so upgrading the library never strands
+your data.
 
 ```python
 import yantrikdb
 
-# Default: bundled embedder, dim=64. Just works.
+# New store: potion-base-8M @ 256 dims (downloads once).
+# Existing store: reopened at whatever dimension it already has.
 db = yantrikdb.YantrikDB.with_default("memory.db")
 
 db.record("Alice is the engineering lead", importance=0.8, domain="people")
@@ -60,34 +69,61 @@ db.think()  # consolidate, detect conflicts, mine patterns
 db.close()
 ```
 
-#### Want higher-quality embeddings?
+#### Why the default is the 256-dim model
 
-Three opt-in upgrade paths, in increasing weight:
+The embedder choice is measured on real agent memory, not a leaderboard.
+Public benchmarks rank on Wikipedia-shaped text; agent memory is dense
+operational notes with heavy internal vocabulary and near-duplicate
+records that supersede one another, and it ranks the models differently.
+
+Measured on **5,035 real production memories** with 12 questions whose
+correct record was pinned by id, retrieved through the engine's own
+`recall()` (not raw cosine — the engine's hybrid lexical lanes and
+composite scoring are part of what you actually get):
+
+| Embedder | Dim | MRR | Correct record absent from the top 100 |
+|---|---|---|---|
+| `potion-base-2M` (bundled fallback) | 64 | 0.120 | **4 of 12** |
+| `potion-base-8M` (default) | 256 | **0.312** | **1 of 12** |
+
+The miss rate is the reason, not the MRR. Under the smaller model a
+third of real questions had no correct answer *anywhere* in the first
+hundred results — which to a user is indistinguishable from the memory
+not being there at all.
+
+Two honest caveats. Twelve probes is a small set, enough to separate
+0.120 from 0.312 but not to rank models a few points apart. And the gain
+is **corpus-specific**: on conversational-paraphrase benchmarks the two
+models are indistinguishable at every `k` from 2 to 80. Expect the
+benefit on dense, vocabulary-heavy stores; do not assume it transfers.
+
+#### Other embedder options
 
 ```python
-# 1. Larger bundled variant — downloads on first call, caches under
-#    your user data dir. Self-hosted from yantrikos/yantrikdb-models;
-#    no HuggingFace dependency, no rate limits.
-db = yantrikdb.YantrikDB("memory.db", embedding_dim=256)
-db.set_embedder_named("potion-base-8M")   # ~28 MB, ~92% MiniLM
-# or:  db.set_embedder_named("potion-base-32M")  # ~121 MB, ~95% MiniLM
+# Larger still — 512-dim, ~121 MB, downloads on first call.
+db = yantrikdb.YantrikDB("memory.db", embedding_dim=512)
+db.set_embedder_named("potion-base-32M")
 
-# 2. Bring your own embedder (sentence-transformers, fastembed, custom).
+# Bring your own (sentence-transformers, fastembed, custom object).
 from sentence_transformers import SentenceTransformer
 db = yantrikdb.YantrikDB("memory.db", embedding_dim=384)
 db.set_embedder(SentenceTransformer("all-MiniLM-L6-v2"))
 
-# 3. Slim build (no bundled embedder, must set_embedder yourself).
-#    For deployments where the ~7 MB bundle is intolerable.
-#    Rust:  yantrikdb = { version = "0.7", default-features = false }
+# Force the bundled model — no download, works fully offline.
+db = yantrikdb.YantrikDB("memory.db", embedding_dim=64)
 ```
 
-| Path | Quality vs MiniLM | Size on disk | Install network |
+| Path | Dim | Size on disk | Install network |
 |---|---|---|---|
-| Bundled default (`with_default`) | ~89% | ~7 MB (bundled) | none |
-| `set_embedder_named("potion-base-8M")` | ~92% | ~28 MB (cached) | first call only |
-| `set_embedder_named("potion-base-32M")` | ~95% | ~121 MB (cached) | first call only |
-| `set_embedder(MiniLM)` | 100% (baseline) | ~80 MB | sentence-transformers' own download |
+| `with_default` on a new store | 256 | ~28 MB (cached) | first run only |
+| Bundled fallback (`embedding_dim=64`) | 64 | ~7 MB (bundled) | none, ever |
+| `set_embedder_named("potion-base-32M")` | 512 | ~121 MB (cached) | first call only |
+| `set_embedder(MiniLM)` | 384 | ~80 MB | sentence-transformers' own download |
+
+**A store's dimension is fixed when it is created.** Switching models
+later means re-embedding — `db.reembed("potion-base-8M")` does it in
+place, preserving graph edges, consolidation state and conflict
+metadata.
 
 ### As a Rust crate
 
@@ -95,8 +131,18 @@ db.set_embedder(SentenceTransformer("all-MiniLM-L6-v2"))
 [dependencies]
 yantrikdb = "0.7"
 
-# Want set_embedder_named() for runtime model upgrades?
+# NOTE: the crate defaults differ from the pip package on purpose.
+# `embedder-download` is OFF here, so a default cargo build has NO
+# network code path at all and `with_default()` uses the bundled
+# 64-dim potion-base-2M. The Python wheel enables it, so pip users get
+# the 256-dim potion-base-8M default described above.
+#
+# To get that default (and set_embedder_named) in Rust, opt in:
 # yantrikdb = { version = "0.7", features = ["embedder-download"] }
+#
+# Why not on by default: it pulls ureq + sha2 + dirs + tar + flate2
+# into every build of an embedded database. See the measured retrieval
+# difference above and decide for your deployment.
 
 # Slim build (no bundled embedder, no network code path):
 # yantrikdb = { version = "0.7", default-features = false }

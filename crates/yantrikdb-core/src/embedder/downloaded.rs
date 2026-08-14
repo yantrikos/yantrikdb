@@ -379,9 +379,26 @@ fn fetch_and_extract(model: &DownloadableModel, name: &str) -> Result<PathBuf> {
 pub struct DownloadedEmbedder {
     model: std::sync::Arc<StaticModel>,
     dim: usize,
+    /// Registry name, e.g. `"potion-base-8M"`.
+    name: String,
+    /// The registry's pinned SHA-256 of the model artifact, already
+    /// verified byte-for-byte at download. See `fingerprint`.
+    sha256: &'static str,
 }
 
 impl DownloadedEmbedder {
+    /// Output dimension of a registry model, WITHOUT downloading it.
+    ///
+    /// The dimension is a compile-time constant per model, so asking for
+    /// it should not cost a network round trip. Auto-attach uses this to
+    /// decide whether a store's dimension could possibly be served by the
+    /// default model before reaching for the network — otherwise opening
+    /// an unrelated store (say 384-dim MiniLM) would attempt a fetch on
+    /// every open.
+    pub fn registry_dim(name: &str) -> Option<usize> {
+        registry(name).map(|m| m.dim)
+    }
+
     /// **Saga task 20 Slice C.** Resolve `name` against the static
     /// registry; download + verify + extract on cache miss; load via
     /// `model2vec-rs`. Returns an `Embedder` impl ready for
@@ -400,6 +417,8 @@ impl DownloadedEmbedder {
         Ok(Self {
             model: std::sync::Arc::new(static_model),
             dim: model.dim,
+            name: name.to_string(),
+            sha256: model.sha256,
         })
     }
 }
@@ -422,6 +441,29 @@ impl Embedder for DownloadedEmbedder {
 
     fn dim(&self) -> usize {
         self.dim
+    }
+
+    /// Stable identity of this embedding space.
+    ///
+    /// Without this the engine cannot record a durable embedder identity
+    /// for a store on a downloaded model, and every pack mount against
+    /// that store fails with "no recorded embedder identity, so
+    /// compatibility cannot be proven" — even when the dimensions match
+    /// exactly. That made the whole pack system usable only with the
+    /// bundled embedder, which surfaced the moment a 256-dim pack was
+    /// built and mounted into a 256-dim host.
+    ///
+    /// The registry's `sha256` is the right value to use: it is a hash of
+    /// the exact model artifact, pinned at compile time and verified
+    /// byte-for-byte before the model is ever loaded. Two engines that
+    /// report the same fingerprint here provably ran the same weights,
+    /// which is precisely the claim a pack mount needs to check.
+    fn fingerprint(&self) -> Option<String> {
+        Some(format!("sha256:{}", self.sha256))
+    }
+
+    fn name(&self) -> Option<String> {
+        Some(self.name.clone())
     }
 }
 

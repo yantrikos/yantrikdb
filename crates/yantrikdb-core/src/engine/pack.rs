@@ -167,6 +167,14 @@ pub struct PackManifest {
     /// attacker swap rules while keeping rows would be theatre.
     #[serde(default)]
     pub signature: Option<String>,
+    /// Set when this pack's vectors were regenerated locally by
+    /// [`convert_pack`](YantrikDB::convert_pack): the embedder digest the
+    /// publisher originally sealed. Its presence means the rows are the
+    /// publisher's (the content digest still verifies) while the vectors
+    /// are this host's, and that any publisher signature was dropped
+    /// because it covered the original embedder identity.
+    #[serde(default)]
+    pub reembedded_from: Option<String>,
     /// **Tier 1 — the constitution.** Rules injected *unconditionally*
     /// while the pack is mounted, via [`YantrikDB::pack_context`].
     ///
@@ -1265,7 +1273,10 @@ impl YantrikDB {
             return Err(YantrikDbError::PackEmbedderMismatch {
                 pack_id: pack_id.to_string(),
                 reason: format!(
-                    "pack vectors are {}-dimensional, this database's are {host_dim}",
+                    "pack vectors are {}-dimensional, this database's are {host_dim}. \
+                     mount_pack is a read-only attach and cannot re-embed; use install_pack(), \
+                     which converts a pack into this database's space automatically, or \
+                     convert_pack(src, dest, embedder) to produce a converted copy yourself",
                     manifest.embedder.dim
                 ),
             });
@@ -1667,6 +1678,54 @@ impl YantrikDB {
     ///
     /// Idempotent on the pack id: installing a pack that is already
     /// installed replaces the stored file and record.
+    /// Convert `src` into this host's embedding space at `dest`, if that
+    /// is both necessary and possible. Returns whether it happened.
+    ///
+    /// Necessary = the pack's dimension differs from this database's.
+    /// Possible = this database's embedder is a named registry model, so
+    /// there is a space to name as the conversion target.
+    fn convert_pack_into_host_space(
+        &self,
+        src: &str,
+        dest: &std::path::Path,
+        manifest: &PackManifest,
+    ) -> Result<bool> {
+        if manifest.embedder.dim == self.embedding_dim() {
+            return Ok(false);
+        }
+        #[cfg(feature = "embedder-download")]
+        {
+            let host_model = self
+                .embedder_identity()?
+                .and_then(|(name, _, _)| name)
+                .filter(|n| {
+                    crate::embedder::DownloadedEmbedder::registry_dim(n)
+                        == Some(self.embedding_dim())
+                });
+            if let Some(name) = host_model {
+                // convert_pack refuses to overwrite, matching seal_pack.
+                if dest.exists() {
+                    std::fs::remove_file(dest).map_err(|e| YantrikDbError::PackUnreadable {
+                        path: dest.display().to_string(),
+                        reason: format!("could not replace existing pack file: {e}"),
+                    })?;
+                }
+                tracing::info!(
+                    target: "yantrikdb::pack",
+                    pack = %manifest.pack_id(),
+                    from_dim = manifest.embedder.dim,
+                    to_dim = self.embedding_dim(),
+                    embedder = %name,
+                    "pack was published in a different embedding space; re-embedding it into \
+                     this database's space on install"
+                );
+                Self::convert_pack(src, &dest.to_string_lossy(), &name)?;
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     pub fn install_pack(&self, path: &str) -> Result<String> {
         let dir = self.pack_dir().ok_or_else(|| {
             YantrikDbError::InvalidInput(
@@ -1697,10 +1756,27 @@ impl YantrikDB {
             .map(|(a, b)| a == b)
             .unwrap_or(false);
         if !same {
-            std::fs::copy(src, &dest).map_err(|e| YantrikDbError::PackUnreadable {
-                path: path.to_string(),
-                reason: format!("could not copy into {}: {e}", dir.display()),
-            })?;
+            // A pack published in a different embedding space is converted
+            // into this host's space rather than refused. Done HERE and not
+            // in `mount_pack` on purpose: install is the durable, one-time,
+            // explicit step, so the re-embedding cost is paid once and the
+            // converted file is what gets remounted on every subsequent
+            // open. `mount_pack` stays a read-only attach that writes
+            // nothing.
+            //
+            // Only possible when this host's embedder is a registry model,
+            // since conversion has to name the space it is converting INTO.
+            // A host on an external embedder (a sentence-transformers
+            // MiniLM, say) falls through to the plain copy and gets the
+            // usual dimension refusal at mount, which is honest: the engine
+            // cannot reproduce an embedder it does not own.
+            let converted = self.convert_pack_into_host_space(path, &dest, &manifest)?;
+            if !converted {
+                std::fs::copy(src, &dest).map_err(|e| YantrikDbError::PackUnreadable {
+                    path: path.to_string(),
+                    reason: format!("could not copy into {}: {e}", dir.display()),
+                })?;
+            }
         }
 
         // Mount before recording: a pack that cannot be mounted must not
@@ -1850,6 +1926,250 @@ impl YantrikDB {
     }
 
     /// Read a pack's manifest without mounting it.
+    /// Rewrite a pack's vectors into a different embedding space.
+    ///
+    /// # Why a pack can be converted at all
+    ///
+    /// A pack's `content_digest` is computed over its `(rid, text)` pairs
+    /// — not its vectors. Re-embedding changes no rid and no text, so the
+    /// converted pack still verifies against the digest the publisher
+    /// sealed. **The vectors are derived data**; a host regenerating them
+    /// with its own embedder is not weakening provenance, it is choosing
+    /// to trust its own encoder over someone else's.
+    ///
+    /// This is what makes a single published artifact usable by hosts in
+    /// different embedding spaces. Without it, every pack would have to be
+    /// published once per dimension and the registry would have to serve
+    /// by host dim, because [`mount_pack`](Self::mount_pack) treats a
+    /// dimension mismatch as unconditionally fatal.
+    ///
+    /// # What is deliberately dropped
+    ///
+    /// The publisher's `signature` covers the embedder identity, so it
+    /// cannot survive re-embedding and is cleared along with
+    /// `publisher_pubkey` — a signature that no longer verifies is worse
+    /// than none, because it invites a checker to conclude "signed". The
+    /// original embedder's digest is recorded in `reembedded_from` so the
+    /// conversion is visible rather than silent, and the content digest
+    /// is re-verified after conversion so a corrupted copy cannot pass.
+    ///
+    /// Refuses to overwrite `dest`, matching [`seal_pack`](Self::seal_pack).
+    #[cfg(feature = "embedder-download")]
+    pub fn convert_pack(src: &str, dest: &str, embedder_name: &str) -> Result<PackManifest> {
+        if std::path::Path::new(dest).exists() {
+            return Err(YantrikDbError::PackDestinationExists {
+                path: dest.to_string(),
+            });
+        }
+        let original = Self::read_manifest(src)?;
+        let target_dim = crate::embedder::DownloadedEmbedder::registry_dim(embedder_name)
+            .ok_or_else(|| {
+                YantrikDbError::InvalidInput(format!(
+                    "unknown embedder name {embedder_name:?}; cannot convert a pack into an \
+                     embedding space whose dimension is unknown"
+                ))
+            })?;
+        if original.embedder.dim == target_dim {
+            return Err(YantrikDbError::InvalidInput(format!(
+                "pack is already {target_dim}-dimensional; conversion would be a no-op"
+            )));
+        }
+
+        // NOT `reembed()`, despite its module docs naming 64->256 as the
+        // motivating case: that path rejects a cross-dimension change
+        // ("engine's standalone embedding_dim field still gates
+        // record_with_rid/replication paths") and tells callers to open a
+        // new database at the target dim and copy. A pack is written
+        // fresh anyway, so that is what this does.
+        //
+        // Rows are re-inserted UNDER THEIR ORIGINAL RIDS. That is the
+        // whole game: the content digest is over (rid, text), so minting
+        // new rids would break the publisher's seal and make the
+        // conversion unverifiable.
+        let convert = || -> Result<PackManifest> {
+            let mut out_db = Self::new(dest, target_dim)?;
+            out_db.set_embedder_named(embedder_name)?;
+            // The engine's background workers must be running for a bulk
+            // write of this shape. Without the COMPACTOR specifically, the
+            // in-memory delta tier fills at `delta_max` (256) and every
+            // further write returns `Backpressure` forever — the CT 132
+            // wedge documented in `materializer.rs`, whose error text says
+            // "ingest queue full" while the queue is in fact draining
+            // fine. Measured: without this, conversion failed on every
+            // pack over 256 rows (3 of the 39 published) and no amount of
+            // retrying helped, because nothing was draining the tier.
+            let out_db = std::sync::Arc::new(out_db);
+            let workers = crate::engine::materializer::spawn_all_workers(&out_db, 2);
+
+            let rows = {
+                let src_conn = Connection::open_with_flags(src, OpenFlags::SQLITE_OPEN_READ_ONLY)
+                    .map_err(|e| YantrikDbError::PackUnreadable {
+                        path: src.to_string(),
+                        reason: e.to_string(),
+                    })?;
+                let mut stmt = src_conn.prepare(
+                    "SELECT rid, text, type, importance, valence, half_life, \
+                            metadata, namespace, certainty, domain, source, emotional_state, \
+                            created_at_unix_micros \
+                     FROM memories WHERE consolidation_status != 'tombstoned' ORDER BY rid",
+                )?;
+                let mapped = stmt.query_map([], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, String>(2)?,
+                        r.get::<_, f64>(3)?,
+                        r.get::<_, f64>(4)?,
+                        r.get::<_, f64>(5)?,
+                        r.get::<_, Option<String>>(6)?,
+                        r.get::<_, String>(7)?,
+                        r.get::<_, f64>(8)?,
+                        r.get::<_, String>(9)?,
+                        r.get::<_, String>(10)?,
+                        r.get::<_, Option<String>>(11)?,
+                        r.get::<_, i64>(12)?,
+                    ))
+                })?;
+                mapped.collect::<std::result::Result<Vec<_>, _>>()?
+            };
+
+            for (
+                rid,
+                text,
+                memory_type,
+                importance,
+                valence,
+                half_life,
+                metadata,
+                namespace,
+                certainty,
+                domain,
+                source,
+                emotional_state,
+                created_at,
+            ) in &rows
+            {
+                let embedding = out_db.embed(text)?;
+                let meta_json: serde_json::Value = metadata
+                    .as_deref()
+                    .and_then(|m| serde_json::from_str(m).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                // Writing a whole corpus in a tight loop outruns the
+                // background materializer and fills the bounded ingest
+                // queue. The engine reports that synchronously WITH a
+                // drain hint and expects the caller to back off — the
+                // documented policy is "retry with backoff after the
+                // hint". Without this, conversion fails on exactly the
+                // packs worth converting: the large ones. Measured on the
+                // published catalogue, 3 of 39 packs hit it.
+                let mut attempt = 0u32;
+                loop {
+                    let res = out_db.record_with_rid(
+                        rid,
+                        text,
+                        memory_type,
+                        *importance,
+                        *valence,
+                        *half_life,
+                        &meta_json,
+                        &embedding,
+                        namespace,
+                        *certainty,
+                        domain,
+                        source,
+                        emotional_state.as_deref(),
+                        *created_at,
+                        &[],
+                        embedder_name,
+                        None,
+                        crate::provenance::WriteAdmission::Admitted,
+                    );
+                    match res {
+                        Err(YantrikDbError::Backpressure { retry_after_ms, .. })
+                            if attempt < 200 =>
+                        {
+                            attempt += 1;
+                            std::thread::sleep(std::time::Duration::from_millis(
+                                retry_after_ms.max(1),
+                            ));
+                        }
+                        other => break other?,
+                    }
+                }
+            }
+
+            let identity = out_db.embedder_identity()?.ok_or_else(|| {
+                YantrikDbError::InvalidInput(
+                    "re-embedding left no durable embedder identity; the converted pack could \
+                     not prove its space to any host"
+                        .into(),
+                )
+            })?;
+            // Stop the workers BEFORE releasing the engine: they hold a
+            // Weak<YantrikDB> and must not be observing a half-dropped
+            // database while the file is finalized below.
+            drop(workers);
+            drop(out_db);
+
+            let mut out = Connection::open(dest).map_err(|e| YantrikDbError::PackUnreadable {
+                path: dest.to_string(),
+                reason: e.to_string(),
+            })?;
+            // A sealed pack must be openable read-only from a read-only
+            // filesystem, so it cannot keep a WAL sidecar.
+            out.pragma_update(None, "journal_mode", "DELETE")?;
+
+            let (rows, digest) = Self::compute_content_digest(&out)?;
+            if Some(&digest) != original.content_digest.as_ref() {
+                return Err(YantrikDbError::InvalidInput(format!(
+                    "content digest changed during conversion ({} rows): re-embedding must not \
+                     alter any rid or text. Refusing to write a pack that no longer matches what \
+                     the publisher sealed.",
+                    rows
+                )));
+            }
+
+            let converted = PackManifest {
+                embedder: PackEmbedder {
+                    name: identity.0.clone(),
+                    digest: Some(identity.1.clone()),
+                    dim: identity.2,
+                },
+                reembedded_from: original.embedder.digest.clone(),
+                // Cleared deliberately — see the doc comment.
+                signature: None,
+                publisher_pubkey: None,
+                ..original.clone()
+            };
+            let json = serde_json::to_string(&converted).map_err(|e| {
+                YantrikDbError::PackManifestInvalid {
+                    path: dest.to_string(),
+                    reason: e.to_string(),
+                }
+            })?;
+            out.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+                rusqlite::params![META_PACK_MANIFEST, json],
+            )?;
+            Self::persist_embedder_identity(
+                &out,
+                converted.embedder.name.as_deref(),
+                identity.1.as_str(),
+                converted.embedder.dim,
+            )?;
+            out.execute("VACUUM", [])?;
+            drop(out);
+            Ok(converted)
+        };
+        match convert() {
+            Ok(m) => Ok(m),
+            Err(e) => {
+                let _ = std::fs::remove_file(dest);
+                Err(e)
+            }
+        }
+    }
+
     pub fn read_manifest(path: &str) -> Result<PackManifest> {
         let conn =
             Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|e| {

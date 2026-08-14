@@ -1719,3 +1719,498 @@ fn explicit_set_embedder_overrides_bundled() {
         "DummyEmbedder's sentinel must be visible — set_embedder overrode bundled"
     );
 }
+
+// ── 2026-08-13: default for NEW file-backed stores moved to
+// potion-base-8M (256d), downloaded on first use.
+//
+// The tests below pin the property that makes that switch safe to ship:
+// an EXISTING database is reopened at the dimension it already holds.
+// The vector index is built from the dimension passed to the
+// constructor, so a store created at 64 and reopened at 256 would build
+// a mismatched index over its existing vectors — data present, and
+// unfindable. None of these touch the network: they assert the
+// protection path, which resolves before any fetch is attempted.
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn existing_store_keeps_its_dimension_when_the_default_changes() {
+    use crate::embedder::BUNDLED_EMBEDDER_DIM;
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("legacy.db");
+    let p = path.to_str().unwrap();
+
+    // A store from before the default changed: 64-dim, with a real
+    // vector in it so the embedder identity gets stamped.
+    {
+        let db = YantrikDB::new(p, BUNDLED_EMBEDDER_DIM).unwrap();
+        db.record_text(
+            "the deploy key is id_yantrikdb_web_deploy",
+            "semantic",
+            0.9,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    }
+
+    // Reopening through the constructor whose default is now 256 must
+    // still land on 64 — otherwise every existing user's store breaks.
+    let reopened = YantrikDB::with_default(p).unwrap();
+    assert_eq!(
+        reopened.embedding_dim(),
+        BUNDLED_EMBEDDER_DIM,
+        "with_default reopened a {BUNDLED_EMBEDDER_DIM}-dim store at {} — this strands \
+         every database created before the default changed",
+        reopened.embedding_dim()
+    );
+    assert_eq!(
+        reopened.stats(None).unwrap().active_memories,
+        1,
+        "the pre-existing record must still be there and readable"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn existing_dimension_is_detected_without_an_embedder_identity() {
+    // Databases whose vectors were supplied by the caller never stamp an
+    // embedder identity — `record()` takes the vector directly. Those are
+    // precisely the deployments a dimension change would corrupt
+    // silently, so detection must fall back to measuring a stored vector
+    // rather than trusting the identity row alone.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("external-vectors.db");
+    let p = path.to_str().unwrap();
+    {
+        let db = YantrikDB::new(p, 384).unwrap();
+        db.record(
+            "vector supplied by an external MiniLM",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(0.3, 384),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    }
+    let reopened = YantrikDB::with_default(p).unwrap();
+    assert_eq!(
+        reopened.embedding_dim(),
+        384,
+        "a store holding 384-dim external vectors must reopen at 384"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn in_memory_default_stays_on_the_bundled_embedder() {
+    // Deliberate: in-memory stores are ephemeral and the test suite opens
+    // many of them, so they must not require a 28 MB download. If this
+    // ever flips, `cargo test` starts depending on the network.
+    use crate::embedder::BUNDLED_EMBEDDER_DIM;
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    assert_eq!(db.embedding_dim(), BUNDLED_EMBEDDER_DIM);
+    assert!(db.has_embedder());
+}
+
+#[cfg(all(feature = "bundled-embedder", feature = "embedder-download"))]
+#[test]
+#[ignore = "touches the model cache / network; run explicitly with --ignored"]
+fn new_file_store_gets_the_downloadable_default() {
+    // The end-to-end claim of the 2026-08-13 default change. Ignored by
+    // default so `cargo test` stays hermetic — the whole reason in-memory
+    // stores were kept on the bundled model.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("fresh.db");
+    let db = YantrikDB::with_default(path.to_str().unwrap()).unwrap();
+    assert_eq!(
+        db.embedding_dim(),
+        256,
+        "a NEW file-backed store must open at potion-base-8M's 256 dims"
+    );
+    assert!(db.has_embedder(), "and must have that embedder attached");
+
+    let rid = db
+        .record_text(
+            "the website deploys via a git post-receive hook",
+            "semantic",
+            0.9,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let hits = db.recall_text("how do I deploy the site", 5).unwrap();
+    assert!(
+        hits.iter().any(|h| h.rid == rid),
+        "the store must actually embed and retrieve with the downloaded model"
+    );
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn stored_vectors_outrank_a_disagreeing_embedder_identity() {
+    // Taken from a real store, not imagined: a 5,050-record production
+    // database recorded `embedder_dim = 64 / potion-base-2M` in `meta`
+    // while holding 1536-byte (384-dim) MiniLM vectors, because the
+    // server embedded python-side and passed vectors to `record()` while
+    // an incidental engine-side `embed()` stamped the attached bundled
+    // model. Believing the identity row would reopen that database at 64
+    // dims and build a 64-dim index over 384-dim vectors.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lying-identity.db");
+    let p = path.to_str().unwrap();
+    {
+        let db = YantrikDB::new(p, 384).unwrap();
+        db.record(
+            "vectors produced outside the engine",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(0.25, 384),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+        // Forge the disagreement the production store actually had.
+        let conn = db.conn();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('embedder_dim', '64')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('embedder_name', 'potion-base-2M')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('embedder_digest', 'blake3:forged')",
+            [],
+        )
+        .unwrap();
+    }
+
+    let reopened = YantrikDB::with_default(p).unwrap();
+    assert_eq!(
+        reopened.embedding_dim(),
+        384,
+        "the stored vectors are 384-dim; the meta row claiming 64 must not win, or the \
+         engine builds a 64-dim index over 384-dim vectors"
+    );
+}
+
+#[cfg(all(feature = "bundled-embedder", feature = "embedder-download"))]
+#[test]
+#[ignore = "needs the model cache; run with --features embedder-download --ignored"]
+fn a_downloaded_embedder_can_prove_its_embedding_space_to_a_pack() {
+    // Before DownloadedEmbedder implemented fingerprint()/name(), a store
+    // on potion-base-8M could not mount ANY pack — not on a dimension
+    // mismatch, but because the engine had no identity to record, so
+    // mount refused with "this database has no recorded embedder
+    // identity, so compatibility cannot be proven". That made the pack
+    // system bundled-embedder-only, which only surfaced when a 256-dim
+    // pack was built and mounted into a 256-dim host.
+    use crate::engine::pack::{PackEmbedder, PackManifest};
+    let dir = tempfile::tempdir().unwrap();
+    let author_path = dir.path().join("author.db");
+    let pack_path = dir.path().join("proof.ydbpack");
+
+    let dim = crate::embedder::DownloadedEmbedder::registry_dim("potion-base-8M").unwrap();
+    let mut author = YantrikDB::new(author_path.to_str().unwrap(), dim).unwrap();
+    author.set_embedder_named("potion-base-8M").unwrap();
+    for text in [
+        "importance 0.8 to 1.0 marks a decision that changes what we build",
+        "a correction preserves history where a second remember does not",
+    ] {
+        author
+            .record_text(
+                text,
+                "semantic",
+                0.6,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                "default",
+                0.8,
+                "general",
+                "document",
+                None,
+            )
+            .unwrap();
+    }
+
+    // THE FIX'S ACTUAL CONTRACT: a store on a downloaded model must now
+    // have a durable embedder identity. Without it the Python binding's
+    // seal_pack has nothing to default the manifest's embedder to, which
+    // is how packs built on 8M ended up declaring name=null digest=null.
+    let identity = author
+        .embedder_identity()
+        .expect("reading identity must not error")
+        .expect(
+            "a store that recorded vectors with a downloaded embedder must have a durable              embedder identity — without one it can neither seal a mountable pack nor mount one",
+        );
+
+    let manifest = PackManifest {
+        name: "identity-proof".into(),
+        version: "0.1.0".into(),
+        origin: "yantrik/identity-proof".into(),
+        description: None,
+        // Mirrors what the Python binding does when the caller omits
+        // these: default them to what the database actually is.
+        embedder: PackEmbedder {
+            name: identity.0.clone(),
+            digest: Some(identity.1.clone()),
+            dim,
+        },
+        content_digest: None,
+        corpus_rows: 0,
+        namespace: None,
+        publisher_pubkey: None,
+        signature: None,
+        reembedded_from: None,
+        constitution: vec![],
+        coverage: vec![],
+        recommended_top_k: None,
+        recommended_min_similarity: None,
+    };
+    let sealed = author
+        .seal_pack(pack_path.to_str().unwrap(), &manifest, None)
+        .expect("sealing from a downloaded-embedder store must work");
+    assert!(
+        sealed.embedder.digest.is_some(),
+        "the sealed pack must carry an embedder digest, or no host can ever prove \
+         compatibility with it; got {:?}",
+        sealed.embedder
+    );
+    assert_eq!(sealed.embedder.name.as_deref(), Some("potion-base-8M"));
+
+    // A different, empty host on the same model must accept it.
+    let host_path = dir.path().join("host.db");
+    let mut host = YantrikDB::new(host_path.to_str().unwrap(), dim).unwrap();
+    host.set_embedder_named("potion-base-8M").unwrap();
+    host.mount_pack(pack_path.to_str().unwrap())
+        .expect("a host on the same downloaded model must mount the pack");
+}
+
+#[cfg(all(feature = "bundled-embedder", feature = "embedder-download"))]
+#[test]
+#[ignore = "needs the model cache; run with --features embedder-download --ignored"]
+fn a_64_dim_pack_converts_and_mounts_into_a_256_dim_host() {
+    // The whole point of convert_pack: ONE published artifact, usable by
+    // hosts in different embedding spaces. Every pack in the wild today
+    // is 64-dim/potion-base-2M, and mount treats a dimension mismatch as
+    // unconditionally fatal, so without conversion the engine's new
+    // 256-dim default would strand the entire pack catalogue.
+    use crate::embedder::BUNDLED_EMBEDDER_DIM;
+    use crate::engine::pack::{PackEmbedder, PackManifest};
+    let dir = tempfile::tempdir().unwrap();
+    let author_path = dir.path().join("author.db");
+    let pack64 = dir.path().join("original-64.ydbpack");
+    let pack256 = dir.path().join("converted-256.ydbpack");
+
+    // Author a pack exactly as the catalogue was built: bundled 2M, 64 dims.
+    let author = YantrikDB::new(author_path.to_str().unwrap(), BUNDLED_EMBEDDER_DIM).unwrap();
+    for text in [
+        "the deploy key for the website is id_yantrikdb_web_deploy",
+        "importance 0.8 to 1.0 marks a decision that changes what we build",
+        "a correction preserves history where a second remember does not",
+    ] {
+        author
+            .record_text(text, "semantic", 0.6, 0.0, 604800.0, &empty_meta(),
+                         "default", 0.9, "general", "document", None)
+            .unwrap();
+    }
+    let identity = author.embedder_identity().unwrap().unwrap();
+    let manifest = PackManifest {
+        name: "convert-proof".into(),
+        version: "0.1.0".into(),
+        origin: "yantrik/convert-proof".into(),
+        description: None,
+        embedder: PackEmbedder {
+            name: identity.0.clone(),
+            digest: Some(identity.1.clone()),
+            dim: BUNDLED_EMBEDDER_DIM,
+        },
+        content_digest: None,
+        corpus_rows: 0,
+        namespace: None,
+        publisher_pubkey: None,
+        signature: None,
+        reembedded_from: None,
+        constitution: vec!["Answer from the asker's side.".into()],
+        coverage: vec!["memory discipline".into()],
+        recommended_top_k: Some(6),
+        recommended_min_similarity: Some(0.5),
+    };
+    let sealed = author
+        .seal_pack(pack64.to_str().unwrap(), &manifest, None)
+        .unwrap();
+    drop(author);
+
+    // A 256-dim host cannot mount it — this is the failure being solved.
+    let host_path = dir.path().join("host.db");
+    let dim256 = crate::embedder::DownloadedEmbedder::registry_dim("potion-base-8M").unwrap();
+    let mut host = YantrikDB::new(host_path.to_str().unwrap(), dim256).unwrap();
+    host.set_embedder_named("potion-base-8M").unwrap();
+    let refused = host.mount_pack(pack64.to_str().unwrap());
+    assert!(
+        refused.is_err(),
+        "a 64-dim pack must NOT mount into a 256-dim host; if this starts passing the          dimension guard has been weakened, not the conversion path fixed"
+    );
+
+    // Convert, then mount.
+    let converted =
+        YantrikDB::convert_pack(pack64.to_str().unwrap(), pack256.to_str().unwrap(), "potion-base-8M")
+            .expect("conversion must succeed");
+    assert_eq!(converted.embedder.dim, dim256);
+    assert_eq!(converted.embedder.name.as_deref(), Some("potion-base-8M"));
+    assert_eq!(
+        converted.content_digest, sealed.content_digest,
+        "conversion must not change the content digest — the rows are still the publisher's,          only the vectors are ours"
+    );
+    assert_eq!(
+        converted.reembedded_from,
+        sealed.embedder.digest,
+        "the original embedder digest must be recorded so the conversion is visible"
+    );
+    assert!(
+        converted.signature.is_none() && converted.publisher_pubkey.is_none(),
+        "a publisher signature covers the embedder identity and cannot survive re-embedding"
+    );
+    assert_eq!(
+        converted.constitution.len(),
+        1,
+        "the constitution must survive conversion — it is what the pack DOES"
+    );
+
+    host.mount_pack(pack256.to_str().unwrap())
+        .expect("the converted pack must mount into the 256-dim host");
+
+    // And it must actually retrieve, not merely mount.
+    let hits = host
+        .recall_text("which ssh key deploys the website", 5)
+        .unwrap();
+    assert!(
+        hits.iter().any(|h| h.text.contains("id_yantrikdb_web_deploy")),
+        "the converted pack's rows must be retrievable in the host's space; got {:?}",
+        hits.iter().map(|h| &h.text).collect::<Vec<_>>()
+    );
+}
+
+#[cfg(all(feature = "bundled-embedder", feature = "embedder-download"))]
+#[test]
+#[ignore = "needs the model cache; run with --features embedder-download --ignored"]
+fn install_pack_converts_a_foreign_dimension_pack_automatically() {
+    // The convenience half: a user should not have to know what embedding
+    // space a pack was published in. install_pack is where the conversion
+    // belongs — durable, once, explicit — while mount_pack stays a
+    // read-only attach that writes nothing.
+    use crate::embedder::BUNDLED_EMBEDDER_DIM;
+    use crate::engine::pack::{PackEmbedder, PackManifest};
+    let dir = tempfile::tempdir().unwrap();
+    let pack64 = dir.path().join("catalogue-64.ydbpack");
+
+    let author = YantrikDB::new(
+        dir.path().join("author.db").to_str().unwrap(),
+        BUNDLED_EMBEDDER_DIM,
+    )
+    .unwrap();
+    author
+        .record_text(
+            "the deploy key for the website is id_yantrikdb_web_deploy",
+            "semantic", 0.6, 0.0, 604800.0, &empty_meta(), "default", 0.9,
+            "general", "document", None,
+        )
+        .unwrap();
+    let ident = author.embedder_identity().unwrap().unwrap();
+    author
+        .seal_pack(
+            pack64.to_str().unwrap(),
+            &PackManifest {
+                name: "auto-convert".into(),
+                version: "0.1.0".into(),
+                origin: "yantrik/auto-convert".into(),
+                description: None,
+                embedder: PackEmbedder {
+                    name: ident.0.clone(),
+                    digest: Some(ident.1.clone()),
+                    dim: BUNDLED_EMBEDDER_DIM,
+                },
+                content_digest: None,
+                corpus_rows: 0,
+                namespace: None,
+                publisher_pubkey: None,
+                signature: None,
+                reembedded_from: None,
+                constitution: vec![],
+                coverage: vec![],
+                recommended_top_k: None,
+                recommended_min_similarity: None,
+            },
+            None,
+        )
+        .unwrap();
+    drop(author);
+
+    let dim256 = crate::embedder::DownloadedEmbedder::registry_dim("potion-base-8M").unwrap();
+    let host_path = dir.path().join("host.db");
+    let mut host = YantrikDB::new(host_path.to_str().unwrap(), dim256).unwrap();
+    host.set_embedder_named("potion-base-8M").unwrap();
+    // Give the host an identity to convert INTO — conversion needs to
+    // name the target space.
+    host.record_text(
+        "host's own memory", "semantic", 0.5, 0.0, 604800.0, &empty_meta(),
+        "default", 0.8, "general", "user", None,
+    )
+    .unwrap();
+
+    host.install_pack(pack64.to_str().unwrap())
+        .expect("install_pack must convert a 64-dim pack into this 256-dim host");
+
+    let hits = host
+        .recall_text("which ssh key deploys the website", 5)
+        .unwrap();
+    assert!(
+        hits.iter().any(|h| h.text.contains("id_yantrikdb_web_deploy")),
+        "the auto-converted pack's rows must be retrievable; got {:?}",
+        hits.iter().map(|h| &h.text).collect::<Vec<_>>()
+    );
+
+    // And it must survive a reopen, which is the point of installing:
+    // the CONVERTED file is what remounts, not the original.
+    drop(host);
+    let mut reopened = YantrikDB::new(host_path.to_str().unwrap(), dim256).unwrap();
+    reopened.set_embedder_named("potion-base-8M").unwrap();
+    reopened.remount_installed();
+    let after = reopened
+        .recall_text("which ssh key deploys the website", 5)
+        .unwrap();
+    assert!(
+        after.iter().any(|h| h.text.contains("id_yantrikdb_web_deploy")),
+        "the converted pack must remount on reopen; got {:?}",
+        after.iter().map(|h| &h.text).collect::<Vec<_>>()
+    );
+}

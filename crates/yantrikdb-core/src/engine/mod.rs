@@ -392,6 +392,15 @@ pub(crate) struct TextMetadataRow {
     pub metadata: String,
 }
 
+/// Embedder a NEW store created via [`YantrikDB::with_default`] uses.
+///
+/// Downloaded on first use (~28 MB, SHA-256 pinned, cached under the
+/// user's cache dir) rather than bundled: the crate already ships 7.9 MB
+/// of `potion-base-2M` weights via `include_bytes!` and crates.io caps a
+/// published crate at 10 MB, so this one cannot be baked in.
+#[cfg(feature = "embedder-download")]
+pub const DEFAULT_NEW_STORE_EMBEDDER: &str = "potion-base-8M";
+
 impl YantrikDB {
     /// Create a new YantrikDB instance with auto-generated actor_id.
     pub fn new(db_path: &str, embedding_dim: usize) -> Result<Self> {
@@ -411,9 +420,155 @@ impl YantrikDB {
     ///
     /// Slim builds (`--no-default-features`) compile this method out
     /// — there is no bundled embedder to align with.
+    ///
+    /// # Which embedder a NEW store gets (changed 2026-08-13)
+    ///
+    /// New stores open at [`DEFAULT_NEW_STORE_EMBEDDER`]'s dimension and
+    /// download it on first use; the bundled 64-dim `potion-base-2M` is
+    /// the offline fallback. The measurement behind the switch, on 5,035
+    /// real production memories with 12 rid-pinned probes, retrieved
+    /// through this engine's own `recall()` rather than raw cosine:
+    ///
+    /// | embedder       | MRR   | correct record absent from top 100 |
+    /// |----------------|-------|------------------------------------|
+    /// | potion-base-2M | 0.120 | 4 of 12                            |
+    /// | potion-base-8M | 0.312 | 1 of 12                            |
+    ///
+    /// The miss rate is the reason, not the MRR: under the bundled model
+    /// a third of real questions had no correct answer anywhere in the
+    /// first hundred results, which reads to a user as the memory simply
+    /// not being there. (On conversational-paraphrase corpora the two are
+    /// indistinguishable at every k from 2 to 80 — the gain is specific to
+    /// dense, vocabulary-heavy stores, which is what agent memory is.)
+    ///
+    /// # Existing stores never change dimension
+    ///
+    /// An existing database is opened at the dimension it already holds,
+    /// so this switch cannot strand anyone's data. That check is the whole
+    /// reason this method is not simply `Self::new(path, 256)`: the vector
+    /// index is built from the dimension passed here, so opening a 64-dim
+    /// store at 256 would build a mismatched index over existing vectors.
     #[cfg(feature = "bundled-embedder")]
     pub fn with_default(db_path: &str) -> Result<Self> {
-        Self::new(db_path, crate::embedder::BUNDLED_EMBEDDER_DIM)
+        Self::new(db_path, Self::default_dim_for(db_path))
+    }
+
+    /// Dimension `with_default` should open `db_path` at.
+    ///
+    /// Existing store → the dimension it already holds. New store → the
+    /// downloadable default if it can be obtained, else the bundled dim.
+    #[cfg(feature = "bundled-embedder")]
+    fn default_dim_for(db_path: &str) -> usize {
+        // In-memory databases keep the bundled embedder deliberately.
+        // They are ephemeral, so the retrieval quality that motivated the
+        // switch cannot accrue to them, and the engine's own test suite
+        // opens hundreds of them — defaulting those to a 28 MB fetch would
+        // make `cargo test` require the network. Callers who want the
+        // larger model in memory ask for it: `new(":memory:", 256)` then
+        // `set_embedder_named`.
+        if db_path.is_empty() || db_path.starts_with(':') {
+            return crate::embedder::BUNDLED_EMBEDDER_DIM;
+        }
+        if let Some(dim) = Self::detect_existing_dim(db_path) {
+            return dim;
+        }
+        #[cfg(feature = "embedder-download")]
+        {
+            // Resolve the model BEFORE choosing the dimension. Opening at
+            // 256 first and discovering the download failed afterwards
+            // would leave a 256-dim store with no embedder that can fill
+            // it — a database broken by its own constructor. Cached after
+            // the first call, so this is not a per-open network hit.
+            match crate::embedder::DownloadedEmbedder::fetch(DEFAULT_NEW_STORE_EMBEDDER) {
+                Ok(emb) => return emb.dim(),
+                Err(e) => {
+                    // Loud, because the alternative is a user believing
+                    // they are on the better embedder when they are not.
+                    // The store records its own embedder identity in
+                    // `meta`, so which one was used stays inspectable
+                    // after the fact rather than being guesswork.
+                    tracing::warn!(
+                        target: "yantrikdb::embedder",
+                        error = %e,
+                        default_model = DEFAULT_NEW_STORE_EMBEDDER,
+                        "could not obtain the default embedder (offline?); creating this \
+                         store with the bundled potion-base-2M at {} dims instead. Retrieval \
+                         on large stores is measurably worse — to switch later you must \
+                         re-embed, since dimension is fixed at creation.",
+                        crate::embedder::BUNDLED_EMBEDDER_DIM
+                    );
+                }
+            }
+        }
+        crate::embedder::BUNDLED_EMBEDDER_DIM
+    }
+
+    /// Embedding dimension an existing database already holds, if any.
+    ///
+    /// **A STORED VECTOR IS THE AUTHORITY, NOT THE RECORDED IDENTITY.**
+    /// That ordering is not fussiness — it was measured on a live store.
+    /// The `meta` embedder identity records what the engine had ATTACHED
+    /// the first time it produced a vector, which is not necessarily what
+    /// produced the vectors in the file: a caller that embeds externally
+    /// and passes vectors to `record()` never stamps an identity, but any
+    /// incidental `embed()` call stamps the attached model anyway. A real
+    /// 5,050-record production store was found claiming
+    /// `embedder_dim = 64 / potion-base-2M` while holding 1536-byte
+    /// (384-dim) MiniLM vectors. Trusting that row would have opened a
+    /// 384-dim database at 64 dims — exactly the silent index corruption
+    /// this function exists to prevent.
+    ///
+    /// The identity is still used when the file holds no vectors to
+    /// measure, where it is the only evidence available and cannot
+    /// contradict anything.
+    #[cfg(feature = "bundled-embedder")]
+    fn detect_existing_dim(db_path: &str) -> Option<usize> {
+        if db_path.is_empty() || db_path.starts_with(':') {
+            return None; // in-memory databases are always new
+        }
+        if !std::path::Path::new(db_path).exists() {
+            return None;
+        }
+        let conn = rusqlite::Connection::open_with_flags(
+            db_path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .ok()?;
+
+        let measured = conn
+            .query_row(
+                "SELECT length(embedding) FROM memories WHERE embedding IS NOT NULL LIMIT 1",
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .ok()
+            .map(|bytes| bytes as usize / std::mem::size_of::<f32>())
+            .filter(|d| *d > 0);
+        let claimed = match Self::read_embedder_identity(&conn) {
+            Ok(Some((_, _, dim))) if dim > 0 => Some(dim),
+            _ => None,
+        };
+
+        match (measured, claimed) {
+            (Some(m), Some(c)) if m != c => {
+                // Surfaced rather than silently reconciled: the store's
+                // provenance record is wrong, which also means pack
+                // mounting and any provenance gate are reasoning from a
+                // false premise. Opening at `m` keeps the data readable.
+                tracing::warn!(
+                    target: "yantrikdb::embedder",
+                    measured_dim = m,
+                    recorded_dim = c,
+                    "database records an embedder dim that disagrees with its own vectors; \
+                     opening at the measured width. The recorded identity is not describing \
+                     the vectors in this file — check how they were produced before relying \
+                     on provenance checks or mounting packs against it."
+                );
+                Some(m)
+            }
+            (Some(m), _) => Some(m),
+            (None, c) => c,
+        }
     }
 
     /// **Saga task 20 Slice C** — replace the engine's current embedder
@@ -516,6 +671,42 @@ impl YantrikDB {
     }
 
     fn auto_attach_bundled_embedder(db: &mut Self) {
+        // A store opened at the downloadable default's dimension gets that
+        // model attached here rather than in `with_default`, so the
+        // attach-then-remount order above holds for it too: a pack proves
+        // it shares this database's embedding space against the ATTACHED
+        // embedder, so attaching after remount would refuse every pack on
+        // a fresh install. Cached after first fetch, so this is not a
+        // per-open network hit; on failure the engine simply comes up
+        // without an embedder, which is the pre-existing behaviour for any
+        // dimension it cannot serve.
+        #[cfg(feature = "embedder-download")]
+        {
+            use crate::embedder::DownloadedEmbedder;
+            let bundled_dim = {
+                #[cfg(feature = "bundled-embedder")]
+                {
+                    crate::embedder::BUNDLED_EMBEDDER_DIM
+                }
+                #[cfg(not(feature = "bundled-embedder"))]
+                {
+                    usize::MAX
+                }
+            };
+            // Check the registry's declared dim FIRST — it is a compile-time
+            // constant. Fetching to discover the dim would put a network
+            // attempt on every open of any store the default cannot serve
+            // (a 384-dim MiniLM store, say).
+            if db.embedding_dim() != bundled_dim
+                && DownloadedEmbedder::registry_dim(DEFAULT_NEW_STORE_EMBEDDER)
+                    == Some(db.embedding_dim())
+            {
+                if let Ok(emb) = DownloadedEmbedder::fetch(DEFAULT_NEW_STORE_EMBEDDER) {
+                    let _ = db.set_embedder(Box::new(emb));
+                    return;
+                }
+            }
+        }
         #[cfg(feature = "bundled-embedder")]
         {
             use crate::embedder::{BundledEmbedder, BUNDLED_EMBEDDER_DIM};

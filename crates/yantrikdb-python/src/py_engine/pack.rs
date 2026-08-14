@@ -87,6 +87,7 @@ impl PyYantrikDB {
             namespace: None,
             publisher_pubkey: None,
             signature: None,
+            reembedded_from: None,
             constitution: constitution.unwrap_or_default(),
             coverage: coverage.unwrap_or_default(),
             // Passed through rather than defaulted: an absent value must
@@ -253,6 +254,38 @@ impl PyYantrikDB {
         manifest_to_dict(py, &m, path)
     }
 
+    /// Rewrite a pack's vectors into a different embedding space.
+    ///
+    /// A pack's vectors only work in the space they were built in, and
+    /// mount treats a dimension mismatch as fatal — 64-dim vectors
+    /// physically cannot be searched by a 256-dim index. This produces a
+    /// converted copy at `dest` so one published artifact can serve hosts
+    /// in any space.
+    ///
+    ///     YantrikDB.convert_pack("mypack.ydbpack",
+    ///                            "mypack-256.ydbpack",
+    ///                            "potion-base-8M")
+    ///
+    /// **You usually do not need to call this.** `install_pack()` converts
+    /// automatically when the pack's space differs from the database's.
+    /// Reach for it when producing artifacts to publish.
+    ///
+    /// The publisher's content digest is over `(rid, text)`, so it still
+    /// verifies afterwards — rows keep their original ids and text, and
+    /// only the vectors are regenerated. Any publisher signature IS
+    /// dropped, because it covers the embedder identity and would no
+    /// longer verify; the original embedder digest is recorded in the new
+    /// manifest's `reembedded_from` so the conversion is visible.
+    ///
+    /// Raises `RuntimeError` if `dest` exists, if the embedder name is
+    /// unknown, or if the pack is already in that space.
+    #[staticmethod]
+    fn convert_pack(py: Python<'_>, src: &str, dest: &str, embedder_name: &str) -> PyResult<PyObject> {
+        let m = yantrikdb_core::YantrikDB::convert_pack(src, dest, embedder_name)
+            .map_err(map_err)?;
+        manifest_to_dict(py, &m, dest)
+    }
+
     /// Generate a publisher keypair as `(secret_hex, public_hex)`.
     ///
     /// The secret key IS the publisher identity — whoever holds it can
@@ -399,6 +432,10 @@ fn manifest_to_dict(py: Python<'_>, m: &PackManifest, path: &str) -> PyResult<Py
     d.set_item("recommended_min_similarity", m.recommended_min_similarity)?;
     d.set_item("publisher_pubkey", m.publisher_pubkey.clone())?;
     d.set_item("signed", m.signature.is_some())?;
+    // Present iff this pack's vectors were regenerated locally: the rows
+    // are still the publisher's (the content digest verifies) but the
+    // vectors are this host's, and any publisher signature was dropped.
+    d.set_item("reembedded_from", m.reembedded_from.clone())?;
     let e = PyDict::new(py);
     e.set_item("name", m.embedder.name.clone())?;
     e.set_item("digest", m.embedder.digest.clone())?;
