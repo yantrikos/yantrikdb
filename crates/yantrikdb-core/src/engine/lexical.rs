@@ -129,7 +129,15 @@ pub(crate) fn rank_cmp(a: &RecallResult, b: &RecallResult) -> std::cmp::Ordering
 /// genuine matches is preserved; weaker matches pay `lex` as a direct
 /// discount.
 pub(crate) fn keyword_lane_boost(keyword_boost: f64, sim: f64, lex: f64) -> f64 {
-    keyword_boost * lex.clamp(0.0, 1.0) * (1.0 - sim).max(0.2)
+    // A negative override defers to the learned weight, so the default path
+    // is unchanged and the knob exists only to be swept.
+    let t = crate::base::tuning::tuning();
+    let kb = if t.keyword_boost_override >= 0.0 {
+        t.keyword_boost_override
+    } else {
+        keyword_boost
+    };
+    kb * lex.clamp(0.0, 1.0) * (1.0 - sim).max(0.2)
 }
 
 /// Keyword slot reservation (step 3.5 of recall): sort by score, then

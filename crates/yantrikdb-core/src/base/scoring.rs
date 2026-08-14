@@ -695,7 +695,7 @@ pub fn adaptive_composite_score(
     // budget instead of expanding it.
     let freshness_z = ((weights.w_decay * decay + weights.w_recency * recency)
         / (weights.w_decay + weights.w_recency).max(1e-9))
-        .clamp(0.0, 1.0);
+    .clamp(0.0, 1.0);
     let gate = sigmoid(GATE_K * (similarity - weights.gate_tau));
     let importance_z = gate * importance.clamp(0.0, 1.0);
     // Learned importance reallocates the budget; it must not enlarge it.
@@ -1493,7 +1493,8 @@ mod lane_and_weight_bound_tests {
         // range those terms could dominate, so a record matching nothing
         // could beat one matching everything. Now the lift is a bounded
         // multiplier: admission is the lane's job, relevance is not.
-        let irrelevant_but_charged = composite_score(0.02, 1.0, 1.0, 1.0, 1.0) * lane_lift_mult(1.0);
+        let irrelevant_but_charged =
+            composite_score(0.02, 1.0, 1.0, 1.0, 1.0) * lane_lift_mult(1.0);
         let relevant_plain = composite_score(0.80, 0.0, 0.0, 0.0, 0.0);
         assert!(
             relevant_plain > irrelevant_but_charged,
@@ -1551,8 +1552,7 @@ mod budget_composition_tests {
         // importance_z is GATED: sigmoid(12*(1.0-0.25)) = 0.99987, not 1.0.
         // Using a literal 1.0 here was an idealized expectation that hid an
         // 8e-6 discrepancy; the gate is the point, so the test uses it.
-        let all_at_once =
-            W_SIM * 1.0 * policy_mult(1.0, importance_gate(1.0), 1.0, 1.0, 0.0);
+        let all_at_once = W_SIM * 1.0 * policy_mult(1.0, importance_gate(1.0), 1.0, 1.0, 0.0);
         assert!(
             (stagewise - all_at_once).abs() < 1e-9,
             "stagewise {stagewise} must equal all-at-once {all_at_once}"

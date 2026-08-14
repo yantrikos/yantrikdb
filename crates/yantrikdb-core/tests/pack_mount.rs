@@ -125,6 +125,7 @@ fn manifest(digest: Option<&str>) -> PackManifest {
         coverage: vec!["particle physics".into(), "quark structure".into()],
         recommended_top_k: None,
         recommended_min_similarity: None,
+        reembedded_from: None,
     }
 }
 
@@ -1127,6 +1128,7 @@ fn signing_payload_is_unchanged_when_retrieval_settings_are_absent() {
         coverage: vec!["one topic".into()],
         recommended_top_k: None,
         recommended_min_similarity: None,
+        reembedded_from: None,
     };
 
     // The payload an old pack was signed over ends after the coverage

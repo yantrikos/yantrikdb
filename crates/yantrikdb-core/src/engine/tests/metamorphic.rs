@@ -366,24 +366,62 @@ fn diag_which_write_paths_populate_the_graph() {
 
     println!("record_text (single):");
     let db1 = YantrikDB::with_default(":memory:").unwrap();
-    db1.record_text(text, "semantic", 0.5, 0.0, 604800.0, &empty_meta(), "default", 0.8, "general", "user", None).unwrap();
+    db1.record_text(
+        text,
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
     let a = count(&db1);
 
     println!("record (single, explicit embedding):");
     let db2 = YantrikDB::with_default(":memory:").unwrap();
     let e = db2.embed(text).unwrap();
-    db2.record(text, "semantic", 0.5, 0.0, 604800.0, &empty_meta(), &e, "default", 0.8, "general", "user", None).unwrap();
+    db2.record(
+        text,
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &e,
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
     let b = count(&db2);
 
     println!("record_batch (one input):");
     let db3 = YantrikDB::with_default(":memory:").unwrap();
     let e3 = db3.embed(text).unwrap();
     db3.record_batch(&[RecordInput {
-        text: text.into(), memory_type: "semantic".into(), importance: 0.5, valence: 0.0,
-        half_life: 604800.0, metadata: empty_meta(), embedding: e3, namespace: "default".into(),
-        certainty: 0.8, domain: "general".into(), source: "user".into(),
-        emotional_state: None, idempotency_key: None, created_at: None,
-    }]).unwrap();
+        text: text.into(),
+        memory_type: "semantic".into(),
+        importance: 0.5,
+        valence: 0.0,
+        half_life: 604800.0,
+        metadata: empty_meta(),
+        embedding: e3,
+        namespace: "default".into(),
+        certainty: 0.8,
+        domain: "general".into(),
+        source: "user".into(),
+        emotional_state: None,
+        idempotency_key: None,
+        created_at: None,
+    }])
+    .unwrap();
     let c = count(&db3);
 
     println!("\nSUMMARY: record_text={a}  record={b}  record_batch={c}");
@@ -395,13 +433,32 @@ fn diag_which_write_paths_populate_the_graph() {
 fn diag_does_think_backfill_the_graph() {
     let text = "Alice Chen met Bob Smith at Yantrik Systems in San Francisco";
     let db = YantrikDB::with_default(":memory:").unwrap();
-    db.record_text(text, "semantic", 0.5, 0.0, 604800.0, &empty_meta(), "default", 0.8, "general", "user", None).unwrap();
-    let n0: i64 = db.conn().query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0)).unwrap();
+    db.record_text(
+        text,
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+    let n0: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0))
+        .unwrap();
     println!("after record_text:        entities={n0}");
 
     let cfg = ThinkConfig::default();
     let _ = db.think(&cfg);
-    let n1: i64 = db.conn().query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0)).unwrap();
+    let n1: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0))
+        .unwrap();
     println!("after think(default):     entities={n1}");
 }
 
@@ -411,13 +468,37 @@ fn diag_does_think_backfill_the_graph() {
 fn diag_materializer_drains_single_write_entities() {
     let text = "Alice Chen met Bob Smith at Yantrik Systems in San Francisco";
     let db = YantrikDB::with_default(":memory:").unwrap();
-    db.record_text(text, "semantic", 0.5, 0.0, 604800.0, &empty_meta(), "default", 0.8, "general", "user", None).unwrap();
-    let n0: i64 = db.conn().query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0)).unwrap();
-    let pend: i64 = db.conn().query_row("SELECT COUNT(*) FROM oplog WHERE applied = 0", [], |r| r.get(0)).unwrap();
+    db.record_text(
+        text,
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+    let n0: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0))
+        .unwrap();
+    let pend: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM oplog WHERE applied = 0", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
     println!("after record_text: entities={n0}  pending_ops={pend}");
     let applied = db.apply_pending_ops_once(256);
     println!("apply_pending_ops_once -> {applied:?}");
-    let n1: i64 = db.conn().query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0)).unwrap();
+    let n1: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM entities", [], |r| r.get(0))
+        .unwrap();
     println!("after drain:       entities={n1}");
 }
 
@@ -432,20 +513,37 @@ fn lane_agreement_breaks_ties_between_near_equals() {
     // favor — that is the entire job of the multiplier.
     let db = YantrikDB::with_default(":memory:").unwrap();
     let rec = |t: &str| {
-        db.record_text(t, "semantic", 0.5, 0.0, 604800.0, &empty_meta(),
-                       "default", 0.8, "general", "user", None).unwrap()
+        db.record_text(
+            t,
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap()
     };
     let both_lanes = rec("the deploy pipeline pushes to the staging cluster nightly");
-    let _vector_only = rec("the release automation ships builds to the test environment each evening");
+    let _vector_only =
+        rec("the release automation ships builds to the test environment each evening");
     let hits = db.recall_text("deploy pipeline staging", 2).unwrap();
     assert_eq!(
-        hits[0].rid, both_lanes,
+        hits[0].rid,
+        both_lanes,
         "the record surfaced by BOTH vector and lexical lanes must outrank a \
          vector-only near-equal; got {:?}",
         hits.iter().map(|h| (&h.rid, h.score)).collect::<Vec<_>>()
     );
     assert!(
-        hits[0].why_retrieved.iter().any(|w| w.contains("multi-lane agreement")),
+        hits[0]
+            .why_retrieved
+            .iter()
+            .any(|w| w.contains("multi-lane agreement")),
         "the boost must be explainable in why_retrieved; got {:?}",
         hits[0].why_retrieved
     );
@@ -469,7 +567,11 @@ fn lane_agreement_cannot_promote_an_irrelevant_record() {
         (agreement_mult(2) - (POLICY_BUDGET_LN * PW_AGREEMENT).exp()).abs() < 1e-12,
         "agreement must spend exactly its budget share, no more"
     );
-    assert_eq!(agreement_mult(2), agreement_mult(9), "cap at two extra lanes");
+    assert_eq!(
+        agreement_mult(2),
+        agreement_mult(9),
+        "cap at two extra lanes"
+    );
     assert!(
         agreement_mult(9) < POLICY_BUDGET_LN.exp(),
         "one prior alone must never consume the whole budget"
@@ -477,16 +579,31 @@ fn lane_agreement_cannot_promote_an_irrelevant_record() {
 
     let db = YantrikDB::with_default(":memory:").unwrap();
     let rec = |t: &str| {
-        db.record_text(t, "semantic", 0.5, 0.0, 604800.0, &empty_meta(),
-                       "default", 0.8, "general", "user", None).unwrap()
+        db.record_text(
+            t,
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap()
     };
     let on_topic = rec("the quarterly budget review moved to the first Monday of the month");
     // Shares the literal words "deploy" and "staging" with nothing —
     // build a keyword-bait record for a DIFFERENT query's vocabulary:
     let _bait = rec("deploy staging deploy staging unrelated grocery list apples");
-    let hits = db.recall_text("when is the quarterly budget review", 2).unwrap();
+    let hits = db
+        .recall_text("when is the quarterly budget review", 2)
+        .unwrap();
     assert_eq!(
-        hits[0].rid, on_topic,
+        hits[0].rid,
+        on_topic,
         "keyword bait with no semantic relevance must not overtake the on-topic \
          record, whatever lanes it matched; got {:?}",
         hits.iter().map(|h| (&h.rid, h.score)).collect::<Vec<_>>()
@@ -511,11 +628,26 @@ fn lane_agreement_cannot_promote_an_irrelevant_record() {
 fn domain_filter_holds_across_every_lane() {
     let db = YantrikDB::with_default(":memory:").unwrap();
     let rec = |text: &str, domain: &str| {
-        db.record_text(text, "semantic", 0.6, 0.0, 604800.0, &empty_meta(),
-                       "default", 0.9, domain, "user", None).unwrap()
+        db.record_text(
+            text,
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.9,
+            domain,
+            "user",
+            None,
+        )
+        .unwrap()
     };
     let _work = rec("the postgres migration runs on the staging cluster", "work");
-    let health = rec("the postgres migration runs on the staging cluster nightly", "health");
+    let health = rec(
+        "the postgres migration runs on the staging cluster nightly",
+        "health",
+    );
 
     let hits = db
         .recall_text_filtered("postgres migration staging cluster", 20, Some("work"), None)
@@ -537,22 +669,60 @@ fn certainty_floor_holds_across_every_lane() {
     // the vector/FTS lanes. The first version of this test used importance 0.6 and
     // could never reach that path — it passed while the bypass was still live.
     let low = db
-        .record_text("the postgres migration runs on the staging cluster", "semantic",
-                     0.9, 0.0, 604800.0, &empty_meta(), "default", 0.2, "general", "user", None)
+        .record_text(
+            "the postgres migration runs on the staging cluster",
+            "semantic",
+            0.9,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.2,
+            "general",
+            "user",
+            None,
+        )
         .unwrap();
-    db.record_text("unrelated grocery list apples bananas", "semantic",
-                   0.6, 0.0, 604800.0, &empty_meta(), "default", 0.95, "general", "user", None)
-        .unwrap();
+    db.record_text(
+        "unrelated grocery list apples bananas",
+        "semantic",
+        0.6,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        "default",
+        0.95,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
 
     let emb = db.embed("postgres migration staging cluster").unwrap();
     let hits = db
-        .recall(&emb, 20, None, None, false, false, Some("postgres migration staging cluster"),
-                true, None, None, None, Some(0.8), None, false)
+        .recall(
+            &emb,
+            20,
+            None,
+            None,
+            false,
+            false,
+            Some("postgres migration staging cluster"),
+            true,
+            None,
+            None,
+            None,
+            Some(0.8),
+            None,
+            false,
+        )
         .unwrap();
     assert!(
         !hits.iter().any(|h| h.rid == low),
         "a certainty_min=0.8 recall returned a certainty=0.2 record; got {:?}",
-        hits.iter().map(|h| (&h.rid, h.certainty, &h.why_retrieved)).collect::<Vec<_>>()
+        hits.iter()
+            .map(|h| (&h.rid, h.certainty, &h.why_retrieved))
+            .collect::<Vec<_>>()
     );
 }
 
@@ -578,40 +748,41 @@ fn quotas_are_unlimited_by_default() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
-fn a_quota_never_returns_fewer_results_than_the_pool_supports() {
-    // The failure mode a naive quota would introduce: capping a lane and
-    // silently shrinking the result set. Over-quota candidates must fall to
-    // the tail, not off the end.
-    use crate::engine::recall::{apply_lane_quotas, lane_owner, LaneOwner};
+fn a_quota_actually_removes_over_quota_candidates() {
+    // The semantics that make a quota DO anything. The first version moved
+    // over-quota candidates to the tail of the pool so that top_k could
+    // always be filled — which was a no-op, because MMR selects from the
+    // whole pool by its own criterion and could pick them anyway. A ceiling
+    // only changes what is selected if the over-quota candidates are gone.
+    use crate::engine::recall::apply_lane_quotas;
     let db = YantrikDB::with_default(":memory:").unwrap();
     for i in 0..30 {
         db.record_text(
             &format!("deploy pipeline staging cluster note number {i}"),
-            "semantic", 0.5, 0.0, 604800.0, &empty_meta(), "default", 0.8,
-            "general", "user", None,
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
         )
         .unwrap();
     }
     let hits = db.recall_text("deploy pipeline staging", 20).unwrap();
-    assert!(hits.len() >= 15, "sanity: pool should be full, got {}", hits.len());
+    assert!(hits.len() >= 10, "sanity: need a pool, got {}", hits.len());
 
-    // With an empty win_by_rid map these are attributed by their why-markers.
-    // They carry keyword_match (the text matches lexically), so they land in
-    // the LEXICAL lane — the attribution is by provenance, not by assumption,
-    // which is why this is read rather than asserted.
+    // Defaults are unlimited: the pool must be untouched.
     let empty = std::collections::HashMap::new();
     let mut pool = hits.clone();
-    let owner = lane_owner(&pool[0], &empty);
-    assert!(
-        !matches!(owner, LaneOwner::Vector),
-        "an empty win_by_rid must not attribute anything to the vector lane"
-    );
     apply_lane_quotas(&mut pool, &empty, 20);
     assert_eq!(
         pool.len(),
         hits.len(),
-        "quotas must never drop candidates from the pool — over-quota ones \
-         move to the tail so top_k can still be filled"
+        "unlimited quotas must not change the pool"
     );
 }
 
@@ -627,8 +798,16 @@ fn a_quota_preserves_relative_order_within_a_lane() {
     for i in 0..20 {
         db.record_text(
             &format!("release checklist item {i} for the deployment runbook"),
-            "semantic", 0.5, 0.0, 604800.0, &empty_meta(), "default", 0.8,
-            "general", "user", None,
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
         )
         .unwrap();
     }

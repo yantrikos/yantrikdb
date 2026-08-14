@@ -71,8 +71,22 @@ fn _yantrikdb_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_consolidate::py_consolidate_cluster, m)?)?;
     m.add_function(wrap_pyfunction!(py_consolidate::py_cosine_similarity, m)?)?;
+    m.add_function(wrap_pyfunction!(tuning_fingerprint, m)?)?;
     m.add_function(wrap_pyfunction!(py_consolidate::py_extractive_summary, m)?)?;
     m.add_function(wrap_pyfunction!(py_consolidate::py_find_clusters, m)?)?;
 
     Ok(())
+}
+
+/// The retrieval tuning actually in force in THIS process, as one line.
+///
+/// Exists because a sweep cannot otherwise distinguish a parameter that had
+/// no effect from one that never reached the engine. Four parameters once
+/// reported "inert" across an entire sweep with byte-identical output because
+/// they were never wired to recall.rs, and the only way to find out was to
+/// read the source. A run that can print its own configuration cannot lie
+/// about it, so callers should stamp this into result metadata beside scores.
+#[pyfunction]
+fn tuning_fingerprint() -> String {
+    yantrikdb_core::tuning::tuning().fingerprint()
 }

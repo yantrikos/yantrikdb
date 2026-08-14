@@ -252,6 +252,113 @@ pub(crate) fn passes_recall_filters(
     true
 }
 
+/// Content words of a chunk, for novelty scoring.
+///
+/// Deliberately crude: lowercase alphanumeric tokens of 4+ characters, no
+/// stemming and no stopword list beyond the length cut. The measurement that
+/// motivated this used exactly this crudeness and still bought +7.0 coverage
+/// points, so precision is not where the value lies.
+fn content_tokens(text: &str) -> std::collections::HashSet<String> {
+    text.split(|c: char| !c.is_alphanumeric())
+        .filter(|w| w.len() >= 4)
+        .map(|w| w.to_lowercase())
+        .collect()
+}
+
+/// Re-select `top_k` to maximise the UNION of content covered, trading some
+/// per-item score for set-level breadth.
+///
+/// # The failure this addresses
+///
+/// Some questions need several distinct parts of a history at once ("list the
+/// order in which I raised each aspect", "summarise how this progressed").
+/// Top-k by score answers those badly: in a compressed embedding space the
+/// highest-scoring chunks are near-duplicates of each other, all describing
+/// whichever phase matched best, so the other phases never appear. Measured
+/// on BEAM event_ordering, an ORACLE selecting from the SAME pool reached
+/// 0.965 rubric coverage where top-k reached 0.592 — the content was
+/// retrieved and then discarded by selection.
+///
+/// # Why MMR does not already do this
+///
+/// MMR measures redundancy by EMBEDDING similarity at lambda 0.9 (relevance
+/// weighted 9:1). In a space where the entire top-100 spans 1.286x, cosine
+/// cannot separate a near-duplicate from a genuinely new record. Lexical
+/// novelty can.
+///
+/// # Shape
+///
+/// ```text
+/// value = (1 - w) * (score / best_score) + w * new_token_fraction
+/// ```
+///
+/// Score is normalised against the best in the set so the two terms are
+/// commensurable. An ABSOLUTE score would make `w` mean something different
+/// in every store — the same calibration mistake this codebase already made
+/// with raw-cosine bounds.
+///
+/// `w = 0` reproduces the input order exactly, so the default path is
+/// untouched.
+pub(crate) fn apply_novelty_selection(scored: &mut Vec<crate::types::RecallResult>, top_k: usize) {
+    // `tuning()` is a process-wide OnceLock, so the weight is split out as a
+    // parameter: a test cannot flip a OnceLock, and an untestable knob is how
+    // four parameters previously reported "inert" while simply being unwired.
+    apply_novelty_selection_w(scored, top_k, crate::base::tuning::tuning().novelty_weight)
+}
+
+pub(crate) fn apply_novelty_selection_w(
+    scored: &mut Vec<crate::types::RecallResult>,
+    top_k: usize,
+    w: f64,
+) {
+    if w <= 0.0 || scored.len() <= 1 || top_k == 0 {
+        return;
+    }
+    let best = scored.iter().map(|r| r.score).fold(f64::MIN, f64::max);
+    if !(best > 0.0) {
+        return;
+    }
+    let toks: Vec<std::collections::HashSet<String>> =
+        scored.iter().map(|r| content_tokens(&r.text)).collect();
+
+    let n = scored.len().min(top_k);
+    let mut picked: Vec<usize> = Vec::with_capacity(n);
+    let mut taken = vec![false; scored.len()];
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for _ in 0..n {
+        let mut best_i: Option<usize> = None;
+        let mut best_v = f64::MIN;
+        for i in 0..scored.len() {
+            if taken[i] {
+                continue;
+            }
+            let novel = if toks[i].is_empty() {
+                0.0
+            } else {
+                toks[i].iter().filter(|t| !seen.contains(*t)).count() as f64 / toks[i].len() as f64
+            };
+            let v = (1.0 - w) * (scored[i].score / best) + w * novel;
+            // Strict > keeps ties on the lower index, i.e. the better
+            // original rank, so selection stays deterministic.
+            if v > best_v {
+                best_v = v;
+                best_i = Some(i);
+            }
+        }
+        let Some(i) = best_i else { break };
+        taken[i] = true;
+        seen.extend(toks[i].iter().cloned());
+        picked.push(i);
+    }
+    // Unpicked candidates keep their original relative order behind the
+    // selection, so nothing is dropped and the tail stays sane.
+    let mut rest: Vec<usize> = (0..scored.len()).filter(|i| !taken[*i]).collect();
+    picked.append(&mut rest);
+    let out: Vec<crate::types::RecallResult> =
+        picked.into_iter().map(|i| scored[i].clone()).collect();
+    *scored = out;
+}
+
 /// Which lane a candidate is ATTRIBUTED to for quota purposes.
 ///
 /// A record can be found by several lanes; quotas need one owner per slot, so
@@ -272,12 +379,25 @@ pub(crate) fn lane_owner(
     r: &crate::types::RecallResult,
     win_by_rid: &std::collections::HashMap<String, u32>,
 ) -> LaneOwner {
+    // Attribution follows WHAT DRIVES THE SCORE, not what found the record
+    // first. The earlier vector-first rule made quotas inert: win_by_rid holds
+    // every raw HNSW result, so the vector lane owned nearly the whole pool.
+    //
+    // Measured on a real store: for one probe the target sat at cosine rank 4
+    // and recall rank 39, and ALL TWELVE records above it carried
+    // `keyword_match` — including ones at cosine 0.305 beating the target's
+    // 0.534. Those records are ranked where they are because of the ADDITIVE
+    // lexical boost, not because the vector lane found them, so the lexical
+    // lane is what a quota must be able to cap.
+    let why = &r.why_retrieved;
+    if why
+        .iter()
+        .any(|w| w == "keyword_match" || w == "fts_sourced")
+    {
+        return LaneOwner::Lexical;
+    }
     if win_by_rid.contains_key(&r.rid) {
         return LaneOwner::Vector;
-    }
-    let why = &r.why_retrieved;
-    if why.iter().any(|w| w == "keyword_match" || w == "fts_sourced") {
-        return LaneOwner::Lexical;
     }
     if why.iter().any(|w| w.starts_with("claims_match")) {
         return LaneOwner::Claims;
@@ -331,7 +451,7 @@ pub(crate) fn apply_lane_quotas(
     {
         return;
     }
-    if scored.len() <= top_k {
+    if scored.is_empty() {
         return;
     }
     let cap = |frac: f64| -> usize {
@@ -353,7 +473,6 @@ pub(crate) fn apply_lane_quotas(
         cap(t.quota_exploration),
     );
     let mut kept: Vec<crate::types::RecallResult> = Vec::with_capacity(scored.len());
-    let mut deferred: Vec<crate::types::RecallResult> = Vec::new();
     for r in scored.drain(..) {
         let owner = lane_owner(&r, win_by_rid);
         let (used, limit) = match owner {
@@ -363,17 +482,22 @@ pub(crate) fn apply_lane_quotas(
             LaneOwner::Graph => (&mut ng, cg),
             LaneOwner::Exploration => (&mut ne, ce),
         };
-        if kept.len() < top_k && *used < limit {
+        if *used < limit {
             *used += 1;
             kept.push(r);
-        } else {
-            deferred.push(r);
         }
     }
-    // Over-quota candidates are not discarded — they fill the tail in their
-    // original order, so a restrictive quota can never return fewer results
-    // than the pool supports.
-    kept.extend(deferred);
+    // Over-quota candidates are REMOVED, not moved to the tail. Deferring
+    // them was a no-op: MMR selects from the whole pool by its own criterion,
+    // so anything still present could be chosen regardless of position. A
+    // quota only changes WHICH records are selected if the over-quota ones
+    // are not there to select. The slots a capped lane gives up are then
+    // filled by the next-best candidates from OTHER lanes, which is the
+    // entire point.
+    //
+    // If the caps sum to less than top_k the result set is genuinely smaller.
+    // That is what a ceiling means, and it is an explicit configuration
+    // choice rather than a defect.
     *scored = kept;
 }
 
@@ -407,9 +531,7 @@ fn apply_lane_agreement(
         if why.iter().any(|w| w.starts_with("claims_match")) {
             lanes += 1;
         }
-        if r.scores.graph_proximity > 0.0
-            || why.iter().any(|w| w.starts_with("graph-connected"))
-        {
+        if r.scores.graph_proximity > 0.0 || why.iter().any(|w| w.starts_with("graph-connected")) {
             lanes += 1;
         }
         let extra = lanes.saturating_sub(1);
@@ -702,6 +824,10 @@ impl YantrikDB {
             return Ok(Some(vec![]));
         }
 
+        // Candidate count BEFORE filtering, for the gate diagnostic: it
+        // separates "the vector layer returned few" from "the filters ate
+        // them", which no amount of reading the selection code can.
+        let vec_candidate_count = vec_results.len();
         // Step 2: Score from in-memory cache (replaces fetch_memories_by_rids)
         let mut scored: Vec<RecallResult> = Vec::new();
         {
@@ -1705,8 +1831,7 @@ impl YantrikDB {
                     // Bounded multiplicative lift, not an unbounded add:
                     // a strongly-valenced record still competes, but one
                     // with no semantic match cannot outrank a real answer.
-                    let valence_lift =
-                        scoring::lane_lift_mult(row.valence.abs() * row.importance);
+                    let valence_lift = scoring::lane_lift_mult(row.valence.abs() * row.importance);
                     let mut why = scoring::build_why(sim_score, recency, decay, row.valence);
                     why.push("valence_match".to_string());
                     let contributions = scoring::adaptive_contributions(
@@ -1943,8 +2068,7 @@ impl YantrikDB {
                                 // Bounded multiplicative lift (see
                                 // LANE_LIFT_MAX): admission is the lane's
                                 // job; it does not buy relevance.
-                                let cold_lift =
-                                    scoring::lane_lift_mult(row.importance);
+                                let cold_lift = scoring::lane_lift_mult(row.importance);
                                 let mut why =
                                     scoring::build_why(sim_score, recency, decay, row.valence);
                                 why.push("cold_memory".to_string());
@@ -2425,7 +2549,6 @@ impl YantrikDB {
         }
         apply_lane_agreement(&mut scored, &win_by_rid);
         crate::engine::lexical::apply_keyword_reserve(&mut scored, &lex_by_rid, top_k);
-        apply_lane_quotas(&mut scored, &win_by_rid, top_k);
 
         // Step 4: MMR diversity selection
         //
@@ -2434,6 +2557,11 @@ impl YantrikDB {
         // each result adds new information by penalizing candidates too similar
         // to already-selected results.
         scored.sort_by(crate::engine::lexical::rank_cmp);
+        // Quotas run AFTER the sort, not before: the sort re-orders the
+        // whole pool by score, so a quota pass placed above it was silently
+        // undone by the very next statement. The function was correct and
+        // correctly called, and had no effect whatsoever.
+        apply_lane_quotas(&mut scored, &win_by_rid, top_k);
         if crate::engine::capture::enabled() {
             crate::engine::capture::emit(
                 capture_inst,
@@ -2641,8 +2769,71 @@ impl YantrikDB {
             });
         }
 
+        // Novelty selection REPLACES MMR rather than composing with it.
+        // They are two diversity mechanisms with different notions of
+        // redundancy (embedding vs lexical); running both in sequence would
+        // make each one's weight mean something different depending on what
+        // the other did first, which is unsweepable.
+        let novelty_w = crate::base::tuning::tuning().novelty_weight;
         let min_pool_for_mmr = (top_k * 3).max(20);
-        if scored.len() > top_k && scored.len() >= min_pool_for_mmr {
+        // Set-level re-selection.
+        //
+        // Needs TEXT, and step 5 below hydrates text only for the final
+        // top_k — by design, so a 100-candidate recall does not fetch 100
+        // bodies. The first version of this ran here against the
+        // pre-hydration structs, where every `text` is String::new(); every
+        // novelty score was therefore 0, every candidate tied, and the
+        // greedy reproduced score order EXACTLY. It looked like a working
+        // feature with a weight that did nothing.
+        //
+        // So when novelty is enabled we hydrate the SELECTION POOL early —
+        // capped, and only on this path, so the default costs nothing.
+        if std::env::var("YANTRIKDB_DEBUG_NOVELTY").is_ok() {
+            eprintln!(
+                "[novelty-gate] w={:.3} vec_candidates={} fetch_k={} scored={} top_k={} enters={}",
+                novelty_w,
+                vec_candidate_count,
+                fetch_k,
+                scored.len(),
+                top_k,
+                novelty_w > 0.0 && scored.len() > top_k
+            );
+        }
+        if novelty_w > 0.0 && scored.len() > top_k {
+            let pool = scored.len().min((top_k * 10).max(min_pool_for_mmr));
+            scored.truncate(pool);
+            let pool_rids: Vec<&str> = scored.iter().map(|r| r.rid.as_str()).collect();
+            let pool_text = self.fetch_text_metadata_by_rids(&pool_rids)?;
+            for r in &mut scored {
+                if let Some(tm) = pool_text.get(&r.rid) {
+                    r.text = tm.text.clone();
+                }
+            }
+            // Diagnostic, off unless asked for: distinguishes "pool too
+            // small to select from" and "text never arrived" from "policy
+            // ran and chose this". Without it the three are indistinguishable
+            // from the outside, which cost a full debugging cycle.
+            if std::env::var("YANTRIKDB_DEBUG_NOVELTY").is_ok() {
+                let hydrated = scored.iter().filter(|r| !r.text.is_empty()).count();
+                let before: Vec<String> =
+                    scored.iter().take(top_k).map(|r| r.rid.clone()).collect();
+                apply_novelty_selection(&mut scored, top_k);
+                let after: Vec<String> = scored.iter().take(top_k).map(|r| r.rid.clone()).collect();
+                eprintln!(
+                    "[novelty] w={:.3} pool={} hydrated={} top_k={} reordered={}",
+                    novelty_w,
+                    pool,
+                    hydrated,
+                    top_k,
+                    before != after
+                );
+            } else {
+                apply_novelty_selection(&mut scored, top_k);
+            }
+            scored.truncate(top_k);
+        }
+
+        if novelty_w <= 0.0 && scored.len() > top_k && scored.len() >= min_pool_for_mmr {
             // Fetch embeddings for top candidates to compute pairwise similarity
             let pool_size = scored.len().min(top_k * 10);
             scored.truncate(pool_size);
@@ -4508,8 +4699,7 @@ impl YantrikDB {
                     // Bounded multiplicative lift, not an unbounded add:
                     // a strongly-valenced record still competes, but one
                     // with no semantic match cannot outrank a real answer.
-                    let valence_lift =
-                        scoring::lane_lift_mult(row.valence.abs() * row.importance);
+                    let valence_lift = scoring::lane_lift_mult(row.valence.abs() * row.importance);
                     let mut why = scoring::build_why(sim_score, recency, decay, row.valence);
                     why.push("valence_match".to_string());
                     let contributions = scoring::adaptive_contributions(
@@ -4728,8 +4918,7 @@ impl YantrikDB {
                                 // Bounded multiplicative lift (see
                                 // LANE_LIFT_MAX): admission is the lane's
                                 // job; it does not buy relevance.
-                                let cold_lift =
-                                    scoring::lane_lift_mult(row.importance);
+                                let cold_lift = scoring::lane_lift_mult(row.importance);
                                 let mut why =
                                     scoring::build_why(sim_score, recency, decay, row.valence);
                                 why.push("cold_memory".to_string());
@@ -5119,14 +5308,79 @@ impl YantrikDB {
         // ── Phase 3.5: Keyword slot reservation (mirrors recall()) ──
         apply_lane_agreement(&mut scored, &win_by_rid);
         crate::engine::lexical::apply_keyword_reserve(&mut scored, &lex_by_rid, top_k);
-        apply_lane_quotas(&mut scored, &win_by_rid, top_k);
 
         // ── Phase 4: MMR diversity selection ──
         let t_sort = Instant::now();
         scored.sort_by(crate::engine::lexical::rank_cmp);
+        // Quotas run AFTER the sort, not before: the sort re-orders the
+        // whole pool by score, so a quota pass placed above it was silently
+        // undone by the very next statement. The function was correct and
+        // correctly called, and had no effect whatsoever.
+        apply_lane_quotas(&mut scored, &win_by_rid, top_k);
 
+        // Novelty selection REPLACES MMR rather than composing with it.
+        // They are two diversity mechanisms with different notions of
+        // redundancy (embedding vs lexical); running both in sequence would
+        // make each one's weight mean something different depending on what
+        // the other did first, which is unsweepable.
+        let novelty_w = crate::base::tuning::tuning().novelty_weight;
         let min_pool_for_mmr = (top_k * 3).max(20);
-        if scored.len() > top_k && scored.len() >= min_pool_for_mmr {
+        // Set-level re-selection.
+        //
+        // Needs TEXT, and step 5 below hydrates text only for the final
+        // top_k — by design, so a 100-candidate recall does not fetch 100
+        // bodies. The first version of this ran here against the
+        // pre-hydration structs, where every `text` is String::new(); every
+        // novelty score was therefore 0, every candidate tied, and the
+        // greedy reproduced score order EXACTLY. It looked like a working
+        // feature with a weight that did nothing.
+        //
+        // So when novelty is enabled we hydrate the SELECTION POOL early —
+        // capped, and only on this path, so the default costs nothing.
+        if std::env::var("YANTRIKDB_DEBUG_NOVELTY").is_ok() {
+            eprintln!(
+                "[novelty-gate] w={:.3} scored={} top_k={} enters={}",
+                novelty_w,
+                scored.len(),
+                top_k,
+                novelty_w > 0.0 && scored.len() > top_k
+            );
+        }
+        if novelty_w > 0.0 && scored.len() > top_k {
+            let pool = scored.len().min((top_k * 10).max(min_pool_for_mmr));
+            scored.truncate(pool);
+            let pool_rids: Vec<&str> = scored.iter().map(|r| r.rid.as_str()).collect();
+            let pool_text = self.fetch_text_metadata_by_rids(&pool_rids)?;
+            for r in &mut scored {
+                if let Some(tm) = pool_text.get(&r.rid) {
+                    r.text = tm.text.clone();
+                }
+            }
+            // Diagnostic, off unless asked for: distinguishes "pool too
+            // small to select from" and "text never arrived" from "policy
+            // ran and chose this". Without it the three are indistinguishable
+            // from the outside, which cost a full debugging cycle.
+            if std::env::var("YANTRIKDB_DEBUG_NOVELTY").is_ok() {
+                let hydrated = scored.iter().filter(|r| !r.text.is_empty()).count();
+                let before: Vec<String> =
+                    scored.iter().take(top_k).map(|r| r.rid.clone()).collect();
+                apply_novelty_selection(&mut scored, top_k);
+                let after: Vec<String> = scored.iter().take(top_k).map(|r| r.rid.clone()).collect();
+                eprintln!(
+                    "[novelty] w={:.3} pool={} hydrated={} top_k={} reordered={}",
+                    novelty_w,
+                    pool,
+                    hydrated,
+                    top_k,
+                    before != after
+                );
+            } else {
+                apply_novelty_selection(&mut scored, top_k);
+            }
+            scored.truncate(top_k);
+        }
+
+        if novelty_w <= 0.0 && scored.len() > top_k && scored.len() >= min_pool_for_mmr {
             let pool_size = scored.len().min(top_k * 10);
             scored.truncate(pool_size);
 
@@ -5208,6 +5462,7 @@ impl YantrikDB {
         } else {
             scored.truncate(top_k);
         }
+
         let sort_truncate_ms = t_sort.elapsed().as_secs_f64() * 1000.0;
 
         // ── Phase 5: Hydrate final top_k with text + metadata ──
@@ -5431,5 +5686,158 @@ impl YantrikDB {
         )?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod novelty_selection_tests {
+    use super::*;
+
+    fn r(rid: &str, score: f64, text: &str) -> crate::types::RecallResult {
+        crate::types::RecallResult {
+            rid: rid.into(),
+            memory_type: "fact".into(),
+            text: text.into(),
+            created_at: 0.0,
+            importance: 0.5,
+            valence: 0.0,
+            score,
+            // Built explicitly rather than via a derived Default: a default
+            // `valence_multiplier` of 0.0 would silently annihilate scores,
+            // so ScoreBreakdown deliberately has no Default to reach for.
+            scores: crate::types::ScoreBreakdown {
+                similarity: score,
+                decay: 1.0,
+                recency: 1.0,
+                importance: 0.5,
+                graph_proximity: 0.0,
+                contributions: crate::types::ScoreContributions {
+                    similarity: score,
+                    decay: 0.0,
+                    recency: 0.0,
+                    importance: 0.0,
+                    graph_proximity: 0.0,
+                },
+                valence_multiplier: 1.0,
+            },
+            why_retrieved: vec![],
+            metadata: serde_json::Value::Null,
+            namespace: "default".into(),
+            certainty: 1.0,
+            domain: String::new(),
+            source: String::new(),
+            emotional_state: None,
+            current_status: Default::default(),
+            superseded_by: None,
+            disputed_with: vec![],
+            aged_last_verified: None,
+            best_span: None,
+        }
+    }
+
+    /// Three near-duplicates outscore the one chunk covering the other half
+    /// of the story. This is the event_ordering failure in miniature.
+    fn redundant_pool() -> Vec<crate::types::RecallResult> {
+        vec![
+            r("a1", 0.90, "deployment pipeline rollout staging cluster"),
+            r(
+                "a2",
+                0.88,
+                "deployment pipeline rollout staging cluster again",
+            ),
+            r(
+                "a3",
+                0.86,
+                "deployment pipeline rollout staging cluster once more",
+            ),
+            r(
+                "b1",
+                0.60,
+                "invoice reconciliation quarterly finance ledger",
+            ),
+        ]
+    }
+
+    /// THE CONNECTIVITY ASSERTION. Four parameters once reported "inert"
+    /// across a whole sweep because they were never wired to this file, and
+    /// the sweep could not tell an ineffective knob from a disconnected one.
+    /// A value that SHOULD change the output must change it, or the feature
+    /// is not shipped.
+    #[test]
+    fn full_novelty_weight_changes_the_selection() {
+        let mut v = redundant_pool();
+        apply_novelty_selection_w(&mut v, 2, 1.0);
+        assert_eq!(
+            v[1].rid,
+            "b1",
+            "pure set-cover must take the uncovered topic second, got {:?}",
+            v.iter().map(|x| x.rid.as_str()).collect::<Vec<_>>()
+        );
+    }
+
+    /// The default path must be byte-identical to today's behaviour, so
+    /// shipping this OFF is genuinely a no-op.
+    #[test]
+    fn zero_weight_is_exactly_score_order() {
+        let mut v = redundant_pool();
+        let before: Vec<String> = v.iter().map(|x| x.rid.clone()).collect();
+        apply_novelty_selection_w(&mut v, 2, 0.0);
+        let after: Vec<String> = v.iter().map(|x| x.rid.clone()).collect();
+        assert_eq!(before, after);
+    }
+
+    /// Selection REORDERS, it never drops: the unpicked tail is retained in
+    /// its original relative order. A selection stage that silently shrinks
+    /// the result set would break every caller that pages through recall.
+    #[test]
+    fn nothing_is_lost_and_the_tail_keeps_its_order() {
+        let mut v = redundant_pool();
+        apply_novelty_selection_w(&mut v, 2, 1.0);
+        assert_eq!(v.len(), 4);
+        let mut rids: Vec<&str> = v.iter().map(|x| x.rid.as_str()).collect();
+        rids.sort_unstable();
+        assert_eq!(rids, vec!["a1", "a2", "a3", "b1"]);
+        let tail: Vec<&str> = v[2..].iter().map(|x| x.rid.as_str()).collect();
+        let mut sorted_tail = tail.clone();
+        sorted_tail.sort_unstable();
+        assert_eq!(tail, sorted_tail, "tail must stay in original score order");
+    }
+
+    /// REGRESSION, and the reason this feature shipped inert once.
+    ///
+    /// Candidates carry `text: String::new()` until step 5 hydrates the
+    /// final top_k. Run against un-hydrated candidates, every novelty score
+    /// is 0, every value ties, and the greedy reproduces score order exactly
+    /// — a weight that changes nothing while looking wired. The other tests
+    /// in this module could not catch it because they all build results WITH
+    /// text. This one pins the degenerate behaviour so that the caller's
+    /// obligation to hydrate first is visible from the test file.
+    #[test]
+    fn empty_text_degenerates_to_score_order_so_callers_must_hydrate_first() {
+        let mut v = redundant_pool();
+        for x in v.iter_mut() {
+            x.text = String::new();
+        }
+        let before: Vec<String> = v.iter().map(|x| x.rid.clone()).collect();
+        apply_novelty_selection_w(&mut v, 2, 1.0);
+        let after: Vec<String> = v.iter().map(|x| x.rid.clone()).collect();
+        assert_eq!(
+            before, after,
+            "un-hydrated candidates must be a documented no-op, not a silent \
+             partial effect — the caller hydrates the pool before selecting"
+        );
+    }
+
+    /// The first pick is always the top-scoring record regardless of weight:
+    /// nothing has been covered yet, so every candidate's novelty is 1.0 and
+    /// score breaks the tie. Guards against a diversity policy that answers
+    /// a specific question with an irrelevant-but-unusual record.
+    #[test]
+    fn best_scoring_record_still_leads() {
+        for w in [0.25, 0.5, 0.9, 1.0] {
+            let mut v = redundant_pool();
+            apply_novelty_selection_w(&mut v, 3, w);
+            assert_eq!(v[0].rid, "a1", "w={w}");
+        }
     }
 }

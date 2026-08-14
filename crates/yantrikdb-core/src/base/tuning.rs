@@ -76,6 +76,23 @@ pub struct Tuning {
     /// MMR relevance/diversity trade-off.
     pub mmr_lambda: f64,
 
+    /// Override for the lexical lane's ADDITIVE boost, or negative to defer to
+    /// the learned weight (the default).
+    ///
+    /// This is the one term deliberately left additive: an exact identifier or
+    /// phrase can be genuinely relevant at low cosine, so lexical evidence
+    /// should not be forced to multiply cosine. The principle is right; the
+    /// MAGNITUDE was never checked. At the learned default of 0.31 the boost
+    /// reaches ~0.22 while the entire similarity contribution is
+    /// `W_SIM * sim = 0.5 * 0.53 ~ 0.27` — a side-signal the same size as
+    /// relevance itself.
+    ///
+    /// Measured consequence on a real store: a probe whose target sat at
+    /// cosine rank 4 came back at recall rank 39, with ALL TWELVE records
+    /// above it carrying `keyword_match`, some at cosine 0.305 against the
+    /// target's 0.534.
+    pub keyword_boost_override: f64,
+
     // ── Lane slot quotas ────────────────────────────────────────────
     //
     // The maximum FRACTION of `top_k` any one lane may claim.
@@ -112,6 +129,32 @@ pub struct Tuning {
     pub quota_claims: f64,
     pub quota_graph: f64,
     pub quota_exploration: f64,
+
+    /// Weight on LEXICAL NOVELTY during selection: 0 = pure score order
+    /// (today), 1 = pure set-cover. Applied only to the final selection, so
+    /// candidate generation and filtering are untouched.
+    ///
+    /// # Why a second diversity mechanism when MMR exists
+    ///
+    /// MMR measures redundancy by EMBEDDING similarity at lambda 0.9, i.e.
+    /// relevance is weighted 9:1 over diversity. In a compressed space that
+    /// cannot work: on a real store the whole top-100 spanned 1.286x, so
+    /// near-duplicates and genuinely distinct records are indistinguishable
+    /// by cosine. Novelty measured on TEXT still separates them.
+    ///
+    /// # Measured
+    ///
+    /// On BEAM's breadth categories, greedily picking the chunk that adds the
+    /// most new content words versus already-selected raised rubric coverage
+    /// on event_ordering by +7.0 points (0.592 -> 0.661) at the same k, where
+    /// chronological presentation gave +0.13, relation annotations +1.5 and
+    /// temporal stratification +0.3. An oracle over the same pool reaches
+    /// 0.965, so the content is retrieved and then discarded by selection.
+    ///
+    /// It is NOT universally good: multi_session_reasoning fell 1.6 points.
+    /// Breadth questions want coverage; pointed ones want the best match.
+    /// Hence a knob, defaulting to OFF.
+    pub novelty_weight: f64,
 }
 
 impl Default for Tuning {
@@ -130,11 +173,13 @@ impl Default for Tuning {
             cold_min_sim: 0.10,
             valence_min_sim: 0.02,
             mmr_lambda: 0.9,
+            keyword_boost_override: -1.0,
             quota_vector: 1.0,
             quota_lexical: 1.0,
             quota_claims: 1.0,
             quota_graph: 1.0,
             quota_exploration: 1.0,
+            novelty_weight: 0.0,
         }
     }
 }
@@ -167,12 +212,14 @@ impl Tuning {
             cold_min_sim: env_f64("YANTRIKDB_COLD_MIN_SIM", d.cold_min_sim),
             valence_min_sim: env_f64("YANTRIKDB_VALENCE_MIN_SIM", d.valence_min_sim),
             mmr_lambda: env_f64("YANTRIKDB_MMR_LAMBDA", d.mmr_lambda).clamp(0.0, 1.0),
+            keyword_boost_override: env_f64("YANTRIKDB_KEYWORD_BOOST", d.keyword_boost_override),
             quota_vector: env_f64("YANTRIKDB_QUOTA_VECTOR", d.quota_vector).clamp(0.0, 1.0),
             quota_lexical: env_f64("YANTRIKDB_QUOTA_LEXICAL", d.quota_lexical).clamp(0.0, 1.0),
             quota_claims: env_f64("YANTRIKDB_QUOTA_CLAIMS", d.quota_claims).clamp(0.0, 1.0),
             quota_graph: env_f64("YANTRIKDB_QUOTA_GRAPH", d.quota_graph).clamp(0.0, 1.0),
             quota_exploration: env_f64("YANTRIKDB_QUOTA_EXPLORATION", d.quota_exploration)
                 .clamp(0.0, 1.0),
+            novelty_weight: env_f64("YANTRIKDB_NOVELTY_WEIGHT", d.novelty_weight).clamp(0.0, 1.0),
         }
     }
 
@@ -209,7 +256,7 @@ impl Tuning {
         let (f, i, g, a, u) = self.normalized_weights();
         format!(
             "budget={:.3} w=[f{:.3},i{:.3},g{:.3},a{:.3},u{:.3}] gate=({:.3},{:.1}) \
-             lane={:.3} floors=[fts{:.3},cold{:.3},val{:.3}] mmr={:.2}",
+             lane={:.3} floors=[fts{:.3},cold{:.3},val{:.3}] mmr={:.2} nov={:.3}",
             self.policy_budget,
             f,
             i,
@@ -223,6 +270,7 @@ impl Tuning {
             self.cold_min_sim,
             self.valence_min_sim,
             self.mmr_lambda,
+            self.novelty_weight,
         )
     }
 }
@@ -355,14 +403,20 @@ mod tests {
         };
         let (f, i, g, a, u) = t.normalized_weights();
         let sum = f + i + g + a + u;
-        assert!((sum - 1.0).abs() < 1e-12, "weights must renormalize, got {sum}");
+        assert!(
+            (sum - 1.0).abs() < 1e-12,
+            "weights must renormalize, got {sum}"
+        );
     }
 
     #[test]
     fn a_budget_below_one_cannot_invert_the_multiplier() {
         // policy_budget < 1.0 would make exp(ln(x)) shrink scores and turn
         // every prior into a PENALTY — a plausible typo in a sweep.
-        let t = Tuning { policy_budget: 0.5, ..Tuning::default() };
+        let t = Tuning {
+            policy_budget: 0.5,
+            ..Tuning::default()
+        };
         assert!(t.policy_budget_ln() >= 0.0);
     }
 
@@ -410,11 +464,21 @@ mod namespace_profile_tests {
         // that could relax certainty_min or a lane floor would reintroduce
         // the filter-bypass class of bug through the front door.
         let base = Tuning::default();
-        for p in [NamespaceProfile::Code, NamespaceProfile::Personal, NamespaceProfile::Reference] {
+        for p in [
+            NamespaceProfile::Code,
+            NamespaceProfile::Personal,
+            NamespaceProfile::Reference,
+        ] {
             let t = p.apply(&base);
             assert_eq!(t.fts_min_sim, base.fts_min_sim, "{p:?} moved a lane floor");
-            assert_eq!(t.cold_min_sim, base.cold_min_sim, "{p:?} moved a lane floor");
-            assert_eq!(t.valence_min_sim, base.valence_min_sim, "{p:?} moved a lane floor");
+            assert_eq!(
+                t.cold_min_sim, base.cold_min_sim,
+                "{p:?} moved a lane floor"
+            );
+            assert_eq!(
+                t.valence_min_sim, base.valence_min_sim,
+                "{p:?} moved a lane floor"
+            );
         }
     }
 
