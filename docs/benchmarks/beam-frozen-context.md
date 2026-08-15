@@ -142,6 +142,66 @@ Our two weakest categories in absolute terms are `event_ordering` (0.298) and
 are where their rag configuration matches or beats us. That is the clearest
 improvement target this benchmark surfaces.
 
+### `contradiction_resolution`: the paper's intent and the judge's behaviour differ
+
+Worth pinning down, because acting on the paper's wording alone costs points
+here.
+
+The BEAM paper (arXiv 2510.27246, Appendix D item 2) defines four nuggets:
+
+1. states there is contradictory information;
+2. mentions claim **A**;
+3. mentions claim **B**;
+4. **which statement is correct?**
+
+Its error analysis (Appendix G) names the dominant failure mode: *"the context
+contains only one side of the contradiction, leading the LLM to answer based
+solely on that information."*
+
+**Measured on our own run** (`ydb-final`, category n = 40):
+
+| | |
+|---|---|
+| binary accuracy | 1.000 |
+| rubric score | 0.688 |
+| answers that literally ask "which one is correct?" | 28 / 40 |
+| score of nugget 4 across the category | **0.000 on all 40** |
+
+Appending one sentence naming which statement is current moves that nugget to
+**0.92 (6/6, offline scoring)**, and a live run reproduced **0.0 -> 1.0** on
+both queries tested. Category score moved 0.688 -> 0.850 (`ydb-confirm-ctrl`,
+n = 40), worth roughly **+1.6 pp overall**.
+
+So nugget 4 reads as a request for clarification, but the judge scores it as
+*"did the response identify which statement is correct"*. Asking scores zero.
+Naming scores one. An earlier draft of this section asserted the reverse — that
+asking "is what the rubric rewards" — reasoning from the paper's intent without
+checking the judge; the table above contradicts it.
+
+**Two operations that must not be conflated:**
+
+* **Destructive resolution** — `auto_resolve_conflicts` (think loop) tombstones
+  one side, destroying nuggets 1, 2 and 3 at once: no conflict left to state,
+  one claim gone. **Do not run destructive conflict resolution before this
+  benchmark.** That warning stands and is unaffected by the above.
+* **Naming the current statement in the answer** — quote BOTH claims, say they
+  conflict, then say which is current. Nuggets 1-3 untouched, nugget 4
+  satisfied. This is the change that moved the category.
+
+**Honest caveat on the gain.** The paper's intent is that a memory system
+surface a contradiction and defer to the user. Our change optimises the judge's
+implementation rather than that intent, so part of it is a rubric artefact
+rather than better memory behaviour. It is defensible on its own terms — the
+harness's global answer rule 3 already says prefer the more recent, and
+reporting which value is *current* is more useful than handing the conflict
+back — but it should be reported as "we satisfy the nugget as scored", not as
+"we solved contradiction resolution".
+
+The `yantrikdb-cognitive` arm (conflict detection + counterpart injection, no
+resolution) measured flat on this category. The remaining headroom is naming
+both claims crisply, which is an answer-shape concern rather than a
+memory-resolution one.
+
 ---
 
 ## Interpretation
@@ -341,6 +401,44 @@ repository, so conditions R and E need no access to their system.
 
 ---
 
+## The rag-mode 2×2 under an equalized frontier-class reader (2026-08-15)
+
+Open item 2 asked for the missing cells of the 2×2. Their rag-mode contexts —
+the retrieval behind the published 0.862 — turned out to ship in the result
+files (`hindsight/rag/100k.json.gz`, all 400 rows), so both memory systems'
+cached contexts were replayed through ONE frontier-class reader
+(`moonshotai/kimi-k2.6`) under the judge Hindsight published with
+(`meta-llama/llama-4-maverick`), scored with `dataset.score_result`.
+
+| contexts | rubric (393 paired queries) |
+|---|---|
+| **YantrikDB** (zero-LLM ingest, ~28% fewer tokens) | **0.6331** |
+| **Hindsight rag-mode** (their 0.862 configuration) | **0.5982** |
+
+Delta **+3.5pp**, conversation-clustered bootstrap 95% CI **[+0.7, +6.2]pp**,
+excludes zero. Query-level: 98 wins / 71 losses / 224 ties.
+
+Two findings, in order of importance:
+
+1. **The reader collapse.** Their own recorded 0.8577 on these *identical*
+   context rows drops to 0.5982 when the reader stops being
+   gemini-3.1-pro-preview (their `temporal_reasoning` alone: 0.900 → 0.331).
+   The published headline is overwhelmingly the answerer.
+2. **The lead concentrates where evidence fidelity matters.** Largest gap:
+   `information_extraction` +17.7pp — their ingest-time LLM extraction
+   compresses away exactly the specifics that category grades. Also +5.9
+   preference, +5.8 temporal, +5.0 knowledge_update, +4.4 contradiction,
+   +4.1 instruction. Their remaining leads are small: summarization −4.0,
+   event_ordering −2.7, abstention −2.5.
+
+Honesty notes. kimi-k2.6 is a frontier-*class* open model, not their exact
+reader, so the claim is "under an equalized frontier-class reader", never "in
+their published setup". Both arms initially lost all 40 summarization queries
+to the same evaluator defect — the reader's 1024-token cap truncated JSON
+mid-summary, and the errors silently shrank the denominator; both arms were
+re-run for that category at 4096 (`NANOGPT_MAX_TOKENS`) before the numbers
+above. ~7 queries per arm remain excluded on residual request errors.
+
 ## Open work
 
 1. **Token-budget curve.** Ask each engine for a fixed budget
@@ -349,9 +447,10 @@ repository, so conditions R and E need no access to their system.
    point. This is now the most valuable remaining experiment, because parity
    on 42% fewer tokens is a claim about the *curve*, and we have measured one
    point on it.
-2. **Matched-answerer end-to-end** — our context through
-   `gemini-3.1-pro-preview`, completing the 2×2. This is the direct test of
-   whether the equivalence holds for a frontier reader.
+2. ~~Matched-answerer end-to-end~~ — **done 2026-08-15** (section above):
+   under an equalized frontier-class reader the equivalence strengthens to a
+   significant lead. The exact-gemini variant remains open only as a
+   robustness check.
 3. **Sequence reconstruction.** `event_ordering` (0.298) and
    `temporal_reasoning` (0.425) are our weakest categories and the ones where
    their rag configuration leads. This benchmark's clearest actionable signal.
