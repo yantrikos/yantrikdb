@@ -593,6 +593,49 @@ def pack_remove(db_path, embedding_dim, pack_id):
         db.close()
 
 
+# ── Import from other memory systems ──
+
+@cli.command("import")
+@_db_option
+@click.argument("source", type=click.Choice(["jsonl", "mem0", "zep", "letta", "markdown", "mnemosyne"]))
+@click.argument("path", required=False, type=click.Path(exists=True))
+@click.option("--namespace", default="default", show_default=True,
+              help="Namespace for imported memories (per-record user_id wins when present).")
+@click.option("--user-id", default=None, help="For API sources: which user to pull.")
+@click.option("--api-key", default=None, envvar=["MEM0_API_KEY", "ZEP_API_KEY"],
+              help="For API sources when no export file is given.")
+@click.option("--limit", default=0, type=int, help="Import at most N records (0 = all).")
+@click.option("--dry-run", is_flag=True, help="Read and count, write nothing.")
+def import_memories(db_path, source, path, namespace, user_id, api_key, limit, dry_run):
+    """Import memories from a known memory system and start immediately.
+
+    File-based (no extra deps): a mem0/zep/letta EXPORT file, generic
+    JSONL/CSV, or a folder of markdown notes. API-based: omit PATH and pass
+    --api-key / --user-id. Imports are exactly-once — re-running after an
+    interruption resumes instead of duplicating — and every import ends
+    with a read-back census. Original timestamps are preserved so recency
+    scoring sees your history as history.
+    """
+    from yantrikdb import YantrikDB
+    from yantrikdb.importers import SOURCES, import_records
+
+    if source != "markdown" and source != "jsonl" and not path and not (api_key or user_id):
+        raise click.UsageError(f"{source}: give an export file PATH, or --api-key/--user-id for the live API.")
+    if source in ("jsonl", "markdown", "mnemosyne") and not path:
+        raise click.UsageError(f"{source}: PATH is required.")
+
+    db = YantrikDB.with_default(db_path)
+    reader = SOURCES()[source]
+    kwargs = {"namespace": namespace, "user_id": user_id, "api_key": api_key}
+    records = reader(path, **kwargs) if path else reader(None, **kwargs)
+    report = import_records(
+        db, records, dry_run=dry_run, limit=limit,
+        progress=lambda n: click.echo(f"  ...{n} read", err=True))
+    click.echo(report.summary())
+    if report.census_missing or (report.errors and not report.written):
+        sys.exit(1)
+
+
 def main():
     """Entry point for the yantrikdb CLI console script."""
     cli()
