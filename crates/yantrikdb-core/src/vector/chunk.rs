@@ -99,10 +99,14 @@ pub fn collapse_to_parents_indexed(results: Vec<(String, f64)>) -> Vec<(String, 
 /// was measured with), until the text is covered or [`MAX_CHUNKS`] is
 /// reached.
 ///
-/// Returns an empty vec when the text fits the window. A final short
-/// tail window is kept only when it adds at least `overlap` chars of
-/// NEW text — a sliver shorter than the overlap is already covered by
-/// the previous window.
+/// Returns an empty vec when the text fits the window. A tail window is
+/// emitted whenever ANY chars remain uncovered, however few. (An earlier
+/// version dropped a tail adding fewer than `overlap` new chars, with a
+/// comment claiming the previous window already covered it — it did not:
+/// the previous window ended exactly where the sliver began, so the last
+/// up-to-`overlap-1` chars of a record just over the window were embedded
+/// in NO chunk. A one-char-over record lost its final char from the
+/// vector space entirely — the bounded version of stored-but-unfindable.)
 ///
 /// Ranges are BYTE offsets aligned down to `char` boundaries, so
 /// slicing `&text[a..b]` is always valid UTF-8. Alignment can shift a
@@ -122,10 +126,6 @@ pub fn chunk_ranges(text: &str, window: usize) -> Vec<(usize, usize)> {
         let end = (start + window).min(len);
         if end <= covered_to + overlap.min(len.saturating_sub(covered_to)) && end < len {
             // Defensive: cannot happen with stride > 0, but never loop.
-            break;
-        }
-        // Keep a tail window only if it adds >= overlap new chars.
-        if end == len && end.saturating_sub(covered_to) < overlap {
             break;
         }
         let a = floor_char_boundary(text, start);
@@ -158,6 +158,26 @@ fn floor_char_boundary(s: &str, i: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_char_of_a_barely_oversized_text_is_in_some_chunk() {
+        // The tail-sliver gap: a record just over the window used to get
+        // NO second chunk, so its final chars were embedded nowhere.
+        // Coverage is the invariant — head window [0, window) plus the
+        // returned ranges must reach len — for every sliver size from one
+        // char up to a full extra window.
+        let window = 100;
+        for extra in [1usize, 5, 19, 20, 21, 99, 100] {
+            let text = "a".repeat(window + extra);
+            let ranges = chunk_ranges(&text, window);
+            let covered = ranges.iter().map(|&(_, b)| b).max().unwrap_or(window);
+            assert_eq!(
+                covered,
+                text.len(),
+                "text of window+{extra} chars must be fully covered; got ranges {ranges:?}"
+            );
+        }
+    }
 
     #[test]
     fn chunk_key_roundtrips_through_parent_of() {
@@ -231,11 +251,16 @@ mod tests {
     }
 
     #[test]
-    fn tiny_tail_sliver_is_dropped() {
-        // window 300, overlap 60, stride 240. len 310: chunk-1 window
-        // would add only 10 new chars (< overlap) — already covered.
+    fn tiny_tail_sliver_gets_its_own_window() {
+        // window 300, overlap 60, stride 240. len 310: this test used to
+        // assert the 10-char tail was DROPPED, pinning the very defect —
+        // its comment claimed the sliver was "already covered", but chunk
+        // 0 ends at 300 and nothing else existed, so chars 300..310 were
+        // embedded nowhere. The tail window [240, 310) carries the sliver
+        // with a stride's worth of preceding context.
         let text = "z".repeat(310);
-        assert!(chunk_ranges(&text, 300).is_empty());
+        let ranges = chunk_ranges(&text, 300);
+        assert_eq!(ranges, vec![(240, 310)]);
     }
 
     #[test]

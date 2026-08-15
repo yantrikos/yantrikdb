@@ -3048,10 +3048,16 @@ impl YantrikDB {
             let _ = self.log_recall_impressions(&scored, query_embedding, namespace, generation);
         }
 
-        // Reinforce accessed memories (spaced repetition)
+        // Reinforce accessed memories (spaced repetition). Best-effort:
+        // reinforcement is a side-effect of a READ, and a read that found
+        // its results must return them — failing the recall over a
+        // bookkeeping UPDATE (as `?` did here) turned a transient BUSY
+        // into a lost answer.
         if !skip_reinforce {
             for r in &scored {
-                self.reinforce(&r.rid)?;
+                if let Err(e) = self.reinforce(&r.rid) {
+                    tracing::warn!(rid = %r.rid, error = %e, "reinforce failed; recall unaffected");
+                }
             }
         }
 
@@ -5537,10 +5543,14 @@ impl YantrikDB {
         }
 
         // ── Phase 6: Reinforce ──
+        // Best-effort, same as the unprofiled twin: a read that found its
+        // results must return them even when the bookkeeping UPDATE fails.
         let t_reinforce = Instant::now();
         if !skip_reinforce {
             for r in &scored {
-                self.reinforce(&r.rid)?;
+                if let Err(e) = self.reinforce(&r.rid) {
+                    tracing::warn!(rid = %r.rid, error = %e, "reinforce failed; recall unaffected");
+                }
             }
         }
         let reinforce_ms = t_reinforce.elapsed().as_secs_f64() * 1000.0;
@@ -5691,7 +5701,15 @@ impl YantrikDB {
         };
 
         {
-            let conn = self.read_conn();
+            // The WRITE connection, deliberately. This is an UPDATE; running
+            // it on a read-pool connection raced the writer for the WAL
+            // write lock — a busy writer meant a 5s BUSY stall and then a
+            // FAILED recall, from a bookkeeping side-effect (residual race
+            // F3 in the 2026-08-15 catalog). The write mutex serializes
+            // instead of erroring, and both call sites are additionally
+            // best-effort now: reinforcement must never cost the caller
+            // their results.
+            let conn = self.conn();
             conn.execute(
                 "UPDATE memories SET last_access = ?1, half_life = ?2, \
                  access_count = access_count + 1 WHERE rid = ?3",

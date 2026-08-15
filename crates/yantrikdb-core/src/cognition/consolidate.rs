@@ -307,6 +307,22 @@ fn load_cluster_members(
                  consolidating it again would orphan the first consolidation's members"
             )));
         }
+        // Namespaces are tenant boundaries. A cluster spanning two of them
+        // would store its synthesis in the FIRST member's namespace — text
+        // synthesized from tenant B's memories, readable by tenant A — and
+        // (in the destructive form) retire records in a namespace the
+        // caller never named. Refuse the incoherent input instead.
+        if let Some(first) = out.first() {
+            let first: &MemoryWithEmbedding = first;
+            if first.namespace != ns {
+                return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                    "consolidate_cluster: members span namespaces \
+                     ('{}' vs '{}' at {rid}) — a cluster must be \
+                     consolidated within one namespace",
+                    first.namespace, ns
+                )));
+            }
+        }
         out.push(MemoryWithEmbedding {
             rid: rid.clone(),
             memory_type,
@@ -618,8 +634,26 @@ fn commit_consolidation(
             .first()
             .map(|m| m.namespace.as_str())
             .unwrap_or("default");
+
+        // EVENT time of the synthesis: the end of the span it abstracts,
+        // not the wall clock of the maintenance run. A summary stamped
+        // now() is invisible to `recall_as_of` / time-window queries on
+        // any backdated corpus (historical import, BEAM) — the abstraction
+        // exists precisely for those reads, and it described nothing that
+        // happened after its newest source. `consolidation_time` in the
+        // metadata still records when the synthesis ran.
+        let span_end = cluster
+            .iter()
+            .map(|m| m.created_at)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let summary_created_at = if span_end.is_finite() {
+            Some(span_end)
+        } else {
+            None
+        };
+
         let consolidated_rid = match &embedding {
-            Some(emb) => db.record(
+            Some(emb) => db.record_with_idempotency(
                 summary_text,
                 "semantic",
                 consolidated_importance,
@@ -632,9 +666,11 @@ fn commit_consolidation(
                 "general",
                 "user",
                 None,
+                None,
+                summary_created_at,
             )?,
             // Engine-embedded: the vector comes from the synthesis itself.
-            None => db.record_text(
+            None => db.record_text_with_idempotency(
                 summary_text,
                 "semantic",
                 consolidated_importance,
@@ -646,6 +682,8 @@ fn commit_consolidation(
                 "general",
                 "user",
                 None,
+                None,
+                summary_created_at,
             )?,
         };
 

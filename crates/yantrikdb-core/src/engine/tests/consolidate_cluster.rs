@@ -187,6 +187,101 @@ fn wrong_dimension_embedding_is_refused() {
     assert_eq!(status, "active", "a refused call must write nothing");
 }
 
+/// The synthesis is an abstraction of a SPAN, and its event time must be
+/// the span's end — not the wall clock of whenever the maintenance pass
+/// happened to run. Stamping now() made every summary invisible to
+/// `recall_as_of`/time-window reads on a backdated corpus (historical
+/// import, BEAM), which is exactly where the abstraction earns its keep.
+#[test]
+fn summary_created_at_is_the_span_end_not_the_wall_clock() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rids: Vec<String> = [(1_000.0, "iota one"), (2_000.0, "iota two")]
+        .iter()
+        .map(|(ts, t)| {
+            db.record_with_idempotency(
+                t,
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &vec_seed(1.0, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+                None,
+                Some(*ts),
+            )
+            .unwrap()
+        })
+        .collect();
+
+    let result =
+        crate::consolidate::summarize_cluster(&db, &rids, "iota summary", Some(&vec_seed(5.0, 8)))
+            .unwrap();
+    let summary_rid = result["consolidated_rid"].as_str().unwrap().to_string();
+    let created_at: f64 = db
+        .conn()
+        .query_row(
+            "SELECT created_at FROM memories WHERE rid = ?1",
+            params![summary_rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        created_at, 2_000.0,
+        "summary event time must be the newest member's, not now()"
+    );
+}
+
+/// Namespaces are tenant boundaries: a cluster spanning two of them would
+/// store tenant B's synthesized content under tenant A's namespace. The
+/// incoherent input is refused before anything is written.
+#[test]
+fn cross_namespace_cluster_is_refused() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid_a = seed(&db, &["kappa one"]).remove(0);
+    let rid_b = db
+        .record(
+            "kappa two",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "tenant_b",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    let err = crate::consolidate::consolidate_cluster(
+        &db,
+        &[rid_a.clone(), rid_b],
+        "kappa summary",
+        Some(&vec_seed(3.0, 8)),
+    )
+    .unwrap_err();
+    assert!(
+        format!("{err}").contains("namespace"),
+        "refusal must name the boundary: {err}"
+    );
+    let status: String = db
+        .conn()
+        .query_row(
+            "SELECT consolidation_status FROM memories WHERE rid = ?1",
+            params![rid_a],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "active", "a refused call must write nothing");
+}
+
 /// `get_memory` — the rid point-read the binding lacked entirely.
 /// Found while wiring LLM conflict resolution: `get_conflicts` hands back
 /// `memory_a`/`memory_b` as bare rids and there was no way to resolve them

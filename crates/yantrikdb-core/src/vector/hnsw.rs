@@ -12,7 +12,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet};
 use rand::rngs::SmallRng;
 use rand::{Rng, SeedableRng};
 
-use crate::error::Result;
+use crate::error::{Result, YantrikDbError};
 
 // ── Distance functions ──
 
@@ -271,7 +271,18 @@ impl HnswIndex {
 
     /// Insert a vector keyed by rid.
     pub fn insert(&mut self, rid: &str, embedding: &[f32]) -> Result<()> {
-        assert_eq!(embedding.len(), self.dim, "embedding dimension mismatch");
+        // Err, not assert: every caller validates dimensions upstream, but
+        // this is the layer that owns the invariant, and a bug upstream
+        // must surface as a failed WRITE, not abort the process mid-
+        // compaction with the index half-built (defense-in-depth; the
+        // panic variant took the compactor thread down with it).
+        if embedding.len() != self.dim {
+            return Err(YantrikDbError::InvalidInput(format!(
+                "hnsw insert: embedding dimension mismatch: expected {}, got {}",
+                self.dim,
+                embedding.len()
+            )));
+        }
 
         // If rid already exists and is tombstoned, resurrect it
         if let Some(&existing_idx) = self.rid_to_idx.get(rid) {

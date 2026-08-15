@@ -406,7 +406,17 @@ impl DeltaIndex {
             // (reserved-uncommitted) entry is not the live vector and must
             // not be turned into the tombstone — leave it for its own
             // correction to publish/remove; append a marker below instead.
-            if entry.rid == rid && !entry.tombstoned && entry.published {
+            //
+            // And only an entry whose seq does not EXCEED the tombstone's
+            // own: seq order is causal order, and a delete that was minted
+            // before a write must lose to it. Without the guard, a stale
+            // tombstone racing a fresh same-rid append rewrote the NEWER
+            // entry's seq and killed it — the newer write silently
+            // destroyed (residual race F4 in the 2026-08-15 catalog).
+            // A stale delete instead falls through to the marker append
+            // below, where seq resolution (highest wins, in search and
+            // compaction alike) correctly ignores it.
+            if entry.rid == rid && !entry.tombstoned && entry.published && entry.seq <= seq {
                 entry.tombstoned = true;
                 entry.seq = seq;
                 // In-place mutation — delta was non-empty already, so the
@@ -1149,6 +1159,35 @@ mod tests {
         idx.append("rid_after".to_string(), vec_seed(10.0, 64), 100)
             .unwrap();
         assert_eq!(idx.delta_len(), 1);
+    }
+
+    #[test]
+    fn stale_tombstone_does_not_destroy_newer_write() {
+        // Residual race F4: a forget whose seq was minted BEFORE a racing
+        // same-rid write used to tombstone that newer entry in place and
+        // rewrite its seq — the newer write silently destroyed. Causal
+        // (seq) order must decide: the stale delete loses.
+        let idx = DeltaIndex::new(64);
+        idx.append("rid_x".to_string(), vec_seed(1.0, 64), 10)
+            .unwrap();
+        assert!(
+            !idx.tombstone("rid_x", 5),
+            "stale tombstone must fall through to a marker, not hit in place"
+        );
+        let hits = idx.search(&vec_seed(1.0, 64), 4).unwrap();
+        assert!(
+            hits.iter().any(|(rid, _)| rid == "rid_x"),
+            "a lower-seq tombstone must not destroy a newer write"
+        );
+
+        // The legitimate direction is untouched: a delete minted AFTER the
+        // write still kills it.
+        assert!(idx.tombstone("rid_x", 11));
+        let hits = idx.search(&vec_seed(1.0, 64), 4).unwrap();
+        assert!(
+            !hits.iter().any(|(rid, _)| rid == "rid_x"),
+            "a newer tombstone must still suppress the rid"
+        );
     }
 
     #[test]
