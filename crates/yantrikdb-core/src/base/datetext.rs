@@ -234,28 +234,39 @@ pub fn merge_event_dates(metadata: &serde_json::Value, text: &str) -> serde_json
     if !m.is_object() {
         m = serde_json::Value::Object(Default::default());
     }
-    if let Some(obj) = m.as_object_mut() {
-        if !obj.contains_key("event_dates") {
-            obj.insert(
-                "event_dates".to_string(),
-                serde_json::Value::Array(
-                    dates
-                        .iter()
-                        .map(|d| serde_json::Value::String(d.iso.clone()))
-                        .collect(),
-                ),
-            );
-        }
-        if !obj.contains_key("event_time_min") {
-            obj.insert("event_time_min".to_string(), dates[0].epoch.into());
-        }
-        if !obj.contains_key("event_time_max") {
-            obj.insert(
-                "event_time_max".to_string(),
-                dates[dates.len() - 1].epoch.into(),
-            );
-        }
+    let Some(obj) = m.as_object_mut() else {
+        return m;
+    };
+    // The three keys are ONE unit, not three independent ones. Checking them
+    // separately produced a record whose fields contradicted each other: a
+    // caller passing `event_dates: []` got an empty list back AND a populated
+    // event_time_min, because the list key existed and the range keys did not.
+    // A consumer reading "no dates" beside "earliest date 2024-03-15" cannot
+    // tell which to believe, and inconsistent metadata is worse than absent
+    // metadata.
+    //
+    // So: if the caller supplied ANY of them they own all three, and nothing
+    // is inferred. Explicit knowledge beats anything read out of prose, and
+    // partial explicit knowledge still means the caller is managing this
+    // field themselves.
+    const KEYS: [&str; 3] = ["event_dates", "event_time_min", "event_time_max"];
+    if KEYS.iter().any(|k| obj.contains_key(*k)) {
+        return m;
     }
+    obj.insert(
+        "event_dates".to_string(),
+        serde_json::Value::Array(
+            dates
+                .iter()
+                .map(|d| serde_json::Value::String(d.iso.clone()))
+                .collect(),
+        ),
+    );
+    obj.insert("event_time_min".to_string(), dates[0].epoch.into());
+    obj.insert(
+        "event_time_max".to_string(),
+        dates[dates.len() - 1].epoch.into(),
+    );
     m
 }
 
@@ -334,6 +345,53 @@ mod tests {
     /// 587 is not a char boundary". Memory text is arbitrary user content: it
     /// WILL contain smart quotes, dashes, accents and emoji, and a panic on
     /// the write path loses the memory being saved.
+    /// REGRESSION, found by an independent review of this file. The three
+    /// event-time keys were checked INDEPENDENTLY, so a caller supplying only
+    /// one of them got a record whose fields contradicted each other:
+    /// `event_dates: []` came back empty AND `event_time_min` came back
+    /// populated from the prose. A consumer reading "no dates" beside
+    /// "earliest date 2024-03-15" cannot tell which to believe, and
+    /// inconsistent metadata is worse than absent metadata.
+    #[test]
+    fn partial_caller_keys_never_produce_contradictory_metadata() {
+        let text = "deadline is March 15, 2024";
+        for supplied in [
+            serde_json::json!({"event_dates": []}),
+            serde_json::json!({"event_time_min": 0.0}),
+            serde_json::json!({"event_time_max": 0.0}),
+            serde_json::json!({"event_dates": ["1999-01-01"]}),
+        ] {
+            let out = merge_event_dates(&supplied, text);
+            let o = out.as_object().unwrap();
+            let n = ["event_dates", "event_time_min", "event_time_max"]
+                .iter()
+                .filter(|k| o.contains_key(**k))
+                .count();
+            assert_eq!(
+                n, 1,
+                "caller supplied one key and owns all three; got {n} in {out:?}"
+            );
+        }
+    }
+
+    /// The clean path still works: no caller keys means all three are set and
+    /// they agree with each other.
+    #[test]
+    fn absent_caller_keys_produce_a_consistent_triple() {
+        let out = merge_event_dates(
+            &serde_json::json!({}),
+            "start January 15, 2024 and deadline March 15, 2024",
+        );
+        assert_eq!(
+            out["event_dates"],
+            serde_json::json!(["2024-01-15", "2024-03-15"])
+        );
+        let lo = out["event_time_min"].as_f64().unwrap();
+        let hi = out["event_time_max"].as_f64().unwrap();
+        assert!(lo < hi, "min must precede max");
+        assert_eq!(lo, extract_event_dates("January 15, 2024")[0].epoch);
+    }
+
     #[test]
     fn never_panics_on_multibyte_text() {
         let cases = [
