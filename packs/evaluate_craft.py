@@ -33,13 +33,14 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
 
-from compile import CRAFT_SYSTEM, craft_module  # noqa: E402
+from compile import craft_module, craft_system  # noqa: E402
 
 
-def ask(host: str, model: str, user: str, num_predict: int = 4000) -> str:
+def ask(host: str, model: str, user: str, num_predict: int = 4000,
+        system: str | None = None) -> str:
     payload = json.dumps({
         "model": model,
-        "messages": [{"role": "system", "content": CRAFT_SYSTEM},
+        "messages": [{"role": "system", "content": system or ""},
                      {"role": "user", "content": user}],
         "options": {"num_predict": num_predict, "temperature": 0.0},
     }).encode()
@@ -107,7 +108,7 @@ def main() -> int:
     results = {arm: [] for arm, _, _ in arms}
     for i, brief in enumerate(briefs, 1):
         for arm, model, wrap in arms:
-            raw = ask(a.host, model, wrap(brief))
+            raw = ask(a.host, model, wrap(brief), system=craft_system(W))
             p, n, res = W.grade_text(raw)
             results[arm].append({
                 "brief": brief, "passed": p, "total": n,

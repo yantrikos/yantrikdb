@@ -213,6 +213,26 @@ CRAFT_SYSTEM = (
     "complete theme.json content only — valid JSON, no prose, no code fence."
 )
 
+
+def craft_system(W) -> str:
+    """The system prompt for THIS pack — never another pack's.
+
+    One hardcoded CRAFT_SYSTEM was sent by all three call sites (trainer,
+    evaluator, repair loop), so motion-craft was trained and graded while
+    being told to reply with theme.json for an HTML artifact: the adapter
+    learned to ignore the instruction and the control arms met it cold,
+    which inflated the compiled-vs-context gap by an unknown amount.
+
+    A pack declares SYSTEM. If it does not, one is built from its own
+    ARTIFACT, so a new pack cannot inherit this failure by omission.
+    """
+    own = getattr(W, "SYSTEM", None)
+    if own:
+        return own
+    artifact = getattr(W, "ARTIFACT", "the requested artifact")
+    return (f"You are an expert in this domain. Reply with {artifact} only "
+            f"— no prose, no code fence.")
+
 # The constitution states rules as prose; the checklist restates the
 # mechanically-checked ones as JSON paths. The distinction is the webkit
 # experiment's finding — ops arm 12/12, both prose arms 0/6, and every
@@ -338,7 +358,10 @@ def do_synthesize_craft(pack: str, teacher: str, host: str | None,
     with ThreadPoolExecutor(max_workers=workers) as pool:
         for idx, brief, p, n, attempts, artifact in pool.map(one, enumerate(briefs, 1)):
             status = "ADMIT" if p == n and artifact else f"{p}/{n}"
+            # The row carries the pack's OWN system prompt, so training
+            # and serving cannot disagree about what was asked for.
             row = {"q": brief, "a": artifact, "craft": True,
+                   "system": craft_system(W),
                    "checks": f"{p}/{n}", "attempts": attempts}
             if p == n and artifact:
                 kept.append(row)
@@ -713,7 +736,11 @@ def do_train(pack: str, base: str, rank: int, alpha: int, epochs: int,
         # artifact will be generated under at eval. Mixing the two
         # system prompts across train/serve is the chat_prefix drift bug
         # in another costume.
-        system = CRAFT_SYSTEM if row.get("craft") else SYSTEM
+        # Prefer the prompt the row was SYNTHESISED under. Older craft
+        # datasets carry no `system` field, so they keep the historic
+        # constant and stay reproducible.
+        system = row.get("system") or (
+            CRAFT_SYSTEM if row.get("craft") else SYSTEM)
         prompt = chat_prefix(tok, [{"role": "system", "content": system},
                                    {"role": "user", "content": row["q"]}])
         p_ids = tok(prompt, add_special_tokens=False)["input_ids"]

@@ -81,6 +81,67 @@ Rules that pay for themselves:
   for collisions — a linear index map silently collapsed 72 intended
   combinations into 12.
 
+## 2b. Relations: the checks a band cannot express
+
+The generated test library was seven single-path predicates, each asking
+"is the value at this path acceptable?". That cannot see the defect these
+packs exist to catch — a document where **every number is inside its band
+and the numbers contradict each other**. A jump whose stated gravity
+disagrees with its own apex height passes fourteen band checks and is
+unusable.
+
+Three kinds close it (`packs/relations.py`):
+
+```json
+{"path": "jump.gravity", "test": "formula",
+ "args": {"expr": "2*h/(t/1000)**2",
+          "vars": {"h": "jump.height_px", "t": "jump.time_ms"}, "tol": 0.03}}
+
+{"path": "jump.fall_gravity", "test": "ratio_range",
+ "args": {"of": "jump.gravity", "min": 1.25, "max": 3.0}}
+
+{"path": "palette.ui_text", "test": "contrast_min",
+ "args": {"against": "palette.bg", "min": 4.5}}
+```
+
+`expr` is **not Python**. It is read by a recursive-descent parser whose
+entire grammar is numbers, the names declared in `vars`, `+ - * / **`,
+unary minus and brackets — no calls, no attributes, no unbound names.
+That preserves the property the fixed test library exists for: a model
+that never writes a checker cannot write a subtly broken one.
+
+**A `formula` is the third carrier arriving in the generated path.** A
+value that is a pure function of other values is emitted by code, so no
+model can get it wrong and no band check has to pretend it was a free
+choice. `ratio_range` plants the source times the midpoint ratio.
+`contrast_min` is asked and then validated, because a floor between two
+colours is checked, never planted.
+
+### Mark the numbers that are decisions
+
+```json
+{"path": "jump.coyote_ms", "test": "number_range",
+ "args": {"min": 60, "max": 160}, "expressive": true}
+```
+
+Without the flag a `number_range` is planted at its midpoint, on the
+reasoning that a number in a range is not a design decision. True for a
+spacing unit; **ruinous for a jump**. Measured: the same generated pack
+scored 9.0/14 while emitting byte-identical physics for all twelve
+briefs, and 12.8/14 with real per-brief variation once eight of its
+numbers were marked expressive. A pack that scores well while producing
+one artifact twelve times is a measurement that means nothing.
+
+### L9 — a relation that cannot be evaluated is worse than one that fails
+
+An unparseable expression makes a check **undecidable**, and an
+undecidable check leaves the denominator. The first pack generated with
+relations wrote `2 * vars.h / (vars.t / 1000) ** 2`, using the key of the
+`vars` map as an attribute. It did not parse, the check never ran, and
+the pack scored 11/11 — full marks on eleven of its twelve checks, with
+the most important one silently absent. `lint_craft.py` now parses every
+relation at authoring time and refuses the pack.
+
 ## 3. Compose the briefs
 
 Every brief should require the same mechanical skeleton so the checks
