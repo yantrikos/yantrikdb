@@ -508,8 +508,8 @@ pub(crate) fn apply_lane_quotas(
 /// `fts_sourced`), claims (`claims_match…`), graph (proximity or
 /// `graph-connected…`) — the same classification the explain path has
 /// always shown, now allowed to touch the score through the bounded
-/// [`agreement_mult`](scoring::agreement_mult) (max +12.5%, shared
-/// inversion budget with freshness and graph). Runs before keyword-slot
+/// [`agreement_mult`](scoring::agreement_mult) (max ~+3.5% at defaults:
+/// exp(ln 1.30 x 0.13), shared inversion budget with freshness and graph). Runs before keyword-slot
 /// reservation in BOTH recall paths so the reserve cutoff sees final
 /// scores; tags boosted rows so the boost itself is explainable.
 fn apply_lane_agreement(
@@ -733,7 +733,7 @@ impl YantrikDB {
 
         // Step 1: Vector candidate generation via HNSW
         // Fetch a large pool to ensure diverse, high-quality candidates survive MMR filtering.
-        let fetch_k = (top_k * 20).min(500);
+        let fetch_k = top_k.saturating_mul(20).min(500);
         // **Issue #41 brainstorm-4 §1.** Snapshot SearchState once for
         // the full recall path so the HNSW search sees the same
         // generation-anchored index every time it's queried within
@@ -1089,7 +1089,10 @@ impl YantrikDB {
         // FTS limit scales dynamically with database size.
         // FTS5 only works when encryption is disabled (the default).
         if !self.is_encrypted() {
-            const FTS_MIN_SIM: f64 = 0.05;
+            // Wired to tuning: YANTRIKDB_FTS_MIN_SIM (default 0.05). This was a
+            // local const while tuning parsed-and-fingerprinted the knob nobody
+            // read — the exact unwired-parameter failure tuning.rs exists to end.
+            let fts_min_sim: f64 = crate::base::tuning::tuning().fts_min_sim;
 
             const STOPWORDS: &[&str] = &[
                 "a", "an", "the", "is", "are", "am", "was", "were", "be", "been", "what", "who",
@@ -1632,7 +1635,7 @@ impl YantrikDB {
                                 ) as f64;
 
                                 let lex = lex_by_rid.get(rid.as_str()).copied().unwrap_or(0.0);
-                                if sim_score < FTS_MIN_SIM
+                                if sim_score < fts_min_sim
                                     && lex < crate::engine::lexical::LEX_STRONG
                                 {
                                     // Below the cosine noise floor AND not a
@@ -1741,7 +1744,9 @@ impl YantrikDB {
         if query_sentiment.abs() > 0.5 {
             const VALENCE_SCAN_THRESHOLD: f64 = 0.4; // min |valence| to consider
             const VALENCE_SCAN_MAX: usize = 30; // max new candidates
-            const VALENCE_MIN_SIM: f64 = 0.02; // very low floor — valence is the signal
+                                                // Wired to tuning: YANTRIKDB_VALENCE_MIN_SIM (default 0.02) — very low
+                                                // floor, valence is the signal.
+            let valence_min_sim: f64 = crate::base::tuning::tuning().valence_min_sim;
 
             let existing_rids: std::collections::HashSet<&str> =
                 scored.iter().map(|r| r.rid.as_str()).collect();
@@ -1808,7 +1813,7 @@ impl YantrikDB {
                     let sim_score =
                         crate::consolidate::cosine_similarity(query_embedding, &mem_emb) as f64;
 
-                    if sim_score < VALENCE_MIN_SIM {
+                    if sim_score < valence_min_sim {
                         continue;
                     }
 
@@ -1896,7 +1901,8 @@ impl YantrikDB {
             if let Some(qt) = query_text {
                 let best_score = scored.iter().map(|r| r.score).fold(0.0f64, f64::max);
                 const COLD_ACTIVATION_THRESHOLD: f64 = 0.55;
-                const COLD_MIN_SIM: f64 = 0.10;
+                // Wired to tuning: YANTRIKDB_COLD_MIN_SIM (default 0.10).
+                let cold_min_sim: f64 = crate::base::tuning::tuning().cold_min_sim;
                 const COLD_MAX_CANDIDATES: usize = 30;
 
                 if best_score < COLD_ACTIVATION_THRESHOLD {
@@ -2046,7 +2052,7 @@ impl YantrikDB {
                                     &mem_emb,
                                 ) as f64;
 
-                                if sim_score < COLD_MIN_SIM {
+                                if sim_score < cold_min_sim {
                                     continue;
                                 }
 
@@ -2286,7 +2292,7 @@ impl YantrikDB {
                         // document frequency (a hub entity is weak evidence)
                         // and by the consolidation penalty, scaled by the
                         // expansion strength. GRAPH_SCALE alone sets the
-                        // ceiling, so the uplift is at most +12.5%.
+                        // ceiling: ~+3.5% at defaults (ln 1.30 x 0.13).
                         let evidence = ((base_boost / MAX_BOOST_PER_MEMORY)
                             * prox
                             * best_idf
@@ -2524,9 +2530,12 @@ impl YantrikDB {
         // ranked by bm25 lexical strength with cosine as the fallback door
         // (engine/lexical.rs; the sim-only door starved exact-phrase matches).
         //
-        // The boost is minimal (just above cutoff). The real benefit comes from
-        // step 4 where keyword_reserved items are exempt from MMR diversity
-        // penalty, guaranteeing they survive into the final results.
+        // The boost is minimal (just above cutoff). NOTE the survival
+        // guarantee is PARTIAL: on the truncate branch reserved items sit at
+        // cutoff+epsilon and survive; inside the MMR branch they compete like
+        // any candidate (no exemption is implemented) and the 0.98 near-dup
+        // skip can drop them. Exempting them inside MMR is a behavior change
+        // that must be measured before shipping, not assumed here.
         if crate::engine::capture::enabled() {
             let mut lex: Vec<(&str, String)> = lex_by_rid
                 .iter()
@@ -2757,7 +2766,7 @@ impl YantrikDB {
                     .to_string(),
                 score_algebra: "score = w_sim*similarity*freshness_mult(decay,recency) * \
                                 importance_mult * valence_multiplier, plus additive lane boosts \
-                                (keyword, graph) and reserve/claims lifts to cutoff+eps. \
+                                (keyword; graph is MULTIPLICATIVE via graph_mult since 2026-08-13) and reserve/claims lifts to cutoff+eps. \
                                 scores.contributions are per-signal DIAGNOSTIC MAGNITUDES on \
                                 these mixed terms and do NOT sum to score — do not derive \
                                 arithmetic from them."
@@ -2775,7 +2784,7 @@ impl YantrikDB {
         // make each one's weight mean something different depending on what
         // the other did first, which is unsweepable.
         let novelty_w = crate::base::tuning::tuning().novelty_weight;
-        let min_pool_for_mmr = (top_k * 3).max(20);
+        let min_pool_for_mmr = top_k.saturating_mul(3).max(20);
         // Set-level re-selection.
         //
         // Needs TEXT, and step 5 below hydrates text only for the final
@@ -2800,7 +2809,9 @@ impl YantrikDB {
             );
         }
         if novelty_w > 0.0 && scored.len() > top_k {
-            let pool = scored.len().min((top_k * 10).max(min_pool_for_mmr));
+            let pool = scored
+                .len()
+                .min(top_k.saturating_mul(10).max(min_pool_for_mmr));
             scored.truncate(pool);
             let pool_rids: Vec<&str> = scored.iter().map(|r| r.rid.as_str()).collect();
             let pool_text = self.fetch_text_metadata_by_rids(&pool_rids)?;
@@ -2835,7 +2846,7 @@ impl YantrikDB {
 
         if novelty_w <= 0.0 && scored.len() > top_k && scored.len() >= min_pool_for_mmr {
             // Fetch embeddings for top candidates to compute pairwise similarity
-            let pool_size = scored.len().min(top_k * 10);
+            let pool_size = scored.len().min(top_k.saturating_mul(10));
             scored.truncate(pool_size);
 
             let pool_rids: Vec<&str> = scored.iter().map(|r| r.rid.as_str()).collect();
@@ -2862,7 +2873,10 @@ impl YantrikDB {
             // reward diversity (one right answer per query), so λ stays
             // below 1.0 on the strength of the near-duplicate UX case, not
             // that measurement.
-            const LAMBDA: f64 = 0.9;
+            // Wired to tuning: YANTRIKDB_MMR_LAMBDA (default 0.9, clamped 0..=1
+            // at parse). The hardcoded const made every λ sweep a silent no-op
+            // while the fingerprint stamped the env value as if it governed.
+            let lambda: f64 = crate::base::tuning::tuning().mmr_lambda;
             const SIM_THRESHOLD: f64 = 0.98; // skip only near-exact duplicates
 
             let mut selected: Vec<usize> = Vec::with_capacity(top_k);
@@ -2903,7 +2917,7 @@ impl YantrikDB {
                         continue;
                     }
 
-                    let mmr = LAMBDA * relevance - (1.0 - LAMBDA) * max_sim;
+                    let mmr = lambda * relevance - (1.0 - lambda) * max_sim;
                     if mmr > best_mmr {
                         best_mmr = mmr;
                         best_idx = Some(idx);
@@ -3323,7 +3337,9 @@ impl YantrikDB {
             0.0
         };
         let signal_diversity = sources_used.len() as f64 / 4.0; // max 4 sources
-        let signal_density = (results.len() as f64 / top_k as f64).min(1.0);
+                                                                // top_k.max(1): a caller-supplied top_k=0 would divide to NaN/Inf
+                                                                // and poison the confidence signal (not a panic — f64 — but garbage).
+        let signal_density = (results.len() as f64 / top_k.max(1) as f64).min(1.0);
 
         let confidence = (0.35 * signal_sim
             + 0.25 * signal_gap
@@ -3735,6 +3751,9 @@ impl YantrikDB {
                 namespace,
                 domain,
                 source,
+                None, // certainty_min — the public profiled surface has no
+                // certainty param; None = no floor, matching recall()
+                // when the caller sets none.
                 epoch0,
             )? {
                 return Ok(r);
@@ -3760,6 +3779,14 @@ impl YantrikDB {
         namespace: Option<&str>,
         domain: Option<&str>,
         source: Option<&str>,
+        // Added 2026-08-15: the 08-13 filter-integrity fix pasted
+        // passes_recall_filters(..certainty_min) calls into this copy while
+        // its signature never carried the parameter — the profiled build
+        // (--features profiling, built by no CI job) shipped uncompilable
+        // and stayed broken through several later commits. The duplicated
+        // pipeline receives fixes only when someone remembers; nothing
+        // checks. Until the copies are collapsed, profiling MUST be in CI.
+        certainty_min: Option<f64>,
         epoch0: u64,
     ) -> Result<Option<RecallProfiledResult>> {
         use std::time::Instant;
@@ -3774,7 +3801,7 @@ impl YantrikDB {
         // ── Phase 1: Vector search (HNSW) ──
         let t_vec = Instant::now();
         let ts = now();
-        let fetch_k = (top_k * 20).min(500);
+        let fetch_k = top_k.saturating_mul(20).min(500);
         // **Issue #41 brainstorm-4 §1.** SearchState snapshot for the
         // profiled-recall variant. Same generation-anchoring contract
         // as `recall_ranked`.
@@ -4039,7 +4066,10 @@ impl YantrikDB {
             std::collections::HashMap::new();
         let t_fts = Instant::now();
         if !self.is_encrypted() {
-            const FTS_MIN_SIM: f64 = 0.05;
+            // Wired to tuning: YANTRIKDB_FTS_MIN_SIM (default 0.05). This was a
+            // local const while tuning parsed-and-fingerprinted the knob nobody
+            // read — the exact unwired-parameter failure tuning.rs exists to end.
+            let fts_min_sim: f64 = crate::base::tuning::tuning().fts_min_sim;
 
             const STOPWORDS: &[&str] = &[
                 "a", "an", "the", "is", "are", "am", "was", "were", "be", "been", "what", "who",
@@ -4520,7 +4550,7 @@ impl YantrikDB {
                                 ) as f64;
 
                                 let lex = lex_by_rid.get(rid.as_str()).copied().unwrap_or(0.0);
-                                if sim_score < FTS_MIN_SIM
+                                if sim_score < fts_min_sim
                                     && lex < crate::engine::lexical::LEX_STRONG
                                 {
                                     // Below the cosine noise floor AND not a
@@ -4623,7 +4653,7 @@ impl YantrikDB {
         if query_sentiment.abs() > 0.5 {
             const VALENCE_SCAN_THRESHOLD: f64 = 0.4;
             const VALENCE_SCAN_MAX: usize = 30;
-            const VALENCE_MIN_SIM: f64 = 0.02;
+            let valence_min_sim: f64 = crate::base::tuning::tuning().valence_min_sim;
 
             let existing_rids: std::collections::HashSet<&str> =
                 scored.iter().map(|r| r.rid.as_str()).collect();
@@ -4679,7 +4709,7 @@ impl YantrikDB {
                     let sim_score =
                         crate::consolidate::cosine_similarity(query_embedding, &mem_emb) as f64;
 
-                    if sim_score < VALENCE_MIN_SIM {
+                    if sim_score < valence_min_sim {
                         continue;
                     }
 
@@ -4751,7 +4781,8 @@ impl YantrikDB {
             if let Some(qt) = query_text {
                 let best_score = scored.iter().map(|r| r.score).fold(0.0f64, f64::max);
                 const COLD_ACTIVATION_THRESHOLD: f64 = 0.55;
-                const COLD_MIN_SIM: f64 = 0.10;
+                // Wired to tuning: YANTRIKDB_COLD_MIN_SIM (default 0.10).
+                let cold_min_sim: f64 = crate::base::tuning::tuning().cold_min_sim;
                 const COLD_MAX_CANDIDATES: usize = 30;
 
                 if best_score < COLD_ACTIVATION_THRESHOLD {
@@ -4897,7 +4928,7 @@ impl YantrikDB {
                                     &mem_emb,
                                 ) as f64;
 
-                                if sim_score < COLD_MIN_SIM {
+                                if sim_score < cold_min_sim {
                                     continue;
                                 }
 
@@ -5132,7 +5163,7 @@ impl YantrikDB {
                         // document frequency (a hub entity is weak evidence)
                         // and by the consolidation penalty, scaled by the
                         // expansion strength. GRAPH_SCALE alone sets the
-                        // ceiling, so the uplift is at most +12.5%.
+                        // ceiling: ~+3.5% at defaults (ln 1.30 x 0.13).
                         let evidence = ((base_boost / MAX_BOOST_PER_MEMORY)
                             * prox
                             * best_idf
@@ -5324,7 +5355,7 @@ impl YantrikDB {
         // make each one's weight mean something different depending on what
         // the other did first, which is unsweepable.
         let novelty_w = crate::base::tuning::tuning().novelty_weight;
-        let min_pool_for_mmr = (top_k * 3).max(20);
+        let min_pool_for_mmr = top_k.saturating_mul(3).max(20);
         // Set-level re-selection.
         //
         // Needs TEXT, and step 5 below hydrates text only for the final
@@ -5347,7 +5378,9 @@ impl YantrikDB {
             );
         }
         if novelty_w > 0.0 && scored.len() > top_k {
-            let pool = scored.len().min((top_k * 10).max(min_pool_for_mmr));
+            let pool = scored
+                .len()
+                .min(top_k.saturating_mul(10).max(min_pool_for_mmr));
             scored.truncate(pool);
             let pool_rids: Vec<&str> = scored.iter().map(|r| r.rid.as_str()).collect();
             let pool_text = self.fetch_text_metadata_by_rids(&pool_rids)?;
@@ -5381,7 +5414,7 @@ impl YantrikDB {
         }
 
         if novelty_w <= 0.0 && scored.len() > top_k && scored.len() >= min_pool_for_mmr {
-            let pool_size = scored.len().min(top_k * 10);
+            let pool_size = scored.len().min(top_k.saturating_mul(10));
             scored.truncate(pool_size);
 
             let pool_rids: Vec<&str> = scored.iter().map(|r| r.rid.as_str()).collect();
@@ -5398,7 +5431,10 @@ impl YantrikDB {
 
             // λ = 0.9 (2026-08-05): see recall_inner's MMR block for the
             // production-clone measurement behind the raise from 0.7.
-            const LAMBDA: f64 = 0.9;
+            // Wired to tuning: YANTRIKDB_MMR_LAMBDA (default 0.9, clamped 0..=1
+            // at parse). The hardcoded const made every λ sweep a silent no-op
+            // while the fingerprint stamped the env value as if it governed.
+            let lambda: f64 = crate::base::tuning::tuning().mmr_lambda;
             const SIM_THRESHOLD: f64 = 0.98;
 
             let mut selected: Vec<usize> = Vec::with_capacity(top_k);
@@ -5436,7 +5472,7 @@ impl YantrikDB {
                         continue;
                     }
 
-                    let mmr = LAMBDA * relevance - (1.0 - LAMBDA) * max_sim;
+                    let mmr = lambda * relevance - (1.0 - lambda) * max_sim;
                     if mmr > best_mmr {
                         best_mmr = mmr;
                         best_idx = Some(idx);

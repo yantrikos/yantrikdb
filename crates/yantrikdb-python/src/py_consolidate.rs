@@ -179,7 +179,16 @@ fn dict_to_mem_with_embedding(d: &Bound<'_, PyDict>) -> PyResult<MemoryWithEmbed
         half_life,
         last_access,
         metadata,
-        namespace: "default".to_string(),
+        // Read from the dict, defaulting only when absent. The old hardcode
+        // was harmless solely because find_clusters ignores namespace — a
+        // landmine for any future per-namespace guard (silent cross-tenant
+        // merge). Read it now so the guard, when it comes, sees the truth.
+        namespace: d
+            .get_item("namespace")
+            .ok()
+            .flatten()
+            .and_then(|v| v.extract::<String>().ok())
+            .unwrap_or_else(|| "default".to_string()),
     })
 }
 

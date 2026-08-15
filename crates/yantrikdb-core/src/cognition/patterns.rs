@@ -138,7 +138,9 @@ fn mine_temporal_clusters(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<
 
             let mut description =
                 format!("Memories cluster around {label} ({} events)", bucket.len());
-            if mean_valence.abs() > 0.3 {
+            // Was a hardcoded 0.3 mirroring (and ignoring) the config knob
+            // of the same value — a sweep of it measured nothing.
+            if mean_valence.abs() > config.valence_trend_delta_threshold {
                 let tone = if mean_valence > 0.0 {
                     "positive"
                 } else {

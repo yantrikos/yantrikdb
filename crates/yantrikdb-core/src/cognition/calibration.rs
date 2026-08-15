@@ -405,8 +405,11 @@ impl CalibrationMap {
         }
     }
 
-    /// Record a prediction and its outcome.
-    pub fn record(&mut self, raw_confidence: f64, was_positive: bool) {
+    /// Record a prediction and its outcome. `refit_interval` comes from
+    /// [`LearningConfig::calibration_refit_interval`] — the hardcoded `% 50`
+    /// this replaces mirrored (and ignored) that knob, so sweeping it
+    /// measured nothing (2026-08-15 knob audit).
+    pub fn record(&mut self, raw_confidence: f64, was_positive: bool, refit_interval: u64) {
         let bin_idx = confidence_to_bin(raw_confidence);
         self.bins[bin_idx].count += 1;
         self.bins[bin_idx].sum_predicted += raw_confidence;
@@ -415,8 +418,8 @@ impl CalibrationMap {
         }
         self.total += 1;
 
-        // Mark for refit every 50 observations
-        if self.total % 50 == 0 {
+        // Mark for refit every `refit_interval` observations (config-owned).
+        if refit_interval > 0 && self.total % refit_interval == 0 {
             self.needs_refit = true;
         }
     }
@@ -728,13 +731,26 @@ impl Default for LearningConfig {
 /// This is the primary entry point — called after every user interaction
 /// with a suggestion/action.
 pub fn record_interaction(state: &mut LearningState, record: InteractionRecord, now: f64) {
+    record_interaction_with(state, record, now, &LearningConfig::default())
+}
+
+/// [`record_interaction`] with an explicit config, so the calibration refit
+/// interval knob actually governs. The bare variant uses defaults.
+pub fn record_interaction_with(
+    state: &mut LearningState,
+    record: InteractionRecord,
+    now: f64,
+    config: &LearningConfig,
+) {
     // 1. Update bandit for this action kind
     state.bandits.record(&record.action_kind, record.outcome);
 
     // 2. Update calibration map
-    state
-        .calibration
-        .record(record.raw_confidence, record.outcome.is_positive());
+    state.calibration.record(
+        record.raw_confidence,
+        record.outcome.is_positive(),
+        config.calibration_refit_interval,
+    );
 
     // 3. Buffer interaction for batch weight updates
     state.interaction_buffer.push(record);
@@ -1044,12 +1060,12 @@ mod tests {
 
         // High confidence predictions that succeed
         for _ in 0..10 {
-            cal.record(0.85, true);
+            cal.record(0.85, true, 50);
         }
 
         // Low confidence predictions that fail
         for _ in 0..10 {
-            cal.record(0.15, false);
+            cal.record(0.15, false, 50);
         }
 
         let high_bin = &cal.bins[8]; // 0.8-0.9
@@ -1067,8 +1083,8 @@ mod tests {
 
         // Well-calibrated: high confidence → high success, low → low success
         for _ in 0..20 {
-            cal.record(0.9, true);
-            cal.record(0.1, false);
+            cal.record(0.9, true, 50);
+            cal.record(0.1, false, 50);
         }
 
         cal.refit();
@@ -1115,10 +1131,10 @@ mod tests {
 
         // Perfect calibration: 80% confidence → 80% success
         for _ in 0..8 {
-            cal.record(0.85, true);
+            cal.record(0.85, true, 50);
         }
         for _ in 0..2 {
-            cal.record(0.85, false);
+            cal.record(0.85, false, 50);
         }
 
         let ece = cal.calibration_error();
@@ -1188,8 +1204,8 @@ mod tests {
 
         // Seed calibration data
         for _ in 0..20 {
-            state.calibration.record(0.8, true);
-            state.calibration.record(0.2, false);
+            state.calibration.record(0.8, true, 50);
+            state.calibration.record(0.2, false, 50);
         }
         state.calibration.refit();
 

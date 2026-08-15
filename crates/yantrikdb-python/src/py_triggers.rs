@@ -49,7 +49,7 @@ impl From<yantrikdb_core::Trigger> for PyTrigger {
 }
 
 #[pyfunction]
-#[pyo3(signature = (db, importance_threshold=0.5, decay_threshold=0.1, max_triggers=5))]
+#[pyo3(signature = (db, importance_threshold=0.5, decay_threshold=0.1, max_triggers=10))]
 pub fn check_decay_triggers(
     db: &PyYantrikDB,
     importance_threshold: f64,
@@ -82,7 +82,7 @@ pub fn check_consolidation_triggers(
 }
 
 #[pyfunction]
-#[pyo3(signature = (db, importance_threshold=0.5, decay_threshold=0.1, max_triggers=5))]
+#[pyo3(signature = (db, importance_threshold=0.5, decay_threshold=0.1, max_triggers=10))]
 pub fn check_all_triggers(
     db: &PyYantrikDB,
     importance_threshold: f64,

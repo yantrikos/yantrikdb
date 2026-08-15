@@ -880,7 +880,11 @@ fn truncate(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+        // Truncate by CHAR, not byte: `&s[..n]` panics when byte n lands
+        // inside a multibyte char (emoji/accent straddling the cut). The
+        // saturating_sub guards the underflow but not the boundary.
+        let take = max_len.saturating_sub(3);
+        format!("{}...", s.chars().take(take).collect::<String>())
     }
 }
 

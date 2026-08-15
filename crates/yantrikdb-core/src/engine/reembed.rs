@@ -251,11 +251,13 @@ pub struct ReembedOptions {
     /// HNSW efSearch override. `None` preserves current.
     pub hnsw_ef_search: Option<u32>,
 
-    /// If `true` (default) and a previous reembed was interrupted at
-    /// Encoding/Rebuilding phase, `open()` resumes from the recorded
-    /// checkpoint. If `false`, `open()` rolls back the partial work
-    /// and clears `meta.reembed_state`. Swapping/Verifying always
-    /// complete forward (past the point of no return).
+    /// NOT IMPLEMENTED — `open()` unconditionally discards interrupted
+    /// staging; no code reads a checkpoint. The field previously defaulted
+    /// `true` and promised resume in this very doc-comment (2026-08-15
+    /// knob audit). It now defaults `false`, and `reembed()` errors if set,
+    /// so the missing capability is loud instead of a silently broken
+    /// promise. Kept (rather than deleted) so implementing real resume is
+    /// an additive change for callers already passing the field.
     pub resume_from_checkpoint: bool,
 
     /// If `true`, run Probing only and return without writing
@@ -275,7 +277,7 @@ impl Default for ReembedOptions {
             hnsw_m: None,
             hnsw_ef_construction: None,
             hnsw_ef_search: None,
-            resume_from_checkpoint: true,
+            resume_from_checkpoint: false,
             dry_run: false,
         }
     }
@@ -607,6 +609,27 @@ impl YantrikDB {
         new_embedder_name: &str,
         options: ReembedOptions,
     ) -> Result<ReembedReport> {
+        // Two options were parsed, defaulted, stamped into durable state,
+        // and honored by NO code (2026-08-15 knob audit) — the exact shape
+        // of the maintenance dry_run incident. Until they are implemented,
+        // asking for them errors instead of silently granting the opposite:
+        // an operator choosing Pause must not get Queue semantics, and a
+        // caller relying on checkpoint resume must learn it does not exist
+        // BEFORE an interrupted 1M-row reembed discards all its work.
+        if matches!(options.write_policy, ReembedWritePolicy::Pause) {
+            return Err(YantrikDbError::InvalidInput(
+                "ReembedWritePolicy::Pause is not implemented — concurrent                  writes would be QUEUED, not rejected. Use Queue explicitly,                  or quiesce writers at the application layer."
+                    .to_string(),
+            ));
+        }
+        // resume_from_checkpoint now defaults false (see ReembedOptions);
+        // explicitly requesting it must fail rather than silently restart.
+        if options.resume_from_checkpoint {
+            return Err(YantrikDbError::InvalidInput(
+                "resume_from_checkpoint is not implemented — open() discards                  interrupted staging and a re-run starts from scratch. Set it                  false (the default) and re-run the full reembed."
+                    .to_string(),
+            ));
+        }
         // **Issue #41 brainstorm-4 — Phase 2 part A.**
         // Resolve the new embedder by name via the embedder-download
         // registry, then delegate to the internal entrypoint that
@@ -787,7 +810,7 @@ impl YantrikDB {
             let n: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM memories \
-                     WHERE consolidation_status = 'active' \
+                     WHERE consolidation_status IN ('active','consolidated') \
                        AND embedding IS NOT NULL \
                        AND COALESCE(embedding_generation, 0) < ?1",
                     params![next_generation as i64],
@@ -892,7 +915,7 @@ impl YantrikDB {
                 let conn = self.read_conn();
                 let mut stmt = conn.prepare(
                     "SELECT rid, text FROM memories \
-                     WHERE consolidation_status = 'active' \
+                     WHERE consolidation_status IN ('active','consolidated') \
                        AND embedding IS NOT NULL \
                        AND COALESCE(embedding_generation, 0) < ?1 \
                      ORDER BY rid \
@@ -1066,7 +1089,7 @@ impl YantrikDB {
                 let conn = self.read_conn();
                 let mut stmt = conn.prepare(
                     "SELECT rid, embedding_new FROM memories \
-                     WHERE consolidation_status = 'active' \
+                     WHERE consolidation_status IN ('active','consolidated') \
                        AND embedding_new IS NOT NULL \
                      ORDER BY rid \
                      LIMIT ?1 OFFSET ?2",
@@ -1109,6 +1132,15 @@ impl YantrikDB {
                     namespace: options.namespace.clone(),
                 });
             }
+        }
+
+        // Every bulk build ends with the connectivity repair (the in-degree
+        // guard during pruning is local and can leave islands); this rebuild
+        // was the one bulk path without it, so a record could survive
+        // re-encoding and still be unreachable in the new index.
+        let rescued = new_hnsw.ensure_all_reachable();
+        if rescued > 0 {
+            tracing::warn!(rescued, "reembed rebuild reconnected unreachable nodes");
         }
 
         self.write_reembed_event(
@@ -1193,7 +1225,7 @@ impl YantrikDB {
             let conn = self.read_conn();
             let mut stmt = conn.prepare(
                 "SELECT rid, text FROM memories \
-                 WHERE consolidation_status = 'active' \
+                 WHERE consolidation_status IN ('active','consolidated') \
                    AND embedding IS NOT NULL \
                    AND embedding_new IS NULL \
                    AND COALESCE(embedding_generation, 0) < ?1",
@@ -1374,7 +1406,7 @@ impl YantrikDB {
             let conn = self.read_conn();
             conn.query_row(
                 "SELECT COUNT(*) FROM memories \
-                 WHERE consolidation_status = 'active' \
+                 WHERE consolidation_status IN ('active','consolidated') \
                    AND embedding IS NOT NULL \
                    AND COALESCE(embedding_generation, 0) < ?1",
                 params![next_generation as i64],
@@ -1667,7 +1699,10 @@ mod tests {
         assert!(opts.hnsw_m.is_none());
         assert!(opts.hnsw_ef_construction.is_none());
         assert!(opts.hnsw_ef_search.is_none());
-        assert!(opts.resume_from_checkpoint);
+        // Flipped 2026-08-15: the old default `true` promised checkpoint
+        // resume that no code implemented; the honest default is false and
+        // reembed() refuses an explicit true.
+        assert!(!opts.resume_from_checkpoint);
         assert!(!opts.dry_run);
     }
 

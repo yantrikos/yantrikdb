@@ -689,6 +689,22 @@ impl YantrikDB {
         // (replay-safe: no double-emit on idempotent re-apply).
         if was_newly_tombstoned {
             self.graph_index.write().unlink_memory(rid);
+            // The DURABLE half of the unlink. The in-memory unlink alone
+            // left memory_entities rows behind, and the graph-index rebuild
+            // loads them with no tombstone filter — so every restart (or
+            // maintenance rebuild) resurrected the forgotten record's
+            // links: graph expansion re-proposed it, entity hints named
+            // it, and only the scoring-cache absence hid it — protection
+            // by coincidence. correct() got both halves (its resync at the
+            // revision path); forget() had only this one. 2026-08-15
+            // surface audit.
+            {
+                let conn = self.conn();
+                conn.execute(
+                    "DELETE FROM memory_entities WHERE memory_rid = ?1",
+                    rusqlite::params![rid],
+                )?;
+            }
             self.cache_remove(rid);
 
             // **Issue #48.** Mark record_links touching this rid as broken
@@ -982,14 +998,17 @@ impl YantrikDB {
         let new_importance_val = new_importance.unwrap_or(cur_importance);
         let new_valence_val = new_valence.unwrap_or(cur_valence);
         let new_text_val: String = match new_text {
-            // Re-verified equal to current above.
-            Some(t) => t.to_string(),
+            // Re-verified equal to current above. Sanitized like every
+            // record surface — correct() was the one remaining path that
+            // could persist a tool-call artifact tail (2026-08-15 surface
+            // audit).
+            Some(t) => crate::engine::sanitize::sanitize_tool_call_artifacts(t).into_owned(),
             None => self.decrypt_text(&cur_stored_text)?,
         };
         let cur_metadata_plain = self.decrypt_text(&cur_stored_metadata)?;
         let cur_metadata_val: serde_json::Value =
             serde_json::from_str(&cur_metadata_plain).unwrap_or(serde_json::Value::Null);
-        let new_metadata_val: serde_json::Value = match metadata_merge {
+        let mut new_metadata_val: serde_json::Value = match metadata_merge {
             Some(patch) => {
                 let mut merged = cur_metadata_val.clone();
                 if let (Some(obj), Some(patch_obj)) = (merged.as_object_mut(), patch.as_object()) {
@@ -1003,6 +1022,31 @@ impl YantrikDB {
             }
             None => cur_metadata_val.clone(),
         };
+        // EVENT TIME follows the text. Correct "March 15" to "April 20" and
+        // the extracted event keys said March forever — metadata
+        // contradicting its own text, the exact class 00edc87 closed for
+        // partial caller keys, missed on the one surface that rewrites text
+        // (2026-08-15 surface audit). On a text change the three keys are
+        // re-derived AS ONE UNIT from the corrected prose — unless this very
+        // correction's metadata_merge supplies any of them, in which case
+        // the caller owns all three (the merge_event_dates ownership rule).
+        if text_changes {
+            let caller_owns_event_keys =
+                metadata_merge.and_then(|p| p.as_object()).is_some_and(|p| {
+                    ["event_dates", "event_time_min", "event_time_max"]
+                        .iter()
+                        .any(|k| p.contains_key(*k))
+                });
+            if !caller_owns_event_keys {
+                if let Some(obj) = new_metadata_val.as_object_mut() {
+                    for k in ["event_dates", "event_time_min", "event_time_max"] {
+                        obj.remove(k);
+                    }
+                }
+                new_metadata_val =
+                    crate::base::datetext::merge_event_dates(&new_metadata_val, &new_text_val);
+            }
+        }
         // **v0.10 Item 4a.4b — anti-laundering gate on the correction path
         // (T06 fan-out).** A `metadata_merge` can flip `kind` to fact/observation
         // on an inference-sourced record, so the gate must see the FINAL MERGED
@@ -1625,6 +1669,29 @@ impl YantrikDB {
                         }
                         None => prior_meta_val.clone(),
                     };
+                    // EVENT TIME follows the corrected text — on THIS path,
+                    // because `text_changes` dispatches here before the
+                    // scalar-path block runs (the same dispatch trap the
+                    // anti-laundering gate below documents; the scalar-path
+                    // twin of this block is defensive only). Re-derive the
+                    // three keys as ONE UNIT from the new prose unless this
+                    // correction's own metadata_merge supplies any of them.
+                    let mut new_metadata_val = new_metadata_val;
+                    let caller_owns_event_keys =
+                        metadata_merge.and_then(|p| p.as_object()).is_some_and(|p| {
+                            ["event_dates", "event_time_min", "event_time_max"]
+                                .iter()
+                                .any(|k| p.contains_key(*k))
+                        });
+                    if !caller_owns_event_keys {
+                        if let Some(obj) = new_metadata_val.as_object_mut() {
+                            for k in ["event_dates", "event_time_min", "event_time_max"] {
+                                obj.remove(k);
+                            }
+                        }
+                        new_metadata_val =
+                            crate::base::datetext::merge_event_dates(&new_metadata_val, new_text);
+                    }
                     // **Anti-laundering gate — the text-changing correction was
                     // a BYPASS (found while wiring 4a.6b).** 4a.4b gated the
                     // scalar-only path (correct_impl), but `text_changes`

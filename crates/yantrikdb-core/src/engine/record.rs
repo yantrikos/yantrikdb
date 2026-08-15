@@ -920,6 +920,23 @@ impl YantrikDB {
             .map(|i| sanitize::sanitize_tool_call_artifacts(&i.text))
             .collect();
 
+        // EVENT TIME, on the batch surface too. merge_event_dates was wired
+        // into record() and record_text() as "the fix for the category", but
+        // the engine has THREE ingest surfaces that store caller text, and a
+        // batch-ingested "deadline March 15, 2024" was getting no event keys
+        // while the identical text through record() did. Merged from the
+        // SANITIZED text, exactly as record() orders it, and used everywhere
+        // downstream that record() would use it: the digest (so a keyed
+        // retry across surfaces is the SAME payload, not a false conflict),
+        // the stored row, and the replicated op payload.
+        let merged_metas: Vec<serde_json::Value> = inputs
+            .iter()
+            .zip(sanitized_texts.iter())
+            .map(|(input, text)| {
+                crate::base::datetext::merge_event_dates(&input.metadata, text.as_ref())
+            })
+            .collect();
+
         // ── 4a.6d-2b: per-item idempotency, prevalidated with everything else ──
         //
         // Digests are the canonical RAW payload exactly as
@@ -965,6 +982,7 @@ impl YantrikDB {
                 );
                 view.namespace = namespaces[i];
                 view.text = sanitized_texts[i].as_ref();
+                view.metadata = &merged_metas[i];
                 let digest = crate::payload_digest::payload_digest(&view);
                 match first_by_key.entry((namespaces[i], key)) {
                     std::collections::hash_map::Entry::Occupied(e) => {
@@ -1288,7 +1306,7 @@ impl YantrikDB {
                 // payload, exactly as record() routes it.
                 let ts = input.created_at.unwrap_or_else(now);
                 let emb_blob = serialize_f32(&input.embedding);
-                let meta_str = serde_json::to_string(&input.metadata)?;
+                let meta_str = serde_json::to_string(&merged_metas[idx])?;
 
                 // 4a.6b: calibrate under the savepoint. The `_on` variant
                 // reads through the HELD guard — calling the locking wrapper
@@ -1351,7 +1369,7 @@ impl YantrikDB {
                     "importance": calibrated,
                     "valence": input.valence,
                     "half_life": input.half_life,
-                    "metadata": input.metadata,
+                    "metadata": merged_metas[idx],
                     "created_at": ts,
                     "updated_at": ts,
                     "namespace": namespaces[idx],
@@ -1581,6 +1599,64 @@ impl YantrikDB {
                         emotional_state: input.emotional_state.clone(),
                     },
                 );
+            }
+        }
+
+        // Loop C+D for the batch surface — relation extraction + claim
+        // ingestion, POST-COMMIT. The batch's inline extraction populated
+        // entities and memory_entities but never ingested claims, so every
+        // batch-written memory was invisible to the claims retrieval lane
+        // forever (2026-08-15 surface audit; the loop was added to the
+        // async path only). Post-commit on purpose: ingest_claim takes the
+        // connection lock, and inside the held savepoint that is the #83
+        // same-thread deadlock. Best-effort like the async path, but a
+        // failure is WARNED, never swallowed silently.
+        for (idx, (rid, linkage)) in rid_slots.iter().zip(per_memory_linkage.iter()).enumerate() {
+            let (Some(rid), Some((heuristic, _))) = (rid, linkage) else {
+                continue;
+            };
+            let relations =
+                crate::graph::extract_heuristic_relations(sanitized_texts[idx].as_ref(), heuristic);
+            for rel in &relations {
+                // Same existence check as the async path (stats.rs Loop
+                // C+D): re-ingesting a known heuristic relation churns
+                // claims without adding information.
+                let already_exists = {
+                    let conn = self.conn();
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM edges WHERE src = ?1 AND rel_type = ?2 AND dst = ?3                          AND namespace = ?4 AND extractor = 'heuristic_v1' AND tombstoned = 0",
+                        params![rel.src, rel.rel_type, rel.dst, namespaces[idx]],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0)
+                        > 0
+                };
+                if already_exists {
+                    continue;
+                }
+                if let Err(e) = self.ingest_claim(
+                    &rel.src,
+                    &rel.rel_type,
+                    &rel.dst,
+                    namespaces[idx],
+                    rel.polarity,
+                    &rel.modality,
+                    None,
+                    None,
+                    "heuristic_v1",
+                    Some("1.0"),
+                    &rel.confidence_band,
+                    Some(rid),
+                    None,
+                    None,
+                    1.0,
+                ) {
+                    tracing::warn!(
+                        rid = %rid,
+                        error = %e,
+                        "batch claims ingestion failed — claims lane will miss this relation"
+                    );
+                }
             }
         }
 

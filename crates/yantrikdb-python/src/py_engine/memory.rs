@@ -480,7 +480,12 @@ impl PyYantrikDB {
                     None,  // time_window
                     None,  // memory_type
                     false, // include_consolidated
-                    true,  // expand_entities — binding behavior, see note
+                    false, // expand_entities — aligned with the engine default 2026-08-15:
+                    // graph expansion measured −0.24 MRR on the production
+                    // corpus, the engine and recall() default false, and
+                    // these surfaces were a silent per-entry-point quality
+                    // fork (the "transport divergence" note documented the
+                    // fork instead of closing it).
                     Some(query),
                     skip_reinforce,
                     namespace,
@@ -511,7 +516,12 @@ impl PyYantrikDB {
                 None,  // time_window
                 None,  // memory_type
                 false, // include_consolidated
-                true,  // expand_entities — binding behavior, see note
+                false, // expand_entities — aligned with the engine default 2026-08-15:
+                // graph expansion measured −0.24 MRR on the production
+                // corpus, the engine and recall() default false, and
+                // these surfaces were a silent per-entry-point quality
+                // fork (the "transport divergence" note documented the
+                // fork instead of closing it).
                 Some(query),
                 skip_reinforce,
                 namespace,
@@ -531,7 +541,7 @@ impl PyYantrikDB {
     }
 
     /// Recall with response including confidence scoring and refinement hints.
-    #[pyo3(signature = (query=None, query_embedding=None, top_k=10, time_window=None, memory_type=None, include_consolidated=false, expand_entities=true, skip_reinforce=false, namespace=None, domain=None, source=None))]
+    #[pyo3(signature = (query=None, query_embedding=None, top_k=10, time_window=None, memory_type=None, include_consolidated=false, expand_entities=false, skip_reinforce=false, namespace=None, domain=None, source=None))]
     fn recall_with_response(
         &self,
         py: Python<'_>,
@@ -1036,7 +1046,7 @@ impl PyYantrikDB {
 
     /// Recall with record-link expansion. `expand_links` is the hop budget
     /// (0 = identical to recall()). Mirrors `recall()` args otherwise.
-    #[pyo3(signature = (query=None, query_embedding=None, top_k=10, expand_links=1, time_window=None, memory_type=None, include_consolidated=false, expand_entities=true, skip_reinforce=false, namespace=None, domain=None, source=None, certainty_min=None, order=None))]
+    #[pyo3(signature = (query=None, query_embedding=None, top_k=10, expand_links=1, time_window=None, memory_type=None, include_consolidated=false, expand_entities=false, skip_reinforce=false, namespace=None, domain=None, source=None, certainty_min=None, order=None))]
     #[allow(clippy::too_many_arguments)]
     fn recall_with_links(
         &self,
@@ -1392,7 +1402,11 @@ impl PyYantrikDB {
     fn run_learning(&self) -> PyResult<String> {
         let db = self.get_inner()?;
         let report = db.run_learning().map_err(map_err)?;
-        Ok(serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string()))
+        serde_json::to_string(&report).map_err(|e| {
+            // Never report "{}" for an operation that ran — the caller
+            // cannot tell "ran, report lost" from "did nothing".
+            pyo3::exceptions::PyRuntimeError::new_err(format!("result serialization failed: {e}"))
+        })
     }
 
     /// v0.10 Item 2 — the most recent learning report (JSON), or None

@@ -118,12 +118,12 @@ pub(crate) fn claims_candidates(
 }
 
 impl super::YantrikDB {
-    /// Apply the claims lane to a recall candidate pool: boost pool
-    /// members whose records back a claim about a query entity, and
-    /// admit source records the vector/FTS lanes missed. The boost is
-    /// keyword-strength at full lexical weight (lex = 1.0) — a claim is
-    /// exact evidence, stronger than any term statistic — and the
-    /// `claims_match:` why makes the candidate keyword-reserve-eligible
+    /// Apply the claims lane to a recall candidate pool: STAMP pool
+    /// members whose records back a claim about a query entity (the
+    /// `claims_match:` why — provenance only, NO score boost; fix (c)
+    /// removed the boost this doc once promised), and admit source
+    /// records the vector/FTS lanes missed at plain composite score.
+    /// The stamp's value is keyword-reserve eligibility at lex = 1.0
     /// (see `lexical::apply_keyword_reserve`), the same rescue
     /// guarantee that flipped the exact-phrase repro.
     ///

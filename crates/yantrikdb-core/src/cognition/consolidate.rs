@@ -66,7 +66,7 @@ pub fn find_clusters(
     let mut used = HashSet::new();
     let mut clusters: Vec<Vec<usize>> = Vec::new();
 
-    for &i in &indices {
+    for (seed_pos, &i) in indices.iter().enumerate() {
         if used.contains(&i) {
             continue;
         }
@@ -74,8 +74,17 @@ pub fn find_clusters(
         let mut cluster = vec![i];
         used.insert(i);
 
-        for &j in &indices {
-            if j <= i || used.contains(&j) {
+        // Candidates are the records LATER in the time order — indexed by
+        // POSITION, not by raw index value. The old `j <= i` compared the
+        // memory-index values, so clustering depended on storage order:
+        // on any corpus where created_at != insertion order (event-time,
+        // historical import, replication) it silently under-clustered, and
+        // mine_topic_clusters (rows fed DESC) returned ZERO clusters for
+        // every distinct-timestamp input. `used` already prevents
+        // re-seeding and cosine is symmetric, so position-after-seed is the
+        // correct and complete candidate set.
+        for &j in &indices[seed_pos + 1..] {
+            if used.contains(&j) {
                 continue;
             }
 
@@ -434,6 +443,18 @@ pub fn find_consolidation_candidates(
         )
         .collect::<Result<Vec<_>>>()?;
 
+    // Derived summaries are OUTPUTS of consolidation, never inputs. A
+    // summary is by construction similar to its own still-live sources, so
+    // without this filter the next automatic (destructive) pass clusters
+    // them together and retires summary AND sources — silently undoing the
+    // additive `summarize_cluster` guarantee — and the additive pass
+    // re-summarizes its own summaries into churn. Sources alone may still
+    // cluster; that is ordinary consolidation.
+    let memories: Vec<MemoryWithEmbedding> = memories
+        .into_iter()
+        .filter(|m| m.metadata.get("consolidated_from").is_none())
+        .collect();
+
     // Load memory→entities map (single query) so the entity-overlap guard
     // can prune false-positive pairs before cosine clustering.
     let entities_by_rid: Option<HashMap<String, HashSet<String>>> = if require_entity_overlap {
@@ -729,6 +750,41 @@ fn commit_consolidation(
 mod tests {
     use super::*;
 
+    /// find_clusters must cluster by POSITION in the time order, not by raw
+    /// index value. Before 2026-08-15 the `j <= i` pair-filter compared
+    /// index VALUES, so on a corpus where created_at != insertion order
+    /// (here: reverse) every cluster collapsed to a singleton — the bug
+    /// that made mine_topic_clusters return zero topics for real data.
+    #[test]
+    fn clusters_by_time_position_not_index_value() {
+        // Five identical embeddings (all similar), created_at DESCENDING by
+        // index — the reverse permutation that fired the bug.
+        let emb = vec![1.0f32, 0.0, 0.0, 0.0];
+        let mems: Vec<MemoryWithEmbedding> = (0..5)
+            .map(|i| MemoryWithEmbedding {
+                rid: format!("m{i}"),
+                memory_type: "episodic".to_string(),
+                text: format!("note {i}"),
+                embedding: emb.clone(),
+                created_at: 500.0 - i as f64 * 100.0,
+                importance: 0.5,
+                valence: 0.0,
+                half_life: 604800.0,
+                last_access: 0.0,
+                metadata: serde_json::Value::Null,
+                namespace: "default".to_string(),
+            })
+            .collect();
+        let clusters = find_clusters(&mems, None, 0.9, f64::MAX, 2, 100);
+        // All five are mutually similar and within the window → ONE cluster
+        // of all five. The bug produced five singletons (returned as none,
+        // since min_cluster_size=2).
+        assert_eq!(clusters.len(), 1, "expected one cluster, got {clusters:?}");
+        assert_eq!(clusters[0].len(), 5, "all five records must cluster");
+    }
+
+    use super::*;
+
     #[test]
     fn cosine_similarity_guards_nan_and_zero_norms() {
         // Issue #62 defect B: the pre-#60 `== 0.0` guard let NaN norms
@@ -954,6 +1010,34 @@ mod additive_summary_tests {
             let m = db.get_memory(r).unwrap().unwrap();
             assert_eq!(m.consolidation_status, "active", "source {r} was retired");
             assert!((m.importance - 0.8).abs() < 1e-6, "source {r} was demoted");
+        }
+    }
+
+    /// A derived summary must never become a clustering INPUT: it is
+    /// similar to its own live sources by construction, so the automatic
+    /// (destructive) pass would cluster them together and retire summary
+    /// AND sources — undoing the additive guarantee silently. Sources
+    /// alone staying clusterable is ordinary consolidation and fine.
+    #[test]
+    fn derived_summaries_are_never_clustering_inputs() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        // Identical embeddings so the pair is a guaranteed cluster.
+        let rids = seed(
+            &db,
+            &["set up the database schema", "configured the local server"],
+        );
+        super::summarize_cluster(&db, &rids, "Initial project setup", Some(&vec![0.5f32; 8]))
+            .unwrap();
+        let clusters =
+            super::find_consolidation_candidates(&db, 0.0, f64::MAX, 2, 100, false).unwrap();
+        for cluster in &clusters {
+            for m in cluster {
+                assert!(
+                    m.metadata.get("consolidated_from").is_none(),
+                    "summary {} offered as a clustering input",
+                    m.rid
+                );
+            }
         }
     }
 

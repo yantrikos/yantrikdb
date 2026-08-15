@@ -55,6 +55,14 @@ pub struct MaintenanceCycleConfig {
     pub split_min_chars: usize,
     /// Repair leaked tool-call artifacts in the corpus (one-off; opt-in).
     pub repair_artifacts: bool,
+    /// Preview mode: dry-capable passes run dry; passes with no dry form
+    /// (think's consolidation, entity backfill, split, repair) are SKIPPED
+    /// rather than quietly run wet, and the summary is NOT persisted as the
+    /// last cycle. Added 2026-08-15 after the MCP layer accepted and
+    /// documented a dry_run parameter no layer below implemented — a "dry"
+    /// call auto-resolved 15 conflicts and tombstoned 13 live records on a
+    /// production store.
+    pub dry_run: bool,
 }
 
 impl Default for MaintenanceCycleConfig {
@@ -71,6 +79,7 @@ impl Default for MaintenanceCycleConfig {
             split_oversized: false,
             split_min_chars: 1500,
             repair_artifacts: false,
+            dry_run: false,
         }
     }
 }
@@ -113,7 +122,9 @@ impl YantrikDB {
         };
 
         // Detect first: consolidation + conflict scan + trigger expiry.
-        if config.run_think {
+        // No dry form exists for think (consolidation writes, conflict scan
+        // writes conflict rows), so in preview it is skipped outright.
+        if config.run_think && !config.dry_run {
             match self.think(&ThinkConfig::default()) {
                 Ok(tr) => {
                     report.think_consolidations = Some(tr.consolidation_count);
@@ -128,12 +139,18 @@ impl YantrikDB {
         // memory↔entity links the at-write (materializer) extraction missed,
         // then refresh the in-memory graph index so recall's expand_entities
         // sees them.
-        if config.backfill_entities {
+        if config.backfill_entities && !config.dry_run {
             match self.backfill_memory_entities() {
                 Ok(n) => {
                     report.entities_linked = Some(n);
                     if n > 0 {
-                        let _ = self.rebuild_graph_index();
+                        // Entities were just committed; a failed index
+                        // rebuild means recall serves a stale graph while
+                        // the report shows entities_linked = n. The errors
+                        // vec exists for exactly this.
+                        if let Err(e) = self.rebuild_graph_index() {
+                            report.errors.push(format!("graph_index: {e}"));
+                        }
                     }
                 }
                 Err(e) => report.errors.push(format!("entities: {e}")),
@@ -142,7 +159,7 @@ impl YantrikDB {
 
         // Raise edge density: relate entities that co-occur in a memory.
         if config.auto_relate {
-            match self.auto_relate(false, config.max_auto_relate_edges) {
+            match self.auto_relate(config.dry_run, config.max_auto_relate_edges) {
                 Ok(r) => report.relations_upserted = Some(r.edges_upserted),
                 Err(e) => report.errors.push(format!("auto_relate: {e}")),
             }
@@ -150,48 +167,51 @@ impl YantrikDB {
 
         // Then resolve the conflicts think (and prior writes) surfaced.
         if config.burn_down_conflicts {
-            match self.auto_resolve_conflicts(false) {
+            match self.auto_resolve_conflicts(config.dry_run) {
                 Ok(r) => report.conflicts = Some(r),
                 Err(e) => report.errors.push(format!("conflicts: {e}")),
             }
         }
 
         if config.prune_triggers {
-            match self.prune_triggers(false, config.max_pending_triggers) {
+            match self.prune_triggers(config.dry_run, config.max_pending_triggers) {
                 Ok(r) => report.triggers = Some(r),
                 Err(e) => report.errors.push(format!("triggers: {e}")),
             }
         }
 
         if config.recalibrate_importance {
-            match self.recalibrate_unused_importance(false) {
+            match self.recalibrate_unused_importance(config.dry_run) {
                 Ok(r) => report.importance = Some(r),
                 Err(e) => report.errors.push(format!("importance: {e}")),
             }
         }
 
         if config.split_oversized {
-            match self.split_oversized_episodes(false, config.split_min_chars) {
+            match self.split_oversized_episodes(config.dry_run, config.split_min_chars) {
                 Ok(r) => report.split = Some(r),
                 Err(e) => report.errors.push(format!("split: {e}")),
             }
         }
 
         if config.repair_artifacts {
-            match self.repair_tool_call_artifacts(false) {
+            match self.repair_tool_call_artifacts(config.dry_run) {
                 Ok(r) => report.repair = Some(r),
                 Err(e) => report.errors.push(format!("repair: {e}")),
             }
         }
 
         // Persist the last-run summary so stats / the boot digest can show
-        // when hygiene last ran and what it did.
-        if let Ok(summary) = serde_json::to_string(&report) {
-            let conn = self.conn();
-            let _ = conn.execute(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_maintenance_cycle', ?1)",
-                rusqlite::params![summary],
-            );
+        // when hygiene last ran and what it did. A preview is not a cycle:
+        // persisting it would let a dry call masquerade as real hygiene.
+        if !config.dry_run {
+            if let Ok(summary) = serde_json::to_string(&report) {
+                let conn = self.conn();
+                let _ = conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_maintenance_cycle', ?1)",
+                    rusqlite::params![summary],
+                );
+            }
         }
 
         tracing::info!(

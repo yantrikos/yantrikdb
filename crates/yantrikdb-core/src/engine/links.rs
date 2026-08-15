@@ -965,6 +965,25 @@ impl YantrikDB {
                 if mem.consolidation_status != "active" {
                     continue;
                 }
+                // NAMESPACE is enforced on neighbors; the soft filters are
+                // not — and both halves are deliberate. Namespace is the
+                // ISOLATION boundary (tenancy/privacy): before 2026-08-15
+                // this admission checked status alone, so a
+                // namespace="work" recall could return a "private" record
+                // one link away — the filter-bypass class the 08-13 lane
+                // fix closed inside recall(), missed on this surface.
+                // Domain/source/type/time, by contrast, are RELEVANCE
+                // filters that link expansion exists to cross: surfacing a
+                // linked supporting record the base filters excluded is
+                // this feature's documented purpose (pinned by
+                // expand_links_surfaces_neighbor_excluded_from_base_pool),
+                // and every surfaced neighbor is labeled "linked via …" so
+                // the crossing is visible, never silent.
+                if let Some(ns) = namespace {
+                    if mem.namespace != ns {
+                        continue;
+                    }
+                }
                 // 1-hop proximity decay mirrors the entity graph's 4^hops.
                 let nscore = seed_score * pol.neighbor_factor / 4.0;
                 present.insert(l.rid.clone());
@@ -2398,6 +2417,68 @@ mod tests {
         assert_eq!(
             LinkType::from_str_lenient("future_type"),
             LinkType::Custom("future_type".to_string())
+        );
+    }
+
+    /// Neighbor surfacing must honor every caller filter. Before the
+    /// 2026-08-15 fix a namespace="work" recall could return a "private"
+    /// record one link away — the admission checked status alone. Same
+    /// class as the 08-13 lane filter fix, missed on this surface.
+    #[test]
+    fn linked_neighbors_respect_caller_namespace() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let seed = rec(&db, "work seed memory", 1.0);
+        // Neighbor lives in a DIFFERENT namespace.
+        let private = db
+            .record(
+                "private diary entry",
+                "semantic",
+                0.9,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &vec_seed(2.0, 8),
+                "private",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+        db.link(
+            &seed,
+            &RecordLink {
+                target_rid: private.clone(),
+                link_type: LinkType::Supports,
+            },
+        )
+        .unwrap();
+
+        let results = db
+            .recall_with_links(
+                &vec_seed(1.0, 8),
+                10,
+                None,            // time_window
+                None,            // memory_type
+                false,           // include_consolidated
+                false,           // expand_entities
+                None,            // query_text
+                true,            // skip_reinforce
+                Some("default"), // namespace — the caller's boundary
+                None,            // domain
+                None,            // source
+                None,            // certainty_min
+                None,            // order
+                1,               // expand_links
+            )
+            .unwrap();
+        assert!(
+            results.iter().all(|r| r.rid != private),
+            "cross-namespace neighbor leaked through link expansion"
+        );
+        assert!(
+            results.iter().any(|r| r.rid == seed),
+            "seed itself must still be retrievable"
         );
     }
 }

@@ -69,7 +69,11 @@ impl YantrikDB {
             None, // time_window — as-of does its own temporal filtering
             memory_type,
             false, // include_consolidated
-            true,  // expand_entities
+            // Aligned 2026-08-15: graph expansion measured −0.24 MRR and is
+            // off by default on every other surface; this pre-decision
+            // hardcode was never revisited (no comment defended it), and
+            // as_of passes query_text=None — the weakest seeding mode.
+            false, // expand_entities
             None,  // query_text
             true,  // skip_reinforce: archaeology is not usage
             namespace,
@@ -165,8 +169,16 @@ impl YantrikDB {
             )
             .optional()?;
         if let Some((text, metadata, importance, valence)) = prior {
-            result.text = text;
-            result.metadata = serde_json::from_str(&metadata).unwrap_or(serde_json::Value::Null);
+            // Revisions are archived in STORED (encrypted-or-plain) form by
+            // design (see the correct() revision insert). Every other read
+            // path decrypts on hydration; this one assigned the stored form
+            // straight into the result — on encrypted DBs the caller got
+            // ciphertext text and Null metadata (serde on ciphertext),
+            // silently. 2026-08-15 surface audit.
+            result.text = self.decrypt_text(&text)?;
+            let metadata_plain = self.decrypt_text(&metadata)?;
+            result.metadata =
+                serde_json::from_str(&metadata_plain).unwrap_or(serde_json::Value::Null);
             result.importance = importance;
             result.valence = valence;
             result

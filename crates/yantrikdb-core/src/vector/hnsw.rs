@@ -281,6 +281,11 @@ impl HnswIndex {
                 node.norm = norm_f64(embedding);
                 node.tombstoned = false;
                 self.active_count += 1;
+                // The tombstone pushed this slot onto free_list; a
+                // resurrected node must take it back, or the next insert
+                // pops the slot and OVERWRITES this live record — stored,
+                // active, and unfindable by vector search.
+                self.free_list.retain(|&s| s != existing_idx);
                 // Re-connect by inserting into the graph at its existing layers
                 let level = node.neighbors.len().saturating_sub(1);
                 self.connect_node(existing_idx, level);
@@ -307,7 +312,13 @@ impl HnswIndex {
                 neighbors,
                 tombstoned: false,
             };
-            self.idx_to_rid[free_idx] = rid.to_string();
+            // Retire the previous occupant's rid mapping if it still
+            // points here: a later remove() of that rid would otherwise
+            // resolve to this slot and tombstone the NEW record.
+            let old_rid = std::mem::replace(&mut self.idx_to_rid[free_idx], rid.to_string());
+            if self.rid_to_idx.get(&old_rid) == Some(&free_idx) {
+                self.rid_to_idx.remove(&old_rid);
+            }
             free_idx
         } else {
             // Append new slot
@@ -624,6 +635,16 @@ impl HnswIndex {
     /// Remove a vector by rid (tombstone-based).
     pub fn remove(&mut self, rid: &str) -> bool {
         if let Some(&idx) = self.rid_to_idx.get(rid) {
+            // Identity check before acting: after slot reuse a stale
+            // mapping can point at a slot now owned by a DIFFERENT rid,
+            // and tombstoning it would delete a live record. Repair the
+            // stale mapping instead of acting on it. (The insert path now
+            // retires stale mappings eagerly; this guards graphs that were
+            // cloned or persisted before that fix.)
+            if self.idx_to_rid.get(idx).map(String::as_str) != Some(rid) {
+                self.rid_to_idx.remove(rid);
+                return false;
+            }
             if !self.nodes[idx].tombstoned {
                 self.nodes[idx].tombstoned = true;
                 self.active_count -= 1;
@@ -1293,5 +1314,52 @@ mod tests {
         let results = bf.search(&vec_seed(1.0, dim), 2);
         assert_eq!(results.len(), 2);
         assert_eq!(results[0].0, "a"); // Closest to seed 1.0
+    }
+
+    #[test]
+    fn resurrect_reclaims_its_free_list_slot() {
+        // remove() pushes the slot onto free_list; insert() of the same rid
+        // resurrects in place. Before the fix the slot STAYED on free_list,
+        // so the next new rid popped it and overwrote the live resurrected
+        // node — stored, active, unfindable.
+        let dim = 8;
+        let mut index = HnswIndex::new(dim);
+        index.insert("victim", &vec_seed(1.0, dim)).unwrap();
+        index.insert("bystander", &vec_seed(50.0, dim)).unwrap();
+        index.remove("victim");
+        index.insert("victim", &vec_seed(1.0, dim)).unwrap(); // resurrect
+        index.insert("newcomer", &vec_seed(90.0, dim)).unwrap(); // must NOT steal the slot
+
+        let hits = index.search(&vec_seed(1.0, dim), 3).unwrap();
+        let rids: Vec<&str> = hits.iter().map(|(r, _)| r.as_str()).collect();
+        assert!(
+            rids.contains(&"victim"),
+            "resurrected node was clobbered: {rids:?}"
+        );
+        assert!(rids.contains(&"newcomer"), "newcomer lost: {rids:?}");
+        assert_eq!(index.len(), 3);
+    }
+
+    #[test]
+    fn repeated_tombstone_after_slot_reuse_spares_the_new_occupant() {
+        // forget() is retried at-least-once by callers, and compaction
+        // applies every tombstone marker blindly. Before the fix, a stale
+        // rid_to_idx entry from a reused slot let remove("old") resolve to
+        // the slot's NEW occupant and tombstone it silently.
+        let dim = 8;
+        let mut index = HnswIndex::new(dim);
+        index.insert("old", &vec_seed(1.0, dim)).unwrap();
+        index.insert("anchor", &vec_seed(50.0, dim)).unwrap();
+        index.remove("old"); // slot freed
+        index.insert("fresh", &vec_seed(2.0, dim)).unwrap(); // reuses the slot
+        assert!(!index.remove("old"), "stale rid must be a no-op");
+
+        let hits = index.search(&vec_seed(2.0, dim), 3).unwrap();
+        let rids: Vec<&str> = hits.iter().map(|(r, _)| r.as_str()).collect();
+        assert!(
+            rids.contains(&"fresh"),
+            "live record tombstoned by stale rid: {rids:?}"
+        );
+        assert_eq!(index.len(), 2);
     }
 }

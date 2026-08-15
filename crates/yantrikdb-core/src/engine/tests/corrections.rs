@@ -1185,3 +1185,120 @@ fn schema_v31_fresh_install_has_record_links_table() {
 
     assert!(crate::base::schema::SCHEMA_VERSION >= 31);
 }
+
+/// Event time follows the corrected TEXT. Before 2026-08-15, correcting
+/// "March 15, 2024" to "April 20, 2024" left event_dates/event_time_min/max
+/// saying March — metadata contradicting its own text, on the one surface
+/// that rewrites text. The three keys re-derive as ONE UNIT unless this
+/// correction's own metadata_merge supplies any of them (caller ownership).
+#[test]
+fn correct_rederives_event_time_from_new_text() {
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let rid = db
+        .record_text(
+            "the launch deadline is March 15, 2024",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            "default",
+            0.8,
+            "work",
+            "user",
+            None,
+        )
+        .unwrap();
+    let before = db.get_memory(&rid).unwrap().unwrap();
+    assert_eq!(
+        before
+            .metadata
+            .get("event_dates")
+            .and_then(|v| v.as_array())
+            .map(|a| a.len()),
+        Some(1),
+        "precondition: write-path extraction produced March"
+    );
+
+    db.correct(
+        &rid,
+        Some("the launch deadline is April 20, 2024"),
+        None,
+        None,
+        None,
+        "deadline moved",
+    )
+    .unwrap();
+
+    let after = db.get_memory(&rid).unwrap().unwrap();
+    let dates: Vec<String> = after
+        .metadata
+        .get("event_dates")
+        .and_then(|v| v.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|d| d.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    assert_eq!(
+        dates,
+        vec!["2024-04-20".to_string()],
+        "event keys must follow the corrected text, got {dates:?}"
+    );
+}
+
+/// forget() must delete the DURABLE memory_entities rows, not just the
+/// in-memory index — the rebuild loads durable rows with no tombstone
+/// filter, so leftovers resurrected forgotten records' links on restart.
+#[test]
+fn forget_deletes_durable_entity_links() {
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    // Batch path extracts entities INLINE (the single-record path is
+    // async), so the durable rows exist deterministically before forget.
+    let rids = db
+        .record_batch(&[crate::types::RecordInput {
+            created_at: None,
+            idempotency_key: None,
+            text: "Alice Chen is the CEO of Acme Corp".to_string(),
+            memory_type: "semantic".to_string(),
+            importance: 0.5,
+            valence: 0.0,
+            half_life: 604800.0,
+            metadata: serde_json::json!({}),
+            embedding: {
+                let raw: Vec<f32> = (0..64).map(|i| (i as f32 + 1.0) * 0.1).collect();
+                let norm: f32 = raw.iter().map(|x| x * x).sum::<f32>().sqrt();
+                raw.iter().map(|x| x / norm).collect()
+            },
+            namespace: "default".to_string(),
+            certainty: 0.8,
+            domain: "people".to_string(),
+            source: "user".to_string(),
+            emotional_state: None,
+        }])
+        .unwrap();
+    let rid = rids[0].clone();
+    let conn = db.conn();
+    let before: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memory_entities WHERE memory_rid = ?1",
+            rusqlite::params![rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    drop(conn);
+    assert!(before > 0, "precondition: entity links exist");
+
+    db.forget(&rid).unwrap();
+
+    let conn = db.conn();
+    let after: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM memory_entities WHERE memory_rid = ?1",
+            rusqlite::params![rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(after, 0, "durable entity links must die with the record");
+}

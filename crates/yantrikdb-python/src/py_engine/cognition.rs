@@ -51,6 +51,42 @@ impl PyYantrikDB {
             if let Ok(Some(v)) = d.get_item("extract_attribute_claims") {
                 c.extract_attribute_claims = v.extract()?;
             }
+            if let Ok(Some(v)) = d.get_item("consolidation_min_cluster") {
+                c.consolidation_min_cluster = v.extract()?;
+            }
+            if let Ok(Some(v)) = d.get_item("consolidation_require_entity_overlap") {
+                c.consolidation_require_entity_overlap = v.extract()?;
+            }
+            // Reject unrecognized keys. This dict was the ONE binding surface
+            // where a misspelled or unsupported knob was silently absorbed —
+            // the dry-run incident shape: two documented ThinkConfig fields
+            // (the pair added above) were unreachable from Python for months
+            // and nothing ever said so. A typo must be an error, not a
+            // silently-default run.
+            const KNOWN: [&str; 14] = [
+                "importance_threshold",
+                "decay_threshold",
+                "max_triggers",
+                "run_consolidation",
+                "run_conflict_scan",
+                "run_pattern_mining",
+                "min_active_memories",
+                "run_personality",
+                "consolidation_limit",
+                "consolidation_time_window_days",
+                "consolidation_sim_threshold",
+                "extract_attribute_claims",
+                "consolidation_min_cluster",
+                "consolidation_require_entity_overlap",
+            ];
+            for key in d.keys() {
+                let k: String = key.extract()?;
+                if !KNOWN.contains(&k.as_str()) {
+                    return Err(pyo3::exceptions::PyValueError::new_err(format!(
+                        "think(): unknown config key {k:?}; known keys: {KNOWN:?}"
+                    )));
+                }
+            }
             c
         } else {
             yantrikdb_core::ThinkConfig::default()

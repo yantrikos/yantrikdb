@@ -104,7 +104,18 @@ impl ConnectionProxy {
     ) -> PyResult<CursorProxy> {
         let conn = self.db.conn();
 
-        let is_select = sql.trim_start().to_uppercase().starts_with("SELECT");
+        // Result-shape detection by the STATEMENT's column count, not a
+        // string prefix: `WITH … SELECT`, `PRAGMA`, and `INSERT … RETURNING`
+        // all produce rows but failed the old starts_with("SELECT") check —
+        // their rows were silently discarded with rowcount 0 (2026-08-15
+        // binding audit; the lenient shim inflates silently in tests).
+        // Probe on the ALREADY-HELD guard — re-acquiring self.db.conn()
+        // here while the outer `conn` is held is the same-thread re-lock
+        // deadlock (#83). The probe statement drops at the match end.
+        let is_select = match conn.prepare(sql) {
+            Ok(stmt) => stmt.column_count() > 0,
+            Err(_) => false, // real error surfaces from the execute below
+        };
 
         let param_values: Vec<Box<dyn rusqlite::types::ToSql>> = if let Some(p) = params {
             p.iter()
@@ -602,18 +613,30 @@ impl PyYantrikDB {
             .map_err(map_err)
     }
 
-    fn close(&mut self) -> PyResult<()> {
+    /// Close the engine. Returns `True` when THIS call performed the
+    /// exclusive close; `False` when other live references (e.g. a `_conn`
+    /// proxy still held) kept the database open — it closes when the last
+    /// reference drops. The old signature returned bare Ok(()) in both
+    /// cases, so "db.close() succeeded" could mean "still open and
+    /// writable through the proxy" (2026-08-15 binding audit).
+    fn close(&mut self) -> PyResult<bool> {
         if let Some(arc) = self.inner.take() {
-            // If we hold the only reference, unwrap and close explicitly.
-            // Otherwise just drop our reference (closes on last drop).
             match Arc::try_unwrap(arc) {
-                Ok(db) => db.close().map_err(map_err)?,
+                Ok(db) => {
+                    db.close().map_err(map_err)?;
+                    return Ok(true);
+                }
                 Err(_arc) => {
-                    // Other references still exist; dropping our ref is fine.
+                    // Other references still exist; ours is dropped, the
+                    // DB closes on last drop — but NOT yet, and the caller
+                    // deserves to know.
+                    return Ok(false);
                 }
             }
         }
-        Ok(())
+        // Already closed: idempotent, and truthfully "no exclusive close
+        // performed by this call".
+        Ok(false)
     }
 }
 

@@ -153,6 +153,22 @@ pub struct DeltaIndex {
     /// windows; this closes that gap).
     compactor_wake_cv: parking_lot::Condvar,
     compactor_wake_mu: parking_lot::Mutex<()>,
+    /// Number of delta entries currently inside a compaction build window
+    /// — snapshotted by `snapshot_published_for_compaction`, physically
+    /// removed by `retire_compacted`. Those entries stay in the delta for
+    /// read visibility, but they are logically LEAVING, so `append_inner`
+    /// subtracts this from the occupancy it holds against `delta_max`.
+    /// Without the subtraction the snapshot design starves writers: the
+    /// delta sits at capacity for the whole build and every write 503s —
+    /// the exact wedge `spawn_all_workers_bundles_materializer_and_compactor`
+    /// pins (this regressed when seal-and-drain became snapshot-and-retire,
+    /// caught by that test before commit). Worst-case transient occupancy
+    /// is `2 * delta_max`: one build in flight plus a fully refilled delta.
+    /// Stores happen while holding the `delta` lock (read in snapshot,
+    /// write in retire), and the admission load happens under the write
+    /// lock, so the lock provides the ordering; the atomic is only there
+    /// so `append_inner` needs no extra lock on its hot path.
+    compacting: std::sync::atomic::AtomicUsize,
 }
 
 /// Outcome of [`DeltaIndex::append_reserved`]. `#[must_use]` is the
@@ -203,6 +219,7 @@ impl DeltaIndex {
             max_dirty_age,
             compactor_wake_cv: parking_lot::Condvar::new(),
             compactor_wake_mu: parking_lot::Mutex::new(()),
+            compacting: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -230,6 +247,7 @@ impl DeltaIndex {
             max_dirty_age,
             compactor_wake_cv: parking_lot::Condvar::new(),
             compactor_wake_mu: parking_lot::Mutex::new(()),
+            compacting: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -321,9 +339,16 @@ impl DeltaIndex {
             return Ok(false);
         }
 
-        if delta.len() >= self.delta_max {
+        // Occupancy excludes entries inside a compaction build window:
+        // they are still HERE (for read visibility) but logically leaving
+        // — `retire_compacted` removes them the moment the merged cold is
+        // installed. Counting them would hold the delta at capacity for
+        // the whole build and 503 every concurrent write.
+        let compacting = self.compacting.load(std::sync::atomic::Ordering::Acquire);
+        let occupancy = delta.len().saturating_sub(compacting);
+        if occupancy >= self.delta_max {
             return Err(YantrikDbError::Backpressure {
-                pending: delta.len() as i64,
+                pending: occupancy as i64,
                 max: self.delta_max as i64,
                 retry_after_ms: 50,
             });
@@ -677,6 +702,50 @@ impl DeltaIndex {
         self.cold.store(Arc::new(new_cold));
     }
 
+    /// SNAPSHOT (clone, do NOT drain) the published entries for compaction.
+    ///
+    /// The drain-at-seal design lost read visibility: `seal` removed
+    /// published entries from the live delta at the START of compaction,
+    /// but the merged cold is not installed until the END (after clone +
+    /// N inserts + the reachability BFS). During that window a recall saw
+    /// neither the old cold (no entry yet) nor the delta (already drained)
+    /// — recently-written records silently vanished on every compaction
+    /// cycle (the stored-active-unfindable class). Snapshotting instead
+    /// keeps them in the delta, visible, for the whole build; `retire_
+    /// compacted` removes them only AFTER the new cold is installed.
+    /// Opens the build window for write admission too: while the returned
+    /// entries await [`Self::retire_compacted`], they stop counting toward
+    /// `delta_max` (they are leaving; holding writers hostage to the build
+    /// duration was the compactor-wedge regression). The count is stored
+    /// while the delta lock is held, so admission (which holds the write
+    /// lock) can never observe the snapshot without the count.
+    pub fn snapshot_published_for_compaction(&self) -> Vec<DeltaEntry> {
+        let delta = self.delta.read();
+        let sealed: Vec<DeltaEntry> = delta.iter().filter(|e| e.published).cloned().collect();
+        self.compacting
+            .store(sealed.len(), std::sync::atomic::Ordering::Release);
+        sealed
+    }
+
+    /// Remove exactly the entries merged into cold, by (rid, seq). Reserved
+    /// (unpublished) entries and any published entry appended DURING the
+    /// build (a newer same-rid write has a higher seq, so a different key)
+    /// are retained. Resets the dirty-age clock from what remains.
+    pub fn retire_compacted(&self, merged: &std::collections::HashSet<(String, u64)>) {
+        let mut delta = self.delta.write();
+        delta.retain(|e| !merged.contains(&(e.rid.clone(), e.seq)));
+        // Close the admission window opened by the snapshot — the merged
+        // entries are physically gone now, so occupancy is honest again.
+        self.compacting
+            .store(0, std::sync::atomic::Ordering::Release);
+        let published_remains = delta.iter().any(|e| e.published);
+        *self.oldest_dirty_at.lock() = if published_remains {
+            Some(std::time::Instant::now())
+        } else {
+            None
+        };
+    }
+
     /// **Decoupled write path RFC, Phase 5 — compaction.**
     ///
     /// Drain the current delta into cold by clone-rebuilding the cold tier.
@@ -685,21 +754,28 @@ impl DeltaIndex {
     /// snapshot; new readers see the merged cold.
     ///
     /// Algorithm:
-    ///   1. seal_delta_for_compaction() — atomically swap delta for an
-    ///      empty new one. Concurrent writes go to the new delta and are
-    ///      preserved across the compaction.
+    ///   1. snapshot_published_for_compaction() — CLONE the published
+    ///      entries; they stay in the live delta (visible to reads) but
+    ///      stop counting toward `delta_max` (writers stay admitted).
     ///   2. Clone the current cold HnswIndex.
     ///   3. For each sealed entry in seq order:
     ///        - tombstoned: HnswIndex::remove(rid) on the clone
     ///        - live with rid not in cold: HnswIndex::insert
     ///        - live with rid in cold (update): remove + re-insert
-    ///   4. ArcSwap.store(Arc::new(new_cold)).
+    ///   4. ensure_all_reachable() on the merged clone.
+    ///   5. ArcSwap.store(Arc::new(new_cold)), THEN retire_compacted()
+    ///      removes exactly the merged (rid, seq) pairs from the delta.
+    ///      At no instant is a sealed entry in neither tier.
     ///
     /// Returns the number of delta entries applied.
     ///
     /// Idempotent on empty delta — returns 0 without touching cold.
     pub fn compact(&self) -> Result<usize> {
-        let sealed = self.seal_delta_for_compaction();
+        // SNAPSHOT, not drain: the sealed entries stay in the live delta —
+        // visible to every recall — until the merged cold is installed
+        // below. See snapshot_published_for_compaction for the visibility
+        // bug this replaces.
+        let sealed = self.snapshot_published_for_compaction();
         if sealed.is_empty() {
             return Ok(0);
         }
@@ -721,20 +797,56 @@ impl DeltaIndex {
             }
         }
 
+        // Apply in SEQ ORDER, as the contract above states. `by_rid.values()`
+        // iterated a HashMap — arbitrary, per-process order — which made the
+        // compacted graph's edge structure non-deterministic across runs
+        // (the exact property the seeded-build work exists to hold).
+        let mut ordered: Vec<&DeltaEntry> = by_rid.values().copied().collect();
+        ordered.sort_by_key(|e| e.seq);
+
         let mut applied = 0usize;
-        for entry in by_rid.values() {
+        for entry in ordered {
             if entry.tombstoned {
                 new_cold.remove(&entry.rid);
             } else {
                 // remove first to handle "update" semantics — if the rid
                 // was already in cold, the new embedding supersedes it.
                 new_cold.remove(&entry.rid);
-                new_cold.insert(&entry.rid, &entry.embedding)?;
+                if let Err(e) = new_cold.insert(&entry.rid, &entry.embedding) {
+                    // Abandon the build: nothing was installed, the delta
+                    // still holds every sealed entry, so state is exactly
+                    // pre-compaction — but the admission window opened by
+                    // the snapshot must close, or occupancy stays
+                    // understated by the sealed count until the next
+                    // (possibly also failing) cycle.
+                    self.compacting
+                        .store(0, std::sync::atomic::Ordering::Release);
+                    return Err(e);
+                }
             }
             applied += 1;
         }
 
+        // The same connectivity guarantee every bulk build ends with. The
+        // in-degree guard during pruning is a LOCAL invariant and is known
+        // to leave two-node islands (~25% of adversarial builds); until now
+        // compaction was the one graph-mutating path that never ran the
+        // repair, so an island formed here persisted — stored, active,
+        // unfindable — until the next reopen rebuilt the index.
+        let rescued = new_cold.ensure_all_reachable();
+        if rescued > 0 {
+            tracing::warn!(rescued, "delta compaction reconnected unreachable nodes");
+        }
+
+        // Install the merged cold FIRST — now every sealed entry is in
+        // cold AND still in the delta (search dedupes by highest seq, so
+        // no double-count) — THEN retire exactly the merged (rid, seq)
+        // pairs from the delta. At no instant is a sealed entry in neither
+        // tier, which is the whole point of the snapshot design.
         self.cold.store(Arc::new(new_cold));
+        let merged: std::collections::HashSet<(String, u64)> =
+            sealed.iter().map(|e| (e.rid.clone(), e.seq)).collect();
+        self.retire_compacted(&merged);
         Ok(applied)
     }
 
@@ -1037,6 +1149,51 @@ mod tests {
         idx.append("rid_after".to_string(), vec_seed(10.0, 64), 100)
             .unwrap();
         assert_eq!(idx.delta_len(), 1);
+    }
+
+    #[test]
+    fn writes_admitted_while_compaction_build_in_flight() {
+        // Regression for the snapshot-and-retire redesign: keeping sealed
+        // entries in the delta for read visibility must not also keep them
+        // counted against delta_max, or every write during a build 503s
+        // (spawn_all_workers_bundles_materializer_and_compactor caught
+        // exactly that wedge). This pins the mechanism deterministically:
+        // snapshot opens the admission window, retire closes it, and the
+        // sealed entries stay searchable for the whole build.
+        let idx = DeltaIndex::with_capacity(64, 8);
+        for i in 0..8 {
+            idx.append(format!("rid_{i}"), vec_seed(i as f32, 64), i as u64)
+                .unwrap();
+        }
+        // Full: admission refused, exactly as before compaction starts.
+        assert!(matches!(
+            idx.append("rid_full".to_string(), vec_seed(99.0, 64), 99),
+            Err(YantrikDbError::Backpressure { .. })
+        ));
+
+        // Build window opens: the sealed entries are logically leaving.
+        let sealed = idx.snapshot_published_for_compaction();
+        assert_eq!(sealed.len(), 8);
+
+        // A write DURING the build is admitted (this is the line that
+        // fails on the drain-counting code)...
+        idx.append("rid_during".to_string(), vec_seed(50.0, 64), 100)
+            .unwrap();
+        // ...and the sealed entries are still visible to search — the
+        // guarantee the snapshot design exists for.
+        let hits = idx.search(&vec_seed(3.0, 64), 12).unwrap();
+        assert!(
+            hits.iter().any(|(rid, _)| rid == "rid_3"),
+            "sealed entry must stay findable during the build"
+        );
+
+        // Build ends: retire the merged pairs; occupancy is honest again.
+        let merged: std::collections::HashSet<(String, u64)> =
+            sealed.iter().map(|e| (e.rid.clone(), e.seq)).collect();
+        idx.retire_compacted(&merged);
+        assert_eq!(idx.delta_len(), 1, "only the during-build write remains");
+        idx.append("rid_after".to_string(), vec_seed(60.0, 64), 101)
+            .unwrap();
     }
 
     #[test]

@@ -1015,14 +1015,19 @@ pub fn scan_claim_conflicts(db: &YantrikDB, max_conflicts: usize) -> Result<Vec<
                 } else {
                     (dst2.as_str(), dst1.as_str(), vf1)
                 };
-                // Set valid_to on the older claim to mark it as historical
+                // Set valid_to on the older claim to mark it as historical.
+                // A failed UPDATE here previously fell through to `continue`
+                // — the older claim stayed current AND the pair was skipped
+                // as handled, so a DETECTED contradiction became permanently
+                // invisible: not superseded, not flagged, never revisited.
+                // Propagate instead; the caller already returns Result.
                 {
                     let conn = db.conn();
-                    let _ = conn.execute(
+                    conn.execute(
                         "UPDATE claims SET valid_to = ?1 \
                          WHERE src = ?2 AND rel_type = ?3 AND dst = ?4 AND valid_to IS NULL AND tombstoned = 0",
                         params![newer_vf.unwrap_or(0.0), src, rel_type, older_src],
-                    );
+                    )?;
                 }
                 continue; // Not a conflict — temporal succession handled
             }

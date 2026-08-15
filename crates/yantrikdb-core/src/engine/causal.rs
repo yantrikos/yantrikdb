@@ -143,7 +143,11 @@ impl YantrikDB {
         effect: &CausalNode,
     ) -> Result<Option<EffectEstimate>> {
         let store = self.load_causal_store()?;
-        Ok(estimate_effect(&store, cause, effect))
+        let threshold = self
+            .load_causal_config()
+            .map(|c| c.intervention_evidence_threshold)
+            .unwrap_or_else(|_| CausalConfig::default().intervention_evidence_threshold);
+        Ok(estimate_effect(&store, cause, effect, threshold))
     }
 
     /// Predict all downstream effects of activating a cause.

@@ -1,6 +1,7 @@
 /// Multi-signal scoring for memory recall.
 ///
-/// Matches the Python implementation exactly (engine.py:246-263).
+/// Origin: ported from the pre-Rust Python engine; the budget-form
+/// composite below has since replaced that formula entirely.
 
 /// Compute the decay score: I(t) = importance * 2^(-t / half_life)
 ///
@@ -326,10 +327,11 @@ pub fn policy_mult(
     (t.policy_budget_ln() * z).exp()
 }
 
-/// How strongly cross-lane agreement may multiply a score:
-/// `1 + AGREEMENT_SCALE * extra_lanes/2`, capped at two extra lanes —
-/// at most +12.5%, deliberately identical to the freshness and graph
-/// ceilings so all three tie-breakers share one inversion budget.
+/// How strongly cross-lane agreement may multiply a score. Budget form:
+/// `exp(policy_budget_ln * w_agreement * extra_lanes/2)`, capped at two
+/// extra lanes — ~+3.5% at defaults (ln 1.30 x 0.13). AGREEMENT_SCALE
+/// below is the pre-budget constant, kept for history; the body no longer
+/// reads it. All tie-breakers share the one inversion budget.
 ///
 /// # Why lane agreement is evidence at all
 ///
@@ -363,8 +365,10 @@ pub fn agreement_mult(extra_lanes: usize) -> f64 {
     (t.policy_budget_ln() * wa * (extra_lanes.min(2) as f64 / 2.0)).exp()
 }
 
-/// How strongly graph proximity may multiply a score: `1 + GRAPH_SCALE * p`,
-/// i.e. at most +12.5% — deliberately identical to the freshness ceiling.
+/// How strongly graph proximity may multiply a score. Budget form:
+/// `exp(policy_budget_ln * w_graph * p)` — ~+3.5% at defaults
+/// (ln 1.30 x 0.13). GRAPH_SCALE below is the pre-budget constant, kept
+/// for history; the body no longer reads it.
 ///
 /// Chosen by INVERSION BUDGET, not taste. A maximally-connected record can
 /// overtake an unconnected one only when `s_high / s_low < 1 + GRAPH_SCALE`,

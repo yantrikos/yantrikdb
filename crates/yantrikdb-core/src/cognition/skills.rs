@@ -418,13 +418,24 @@ impl LearnedSkill {
             && self.confidence >= 0.7
     }
 
-    /// Whether this skill is eligible for promotion to an ActionSchema.
-    pub fn is_promotable(&self) -> bool {
-        self.confidence >= 0.9
-            && self.observation_count >= 10
-            && self.success_rate() >= 0.75
+    /// Whether this skill is eligible for promotion to an ActionSchema,
+    /// judged against `config` — the promotion_* knobs. The bare
+    /// [`Self::is_promotable`] previously hardcoded 0.9/10/0.75, mirroring
+    /// (and ignoring) the config defaults: sweeping the knobs measured
+    /// nothing (2026-08-15 knob audit).
+    pub fn is_promotable_with(&self, config: &SkillConfig) -> bool {
+        self.confidence >= config.promotion_confidence
+            && self.observation_count >= config.promotion_min_observations
+            && self.success_rate() >= config.promotion_min_success_rate
             && self.promoted_schema_id.is_none()
             && !self.deprecated
+    }
+
+    /// Promotion eligibility at the DEFAULT thresholds. Callers holding a
+    /// loaded [`SkillConfig`] should use [`Self::is_promotable_with`] so the
+    /// env-tuned knobs actually govern.
+    pub fn is_promotable(&self) -> bool {
+        self.is_promotable_with(&SkillConfig::default())
     }
 
     /// Number of steps in this skill.
@@ -554,9 +565,18 @@ impl SkillRegistry {
         self.skills.values().filter(|s| s.is_offerable()).collect()
     }
 
-    /// Skills eligible for promotion.
+    /// Skills eligible for promotion at the default thresholds; prefer
+    /// [`Self::promotable_with`] with a loaded config.
     pub fn promotable(&self) -> Vec<&LearnedSkill> {
         self.skills.values().filter(|s| s.is_promotable()).collect()
+    }
+
+    /// Skills eligible for promotion under `config`'s promotion_* knobs.
+    pub fn promotable_with(&self, config: &SkillConfig) -> Vec<&LearnedSkill> {
+        self.skills
+            .values()
+            .filter(|s| s.is_promotable_with(config))
+            .collect()
     }
 
     /// Skills by origin.

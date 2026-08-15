@@ -324,7 +324,8 @@ impl PyYantrikDB {
         max_auto_relate_edges = 500,
         split_oversized = false,
         split_min_chars = 1500,
-        repair_artifacts = false
+        repair_artifacts = false,
+        dry_run = false
     ))]
     #[allow(clippy::too_many_arguments)]
     fn run_maintenance_cycle(
@@ -340,6 +341,7 @@ impl PyYantrikDB {
         split_oversized: bool,
         split_min_chars: usize,
         repair_artifacts: bool,
+        dry_run: bool,
     ) -> PyResult<String> {
         let db = self.get_inner()?;
         let cfg = yantrikdb_core::MaintenanceCycleConfig {
@@ -354,9 +356,16 @@ impl PyYantrikDB {
             split_oversized,
             split_min_chars,
             repair_artifacts,
+            dry_run,
         };
         let report = db.run_maintenance_cycle(&cfg).map_err(map_err)?;
-        Ok(serde_json::to_string(&report).unwrap_or_else(|_| "{}".to_string()))
+        Ok(serde_json::to_string(&report).map_err(|e| {
+            // A maintenance cycle that RAN must never report as "{}" — the
+            // caller could not tell "ran, report lost" from "did nothing".
+            pyo3::exceptions::PyRuntimeError::new_err(format!(
+                "report serialization failed after the cycle ran: {e}"
+            ))
+        })?)
     }
 
     /// The last persisted maintenance-cycle summary (JSON), or None.
@@ -403,7 +412,11 @@ impl PyYantrikDB {
             include_superseded,
         };
         let digest = db.session_digest(&cfg).map_err(map_err)?;
-        Ok(serde_json::to_string(&digest).unwrap_or_else(|_| "{}".to_string()))
+        serde_json::to_string(&digest).map_err(|e| {
+            // Never report "{}" for an operation that ran — the caller
+            // cannot tell "ran, report lost" from "did nothing".
+            pyo3::exceptions::PyRuntimeError::new_err(format!("result serialization failed: {e}"))
+        })
     }
 
     /// v0.10 Item 1c (trace T10) — what changed since `since` (epoch
@@ -421,7 +434,11 @@ impl PyYantrikDB {
         let changes = db
             .what_changed_since(since, namespace, snippet_chars)
             .map_err(map_err)?;
-        Ok(serde_json::to_string(&changes).unwrap_or_else(|_| "{}".to_string()))
+        serde_json::to_string(&changes).map_err(|e| {
+            // Never report "{}" for an operation that ran — the caller
+            // cannot tell "ran, report lost" from "did nothing".
+            pyo3::exceptions::PyRuntimeError::new_err(format!("result serialization failed: {e}"))
+        })
     }
 
     /// End-of-session auto-capture (task 40): atomize an agent-provided

@@ -119,15 +119,33 @@ impl TenantManager {
         Ok(())
     }
 
-    fn db_path(&self, tenant_id: &str) -> String {
-        self.base_dir
+    /// True when `tenant_id` is safe to embed in a filesystem path.
+    /// Rejects anything outside `[A-Za-z0-9_-]` so a request-supplied id
+    /// like "../../etc/foo" cannot open or create a SQLite DB outside
+    /// `base_dir` (the `.db` suffix does not stop `..` traversal).
+    fn tenant_id_is_safe(tenant_id: &str) -> bool {
+        !tenant_id.is_empty()
+            && tenant_id.len() <= 128
+            && tenant_id
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    }
+
+    fn db_path(&self, tenant_id: &str) -> Result<String> {
+        if !Self::tenant_id_is_safe(tenant_id) {
+            return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                "tenant_id {tenant_id:?} must be non-empty and match [A-Za-z0-9_-]                  (max 128 chars) — refusing to build a filesystem path from it"
+            )));
+        }
+        Ok(self
+            .base_dir
             .join(format!("{tenant_id}.db"))
             .to_string_lossy()
-            .to_string()
+            .to_string())
     }
 
     fn open_tenant(&self, tenant_id: &str) -> Result<YantrikDB> {
-        let path = self.db_path(tenant_id);
+        let path = self.db_path(tenant_id)?;
         let config = self.configs.get(tenant_id);
 
         let dim = config

@@ -539,7 +539,21 @@ fn tier1_extract(text: &str, _config: &ExtractorConfig) -> Vec<CognitiveUpdate> 
     for rule in PATTERN_RULES {
         for &trigger in rule.triggers {
             if let Some(pos) = lower.find(trigger) {
-                let suffix = &text[pos + trigger.len()..];
+                // `pos` is a byte offset into the LOWERCASED copy. Slicing
+                // `text` with it panics (host abort over FFI) whenever a
+                // length-changing lowercase (ẞ→ß, İ→i̇) precedes the
+                // trigger. On the common all-ASCII path the two strings are
+                // byte-identical, so prefer `text` to preserve original
+                // case (the extractor's contract, pinned by tests); fall
+                // back to the safe `lower` slice only when the offset is
+                // NOT a valid char boundary in `text` — rare, never panics.
+                let src: &str =
+                    if text.is_char_boundary(pos) && text.is_char_boundary(pos + trigger.len()) {
+                        text
+                    } else {
+                        &lower
+                    };
+                let suffix = &src[pos + trigger.len()..];
                 let suffix_trimmed = suffix.trim();
                 if suffix_trimmed.is_empty()
                     && !matches!(
@@ -560,7 +574,7 @@ fn tier1_extract(text: &str, _config: &ExtractorConfig) -> Vec<CognitiveUpdate> 
                         confidence: rule.confidence,
                         tier: ExtractorTier::Rule,
                         match_source: format!("rule:{}", rule.category),
-                        matched_text: text[pos..].to_string(),
+                        matched_text: src[pos..].to_string(),
                     });
                     break; // One match per rule
                 }
@@ -761,8 +775,18 @@ fn split_comparative(text: &str) -> (String, String) {
     // Order matters: check multi-word separators first
     for sep in &[" rather than ", " instead of ", " over ", " than ", " to "] {
         if let Some(pos) = lower.find(sep) {
-            let preferred = text[..pos].trim().to_string();
-            let dispreferred = text[pos + sep.len()..].trim().to_string();
+            // Prefer the original `text` (preserves case) when `pos` is a
+            // valid boundary there; fall back to the lowercased copy only
+            // when a length-changing lowercase before `sep` would make the
+            // byte offset land mid-char in `text` (panic → host abort).
+            let src: &str = if text.is_char_boundary(pos) && text.is_char_boundary(pos + sep.len())
+            {
+                text
+            } else {
+                &lower
+            };
+            let preferred = src[..pos].trim().to_string();
+            let dispreferred = src[pos + sep.len()..].trim().to_string();
             return (preferred, dispreferred);
         }
     }
@@ -1589,6 +1613,29 @@ pub fn summarize_extractor(store: &TemplateStore) -> ExtractorSummary {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn multibyte_before_trigger_never_panics() {
+        // ẞ (U+1E9E, 3 bytes) lowercases to ß (2 bytes): the byte offset
+        // from the lowercased copy no longer lands on a char boundary in
+        // the original. Every trigger/separator must be exercised without
+        // aborting the host (these run across the pyo3 FFI boundary).
+        let cfg = super::ExtractorConfig::default();
+        for prefix in ["ẞ", "İ", "ǰ", "ﬁ", "Σίσυφος"] {
+            for body in [
+                "i prefer tea over coffee",
+                "i feel great about this",
+                "my goal is to ship",
+                "i love the new plan",
+                "i never use flask",
+            ] {
+                let text = format!("{prefix} {body}");
+                // Must not panic.
+                let _ = super::tier1_extract(&text, &cfg);
+                let _ = super::split_comparative(&text);
+            }
+        }
+    }
+
     use super::*;
 
     fn default_config() -> ExtractorConfig {

@@ -872,11 +872,14 @@ pub fn estimate_effect(
     store: &CausalStore,
     cause: &CausalNode,
     effect: &CausalNode,
+    intervention_evidence_threshold: u32,
 ) -> Option<EffectEstimate> {
     let edge = store.find_edge(cause, effect)?;
 
-    // Weigh evidence types differently.
-    let has_intervention = edge.intervention_count > 0;
+    // Weigh evidence types differently. `> 0` previously granted
+    // Interventional quality after ONE lucky intervention while the config
+    // knob (default 3) had zero readers — a knob mirroring nothing.
+    let has_intervention = edge.intervention_count >= intervention_evidence_threshold;
     let has_granger = edge
         .trace
         .evidence
@@ -1857,6 +1860,7 @@ mod tests {
             &store,
             &CausalNode::Action(ActionKind::SurfaceSuggestion),
             &CausalNode::Event(EventKind::SuggestionAccepted),
+            CausalConfig::default().intervention_evidence_threshold,
         );
         assert!(estimate.is_some());
 

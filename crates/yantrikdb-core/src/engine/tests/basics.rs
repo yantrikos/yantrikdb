@@ -83,6 +83,48 @@ fn test_record_auto_extracts_entities() {
 }
 
 #[test]
+fn test_record_batch_extracts_event_time_like_record() {
+    // Third instance of the batch-path-skips-what-record-does family (the
+    // test above is the entity-linking instance). merge_event_dates was
+    // wired into record() and record_text() as "the fix for the category";
+    // the batch surface was left out, so a batch-ingested "deadline
+    // March 15, 2024" got no event keys while the identical text through
+    // record() did — silently.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let inputs = vec![RecordInput {
+        created_at: None,
+        idempotency_key: None,
+        text: "the launch deadline is March 15, 2024".to_string(),
+        memory_type: "episodic".to_string(),
+        importance: 0.5,
+        valence: 0.0,
+        half_life: 604800.0,
+        metadata: empty_meta(),
+        embedding: vec_seed(1.0, 8),
+        namespace: "default".to_string(),
+        certainty: 0.8,
+        domain: "work".to_string(),
+        source: "user".to_string(),
+        emotional_state: None,
+    }];
+    let rids = db.record_batch(&inputs).unwrap();
+    let m = db.get_memory(&rids[0]).unwrap().unwrap();
+    let dates = m
+        .metadata
+        .get("event_dates")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    assert_eq!(
+        dates,
+        vec![serde_json::json!("2024-03-15")],
+        "batch write must extract event time exactly as record() does"
+    );
+    assert!(m.metadata.get("event_time_min").is_some());
+    assert!(m.metadata.get("event_time_max").is_some());
+}
+
+#[test]
 fn test_record_batch_auto_extracts_entities() {
     // Same regression as above but for the batch path, which previously
     // skipped entity linking entirely.

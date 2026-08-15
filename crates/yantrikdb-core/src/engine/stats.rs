@@ -993,6 +993,55 @@ impl YantrikDB {
         // current generation's covers_through_seq logic.
         self.bump_visible_seq(namespace, seq);
 
+        // The two obligations every other write surface discharges and this
+        // drain silently didn't (found in the 2026-08-15 surface-family
+        // audit):
+        //
+        // 1. SCORING CACHE. Every recall lane begins `let Some(row) =
+        //    cache.get(rid)` and the cache loads from SQL only at open — so
+        //    a record written during a reembed cutover was durable, oplogged
+        //    and vector-indexed, yet INVISIBLE to every recall until the
+        //    engine restarted.
+        self.cache_insert(
+            rid.to_string(),
+            crate::types::ScoringRow {
+                created_at: ts,
+                importance,
+                half_life,
+                last_access: ts,
+                access_count: 0,
+                valence,
+                consolidation_status: "active".to_string(),
+                memory_type: memory_type.to_string(),
+                namespace: namespace.to_string(),
+                certainty,
+                domain: domain.to_string(),
+                source: source.to_string(),
+                emotional_state: emotional_state.map(|s| s.to_string()),
+            },
+        );
+
+        // 2. MATERIALIZE POST-OP. record() enqueues entity extraction /
+        //    claims ingestion for every write; the drain never did, so
+        //    cutover-written records permanently got no entities, no graph
+        //    links, no claims. Not the record_with_rid determinism contract
+        //    — this is an ORIGIN write.
+        let post_payload = serde_json::json!({
+            "rid": rid,
+            "text": stored_text,
+            "namespace": namespace,
+            "ts_secs": ts,
+            "domain": domain,
+            "source": source,
+        });
+        self.log_op_pending(
+            crate::engine::op_types::OP_MATERIALIZE_RECORD_POST,
+            Some(rid),
+            &post_payload,
+            None,
+            None,
+        )?;
+
         Ok(())
     }
 

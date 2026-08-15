@@ -96,7 +96,7 @@ impl YantrikDB {
         let mut nodes = self.load_active_cognitive_nodes()?;
 
         let ts = now();
-        let report = cognitive_tick(
+        let mut report = cognitive_tick(
             ts,
             &mut tick_state,
             &mut agenda,
@@ -114,9 +114,16 @@ impl YantrikDB {
             self.persist_cognitive_node(node)?;
         }
 
-        // If consolidation was flagged, run it at the engine level
+        // If consolidation was flagged, run it at the engine level.
+        // consolidation_ran was previously set BEFORE this call and the
+        // Result discarded — the report affirmatively lied that
+        // consolidation ran when it had failed. The flag now reflects
+        // what actually happened.
         if report.consolidation_ran {
-            let _ = self.run_consolidation();
+            if let Err(e) = self.run_consolidation() {
+                report.consolidation_ran = false;
+                tracing::warn!(error = %e, "tick: consolidation failed after being flagged");
+            }
         }
 
         Ok(report)

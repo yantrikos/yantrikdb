@@ -841,6 +841,79 @@ fn maintenance_cycle_runs_passes_and_records_last_run() {
     assert!(again.errors.is_empty());
 }
 
+/// A dry cycle must leave ZERO fingerprints. The 2026-08-15 incident: the
+/// MCP layer accepted dry_run=true, dropped it, and a "preview" auto-resolved
+/// 15 conflicts and tombstoned 13 live records on a production store. This
+/// pins the whole invariant at the engine layer: no status changes, no
+/// importance drift, no conflict resolutions, no persisted summary.
+#[cfg(feature = "bundled-embedder")]
+#[test]
+fn dry_run_maintenance_cycle_mutates_nothing() {
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    for t in [
+        "fact one about the project",
+        "fact two about the project",
+        "an old important note",
+        "another note entirely",
+    ] {
+        db.record_text(
+            t,
+            "semantic",
+            0.9,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "ns",
+            0.8,
+            "work",
+            "user",
+            None,
+        )
+        .unwrap();
+    }
+    let snapshot = |db: &crate::YantrikDB| {
+        let conn = db.conn();
+        let row = |q: &str| -> i64 { conn.query_row(q, [], |r| r.get(0)).unwrap() };
+        (
+            row("SELECT COUNT(*) FROM memories WHERE consolidation_status='active'"),
+            row("SELECT COUNT(*) FROM memories WHERE consolidation_status='tombstoned'"),
+            row("SELECT COUNT(*) FROM conflicts WHERE status='resolved'"),
+            format!(
+                "{:?}",
+                conn.prepare("SELECT rid, importance FROM memories ORDER BY rid")
+                    .unwrap()
+                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, f64>(1)?)))
+                    .unwrap()
+                    .collect::<std::result::Result<Vec<_>, _>>()
+                    .unwrap()
+            ),
+        )
+    };
+    let before = snapshot(&db);
+
+    let cfg = crate::MaintenanceCycleConfig {
+        dry_run: true,
+        ..Default::default()
+    };
+    let report = db.run_maintenance_cycle(&cfg).unwrap();
+    assert!(report.errors.is_empty(), "errors: {:?}", report.errors);
+    // Passes with no dry form are skipped, not quietly run wet.
+    assert!(
+        report.think_consolidations.is_none(),
+        "think ran in a dry cycle"
+    );
+    assert!(
+        report.entities_linked.is_none(),
+        "backfill ran in a dry cycle"
+    );
+
+    assert_eq!(snapshot(&db), before, "dry cycle mutated the store");
+    assert!(
+        db.last_maintenance_cycle().unwrap().is_none(),
+        "a preview must not masquerade as the last real cycle"
+    );
+}
+
 #[cfg(feature = "bundled-embedder")]
 #[test]
 fn recall_emits_structural_intent_hint() {

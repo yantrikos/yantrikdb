@@ -29,6 +29,22 @@
 //! YANTRIKDB_POLICY_BUDGET=1.05 YANTRIKDB_GATE_TAU=0.45 <run the eval>
 //! ```
 //!
+//! # Which knobs actually reach the recall path (audited 2026-08-15)
+//!
+//! WIRED: `novelty_weight`, the lane quotas, `fts_min_sim`, `cold_min_sim`,
+//! `valence_min_sim`, `mmr_lambda`, and (via `normalized_weights` /
+//! `policy_budget_ln`) the budget shares consumed by `agreement_mult` and
+//! `graph_mult`.
+//!
+//! NOT WIRED to the main composite: `gate_tau` here loses to the LEARNED
+//! per-DB `gate_tau` (feedback.rs) inside `adaptive_composite_score`, and
+//! `GATE_K` / the `PW_*` freshness-vs-importance split are compiled consts
+//! there. Sweeping `YANTRIKDB_GATE_TAU` on a store with learned weights
+//! present therefore moves NOTHING — a fingerprint that stamps it is
+//! stamping configuration the run did not use. `NamespaceProfile` has no
+//! production caller at all. Wire before sweeping; this note is the
+//! guard against believing such a sweep.
+//!
 //! Read once per process on first use. That is deliberate: retrieval must be
 //! deterministic within a run, so a mid-run change cannot silently split a
 //! measurement into two configurations. Tests that need a specific

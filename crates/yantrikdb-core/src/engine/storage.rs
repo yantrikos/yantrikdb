@@ -8,6 +8,19 @@ use super::{now, YantrikDB};
 impl YantrikDB {
     /// Archive a hot memory to cold storage (compress embedding, remove from vec index).
     /// Returns true if the memory was archived, false if not found or already cold.
+    ///
+    /// # KNOWN SPLIT-BRAIN (2026-08-15 surface audit — policy undecided)
+    ///
+    /// Archiving tombstones the VECTOR index entry but leaves the scoring
+    /// cache untouched, so an archived record is unfindable by similarity
+    /// yet still fully admissible to the FTS/keyword, claims, valence and
+    /// importance-fallback lanes — "archive" means something different per
+    /// lane. `forget()` by contrast removes the cache entry. If the intent
+    /// is "cold but keyword-findable", that is a defensible policy — but it
+    /// must be chosen, documented and tested, not inherited from whichever
+    /// lane happened to read which structure. Also: no `visible_seq` bump,
+    /// and the raw `vec_seq.fetch_add` below predates `assign_seq`. Do not
+    /// "fix" any half of this in isolation — decide the policy first.
     #[tracing::instrument(skip(self))]
     pub fn archive(&self, rid: &str) -> Result<bool> {
         let ts = {

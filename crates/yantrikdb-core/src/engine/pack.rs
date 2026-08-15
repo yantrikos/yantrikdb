@@ -1738,6 +1738,26 @@ impl YantrikDB {
         // Read the manifest before copying, so an unreadable or
         // incompatible pack fails without leaving a file behind.
         let manifest = Self::read_manifest(path)?;
+
+        // The filename is built from manifest.name/version, which come
+        // straight from the untrusted pack file. Path separators or `..`
+        // there let a malicious .ydbpack write its bytes outside the pack
+        // directory (Path::join with an absolute component replaces the
+        // base). Reject them before any filesystem op — the operator who
+        // installs the pack cannot eyeball a field buried inside it.
+        for (field, value) in [("name", &manifest.name), ("version", &manifest.version)] {
+            if value.is_empty()
+                || value.contains('/')
+                || value.contains('\\')
+                || value.contains("..")
+                || value.contains('\0')
+            {
+                return Err(YantrikDbError::InvalidInput(format!(
+                    "pack manifest {field} {value:?} contains a path separator, \
+                             '..', a NUL, or is empty — refusing to derive a file path from it"
+                )));
+            }
+        }
         let pack_id = manifest.pack_id();
 
         std::fs::create_dir_all(&dir).map_err(|e| YantrikDbError::PackUnreadable {
