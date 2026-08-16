@@ -83,8 +83,8 @@ def iter_mem0(path: str | None = None, *, api_key: str | None = None,
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         items = data.get("results", data) if isinstance(data, dict) else data
     else:
-        # pylint: disable=import-error  # optional dep, lint-gate convention
-        from mem0 import MemoryClient
+        # Optional dep, lint-gate convention: the disable rides the import line.
+        from mem0 import MemoryClient  # pylint: disable=import-error
         client = MemoryClient(api_key=api_key or os.environ.get("MEM0_API_KEY"))
         got = client.get_all(user_id=user_id) if user_id else client.get_all()
         items = got.get("results", got) if isinstance(got, dict) else got
@@ -115,8 +115,7 @@ def iter_zep(path: str | None = None, *, api_key: str | None = None,
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         items = data.get("facts", data) if isinstance(data, dict) else data
     else:
-        # pylint: disable=import-error
-        from zep_cloud.client import Zep
+        from zep_cloud.client import Zep  # pylint: disable=import-error
         client = Zep(api_key=api_key or os.environ.get("ZEP_API_KEY"))
         items = [f.dict() for f in
                  (client.user.get_facts(user_id=user_id).facts or [])]
@@ -144,8 +143,7 @@ def iter_letta(path: str | None = None, *, agent_id: str | None = None,
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         items = data if isinstance(data, list) else data.get("passages", [])
     else:
-        # pylint: disable=import-error
-        from letta_client import Letta
+        from letta_client import Letta  # pylint: disable=import-error
         client = Letta(base_url=os.environ.get("LETTA_BASE_URL",
                                                "http://localhost:8283"))
         items = [p.dict() for p in
