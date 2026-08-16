@@ -148,6 +148,22 @@ class TestExportImport:
         assert len(data1["entities"]) == len(data2["entities"])
 
 
+class TestMigrateAndImportAreDistinct:
+    """The cross-system migrator registered itself as a second "import"
+    and click silently REPLACED the export-restore command — every module
+    still imported cleanly, only invocation broke. Pin both names."""
+
+    def test_import_is_still_the_export_restore(self, runner):
+        result = runner.invoke(cli, ["import", "--help"])
+        assert result.exit_code == 0
+        assert "JSON export" in result.output
+
+    def test_migrate_is_the_cross_system_reader(self, runner):
+        result = runner.invoke(cli, ["migrate", "--help"])
+        assert result.exit_code == 0
+        assert "mem0" in result.output
+
+
 class TestThink:
     def test_think_empty_db(self, runner, tmp_path):
         p = str(tmp_path / "empty.db")

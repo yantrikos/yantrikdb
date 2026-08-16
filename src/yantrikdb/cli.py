@@ -593,9 +593,15 @@ def pack_remove(db_path, embedding_dim, pack_id):
         db.close()
 
 
-# ── Import from other memory systems ──
+# ── Migrate from other memory systems ──
+#
+# Named `migrate`, NOT `import`: `import` is the long-shipped restore of
+# this engine's own JSON export (above), and click resolves duplicate
+# command names silently — registering a second "import" here replaced
+# the first and broke the export round-trip while every module still
+# imported cleanly. Caught by tests/test_cli.py before push.
 
-@cli.command("import")
+@cli.command("migrate")
 @_db_option
 @click.argument("source", type=click.Choice(["jsonl", "mem0", "zep", "letta", "markdown", "mnemosyne"]))
 @click.argument("path", required=False, type=click.Path(exists=True))
