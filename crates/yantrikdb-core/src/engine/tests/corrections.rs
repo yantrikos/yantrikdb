@@ -1192,6 +1192,7 @@ fn schema_v31_fresh_install_has_record_links_table() {
 /// that rewrites text. The three keys re-derive as ONE UNIT unless this
 /// correction's own metadata_merge supplies any of them (caller ownership).
 #[test]
+#[cfg(feature = "bundled-embedder")] // with_default needs the bundled embedder; slim CI compiles tests too
 fn correct_rederives_event_time_from_new_text() {
     let db = YantrikDB::with_default(":memory:").unwrap();
     let rid = db
@@ -1252,6 +1253,7 @@ fn correct_rederives_event_time_from_new_text() {
 /// in-memory index — the rebuild loads durable rows with no tombstone
 /// filter, so leftovers resurrected forgotten records' links on restart.
 #[test]
+#[cfg(feature = "bundled-embedder")] // with_default needs the bundled embedder; slim CI compiles tests too
 fn forget_deletes_durable_entity_links() {
     let db = YantrikDB::with_default(":memory:").unwrap();
     // Batch path extracts entities INLINE (the single-record path is
