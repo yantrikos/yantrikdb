@@ -73,8 +73,9 @@ what their answerer received, not one round of several.
 > "the release the code corresponds to", which is an assumption, not a
 > measurement. Nothing else on this page is affected: every result was produced
 > by that same 0.13.4 build, so the comparisons remain internally consistent.
-> A 0.14.1 run is pending and will be reported separately rather than folded
-> into these numbers.
+> The pending newer-engine run happened on 0.15.0 — see "The engine re-run"
+> section below; these 0.13.4 numbers stand as the anchor it is measured
+> against.
 >
 > The run files record no engine version at all, which is why this was
 > undetectable from the outputs. That is now a gap worth closing in the
@@ -438,6 +439,45 @@ to the same evaluator defect — the reader's 1024-token cap truncated JSON
 mid-summary, and the errors silently shrank the denominator; both arms were
 re-run for that category at 4096 (`NANOGPT_MAX_TOKENS`) before the numbers
 above. ~7 queries per arm remain excluded on residual request errors.
+
+## The engine re-run: 0.13.4 → 0.15.0, everything else frozen (2026-08-16)
+
+Engine 0.15.0 deliberately changed retrieval — per-lane filter integrity,
+lane slot quotas, a shared prior-boost budget, and four tuning knobs that
+previous releases parsed and silently never read. Every number above predates
+those changes, so this run answers one question: did the correctness campaign
+cost retrieval quality? Config, answerer, judge, and dataset all held
+identical to `ydb-final` (turn-aware chunking, k=40, rag mode,
+`deepseek-v4-flash` for both roles); the only variable is the engine — and,
+one honesty note, the published 0.15.0 wheel replaced what turns out to have
+been a locally-built 0.13.4 in the harness venv.
+
+| | binary | rubric |
+|---|---|---|
+| **ydb-0150 — engine 0.15.0** | **290/400 = 72.5%** | **0.6375** |
+| ydb-final — engine 0.13.4 (anchor) | 286/400 = 71.5% | 0.6107 |
+
+Rubric delta **+0.027**, conversation-clustered bootstrap 95% CI
+**[+0.007, +0.045]** — excludes zero. Direction is unusually consistent for
+this benchmark: **17 of 20 conversations favour 0.15.0, 0 tie, 3 favour the
+anchor** (compare A-vs-R above, which was a 7/5/8 coin flip). The delta is
+~7× the 0.004 answerer-stochasticity estimate from the validation section.
+
+Where it moved (point estimates, same non-independence caveats as above):
+`contradiction_resolution` +0.141 — the naming-the-current-statement change
+plus the engine no longer letting reserve lanes smuggle filtered records;
+`temporal_reasoning` +0.062; `abstention` +0.050; `information_extraction`
++0.034. The largest loss is `multi_session_reasoning` at −0.026, inside
+noise. `event_ordering` stays this system's worst category (0.298) — the
+sequence-reconstruction signal from the original analysis is unchanged and
+still the clearest improvement target.
+
+What this does NOT claim: it is one run per side, the interval is against a
+single anchor draw, and 0.13.4→0.15.0 is a cumulative jump (0.14.x rode
+along) — it attributes the gain to the release span, not to any single
+mechanism inside it. The regression question it was run to answer is
+answered: **the silent-defect campaign did not cost retrieval quality; it
+measurably improved it.**
 
 ## Open work
 
