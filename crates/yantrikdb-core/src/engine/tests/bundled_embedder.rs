@@ -2321,3 +2321,106 @@ fn install_pack_converts_a_foreign_dimension_pack_automatically() {
         after.iter().map(|h| &h.text).collect::<Vec<_>>()
     );
 }
+
+#[test]
+fn refresh_embeddings_heals_rows_that_have_no_vector() {
+    // The replication shape, reproduced locally: a row that is present and
+    // ACTIVE in SQL but carries no embedding, so it is invisible to semantic
+    // recall while looking perfectly healthy to `get()` and to any count.
+    // replication.rs materializes exactly this — its INSERT omits embedding,
+    // embedding_model and embedding_generation — and then declines to add the
+    // record to HNSW because it has no vector to add.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let target = "The reconciliation service settles invoices against bank statements.";
+    let rid = db
+        .record_text(
+            target,
+            "semantic",
+            0.6,
+            0.0,
+            86400.0,
+            &serde_json::json!({}),
+            "repl",
+            0.9,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    db.record_text(
+        "Unrelated note about the office coffee machine.",
+        "semantic",
+        0.5,
+        0.0,
+        86400.0,
+        &serde_json::json!({}),
+        "repl",
+        0.9,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+
+    let indexed_before = db.rebuild_vec_index().unwrap();
+    assert_eq!(indexed_before, 2, "both rows start with usable vectors");
+
+    // Strip the vector, the way a replicated row arrives.
+    db.conn()
+        .execute(
+            "UPDATE memories SET embedding = NULL WHERE rid = ?1",
+            [&rid],
+        )
+        .unwrap();
+
+    // Assert on INDEX MEMBERSHIP, not on a recall result. A vector-less row
+    // is still reachable through the FTS lane whenever the query happens to
+    // share tokens with the text — the damage is confined to the vector lane,
+    // so that is where it has to be measured. (Worth knowing on its own: the
+    // replication gap degrades SEMANTIC recall specifically; it does not make
+    // a record wholly unfindable, which is part of why it stayed quiet.)
+    let indexed_damaged = db.rebuild_vec_index().unwrap();
+    assert_eq!(
+        indexed_damaged, 1,
+        "precondition: a row with no vector cannot be in the vector index"
+    );
+
+    // Dry run reports the damage and changes nothing.
+    let dry = db.refresh_embeddings(Some("repl"), true).unwrap();
+    assert!(dry.dry_run);
+    assert_eq!(
+        dry.unusable_found, 1,
+        "exactly one row lacks a usable vector"
+    );
+    assert_eq!(dry.refreshed, 0, "a dry run must not write");
+    assert!(dry.sample_rids.contains(&rid));
+
+    // Apply heals it.
+    let applied = db.refresh_embeddings(Some("repl"), false).unwrap();
+    assert_eq!(applied.refreshed, 1, "the damaged row must be re-encoded");
+    assert!(applied.errors.is_empty(), "errors: {:?}", applied.errors);
+
+    let indexed_after = db.rebuild_vec_index().unwrap();
+    assert_eq!(
+        indexed_after, 2,
+        "after refresh the healed row must be back in the vector index"
+    );
+    let back = db
+        .recall_text("how are invoices settled against statements", 5)
+        .unwrap();
+    assert!(
+        back.iter().any(|h| h.text == target),
+        "and reachable again; got {:?}",
+        back.iter().map(|h| &h.text).collect::<Vec<_>>()
+    );
+
+    // Idempotent: nothing is unusable now, so a second sweep is a no-op.
+    let again = db.refresh_embeddings(Some("repl"), false).unwrap();
+    assert_eq!(again.unusable_found, 0, "refresh must be idempotent");
+    assert_eq!(again.refreshed, 0);
+
+    // Namespace scoping is real: a sweep of another namespace sees nothing
+    // here, and the whole-store sweep still finds nothing to do.
+    let other = db.refresh_embeddings(Some("does-not-exist"), true).unwrap();
+    assert_eq!(other.scanned, 0, "namespace scope must actually filter");
+}

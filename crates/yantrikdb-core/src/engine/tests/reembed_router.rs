@@ -2143,8 +2143,8 @@ fn unimplemented_reembed_namespace_is_rejected_not_silently_global() {
     };
     let msg = reembed_err(&db, opts);
     assert!(
-        msg.contains("namespace is not implemented"),
-        "namespace must be refused by name; got: {msg}"
+        msg.contains("embedding space belongs to the ENGINE"),
+        "namespace must be refused as an engine-scoped-embedding request; got: {msg}"
     );
 }
 

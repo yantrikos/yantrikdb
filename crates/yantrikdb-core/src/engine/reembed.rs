@@ -642,19 +642,38 @@ impl YantrikDB {
         // The only `namespace =` predicate anywhere in this file is in a
         // test.
         //
-        // Rejecting rather than implementing: the engine has ONE embedder,
-        // one SearchState and one vector space, so a namespace-scoped
-        // re-embed needs per-namespace generations, provenance and indexes
-        // — a redesign, not a WHERE clause. Half of a vector space encoded
-        // with a different model is not a state this engine can represent,
-        // and silently doing the global thing is the worse failure.
+        // This rejection is PERMANENT, not a stopgap (architecture decision,
+        // Pranab, 2026-08-17: "embedding is not namespace specific, it is
+        // engine specific").
+        //
+        // The embedding space is a property of the ENGINE: one embedder, one
+        // SearchState, one vector space, and every query encoded by that one
+        // model. `reembed` exists to change that model, so it is inherently
+        // global — asking to change it for one namespace is not an
+        // unimplemented feature, it is a request the data model cannot
+        // represent. Half a vector space encoded with a different model is
+        // not a state this engine has, and the same reasoning already
+        // governs the cross-dimension refusal a few lines below: the
+        // documented escape hatch there is "open a NEW DB at the new dim and
+        // copy memories over", i.e. a second engine — which is also exactly
+        // what a mounted pack is.
+        //
+        // What a caller asking for this usually wants is a same-space
+        // REFRESH: re-encode a namespace's records with the embedder that is
+        // already active (repairing missing or damaged vectors, including
+        // replicated rows that arrive with no embedding at all). That is a
+        // repair operation, not a model change — it needs no generation
+        // bump, no cutover and no shadow index — and it belongs beside the
+        // other bulk same-space repairs in engine/repair.rs.
         if options.namespace.is_some() {
             return Err(YantrikDbError::InvalidInput(
-                "ReembedOptions::namespace is not implemented — it was accepted \
-                 and reported but applied to no query, so the whole store was \
-                 re-embedded regardless. A namespace-scoped re-embed needs \
-                 per-namespace embedding generations and indexes. Leave it None \
-                 to re-embed the store."
+                "ReembedOptions::namespace is not a supported request: the embedding space \
+                 belongs to the ENGINE, not to a namespace, so re-embedding is necessarily \
+                 store-wide. (Until 2026-08-17 this option was accepted and echoed back while \
+                 being applied to no query, so a 'scoped' call silently re-embedded everything.) \
+                 Leave it None to re-embed the store; to re-encode one namespace under the \
+                 CURRENT embedder, use the same-space refresh instead. For a genuinely separate \
+                 embedding space, use a separate engine — see the cross-dimension note below."
                     .to_string(),
             ));
         }

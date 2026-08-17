@@ -283,3 +283,262 @@ impl YantrikDB {
         Ok(report)
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// Same-space embedding refresh.
+// ─────────────────────────────────────────────────────────────────────
+
+/// Outcome of a [`YantrikDB::refresh_embeddings`] sweep.
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct RefreshReport {
+    /// Whether this was a dry run (no mutations performed).
+    pub dry_run: bool,
+    /// Namespace the sweep was limited to, or `None` for the whole store.
+    pub namespace: Option<String>,
+    /// Recall-visible rows examined (active + consolidated).
+    pub scanned: usize,
+    /// Rows that cannot participate in vector search under the active space:
+    /// a NULL embedding, or a blob whose length is not `dim * 4` bytes.
+    pub unusable_found: usize,
+    /// Rows re-encoded and written back. Always zero on a dry run.
+    pub refreshed: usize,
+    /// Rows whose text changed between scan and apply — skipped, never
+    /// clobbered.
+    pub skipped_concurrent_modification: usize,
+    /// Up to `SAMPLE_CAP` rids that were found unusable.
+    pub sample_rids: Vec<String>,
+    /// Per-row failures. One bad row never aborts the sweep.
+    pub errors: Vec<RepairError>,
+}
+
+struct PendingRefresh {
+    rid: String,
+    scanned_ciphertext: String,
+    new_embedding_blob: Vec<u8>,
+}
+
+impl YantrikDB {
+    /// Re-encode records whose vectors are missing or unusable, using the
+    /// embedder that is **already active**.
+    ///
+    /// # Why this is not a re-embed
+    ///
+    /// The embedding space belongs to the ENGINE, not to a namespace
+    /// (architecture decision, 2026-08-17), so `reembed` — which exists to
+    /// change that model — is necessarily store-wide and rejects a namespace
+    /// scope outright. This is the operation callers usually want instead: it
+    /// changes no model, no fingerprint, no dimension and no generation. It
+    /// only fills in vectors that are absent or malformed, in the space the
+    /// engine is already using.
+    ///
+    /// Because nothing about the space changes, none of the re-embed
+    /// machinery applies: no staging columns, no cutover, no shadow index, no
+    /// `SearchState` swap.
+    ///
+    /// # What it repairs
+    ///
+    /// A row is "unusable" when it is recall-visible but cannot participate
+    /// in vector search: `embedding IS NULL`, or a blob whose length is not
+    /// `dim * 4` bytes. The most important source of the first case is
+    /// REPLICATION — the follower insert omits `embedding`,
+    /// `embedding_model` and `embedding_generation` entirely, so replicated
+    /// rows arrive active in SQL and invisible to semantic recall. This is
+    /// the repair for them.
+    ///
+    /// # Safety
+    ///
+    /// Mirrors [`Self::repair_tool_call_artifacts`], the precedent for bulk
+    /// same-space work: dry-run first, the slow embedding happens outside the
+    /// connection lock, the UPDATE is concurrency-guarded on the exact
+    /// ciphertext that was scanned, and one failing row is recorded rather
+    /// than thrown. The index is rebuilt once at the end — and
+    /// `rebuild_vec_index` now refuses to install across a re-embed cutover,
+    /// so a refresh that races one is reported rather than mixed into the
+    /// wrong space.
+    pub fn refresh_embeddings(
+        &self,
+        namespace: Option<&str>,
+        dry_run: bool,
+    ) -> Result<RefreshReport> {
+        let mut report = RefreshReport {
+            dry_run,
+            namespace: namespace.map(|s| s.to_string()),
+            ..Default::default()
+        };
+
+        // Apply mode re-encodes; fail fast rather than reporting success
+        // while leaving the rows exactly as unusable as they were.
+        if !dry_run && !self.has_embedder() {
+            return Err(YantrikDbError::NoEmbedder);
+        }
+
+        let expected_len = self.embedding_dim() * 4;
+
+        // ── Phase 1: scan. Read-only, conn released before any embedding.
+        // Matches build_vec_index's visible set so text and index stay in
+        // step, exactly as the sibling repair does.
+        let scanned: Vec<(String, String, Option<usize>)> = {
+            let conn = self.conn();
+            let sql = if namespace.is_some() {
+                "SELECT rid, text, length(embedding) FROM memories \
+                 WHERE consolidation_status IN ('active', 'consolidated') \
+                   AND namespace = ?1 \
+                 ORDER BY rid"
+            } else {
+                "SELECT rid, text, length(embedding) FROM memories \
+                 WHERE consolidation_status IN ('active', 'consolidated') \
+                 ORDER BY rid"
+            };
+            let mut stmt = conn.prepare(sql)?;
+            fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String, Option<usize>)> {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<i64>>(2)?.map(|n| n as usize),
+                ))
+            }
+            match namespace {
+                Some(ns) => stmt
+                    .query_map(params![ns], map_row)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+                None => stmt
+                    .query_map([], map_row)?
+                    .collect::<std::result::Result<Vec<_>, _>>()?,
+            }
+        };
+        report.scanned = scanned.len();
+
+        // ── Phase 2: select the unusable rows and, in apply mode, encode
+        // them OUTSIDE the conn lock.
+        let mut pending: Vec<PendingRefresh> = Vec::new();
+        for (rid, scanned_ciphertext, blob_len) in scanned {
+            // Encrypted stores pad the blob, so a strict length check would
+            // false-positive on every row; there, only a NULL vector is
+            // provably unusable. Better to under-repair than to churn a
+            // whole corpus on a bad predicate.
+            let usable = match blob_len {
+                None => false,
+                Some(n) if self.is_encrypted() => n > 0,
+                Some(n) => n == expected_len,
+            };
+            if usable {
+                continue;
+            }
+            report.unusable_found += 1;
+            if report.sample_rids.len() < SAMPLE_CAP {
+                report.sample_rids.push(rid.clone());
+            }
+            if dry_run {
+                continue;
+            }
+
+            let plaintext = match self.decrypt_text(&scanned_ciphertext) {
+                Ok(t) => t,
+                Err(e) => {
+                    report.errors.push(RepairError {
+                        rid,
+                        message: format!("decrypt failed: {e}"),
+                    });
+                    continue;
+                }
+            };
+            let embedding = match self.embed(&plaintext) {
+                Ok(v) => v,
+                Err(e) => {
+                    report.errors.push(RepairError {
+                        rid,
+                        message: format!("embed failed: {e}"),
+                    });
+                    continue;
+                }
+            };
+            let new_embedding_blob = match self.encrypt_embedding(&serialize_f32(&embedding)) {
+                Ok(b) => b,
+                Err(e) => {
+                    report.errors.push(RepairError {
+                        rid,
+                        message: format!("encrypt embedding failed: {e}"),
+                    });
+                    continue;
+                }
+            };
+            pending.push(PendingRefresh {
+                rid,
+                scanned_ciphertext,
+                new_embedding_blob,
+            });
+        }
+
+        if dry_run || pending.is_empty() {
+            return Ok(report);
+        }
+
+        // ── Phase 3: apply in one transaction. The generation is READ, never
+        // bumped: this is the same space the store was already in, and
+        // advancing the store-wide watermark for a repair would make every
+        // untouched row look stale.
+        let state = self.search_state.load_full();
+        let generation = state.generation as i64;
+        let model = state.runtime_embedder_name.clone();
+        let updated_at = now();
+        {
+            let conn = self.conn();
+            conn.execute_batch("SAVEPOINT refresh_embeddings")?;
+            let apply: Result<()> = (|| {
+                for p in &pending {
+                    // Guarded on the exact ciphertext scanned: if a
+                    // concurrent write changed the text, the vector just
+                    // computed describes content that no longer exists.
+                    let updated = conn.execute(
+                        "UPDATE memories \
+                         SET embedding = ?1, embedding_model = ?2, \
+                             embedding_generation = ?3, updated_at = ?4 \
+                         WHERE rid = ?5 AND text = ?6",
+                        params![
+                            p.new_embedding_blob,
+                            model,
+                            generation,
+                            updated_at,
+                            p.rid,
+                            p.scanned_ciphertext,
+                        ],
+                    )?;
+                    if updated == 0 {
+                        report.skipped_concurrent_modification += 1;
+                        continue;
+                    }
+                    report.refreshed += 1;
+                }
+                Ok(())
+            })();
+            match apply {
+                Ok(()) => conn.execute_batch("RELEASE refresh_embeddings")?,
+                Err(e) => {
+                    let _ = conn.execute_batch(
+                        "ROLLBACK TO refresh_embeddings; RELEASE refresh_embeddings",
+                    );
+                    return Err(e);
+                }
+            }
+        }
+
+        // ── Phase 4: one rebuild, so the newly-filled vectors become
+        // searchable. Refuses to install across a cutover.
+        if report.refreshed > 0 {
+            self.rebuild_vec_index()?;
+        }
+
+        tracing::info!(
+            target: "yantrikdb::audit::repair",
+            namespace = ?report.namespace,
+            scanned = report.scanned,
+            unusable_found = report.unusable_found,
+            refreshed = report.refreshed,
+            skipped_concurrent = report.skipped_concurrent_modification,
+            errors = report.errors.len(),
+            "same-space embedding refresh complete",
+        );
+
+        Ok(report)
+    }
+}
