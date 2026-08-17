@@ -638,6 +638,38 @@ impl YantrikDB {
         ts_micros: i64,
         seq: Option<u64>,
     ) -> Result<bool> {
+        // THE F1/F2 FORGET-RESURRECTION RACE, closed 2026-08-17.
+        //
+        // Both entry points — `forget()` and the cluster-deterministic
+        // `tombstone_with_rid()` — funnel here, and this body tombstones the
+        // rid AND its chunks in `self.search_state.load().vec_index` (see
+        // `purge_chunks`). Neither took the sync-writer guard, so a reembed
+        // cutover could interleave:
+        //
+        //   1. forget() tombstones the row in SQL and in the CURRENT delta;
+        //   2. reembed publishes a new SearchState whose index was built
+        //      from a SQL snapshot taken BEFORE that tombstone committed;
+        //   3. the delta tombstone died with the discarded state.
+        //
+        // The record is then tombstoned in SQL and ALIVE in the live index —
+        // a delete that silently un-deletes, visible only to whoever
+        // retrieves the thing the user asked to forget. Guarding here means
+        // the cutover cannot complete mid-delete: reembed switches to
+        // Queueing and then waits for in-flight sync writers to drain, so a
+        // forget either finishes before the swap or is refused outright.
+        //
+        // Guarded at `tombstone_inner` rather than at each caller
+        // deliberately — one predicate covering forget(), tombstone_with_rid()
+        // and the chunk purge they share, instead of three copies to keep in
+        // sync. (`purge_chunks` has two further direct callers on the
+        // replication conflict-loser path; those are not covered by this
+        // guard and are tracked separately.)
+        let Some(_sync_guard) = self.write_router.try_enter_sync_writer() else {
+            return Err(crate::error::YantrikDbError::ForgetDeferredDuringReembed {
+                rid: rid.to_string(),
+            });
+        };
+
         let ts_secs = (ts_micros as f64) / 1_000_000.0;
 
         // Resolve namespace + execute the UPDATE in a single conn block.
