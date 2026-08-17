@@ -44,6 +44,9 @@ pub(crate) struct ClaimCandidate {
 /// their claims. Best-effort by design: a missing `claims` table (old
 /// packs) or any read error yields an empty lane, never a failed
 /// recall. Duplicate rids keep their first (best-anchored) why.
+/// Claims with a phantom endpoint (an entity today's extractor would
+/// not mint) are suppressed at read time unless `extractor = 'manual'`
+/// — see the inline comment in the row loop.
 pub(crate) fn claims_candidates(
     conn: &Connection,
     graph_index: &GraphIndex,
@@ -70,7 +73,7 @@ pub(crate) fn claims_candidates(
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (entity, _etype, _mentions) in &anchors {
         let sql = format!(
-            "SELECT src, rel_type, dst, source_memory_rid, polarity FROM claims \
+            "SELECT src, rel_type, dst, source_memory_rid, polarity, extractor FROM claims \
              WHERE (src = ?1 OR dst = ?1) AND tombstoned = 0 \
              AND source_memory_rid IS NOT NULL {} \
              ORDER BY created_at DESC LIMIT {}",
@@ -84,7 +87,7 @@ pub(crate) fn claims_candidates(
         let Ok(mut stmt) = conn.prepare_cached(&sql) else {
             return out; // no claims table — empty lane, never an error
         };
-        let rows: Vec<(String, String, String, String, i64)> = {
+        let rows: Vec<(String, String, String, String, i64, String)> = {
             let mapper = |row: &rusqlite::Row| -> rusqlite::Result<_> {
                 Ok((
                     row.get(0)?,
@@ -92,6 +95,7 @@ pub(crate) fn claims_candidates(
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
                 ))
             };
             let res = if let Some(ns) = namespace {
@@ -103,7 +107,36 @@ pub(crate) fn claims_candidates(
             };
             res.unwrap_or_default()
         };
-        for (src, rel, dst, rid, polarity) in rows {
+        for (src, rel, dst, rid, polarity, extractor) in rows {
+            // PHANTOM SUPPRESSION — the claims-lane twin of the 0.14.1
+            // GraphIndex::build_from_db heal. Claims written by pre-0.14.1
+            // extractors keep stopword anchors (observed live 2026-08-16:
+            // `claims_match: DB -leads-> THE (anchor THE)` in production
+            // why_retrieved), and this lane read them back verbatim. A claim
+            // whose src or dst is an entity today's extractor would not mint
+            // is excluded at READ time — rows are never rewritten, so
+            // reverting the rules restores the old behaviour exactly, same
+            // reversibility contract as the graph heal.
+            //
+            // `extractor = 'manual'` exempts the CLAIM, mirroring how the
+            // graph heal exempts relate()'d names. Deliberately judged
+            // per-claim rather than per-entity: the graph heal's protected
+            // SET would immunise every heuristic phantom claim the moment
+            // one manual claim touched the name — the same auto-relate
+            // loophole the graph heal refused ("a heuristic claim does NOT
+            // protect"). This also closes the protected-anchor leak: a
+            // manually protected stopword entity still resolves as an
+            // anchor, but only manual claims about it surface.
+            //
+            // Suppressed rows do occupy slots in the per-anchor fetch
+            // window above; a phantom-heavy window yields fewer candidates,
+            // which is the point — those rows were noise.
+            if extractor != "manual"
+                && (crate::graph::is_rejected_entity_name(&src)
+                    || crate::graph::is_rejected_entity_name(&dst))
+            {
+                continue;
+            }
             if !seen.insert(rid.clone()) {
                 continue;
             }
@@ -294,6 +327,108 @@ impl super::YantrikDB {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A store the way a pre-0.14.1 extractor left it: phantom entity
+    /// `THE` with real mentions, a heuristic claim anchored on it
+    /// (`DB -leads-> THE`, the exact row observed in production
+    /// why_retrieved 2026-08-16), a legitimate heuristic claim, and a
+    /// manual claim. `edges` is a VIEW over `claims`, as in the real
+    /// schema since V17.
+    fn seeded_store() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE entities (name TEXT PRIMARY KEY, entity_type TEXT, \
+                 first_seen REAL, last_seen REAL, mention_count INTEGER);
+             CREATE TABLE memory_entities (memory_rid TEXT, entity_name TEXT);
+             CREATE TABLE claims (claim_id TEXT PRIMARY KEY, src TEXT NOT NULL, \
+                 dst TEXT NOT NULL, rel_type TEXT NOT NULL, weight REAL DEFAULT 1.0, \
+                 created_at REAL NOT NULL, tombstoned INTEGER NOT NULL DEFAULT 0, \
+                 polarity INTEGER NOT NULL DEFAULT 1, \
+                 extractor TEXT NOT NULL DEFAULT 'manual', source_memory_rid TEXT, \
+                 namespace TEXT NOT NULL DEFAULT 'default');
+             CREATE VIEW edges AS SELECT src, dst, weight, tombstoned FROM claims;",
+        )
+        .unwrap();
+        for (name, etype, mc) in [
+            ("DB", "tech", 5),
+            ("Postgres", "tech", 3),
+            ("THE", "unknown", 10),
+        ] {
+            conn.execute(
+                "INSERT INTO entities (name, entity_type, first_seen, last_seen, mention_count) \
+                 VALUES (?1, ?2, 0.0, 0.0, ?3)",
+                params![name, etype, mc],
+            )
+            .unwrap();
+        }
+        for (cid, src, dst, rel, ts, extractor, rid) in [
+            // The live phantom, verbatim: an old extractor minted `THE`.
+            ("c1", "DB", "THE", "leads", 3.0, "heuristic_v1", "m1"),
+            // A legitimate claim between real entities.
+            ("c2", "DB", "Postgres", "uses", 2.0, "heuristic_v1", "m2"),
+            // A deliberate relate()-style assertion touching the stopword.
+            ("c3", "THE", "DB", "leads", 1.0, "manual", "m3"),
+        ] {
+            conn.execute(
+                "INSERT INTO claims (claim_id, src, dst, rel_type, created_at, \
+                 extractor, source_memory_rid) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                params![cid, src, dst, rel, ts, extractor, rid],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    /// The heal, anchored from the LEGITIMATE side: a claim whose other
+    /// endpoint is a stopword phantom must not ride in on its real
+    /// anchor. The legitimate claim and the manual claim still match.
+    #[test]
+    fn stopword_endpoint_claims_are_suppressed_at_read() {
+        let conn = seeded_store();
+        let gi = GraphIndex::build_from_db(&conn).unwrap();
+        let tokens = crate::graph::tokenize("what does DB use");
+        let cands = claims_candidates(&conn, &gi, &tokens, None);
+        let rids: Vec<&str> = cands.iter().map(|c| c.rid.as_str()).collect();
+        assert!(
+            !rids.contains(&"m1"),
+            "heuristic claim with stopword dst must be suppressed, got {rids:?}"
+        );
+        assert!(
+            rids.contains(&"m2"),
+            "legitimate claim must still match, got {rids:?}"
+        );
+        assert!(
+            rids.contains(&"m3"),
+            "manual claim must stay exempt (relate() provenance), got {rids:?}"
+        );
+    }
+
+    /// The production repro: `claims_match: DB -leads-> THE (anchor THE)`.
+    /// The manual claim c3 protects entity `THE` in the graph index (the
+    /// 0.14.1 heal's entity-level exemption), so `THE` still resolves as
+    /// an anchor — but only MANUAL claims about it may surface. The
+    /// heuristic phantom row must not, even anchored at `THE` itself.
+    #[test]
+    fn protected_stopword_anchor_surfaces_only_manual_claims() {
+        let conn = seeded_store();
+        let gi = GraphIndex::build_from_db(&conn).unwrap();
+        // Precondition of the live defect: THE is a resolvable anchor.
+        assert!(
+            !gi.entity_matches_query(&[String::from("the")]).is_empty(),
+            "fixture must reproduce the protected-anchor precondition"
+        );
+        let tokens = crate::graph::tokenize("the database leads");
+        let cands = claims_candidates(&conn, &gi, &tokens, None);
+        assert!(
+            !cands.iter().any(|c| c.why.contains("DB -leads-> THE")),
+            "the exact live phantom why must never be emitted, got {:?}",
+            cands.iter().map(|c| c.why.as_str()).collect::<Vec<_>>()
+        );
+        assert!(
+            cands.iter().any(|c| c.rid == "m3"),
+            "the manual claim anchored at the protected name must survive"
+        );
+    }
 
     #[test]
     fn direction_provenance_is_spelled_out() {
