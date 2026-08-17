@@ -321,6 +321,18 @@ pub fn is_rejected_entity_name(name: &str) -> bool {
     if toks.is_empty() {
         return true;
     }
+    // No alphabetic character anywhere: "546", "15", "3.6", "2026-08-16".
+    // The capitalized-chunk extractor can never mint these, but the claims
+    // lane can and did — a first-hand probe on the production store found
+    // `claims_match: 15 -leads-> LOG (anchor 15)` SURVIVING the stopword
+    // heal, because this predicate only knew function words. A subject
+    // with no letters names nothing; it anchors neither claims nor
+    // conflicts. (The conflict detector carried its own copy of this
+    // guard; centralizing it here makes every surface that consults this
+    // predicate — graph load, claims lane, conflict admission — agree.)
+    if !name.chars().any(|c| c.is_alphabetic()) {
+        return true;
+    }
     // Wholly made of function words / bare months: "AT", "June", "THE Most".
     if toks.iter().all(|t| is_entity_stopword(t)) {
         return true;

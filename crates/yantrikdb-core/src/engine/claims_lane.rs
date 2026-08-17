@@ -45,8 +45,9 @@ pub(crate) struct ClaimCandidate {
 /// packs) or any read error yields an empty lane, never a failed
 /// recall. Duplicate rids keep their first (best-anchored) why.
 /// Claims with a phantom endpoint (an entity today's extractor would
-/// not mint) are suppressed at read time unless `extractor = 'manual'`
-/// — see the inline comment in the row loop.
+/// not mint) are suppressed at read time, with NO extractor exemption —
+/// the V14→V15 backfill made 'manual' untrustworthy on lane rows; see
+/// the inline comment in the row loop.
 pub(crate) fn claims_candidates(
     conn: &Connection,
     graph_index: &GraphIndex,
@@ -118,22 +119,31 @@ pub(crate) fn claims_candidates(
             // reverting the rules restores the old behaviour exactly, same
             // reversibility contract as the graph heal.
             //
-            // `extractor = 'manual'` exempts the CLAIM, mirroring how the
-            // graph heal exempts relate()'d names. Deliberately judged
-            // per-claim rather than per-entity: the graph heal's protected
-            // SET would immunise every heuristic phantom claim the moment
-            // one manual claim touched the name — the same auto-relate
-            // loophole the graph heal refused ("a heuristic claim does NOT
-            // protect"). This also closes the protected-anchor leak: a
-            // manually protected stopword entity still resolves as an
-            // anchor, but only manual claims about it surface.
+            // NO extractor exemption in THIS lane. A GENUINE relate() row
+            // cannot reach it: relate() writes no source_memory_rid and
+            // the lane's SQL requires one — so the only 'manual'-labeled
+            // rows the lane can see are V14→V15 migration backfills of old
+            // extraction (schema.rs backfilled every pre-V15 row to
+            // 'manual'), for which the label is not evidence of intent.
+            // An exemption here would therefore protect exactly and only
+            // mislabeled rows. Filter unconditionally; if relate() rows
+            // ever gain lane access, the exemption question reopens then —
+            // explicitly, not by default.
+            //
+            // (Release-probe note, 2026-08-17: an earlier claim that
+            // phantoms "survived the exemption" on the production store
+            // was a broken instrument — the probe had imported the
+            // published wheel via a relative PYTHONPATH. The store's
+            // phantom rows are extractor='heuristic_v1' and the original
+            // per-claim filter caught them; this unconditional form is
+            // kept on the architectural argument above, not that probe.)
             //
             // Suppressed rows do occupy slots in the per-anchor fetch
             // window above; a phantom-heavy window yields fewer candidates,
             // which is the point — those rows were noise.
-            if extractor != "manual"
-                && (crate::graph::is_rejected_entity_name(&src)
-                    || crate::graph::is_rejected_entity_name(&dst))
+            let _ = &extractor; // fetched for observability; not a gate here
+            if crate::graph::is_rejected_entity_name(&src)
+                || crate::graph::is_rejected_entity_name(&dst)
             {
                 continue;
             }
@@ -381,7 +391,10 @@ mod tests {
 
     /// The heal, anchored from the LEGITIMATE side: a claim whose other
     /// endpoint is a stopword phantom must not ride in on its real
-    /// anchor. The legitimate claim and the manual claim still match.
+    /// anchor — REGARDLESS of extractor label. The V14→V15 migration
+    /// backfilled every old row to 'manual', so inside this lane the
+    /// label cannot be trusted (and genuine relate() rows never reach
+    /// the lane at all — they carry no source_memory_rid).
     #[test]
     fn stopword_endpoint_claims_are_suppressed_at_read() {
         let conn = seeded_store();
@@ -398,8 +411,43 @@ mod tests {
             "legitimate claim must still match, got {rids:?}"
         );
         assert!(
-            rids.contains(&"m3"),
-            "manual claim must stay exempt (relate() provenance), got {rids:?}"
+            !rids.contains(&"m3"),
+            "migration-backfilled 'manual' label must NOT exempt a phantom-anchored              claim in this lane, got {rids:?}"
+        );
+    }
+
+    /// The SECOND production repro, caught by the first-hand release probe
+    /// AFTER the stopword heal: `claims_match: 15 -leads-> LOG (anchor 15)`.
+    /// Bare-number subjects carry no meaning and passed the stopword-only
+    /// predicate; `is_rejected_entity_name` now rejects any name with no
+    /// alphabetic character, and this pins the claims lane honoring it.
+    #[test]
+    fn numeric_endpoint_claims_are_suppressed_at_read() {
+        let conn = seeded_store();
+        conn.execute(
+            "INSERT INTO entities (name, entity_type, first_seen, last_seen, mention_count) \
+             VALUES ('15', 'unknown', 0.0, 0.0, 4)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO claims (claim_id, src, dst, rel_type, created_at, extractor, \
+             source_memory_rid) VALUES ('c15', '15', 'LOG', 'leads', 0.0, 'heuristic_v1', 'm9')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_entities (memory_rid, entity_name) VALUES ('m9', '15')",
+            [],
+        )
+        .unwrap();
+        let gi = GraphIndex::build_from_db(&conn).unwrap();
+        let tokens = crate::graph::tokenize("release 15 log architecture");
+        let cands = claims_candidates(&conn, &gi, &tokens, None);
+        let rids: Vec<&str> = cands.iter().map(|c| c.rid.as_str()).collect();
+        assert!(
+            !rids.contains(&"m9"),
+            "bare-number-anchored heuristic claim must be suppressed, got {rids:?}"
         );
     }
 
@@ -425,8 +473,8 @@ mod tests {
             cands.iter().map(|c| c.why.as_str()).collect::<Vec<_>>()
         );
         assert!(
-            cands.iter().any(|c| c.rid == "m3"),
-            "the manual claim anchored at the protected name must survive"
+            !cands.iter().any(|c| c.rid == "m3"),
+            "no phantom-anchored claim survives, whatever its extractor label —              the migration backfill made 'manual' meaningless for lane rows"
         );
     }
 
