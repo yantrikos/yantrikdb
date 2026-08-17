@@ -41,7 +41,7 @@ pub use engine::digest::{ChangesSince, SessionDigest, SessionDigestConfig, Statu
 pub use engine::graph_ops::AutoRelateReport;
 pub use engine::importance::ImportanceRecalibrationReport;
 pub use engine::links::ChainAuditReport;
-pub use engine::maintenance::{MaintenanceCycleConfig, MaintenanceCycleReport};
+pub use engine::maintenance::{MaintenanceCycleConfig, MaintenanceCycleReport, MaintenanceDebt};
 pub use engine::pack::{
     MountOptions, MountedPack, PackEmbedder, PackInfo, PackManifest, PackTrust,
 };

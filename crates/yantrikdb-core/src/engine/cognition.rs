@@ -367,11 +367,25 @@ impl YantrikDB {
             false
         };
 
-        // Record last_think_at
-        self.conn().execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_think_at', ?1)",
-            params![ts.to_string()],
-        )?;
+        // Record last_think_at — and settle the maintenance-debt ledger when
+        // this pass actually LOOKED at the accumulated writes. The conflict
+        // scan (entity + claim) is the pass that reads new content, so only
+        // a think with run_conflict_scan clears `writes_since_think`; a
+        // think called with the scan disabled still stamps last_think_at
+        // (pre-existing behavior, unchanged) but leaves the write debt
+        // standing — nothing examined those writes, so the ledger must keep
+        // saying so.
+        {
+            let conn = self.conn();
+            if config.run_conflict_scan {
+                Self::clear_maintenance_debt_on(&conn, ts)?;
+            } else {
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_think_at', ?1)",
+                    params![ts.to_string()],
+                )?;
+            }
+        }
 
         // Log think op (informational, not materialized on remote)
         self.log_op(
