@@ -8,7 +8,7 @@
 // v40 adds `memory_chunks` (chunked embeddings — one record, N window
 // vectors; docs/chunked_embeddings_design.md). Same v39 shape: a new
 // CREATE TABLE IF NOT EXISTS in SCHEMA_SQL, no migration constant.
-pub const SCHEMA_VERSION: i32 = 40;
+pub const SCHEMA_VERSION: i32 = 41;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -768,6 +768,11 @@ CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- Fresh stores record every impression under the post-2026-08-17 meaning
+-- of the ranking features, so the learner filters nothing. Upgraded stores
+-- get a real timestamp here instead. See MIGRATE_V40_TO_V41.
+INSERT OR IGNORE INTO meta (key, value) VALUES ('ranking_feature_epoch', '0');
 
 -- v27 (issue #41): durable audit log of db.reembed() phase transitions.
 -- Authoritative source for crash recovery and observability. The
@@ -2767,4 +2772,42 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_memories_idempotency
 pub const MIGRATE_V37_TO_V38: &str = "
 CREATE INDEX IF NOT EXISTS idx_oplog_pending_ordered ON oplog(hlc, op_id) WHERE applied = 0;
 DROP INDEX IF EXISTS idx_oplog_pending;
+";
+
+/// v41 (2026-08-17): the ranking features changed MEANING, so every fit
+/// made against the old meaning is void.
+///
+/// `f_decay` is recorded at serve time from `ScoreBreakdown.decay`
+/// (engine/impressions.rs) and read back by the learner
+/// (engine/learning.rs) with no notion of which formula produced it. On
+/// 2026-08-17 `decay` stopped being "time since this record was last READ"
+/// (`decay_score(importance, half_life, now - last_access)`) and became
+/// "the record's own age" (`scoring::ranking_decay`). Same column, same
+/// name, different quantity.
+///
+/// Two consequences, both silent without this migration:
+///
+///  1. `learned_weights` holds a `w_decay` fitted against the OLD feature
+///     and applied, on every recall, to the NEW one. The other weights were
+///     fitted jointly with it, so the whole vector is suspect — not just
+///     `w_decay`. Reset to defaults; a store simply relearns.
+///  2. Future fits would mix old-meaning and new-meaning rows under one
+///     feature name. Rather than delete the operator's labelled episodes
+///     (production had ~12, they are expensive to collect), stamp the
+///     boundary and let the learner read only what lies after it.
+///
+/// `keyword_boost` is reset here for a second reason: the additive keyword
+/// boost was removed the same day, so that weight is now inert (see
+/// engine/lexical.rs). Its column stays for schema compatibility.
+///
+/// Fresh installs seed the epoch to 0 in SCHEMA_SQL — every impression they
+/// will ever record already uses the new meaning, so nothing is filtered.
+pub const MIGRATE_V40_TO_V41: &str = "
+UPDATE learned_weights SET
+    w_sim = 0.50, w_decay = 0.20, w_recency = 0.30,
+    gate_tau = 0.25, alpha_imp = 0.80, keyword_boost = 0.31,
+    generation = generation + 1, updated_at = strftime('%s','now')
+WHERE id = 1;
+INSERT OR REPLACE INTO meta (key, value)
+    VALUES ('ranking_feature_epoch', CAST(strftime('%s','now') AS TEXT));
 ";
