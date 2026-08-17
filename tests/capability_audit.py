@@ -113,16 +113,23 @@ def probe_window(db, results):
     results["window_PASS"] = len(inside) == len(expected) and not leaked
 
 
-def probe_succession(db, results):
-    """Current-value: the LATEST tolerance must outrank the superseded ones."""
+def probe_succession(db, results, phase="warm"):
+    """Current-value: the LATEST tolerance must outrank the superseded ones.
+
+    Run TWICE — once on a COLD store and once after unrelated queries have
+    already run. Cold alone is not a test: the defect this pins was invisible
+    cold and only appeared once an unrelated recall had reinforced some other
+    record. A currency guarantee that holds only until someone else asks a
+    question is not a guarantee.
+    """
     hits = db.recall(query="what is the matching tolerance", top_k=5, namespace=NS, expand_entities=False)
     texts = [h["text"] for h in hits]
     current = SUCCESSION[-1][1]
     rank = next((i for i, t in enumerate(texts) if t == current), None)
-    results["succession_current_rank"] = rank
-    results["succession_all_three_retrieved"] = sum(
+    results[f"succession_current_rank_{phase}"] = rank
+    results[f"succession_all_three_retrieved_{phase}"] = sum(
         1 for _, t in SUCCESSION if t in texts)
-    results["succession_PASS"] = rank == 0
+    results[f"_succession_ok_{phase}"] = rank == 0
 
 
 def probe_abstention(db, results):
@@ -160,18 +167,40 @@ def probe_interval(db, results):
     results["interval_PASS"] = days == truth
 
 
-def main():
-    path = os.path.join(tempfile.mkdtemp(), "audit.db")
-    db = YantrikDB.with_default(path)
+def fresh_store():
+    db = YantrikDB.with_default(os.path.join(tempfile.mkdtemp(), "audit.db"))
     build(db)
+    return db
+
+
+def run(fn, results, *args):
+    """Call a probe; a probe that raises must not kill the audit."""
+    try:
+        fn(*args)
+    except Exception as e:
+        results[fn.__name__ + "_ERROR"] = f"{type(e).__name__}: {e}"
+
+
+def main():
     results = {}
-    for fn in (probe_ordering, probe_window, probe_succession,
-               probe_abstention, probe_interval):
-        try:
-            fn(db, results)
-        except Exception as e:  # a probe must not kill the audit
-            results[fn.__name__ + "_ERROR"] = f"{type(e).__name__}: {e}"
+
+    # COLD: a store nobody has queried yet.
+    cold = fresh_store()
+    run(probe_succession, results, cold, results, "cold")
+    cold.close()
+
+    # WARM: the same corpus, but after unrelated questions have been asked.
+    db = fresh_store()
+    for fn in (probe_ordering, probe_window):
+        run(fn, results, db, results)
+    run(probe_succession, results, db, results, "warm")
+    for fn in (probe_abstention, probe_interval):
+        run(fn, results, db, results)
     db.close()
+
+    # One probe, two conditions: currency must survive other people's queries.
+    results["succession_PASS"] = bool(
+        results.get("_succession_ok_cold") and results.get("_succession_ok_warm"))
     passes = [k for k, v in results.items() if k.endswith("_PASS") and v is True]
     fails = [k for k, v in results.items() if k.endswith("_PASS") and v is not True]
     print(json.dumps(results, indent=1, default=str))

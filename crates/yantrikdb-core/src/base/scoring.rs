@@ -19,6 +19,69 @@ pub fn decay_score(importance: f64, half_life: f64, elapsed: f64) -> f64 {
     }
 }
 
+/// Half-life used by the RANKING freshness prior — 7 days, the schema
+/// default for `memories.half_life`.
+///
+/// A CONSTANT, deliberately, rather than the record's stored `half_life`.
+/// See [`ranking_decay`] for why.
+pub const RANKING_HALF_LIFE: f64 = 604_800.0;
+
+/// The decay half of the freshness prior, **for ranking only**.
+///
+/// # The currency bug this replaces (2026-08-17)
+///
+/// Every ranking lane computed its decay term as
+/// `decay_score(importance, row.half_life, now - row.last_access)`. Both of
+/// those inputs are mutated by `reinforce()`, which runs on every recall
+/// that returns a record: it sets `last_access = now` and multiplies
+/// `half_life` by 1.2. So the "freshness" prior was not a property of the
+/// record at all — it was a property of WHO HAD READ IT RECENTLY.
+///
+/// Because reinforcement is PARTIAL — a query freshens only the records IT
+/// returned — this leaks one query's access pattern into the next query's
+/// ranking. Measured on a synthetic store with total ground truth (a value
+/// restated three times: 5 cents → 3 cents → 2 cents):
+///
+/// ```text
+/// COLD store:  "what is the matching tolerance" → 2 cents (current) at #1
+/// after ONE unrelated recall that happened to return the older two:
+///              → 3 cents (STALE) at #1, current demoted to #3
+/// ```
+///
+/// The current record's score never changed (0.49188 both times). The stale
+/// records ROSE, by ~1.5%, purely because their decay term jumped from ~0 to
+/// 0.80 when an unrelated query touched them — and the similarity gap
+/// separating them was only 0.85%. The 30% policy budget is an inversion
+/// budget by design; feeding it access noise means access noise inverts
+/// rankings. It degrades with usage, so it is worst on the most-used stores.
+///
+/// # The rule
+///
+/// A prior is a property of the RECORD, not of the query and not of the
+/// reader. Freshness therefore reads the record's own event time and a fixed
+/// half-life. Usage is a legitimate but DIFFERENT prior with its own bounded,
+/// saturating share of the budget ([`usage_z`] / [`PW_USAGE`]); it must enter
+/// there or not at all, never disguised as freshness at freshness's weight.
+///
+/// `last_access` and the reinforced `half_life` keep driving LIFECYCLE —
+/// [`eviction_score`], tiering, and the `decay()` sweep — which is what
+/// spaced repetition is actually for. Nothing there changes.
+///
+/// # Why a constant half-life
+///
+/// The authored per-record `half_life` would be a fair prior ("this fact is
+/// ephemeral"), but reinforcement OVERWRITES the authored value in place, so
+/// on any store that has served traffic it no longer records what the author
+/// asked for — only how often the record has been read. Restoring it as a
+/// ranking signal needs a separate retention column so the two stop sharing
+/// storage; until then, reading it would re-admit the same leak at 80%
+/// strength (a record read 40 times reaches the 1-year cap and holds decay
+/// 0.37 where an unread peer of the same age holds ~0).
+#[inline]
+pub fn ranking_decay(importance: f64, created_at: f64, ts: f64) -> f64 {
+    decay_score(importance, RANKING_HALF_LIFE, ts - created_at)
+}
+
 /// Compute the recency score: exp(-age / (7 * 86400))
 ///
 /// Negative `age` clamps to 0 (score = 1.0, the maximum) — see
@@ -27,9 +90,61 @@ pub fn recency_score(age: f64) -> f64 {
     f64::exp(-age.max(0.0) / (7.0 * 86400.0))
 }
 
+/// The range `valence` is documented to occupy. Anything outside it is a
+/// caller error, and [`clamp_valence`] treats it as one.
+pub const VALENCE_RANGE: (f64, f64) = (-1.0, 1.0);
+
+/// Clamp a stored valence into its documented range before it multiplies
+/// anything.
+///
+/// # The defect this closes (2026-08-17)
+///
+/// `valence` is documented as `[-1, 1]`, but the write path validates only
+/// that scoring scalars are FINITE (`base/validate.rs`, `validate_scalars`),
+/// so any finite `f64` reaches storage — and from there the score, as an
+/// UNBOUNDED multiplier applied outside the policy budget. Measured on the
+/// published 0.15.2 wheel:
+///
+/// ```text
+/// record A: "…ingest pipeline parses OFX and CSV…"  valence 0    sim 0.7043
+/// record B: "…grandmother's lasagna recipe…"        valence 100  sim 0.0915
+/// query:    "what statement formats does the ingest parse"
+///
+///   B  score 1.49608  (valence multiplier 31.0)   <- rank 0
+///   A  score 0.48850  (valence multiplier  1.0)   <- rank 1
+/// ```
+///
+/// An irrelevant record outscored a relevant one 3:1, and the write that
+/// caused it was accepted without complaint. At `valence = 1e6` the
+/// multiplier is ~300,000: one stored scalar controls the whole ranking.
+///
+/// This is the FIFTH instance of one family — the importance wall, the
+/// recency wall, the graph wall, the currency bug, and now this. Every one
+/// was a signal permitted to create or invert relevance from outside the
+/// shared budget. Clamping HERE, at the two functions every lane's score
+/// passes through, fixes existing stores too: the out-of-range values are
+/// already written, so validating only new writes would leave them live.
+///
+/// Note this bounds the multiplier; it does not put it INSIDE the policy
+/// budget. On a neutral query the surviving `1 + 0.3*|valence|` is still a
+/// query-independent prior spending up to 1.30x outside the shared
+/// allocation, and an aligned sentiment reaches 1.56x against a documented
+/// 1.30x ceiling. That is a separate decision with its own measurement —
+/// deliberately NOT bundled into this fix.
+#[inline]
+pub fn clamp_valence(valence: f64) -> f64 {
+    // NaN maps to 0.0 (neutral): `f64::clamp` panics on a NaN bound and
+    // propagates a NaN value, and a NaN multiplier would poison the whole
+    // ranking rather than just this record.
+    if valence.is_nan() {
+        return 0.0;
+    }
+    valence.clamp(VALENCE_RANGE.0, VALENCE_RANGE.1)
+}
+
 /// Compute the valence boost: 1.0 + 0.3 * |valence|
 pub fn valence_boost(valence: f64) -> f64 {
-    1.0 + 0.3 * valence.abs()
+    1.0 + 0.3 * clamp_valence(valence).abs()
 }
 
 /// Negative sentiment keywords for query-aware valence matching.
@@ -141,7 +256,11 @@ pub fn detect_query_sentiment(query_text: &str) -> f64 {
 /// When query sentiment matches memory valence sign (e.g., negative query + negative memory),
 /// the boost is increased. When they mismatch, the boost is reduced.
 /// For neutral queries (sentiment == 0.0), falls back to the standard symmetric boost.
+///
+/// `memory_valence` is clamped to its documented range first — see
+/// [`clamp_valence`] for the unbounded-multiplier defect that required it.
 pub fn query_valence_boost(memory_valence: f64, query_sentiment: f64) -> f64 {
+    let memory_valence = clamp_valence(memory_valence);
     let base = 1.0 + 0.3 * memory_valence.abs();
     if query_sentiment == 0.0 {
         return base;
@@ -960,6 +1079,136 @@ mod tests {
         assert!(
             relevant_isolated > irrelevant_connected,
             "the graph wall is back: connected {irrelevant_connected} beat relevant {relevant_isolated}"
+        );
+    }
+
+    #[test]
+    fn valence_cannot_be_an_unbounded_multiplier() {
+        // THE 2026-08-17 fifth-wall defect. `valence` is documented [-1,1] but
+        // the write path validates only finiteness, so any f64 reached the
+        // score as a multiplier. Reproduced on the shipped 0.15.2 wheel: an
+        // irrelevant record (sim 0.0915, valence 100) scored 1.49608 and beat
+        // a relevant one (sim 0.7043, valence 0) at 0.48850 — a 31x multiplier.
+        //
+        // The property: no stored valence, however absurd, may lift a record
+        // past the documented ceiling.
+        let ceiling = valence_boost(1.0); // 1.30, the honest maximum
+        for v in [1.0, 1.000_001, 2.0, 100.0, 1e6, f64::MAX, f64::INFINITY] {
+            for signed in [v, -v] {
+                assert!(
+                    valence_boost(signed) <= ceiling + 1e-12,
+                    "valence {signed} escaped the ceiling: {} > {ceiling}",
+                    valence_boost(signed)
+                );
+                // Same bound on the query-aware path, at every sentiment.
+                for s in [-1.0, 0.0, 1.0] {
+                    let b = query_valence_boost(signed, s);
+                    assert!(
+                        b.is_finite() && b <= ceiling * 1.2 + 1e-12,
+                        "query_valence_boost({signed}, {s}) = {b} escaped the bound"
+                    );
+                }
+            }
+        }
+        // NaN must not poison the ranking — it is neutral, not infinite.
+        assert_eq!(valence_boost(f64::NAN), 1.0);
+        assert_eq!(query_valence_boost(f64::NAN, -1.0), 1.0);
+
+        // FAIL-ON-OLD, as an assertion: the pre-fix expression is what the
+        // engine computed. If this ever stops being an inversion, the fixture
+        // no longer models the defect and the assertions above prove nothing.
+        let old_boost_at_100 = 1.0 + 0.3 * 100.0_f64.abs();
+        let old_irrelevant = W_SIM * 0.0915 * old_boost_at_100;
+        let old_relevant = W_SIM * 0.7043 * 1.0;
+        assert!(
+            old_irrelevant > old_relevant,
+            "fixture must reproduce the measured inversion: {old_irrelevant:.5} vs {old_relevant:.5}"
+        );
+
+        // And the same pair under the fix: relevance wins.
+        let now_irrelevant = composite_score(0.0915, 0.0, 0.0, 0.5, 100.0);
+        let now_relevant = composite_score(0.7043, 0.0, 0.0, 0.5, 0.0);
+        assert!(
+            now_relevant > now_irrelevant,
+            "clamped: relevant {now_relevant:.5} must beat valence-inflated {now_irrelevant:.5}"
+        );
+    }
+
+    #[test]
+    fn ranking_decay_reads_event_time_not_access_time() {
+        // The property, stated directly: ranking freshness is a function of
+        // (importance, age) and NOTHING else. It cannot take `last_access` or
+        // the reinforced `half_life` — they are not parameters — so no amount
+        // of reading can move it.
+        let now = 1_000_000_000.0;
+        let age = 300.0 * 86400.0;
+        assert_eq!(
+            ranking_decay(0.8, now - age, now),
+            decay_score(0.8, RANKING_HALF_LIFE, age)
+        );
+        // Monotone in age, and a future-dated record is "new", never amplified.
+        assert!(ranking_decay(0.8, now, now) > ranking_decay(0.8, now - age, now));
+        assert_eq!(ranking_decay(0.8, now + age, now), 0.8);
+    }
+
+    #[test]
+    fn access_history_cannot_invert_a_currency_ranking() {
+        // THE 2026-08-17 currency bug, in score space, from the measured
+        // numbers. One claim restated three times on an aged corpus; the
+        // CURRENT value matches the query slightly better than the stale one
+        // (similarity 0.7428 vs 0.7365 — a 0.85% gap). An earlier, unrelated
+        // query happened to return the stale record and not the current one,
+        // so reinforcement set the stale record's `last_access` to now and its
+        // decay term to 0.80, while the current record kept ~0.
+        let (sim_current, sim_stale) = (0.742_794_8, 0.736_523_7);
+        let age_current = 768.0 * 86400.0;
+        let age_stale = 850.0 * 86400.0;
+        let imp = 0.8;
+
+        // What every ranking lane used to compute: decay from `now - last_access`.
+        let stale_reinforced = composite_score(
+            sim_stale,
+            decay_score(imp, 604_800.0, 0.0), // just read → elapsed 0
+            recency_score(age_stale),
+            imp,
+            0.0,
+        );
+        let current_untouched = composite_score(
+            sim_current,
+            decay_score(imp, 604_800.0, age_current), // never read → ~0
+            recency_score(age_current),
+            imp,
+            0.0,
+        );
+        // FAIL-ON-OLD, kept as an assertion: if this stops holding, the
+        // fixture no longer reproduces the defect and the test below is
+        // proving nothing.
+        assert!(
+            stale_reinforced > current_untouched,
+            "fixture must reproduce the inversion: stale {stale_reinforced:.6} \
+             must beat current {current_untouched:.6} under access-driven decay"
+        );
+
+        // What ranking computes now: freshness from the record's own event time.
+        let now = 1_000_000_000.0;
+        let stale_fixed = composite_score(
+            sim_stale,
+            ranking_decay(imp, now - age_stale, now),
+            recency_score(age_stale),
+            imp,
+            0.0,
+        );
+        let current_fixed = composite_score(
+            sim_current,
+            ranking_decay(imp, now - age_current, now),
+            recency_score(age_current),
+            imp,
+            0.0,
+        );
+        assert!(
+            current_fixed > stale_fixed,
+            "an unrelated prior query must not promote a superseded value: \
+             current {current_fixed:.6} vs stale {stale_fixed:.6}"
         );
     }
 

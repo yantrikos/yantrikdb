@@ -892,8 +892,7 @@ impl YantrikDB {
                 }
 
                 let sim_score = (1.0 - distance).max(0.0);
-                let elapsed = ts - row.last_access;
-                let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
+                let decay = scoring::ranking_decay(row.importance, row.created_at, ts);
                 let age = ts - row.created_at;
                 let recency = scoring::recency_score(age);
                 let composite = scoring::adaptive_composite_score(
@@ -1007,8 +1006,7 @@ impl YantrikDB {
                         continue;
                     }
 
-                    let elapsed = ts - row.last_access;
-                    let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
+                    let decay = scoring::ranking_decay(row.importance, row.created_at, ts);
                     let age = ts - row.created_at;
                     let recency = scoring::recency_score(age);
                     let composite = scoring::adaptive_composite_score(
@@ -1565,8 +1563,8 @@ impl YantrikDB {
                         // Scale boost inversely with similarity: memories where vector
                         // search failed but keywords matched get more boost.
                         // Per-query lexical strengths from every phase's bm25
-                        // rows — read by the boost sites below and by the
-                        // keyword reserve (see engine/lexical.rs).
+                        // rows — read by the keyword reserve, the only
+                        // consumer left (see engine/lexical.rs).
                         lex_by_rid = crate::engine::lexical::lexical_strengths(&lex_ranked);
                         explain_fts_ran = true;
 
@@ -1577,15 +1575,6 @@ impl YantrikDB {
                                 if fts_rid_set.contains(result.rid.as_str())
                                     && !result.why_retrieved.iter().any(|w| w == "keyword_match")
                                 {
-                                    let sim = result.scores.similarity;
-                                    let lex =
-                                        lex_by_rid.get(result.rid.as_str()).copied().unwrap_or(1.0);
-                                    let boost = crate::engine::lexical::keyword_lane_boost(
-                                        learned_weights.keyword_boost,
-                                        sim,
-                                        lex,
-                                    );
-                                    result.score += boost;
                                     result.why_retrieved.push("keyword_match".to_string());
                                 }
                             }
@@ -1645,9 +1634,8 @@ impl YantrikDB {
                                     continue;
                                 }
 
-                                let elapsed = ts - row.last_access;
                                 let decay =
-                                    scoring::decay_score(row.importance, row.half_life, elapsed);
+                                    scoring::ranking_decay(row.importance, row.created_at, ts);
                                 let age = ts - row.created_at;
                                 let recency = scoring::recency_score(age);
                                 let composite = scoring::adaptive_composite_score(
@@ -1658,11 +1646,6 @@ impl YantrikDB {
                                     row.valence,
                                     query_sentiment,
                                     &learned_weights,
-                                );
-                                let kw_boost = crate::engine::lexical::keyword_lane_boost(
-                                    learned_weights.keyword_boost,
-                                    sim_score,
-                                    lex,
                                 );
                                 let mut why =
                                     scoring::build_why(sim_score, recency, decay, row.valence);
@@ -1685,7 +1668,7 @@ impl YantrikDB {
                                     created_at: row.created_at,
                                     importance: row.importance,
                                     valence: row.valence,
-                                    score: composite + kw_boost,
+                                    score: composite,
                                     scores: ScoreBreakdown {
                                         similarity: sim_score,
                                         decay,
@@ -1817,8 +1800,7 @@ impl YantrikDB {
                         continue;
                     }
 
-                    let elapsed = ts - row.last_access;
-                    let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
+                    let decay = scoring::ranking_decay(row.importance, row.created_at, ts);
                     let age = ts - row.created_at;
                     let recency = scoring::recency_score(age);
                     let composite = scoring::adaptive_composite_score(
@@ -1891,12 +1873,32 @@ impl YantrikDB {
             );
         }
 
-        // Step 2.9: Cold memory fallback
+        // Step 2.9: Lexical rescue fallback
         //
-        // Memories that have NEVER been retrieved (access_count == 0) may contain
-        // unique facts that get buried under frequently-accessed noise. When the
-        // best score so far is weak, search cold memories via FTS to surface
-        // forgotten knowledge.
+        // When the vector lane's best score is weak, sweep FTS for records it
+        // missed. Admission is a pure function of (query, corpus): the
+        // activation threshold, the `cold_min_sim` floor, the dedup against
+        // already-scored RIDs and `passes_recall_filters` do all the work.
+        //
+        // THIS LANE USED TO FILTER ON `access_count = 0` (2026-08-17). The
+        // stated intent was "surface knowledge buried under frequently-accessed
+        // noise", but `reinforce()` increments `access_count` on every recall
+        // that RETURNS a record, so the predicate had two effects the intent
+        // did not ask for:
+        //
+        //   1. Read history decided admission. A record surfaced once by an
+        //      UNRELATED query lost its only rescue route permanently — two
+        //      byte-identical stores gave different results because someone
+        //      had read one of them. Same defect family as the currency bug
+        //      (a prior computed from state a reader mutates), one layer up:
+        //      that one leaked into scoring, this one into candidate selection.
+        //   2. The lane SELF-DISABLED with use. On a mature store nearly every
+        //      record has been returned at least once, so the eligible set
+        //      drains toward empty — the rescue path stops working precisely
+        //      when the corpus is large enough to need it.
+        //
+        // The lift below is keyed on `row.importance`, a property of the
+        // record, so it was never part of this leak and is unchanged.
         if !self.is_encrypted() {
             if let Some(qt) = query_text {
                 let best_score = scored.iter().map(|r| r.score).fold(0.0f64, f64::max);
@@ -1942,14 +1944,13 @@ impl YantrikDB {
                         }
                         let cold_fts = fts_parts.join(" OR ");
 
-                        // Query ONLY cold memories (access_count = 0)
+                        // Lexical rescue over ALL active rows (see the lane comment)
                         let cold_sql = if memory_type.is_some() {
                             format!(
                                 "SELECT m.rid FROM memories m \
                                  JOIN memories_fts ON memories_fts.rowid = m.rowid \
                                  WHERE memories_fts MATCH ?1 \
                                  AND m.consolidation_status = 'active' \
-                                 AND m.access_count = 0 \
                                  AND m.type = ?2 \
                                  {} \
                                  ORDER BY m.importance DESC \
@@ -1967,7 +1968,6 @@ impl YantrikDB {
                                  JOIN memories_fts ON memories_fts.rowid = m.rowid \
                                  WHERE memories_fts MATCH ?1 \
                                  AND m.consolidation_status = 'active' \
-                                 AND m.access_count = 0 \
                                  {} \
                                  ORDER BY m.importance DESC \
                                  LIMIT {}",
@@ -2056,9 +2056,8 @@ impl YantrikDB {
                                     continue;
                                 }
 
-                                let elapsed = ts - row.last_access;
                                 let decay =
-                                    scoring::decay_score(row.importance, row.half_life, elapsed);
+                                    scoring::ranking_decay(row.importance, row.created_at, ts);
                                 let age = ts - row.created_at;
                                 let recency = scoring::recency_score(age);
                                 let composite = scoring::adaptive_composite_score(
@@ -2070,14 +2069,15 @@ impl YantrikDB {
                                     query_sentiment,
                                     &learned_weights,
                                 );
-                                // Cold memory bonus: these haven't been surfaced before
+                                // Rescue-lane lift, scaled by the record's own
+                                // importance — NOT by whether it has been read.
                                 // Bounded multiplicative lift (see
                                 // LANE_LIFT_MAX): admission is the lane's
                                 // job; it does not buy relevance.
                                 let cold_lift = scoring::lane_lift_mult(row.importance);
                                 let mut why =
                                     scoring::build_why(sim_score, recency, decay, row.valence);
-                                why.push("cold_memory".to_string());
+                                why.push("lexical_rescue".to_string());
                                 let contributions = scoring::adaptive_contributions(
                                     sim_score,
                                     decay,
@@ -2384,8 +2384,7 @@ impl YantrikDB {
                             crate::consolidate::cosine_similarity(query_embedding, &mem_embedding)
                                 as f64;
 
-                        let elapsed = ts - row.last_access;
-                        let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
+                        let decay = scoring::ranking_decay(row.importance, row.created_at, ts);
                         let age = ts - row.created_at;
                         let recency = scoring::recency_score(age);
 
@@ -2623,8 +2622,8 @@ impl YantrikDB {
                     {
                         lanes.push("graph".into());
                     }
-                    if why.iter().any(|w| w == "cold_memory") {
-                        lanes.push("cold_fallback".into());
+                    if why.iter().any(|w| w == "lexical_rescue") {
+                        lanes.push("lexical_rescue".into());
                     }
                     if why.iter().any(|w| w == "keyword_reserved") {
                         lanes.push("keyword_reserve".into());
@@ -3899,8 +3898,7 @@ impl YantrikDB {
                 }
 
                 let sim_score = (1.0 - distance).max(0.0);
-                let elapsed = ts - row.last_access;
-                let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
+                let decay = scoring::ranking_decay(row.importance, row.created_at, ts);
                 let age = ts - row.created_at;
                 let recency = scoring::recency_score(age);
                 let composite = scoring::adaptive_composite_score(
@@ -4007,8 +4005,7 @@ impl YantrikDB {
                         continue;
                     }
 
-                    let elapsed = ts - row.last_access;
-                    let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
+                    let decay = scoring::ranking_decay(row.importance, row.created_at, ts);
                     let age = ts - row.created_at;
                     let recency = scoring::recency_score(age);
                     let composite = scoring::adaptive_composite_score(
@@ -4489,8 +4486,8 @@ impl YantrikDB {
                         }
 
                         // Per-query lexical strengths from every phase's bm25
-                        // rows — read by the boost sites below and by the
-                        // keyword reserve (see engine/lexical.rs).
+                        // rows — read by the keyword reserve, the only
+                        // consumer left (see engine/lexical.rs).
                         lex_by_rid = crate::engine::lexical::lexical_strengths(&lex_ranked);
 
                         {
@@ -4500,15 +4497,6 @@ impl YantrikDB {
                                 if fts_rid_set.contains(result.rid.as_str())
                                     && !result.why_retrieved.iter().any(|w| w == "keyword_match")
                                 {
-                                    let sim = result.scores.similarity;
-                                    let lex =
-                                        lex_by_rid.get(result.rid.as_str()).copied().unwrap_or(1.0);
-                                    let boost = crate::engine::lexical::keyword_lane_boost(
-                                        learned_weights.keyword_boost,
-                                        sim,
-                                        lex,
-                                    );
-                                    result.score += boost;
                                     result.why_retrieved.push("keyword_match".to_string());
                                 }
                             }
@@ -4566,9 +4554,8 @@ impl YantrikDB {
                                     continue;
                                 }
 
-                                let elapsed = ts - row.last_access;
                                 let decay =
-                                    scoring::decay_score(row.importance, row.half_life, elapsed);
+                                    scoring::ranking_decay(row.importance, row.created_at, ts);
                                 let age = ts - row.created_at;
                                 let recency = scoring::recency_score(age);
                                 let composite = scoring::adaptive_composite_score(
@@ -4579,11 +4566,6 @@ impl YantrikDB {
                                     row.valence,
                                     query_sentiment,
                                     &learned_weights,
-                                );
-                                let kw_boost = crate::engine::lexical::keyword_lane_boost(
-                                    learned_weights.keyword_boost,
-                                    sim_score,
-                                    lex,
                                 );
                                 let mut why =
                                     scoring::build_why(sim_score, recency, decay, row.valence);
@@ -4606,7 +4588,7 @@ impl YantrikDB {
                                     created_at: row.created_at,
                                     importance: row.importance,
                                     valence: row.valence,
-                                    score: composite + kw_boost,
+                                    score: composite,
                                     scores: ScoreBreakdown {
                                         similarity: sim_score,
                                         decay,
@@ -4719,8 +4701,7 @@ impl YantrikDB {
                         continue;
                     }
 
-                    let elapsed = ts - row.last_access;
-                    let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
+                    let decay = scoring::ranking_decay(row.importance, row.created_at, ts);
                     let age = ts - row.created_at;
                     let recency = scoring::recency_score(age);
                     let composite = scoring::adaptive_composite_score(
@@ -4782,7 +4763,7 @@ impl YantrikDB {
             }
         }
 
-        // ── Step 2.9: Cold memory fallback (mirrors recall()) ──
+        // ── Step 2.9: Lexical rescue fallback (mirrors recall()) ──
         if !self.is_encrypted() {
             if let Some(qt) = query_text {
                 let best_score = scored.iter().map(|r| r.score).fold(0.0f64, f64::max);
@@ -4832,7 +4813,6 @@ impl YantrikDB {
                                  JOIN memories_fts ON memories_fts.rowid = m.rowid \
                                  WHERE memories_fts MATCH ?1 \
                                  AND m.consolidation_status = 'active' \
-                                 AND m.access_count = 0 \
                                  AND m.type = ?2 \
                                  {} \
                                  ORDER BY m.importance DESC \
@@ -4850,7 +4830,6 @@ impl YantrikDB {
                                  JOIN memories_fts ON memories_fts.rowid = m.rowid \
                                  WHERE memories_fts MATCH ?1 \
                                  AND m.consolidation_status = 'active' \
-                                 AND m.access_count = 0 \
                                  {} \
                                  ORDER BY m.importance DESC \
                                  LIMIT {}",
@@ -4938,9 +4917,8 @@ impl YantrikDB {
                                     continue;
                                 }
 
-                                let elapsed = ts - row.last_access;
                                 let decay =
-                                    scoring::decay_score(row.importance, row.half_life, elapsed);
+                                    scoring::ranking_decay(row.importance, row.created_at, ts);
                                 let age = ts - row.created_at;
                                 let recency = scoring::recency_score(age);
                                 let composite = scoring::adaptive_composite_score(
@@ -4958,7 +4936,7 @@ impl YantrikDB {
                                 let cold_lift = scoring::lane_lift_mult(row.importance);
                                 let mut why =
                                     scoring::build_why(sim_score, recency, decay, row.valence);
-                                why.push("cold_memory".to_string());
+                                why.push("lexical_rescue".to_string());
                                 let contributions = scoring::adaptive_contributions(
                                     sim_score,
                                     decay,
@@ -5251,9 +5229,7 @@ impl YantrikDB {
                                 query_embedding,
                                 &mem_embedding,
                             ) as f64;
-                            let elapsed = ts - row.last_access;
-                            let decay =
-                                scoring::decay_score(row.importance, row.half_life, elapsed);
+                            let decay = scoring::ranking_decay(row.importance, row.created_at, ts);
                             let age = ts - row.created_at;
                             let recency = scoring::recency_score(age);
                             let prox = gi.graph_proximity(rid, &expanded_map);

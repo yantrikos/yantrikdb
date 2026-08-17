@@ -276,8 +276,7 @@ impl super::YantrikDB {
             };
             let mem_emb = crate::serde_helpers::deserialize_f32(emb_blob);
             let sim_score = crate::consolidate::cosine_similarity(query_embedding, &mem_emb) as f64;
-            let elapsed = ts - row.last_access;
-            let decay = scoring::decay_score(row.importance, row.half_life, elapsed);
+            let decay = scoring::ranking_decay(row.importance, row.created_at, ts);
             let age = ts - row.created_at;
             let recency = scoring::recency_score(age);
             let composite = scoring::adaptive_composite_score(

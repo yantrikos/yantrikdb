@@ -1565,8 +1565,7 @@ impl YantrikDB {
                 }
 
                 let sim_score = (1.0 - distance).max(0.0);
-                let elapsed = ts - row.last_access;
-                let decay = crate::scoring::decay_score(row.importance, row.half_life, elapsed);
+                let decay = crate::scoring::ranking_decay(row.importance, row.created_at, ts);
                 let age = ts - row.created_at;
                 let recency = crate::scoring::recency_score(age);
                 let composite = crate::scoring::adaptive_composite_score(
