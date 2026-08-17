@@ -122,15 +122,59 @@ impl YantrikDB {
     }
 
     /// Rebuild the HNSW vector index from scratch. Called after replication.
+    ///
+    /// # Why the generation is snapshotted and re-checked (2026-08-17)
+    ///
+    /// The rebuild reads `memories.embedding` — vectors in the CURRENTLY
+    /// ACTIVE embedding space — and then installs the result as the cold
+    /// tier of whatever `SearchState` happens to be live at that moment. A
+    /// reembed cutover between those two points meant installing an index
+    /// built entirely from OLD-space vectors into the NEW generation's
+    /// state: every cold-tier distance computed against a query encoded by
+    /// a different model. Not a lost write — a whole tier of quietly
+    /// meaningless scores, which no test would notice because the index is
+    /// populated and every lookup returns something.
+    ///
+    /// The guard is NOT held across the build: on a large store that is
+    /// seconds to minutes of work, and blocking the cutover for its
+    /// duration would trade a correctness bug for an availability one.
+    /// Instead this follows the correction path's shape — snapshot the
+    /// generation, do the slow work unguarded, then take the guard and
+    /// revalidate. If the generation moved, the rebuilt index describes a
+    /// space that is no longer current and is discarded rather than
+    /// installed; the caller retries against the new generation.
     pub fn rebuild_vec_index(&self) -> Result<usize> {
+        let generation_before = self.search_state.load_full().generation;
+
         let conn = self.conn.lock();
         let new_index =
             Self::build_vec_index_with_enc(&conn, self.embedding_dim, self.enc.as_ref())?;
         let count = new_index.len();
         drop(conn);
+
+        let Some(_sync_guard) = self.write_router.try_enter_sync_writer() else {
+            return Err(
+                crate::error::YantrikDbError::IndexRebuildDeferredDuringReembed {
+                    reason: "a reembed cutover began while the index was being rebuilt".to_string(),
+                },
+            );
+        };
+        let state = self.search_state.load_full();
+        if state.generation != generation_before {
+            return Err(
+                crate::error::YantrikDbError::IndexRebuildDeferredDuringReembed {
+                    reason: format!(
+                        "generation moved {generation_before} -> {} during the rebuild; the built \
+                     index holds vectors from the old embedding space",
+                        state.generation
+                    ),
+                },
+            );
+        }
+
         // **Issue #41 brainstorm-4 §1.** Install the rebuilt cold tier
         // into the active-generation DeltaIndex via SearchState.
-        self.search_state.load().vec_index.install_cold(new_index);
+        state.vec_index.install_cold(new_index);
         Ok(count)
     }
 

@@ -2456,3 +2456,60 @@ fn forget_defers_rather_than_tombstoning_into_a_doomed_index() {
         .unwrap();
     assert_eq!(status, "tombstoned");
 }
+
+// =====================================================================
+// 2026-08-17 — the last two index mutators that could cross a cutover.
+// Both are deletes-or-installs that read SearchState and then mutate it.
+// =====================================================================
+
+#[test]
+fn rebuild_vec_index_discards_rather_than_mixing_embedding_spaces() {
+    // The rebuild reads memories.embedding — the space active when it
+    // STARTED — and installs the result as the cold tier of whatever state
+    // is live when it FINISHES. Across a cutover that means old-space
+    // vectors inside the new generation's index: every cold-tier distance
+    // measured against a query encoded by a different model. Nothing is
+    // lost and nothing errors, which is exactly why no test caught it —
+    // the index is populated and every lookup returns something.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    for i in 0..6 {
+        db.record(
+            &format!("rebuildable record {i}"),
+            "semantic",
+            0.5,
+            0.0,
+            86400.0,
+            &empty_meta(),
+            &vec_seed(i as f32 + 1.0, 8),
+            "default",
+            0.9,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    }
+    // Healthy case: no cutover, the rebuild installs.
+    let n = db.rebuild_vec_index().expect("rebuild must work normally");
+    assert!(n > 0, "rebuild should install a populated cold tier");
+
+    // Cutover in flight: the rebuilt index describes a space that may no
+    // longer be current, so it must be thrown away, not installed.
+    db.write_router.switch_to_queueing();
+    let err = db
+        .rebuild_vec_index()
+        .expect_err("a rebuild finishing during a cutover must not install");
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::IndexRebuildDeferredDuringReembed { .. }
+        ),
+        "must be the typed retryable deferral, got: {err}"
+    );
+
+    db.write_router.switch_to_normal();
+    assert!(
+        db.rebuild_vec_index().unwrap() > 0,
+        "rebuild must work again once the cutover completes"
+    );
+}

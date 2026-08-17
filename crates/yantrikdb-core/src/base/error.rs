@@ -338,6 +338,26 @@ pub enum YantrikDbError {
     )]
     ForgetDeferredDuringReembed { rid: String },
 
+    /// **2026-08-17.** `rebuild_vec_index` finished building a replacement
+    /// cold tier, but a `db.reembed()` cutover started (or completed) while
+    /// it was working.
+    ///
+    /// The rebuild reads `memories.embedding` — vectors in the space that
+    /// was active when it started — so installing it after a cutover would
+    /// place an index built entirely from OLD-space vectors into the NEW
+    /// generation's state. Every cold-tier distance would then be computed
+    /// against a query encoded by a different model: not a lost write, but
+    /// a whole tier of quietly meaningless scores that no test notices,
+    /// because the index is populated and every lookup returns something.
+    ///
+    /// Retryable: nothing was installed. Re-run the rebuild against the new
+    /// generation.
+    #[error(
+        "rebuild_vec_index deferred: {reason}. Nothing was installed — the rebuilt index was \
+         discarded rather than mixed into a different embedding space. Retry the rebuild."
+    )]
+    IndexRebuildDeferredDuringReembed { reason: String },
+
     /// **v0.10 Item 3 (correction seqlock, sol r5).** A recall could not
     /// obtain a coherent snapshot within its retry budget because
     /// text-changing corrections kept interleaving with its candidate

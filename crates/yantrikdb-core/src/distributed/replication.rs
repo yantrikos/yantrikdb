@@ -469,6 +469,27 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             // Remove from scoring cache + vec index + graph index
             let rid = op.payload["rid"].as_str().unwrap_or_default();
             if !rid.is_empty() {
+                // 2026-08-17: a replicated tombstone is a delete, and a
+                // delete applied to an index that is about to be discarded
+                // resurrects the record — the same F1/F2 shape closed at
+                // `tombstone_inner`, reached through the replication
+                // applier instead of forget(). Guard before touching
+                // SearchState so a cutover cannot land between the load and
+                // the tombstone.
+                //
+                // Returning Err here is the RETRYABLE outcome by
+                // construction: `apply_ops` calls `materialize_op` BEFORE
+                // marking the oplog row applied, so a deferred op stays
+                // pending and the next sync replays it. Guarded at the arm
+                // rather than at `purge_chunks` itself, because
+                // `tombstone_inner` already holds a guard when it calls
+                // that helper and a nested acquisition would fail the
+                // moment a cutover began mid-forget.
+                let Some(_sync_guard) = db.write_router.try_enter_sync_writer() else {
+                    return Err(crate::error::YantrikDbError::ForgetDeferredDuringReembed {
+                        rid: rid.to_string(),
+                    });
+                };
                 db.cache_remove(rid);
                 let _seq = db
                     .vec_seq
@@ -529,6 +550,16 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             let strategy = op.payload["strategy"].as_str().unwrap_or("");
             if strategy == "keep_a" || strategy == "keep_b" {
                 if let Some(loser) = op.payload["loser_rid"].as_str() {
+                    // Conflict-loser suppression is a delete too — same
+                    // cutover hazard as the replicated forget above, and a
+                    // resurrected loser is worse than a resurrected forget
+                    // because the winner is still present: the store would
+                    // serve both sides of a resolved conflict.
+                    let Some(_sync_guard) = db.write_router.try_enter_sync_writer() else {
+                        return Err(crate::error::YantrikDbError::ForgetDeferredDuringReembed {
+                            rid: loser.to_string(),
+                        });
+                    };
                     db.cache_remove(loser);
                     let _seq = db
                         .vec_seq
