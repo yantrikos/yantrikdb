@@ -374,6 +374,24 @@ impl PyYantrikDB {
         db.last_maintenance_cycle().map_err(map_err)
     }
 
+    /// The maintenance-debt ledger — how overdue is cognition? Returns a dict
+    /// with exactly four keys: `writes_since_think` (memory writes committed
+    /// since cognition last completed a pass), `last_think_at` (epoch float,
+    /// None if cognition has never run), `open_conflicts`, and
+    /// `pending_triggers`. Read-only and cheap; a reactive host (the MCP
+    /// server) surfaces this to the calling LLM, which acts as the scheduler
+    /// the passive engine deliberately does not own.
+    fn maintenance_debt(&self, py: Python<'_>) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let debt = db.maintenance_debt();
+        let dict = PyDict::new(py);
+        dict.set_item("writes_since_think", debt.writes_since_think)?;
+        dict.set_item("last_think_at", debt.last_think_at)?;
+        dict.set_item("open_conflicts", debt.open_conflicts)?;
+        dict.set_item("pending_triggers", debt.pending_triggers)?;
+        Ok(dict.into())
+    }
+
     /// Materialize the session-start digest (task 38) — narrative chain head,
     /// top live decisions, open conflicts, pending triggers, last maintenance.
     /// One call, host-injected at boot. Returns a JSON string.

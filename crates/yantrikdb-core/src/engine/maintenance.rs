@@ -84,6 +84,32 @@ impl Default for MaintenanceCycleConfig {
     }
 }
 
+/// The cognitive compactor's ledger (v0.15.x).
+///
+/// The core is a passive library — it cannot schedule maintenance, but it
+/// must always be able to ANSWER "how overdue is maintenance?". A reactive
+/// deployment (the MCP server) surfaces this to the calling LLM, which acts
+/// as the scheduler. Four cheap numbers, one call:
+///
+/// - `writes_since_think`: memory writes committed since cognition last
+///   completed a pass — new material no conflict scan has seen. Incremented
+///   atomically with each origin content write (record / record_text /
+///   record_batch per item / correct / origin record_with_rid); NOT moved by
+///   access-pattern ops (reinforce, feedback, relate, archive, forget) or by
+///   replication apply (a follower's imports get thought about on the
+///   leader).
+/// - `last_think_at`: when cognition last completed a pass (`think` with its
+///   conflict scan, or a non-dry `run_maintenance_cycle`). `None` = never.
+/// - `open_conflicts` / `pending_triggers`: the backlog cognition has
+///   surfaced but nobody has resolved.
+#[derive(Debug, Clone, Copy, Default, PartialEq, serde::Serialize)]
+pub struct MaintenanceDebt {
+    pub writes_since_think: u64,
+    pub last_think_at: Option<f64>,
+    pub open_conflicts: u64,
+    pub pending_triggers: u64,
+}
+
 /// Summary of one maintenance cycle. Sub-reports are `Some` only for passes
 /// that ran.
 #[derive(Debug, Clone, Default, serde::Serialize)]
@@ -107,6 +133,87 @@ pub struct MaintenanceCycleReport {
 }
 
 impl YantrikDB {
+    /// Debt-ledger increment: `meta.writes_since_think += n`.
+    ///
+    /// MUST be called on the SAME connection/transaction as the write it
+    /// counts, inside the write's transaction wherever one exists — the
+    /// counter is then atomic with the row it counts, so a rollback (or an
+    /// idempotent hit that never reaches the tx) leaves the ledger untouched
+    /// and the count can never drift from the corpus. Same discipline as
+    /// `advance_importance_stats_in_tx`, and it sits next to that call at
+    /// every site.
+    ///
+    /// Associated fn (no `&self`) precisely so a call site holding the conn
+    /// lock cannot accidentally re-lock it.
+    pub(crate) fn bump_writes_since_think_on(conn: &rusqlite::Connection, n: u64) -> Result<()> {
+        // Stored as TEXT like every meta value; CAST round-trips it. A
+        // missing key starts the ledger at n; a non-numeric value (never
+        // written by the engine) CASTs to 0 rather than erroring.
+        conn.execute(
+            "INSERT INTO meta (key, value) VALUES ('writes_since_think', CAST(?1 AS TEXT)) \
+             ON CONFLICT(key) DO UPDATE SET \
+                 value = CAST(CAST(value AS INTEGER) + ?1 AS TEXT)",
+            rusqlite::params![n as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Debt-ledger reset: cognition completed a pass over the corpus — stamp
+    /// `last_think_at` and zero `writes_since_think`, atomically on the
+    /// caller's connection. Called from `think()` when its conflict scan ran
+    /// and from a non-dry `run_maintenance_cycle` at completion. A dry run
+    /// must NEVER reach this (the 0.15.0 dry-run contract: a preview clears
+    /// nothing).
+    pub(crate) fn clear_maintenance_debt_on(conn: &rusqlite::Connection, ts: f64) -> Result<()> {
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('last_think_at', ?1)",
+            rusqlite::params![ts.to_string()],
+        )?;
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('writes_since_think', '0')",
+            [],
+        )?;
+        Ok(())
+    }
+
+    /// How overdue is maintenance? See [`MaintenanceDebt`].
+    ///
+    /// Read-only, served from the read pool, and it never fails the caller:
+    /// missing meta keys read as zero/`None`, and each COUNT is best-effort
+    /// (a schema too old to have the table reads as zero rather than
+    /// erroring). This is the one call a reactive host must always be able
+    /// to make, so it degrades to zeros instead of propagating errors.
+    pub fn maintenance_debt(&self) -> MaintenanceDebt {
+        let conn = self.read_conn();
+        let meta_str = |key: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                rusqlite::params![key],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+        };
+        let writes_since_think = meta_str("writes_since_think")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        let last_think_at = meta_str("last_think_at").and_then(|v| v.trim().parse::<f64>().ok());
+        let count = |sql: &str| -> u64 {
+            conn.query_row(sql, [], |r| r.get::<_, i64>(0))
+                .map(|n| n.max(0) as u64)
+                .unwrap_or(0)
+        };
+        // The same predicates stats() and the boot digest use — one
+        // definition of "open" and "pending" across every surface.
+        let open_conflicts = count("SELECT COUNT(*) FROM conflicts WHERE status = 'open'");
+        let pending_triggers = count("SELECT COUNT(*) FROM trigger_log WHERE status = 'pending'");
+        MaintenanceDebt {
+            writes_since_think,
+            last_think_at,
+            open_conflicts,
+            pending_triggers,
+        }
+    }
+
     /// Run one maintenance cycle — the sleep cycle. Runs the enabled passes in
     /// dependency order (detect via `think`, then resolve/prune/recalibrate),
     /// isolates per-pass failures, persists the summary for `stats`/the boot
@@ -198,6 +305,23 @@ impl YantrikDB {
             match self.repair_tool_call_artifacts(config.dry_run) {
                 Ok(r) => report.repair = Some(r),
                 Err(e) => report.errors.push(format!("repair: {e}")),
+            }
+        }
+
+        // Completion of a REAL cycle settles the debt ledger: stamp
+        // last_think_at and zero writes_since_think. A dry run must not —
+        // a preview that cleared debt would tell the scheduling host the
+        // corpus was thought about when nothing looked at it (the same
+        // masquerade the persist guard below exists for). If the think pass
+        // above ran, its conflict scan already cleared the ledger; this
+        // re-stamp is idempotent and also covers cycles configured with
+        // run_think = false — the cycle's other hygiene passes still
+        // constitute a completed pass over the corpus. Runs BEFORE the
+        // summary persist so a failure here lands in the persisted report.
+        if !config.dry_run {
+            let conn = self.conn();
+            if let Err(e) = Self::clear_maintenance_debt_on(&conn, now()) {
+                report.errors.push(format!("debt_ledger: {e}"));
             }
         }
 

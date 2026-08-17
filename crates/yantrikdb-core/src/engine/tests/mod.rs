@@ -31,6 +31,7 @@ mod explain;
 mod idempotency;
 mod interactive_recall;
 mod learning_categories;
+mod maintenance_debt;
 mod metamorphic;
 mod migrations;
 mod mobility_contest;

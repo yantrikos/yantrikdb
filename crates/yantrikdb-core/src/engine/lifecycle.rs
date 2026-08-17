@@ -1131,6 +1131,12 @@ impl YantrikDB {
             applied_generation,
         )?;
 
+        // Maintenance-debt ledger: a correction rewrites content — new
+        // material for cognition (the corrected claim may now conflict with
+        // records the old text agreed with). Counted inside the tx, atomic
+        // with the mutation it counts.
+        Self::bump_writes_since_think_on(&tx, 1)?;
+
         tx.commit()?;
 
         // 4a.6b: the correction is durable — a warn-mode flag counts now.
@@ -1825,6 +1831,10 @@ impl YantrikDB {
                         Some(&stored_new_emb),
                         generation,
                     )?;
+                    // Maintenance-debt ledger: the text-changing correction
+                    // path — same rationale as the metadata/scalar path's
+                    // count, same in-tx atomicity.
+                    Self::bump_writes_since_think_on(&tx, 1)?;
                     tx.commit()?;
                     let _ = (new_importance_val, new_valence_val); // used in the UPDATE above
                     Ok(n)

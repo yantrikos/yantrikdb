@@ -689,6 +689,15 @@ impl YantrikDB {
             // longer move state.
             self.advance_importance_stats_in_tx(&tx, namespace, raw_importance)?;
 
+            // Maintenance-debt ledger: this row is new material cognition has
+            // not seen. Counted inside the winning transaction for the same
+            // winner-only reason as the stats advance above — an idempotent
+            // hit never reaches here, and a rollback takes the count with it.
+            // This one call covers the whole sync record category: record(),
+            // record_with_idempotency(), and record_text* all commit through
+            // this function.
+            Self::bump_writes_since_think_on(&tx, 1)?;
+
             // Kill boundary. Before 4a.6a the row above was already committed by
             // its own autocommit at this point, while the oplog op below had not
             // been written — a process death here left exactly the orphan the
@@ -1468,6 +1477,17 @@ impl YantrikDB {
                 self.advance_importance_stats_in_tx(&conn, namespaces[idx], input.importance)?;
             }
 
+            // Maintenance-debt ledger: one count PER ITEM WRITTEN, not per
+            // call — the debt measures unexamined material, and a 50-item
+            // batch deposits 50 memories cognition has not seen. Idempotent
+            // hits and in-batch aliases wrote nothing and count nothing
+            // (rid_slots is Some only for writers). Inside the savepoint,
+            // so a rejected batch rolls the count back with its rows.
+            let written = rid_slots.iter().filter(|s| s.is_some()).count() as u64;
+            if written > 0 {
+                Self::bump_writes_since_think_on(&conn, written)?;
+            }
+
             savepoint.release()?;
             // The obligation inverts HERE: the rows are durable, so from this
             // point the reservations owe publish, not removal. Nothing
@@ -1891,6 +1911,19 @@ impl YantrikDB {
                 )?;
             }
 
+            // Maintenance-debt ledger: ORIGIN writes only, and only on first
+            // insert. `record_with_rid` is both the public caller-supplied-rid
+            // origin API and the cluster/replication APPLY primitive, and the
+            // ledger wants exactly the split `WriteAdmission` already encodes
+            // for the provenance gate: an Admitted apply was (or will be)
+            // thought about on its leader, so counting it here would tell a
+            // follower's host to schedule cognition over material that is not
+            // its to think about. Replay (was_new_row = false) counts nothing
+            // — an idempotent re-apply deposits no new material.
+            if admission == crate::provenance::WriteAdmission::Origin {
+                Self::bump_writes_since_think_on(&conn, 1)?;
+            }
+
             // Kill boundary (4a.6d-3): pre-port the process could die between
             // the RELEASEd row and the op's autocommit — the unrepairable
             // orphan. Inside the savepoint, dying here rolls back BOTH.
@@ -2299,6 +2332,15 @@ impl YantrikDB {
         )?;
         if let Some((namespace, raw_importance)) = stats_advance {
             self.advance_importance_stats_in_tx(&tx, namespace, raw_importance)?;
+        }
+        // Maintenance-debt ledger, queued route: the pending op IS this
+        // write's only durable record, so the count rides its transaction
+        // exactly like the stats advance. Gated on op_type — a future
+        // non-record pending op must not inherit a content-write count.
+        // The post-swap materializer that later drains this op materializes
+        // directly (apply_queued_reembed_record) and does NOT count again.
+        if op_type == "record" {
+            Self::bump_writes_since_think_on(&tx, 1)?;
         }
         tx.commit()?;
         // Only after commit: a plain INSERT inside a committed tx means exactly
