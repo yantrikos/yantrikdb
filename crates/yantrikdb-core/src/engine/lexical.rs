@@ -20,20 +20,15 @@
 //!    refused sim 0.057–0.20, i.e. exactly the records it was built to
 //!    rescue.
 //!
-//! The fusion: capture the raw bm25 rank FTS5 already computes and
-//! normalize it per query to a strength in (0, 1] (best match = 1).
-//! That strength then (a) admits reserve slots by lexical strength OR
-//! cosine, so an exact match is rescuable at any similarity, and (b)
-//! lets a top-tier lexical match bypass the FTS_MIN_SIM cosine floor,
-//! which is itself a dim-calibrated constant.
-//!
-//! There used to be a third use — scaling an ADDITIVE keyword boost onto
-//! the score. That was removed on 2026-08-17; see the note where
-//! `keyword_lane_boost` was defined for the measurement. Lexical evidence
-//! now reaches the score only through `apply_lane_agreement`'s budgeted
-//! `agreement_mult`, and lexical RESCUE happens through slot reservation
-//! below. Admission and rescue were always this lane's real jobs; the
-//! additive term was a fourth, unbounded one.
+//! The fusion: capture the raw bm25 rank FTS5 already computes,
+//! normalize per query to a strength in (0, 1] (best match = 1), and
+//! (a) scale the keyword boost by that strength — the query's best
+//! lexical match keeps the old boost magnitude (whose +0.034 MRR
+//! contribution on the production clone is the measured baseline to
+//! preserve), noise pays its own discount; (b) admit reserve slots by
+//! lexical strength OR cosine, so an exact match is rescuable at any
+//! similarity; (c) let a top-tier lexical match bypass the FTS_MIN_SIM
+//! cosine floor, which is itself a dim-calibrated constant.
 //!
 //! Everything here is shared by `recall_inner` and
 //! `recall_profiled_inner` — the two keyword lanes are copies, and a
@@ -128,46 +123,22 @@ pub(crate) fn rank_cmp(a: &RecallResult, b: &RecallResult) -> std::cmp::Ordering
         .then_with(|| a.rid.cmp(&b.rid))
 }
 
-// REMOVED 2026-08-17: `keyword_lane_boost` — the additive keyword boost.
-//
-// It was applied as `score += kb * lex * (1-sim).max(0.2)` at four sites
-// (two per recall twin), which is the one thing base/scoring.rs forbids in
-// its header: NOTHING may be added to similarity. With kb = 0.31 against a
-// relevance ceiling of W_SIM = 0.5, it was a wall of the same family as the
-// importance, recency, graph and valence walls.
-//
-// # Why it could invert a ranking, and why only in one shape
-//
-// Between two FTS-matched records it could NOT invert anything: relevance
-// grows at 0.5 per unit similarity while the boost SHRINKS at 0.31 per unit
-// similarity, so the better match always won. It bit only when the semantic
-// answer was NOT an FTS match — a question answered in synonyms — and so
-// received no boost while token-matching noise collected up to +0.31.
-// Measured on that fixture: the anchor at similarity 0.4774, HIGHER than
-// every distractor (0.4590/0.4578/0.4571), ranked 34th of 35 — score
-// 0.26581 against 0.42723. Subtracting the boost from the distractor gives
-// 0.25952, below the anchor: the additive term alone inverted a true
-// relevance ordering by 34 positions. The same defect was already recorded
-// against `keyword_boost_override` in base/tuning.rs (a target at cosine
-// rank 4 returning at recall rank 39) and left behind a knob.
-//
-// # Why deleting it does not reopen exact-phrase starvation
-//
-// The lane's rescue job is done by [`apply_keyword_reserve`], not by this
-// boost, and its corroboration job is done by `apply_lane_agreement`, which
-// already counts `keyword_match`/`fts_sourced` as a lane and applies the
-// BUDGETED `agreement_mult` (~+3.5%, inside the shared inversion budget).
-// Measured with the boost disabled: the semantic-anchor drop rate falls
-// 1.00 -> 0.00 while exact-phrase recall stays 1.00 and the permanent gate
-// `exact_phrase_in_a_long_record_survives_frame_noise` still passes. So the
-// evidence keeps a score effect — it just spends the shared budget like
-// every other prior instead of an unbounded additive allowance.
-//
-// `LearnedWeights::keyword_boost` and the `YANTRIKDB_KEYWORD_BOOST` knob are
-// deliberately left in place for now: the weight is persisted in the schema
-// and trained from the `keyword_boosted` impression feature. Both are now
-// INERT for ranking. Retiring them touches the schema and the learner, so it
-// is its own change — see the note on `keyword_boost` in base/types.rs.
+/// The keyword-lane boost: the pre-fusion `keyword_boost * (1 - sim)`
+/// scaled by lexical strength. `lex = 1.0` reproduces the old formula
+/// bit-for-bit, so the measured +0.034 contribution of the lane's
+/// genuine matches is preserved; weaker matches pay `lex` as a direct
+/// discount.
+pub(crate) fn keyword_lane_boost(keyword_boost: f64, sim: f64, lex: f64) -> f64 {
+    // A negative override defers to the learned weight, so the default path
+    // is unchanged and the knob exists only to be swept.
+    let t = crate::base::tuning::tuning();
+    let kb = if t.keyword_boost_override >= 0.0 {
+        t.keyword_boost_override
+    } else {
+        keyword_boost
+    };
+    kb * lex.clamp(0.0, 1.0) * (1.0 - sim).max(0.2)
+}
 
 /// Keyword slot reservation (step 3.5 of recall): sort by score, then
 /// lift the best keyword-matched candidates stranded below the top_k
@@ -322,16 +293,14 @@ mod tests {
     }
 
     #[test]
-    fn uniform_ranks_yield_equal_strength() {
-        // When bm25 does not discriminate, every strength is exactly 1.0.
-        // This used to assert that `keyword_lane_boost` then reproduced the
-        // pre-fusion flat formula; that boost is gone (see the note where it
-        // was defined), so what remains testable — and what actually matters
-        // to the reserve, the only consumer left — is the strength itself.
+    fn uniform_ranks_reproduce_the_pre_fusion_lane() {
+        // When bm25 does not discriminate, every strength is 1.0 and
+        // keyword_lane_boost equals the old flat formula exactly.
         let ranked = vec![("x".to_string(), -3.0), ("y".to_string(), -3.0)];
         let lex = lexical_strengths(&ranked);
         for rid in ["x", "y"] {
-            assert_eq!(lex[rid], 1.0);
+            let old = 0.31 * (1.0f64 - 0.4).max(0.2);
+            assert_eq!(keyword_lane_boost(0.31, 0.4, lex[rid]), old);
         }
     }
 

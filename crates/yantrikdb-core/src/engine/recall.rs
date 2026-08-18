@@ -1575,6 +1575,15 @@ impl YantrikDB {
                                 if fts_rid_set.contains(result.rid.as_str())
                                     && !result.why_retrieved.iter().any(|w| w == "keyword_match")
                                 {
+                                    let sim = result.scores.similarity;
+                                    let lex =
+                                        lex_by_rid.get(result.rid.as_str()).copied().unwrap_or(1.0);
+                                    let boost = crate::engine::lexical::keyword_lane_boost(
+                                        learned_weights.keyword_boost,
+                                        sim,
+                                        lex,
+                                    );
+                                    result.score += boost;
                                     result.why_retrieved.push("keyword_match".to_string());
                                 }
                             }
@@ -1647,6 +1656,11 @@ impl YantrikDB {
                                     query_sentiment,
                                     &learned_weights,
                                 );
+                                let kw_boost = crate::engine::lexical::keyword_lane_boost(
+                                    learned_weights.keyword_boost,
+                                    sim_score,
+                                    lex,
+                                );
                                 let mut why =
                                     scoring::build_why(sim_score, recency, decay, row.valence);
                                 why.push("keyword_match".to_string());
@@ -1668,7 +1682,7 @@ impl YantrikDB {
                                     created_at: row.created_at,
                                     importance: row.importance,
                                     valence: row.valence,
-                                    score: composite,
+                                    score: composite + kw_boost,
                                     scores: ScoreBreakdown {
                                         similarity: sim_score,
                                         decay,
@@ -4497,6 +4511,15 @@ impl YantrikDB {
                                 if fts_rid_set.contains(result.rid.as_str())
                                     && !result.why_retrieved.iter().any(|w| w == "keyword_match")
                                 {
+                                    let sim = result.scores.similarity;
+                                    let lex =
+                                        lex_by_rid.get(result.rid.as_str()).copied().unwrap_or(1.0);
+                                    let boost = crate::engine::lexical::keyword_lane_boost(
+                                        learned_weights.keyword_boost,
+                                        sim,
+                                        lex,
+                                    );
+                                    result.score += boost;
                                     result.why_retrieved.push("keyword_match".to_string());
                                 }
                             }
@@ -4567,6 +4590,11 @@ impl YantrikDB {
                                     query_sentiment,
                                     &learned_weights,
                                 );
+                                let kw_boost = crate::engine::lexical::keyword_lane_boost(
+                                    learned_weights.keyword_boost,
+                                    sim_score,
+                                    lex,
+                                );
                                 let mut why =
                                     scoring::build_why(sim_score, recency, decay, row.valence);
                                 why.push("keyword_match".to_string());
@@ -4588,7 +4616,7 @@ impl YantrikDB {
                                     created_at: row.created_at,
                                     importance: row.importance,
                                     valence: row.valence,
-                                    score: composite,
+                                    score: composite + kw_boost,
                                     scores: ScoreBreakdown {
                                         similarity: sim_score,
                                         decay,
