@@ -87,4 +87,4 @@ compiler version it was written against.
 
 ## Licence
 
-AGPL-3.0-or-later.
+Apache-2.0.
