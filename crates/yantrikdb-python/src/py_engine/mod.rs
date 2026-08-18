@@ -48,6 +48,75 @@ impl PyYantrikDB {
         }
     }
 
+    /// Compare a Python embedder against the identity the store recorded for
+    /// the vectors already on disk (#117).
+    ///
+    /// The engine refuses a same-dim-different-digest swap in its own
+    /// `set_embedder`, but a Python embedder never reaches that path: it is
+    /// held on this wrapper, encoding queries and writes for an engine whose
+    /// `SearchState` has never seen it. So the comparison has to happen here.
+    ///
+    /// A Python object has no digest the engine can derive, so it declares
+    /// one — `fingerprint` or `digest`, a plain string attribute. Rules:
+    ///
+    /// * store has no recorded identity -> nothing to contradict, attach.
+    /// * declared fingerprint equals the recorded digest -> attach.
+    /// * declared fingerprint differs -> refuse. This is the provable
+    ///   mismatch, and it is silent corruption if allowed: cosine distance
+    ///   between two unrelated spaces still returns a plausible number
+    ///   (measured: 0.595 against vectors built by a different model).
+    /// * nothing declared -> refuse. "I cannot prove these vectors are mine"
+    ///   is the case that produced the 0.595, not a safe default.
+    ///
+    /// `allow_unverified_embedder` overrides the last two, matching the
+    /// convention `pack.rs` already uses for mounting.
+    fn check_embedder_identity(
+        &self,
+        py: Python<'_>,
+        embedder: &PyObject,
+        allow_unverified: bool,
+    ) -> PyResult<()> {
+        if allow_unverified {
+            return Ok(());
+        }
+        let Some(inner) = self.inner.as_ref() else {
+            return Ok(());
+        };
+        // (name, digest, dim) of whatever built the vectors already stored.
+        let recorded = inner.embedder_identity().map_err(map_err)?;
+        let Some((recorded_name, recorded_digest, recorded_dim)) = recorded else {
+            return Ok(()); // nothing recorded: nothing to contradict
+        };
+
+        let declared = ["fingerprint", "digest"].iter().find_map(|attr| {
+            embedder
+                .getattr(py, *attr)
+                .ok()
+                .and_then(|v| v.extract::<String>(py).ok())
+        });
+
+        match declared {
+            Some(fp) if fp == recorded_digest => Ok(()),
+            other => {
+                let named = recorded_name.unwrap_or_else(|| "<unnamed>".to_string());
+                let got = match other {
+                    Some(fp) => format!("declares fingerprint {fp:?}"),
+                    None => "declares no `fingerprint` or `digest`".to_string(),
+                };
+                Err(PyRuntimeError::new_err(format!(
+                    "this database's vectors were built by {named} (digest {recorded_digest}, \
+                     dim {recorded_dim}), and the embedder being attached {got}. Queries would \
+                     be encoded in a different space than the vectors they are compared against, \
+                     and cosine distance still returns a plausible number for unrelated spaces — \
+                     so the results would look fine and be wrong. Options: attach the embedder \
+                     that built them; set `.fingerprint = \"{recorded_digest}\"` on your \
+                     embedder if it IS that model; call reembed() to rebuild the vectors in the \
+                     new space; or pass allow_unverified_embedder=True if you accept the risk."
+                )))
+            }
+        }
+    }
+
     /// (Re)spawn the background worker pool against the live engine `Arc`.
     /// Paired with `self._workers = None` (which drops the guards and JOINs
     /// the worker threads) around any operation that needs exclusive
@@ -263,13 +332,15 @@ pub(crate) fn map_err(e: yantrikdb_core::YantrikDbError) -> PyErr {
 #[pymethods]
 impl PyYantrikDB {
     #[new]
-    #[pyo3(signature = (db_path=":memory:", embedding_dim=384, embedder=None, encryption_key=None, model_dir=None))]
+    #[pyo3(signature = (db_path=":memory:", embedding_dim=384, embedder=None, encryption_key=None, model_dir=None, allow_unverified_embedder=false))]
     fn new(
+        py: Python<'_>,
         db_path: &str,
         embedding_dim: usize,
         embedder: Option<PyObject>,
         encryption_key: Option<Vec<u8>>,
         model_dir: Option<&str>,
+        allow_unverified_embedder: bool,
     ) -> PyResult<Self> {
         #[allow(unused_mut)]
         let mut inner = if let Some(key_bytes) = encryption_key {
@@ -307,7 +378,16 @@ impl PyYantrikDB {
             ));
         }
 
-        Ok(Self::from_engine(inner, embedder))
+        // #117: the constructor is the path the original report used. Build
+        // the wrapper first so the engine is queryable, then prove the
+        // embedder belongs to these vectors BEFORE it is allowed to encode
+        // anything. Gating only `set_embedder` left this open.
+        let mut this = Self::from_engine(inner, None);
+        if let Some(emb) = embedder {
+            this.check_embedder_identity(py, &emb, allow_unverified_embedder)?;
+            this.embedder = Some(emb);
+        }
+        Ok(this)
     }
 
     /// **v0.7.4** — open with a default embedder pre-attached.
@@ -415,7 +495,13 @@ impl PyYantrikDB {
     /// reject anything that doesn't return a numeric vector. Costs one
     /// extra `encode()` call up front in exchange for a clear,
     /// localized error.
-    fn set_embedder(&mut self, py: Python<'_>, embedder: PyObject) -> PyResult<()> {
+    #[pyo3(signature = (embedder, allow_unverified_embedder = false))]
+    fn set_embedder(
+        &mut self,
+        py: Python<'_>,
+        embedder: PyObject,
+        allow_unverified_embedder: bool,
+    ) -> PyResult<()> {
         // Probe with a sentinel — if encode() doesn't produce a numeric
         // vector, the embedder is bogus and we raise immediately.
         let probe = embedder
@@ -444,6 +530,10 @@ impl PyYantrikDB {
                  charset codec, not an embedder).",
             ));
         }
+
+        // #117: the probe above proves it is AN embedder. This proves it is
+        // THE embedder — the one whose space the stored vectors live in.
+        self.check_embedder_identity(py, &embedder, allow_unverified_embedder)?;
 
         self.embedder = Some(embedder);
         Ok(())
