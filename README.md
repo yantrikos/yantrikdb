@@ -1,8 +1,16 @@
 # YantrikDB — A Cognitive Memory Engine for Persistent AI Systems
 
-> The memory engine for AI that actually knows you.
+Your agent starts every session as a stranger. Bolting a vector store onto it
+doesn't fix that: nothing is ever forgotten, near-duplicate memories pile up,
+and two contradictory facts come back ranked side by side with no signal that
+they disagree.
+
+YantrikDB is the engine that manages memories instead of just storing them —
+temporal decay, autonomous consolidation, contradiction detection, and a
+knowledge graph, in an embeddable Rust library with Python bindings.
 
 [![PyPI](https://img.shields.io/pypi/v/yantrikdb)](https://pypi.org/project/yantrikdb/)
+[![PyPI downloads](https://img.shields.io/pypi/dm/yantrikdb)](https://pypi.org/project/yantrikdb/)
 [![Crates.io](https://img.shields.io/crates/v/yantrikdb)](https://crates.io/crates/yantrikdb)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
@@ -459,11 +467,18 @@ filter on a timeline that never existed. Omit it and the engine stamps
 
 ## Ecosystem
 
-| Package | What | Install |
+This repo is the engine. The rest of the stack builds on it:
+
+| Project | What | Install |
 |---------|------|---------|
-| [yantrikdb](https://crates.io/crates/yantrikdb) | Rust engine | `cargo add yantrikdb` |
-| [yantrikdb](https://pypi.org/project/yantrikdb/) | Python bindings (PyO3) | `pip install yantrikdb` |
-| [yantrikdb-mcp](https://pypi.org/project/yantrikdb-mcp/) | MCP server for AI agents | `pip install yantrikdb-mcp` |
+| [yantrikdb](https://crates.io/crates/yantrikdb) | This repo — embedded Rust engine | `cargo add yantrikdb` |
+| [yantrikdb](https://pypi.org/project/yantrikdb/) | This repo — Python bindings (PyO3) | `pip install yantrikdb` |
+| [yantrikdb-mcp](https://github.com/yantrikos/yantrikdb-mcp) | MCP server for Claude Code, Cursor, Windsurf — start here if you use an agent | `pip install yantrikdb-mcp` |
+| [yantrikdb-server](https://github.com/yantrikos/yantrikdb-server) | HTTP gateway and HA cluster around this engine | `docker run ghcr.io/yantrikos/yantrikdb` |
+| [yantrikdb-client](https://github.com/yantrikos/yantrikdb-client) | Typed Python client for the HTTP server | `pip install yantrikdb-client` |
+| [langchain-yantrikdb](https://github.com/yantrikos/langchain-yantrikdb) | LangChain `VectorStore` + `ChatMessageHistory` | `pip install langchain-yantrikdb` |
+| [yantrikdb-hermes-plugin](https://github.com/yantrikos/yantrikdb-hermes-plugin) | Memory provider for NousResearch/hermes-agent | `pip install yantrikdb-hermes-plugin` |
+| [yantrik-memory](https://github.com/yantrikos/yantrik-memory) | Framework-agnostic memory layer — traits, bond evolution | `pip install yantrik-memory` |
 
 ## Roadmap
 
