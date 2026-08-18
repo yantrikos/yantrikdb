@@ -7,7 +7,7 @@ name = "yantrikdb"
 version = "0.15.3"
 description = "A Cognitive Memory Engine for Persistent AI Systems"
 readme = "README.md"
-license = "AGPL-3.0-only"
+license = "Apache-2.0"
 # Explicitly declare the LICENSE file for PEP 639 compliance. Without
 # this, maturin's sdist auto-detection found the duplicate copy at
 # crates/yantrikdb-python/LICENSE and packaged it at that nested path
@@ -25,7 +25,7 @@ keywords = ["ai", "memory", "cognitive", "database", "embeddings", "knowledge-gr
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: GNU Affero General Public License v3",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Rust",
     "Programming Language :: Python :: Implementation :: CPython",
     "Programming Language :: Python :: 3.10",

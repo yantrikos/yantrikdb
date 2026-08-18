@@ -4,7 +4,7 @@
 
 [![PyPI](https://img.shields.io/pypi/v/yantrikdb)](https://pypi.org/project/yantrikdb/)
 [![Crates.io](https://img.shields.io/crates/v/yantrikdb)](https://crates.io/crates/yantrikdb)
-[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue)](LICENSE)
+[![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 ## Get Started in 60 Seconds
 
@@ -511,6 +511,6 @@ A measurement paper at 5K-skill scale: token cost vs filesystem catalogs (with t
 
 ## License
 
-AGPL-3.0. See [LICENSE](LICENSE) for the full text.
+Apache-2.0. See [LICENSE](LICENSE) for the full text.
 
-The [MCP server](https://github.com/yantrikos/yantrikdb-mcp) is MIT-licensed — using the engine via the MCP server does not trigger AGPL obligations on your code.
+The [MCP server](https://github.com/yantrikos/yantrikdb-mcp) is MIT-licensed.
