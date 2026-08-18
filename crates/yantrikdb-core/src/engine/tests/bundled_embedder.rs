@@ -2322,6 +2322,10 @@ fn install_pack_converts_a_foreign_dimension_pack_automatically() {
     );
 }
 
+// `with_default` only exists with the bundled embedder; every other test in
+// this file is gated the same way, and the slim (`--no-default-features`)
+// build is a real deployment surface for BYO-embedder users.
+#[cfg(feature = "bundled-embedder")]
 #[test]
 fn refresh_embeddings_heals_rows_that_have_no_vector() {
     // The replication shape, reproduced locally: a row that is present and
