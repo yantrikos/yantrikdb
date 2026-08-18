@@ -221,6 +221,57 @@ impl PyYantrikDB {
         Ok(dict.into())
     }
 
+    /// Re-encode records whose vectors are missing or unusable, using the
+    /// embedder that is ALREADY ACTIVE.
+    ///
+    /// This is not a re-embed: it changes no model, fingerprint, dimension or
+    /// generation, so none of the cutover machinery applies. It fills in
+    /// vectors that are absent or malformed, in the space the engine is
+    /// already using.
+    ///
+    /// The case that matters most is REPLICATION — the follower insert omits
+    /// `embedding`, `embedding_model` and `embedding_generation` entirely, so
+    /// replicated rows arrive active in SQL and invisible to semantic recall.
+    /// Without this binding that repair was reachable only from Rust, which
+    /// meant an operator hitting the problem through the server or MCP had no
+    /// way to run it.
+    ///
+    /// `namespace=None` sweeps the whole store. Call with `dry_run=True`
+    /// first; it reports what it would touch without writing.
+    #[pyo3(signature = (namespace = None, dry_run = true))]
+    fn refresh_embeddings(
+        &self,
+        py: Python<'_>,
+        namespace: Option<&str>,
+        dry_run: bool,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let report = db.refresh_embeddings(namespace, dry_run).map_err(map_err)?;
+
+        let dict = PyDict::new(py);
+        dict.set_item("dry_run", report.dry_run)?;
+        dict.set_item("namespace", report.namespace.clone())?;
+        dict.set_item("scanned", report.scanned)?;
+        dict.set_item("unusable_found", report.unusable_found)?;
+        dict.set_item("refreshed", report.refreshed)?;
+        dict.set_item(
+            "skipped_concurrent_modification",
+            report.skipped_concurrent_modification,
+        )?;
+        dict.set_item("sample_rids", report.sample_rids.clone())?;
+
+        let errors = pyo3::types::PyList::empty(py);
+        for e in &report.errors {
+            let ed = PyDict::new(py);
+            ed.set_item("rid", &e.rid)?;
+            ed.set_item("message", &e.message)?;
+            errors.append(ed)?;
+        }
+        dict.set_item("errors", errors)?;
+
+        Ok(dict.into())
+    }
+
     /// Revert stale, unused, high-importance memories toward baseline
     /// (use-it-or-lose-it, task 32). Background maintenance; call with
     /// `dry_run=True` first. Returns a report dict.

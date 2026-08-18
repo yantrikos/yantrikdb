@@ -1804,6 +1804,31 @@ impl YantrikDB {
             ],
         )?;
 
+        // Issue #41 layer 3, completed 2026-08-17: acquire the sync-writer
+        // guard BEFORE snapshotting, for the same reason record_batch
+        // documents at its own guard — "loaded AFTER the guard above, which
+        // is what actually makes that true: with the guard held, reembed
+        // cannot complete its swap for the rest of this call."
+        //
+        // Until now this path took the snapshot unguarded, so a reembed
+        // cutover could publish a new SearchState between the load and the
+        // index append below. The vector then landed in a DISCARDED delta
+        // index while the row committed to SQL as active: stored, alive,
+        // unfindable — the HNSW-orphan shape through a different door.
+        //
+        // Deferring rather than falling back to record()'s queued path is
+        // deliberate: the queued materializer RE-ENCODES under the new
+        // embedder, and this primitive exists to be byte-deterministic
+        // across leader and followers. Re-encoding would silently break the
+        // determinism contract that is its entire reason to exist.
+        let Some(_sync_guard) = self.write_router.try_enter_sync_writer() else {
+            return Err(
+                crate::error::YantrikDbError::DeterministicWriteDeferredDuringReembed {
+                    rid: rid.to_string(),
+                },
+            );
+        };
+
         // **Issue #41 brainstorm-4 §1.** SearchState snapshot for the
         // determinstic-replay path. The replicated write lands on the
         // currently-active generation's DeltaIndex.

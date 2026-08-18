@@ -2111,3 +2111,405 @@ fn boundary_audit_pattern_detects_synthetic_violation() {
          the audit over-rejects which would prevent legitimate refactors"
     );
 }
+
+// =====================================================================
+// 2026-08-17: the three ReembedOptions knobs that are ACCEPTED but NOT
+// IMPLEMENTED must fail loudly.
+//
+// The 2026-08-15 knob audit found `write_policy: Pause` and
+// `resume_from_checkpoint` in that state and made them error — but pinned
+// neither, and MISSED `namespace`, which was the worst of the three: it was
+// echoed into every progress event and the durable status while applying to
+// no query, so a caller asking to re-embed one namespace silently re-embedded
+// the whole store and got told it had done what it asked.
+//
+// One test per knob, because "the audit fixed the instances it happened to
+// look at" is exactly how the third one survived.
+// =====================================================================
+
+fn reembed_err(db: &YantrikDB, opts: crate::engine::reembed::ReembedOptions) -> String {
+    match db.reembed("test-embedder", opts) {
+        Err(e) => e.to_string(),
+        Ok(_) => panic!("an unimplemented ReembedOptions knob must error, not succeed"),
+    }
+}
+
+#[test]
+fn unimplemented_reembed_namespace_is_rejected_not_silently_global() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let opts = crate::engine::reembed::ReembedOptions {
+        namespace: Some("only-this-one".to_string()),
+        ..Default::default()
+    };
+    let msg = reembed_err(&db, opts);
+    assert!(
+        msg.contains("embedding space belongs to the ENGINE"),
+        "namespace must be refused as an engine-scoped-embedding request; got: {msg}"
+    );
+}
+
+#[test]
+fn unimplemented_reembed_pause_policy_is_rejected() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let opts = crate::engine::reembed::ReembedOptions {
+        write_policy: crate::engine::reembed::ReembedWritePolicy::Pause,
+        ..Default::default()
+    };
+    let msg = reembed_err(&db, opts);
+    assert!(
+        msg.contains("Pause is not implemented"),
+        "Pause must be refused rather than silently granting Queue; got: {msg}"
+    );
+}
+
+#[test]
+fn unimplemented_reembed_resume_from_checkpoint_is_rejected() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let opts = crate::engine::reembed::ReembedOptions {
+        resume_from_checkpoint: true,
+        ..Default::default()
+    };
+    let msg = reembed_err(&db, opts);
+    assert!(
+        msg.contains("resume_from_checkpoint is not implemented"),
+        "resume must be refused before an interrupted run discards its work; got: {msg}"
+    );
+}
+
+// =====================================================================
+// THE GATE for namespace-scoped reembed, written BEFORE the feature.
+//
+// A scoped reembed touches ONE namespace; everything about every other
+// namespace must be bit-identical afterwards. Four parts of this pipeline
+// are global by construction and each would violate that silently:
+//
+//   1. Rebuilding sources only rows with `embedding_new` (reembed.rs
+//      ~:1127), so a scoped run rebuilds an index containing ONLY the
+//      scoped namespace — every other namespace silently disappears from
+//      vector search while still being present and "active" in SQL. That
+//      is the HNSW-orphan failure shape again.
+//   2. The swap does `DELETE FROM memory_chunks` with no predicate
+//      (~:1343), destroying chunk vectors for untouched namespaces.
+//   3. `meta.active_generation` is bumped globally (~:1319), so untouched
+//      rows are left behind the generation watermark.
+//   4. Verifying asserts EVERY row carries the new embedder.
+//
+// While scoping is unimplemented this asserts the guard is SIDE-EFFECT
+// FREE — a rejected call must not leave the store half-migrated. When
+// scoping lands, the same assertions become the real invariant and this
+// test starts doing its full job without being rewritten.
+// =====================================================================
+#[test]
+fn scoped_reembed_must_not_disturb_other_namespaces() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    for i in 0..8 {
+        db.record(
+            &format!("keep record {i} about ledgers"),
+            "semantic",
+            0.5,
+            0.0,
+            86400.0,
+            &empty_meta(),
+            &vec_seed(i as f32 + 1.0, 8),
+            "keep",
+            0.9,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+        db.record(
+            &format!("touch record {i} about deployments"),
+            "semantic",
+            0.5,
+            0.0,
+            86400.0,
+            &empty_meta(),
+            &vec_seed(i as f32 + 100.0, 8),
+            "touch",
+            0.9,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    }
+
+    let snapshot = |db: &YantrikDB| -> Vec<(String, i64, usize)> {
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare(
+                "SELECT rid, COALESCE(embedding_generation,0), length(embedding) \
+                 FROM memories WHERE namespace = 'keep' ORDER BY rid",
+            )
+            .unwrap();
+        let rows = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, i64>(1)?,
+                    r.get::<_, i64>(2)? as usize,
+                ))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        rows
+    };
+    let chunk_count = |db: &YantrikDB| -> i64 {
+        db.conn()
+            .query_row("SELECT COUNT(*) FROM memory_chunks", [], |r| r.get(0))
+            .unwrap_or(0)
+    };
+
+    let keep_before = snapshot(&db);
+    let chunks_before = chunk_count(&db);
+    assert!(
+        !keep_before.is_empty(),
+        "fixture must have 'keep' rows to protect"
+    );
+
+    let opts = crate::engine::reembed::ReembedOptions {
+        namespace: Some("touch".to_string()),
+        ..Default::default()
+    };
+    // Unimplemented today -> Err. Implemented later -> Ok. EITHER WAY the
+    // assertions below must hold; that is the whole point of the gate.
+    let _ = db.reembed("test-embedder", opts);
+
+    assert_eq!(
+        keep_before,
+        snapshot(&db),
+        "a namespace-scoped reembed (or its rejection) changed rows in ANOTHER \
+         namespace — rid/generation/embedding-length must be bit-identical"
+    );
+    assert_eq!(
+        chunks_before,
+        chunk_count(&db),
+        "memory_chunks was purged globally; untouched namespaces lost their \
+         chunk vectors (reembed.rs DELETE FROM memory_chunks has no predicate)"
+    );
+}
+
+// =====================================================================
+// 2026-08-17: record_with_rid must not cross a reembed cutover.
+//
+// It is the deterministic replay primitive (caller-supplied rid, vector,
+// timestamp and model; the engine's own embedder is never invoked), used by
+// the cluster applier and the materializer drain. It took its SearchState
+// snapshot with NO sync-writer guard, so a reembed cutover could publish a
+// new state between the snapshot and the index append — landing the vector
+// in a DISCARDED delta index while the row committed to SQL as active.
+// Stored, alive, unfindable: the HNSW-orphan shape through another door.
+//
+// It cannot use record()'s queued fallback, because the queued materializer
+// re-encodes under the NEW embedder and this path exists to be
+// byte-identical across leader and followers. So it defers retryably,
+// following the record_batch precedent.
+// =====================================================================
+#[test]
+fn record_with_rid_defers_instead_of_crossing_a_reembed_cutover() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+
+    // Put the router where a reembed cutover puts it.
+    db.write_router.switch_to_queueing();
+
+    let err = db
+        .record_with_rid(
+            "01900000-0000-7000-8000-0000000000ab",
+            "deterministic replicated fact",
+            "semantic",
+            0.6,
+            0.0,
+            1000.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "work",
+            0.9,
+            "general",
+            "inference",
+            None,
+            1_700_000_000_000_000,
+            &[],
+            "test-model",
+            None,
+            crate::provenance::WriteAdmission::Admitted,
+        )
+        .expect_err("a cutover in flight must defer, not commit against a doomed generation");
+
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::DeterministicWriteDeferredDuringReembed { .. }
+        ),
+        "must be the typed retryable deferral, got: {err}"
+    );
+
+    // NOTHING durable may have happened — the whole point of deferring.
+    let n: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE rid = '01900000-0000-7000-8000-0000000000ab'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        n, 0,
+        "a deferred deterministic write must leave no row behind"
+    );
+
+    // And it works again once the cutover finishes.
+    db.write_router.switch_to_normal();
+    db.record_with_rid(
+        "01900000-0000-7000-8000-0000000000ab",
+        "deterministic replicated fact",
+        "semantic",
+        0.6,
+        0.0,
+        1000.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "work",
+        0.9,
+        "general",
+        "inference",
+        None,
+        1_700_000_000_000_000,
+        &[],
+        "test-model",
+        None,
+        crate::provenance::WriteAdmission::Admitted,
+    )
+    .expect("must succeed once the router is Normal again");
+}
+
+// =====================================================================
+// 2026-08-17 — the F1/F2 forget-resurrection race, as a gate.
+//
+// forget() and tombstone_with_rid() both funnel into tombstone_inner,
+// which tombstones the rid AND its chunks in
+// search_state.load().vec_index. Unguarded, a reembed cutover could
+// publish an index built from a SQL snapshot predating the tombstone,
+// while the delta tombstone died with the discarded state: the record
+// ends up tombstoned in SQL and ALIVE in the live index. A delete that
+// silently un-deletes.
+// =====================================================================
+#[test]
+fn forget_defers_rather_than_tombstoning_into_a_doomed_index() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid = db
+        .record(
+            "a fact the user will ask to forget",
+            "semantic",
+            0.5,
+            0.0,
+            86400.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.9,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    // A reembed cutover is in flight.
+    db.write_router.switch_to_queueing();
+
+    let err = db
+        .forget(&rid)
+        .expect_err("forget during a cutover must defer, not tombstone into a doomed index");
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::ForgetDeferredDuringReembed { .. }
+        ),
+        "must be the typed retryable deferral, got: {err}"
+    );
+
+    // The row must be untouched — a deferred delete is not a partial delete.
+    let status: String = db
+        .conn()
+        .query_row(
+            "SELECT consolidation_status FROM memories WHERE rid = ?1",
+            [&rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        status, "active",
+        "a deferred forget must leave the row exactly as it was"
+    );
+
+    // And it works once the cutover completes.
+    db.write_router.switch_to_normal();
+    assert!(db.forget(&rid).unwrap(), "forget must succeed post-cutover");
+    let status: String = db
+        .conn()
+        .query_row(
+            "SELECT consolidation_status FROM memories WHERE rid = ?1",
+            [&rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "tombstoned");
+}
+
+// =====================================================================
+// 2026-08-17 — the last two index mutators that could cross a cutover.
+// Both are deletes-or-installs that read SearchState and then mutate it.
+// =====================================================================
+
+#[test]
+fn rebuild_vec_index_discards_rather_than_mixing_embedding_spaces() {
+    // The rebuild reads memories.embedding — the space active when it
+    // STARTED — and installs the result as the cold tier of whatever state
+    // is live when it FINISHES. Across a cutover that means old-space
+    // vectors inside the new generation's index: every cold-tier distance
+    // measured against a query encoded by a different model. Nothing is
+    // lost and nothing errors, which is exactly why no test caught it —
+    // the index is populated and every lookup returns something.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    for i in 0..6 {
+        db.record(
+            &format!("rebuildable record {i}"),
+            "semantic",
+            0.5,
+            0.0,
+            86400.0,
+            &empty_meta(),
+            &vec_seed(i as f32 + 1.0, 8),
+            "default",
+            0.9,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    }
+    // Healthy case: no cutover, the rebuild installs.
+    let n = db.rebuild_vec_index().expect("rebuild must work normally");
+    assert!(n > 0, "rebuild should install a populated cold tier");
+
+    // Cutover in flight: the rebuilt index describes a space that may no
+    // longer be current, so it must be thrown away, not installed.
+    db.write_router.switch_to_queueing();
+    let err = db
+        .rebuild_vec_index()
+        .expect_err("a rebuild finishing during a cutover must not install");
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::IndexRebuildDeferredDuringReembed { .. }
+        ),
+        "must be the typed retryable deferral, got: {err}"
+    );
+
+    db.write_router.switch_to_normal();
+    assert!(
+        db.rebuild_vec_index().unwrap() > 0,
+        "rebuild must work again once the cutover completes"
+    );
+}

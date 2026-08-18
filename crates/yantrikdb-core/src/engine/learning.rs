@@ -631,6 +631,21 @@ impl YantrikDB {
     /// episode and pair mass normalized per episode.
     fn load_preference_episodes(&self) -> Result<Vec<Episode>> {
         let conn = self.conn();
+        // Impressions recorded before `ranking_feature_epoch` were frozen
+        // under a DIFFERENT meaning of `f_decay` — "time since last read"
+        // rather than "the record's own age" (see MIGRATE_V40_TO_V41). The
+        // column name is identical, so nothing but this boundary
+        // distinguishes them, and fitting across it trains one weight on two
+        // quantities. Fresh stores stamp the epoch at 0 and filter nothing.
+        let epoch: f64 = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = 'ranking_feature_epoch'",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0);
         let mut stmt = conn.prepare(
             "SELECT i.episode_id, i.rid, i.f_similarity, i.f_decay, i.f_recency, \
                     i.f_importance, i.f_valence, i.keyword_boosted, i.created_at, \
@@ -638,10 +653,11 @@ impl YantrikDB {
              FROM ranking_labels l \
              JOIN recall_impressions i \
                ON i.episode_id = l.episode_id AND i.rid = l.rid \
+             WHERE i.created_at >= ?1 \
              ORDER BY i.episode_id, i.rank",
         )?;
         let rows = stmt
-            .query_map([], |r| {
+            .query_map(params![epoch], |r| {
                 Ok(LabeledImpression {
                     episode_id: r.get(0)?,
                     first_seen: r.get(8)?,

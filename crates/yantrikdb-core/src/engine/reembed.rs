@@ -216,9 +216,14 @@ pub struct ReembedProgress {
 /// `batch_size = 256`, `resume_from_checkpoint = true`, no callbacks)
 /// and override per-field as needed.
 pub struct ReembedOptions {
-    /// If set, only re-embed memories in this namespace. Cross-
-    /// namespace reembed is rejected if another reembed is in flight
-    /// (single-job invariant via `meta.reembed_state`).
+    /// **NOT IMPLEMENTED — setting this returns `InvalidInput`.**
+    ///
+    /// It was accepted, echoed into every progress event and stamped into
+    /// the durable status while being applied to no query at all, so a
+    /// "scoped" re-embed silently rewrote the entire store. It now fails
+    /// loudly instead; see the check in [`YantrikDB::reembed`] for why
+    /// scoping needs per-namespace generations and indexes rather than a
+    /// `WHERE` clause.
     pub namespace: Option<String>,
 
     /// Best-effort progress callback fired after each Encoding batch +
@@ -619,6 +624,56 @@ impl YantrikDB {
         if matches!(options.write_policy, ReembedWritePolicy::Pause) {
             return Err(YantrikDbError::InvalidInput(
                 "ReembedWritePolicy::Pause is not implemented — concurrent                  writes would be QUEUED, not rejected. Use Queue explicitly,                  or quiesce writers at the application layer."
+                    .to_string(),
+            ));
+        }
+        // THE THIRD ONE THAT AUDIT MISSED (2026-08-17). `namespace` is
+        // parsed, cloned into every progress event and into the durable
+        // status record — and referenced by ZERO data queries. The count,
+        // the encoding scan, the HNSW rebuild, the tail scan and the final
+        // swap are all global:
+        //
+        //     UPDATE memories SET embedding = embedding_new, ...
+        //         WHERE embedding_new IS NOT NULL
+        //
+        // So `reembed(namespace: Some("a"))` re-embedded the WHOLE STORE
+        // while every progress callback reported namespace "a" — the
+        // failure is invisible precisely because the option is echoed back.
+        // The only `namespace =` predicate anywhere in this file is in a
+        // test.
+        //
+        // This rejection is PERMANENT, not a stopgap (architecture decision,
+        // Pranab, 2026-08-17: "embedding is not namespace specific, it is
+        // engine specific").
+        //
+        // The embedding space is a property of the ENGINE: one embedder, one
+        // SearchState, one vector space, and every query encoded by that one
+        // model. `reembed` exists to change that model, so it is inherently
+        // global — asking to change it for one namespace is not an
+        // unimplemented feature, it is a request the data model cannot
+        // represent. Half a vector space encoded with a different model is
+        // not a state this engine has, and the same reasoning already
+        // governs the cross-dimension refusal a few lines below: the
+        // documented escape hatch there is "open a NEW DB at the new dim and
+        // copy memories over", i.e. a second engine — which is also exactly
+        // what a mounted pack is.
+        //
+        // What a caller asking for this usually wants is a same-space
+        // REFRESH: re-encode a namespace's records with the embedder that is
+        // already active (repairing missing or damaged vectors, including
+        // replicated rows that arrive with no embedding at all). That is a
+        // repair operation, not a model change — it needs no generation
+        // bump, no cutover and no shadow index — and it belongs beside the
+        // other bulk same-space repairs in engine/repair.rs.
+        if options.namespace.is_some() {
+            return Err(YantrikDbError::InvalidInput(
+                "ReembedOptions::namespace is not a supported request: the embedding space \
+                 belongs to the ENGINE, not to a namespace, so re-embedding is necessarily \
+                 store-wide. (Until 2026-08-17 this option was accepted and echoed back while \
+                 being applied to no query, so a 'scoped' call silently re-embedded everything.) \
+                 Leave it None to re-embed the store; to re-encode one namespace under the \
+                 CURRENT embedder, use the same-space refresh instead. For a genuinely separate \
+                 embedding space, use a separate engine — see the cross-dimension note below."
                     .to_string(),
             ));
         }
@@ -1283,9 +1338,29 @@ impl YantrikDB {
                     "INSERT OR REPLACE INTO meta (key, value) VALUES ('active_generation', ?1)",
                     params![next_generation.to_string()],
                 )?;
+                // `embedding_model` is promoted from `embedding_new_model` in
+                // the SAME statement as the vector it describes.
+                //
+                // THE DEFECT (2026-08-17): it was not. The swap moved the
+                // vector and NULLed the staging columns while leaving
+                // `embedding_model` at the OLD embedder's name, so after every
+                // global reembed each row claimed a model it was not encoded
+                // with. Three places document the intended behaviour —
+                // base/schema.rs:74 ("an atomic transaction moves these into
+                // the active `embedding` + `embedding_model` columns"),
+                // base/schema.rs:2404 ("Used by the Swap phase to populate
+                // `embedding_model` correctly"), and the `Verifying` doc on
+                // ReembedPhase ("sanity-check that all rows have
+                // `embedding_model = new_embedder`") — and none of it was
+                // implemented. `idx_memories_embedding_model` indexes the
+                // column, so the wrong answer was also fast.
+                //
+                // It survived because NOTHING calls the full reembed pipeline
+                // in a test; `reembed_with_embedder` had zero test callers.
                 let n = conn.execute(
                     "UPDATE memories \
                      SET embedding = embedding_new, \
+                         embedding_model = embedding_new_model, \
                          embedding_generation = ?1, \
                          embedding_new = NULL, \
                          embedding_new_model = NULL \
@@ -1814,6 +1889,77 @@ mod tests {
         }
         fn name(&self) -> Option<String> {
             Some(self.name.clone())
+        }
+    }
+
+    #[test]
+    fn swap_promotes_the_model_identity_with_the_vector() {
+        // THE FIRST END-TO-END REEMBED TEST. `reembed_with_embedder` had
+        // ZERO test callers, which is how the Swap phase shipped without
+        // ever setting `embedding_model` — the vector moved to the new
+        // model, the provenance column kept the old model's name, and
+        // `idx_memories_embedding_model` served that wrong answer quickly.
+        //
+        // Three docs assert the behaviour this pins: base/schema.rs:74,
+        // base/schema.rs:2404, and the `Verifying` variant's own doc
+        // comment ("all rows have embedding_model = new_embedder").
+        let mut db = crate::YantrikDB::new(":memory:", 8).unwrap();
+        db.set_embedder(Box::new(PhaseTestEmbedderSentinel {
+            dim: 8,
+            fp: "sha256:old".to_string(),
+            name: "model-old".to_string(),
+            sentinel: 1.0,
+        }))
+        .unwrap();
+        for i in 0..4 {
+            db.record_text(
+                &format!("record {i}"),
+                "semantic",
+                0.5,
+                0.0,
+                86400.0,
+                &serde_json::json!({}),
+                "default",
+                0.9,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+        }
+
+        let new_embedder = std::sync::Arc::new(PhaseTestEmbedderSentinel {
+            dim: 8,
+            fp: "sha256:new".to_string(),
+            name: "model-new".to_string(),
+            sentinel: 2.0,
+        });
+        db.reembed_with_embedder("model-new", Some(new_embedder), ReembedOptions::default())
+            .unwrap();
+
+        // Every row must now agree with itself: the vector came from
+        // model-new (sentinel 2.0), so the provenance must say model-new.
+        let conn = db.conn();
+        let mut stmt = conn
+            .prepare("SELECT rid, embedding_model, embedding FROM memories")
+            .unwrap();
+        let rows: Vec<(String, Option<String>, Vec<u8>)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, Vec<u8>>(2)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert!(!rows.is_empty(), "fixture must have rows");
+        for (rid, model, blob) in rows {
+            let vec0 = f32::from_le_bytes(blob[0..4].try_into().unwrap());
+            assert_eq!(
+                vec0, 2.0,
+                "row {rid}: vector must come from the NEW embedder"
+            );
+            assert_eq!(
+                model.as_deref(),
+                Some("model-new"),
+                "row {rid}: vector is model-new's but provenance says {model:?} —                  the Swap phase must promote embedding_new_model alongside the vector"
+            );
         }
     }
 

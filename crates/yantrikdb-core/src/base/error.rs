@@ -292,6 +292,72 @@ pub enum YantrikDbError {
     )]
     BatchDeferredDuringReembed { count: usize },
 
+    /// **2026-08-17.** `record_with_rid` — the deterministic replay primitive
+    /// used by the cluster applier — could not acquire a `SyncWriteGuard`
+    /// because a `db.reembed()` cutover is in flight.
+    ///
+    /// It previously took its `SearchState` snapshot with NO guard at all
+    /// (`self.search_state.load_full()`), which is the exact hazard the
+    /// sibling paths were built to avoid: reembed could complete its swap
+    /// between the snapshot and the append, landing the vector in a
+    /// DISCARDED delta index. The row is then durably in SQL, marked active,
+    /// and absent from the live index — stored, alive, unfindable. That is
+    /// the HNSW-orphan failure shape, reached through a different door.
+    ///
+    /// It cannot use `record()`'s queued fallback: this path is deliberately
+    /// byte-deterministic (caller-supplied rid, embedding, timestamp and
+    /// model, engine embedder never invoked), and the queued materializer
+    /// re-encodes under the NEW embedder, which would change the bytes the
+    /// caller pinned. Deferring retryably — the `record_batch` precedent —
+    /// is the honest option: nothing durable has happened yet.
+    #[error(
+        "record_with_rid({rid}) deferred: a db.reembed() cutover is in progress, so the \
+         caller-supplied embedding cannot be committed against a stable generation. No \
+         durable state was changed — retry verbatim once the reembed completes. (This \
+         path cannot take record()'s queued fallback without re-encoding the vector the \
+         caller pinned, which would break its determinism contract.)"
+    )]
+    DeterministicWriteDeferredDuringReembed { rid: String },
+
+    /// **2026-08-17 — the F1/F2 forget-resurrection race.** `forget()` /
+    /// `tombstone_with_rid()` could not acquire a `SyncWriteGuard` because a
+    /// `db.reembed()` cutover is in flight.
+    ///
+    /// Both funnel through `tombstone_inner`, which tombstones the rid and
+    /// its chunks in `search_state.load().vec_index`. Unguarded, a cutover
+    /// could publish an index built from a SQL snapshot predating the
+    /// tombstone, and the delta tombstone died with the discarded state —
+    /// leaving the record tombstoned in SQL and ALIVE in the live index. A
+    /// delete that silently un-deletes.
+    ///
+    /// Retryable: SQL is untouched when this is returned.
+    #[error(
+        "forget({rid}) deferred: a db.reembed() cutover is in progress, so the tombstone \
+         could be applied to an index that is about to be discarded — which would resurrect \
+         the record. No durable state was changed; retry once the reembed completes."
+    )]
+    ForgetDeferredDuringReembed { rid: String },
+
+    /// **2026-08-17.** `rebuild_vec_index` finished building a replacement
+    /// cold tier, but a `db.reembed()` cutover started (or completed) while
+    /// it was working.
+    ///
+    /// The rebuild reads `memories.embedding` — vectors in the space that
+    /// was active when it started — so installing it after a cutover would
+    /// place an index built entirely from OLD-space vectors into the NEW
+    /// generation's state. Every cold-tier distance would then be computed
+    /// against a query encoded by a different model: not a lost write, but
+    /// a whole tier of quietly meaningless scores that no test notices,
+    /// because the index is populated and every lookup returns something.
+    ///
+    /// Retryable: nothing was installed. Re-run the rebuild against the new
+    /// generation.
+    #[error(
+        "rebuild_vec_index deferred: {reason}. Nothing was installed — the rebuilt index was \
+         discarded rather than mixed into a different embedding space. Retry the rebuild."
+    )]
+    IndexRebuildDeferredDuringReembed { reason: String },
+
     /// **v0.10 Item 3 (correction seqlock, sol r5).** A recall could not
     /// obtain a coherent snapshot within its retry budget because
     /// text-changing corrections kept interleaving with its candidate
