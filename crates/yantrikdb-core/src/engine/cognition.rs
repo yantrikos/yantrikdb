@@ -83,6 +83,41 @@ impl YantrikDB {
         let start = crate::time::Instant::now();
         let ts = now();
 
+        // Phase -1 (#95): materialize what the caller just wrote, BEFORE
+        // anything reads it.
+        //
+        // Every phase below reads derived state — the conflict scans read
+        // `claims`, consolidation reads `memory_entities`, the trigger checks
+        // read `entities`. None of that exists at `record()` time any more:
+        // the foreground write enqueues `OP_MATERIALIZE_RECORD_POST` and the
+        // extraction runs on the background materializer pool's 100 ms idle
+        // timer. So `record(); record(); think()` was a race, and the caller
+        // lost it by default — the documented contradiction example returned
+        // `conflicts_found: 0` immediately and `1` after a `sleep`, on
+        // identical input. Draining here makes think() read a store that
+        // contains the writes that preceded it, which is the contract every
+        // caller already assumed it had.
+        //
+        // FIRST STATEMENT ON PURPOSE, and it must stay first. The drain
+        // dispatches into materializers that take the conn lock, which is not
+        // reentrant — running it after any phase that holds a guard would
+        // deadlock. Nothing above this line takes one.
+        //
+        // Bounded and best-effort: `drain_materializer_backlog` caps the work
+        // (see its docs for the backlog tradeoff), and a drain FAILURE must
+        // not abort cognition. A store that cannot materialize is exactly a
+        // store that still needs its triggers expired and its existing
+        // conflicts scanned — degrading to the old racy behaviour beats
+        // returning an error from a maintenance call.
+        match self.drain_materializer_backlog() {
+            Ok(0) => {}
+            Ok(n) => tracing::debug!(applied = n, "think: drained materializer backlog"),
+            Err(e) => tracing::warn!(
+                error = %e,
+                "think: materializer drain failed; scanning possibly-stale derived state"
+            ),
+        }
+
         // Phase 0: Expire old triggers
         let expired = crate::triggers::expire_triggers(self, ts)?;
 

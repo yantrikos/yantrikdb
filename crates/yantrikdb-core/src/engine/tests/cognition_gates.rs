@@ -622,3 +622,131 @@ fn test_schema_v20_mobility_state_roundtrip() {
         "untouched background components should remain NULL"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────
+// #95 — think() is deterministic against the writes that precede it.
+// ─────────────────────────────────────────────────────────────────
+
+/// Record two contradicting memories, then `think()` **immediately** — no
+/// sleep, no manual `apply_pending_ops_once` — and require the conflict.
+///
+/// This is the regression this change exists for. Foreground `record()` only
+/// enqueues `OP_MATERIALIZE_RECORD_POST`; the extraction that fills `claims`
+/// runs in the materializer. Before the fix the only thing that ever ran it
+/// was the background pool's 100 ms idle timer, so this sequence reported
+/// `conflicts_found: 0` and the same input with a `sleep` inserted reported
+/// `1`. A documented example whose result depends on wall-clock timing is not
+/// a documented example.
+///
+/// Deliberately NOT a timing test. `YantrikDB::new` spawns no materializer
+/// pool (only the Python binding does), so there is no thread that could
+/// incidentally make this pass — before the fix it fails every time, after it
+/// passes every time. No sleep appears anywhere in this test, and none may be
+/// added to it: a sleep here would re-admit exactly the defect being pinned.
+#[test]
+fn think_is_deterministic_without_sleeping_for_the_materializer() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+
+    // "<Entity> is based in <Place>" — extracted by the heuristic relation
+    // pass into headquartered_in, which is a FUNCTIONAL relation, so two
+    // distinct places for one subject is a genuine claim conflict.
+    for (i, text) in ["Acme is based in Boston.", "Acme is based in Denver."]
+        .iter()
+        .enumerate()
+    {
+        db.record(
+            text,
+            "semantic",
+            0.9,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(i as f32 + 1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    }
+
+    // No sleep. No explicit drain. Just think().
+    let cfg = ThinkConfig {
+        run_consolidation: false,
+        run_personality: false,
+        ..Default::default()
+    };
+    let res = db.think(&cfg).unwrap();
+
+    assert!(
+        res.conflicts_found >= 1,
+        "think() must see the writes that preceded it; got conflicts_found = {} \
+         (this is #95: the materialize op was still pending at scan time)",
+        res.conflicts_found
+    );
+
+    let conflicts = db
+        .get_conflicts(Some("open"), None, None, None, None, 50)
+        .unwrap();
+    assert!(
+        conflicts
+            .iter()
+            .any(|c| c.rel_type.as_deref() == Some("headquartered_in")),
+        "expected a headquartered_in claim conflict, got: {:?}",
+        conflicts
+            .iter()
+            .map(|c| (&c.rel_type, &c.detection_reason))
+            .collect::<Vec<_>>()
+    );
+
+    // Same race, second symptom (#95): `search_entities` returned nothing for
+    // freshly-written memories because the ops were still at applied = 0.
+    let entities = db.search_entities(Some("Acme"), None, 10).unwrap();
+    assert!(
+        !entities.is_empty(),
+        "entities must be materialized by the time think() returns"
+    );
+}
+
+/// The drain is BOUNDED, and empty/idle stores cost nothing.
+///
+/// `think()` is a foreground call. Draining to a fixed point must not become
+/// "block until an arbitrarily large backlog clears", and a store with no
+/// pending work must not pay for the check twice. Draining an already-drained
+/// store applies zero ops and is a no-op on the second call — which is also
+/// what guarantees the loop cannot spin.
+#[test]
+fn draining_an_idle_store_is_a_no_op() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    db.record(
+        "Acme is based in Boston.",
+        "semantic",
+        0.9,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+
+    let first = db.drain_materializer_backlog().unwrap();
+    assert!(first >= 1, "the pending materialize op should be applied");
+
+    // Fixed point: nothing left, and re-draining terminates immediately.
+    assert_eq!(db.drain_materializer_backlog().unwrap(), 0);
+    assert_eq!(db.drain_materializer_backlog().unwrap(), 0);
+
+    let pending: i64 = db
+        .conn()
+        .query_row("SELECT COUNT(*) FROM oplog WHERE applied = 0", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(pending, 0, "drain should reach a fixed point");
+}
