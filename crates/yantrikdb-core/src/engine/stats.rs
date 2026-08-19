@@ -14,6 +14,22 @@ use super::{now, YantrikDB};
 /// its copies.
 pub(crate) const MAX_PENDING_OPS: i64 = 10_000;
 
+/// Ops drained per pass by [`YantrikDB::drain_materializer_backlog`].
+///
+/// The conn lock is released between passes, so this is the granularity at
+/// which a foreground drain yields to concurrent writers and to the
+/// background materializer pool. Matches the pool's own `DRAIN_BATCH_SIZE`
+/// order of magnitude; larger would hold the lock longer for no gain.
+const THINK_DRAIN_BATCH: usize = 64;
+
+/// Hard ceiling on ops a single `think()` will drain.
+///
+/// Deliberately below [`MAX_PENDING_OPS`] (10_000): a foreground call must
+/// stay bounded even when the queue is at its admission ceiling. See
+/// [`YantrikDB::drain_materializer_backlog`] for what is given up at the
+/// boundary and why a bounded drain beats an unbounded one.
+const THINK_DRAIN_BUDGET: usize = 4096;
+
 impl YantrikDB {
     /// Get engine statistics. Optionally filter memory counts by namespace.
     pub fn stats(&self, namespace: Option<&str>) -> Result<Stats> {
@@ -742,6 +758,77 @@ impl YantrikDB {
         }
 
         Ok(applied)
+    }
+
+    /// Drain the materializer backlog to a fixed point, bounded.
+    ///
+    /// **Why this exists (#95).** Foreground `record()` no longer extracts
+    /// entities or claims inline — it enqueues `OP_MATERIALIZE_RECORD_POST`
+    /// and returns (`engine/record.rs`). The extraction that actually
+    /// populates `entities`, `memory_entities` and `claims` runs in
+    /// [`Self::apply_materialize_record_post`], reached only from
+    /// [`Self::apply_pending_ops_once`] — which, before this, was called
+    /// only by the background materializer pool on its 100 ms idle timer
+    /// ([`crate::engine::materializer`]) and had no binding surface at all.
+    ///
+    /// So every `record(); record(); think()` sequence RACED that timer and
+    /// usually lost: the conflict scans read `claims`, `claims` was still
+    /// empty, and `think()` reported `conflicts_found: 0`. Adding a `sleep`
+    /// before `think()` — changing nothing else — flipped the same input to
+    /// `1`. The same race is why `search_entities` and
+    /// `backfill_memory_entities` returned 0 for freshly-written memories:
+    /// the ops were still sitting in the oplog at `applied = 0`.
+    ///
+    /// **Bounded, deliberately.** `think()` is a foreground call with a
+    /// latency budget; it must not become "block until an arbitrarily large
+    /// backlog clears". Two limits:
+    ///
+    /// - each pass drains at most [`THINK_DRAIN_BATCH`] ops, so the conn
+    ///   lock is released between passes and concurrent writers make
+    ///   progress;
+    /// - the call applies at most [`THINK_DRAIN_BUDGET`] ops in total.
+    ///
+    /// The budget is the honest tradeoff and worth stating plainly: the
+    /// drain query is `ORDER BY hlc, op_id` (oldest first), so on a store
+    /// whose backlog exceeds the budget, `think()` clears the *oldest*
+    /// ops and the just-written ones may still be pending. Determinism is
+    /// therefore guaranteed for the case that matters — an interactive
+    /// caller whose backlog is its own handful of writes — and degrades to
+    /// today's behaviour under a backlog larger than 4096 ops, rather than
+    /// degrading into an unbounded stall. A hang would be strictly worse
+    /// than the bug being fixed.
+    ///
+    /// **Terminates.** Each pass either applies at least one op or returns
+    /// zero and breaks. Ops that a materializer refuses (an apply error, or
+    /// a record deferred mid-reembed) stay `applied = 0` and are simply not
+    /// counted, so a queue of nothing-but-deferred ops yields `0` on the
+    /// first pass and exits — it cannot spin.
+    ///
+    /// **Cannot deadlock.** `apply_pending_ops_once` and the materializers
+    /// it dispatches to acquire [`Self::conn`] themselves, and that mutex
+    /// is not reentrant. Every caller must therefore hold NO connection
+    /// guard across this call. `think()` satisfies that by calling it as
+    /// its first statement, before any phase takes a guard.
+    ///
+    /// **Safe against the background pool.** Concurrent foreground and
+    /// worker drains are the design `apply_pending_ops_once` already
+    /// documents: the materializers are idempotent, and `mark_op_applied`
+    /// awards the count to exactly one racer. A pass that loses every race
+    /// returns `0` while the effects it applied are nonetheless in place,
+    /// which is why breaking on zero is correct rather than premature.
+    ///
+    /// Returns the number of ops this call was credited with applying.
+    pub(crate) fn drain_materializer_backlog(&self) -> Result<usize> {
+        let mut total = 0usize;
+        while total < THINK_DRAIN_BUDGET {
+            let batch = THINK_DRAIN_BATCH.min(THINK_DRAIN_BUDGET - total);
+            let applied = self.apply_pending_ops_once(batch)?;
+            if applied == 0 {
+                break;
+            }
+            total += applied;
+        }
+        Ok(total)
     }
 
     /// **Phase 4.3 — apply a queued `materialize_record_post` op.**
