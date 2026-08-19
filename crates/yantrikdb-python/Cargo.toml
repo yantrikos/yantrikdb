@@ -1,6 +1,6 @@
 [package]
 name = "yantrikdb-python"
-version = "0.15.5"
+version = "0.15.6"
 edition = "2021"
 license = "Apache-2.0"
 description = "Python bindings for YantrikDB cognitive memory engine"
