@@ -2428,3 +2428,75 @@ fn refresh_embeddings_heals_rows_that_have_no_vector() {
     let other = db.refresh_embeddings(Some("does-not-exist"), true).unwrap();
     assert_eq!(other.scanned, 0, "namespace scope must actually filter");
 }
+
+/// #142 — `think()`'s reported count must equal the rows it actually wrote.
+///
+/// The counter used to sum only the two Phase-2 scans, while Phase 1's
+/// redundancy check ALSO persisted conflicts through `create_conflict` and
+/// returned only its triggers. A real, stored conflict was reported as zero,
+/// so a caller following the documented example concluded the feature had not
+/// fired while their store held an open conflict.
+///
+/// The invariant is what matters, not the specific number: anything that
+/// persists to `conflicts` has to contribute, otherwise this recurs the next
+/// time a detector is added.
+///
+/// Honest limit: this asserts the invariant on the CLAIM path. The redundancy
+/// path that actually caused #142 needs >=0.85 embedding similarity, which the
+/// bundled 64-dim embedder does not reach for the motivating pair — so this
+/// test would NOT have caught the original bug. It catches the next one that
+/// lands on a path it can reach.
+#[test]
+#[cfg(feature = "bundled-embedder")]
+fn think_conflicts_found_matches_rows_written() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = YantrikDB::with_default(dir.path().join("i142.db").to_str().unwrap()).unwrap();
+
+    let count = |db: &YantrikDB| {
+        db.get_conflicts(None, None, None, None, None, 1000)
+            .unwrap()
+            .len()
+    };
+    let rec = |db: &YantrikDB, text: &str| {
+        db.record_text(
+            text,
+            "semantic",
+            0.8,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap()
+    };
+
+    let before = count(&db);
+    // Boston/Denver goes through scan_claim_conflicts, which fires on the
+    // bundled 64-dim embedder. The motivating case ("works at Google" vs
+    // "Meta") travels the REDUNDANCY path instead, and that path gates on
+    // >=0.85 embedding similarity — reachable with the 256-dim default
+    // embedder but not with the bundled one, so it cannot be exercised here.
+    // This test therefore guards the invariant rather than reproducing #142.
+    rec(&db, "Acme is based in Boston.");
+    rec(&db, "Acme is based in Denver.");
+
+    let report = db.think(&ThinkConfig::default()).unwrap();
+    let written = count(&db) - before;
+
+    // Guard the guard: if the redundancy path never fires here, the assertion
+    // below compares 0 to 0 and proves nothing. A test that cannot fail is
+    // worse than no test.
+    assert!(
+        written > 0,
+        "no conflict was written — this test cannot detect the undercount"
+    );
+    assert_eq!(
+        report.conflicts_found, written,
+        "think() reported {} conflicts but {} rows were written",
+        report.conflicts_found, written
+    );
+}

@@ -118,6 +118,20 @@ impl YantrikDB {
             ),
         }
 
+        // #142: `conflicts_found` used to sum only the two Phase-2 scans, but
+        // Phase 1's `check_redundancy` ALSO persists conflicts (learned
+        // substitution categories, via create_conflict) and returns only its
+        // triggers — so a real, stored conflict reported as 0. Counting rows
+        // written across the whole cycle makes the number mean "what think()
+        // actually persisted", and stays correct when a fourth writer appears.
+        let conflicts_before: i64 = if config.run_conflict_scan {
+            self.conn()
+                .query_row("SELECT COUNT(*) FROM conflicts", [], |r| r.get(0))
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
         // Phase 0: Expire old triggers
         let expired = crate::triggers::expire_triggers(self, ts)?;
 
@@ -158,12 +172,18 @@ impl YantrikDB {
         // (so contradictions are flagged before similar memories get merged)
         // Uses consolidation_limit to cap work per call (incremental processing).
         let conflicts_found = if config.run_conflict_scan {
-            let entity_conflicts =
-                crate::conflict::scan_conflicts_limited(self, config.consolidation_limit)?.len();
+            crate::conflict::scan_conflicts_limited(self, config.consolidation_limit)?;
             // RFC 006 Phase 1: also scan claim-based conflicts (scoped, with severity + reason codes)
-            let claim_conflicts =
-                crate::conflict::scan_claim_conflicts(self, config.consolidation_limit)?.len();
-            entity_conflicts + claim_conflicts
+            crate::conflict::scan_claim_conflicts(self, config.consolidation_limit)?;
+            // Delta over the whole cycle rather than the sum of these two scans'
+            // return values — see the note at `conflicts_before`. Saturating
+            // because consolidation can tombstone rows, and a negative "found"
+            // would be worse than an undercount.
+            let after: i64 = self
+                .conn()
+                .query_row("SELECT COUNT(*) FROM conflicts", [], |r| r.get(0))
+                .unwrap_or(conflicts_before);
+            (after - conflicts_before).max(0) as usize
         } else {
             0
         };
