@@ -209,6 +209,34 @@ gated in CI ([`.github/workflows/benchmark.yml`](.github/workflows/benchmark.yml
 These run dependency-free on the bundled embedder, so anyone can reproduce them with
 one command.
 
+### LongMemEval-S — retrieval, scored mechanically
+
+[LongMemEval](https://github.com/xiaowu0162/LongMemEval) asks a question against a
+haystack of ~48 chat sessions per user, most of them near-identical distractors, and
+names the sessions that actually hold the evidence. This measures **retrieval only** —
+no answerer, no LLM judge, so there is nothing to disagree about. A query counts as
+`all@k` only if *every* gold session is in the top k (queries average 1.7 golds, so
+missing one scores zero).
+
+| top&nbsp;k | at least one gold | **every** gold |
+|-----:|------:|------:|
+| 5 | 96.0% | 85.0% |
+| 10 | 98.5% | 92.9% |
+| 20 | 99.6% | 98.3% |
+| **40** | **99.6%** | **98.7%** |
+
+479 of 500 queries scored, 0 errors. **k=40 is the shipped default**, and it is
+load-bearing rather than generous: a paired 400-query BEAM run measured k=40 → k=20
+costing 3.4 rubric points across 8 of 10 categories.
+
+The whole curve is published rather than the best row, because "recall@5" is not a
+well-defined quantity without saying what pool it was selected from — retrieving 40
+and keeping the best 5 documents scores 85.0%, while retrieving 5 directly scores
+72.9%, on the same queries with the same metric.
+
+Reproduce: [`python lme_recall_multik.py 500 24`](https://github.com/yantrikos/agent-memory-benchmark)
+(one retrieval per query at k=40, every prefix scored).
+
 ## Architecture
 
 ### Design Principles
