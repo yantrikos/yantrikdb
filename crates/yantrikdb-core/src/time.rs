@@ -40,7 +40,17 @@ pub fn now_ms() -> u64 {
 }
 
 /// Monotonic-ish instant for measuring elapsed time.
+///
+/// **Use this, not `std::time::Instant`, anywhere the engine's own code
+/// paths can reach.** `std::time::Instant::now()` panics on
+/// wasm32-unknown-unknown ("time not implemented on this platform"), and
+/// the panic is an `unreachable` trap with no message — the browser build
+/// died inside `DeltaIndex::append_inner` on the very first `record()`
+/// with nothing but a stack address to go on. `Copy` + `elapsed()` are
+/// here so a `std::time::Instant` field or local can be swapped for this
+/// one without touching the surrounding logic.
 #[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Copy)]
 pub struct Instant(std::time::Instant);
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -48,18 +58,25 @@ impl Instant {
     pub fn now() -> Self {
         Instant(std::time::Instant::now())
     }
+    pub fn elapsed(&self) -> std::time::Duration {
+        self.0.elapsed()
+    }
     pub fn elapsed_ms(&self) -> u64 {
         self.0.elapsed().as_millis() as u64
     }
 }
 
 #[cfg(target_arch = "wasm32")]
+#[derive(Debug, Clone, Copy)]
 pub struct Instant(f64);
 
 #[cfg(target_arch = "wasm32")]
 impl Instant {
     pub fn now() -> Self {
         Instant(js_sys::Date::now())
+    }
+    pub fn elapsed(&self) -> std::time::Duration {
+        std::time::Duration::from_secs_f64((js_sys::Date::now() - self.0).max(0.0) / 1000.0)
     }
     pub fn elapsed_ms(&self) -> u64 {
         (js_sys::Date::now() - self.0).max(0.0) as u64

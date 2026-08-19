@@ -517,11 +517,12 @@ fn content_hash(claims: &[ClaimRow]) -> String {
 }
 
 fn unix_seconds() -> i64 {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_secs() as i64)
-        .unwrap_or(0)
+    // `crate::time`, not `std::time` — this runs inside `ingest_claim`, which
+    // `think()` reaches through the materializer drain, and
+    // `SystemTime::now()` panics on wasm32-unknown-unknown. The browser build
+    // died here on the first `think()` after the equivalent fix in
+    // `DeltaIndex`.
+    crate::time::now_secs() as i64
 }
 
 /// ⊕ accumulation: sum of weighted supports with leave-one-out dependence

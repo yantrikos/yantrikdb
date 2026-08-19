@@ -9,7 +9,11 @@ description = "YantrikDB compiled to WebAssembly — run cognitive memory in the
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-yantrikdb = { path = "../yantrikdb-core" }
+# default-features = false drops `bundled-embedder`. model2vec-rs pulls in
+# tokenizers -> hf-hub -> ureq -> socks, and socks does not compile for
+# wasm32-unknown-unknown (it calls UdpSocket::readv). The browser has no use
+# for an in-engine embedder anyway: the JS caller supplies the vectors.
+yantrikdb = { path = "../yantrikdb-core", default-features = false }
 wasm-bindgen = "0.2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

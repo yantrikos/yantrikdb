@@ -135,7 +135,7 @@ pub struct DeltaIndex {
     /// Lives on `DeltaIndex` rather than per-`DeltaEntry` so a busy
     /// workload with frequent appends doesn't pay one Instant per entry —
     /// we only care about the *oldest* unflushed entry's age.
-    oldest_dirty_at: parking_lot::Mutex<Option<std::time::Instant>>,
+    oldest_dirty_at: parking_lot::Mutex<Option<crate::time::Instant>>,
     /// Compaction trigger threshold for `oldest_dirty_at` — once the
     /// delta's oldest entry has been sitting longer than this, the
     /// compactor fires regardless of delta size.
@@ -372,7 +372,7 @@ impl DeltaIndex {
         // don't touch it — only the oldest entry's age matters for the
         // age-based trigger.
         if was_empty {
-            *self.oldest_dirty_at.lock() = Some(std::time::Instant::now());
+            *self.oldest_dirty_at.lock() = Some(crate::time::Instant::now());
         }
         // **Saga task 18 Option 4 (v0.7.2).** Wake the compactor early
         // when delta crosses ~80% of capacity. Without this, the
@@ -441,7 +441,7 @@ impl DeltaIndex {
         // entry in the delta (delta was empty before the push). Same rule
         // as append(): only the *oldest* dirty entry's age matters.
         if was_empty {
-            *self.oldest_dirty_at.lock() = Some(std::time::Instant::now());
+            *self.oldest_dirty_at.lock() = Some(crate::time::Instant::now());
         }
         // Saga task 18 Option 4: tombstone-only paths also fill the
         // delta and should wake the compactor at the same threshold.
@@ -493,7 +493,7 @@ impl DeltaIndex {
                 // entry ages into cold rather than sitting in the delta.
                 let mut clock = self.oldest_dirty_at.lock();
                 if clock.is_none() {
-                    *clock = Some(std::time::Instant::now());
+                    *clock = Some(crate::time::Instant::now());
                 }
                 return true;
             }
@@ -698,7 +698,7 @@ impl DeltaIndex {
         // compaction — otherwise a low-volume published correction could
         // sit in the linear-scan delta forever, defeating the age trigger.
         *self.oldest_dirty_at.lock() = if retained_any {
-            Some(std::time::Instant::now())
+            Some(crate::time::Instant::now())
         } else {
             None
         };
@@ -750,7 +750,7 @@ impl DeltaIndex {
             .store(0, std::sync::atomic::Ordering::Release);
         let published_remains = delta.iter().any(|e| e.published);
         *self.oldest_dirty_at.lock() = if published_remains {
-            Some(std::time::Instant::now())
+            Some(crate::time::Instant::now())
         } else {
             None
         };
