@@ -459,6 +459,39 @@ fn schema_v43_fresh_install_has_typed_synthesis_lifecycle() {
 }
 
 #[test]
+fn schema_v44_fresh_install_has_rollup_outcome_ledger() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let conn = db.conn();
+    for table in [
+        "rollup_impressions",
+        "rollup_impression_children",
+        "rollup_impression_outcomes",
+    ] {
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1,
+            "v44 fresh schema missing {table}"
+        );
+    }
+    for index in [
+        "idx_rollup_impressions_rollup",
+        "idx_rollup_impressions_query",
+        "idx_rollup_impression_children_child",
+        "idx_rollup_impression_outcomes_created",
+    ] {
+        assert!(
+            index_exists(&conn, index),
+            "v44 fresh schema missing {index}"
+        );
+    }
+}
+
+#[test]
 fn schema_v43_migration_adds_synthesis_generation_clock() {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     conn.execute("CREATE TABLE memories (rid TEXT PRIMARY KEY)", [])

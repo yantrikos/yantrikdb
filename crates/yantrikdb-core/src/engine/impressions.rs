@@ -19,7 +19,7 @@
 //! outcome is that the database never learns ("abstain from learning
 //! rather than teach itself that its own answers were correct").
 
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use crate::error::Result;
 use crate::types::RecallResult;
@@ -157,6 +157,174 @@ impl YantrikDB {
         Ok(inserted > 0)
     }
 
+    /// Record one rollup surfaced by a caller-side organization layer.
+    /// `impression_id` is optional for convenience; callers that retry across
+    /// a transport boundary should generate and reuse one.
+    pub fn note_rollup_impression(
+        &self,
+        rollup_rid: &str,
+        query_text: &str,
+        namespace: Option<&str>,
+        rank: usize,
+        score: f64,
+        impression_id: Option<&str>,
+    ) -> Result<String> {
+        if rollup_rid.trim().is_empty() || query_text.trim().is_empty() || !score.is_finite() {
+            return Err(crate::error::YantrikDbError::InvalidInput(
+                "rollup impression requires non-empty rollup_rid/query_text and a finite score"
+                    .to_string(),
+            ));
+        }
+        let impression_id = impression_id
+            .filter(|value| !value.trim().is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(crate::id::new_id);
+        let query_hash = stable_text_hash(query_text);
+        let ts = crate::time::now_secs();
+        let conn = self.conn();
+        let stored_namespace: String = conn
+            .query_row(
+                "SELECT namespace FROM memories WHERE rid = ?1",
+                params![rollup_rid],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                crate::error::YantrikDbError::NotFound(format!("rollup: {rollup_rid}"))
+            })?;
+        if namespace.is_some_and(|value| value != stored_namespace) {
+            return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                "rollup {rollup_rid:?} belongs to namespace {stored_namespace:?}, not {namespace:?}"
+            )));
+        }
+        conn.execute(
+            "INSERT OR IGNORE INTO rollup_impressions \
+             (impression_id, rollup_rid, query_hash, namespace, rank, score, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                impression_id,
+                rollup_rid,
+                query_hash,
+                stored_namespace,
+                rank as i64,
+                score,
+                ts,
+            ],
+        )?;
+        let existing: (String, String, String, i64, f64) = conn.query_row(
+            "SELECT rollup_rid, query_hash, namespace, rank, score \
+             FROM rollup_impressions WHERE impression_id = ?1",
+            params![impression_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )?;
+        if existing
+            != (
+                rollup_rid.to_string(),
+                query_hash,
+                stored_namespace,
+                rank as i64,
+                score,
+            )
+        {
+            return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                "impression_id {impression_id:?} was already used with a different payload"
+            )));
+        }
+        Ok(impression_id)
+    }
+
+    /// Bind the exact ordered children returned by an expansion. Reusing an
+    /// impression id with a different child payload is rejected.
+    pub fn note_rollup_expansion(
+        &self,
+        impression_id: &str,
+        returned_child_rids: &[&str],
+    ) -> Result<usize> {
+        let mut clean = Vec::new();
+        for rid in returned_child_rids.iter().copied() {
+            if !rid.trim().is_empty() && !clean.contains(&rid) {
+                clean.push(rid);
+            }
+        }
+        let payload_hash = stable_text_hash(&clean.join("\u{0}"));
+        let conn = self.conn();
+        let tx = conn.unchecked_transaction()?;
+        let existing_hash: Option<String> = tx
+            .query_row(
+                "SELECT expansion_payload_hash FROM rollup_impressions \
+                 WHERE impression_id = ?1",
+                params![impression_id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| {
+                crate::error::YantrikDbError::NotFound(format!(
+                    "rollup impression: {impression_id}"
+                ))
+            })?;
+        if existing_hash
+            .as_deref()
+            .is_some_and(|hash| hash != payload_hash)
+        {
+            return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                "rollup impression {impression_id:?} was expanded with a different child payload"
+            )));
+        }
+        tx.execute(
+            "UPDATE rollup_impressions SET expansion_payload_hash = ?2, \
+             expanded_at = COALESCE(expanded_at, ?3) WHERE impression_id = ?1",
+            params![impression_id, payload_hash, crate::time::now_secs()],
+        )?;
+        let mut stmt = tx.prepare_cached(
+            "INSERT OR IGNORE INTO rollup_impression_children \
+             (impression_id, child_rid, rank) VALUES (?1, ?2, ?3)",
+        )?;
+        for (rank, child_rid) in clean.iter().enumerate() {
+            stmt.execute(params![impression_id, child_rid, rank as i64])?;
+        }
+        drop(stmt);
+        tx.commit()?;
+        Ok(clean.len())
+    }
+
+    /// Explicitly record that a caller selected or corrected a returned child.
+    pub fn note_rollup_selection(
+        &self,
+        impression_id: &str,
+        child_rid: &str,
+        source: &str,
+    ) -> Result<bool> {
+        if !matches!(source, "selected" | "corrected") {
+            return Err(crate::error::YantrikDbError::InvalidInput(
+                "rollup selection source must be 'selected' or 'corrected'".to_string(),
+            ));
+        }
+        let conn = self.conn();
+        let inserted = conn.execute(
+            "INSERT OR IGNORE INTO rollup_impression_outcomes \
+             (outcome_id, impression_id, child_rid, source, created_at) \
+             SELECT ?1, ?2, ?3, ?4, ?5 \
+             WHERE EXISTS (SELECT 1 FROM rollup_impression_children \
+                           WHERE impression_id = ?2 AND child_rid = ?3)",
+            params![
+                crate::id::new_id(),
+                impression_id,
+                child_rid,
+                source,
+                crate::time::now_secs(),
+            ],
+        )?;
+        Ok(inserted > 0)
+    }
+
     /// v0.10 Item 2 — explicit rejection: the caller states that these
     /// served results were IRRELEVANT to the query they were served for
     /// (typically alongside a refine). This is deliberately a separate
@@ -246,6 +414,10 @@ impl YantrikDB {
         // actual operation.
         let _ = self.record_ranking_label(rid, "caller_used", 1, WEIGHT_CALLER_USED);
     }
+}
+
+fn stable_text_hash(value: &str) -> String {
+    blake3::hash(value.as_bytes()).to_hex().to_string()
 }
 
 #[cfg(test)]
@@ -402,6 +574,120 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM ranking_labels", [], |r| r.get(0))
             .unwrap();
         assert_eq!(n, 0);
+    }
+
+    #[test]
+    fn rollup_outcomes_are_explicit_exact_and_idempotent() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let rollup = rec(&db, "topic rollup", 1.0);
+        let child = rec(&db, "answer-sized child", 20.0);
+        let first = db
+            .note_rollup_impression(
+                &rollup,
+                "topic question",
+                None,
+                0,
+                0.8,
+                Some("impression-1"),
+            )
+            .unwrap()
+            .to_string();
+        let retry = db
+            .note_rollup_impression(
+                &rollup,
+                "topic question",
+                None,
+                0,
+                0.8,
+                Some("impression-1"),
+            )
+            .unwrap();
+        assert_eq!(first, retry);
+        assert!(db
+            .note_rollup_impression(
+                &rollup,
+                "different question",
+                None,
+                0,
+                0.8,
+                Some("impression-1"),
+            )
+            .is_err());
+
+        assert_eq!(
+            db.note_rollup_selection(&first, &child, "selected")
+                .unwrap(),
+            false,
+            "a child must have been returned before it can be selected"
+        );
+        assert_eq!(
+            db.note_rollup_expansion(&first, &[&child, &child]).unwrap(),
+            1
+        );
+        assert_eq!(db.note_rollup_expansion(&first, &[&child]).unwrap(), 1);
+        let conn = db.conn();
+        let impressions: i64 = conn
+            .query_row("SELECT COUNT(*) FROM rollup_impressions", [], |r| r.get(0))
+            .unwrap();
+        let children: i64 = conn
+            .query_row("SELECT COUNT(*) FROM rollup_impression_children", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(impressions, 1);
+        assert_eq!(children, 1);
+        drop(conn);
+
+        // A generic point-read carries no hidden rollup semantics.
+        let _ = db.get(&child).unwrap();
+        assert_eq!(
+            db.conn()
+                .query_row("SELECT COUNT(*) FROM rollup_impression_outcomes", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+                .unwrap(),
+            0
+        );
+        assert!(db
+            .note_rollup_selection(&first, &child, "selected")
+            .unwrap());
+        assert!(!db
+            .note_rollup_selection(&first, &child, "selected")
+            .unwrap());
+        assert!(db
+            .note_rollup_selection(&first, &child, "corrected")
+            .unwrap());
+        let conn = db.conn();
+        let outcomes: i64 = conn
+            .query_row("SELECT COUNT(*) FROM rollup_impression_outcomes", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(outcomes, 2);
+
+        conn.execute(
+            "DELETE FROM rollup_impressions WHERE impression_id = ?1",
+            params![first],
+        )
+        .unwrap();
+        let outcomes_after_delete: i64 = conn
+            .query_row("SELECT COUNT(*) FROM rollup_impression_outcomes", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(outcomes_after_delete, 0);
+    }
+
+    #[test]
+    fn rollup_expansion_requires_an_exact_impression() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        assert!(db.note_rollup_expansion("missing", &[]).is_err());
+        assert!(!db
+            .note_rollup_selection("missing", "child", "selected")
+            .unwrap());
+        assert!(db
+            .note_rollup_selection("missing", "child", "implicit")
+            .is_err());
     }
 
     #[test]

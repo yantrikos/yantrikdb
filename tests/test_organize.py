@@ -440,6 +440,44 @@ def test_organized_expansion_uses_non_labeling_point_reads():
     assert db.get_calls == []
 
 
+def test_organized_recall_records_only_returned_handle_children():
+    handle = _recall_hit(
+        "handle",
+        0.9,
+        metadata={
+            "organizer_kind": "query_independent_topic",
+            "organizer_handle_id": "topic",
+            "child_rids": ["best", "not-returned"],
+        },
+    )
+    best = _recall_hit("best", 0.8)
+    not_returned = _recall_hit("not-returned", 0.2)
+    db = RecallDB([handle, best, not_returned])
+    db.impressions = []
+    db.expansions = []
+    db.note_rollup_impression = lambda rid, query, namespace, rank, score: (
+        db.impressions.append((rid, query, namespace, rank, score)) or "imp-1"
+    )
+    db.note_rollup_expansion = lambda impression_id, children: db.expansions.append(
+        (impression_id, children)
+    )
+
+    results = recall_organized(
+        db,
+        "List the topic items in order",
+        top_k=1,
+        candidate_pool=10,
+        order="relevance",
+    )
+
+    assert [result["rid"] for result in results] == ["best"]
+    assert db.impressions == [("handle", "List the topic items in order", None, 0, 0.9)]
+    assert db.expansions == [("imp-1", ["best"])]
+    assert results[0]["metadata"]["organization_rollup_impression_ids"] == [
+        "imp-1"
+    ]
+
+
 def test_organized_recall_uses_turn_order_for_conversation_queries():
     handle = _recall_hit(
         "handle",

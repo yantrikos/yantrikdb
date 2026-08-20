@@ -266,6 +266,16 @@ temporal axis: `metadata.first_mention_turn` orders when the user disclosed an
 item, while `metadata.first_mention_at` orders the real-world event. If event
 time is absent, presentation falls back to `created_at`.
 
+Schema v44 adds an explicit rollup-outcome protocol for learning the grouping
+policy from real use. `rollup_impressions` freezes the surfaced rollup's hashed
+query, namespace, rank, and score. Expansion and child selection/correction are
+separate, ID-bound events, so a later recall of the same rollup cannot steal the
+outcome and a generic `get(child_rid)` cannot silently label a parent. Retries
+are idempotent; reusing an impression ID with a different payload fails closed.
+The initial release treats this ledger as measurement data only. Promotion into
+ranking labels or learned features requires evidence that the outcome predicts
+usefulness without introducing exposure bias.
+
 Local frozen-store probes show why the middle representation is required.
 Atomic records can split one concern into adjacent follow-up actions, while a
 topic handle can combine a dozen concerns. Hierarchical query-free discovery on

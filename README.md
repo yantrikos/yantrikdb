@@ -485,11 +485,19 @@ list and timeline queries. Its default `order="auto"` uses
 conversation, while real-world timelines use `first_mention_at` and then
 `created_at` as a fallback.
 
+Organized recall also records a privacy-preserving rollup outcome ledger. A
+surfaced rollup gets an immutable impression ID with its hashed query, rank,
+score, and namespace; expansion records the ordered children actually returned.
+Applications can explicitly mark a returned child as `selected` or `corrected`
+with `note_rollup_selection`. Generic point reads and corrections never infer a
+rollup outcome. These observations are measurement data and are not ranker
+labels until their predictive value has been validated.
+
 ## Full API
 
 | Operation | Methods |
 |-----------|---------|
-| **Core** | `record`, `record_batch`, `recall`, `recall_with_response`, `recall_refine`, `forget`, `correct` |
+| **Core** | `record`, `record_batch`, `recall`, `recall_with_response`, `recall_refine`, `forget`, `correct`, `note_rollup_impression`, `note_rollup_expansion`, `note_rollup_selection` |
 | **Knowledge Graph** | `relate`, `get_edges`, `search_entities`, `entity_profile`, `relationship_depth`, `link_memory_entity` |
 | **Cognition** | `think`, `get_patterns`, `scan_conflicts`, `resolve_conflict`, `derive_personality` |
 | **Triggers** | `get_pending_triggers`, `acknowledge_trigger`, `deliver_trigger`, `act_on_trigger`, `dismiss_trigger` |

@@ -1431,6 +1431,51 @@ impl PyYantrikDB {
         db.reject_recalled(&refs).map_err(map_err)
     }
 
+    #[pyo3(signature = (rollup_rid, query_text, namespace=None, rank=0, score=0.0, impression_id=None))]
+    fn note_rollup_impression(
+        &self,
+        rollup_rid: &str,
+        query_text: &str,
+        namespace: Option<&str>,
+        rank: usize,
+        score: f64,
+        impression_id: Option<&str>,
+    ) -> PyResult<String> {
+        let db = self.get_inner()?;
+        db.note_rollup_impression(
+            rollup_rid,
+            query_text,
+            namespace,
+            rank,
+            score,
+            impression_id,
+        )
+        .map_err(map_err)
+    }
+
+    fn note_rollup_expansion(
+        &self,
+        impression_id: &str,
+        returned_child_rids: Vec<String>,
+    ) -> PyResult<usize> {
+        let db = self.get_inner()?;
+        let refs: Vec<&str> = returned_child_rids.iter().map(String::as_str).collect();
+        db.note_rollup_expansion(impression_id, &refs)
+            .map_err(map_err)
+    }
+
+    #[pyo3(signature = (impression_id, child_rid, source="selected"))]
+    fn note_rollup_selection(
+        &self,
+        impression_id: &str,
+        child_rid: &str,
+        source: &str,
+    ) -> PyResult<bool> {
+        let db = self.get_inner()?;
+        db.note_rollup_selection(impression_id, child_rid, source)
+            .map_err(map_err)
+    }
+
     /// v0.10 Item 2 — run the self-sufficient learning loop once and
     /// return its typed report as JSON (outcome, gates, losses,
     /// label_counts, semantic_anchor_drop_rate,

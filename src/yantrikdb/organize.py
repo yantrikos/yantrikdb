@@ -569,6 +569,45 @@ def _deduplicate_concern_hits(
     ]
 
 
+def _note_rollup_impressions(
+    db,
+    query: str,
+    handles: Sequence[Mapping],
+    results: Sequence[Mapping] | None = None,
+):
+    note_impression = getattr(db, "note_rollup_impression", None)
+    note_expansion = getattr(db, "note_rollup_expansion", None)
+    if note_impression is None or (results is not None and note_expansion is None):
+        return
+    returned_rids = [str(result.get("rid") or "") for result in results or []]
+    for rank, handle in enumerate(handles):
+        metadata = handle.get("metadata") or {}
+        impression_id = note_impression(
+            str(handle.get("rid") or ""),
+            query,
+            handle.get("namespace"),
+            rank,
+            float(handle.get("score") or 0.0),
+        )
+        if results is None:
+            handle_metadata = dict(metadata)
+            handle_metadata["organization_rollup_impression_id"] = impression_id
+            handle["metadata"] = handle_metadata
+            continue
+        child_rids = {str(rid) for rid in metadata.get("child_rids") or []}
+        returned_children = [rid for rid in returned_rids if rid in child_rids]
+        note_expansion(impression_id, returned_children)
+        for result in results:
+            if str(result.get("rid") or "") not in child_rids:
+                continue
+            result_metadata = dict(result.get("metadata") or {})
+            ids = list(result_metadata.get("organization_rollup_impression_ids") or [])
+            if impression_id not in ids:
+                ids.append(impression_id)
+            result_metadata["organization_rollup_impression_ids"] = ids
+            result["metadata"] = result_metadata
+
+
 def recall_organized(
     db,
     query: str,
@@ -645,7 +684,9 @@ def recall_organized(
     if not handles:
         return hits[:top_k]
     if selected_mode == "handles":
-        return handles[:top_k]
+        selected_handles = handles[:top_k]
+        _note_rollup_impressions(db, query, selected_handles)
+        return selected_handles
 
     focused_handles = _query_focus_handles(query, handles)
     entity_handles = _query_entity_handles(query, handles)
@@ -814,6 +855,7 @@ def recall_organized(
         children.sort(key=_result_conversation_key)
     elif selected_order in {"first_mention", "chronological"}:
         children.sort(key=_result_occurrence_key)
+    _note_rollup_impressions(db, query, selected_handles, children)
     return children
 
 

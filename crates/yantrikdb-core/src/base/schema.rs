@@ -8,7 +8,9 @@
 // v40 adds `memory_chunks` (chunked embeddings — one record, N window
 // vectors; docs/chunked_embeddings_design.md). Same v39 shape: a new
 // CREATE TABLE IF NOT EXISTS in SCHEMA_SQL, no migration constant.
-pub const SCHEMA_VERSION: i32 = 43;
+// v44 adds the expansion-outcome ledger. It is additive and is likewise
+// created by SCHEMA_SQL on every open.
+pub const SCHEMA_VERSION: i32 = 44;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -1180,6 +1182,49 @@ CREATE TABLE IF NOT EXISTS recall_impressions (
 );
 CREATE INDEX IF NOT EXISTS idx_impressions_rid ON recall_impressions(rid, created_at);
 CREATE INDEX IF NOT EXISTS idx_impressions_created ON recall_impressions(created_at);
+
+-- v44: observable rollup outcomes for caller-side organization layers. These
+-- are separate from raw recall_impressions because organizer candidate recall
+-- is internal and must not be logged as though the whole pool was served.
+CREATE TABLE IF NOT EXISTS rollup_impressions (
+    impression_id TEXT PRIMARY KEY,
+    rollup_rid TEXT NOT NULL,
+    query_hash TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    rank INTEGER NOT NULL CHECK (rank >= 0),
+    score REAL NOT NULL,
+    expansion_payload_hash TEXT,
+    created_at REAL NOT NULL,
+    expanded_at REAL,
+    FOREIGN KEY (rollup_rid) REFERENCES memories(rid) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_rollup_impressions_rollup
+    ON rollup_impressions(rollup_rid, created_at);
+CREATE INDEX IF NOT EXISTS idx_rollup_impressions_query
+    ON rollup_impressions(query_hash, created_at);
+CREATE TABLE IF NOT EXISTS rollup_impression_children (
+    impression_id TEXT NOT NULL,
+    child_rid TEXT NOT NULL,
+    rank INTEGER NOT NULL CHECK (rank >= 0),
+    PRIMARY KEY (impression_id, child_rid),
+    FOREIGN KEY (impression_id)
+        REFERENCES rollup_impressions(impression_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_rollup_impression_children_child
+    ON rollup_impression_children(child_rid, impression_id);
+CREATE TABLE IF NOT EXISTS rollup_impression_outcomes (
+    outcome_id TEXT PRIMARY KEY,
+    impression_id TEXT NOT NULL,
+    child_rid TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('selected', 'corrected')),
+    created_at REAL NOT NULL,
+    UNIQUE (impression_id, child_rid, source),
+    FOREIGN KEY (impression_id, child_rid)
+        REFERENCES rollup_impression_children(impression_id, child_rid)
+        ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_rollup_impression_outcomes_created
+    ON rollup_impression_outcomes(created_at);
 
 -- v0.10 Item 2 (schema v35): typed ranking labels, bound to impressions.
 -- Sources (sol ruling 1): 'explicit' (recall feedback, weight 1.0);
