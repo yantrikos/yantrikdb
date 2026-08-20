@@ -131,3 +131,92 @@ def test_a_store_with_no_recorded_identity_is_not_gated(tmp_path):
     hits = db.recall(query="the caller's own embedder", top_k=1, namespace="n")
     assert hits, "a BYO-embedder store must still be usable end to end"
     db.close()
+
+
+# --- the recorded identity can itself be false -------------------------------
+#
+# Found on CT128, a 5,699-record production store, when 0.16.0 first opened it:
+# `meta` recorded `potion-base-2M / dim 64` while every stored vector was 1536
+# bytes — 384 f32, MiniLM. potion-base-2M does not emit 384-dim vectors, so it
+# cannot have built them. The row was already wrong before the gate existed;
+# the identity is stamped by whatever was ATTACHED at the first `embed()`, not
+# by whatever produced vectors handed to `record()`.
+#
+# The gate refused the open on the strength of that row. Every MCP call then
+# failed — lazily, after the service came up clean — and the error named a
+# model provably not responsible. `detect_existing_dim` in the core has refused
+# to trust this same row since v0.10 ("A STORED VECTOR IS THE AUTHORITY, NOT
+# THE RECORDED IDENTITY", citing this very store), so the engine held two
+# opposite rulings on one value.
+#
+# "Cannot verify" must stay a distinct state from "verified mismatch".
+
+
+@pytest.fixture
+def false_identity(tmp_path):
+    """A store whose recorded embedder dim contradicts its stored vectors."""
+    db_path = str(tmp_path / "false_identity.db")
+    db = YantrikDB(db_path=db_path, embedding_dim=DIM)
+    db.record("the deploy key for node4 is id_deploy", namespace="n")
+    db.close()
+
+    conn = sqlite3.connect(db_path)
+    try:
+        # The vectors stay DIM-wide; only the claim about them changes.
+        conn.execute("UPDATE meta SET value='384' WHERE key='embedder_dim'")
+        conn.commit()
+        width = conn.execute(
+            "SELECT length(embedding) FROM memories WHERE embedding IS NOT NULL LIMIT 1"
+        ).fetchone()[0]
+    finally:
+        conn.close()
+    assert width == DIM * 4, "fixture must leave the vectors untouched"
+    return db_path
+
+
+def test_a_recorded_identity_contradicting_the_vectors_does_not_brick_the_db(
+    false_identity,
+):
+    """The CT128 regression: a false row must not be grounds for refusal."""
+    with pytest.warns(UserWarning, match="recorded identity is wrong"):
+        db = YantrikDB(db_path=false_identity, embedding_dim=DIM, embedder=_Hostile())
+    try:
+        db.record("written after attaching", namespace="n")
+        assert db.recall("deploy key", namespace="n") is not None
+    finally:
+        db.close()
+
+
+def test_the_warning_names_both_dimensions_so_it_can_be_repaired(false_identity):
+    """A warning that does not say what is wrong is not actionable."""
+    with pytest.warns(UserWarning) as rec:
+        db = YantrikDB(db_path=false_identity, embedding_dim=DIM, embedder=_Hostile())
+    db.close()
+    msg = str(rec[0].message)
+    assert "384" in msg and str(DIM) in msg
+    assert "UNVERIFIED" in msg
+
+
+def test_set_embedder_also_survives_a_false_recorded_identity(false_identity):
+    db = YantrikDB(db_path=false_identity, embedding_dim=DIM)
+    try:
+        with pytest.warns(UserWarning):
+            db.set_embedder(_Hostile())
+    finally:
+        db.close()
+
+
+def test_a_consistent_identity_still_refuses(built):
+    """The gate must not have been weakened for the case it was built for.
+
+    `built` records an identity whose dim agrees with its vectors, so nothing
+    about it is provably false and the refusal must stand.
+    """
+    db_path, _ = built
+    db = YantrikDB(db_path=db_path, embedding_dim=DIM)
+    try:
+        with pytest.raises(RuntimeError) as e:
+            db.set_embedder(_Hostile())
+        assert "vectors were built by" in str(e.value)
+    finally:
+        db.close()

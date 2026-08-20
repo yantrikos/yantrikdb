@@ -60,6 +60,11 @@ impl PyYantrikDB {
     /// one — `fingerprint` or `digest`, a plain string attribute. Rules:
     ///
     /// * store has no recorded identity -> nothing to contradict, attach.
+    /// * recorded dim contradicts the width of the vectors actually stored
+    ///   -> the row is provably false (that model does not emit that width),
+    ///   so it is evidence of nothing. Attach, warn loudly. This is "cannot
+    ///   verify", NOT "verified mismatch" — the two must not collapse, or
+    ///   every database written before identities were recorded is bricked.
     /// * declared fingerprint equals the recorded digest -> attach.
     /// * declared fingerprint differs -> refuse. This is the provable
     ///   mismatch, and it is silent corruption if allowed: cosine distance
@@ -87,6 +92,56 @@ impl PyYantrikDB {
         let Some((recorded_name, recorded_digest, recorded_dim)) = recorded else {
             return Ok(()); // nothing recorded: nothing to contradict
         };
+
+        // **A stored vector is the authority, not the recorded identity.**
+        // The same ordering `detect_existing_dim` applies at open time, for
+        // the same reason: the identity row records what was ATTACHED when
+        // the engine first embedded, which is not necessarily what produced
+        // the vectors in the file. A caller that embeds externally and passes
+        // vectors to `record()` never stamps an identity, but any incidental
+        // `embed()` call stamps the attached model anyway.
+        //
+        // `embedding_dim()` is the dimension the engine actually opened at,
+        // and `detect_existing_dim` derives that by MEASURING a stored vector
+        // whenever the file holds one. So a recorded dim that disagrees with
+        // it is not a difference of opinion — the named model cannot have
+        // produced vectors of a width it does not emit. The row is
+        // demonstrably false, and a false row carries no evidence about the
+        // embedder being attached now.
+        //
+        // Refusing on it would be worse than useless: it bricks the database
+        // (every call fails, lazily, after the service starts clean) on the
+        // strength of a value the engine elsewhere already refuses to trust,
+        // and the error names a model we can prove did not build the vectors.
+        // A gate that misreports provenance is worse than no gate.
+        //
+        // Found on a real 5,699-record production store recording
+        // `potion-base-2M / dim 64` while holding 1536-byte (384-dim) MiniLM
+        // vectors — the same store `detect_existing_dim`'s comment cites.
+        //
+        // This is "cannot verify", which is a DIFFERENT state from "verified
+        // mismatch" — collapsing the two is what bricks legacy databases.
+        // Unverified is where every pre-gate database already lived, so this
+        // is no weaker than the release before it; it simply declines to
+        // manufacture a verdict from a row known to be wrong. Loud, because
+        // the identity still needs repairing — see `reembed()` and the
+        // dimension reported below.
+        let measured_dim = inner.embedding_dim();
+        if recorded_dim != measured_dim {
+            let named = recorded_name
+                .clone()
+                .unwrap_or_else(|| "<unnamed>".to_string());
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyUserWarning>(),
+                &std::ffi::CString::new(format!(
+                    "this database records its vectors as built by {named} (dim                      {recorded_dim}), but the vectors it holds are {measured_dim}-dim, so that                      model cannot have produced them and the recorded identity is wrong.                      Attaching without an identity check: provenance is UNVERIFIED, which is                      what it was before this check existed. To repair it, attach the embedder                      that did build them and call reembed(), or record a digest only after                      verifying it re-produces the stored vectors from their source text."
+                ))
+                .map_err(|e| PyValueError::new_err(e.to_string()))?,
+                0,
+            )?;
+            return Ok(());
+        }
 
         let declared = ["fingerprint", "digest"].iter().find_map(|attr| {
             embedder
