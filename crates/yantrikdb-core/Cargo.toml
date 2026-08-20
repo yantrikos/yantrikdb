@@ -1,6 +1,6 @@
 [package]
 name = "yantrikdb"
-version = "0.15.6"
+version = "0.16.0"
 edition = "2021"
 license = "Apache-2.0"
 description = "Cognitive memory engine for persistent AI systems"
