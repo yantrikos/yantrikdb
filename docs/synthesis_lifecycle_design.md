@@ -272,9 +272,21 @@ query, namespace, rank, and score. Expansion and child selection/correction are
 separate, ID-bound events, so a later recall of the same rollup cannot steal the
 outcome and a generic `get(child_rid)` cannot silently label a parent. Retries
 are idempotent; reusing an impression ID with a different payload fails closed.
-The initial release treats this ledger as measurement data only. Promotion into
-ranking labels or learned features requires evidence that the outcome predicts
-usefulness without introducing exposure bias.
+Schema v45 adds `finalize_rollup_outcome`, an exact complete-set boundary:
+corrected children imply selection, every child must belong to the recorded
+expansion, exact retries are idempotent, and changed payloads fail closed. Until
+finalization, the absence of a child selection is unknown telemetry rather than
+a negative label.
+
+`rollup_outcome_report(namespace, since)` reads this ledger without mutation.
+Its per-rank rates and readiness gate use only finalized outcomes. Offline
+evaluation readiness requires 200 finalized impressions spanning 30 queries
+and 20 rollups, at least 50 selected and 50 explicitly unselected children,
+80% completion among expanded impressions, and no query or rollup contributing
+more than 25% of the finalized cohort. This gate authorizes an offline
+evaluation only. Promotion into ranking labels or learned features still
+requires evidence that the outcome predicts usefulness without introducing
+exposure bias.
 
 Local frozen-store probes show why the middle representation is required.
 Atomic records can split one concern into adjacent follow-up actions, while a

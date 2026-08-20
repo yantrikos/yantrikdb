@@ -1476,6 +1476,39 @@ impl PyYantrikDB {
             .map_err(map_err)
     }
 
+    #[pyo3(signature = (impression_id, selected_child_rids, corrected_child_rids=vec![]))]
+    fn finalize_rollup_outcome(
+        &self,
+        impression_id: &str,
+        selected_child_rids: Vec<String>,
+        corrected_child_rids: Vec<String>,
+    ) -> PyResult<usize> {
+        let db = self.get_inner()?;
+        let selected: Vec<&str> = selected_child_rids.iter().map(String::as_str).collect();
+        let corrected: Vec<&str> = corrected_child_rids.iter().map(String::as_str).collect();
+        db.finalize_rollup_outcome(impression_id, &selected, &corrected)
+            .map_err(map_err)
+    }
+
+    #[pyo3(signature = (namespace=None, since=None))]
+    fn rollup_outcome_report(
+        &self,
+        py: Python<'_>,
+        namespace: Option<&str>,
+        since: Option<f64>,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let report = db
+            .rollup_outcome_report(namespace, since)
+            .map_err(map_err)?;
+        let value = serde_json::to_value(report).map_err(|error| {
+            PyRuntimeError::new_err(format!(
+                "rollup outcome report serialization failed: {error}"
+            ))
+        })?;
+        json_to_py(py, &value)
+    }
+
     /// v0.10 Item 2 — run the self-sufficient learning loop once and
     /// return its typed report as JSON (outcome, gates, losses,
     /// label_counts, semantic_anchor_drop_rate,

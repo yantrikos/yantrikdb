@@ -22,7 +22,7 @@
 use rusqlite::{params, OptionalExtension};
 
 use crate::error::Result;
-use crate::types::RecallResult;
+use crate::types::{RecallResult, RollupOutcomeReport, RollupRankOutcomeStats};
 
 use super::YantrikDB;
 
@@ -308,6 +308,31 @@ impl YantrikDB {
             ));
         }
         let conn = self.conn();
+        let finalized: Option<Option<f64>> = conn
+            .query_row(
+                "SELECT outcome_finalized_at FROM rollup_impressions \
+                 WHERE impression_id = ?1",
+                params![impression_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(finalized) = finalized else {
+            return Ok(false);
+        };
+        if finalized.is_some() {
+            let exists: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM rollup_impression_outcomes \
+                 WHERE impression_id = ?1 AND child_rid = ?2 AND source = ?3)",
+                params![impression_id, child_rid, source],
+                |row| row.get(0),
+            )?;
+            if exists {
+                return Ok(false);
+            }
+            return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                "rollup impression {impression_id:?} already has a finalized outcome"
+            )));
+        }
         let inserted = conn.execute(
             "INSERT OR IGNORE INTO rollup_impression_outcomes \
              (outcome_id, impression_id, child_rid, source, created_at) \
@@ -323,6 +348,352 @@ impl YantrikDB {
             ],
         )?;
         Ok(inserted > 0)
+    }
+
+    /// Close the telemetry loop with the complete set of children used by the
+    /// caller. Only after this call may omitted returned children be treated as
+    /// explicit non-selections in offline measurement.
+    pub fn finalize_rollup_outcome(
+        &self,
+        impression_id: &str,
+        selected_child_rids: &[&str],
+        corrected_child_rids: &[&str],
+    ) -> Result<usize> {
+        let mut selected: Vec<String> = selected_child_rids
+            .iter()
+            .map(|rid| rid.trim())
+            .filter(|rid| !rid.is_empty())
+            .map(str::to_string)
+            .collect();
+        let corrected: Vec<String> = corrected_child_rids
+            .iter()
+            .map(|rid| rid.trim())
+            .filter(|rid| !rid.is_empty())
+            .map(str::to_string)
+            .collect();
+        selected.extend(corrected.iter().cloned());
+        selected.sort();
+        selected.dedup();
+        let mut corrected = corrected;
+        corrected.sort();
+        corrected.dedup();
+        let payload = format!(
+            "selected:{}\u{0}corrected:{}",
+            selected.join("\u{0}"),
+            corrected.join("\u{0}")
+        );
+        let payload_hash = stable_text_hash(&payload);
+
+        let conn = self.conn();
+        let tx = conn.unchecked_transaction()?;
+        let state: Option<(Option<String>, Option<f64>)> = tx
+            .query_row(
+                "SELECT outcome_payload_hash, expanded_at FROM rollup_impressions \
+                 WHERE impression_id = ?1",
+                params![impression_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((existing_hash, expanded_at)) = state else {
+            return Err(crate::error::YantrikDbError::NotFound(format!(
+                "rollup impression: {impression_id}"
+            )));
+        };
+        if expanded_at.is_none() {
+            return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                "rollup impression {impression_id:?} has not been expanded"
+            )));
+        }
+        if existing_hash
+            .as_deref()
+            .is_some_and(|hash| hash != payload_hash)
+        {
+            return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                "rollup impression {impression_id:?} was finalized with a different outcome"
+            )));
+        }
+
+        for child_rid in &selected {
+            let returned: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM rollup_impression_children \
+                 WHERE impression_id = ?1 AND child_rid = ?2)",
+                params![impression_id, child_rid],
+                |row| row.get(0),
+            )?;
+            if !returned {
+                return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                    "child {child_rid:?} was not returned by rollup impression {impression_id:?}"
+                )));
+            }
+        }
+
+        let mut existing_stmt = tx.prepare(
+            "SELECT child_rid, source FROM rollup_impression_outcomes \
+             WHERE impression_id = ?1",
+        )?;
+        let existing: Vec<(String, String)> = existing_stmt
+            .query_map(params![impression_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        drop(existing_stmt);
+        for (child_rid, source) in existing {
+            let declared = match source.as_str() {
+                "selected" => selected.contains(&child_rid),
+                "corrected" => corrected.contains(&child_rid),
+                _ => false,
+            };
+            if !declared {
+                return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                    "existing {source} outcome for child {child_rid:?} is absent from the finalized payload"
+                )));
+            }
+        }
+
+        let now = crate::time::now_secs();
+        let mut insert = tx.prepare_cached(
+            "INSERT OR IGNORE INTO rollup_impression_outcomes \
+             (outcome_id, impression_id, child_rid, source, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?;
+        for child_rid in &selected {
+            insert.execute(params![
+                crate::id::new_id(),
+                impression_id,
+                child_rid,
+                "selected",
+                now,
+            ])?;
+        }
+        for child_rid in &corrected {
+            insert.execute(params![
+                crate::id::new_id(),
+                impression_id,
+                child_rid,
+                "corrected",
+                now,
+            ])?;
+        }
+        drop(insert);
+        tx.execute(
+            "UPDATE rollup_impressions SET outcome_payload_hash = ?2, \
+             outcome_finalized_at = COALESCE(outcome_finalized_at, ?3) \
+             WHERE impression_id = ?1",
+            params![impression_id, payload_hash, now],
+        )?;
+        tx.commit()?;
+        Ok(selected.len())
+    }
+
+    /// Summarize explicit rollup outcomes without mutating the ledger. Missing
+    /// finalization is unknown telemetry and never contributes a negative.
+    pub fn rollup_outcome_report(
+        &self,
+        namespace: Option<&str>,
+        since: Option<f64>,
+    ) -> Result<RollupOutcomeReport> {
+        if since.is_some_and(|value| !value.is_finite()) {
+            return Err(crate::error::YantrikDbError::InvalidInput(
+                "rollup outcome report requires a finite since timestamp".to_string(),
+            ));
+        }
+        let conn = self.conn();
+        let (
+            total_impressions,
+            distinct_queries,
+            distinct_rollups,
+            expanded_impressions,
+            finalized_impressions,
+            finalized_distinct_queries,
+            finalized_distinct_rollups,
+        ): (i64, i64, i64, i64, i64, i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COUNT(DISTINCT query_hash), COUNT(DISTINCT rollup_rid), \
+                    COALESCE(SUM(expanded_at IS NOT NULL), 0), \
+                    COALESCE(SUM(outcome_finalized_at IS NOT NULL), 0), \
+                    COUNT(DISTINCT CASE WHEN outcome_finalized_at IS NOT NULL \
+                                        THEN query_hash END), \
+                    COUNT(DISTINCT CASE WHEN outcome_finalized_at IS NOT NULL \
+                                        THEN rollup_rid END) \
+             FROM rollup_impressions \
+             WHERE (?1 IS NULL OR namespace = ?1) \
+               AND (?2 IS NULL OR created_at >= ?2)",
+            params![namespace, since],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
+                ))
+            },
+        )?;
+        let (
+            finalized_returned_children,
+            finalized_selected_children,
+            finalized_corrected_children,
+        ): (i64, i64, i64) = conn.query_row(
+            "SELECT COUNT(*), \
+                    COALESCE(SUM(EXISTS(SELECT 1 FROM rollup_impression_outcomes o \
+                                        WHERE o.impression_id = i.impression_id \
+                                          AND o.child_rid = c.child_rid \
+                                          AND o.source IN ('selected', 'corrected'))), 0), \
+                    COALESCE(SUM(EXISTS(SELECT 1 FROM rollup_impression_outcomes o \
+                                        WHERE o.impression_id = i.impression_id \
+                                          AND o.child_rid = c.child_rid \
+                                          AND o.source = 'corrected')), 0) \
+             FROM rollup_impressions i \
+             JOIN rollup_impression_children c USING (impression_id) \
+             WHERE i.outcome_finalized_at IS NOT NULL \
+               AND (?1 IS NULL OR i.namespace = ?1) \
+               AND (?2 IS NULL OR i.created_at >= ?2)",
+            params![namespace, since],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+
+        let max_group_count = |column: &str| -> Result<i64> {
+            let sql = format!(
+                "SELECT COALESCE(MAX(group_count), 0) FROM (\
+                     SELECT COUNT(*) AS group_count FROM rollup_impressions \
+                     WHERE outcome_finalized_at IS NOT NULL \
+                       AND (?1 IS NULL OR namespace = ?1) \
+                       AND (?2 IS NULL OR created_at >= ?2) \
+                     GROUP BY {column})"
+            );
+            Ok(conn.query_row(&sql, params![namespace, since], |row| row.get(0))?)
+        };
+        let max_query_count = max_group_count("query_hash")?;
+        let max_rollup_count = max_group_count("rollup_rid")?;
+
+        let mut rank_stmt = conn.prepare(
+            "SELECT i.rank, COUNT(*), \
+                    COALESCE(SUM(i.expanded_at IS NOT NULL), 0), \
+                    COALESCE(SUM(i.outcome_finalized_at IS NOT NULL), 0), \
+                    COALESCE(SUM(CASE WHEN i.outcome_finalized_at IS NOT NULL THEN \
+                        (SELECT COUNT(*) FROM rollup_impression_children c \
+                         WHERE c.impression_id = i.impression_id) ELSE 0 END), 0), \
+                    COALESCE(SUM(CASE WHEN i.outcome_finalized_at IS NOT NULL THEN \
+                        (SELECT COUNT(DISTINCT o.child_rid) \
+                         FROM rollup_impression_outcomes o \
+                         WHERE o.impression_id = i.impression_id \
+                           AND o.source IN ('selected', 'corrected')) ELSE 0 END), 0), \
+                    COALESCE(SUM(CASE WHEN i.outcome_finalized_at IS NOT NULL THEN \
+                        (SELECT COUNT(*) FROM rollup_impression_outcomes o \
+                         WHERE o.impression_id = i.impression_id \
+                           AND o.source = 'corrected') ELSE 0 END), 0) \
+             FROM rollup_impressions i \
+             WHERE (?1 IS NULL OR i.namespace = ?1) \
+               AND (?2 IS NULL OR i.created_at >= ?2) \
+             GROUP BY i.rank ORDER BY i.rank",
+        )?;
+        let per_rank = rank_stmt
+            .query_map(params![namespace, since], |row| {
+                let returned: i64 = row.get(4)?;
+                let selected: i64 = row.get(5)?;
+                Ok(RollupRankOutcomeStats {
+                    rank: row.get::<_, i64>(0)? as usize,
+                    impressions: row.get(1)?,
+                    expanded_impressions: row.get(2)?,
+                    finalized_impressions: row.get(3)?,
+                    finalized_returned_children: returned,
+                    finalized_selected_children: selected,
+                    finalized_corrected_children: row.get(6)?,
+                    explicit_child_selection_rate: ratio(selected, returned),
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let explicitly_unselected_children =
+            finalized_returned_children - finalized_selected_children;
+        let expansion_rate = ratio(expanded_impressions, total_impressions);
+        let telemetry_completion_rate = ratio(finalized_impressions, expanded_impressions);
+        let explicit_child_selection_rate =
+            ratio(finalized_selected_children, finalized_returned_children);
+        let max_finalized_query_share = ratio(max_query_count, finalized_impressions);
+        let max_finalized_rollup_share = ratio(max_rollup_count, finalized_impressions);
+
+        const MIN_FINALIZED_IMPRESSIONS: i64 = 200;
+        const MIN_FINALIZED_QUERIES: i64 = 30;
+        const MIN_FINALIZED_ROLLUPS: i64 = 20;
+        const MIN_SELECTED_CHILDREN: i64 = 50;
+        const MIN_UNSELECTED_CHILDREN: i64 = 50;
+        const MIN_TELEMETRY_COMPLETION_RATE: f64 = 0.80;
+        const MAX_GROUP_SHARE: f64 = 0.25;
+        let mut readiness_failures = Vec::new();
+        if finalized_impressions < MIN_FINALIZED_IMPRESSIONS {
+            readiness_failures.push(format!(
+                "finalized_impressions requires at least {MIN_FINALIZED_IMPRESSIONS} (observed {finalized_impressions})"
+            ));
+        }
+        if finalized_distinct_queries < MIN_FINALIZED_QUERIES {
+            readiness_failures.push(format!(
+                "finalized_distinct_queries requires at least {MIN_FINALIZED_QUERIES} (observed {finalized_distinct_queries})"
+            ));
+        }
+        if finalized_distinct_rollups < MIN_FINALIZED_ROLLUPS {
+            readiness_failures.push(format!(
+                "finalized_distinct_rollups requires at least {MIN_FINALIZED_ROLLUPS} (observed {finalized_distinct_rollups})"
+            ));
+        }
+        if finalized_selected_children < MIN_SELECTED_CHILDREN {
+            readiness_failures.push(format!(
+                "finalized_selected_children requires at least {MIN_SELECTED_CHILDREN} (observed {finalized_selected_children})"
+            ));
+        }
+        if explicitly_unselected_children < MIN_UNSELECTED_CHILDREN {
+            readiness_failures.push(format!(
+                "explicitly_unselected_children requires at least {MIN_UNSELECTED_CHILDREN} (observed {explicitly_unselected_children})"
+            ));
+        }
+        if telemetry_completion_rate.is_none_or(|rate| rate < MIN_TELEMETRY_COMPLETION_RATE) {
+            readiness_failures.push(format!(
+                "telemetry_completion_rate requires at least {MIN_TELEMETRY_COMPLETION_RATE:.2} (observed {:.4})",
+                telemetry_completion_rate.unwrap_or_default()
+            ));
+        }
+        if max_finalized_query_share.is_some_and(|share| share > MAX_GROUP_SHARE) {
+            readiness_failures.push(format!(
+                "max_finalized_query_share must be at most {MAX_GROUP_SHARE:.2} (observed {:.4})",
+                max_finalized_query_share.unwrap_or_default()
+            ));
+        }
+        if max_finalized_rollup_share.is_some_and(|share| share > MAX_GROUP_SHARE) {
+            readiness_failures.push(format!(
+                "max_finalized_rollup_share must be at most {MAX_GROUP_SHARE:.2} (observed {:.4})",
+                max_finalized_rollup_share.unwrap_or_default()
+            ));
+        }
+        let evidence_status = if total_impressions == 0 {
+            "no_data"
+        } else if readiness_failures.is_empty() {
+            "ready_for_offline_evaluation"
+        } else {
+            "insufficient_evidence"
+        };
+
+        Ok(RollupOutcomeReport {
+            namespace: namespace.map(str::to_string),
+            since,
+            total_impressions,
+            distinct_queries,
+            distinct_rollups,
+            expanded_impressions,
+            finalized_impressions,
+            finalized_distinct_queries,
+            finalized_distinct_rollups,
+            finalized_returned_children,
+            finalized_selected_children,
+            finalized_corrected_children,
+            explicitly_unselected_children,
+            expansion_rate,
+            telemetry_completion_rate,
+            explicit_child_selection_rate,
+            max_finalized_query_share,
+            max_finalized_rollup_share,
+            per_rank,
+            evidence_status: evidence_status.to_string(),
+            readiness_failures,
+        })
     }
 
     /// v0.10 Item 2 — explicit rejection: the caller states that these
@@ -418,6 +789,10 @@ impl YantrikDB {
 
 fn stable_text_hash(value: &str) -> String {
     blake3::hash(value.as_bytes()).to_hex().to_string()
+}
+
+fn ratio(numerator: i64, denominator: i64) -> Option<f64> {
+    (denominator > 0).then_some(numerator as f64 / denominator as f64)
 }
 
 #[cfg(test)]
@@ -657,6 +1032,21 @@ mod tests {
         assert!(db
             .note_rollup_selection(&first, &child, "corrected")
             .unwrap());
+        assert_eq!(
+            db.finalize_rollup_outcome(&first, &[&child], &[&child])
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.finalize_rollup_outcome(&first, &[&child], &[&child])
+                .unwrap(),
+            1,
+            "an exact retry must be idempotent"
+        );
+        assert!(db.finalize_rollup_outcome(&first, &[], &[]).is_err());
+        assert!(!db
+            .note_rollup_selection(&first, &child, "selected")
+            .unwrap());
         let conn = db.conn();
         let outcomes: i64 = conn
             .query_row("SELECT COUNT(*) FROM rollup_impression_outcomes", [], |r| {
@@ -664,7 +1054,26 @@ mod tests {
             })
             .unwrap();
         assert_eq!(outcomes, 2);
+        drop(conn);
+        let report = db.rollup_outcome_report(None, None).unwrap();
+        assert_eq!(report.finalized_returned_children, 1);
+        assert_eq!(report.finalized_selected_children, 1);
+        assert_eq!(report.finalized_corrected_children, 1);
+        assert_eq!(report.explicitly_unselected_children, 0);
 
+        let conn = db.conn();
+        conn.execute(
+            "DELETE FROM rollup_impression_outcomes \
+             WHERE impression_id = ?1 AND source = 'selected'",
+            params![first],
+        )
+        .unwrap();
+        drop(conn);
+        let corrected_only = db.rollup_outcome_report(None, None).unwrap();
+        assert_eq!(corrected_only.finalized_selected_children, 1);
+        assert_eq!(corrected_only.explicitly_unselected_children, 0);
+
+        let conn = db.conn();
         conn.execute(
             "DELETE FROM rollup_impressions WHERE impression_id = ?1",
             params![first],
@@ -688,6 +1097,115 @@ mod tests {
         assert!(db
             .note_rollup_selection("missing", "child", "implicit")
             .is_err());
+        assert!(db.finalize_rollup_outcome("missing", &[], &[]).is_err());
+    }
+
+    #[test]
+    fn rollup_outcome_report_counts_only_finalized_absence_as_negative() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let rollup = rec(&db, "topic rollup", 1.0);
+        let first_child = rec(&db, "first child", 20.0);
+        let second_child = rec(&db, "second child", 21.0);
+
+        let unfinished = db
+            .note_rollup_impression(&rollup, "unfinished", None, 1, 0.7, None)
+            .unwrap();
+        db.note_rollup_expansion(&unfinished, &[&first_child, &second_child])
+            .unwrap();
+        let before = db.rollup_outcome_report(None, None).unwrap();
+        assert_eq!(before.finalized_impressions, 0);
+        assert_eq!(before.finalized_returned_children, 0);
+        assert_eq!(before.explicitly_unselected_children, 0);
+        assert_eq!(before.telemetry_completion_rate, Some(0.0));
+
+        let finalized = db
+            .note_rollup_impression(&rollup, "finalized", None, 0, 0.9, None)
+            .unwrap();
+        db.note_rollup_expansion(&finalized, &[&first_child, &second_child])
+            .unwrap();
+        assert_eq!(db.finalize_rollup_outcome(&finalized, &[], &[]).unwrap(), 0);
+        assert!(db
+            .note_rollup_selection(&finalized, &first_child, "selected")
+            .is_err());
+
+        let count_before: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM rollup_impressions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let report = db.rollup_outcome_report(Some("default"), None).unwrap();
+        let count_after: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM rollup_impressions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(count_before, count_after, "the report must be read-only");
+        assert_eq!(report.total_impressions, 2);
+        assert_eq!(report.expanded_impressions, 2);
+        assert_eq!(report.finalized_impressions, 1);
+        assert_eq!(report.finalized_returned_children, 2);
+        assert_eq!(report.finalized_selected_children, 0);
+        assert_eq!(report.explicitly_unselected_children, 2);
+        assert_eq!(report.telemetry_completion_rate, Some(0.5));
+        assert_eq!(report.explicit_child_selection_rate, Some(0.0));
+        assert_eq!(report.evidence_status, "insufficient_evidence");
+        assert_eq!(report.per_rank.len(), 2);
+        assert_eq!(report.per_rank[0].rank, 0);
+        assert_eq!(report.per_rank[0].finalized_impressions, 1);
+        assert_eq!(report.per_rank[1].rank, 1);
+        assert_eq!(report.per_rank[1].finalized_impressions, 0);
+        assert_eq!(
+            db.rollup_outcome_report(Some("other"), None)
+                .unwrap()
+                .evidence_status,
+            "no_data"
+        );
+        assert_eq!(
+            db.rollup_outcome_report(None, Some(crate::time::now_secs() + 1.0))
+                .unwrap()
+                .evidence_status,
+            "no_data"
+        );
+        assert!(db.rollup_outcome_report(None, Some(f64::NAN)).is_err());
+    }
+
+    #[test]
+    fn rollup_outcome_report_reaches_offline_readiness_with_diverse_complete_data() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let rollups: Vec<String> = (0..20)
+            .map(|index| rec(&db, &format!("rollup {index}"), index as f32 + 1.0))
+            .collect();
+        let selected = rec(&db, "selected child", 30.0);
+        let unselected = rec(&db, "unselected child", 31.0);
+
+        for index in 0..200 {
+            let impression = db
+                .note_rollup_impression(
+                    &rollups[index % rollups.len()],
+                    &format!("question {}", index % 40),
+                    None,
+                    index % 4,
+                    0.8,
+                    None,
+                )
+                .unwrap();
+            db.note_rollup_expansion(&impression, &[&selected, &unselected])
+                .unwrap();
+            db.finalize_rollup_outcome(&impression, &[&selected], &[])
+                .unwrap();
+        }
+
+        let report = db.rollup_outcome_report(None, None).unwrap();
+        assert_eq!(report.finalized_impressions, 200);
+        assert_eq!(report.finalized_distinct_queries, 40);
+        assert_eq!(report.finalized_distinct_rollups, 20);
+        assert_eq!(report.finalized_selected_children, 200);
+        assert_eq!(report.explicitly_unselected_children, 200);
+        assert_eq!(report.telemetry_completion_rate, Some(1.0));
+        assert_eq!(report.evidence_status, "ready_for_offline_evaluation");
+        assert!(report.readiness_failures.is_empty());
     }
 
     #[test]

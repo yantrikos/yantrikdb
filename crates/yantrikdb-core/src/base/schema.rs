@@ -9,8 +9,9 @@
 // vectors; docs/chunked_embeddings_design.md). Same v39 shape: a new
 // CREATE TABLE IF NOT EXISTS in SCHEMA_SQL, no migration constant.
 // v44 adds the expansion-outcome ledger. It is additive and is likewise
-// created by SCHEMA_SQL on every open.
-pub const SCHEMA_VERSION: i32 = 44;
+// created by SCHEMA_SQL on every open. v45 adds exact outcome finalization so
+// missing telemetry remains unknown rather than becoming an implicit negative.
+pub const SCHEMA_VERSION: i32 = 45;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -1194,8 +1195,10 @@ CREATE TABLE IF NOT EXISTS rollup_impressions (
     rank INTEGER NOT NULL CHECK (rank >= 0),
     score REAL NOT NULL,
     expansion_payload_hash TEXT,
+    outcome_payload_hash TEXT,
     created_at REAL NOT NULL,
     expanded_at REAL,
+    outcome_finalized_at REAL,
     FOREIGN KEY (rollup_rid) REFERENCES memories(rid) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_rollup_impressions_rollup
@@ -2917,4 +2920,23 @@ CREATE INDEX IF NOT EXISTS idx_synthesis_dependencies_synthesis
 
 pub const MIGRATE_V42_TO_V43: &str = "
 ALTER TABLE memories ADD COLUMN synthesis_generation_hlc BLOB;
+";
+
+pub const MIGRATE_V44_TO_V45: &str = "
+-- v44 was additive SCHEMA_SQL with no migration. Because migrations run before
+-- SCHEMA_SQL, a database jumping directly from v43 must bootstrap that table.
+CREATE TABLE IF NOT EXISTS rollup_impressions (
+    impression_id TEXT PRIMARY KEY,
+    rollup_rid TEXT NOT NULL,
+    query_hash TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    rank INTEGER NOT NULL CHECK (rank >= 0),
+    score REAL NOT NULL,
+    expansion_payload_hash TEXT,
+    created_at REAL NOT NULL,
+    expanded_at REAL,
+    FOREIGN KEY (rollup_rid) REFERENCES memories(rid) ON DELETE CASCADE
+);
+ALTER TABLE rollup_impressions ADD COLUMN outcome_payload_hash TEXT;
+ALTER TABLE rollup_impressions ADD COLUMN outcome_finalized_at REAL;
 ";

@@ -459,7 +459,7 @@ fn schema_v43_fresh_install_has_typed_synthesis_lifecycle() {
 }
 
 #[test]
-fn schema_v44_fresh_install_has_rollup_outcome_ledger() {
+fn schema_v45_fresh_install_has_rollup_outcome_ledger() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let conn = db.conn();
     for table in [
@@ -475,7 +475,7 @@ fn schema_v44_fresh_install_has_rollup_outcome_ledger() {
             )
             .unwrap(),
             1,
-            "v44 fresh schema missing {table}"
+            "v45 fresh schema missing {table}"
         );
     }
     for index in [
@@ -486,8 +486,41 @@ fn schema_v44_fresh_install_has_rollup_outcome_ledger() {
     ] {
         assert!(
             index_exists(&conn, index),
-            "v44 fresh schema missing {index}"
+            "v45 fresh schema missing {index}"
         );
+    }
+}
+
+#[test]
+fn schema_v45_migration_adds_rollup_outcome_finalization() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute(
+        "CREATE TABLE rollup_impressions (impression_id TEXT PRIMARY KEY)",
+        [],
+    )
+    .unwrap();
+    conn.execute_batch(crate::base::schema::MIGRATE_V44_TO_V45)
+        .unwrap();
+
+    let cols = table_columns(&conn, "rollup_impressions");
+    assert!(cols.iter().any(|col| col == "outcome_payload_hash"));
+    assert!(cols.iter().any(|col| col == "outcome_finalized_at"));
+}
+
+#[test]
+fn schema_v45_migration_bootstraps_ledger_skipped_by_v43() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(crate::base::schema::MIGRATE_V44_TO_V45)
+        .unwrap();
+
+    let cols = table_columns(&conn, "rollup_impressions");
+    for expected in [
+        "rollup_rid",
+        "expansion_payload_hash",
+        "outcome_payload_hash",
+        "outcome_finalized_at",
+    ] {
+        assert!(cols.iter().any(|col| col == expected), "missing {expected}");
     }
 }
 

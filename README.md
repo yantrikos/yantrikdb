@@ -489,15 +489,22 @@ Organized recall also records a privacy-preserving rollup outcome ledger. A
 surfaced rollup gets an immutable impression ID with its hashed query, rank,
 score, and namespace; expansion records the ordered children actually returned.
 Applications can explicitly mark a returned child as `selected` or `corrected`
-with `note_rollup_selection`. Generic point reads and corrections never infer a
-rollup outcome. These observations are measurement data and are not ranker
-labels until their predictive value has been validated.
+with `note_rollup_selection`, then close the interaction with
+`finalize_rollup_outcome`. Finalization supplies the complete selected/corrected
+set; only then can an omitted returned child count as an explicit non-selection.
+Generic point reads, unfinished interactions, and ordinary corrections never
+infer a rollup outcome. `rollup_outcome_report` is a read-only, namespace/time
+scoped coverage report. Its readiness gate requires enough finalized queries,
+rollups, positive and negative children, at least 80% telemetry completion, and
+no dominant query or rollup. `ready_for_offline_evaluation` means only that an
+offline test is credible: these observations remain measurement data and are
+not ranker labels until their predictive value has been validated.
 
 ## Full API
 
 | Operation | Methods |
 |-----------|---------|
-| **Core** | `record`, `record_batch`, `recall`, `recall_with_response`, `recall_refine`, `forget`, `correct`, `note_rollup_impression`, `note_rollup_expansion`, `note_rollup_selection` |
+| **Core** | `record`, `record_batch`, `recall`, `recall_with_response`, `recall_refine`, `forget`, `correct`, `note_rollup_impression`, `note_rollup_expansion`, `note_rollup_selection`, `finalize_rollup_outcome`, `rollup_outcome_report` |
 | **Knowledge Graph** | `relate`, `get_edges`, `search_entities`, `entity_profile`, `relationship_depth`, `link_memory_entity` |
 | **Cognition** | `think`, `get_patterns`, `scan_conflicts`, `resolve_conflict`, `derive_personality` |
 | **Triggers** | `get_pending_triggers`, `acknowledge_trigger`, `deliver_trigger`, `act_on_trigger`, `dismiss_trigger` |

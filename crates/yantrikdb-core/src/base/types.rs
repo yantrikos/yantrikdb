@@ -420,6 +420,48 @@ pub struct Entity {
     pub mention_count: i64,
 }
 
+/// Per-rank outcome coverage for caller-side organization rollups.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RollupRankOutcomeStats {
+    pub rank: usize,
+    pub impressions: i64,
+    pub expanded_impressions: i64,
+    pub finalized_impressions: i64,
+    pub finalized_returned_children: i64,
+    pub finalized_selected_children: i64,
+    pub finalized_corrected_children: i64,
+    pub explicit_child_selection_rate: Option<f64>,
+}
+
+/// Read-only telemetry report for deciding whether rollup outcomes are ready
+/// for an offline evaluation. This does not authorize production learning.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RollupOutcomeReport {
+    pub namespace: Option<String>,
+    pub since: Option<f64>,
+    pub total_impressions: i64,
+    pub distinct_queries: i64,
+    pub distinct_rollups: i64,
+    pub expanded_impressions: i64,
+    pub finalized_impressions: i64,
+    pub finalized_distinct_queries: i64,
+    pub finalized_distinct_rollups: i64,
+    pub finalized_returned_children: i64,
+    pub finalized_selected_children: i64,
+    pub finalized_corrected_children: i64,
+    pub explicitly_unselected_children: i64,
+    pub expansion_rate: Option<f64>,
+    pub telemetry_completion_rate: Option<f64>,
+    pub explicit_child_selection_rate: Option<f64>,
+    pub max_finalized_query_share: Option<f64>,
+    pub max_finalized_rollup_share: Option<f64>,
+    pub per_rank: Vec<RollupRankOutcomeStats>,
+    /// `no_data`, `insufficient_evidence`, or
+    /// `ready_for_offline_evaluation`.
+    pub evidence_status: String,
+    pub readiness_failures: Vec<String>,
+}
+
 /// Engine statistics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Stats {
