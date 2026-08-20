@@ -234,6 +234,7 @@ class TestPhase1InteractiveRecall:
         assert "results" in resp
         assert "confidence" in resp
         assert "retrieval_summary" in resp
+        assert "retrieval_limits" in resp
         assert "hints" in resp
 
     # 10

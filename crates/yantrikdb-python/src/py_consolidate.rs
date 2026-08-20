@@ -258,6 +258,60 @@ pub fn py_summarize_cluster(
     json_to_py(py, &out)
 }
 
+/// Persist a query-independent synthesized item beside its source evidence.
+///
+/// The engine owns provenance and temporal metadata: `created_at` is the
+/// newest source (availability), while `metadata.first_mention_at` is the
+/// earliest source mention. `axis` and `granularity` let callers store a
+/// lattice of fine children and rollups instead of one irreversible summary.
+/// `idempotency_key` must be stable for the logical item. A retry over the
+/// same evidence whose text changes is rejected. Changed evidence creates a
+/// new generation and atomically supersedes the older logical generation.
+#[pyfunction]
+#[pyo3(
+    name = "record_synthesis",
+    signature = (
+        db,
+        source_rids,
+        text,
+        axis,
+        idempotency_key,
+        granularity="atomic",
+        embedding=None,
+        metadata=None
+    )
+)]
+#[allow(clippy::too_many_arguments)]
+pub fn py_record_synthesis(
+    py: Python<'_>,
+    db: &PyYantrikDB,
+    source_rids: Vec<String>,
+    text: &str,
+    axis: &str,
+    idempotency_key: &str,
+    granularity: &str,
+    embedding: Option<Vec<f32>>,
+    metadata: Option<&Bound<'_, PyDict>>,
+) -> PyResult<PyObject> {
+    let inner = db.get_inner()?;
+    let metadata = match metadata {
+        Some(value) => py_to_json(&value.as_any())?,
+        None => serde_json::json!({}),
+    };
+    let out = yantrikdb_core::consolidate::record_synthesis(
+        inner,
+        &source_rids,
+        text,
+        embedding.as_deref(),
+        axis,
+        granularity,
+        &metadata,
+        idempotency_key,
+    )
+    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    json_to_py(py, &out)
+}
+
 #[pyfunction]
 #[pyo3(name = "consolidate_cluster", signature = (db, source_rids, text, embedding=None))]
 pub fn py_consolidate_cluster(

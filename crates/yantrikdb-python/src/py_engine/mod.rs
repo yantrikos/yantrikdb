@@ -664,6 +664,18 @@ impl PyYantrikDB {
             .map_err(map_err)
     }
 
+    /// Maximum local verified-synthesis fan-out per evidence record.
+    fn synthesis_fanout_cap(&self) -> PyResult<usize> {
+        self.get_inner()?.synthesis_fanout_cap().map_err(map_err)
+    }
+
+    /// Durably set the local synthesis fan-out admission ceiling.
+    fn set_synthesis_fanout_cap(&self, cap: usize) -> PyResult<()> {
+        self.get_inner()?
+            .set_synthesis_fanout_cap(cap)
+            .map_err(map_err)
+    }
+
     /// **v0.10 Item 4a.4** — the active anti-laundering gate mode:
     /// `"off"` | `"warn"` | `"enforce"`. Fresh databases default to `enforce`;
     /// MIGRATED databases default to `warn` (the gate counts violations into

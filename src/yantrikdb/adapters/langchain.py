@@ -85,14 +85,26 @@ class YantrikDBChatMemory:
                 text=f"Human: {human_input}",
                 memory_type="episodic",
                 importance=self.importance,
+                metadata={
+                    "speaker_role": "user",
+                    "provenance_verified": True,
+                    "provenance_method": "direct_turn_v1",
+                },
                 namespace=self.namespace,
+                source="user",
             )
         if ai_output:
             self.db.record(
                 text=f"AI: {ai_output}",
                 memory_type="episodic",
                 importance=self.importance,
+                metadata={
+                    "speaker_role": "assistant",
+                    "provenance_verified": True,
+                    "provenance_method": "direct_turn_v1",
+                },
                 namespace=self.namespace,
+                source="assistant",
             )
 
     def clear(self) -> None:

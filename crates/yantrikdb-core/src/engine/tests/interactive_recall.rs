@@ -55,6 +55,10 @@ fn test_recall_with_response_structure() {
         response.retrieval_summary.candidate_count > 0,
         "candidate_count should be > 0"
     );
+    assert_eq!(response.retrieval_limits.requested_top_k, 5);
+    assert_eq!(response.retrieval_limits.index_len, 1);
+    assert_eq!(response.retrieval_limits.fetch_k, 1);
+    assert!(!response.retrieval_limits.cap_bound);
     // hints is a Vec, may be empty or not
     let _ = response.hints; // just ensure the field exists and is accessible
 }

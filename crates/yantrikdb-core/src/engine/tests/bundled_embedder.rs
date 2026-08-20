@@ -1553,34 +1553,56 @@ fn session_digest_scopes_decisions_and_conflicts_to_namespace() {
     // v0.9.3: a namespace-scoped digest must not mix another tenant's
     // high-importance memories into top_decisions.
     let db = YantrikDB::with_default(":memory:").unwrap();
-    db.record_text(
-        "tenant A signed the enterprise contract",
-        "semantic",
-        0.95,
-        0.0,
-        604800.0,
-        &empty_meta(),
-        "tenant-a",
-        0.9,
-        "work",
-        "user",
-        None,
-    )
-    .unwrap();
-    db.record_text(
-        "tenant B is migrating to postgres",
-        "semantic",
-        0.95,
-        0.0,
-        604800.0,
-        &empty_meta(),
-        "tenant-b",
-        0.9,
-        "work",
-        "user",
-        None,
-    )
-    .unwrap();
+    let tenant_a_rid = db
+        .record_text(
+            "tenant A signed the enterprise contract",
+            "semantic",
+            0.95,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "tenant-a",
+            0.9,
+            "work",
+            "user",
+            None,
+        )
+        .unwrap();
+    let tenant_b_rid = db
+        .record_text(
+            "tenant B is migrating to postgres",
+            "semantic",
+            0.95,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            "tenant-b",
+            0.9,
+            "work",
+            "user",
+            None,
+        )
+        .unwrap();
+
+    for (reason, source_rids) in [
+        ("tenant-a review", vec![tenant_a_rid]),
+        ("tenant-b review", vec![tenant_b_rid]),
+        ("global maintenance", vec![]),
+    ] {
+        crate::triggers::persist_trigger(
+            &db,
+            &crate::types::Trigger {
+                trigger_type: "decay_review".to_string(),
+                reason: reason.to_string(),
+                urgency: 0.8,
+                source_rids,
+                suggested_action: "review".to_string(),
+                context: std::collections::HashMap::new(),
+            },
+            crate::time::now_secs(),
+        )
+        .unwrap();
+    }
 
     let scoped = db
         .session_digest(&crate::SessionDigestConfig {
@@ -1600,6 +1622,8 @@ fn session_digest_scopes_decisions_and_conflicts_to_namespace() {
         "no cross-tenant decisions in a scoped digest: {:?}",
         scoped.top_decisions
     );
+    assert_eq!(scoped.pending_trigger_count, 1);
+    assert_eq!(scoped.pending_triggers[0].reason, "tenant-a review");
 
     // Unscoped (explicit-global) digest still sees both — unchanged behavior.
     let global = db
@@ -1611,6 +1635,10 @@ fn session_digest_scopes_decisions_and_conflicts_to_namespace() {
         .map(|d| d.namespace.clone())
         .collect();
     assert!(namespaces.contains("tenant-a") && namespaces.contains("tenant-b"));
+    assert_eq!(
+        global.pending_trigger_count, 3,
+        "the explicit-global digest retains source-less operational alerts"
+    );
 }
 
 #[test]

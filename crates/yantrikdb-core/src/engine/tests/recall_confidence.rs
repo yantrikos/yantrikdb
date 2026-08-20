@@ -1,5 +1,28 @@
 use super::*;
 
+#[test]
+fn recall_fetch_plan_reports_only_effective_cap_binding() {
+    let ordinary = crate::engine::recall::recall_fetch_plan(20, 5_000, false);
+    assert_eq!(ordinary.fetch_k, 400);
+    assert_eq!(ordinary.requested_candidates, 400);
+    assert_eq!(ordinary.candidate_cap, 10_000);
+    assert!(!ordinary.cap_bound);
+
+    let filtered = crate::engine::recall::recall_fetch_plan(20, 20_000, true);
+    assert_eq!(filtered.fetch_k, 10_000);
+    assert_eq!(filtered.requested_candidates, 20_000);
+    assert!(filtered.cap_bound);
+
+    let small_index = crate::engine::recall::recall_fetch_plan(1_000, 5_000, false);
+    assert_eq!(small_index.fetch_k, 5_000);
+    assert!(!small_index.cap_bound);
+
+    let above_static_cap = crate::engine::recall::recall_fetch_plan(10_001, 20_000, false);
+    assert_eq!(above_static_cap.fetch_k, 10_001);
+    assert_eq!(above_static_cap.candidate_cap, 10_001);
+    assert!(above_static_cap.cap_bound);
+}
+
 // ── Issue #46: confidence first-class on recall ───────────────────────
 
 /// Seed a small DB with N records, each carrying a different `certainty`.
@@ -158,6 +181,67 @@ fn recall_order_recency_returns_results_in_created_at_desc() {
             "order=recency must be non-increasing on created_at; got [{}, {}]",
             w[0].created_at,
             w[1].created_at,
+        );
+    }
+}
+
+#[test]
+fn recall_order_first_mention_uses_metadata_then_created_at() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let inputs = [
+        ("first concern", 300.0, Some(100.0)),
+        ("second concern", 200.0, None),
+        ("third concern", 100.0, Some(250.0)),
+    ];
+    for (text, created_at, first_mention_at) in inputs {
+        let metadata = first_mention_at
+            .map(|value| serde_json::json!({"first_mention_at": value}))
+            .unwrap_or_else(empty_meta);
+        db.record_with_idempotency(
+            text,
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &metadata,
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "inference",
+            None,
+            None,
+            Some(created_at),
+        )
+        .unwrap();
+    }
+
+    for order in ["first_mention", "chronological"] {
+        let results = db
+            .recall(
+                &vec_seed(1.0, 8),
+                3,
+                None,
+                None,
+                false,
+                false,
+                None,
+                true,
+                None,
+                None,
+                None,
+                None,
+                Some(order),
+                false,
+            )
+            .unwrap();
+        assert_eq!(
+            results
+                .iter()
+                .map(|result| result.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first concern", "second concern", "third concern"],
+            "order={order} must use first_mention_at and fall back to created_at"
         );
     }
 }

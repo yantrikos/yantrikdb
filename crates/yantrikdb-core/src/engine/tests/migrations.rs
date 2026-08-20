@@ -418,3 +418,95 @@ fn schema_v26_migration_replay_is_idempotent() {
     )
     .unwrap();
 }
+
+#[test]
+fn schema_v43_fresh_install_has_typed_synthesis_lifecycle() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let conn = db.conn();
+    let cols = table_columns(&conn, "memories");
+    for required in [
+        "synthesis_axis",
+        "synthesis_granularity",
+        "synthesis_logical_key",
+        "synthesis_evidence_version",
+        "synthesis_generation_hlc",
+        "synthesis_state",
+    ] {
+        assert!(
+            cols.iter().any(|col| col == required),
+            "v43 fresh schema missing memories.{required}"
+        );
+    }
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type = 'table' AND name = 'synthesis_dependencies'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        1
+    );
+    for index in [
+        "idx_synthesis_dependencies_source",
+        "idx_synthesis_dependencies_synthesis",
+    ] {
+        assert!(
+            index_exists(&conn, index),
+            "v42 fresh schema missing {index}"
+        );
+    }
+}
+
+#[test]
+fn schema_v43_migration_adds_synthesis_generation_clock() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute("CREATE TABLE memories (rid TEXT PRIMARY KEY)", [])
+        .unwrap();
+    conn.execute_batch(crate::base::schema::MIGRATE_V42_TO_V43)
+        .unwrap();
+
+    let cols = table_columns(&conn, "memories");
+    assert!(cols.iter().any(|col| col == "synthesis_generation_hlc"));
+}
+
+#[test]
+fn schema_v42_migration_adds_the_same_synthesis_surface() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute("CREATE TABLE memories (rid TEXT PRIMARY KEY)", [])
+        .unwrap();
+    conn.execute_batch(crate::base::schema::MIGRATE_V41_TO_V42)
+        .unwrap();
+
+    let cols = table_columns(&conn, "memories");
+    for required in [
+        "synthesis_axis",
+        "synthesis_granularity",
+        "synthesis_logical_key",
+        "synthesis_evidence_version",
+        "synthesis_state",
+    ] {
+        assert!(cols.iter().any(|col| col == required));
+    }
+    assert!(index_exists(&conn, "idx_synthesis_dependencies_source"));
+    assert!(index_exists(&conn, "idx_synthesis_dependencies_synthesis"));
+
+    conn.execute(
+        "INSERT INTO memories (rid, synthesis_granularity, synthesis_state) \
+         VALUES ('ordinary', NULL, NULL), ('synth', 'atomic', 'verified')",
+        [],
+    )
+    .unwrap();
+    assert!(conn
+        .execute(
+            "INSERT INTO memories (rid, synthesis_granularity) VALUES ('bad-g', 'session')",
+            [],
+        )
+        .is_err());
+    assert!(conn
+        .execute(
+            "INSERT INTO memories (rid, synthesis_state) VALUES ('bad-s', 'active')",
+            [],
+        )
+        .is_err());
+}

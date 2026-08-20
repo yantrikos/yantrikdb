@@ -8,7 +8,7 @@
 // v40 adds `memory_chunks` (chunked embeddings — one record, N window
 // vectors; docs/chunked_embeddings_design.md). Same v39 shape: a new
 // CREATE TABLE IF NOT EXISTS in SCHEMA_SQL, no migration constant.
-pub const SCHEMA_VERSION: i32 = 41;
+pub const SCHEMA_VERSION: i32 = 43;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -101,6 +101,21 @@ CREATE TABLE IF NOT EXISTS memories (
     confidence_basis TEXT,
     idempotency_key TEXT,
     origin_actor TEXT,
+
+    -- v42: engine-owned synthesis lifecycle. NULL on ordinary memories.
+    -- These remain typed beside encrypted metadata so recall can fail closed
+    -- without decrypting or joining the evidence graph on its hot path.
+    synthesis_axis TEXT,
+    synthesis_granularity TEXT
+        CHECK (synthesis_granularity IS NULL OR synthesis_granularity IN ('atomic', 'rollup')),
+    synthesis_logical_key TEXT,
+    synthesis_evidence_version TEXT,
+    -- HLC of the authoritative record op. This is the deterministic
+    -- generation order used to select one verified logical synthesis.
+    synthesis_generation_hlc BLOB,
+    synthesis_state TEXT
+        CHECK (synthesis_state IS NULL OR synthesis_state IN
+               ('verified', 'invalidated', 'unverified', 'superseded')),
 
     -- v32 (structural query / list_records): indexed generated columns that
     -- extract JSON metadata fields for typed enumeration without scanning the
@@ -878,6 +893,23 @@ CREATE TABLE IF NOT EXISTS consolidation_members (
     actor_id TEXT NOT NULL,             -- which device did it
     PRIMARY KEY (consolidation_rid, source_rid)
 );
+
+-- v42: authoritative synthesis provenance. Unlike consolidation_members,
+-- this records the observed revision of each direct source and flattened raw
+-- leaf, allowing one indexed correction/forget invalidation with no recursive
+-- query on recall.
+CREATE TABLE IF NOT EXISTS synthesis_dependencies (
+    synthesis_rid TEXT NOT NULL,
+    source_rid TEXT NOT NULL,
+    source_revision_num INTEGER NOT NULL CHECK (source_revision_num >= 0),
+    namespace TEXT NOT NULL,
+    is_direct INTEGER NOT NULL CHECK (is_direct IN (0, 1)),
+    PRIMARY KEY (synthesis_rid, source_rid)
+);
+CREATE INDEX IF NOT EXISTS idx_synthesis_dependencies_source
+    ON synthesis_dependencies(namespace, source_rid, synthesis_rid);
+CREATE INDEX IF NOT EXISTS idx_synthesis_dependencies_synthesis
+    ON synthesis_dependencies(synthesis_rid, is_direct, source_rid);
 
 -- Conflict tracking (first-class data)
 CREATE TABLE IF NOT EXISTS conflicts (
@@ -2810,4 +2842,34 @@ UPDATE learned_weights SET
 WHERE id = 1;
 INSERT OR REPLACE INTO meta (key, value)
     VALUES ('ranking_feature_epoch', CAST(strftime('%s','now') AS TEXT));
+";
+
+/// v42: fail-closed, evidence-versioned synthesis lifecycle. Ordinary rows
+/// migrate to NULL typed fields; generated rows are admitted with a complete
+/// dependency closure by the engine's record transaction.
+pub const MIGRATE_V41_TO_V42: &str = "
+ALTER TABLE memories ADD COLUMN synthesis_axis TEXT;
+ALTER TABLE memories ADD COLUMN synthesis_granularity TEXT
+    CHECK (synthesis_granularity IS NULL OR synthesis_granularity IN ('atomic', 'rollup'));
+ALTER TABLE memories ADD COLUMN synthesis_logical_key TEXT;
+ALTER TABLE memories ADD COLUMN synthesis_evidence_version TEXT;
+ALTER TABLE memories ADD COLUMN synthesis_state TEXT
+    CHECK (synthesis_state IS NULL OR synthesis_state IN
+           ('verified', 'invalidated', 'unverified', 'superseded'));
+CREATE TABLE IF NOT EXISTS synthesis_dependencies (
+    synthesis_rid TEXT NOT NULL,
+    source_rid TEXT NOT NULL,
+    source_revision_num INTEGER NOT NULL CHECK (source_revision_num >= 0),
+    namespace TEXT NOT NULL,
+    is_direct INTEGER NOT NULL CHECK (is_direct IN (0, 1)),
+    PRIMARY KEY (synthesis_rid, source_rid)
+);
+CREATE INDEX IF NOT EXISTS idx_synthesis_dependencies_source
+    ON synthesis_dependencies(namespace, source_rid, synthesis_rid);
+CREATE INDEX IF NOT EXISTS idx_synthesis_dependencies_synthesis
+    ON synthesis_dependencies(synthesis_rid, is_direct, source_rid);
+";
+
+pub const MIGRATE_V42_TO_V43: &str = "
+ALTER TABLE memories ADD COLUMN synthesis_generation_hlc BLOB;
 ";

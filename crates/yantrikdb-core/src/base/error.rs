@@ -292,6 +292,36 @@ pub enum YantrikDbError {
     )]
     BatchDeferredDuringReembed { count: usize },
 
+    /// A consolidation/synthesis write cannot use `record()`'s queued fallback:
+    /// the caller must attach provenance and source bookkeeping to a materialized
+    /// memory row before returning success. Queueing only the base record would
+    /// expose a rid whose dependent side effects refer to a row that does not yet
+    /// exist. Retryable; the sync-only route checks this before writing a claim,
+    /// memory row, or oplog entry.
+    #[error(
+        "consolidation deferred: a db.reembed() cutover is in progress, so the base \
+         record cannot be materialized before attaching its provenance. No durable state was \
+         changed — retry once the reembed completes"
+    )]
+    ConsolidationDeferredDuringReembed,
+
+    /// A local synthesis admission would make one evidence record back more
+    /// verified synthesis generations than the configured invalidation bound.
+    /// The check runs in the synthesis record transaction, after idempotency
+    /// resolution, so a refusal leaves no memory, dependency edge, claim, or
+    /// oplog row. Replication never drops an already-durable remote operation;
+    /// an over-cap follower state is instead exposed through `stats()`.
+    #[error(
+        "synthesis admission refused: evidence {source_rid} already backs {current} live \
+         synthesis generations (cap={limit}); invalidate or supersede an existing \
+         generation, or raise it with set_synthesis_fanout_cap()"
+    )]
+    SynthesisFanoutLimit {
+        source_rid: String,
+        current: usize,
+        limit: usize,
+    },
+
     /// **2026-08-17.** `record_with_rid` — the deterministic replay primitive
     /// used by the cluster applier — could not acquire a `SyncWriteGuard`
     /// because a `db.reembed()` cutover is in flight.

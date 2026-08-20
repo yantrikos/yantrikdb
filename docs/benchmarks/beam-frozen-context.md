@@ -381,9 +381,161 @@ uv sync
 
 python /path/to/yantrikdb/benchmarks/amb/install.py .
 
+# Treat limits as part of the measured configuration. Provider selection
+# traces record requested_k, provider_default_k, effective_recall_k,
+# recall_candidates, and returned; token-budgeted arms also record whether
+# that budget bound. Preserve those fields in frozen artifacts so sync/async
+# default drift is detectable before judging.
+
 # 1. End-to-end run (writes its own contexts)
 YDB_BENCH_TURN_AWARE=1 YDB_BENCH_TOPK=40 \
   uv run amb run --dataset beam --split 100k --memory yantrikdb -n ydb-final
+
+# 1b. Query-time global synthesis ceiling probe.
+# This intentionally uses two LLM calls per retrieval in the memory layer:
+# a full-bank recall, one extraction pass over up to 160 user-authored
+# evidence blocks, then one ordering pass.
+YDB_BENCH_TURN_AWARE=1 YDB_BENCH_TOPK=40 \
+  YDB_BENCH_SYNTH_RECALL_POOL=1000 YDB_BENCH_SYNTH_BLOCKS=160 \
+  YDB_BENCH_SYNTH_USER_ONLY=1 \
+  uv run amb run --dataset beam --split 100k \
+    --memory yantrikdb-global-synthesis -n ydb-global-synthesis
+
+# Optional evidence-ID selector before extraction. This adds one bounded LLM
+# call that chooses 20-30 relevant user-turn blocks, then runs extraction and
+# ordering only over that concern-focused evidence set.
+YDB_BENCH_SYNTH_PREFILTER=1
+
+# 1c. Evidence-preserving synthesis arm. This uses speaker-level ingestion,
+# keeps the role-aware raw evidence in the answer context, and appends the
+# synthesized candidate timeline as a derived navigation aid. If synthesis
+# fails, retrieval returns the raw evidence instead of an empty context.
+YDB_BENCH_TURN_AWARE=1 YDB_BENCH_TOPK=40 \
+  YDB_BENCH_SYNTH_RECALL_POOL=1000 YDB_BENCH_SYNTH_BLOCKS=160 \
+  YDB_BENCH_SYNTH_USER_ONLY=1 YDB_BENCH_SYNTH_PREFILTER=1 \
+  uv run amb run --dataset beam --split 100k \
+    --memory yantrikdb-role-aware-synthesis \
+    -n ydb-role-aware-synthesis
+
+# Synthesized-item date precedence is explicit event date, then the first
+# evidence block's historical created_at, then synthesis-record created_at.
+# Returned items expose date_source and date_confidence so fallback dates are
+# sortable without being presented as equally precise event timestamps.
+# The synthesis-only Ollama client disables hidden reasoning, requests a
+# 65,536-token context, and caps output at 4,096 tokens. This reduced a
+# measured structured cloud call from a 10-minute stall to seconds without
+# changing answerer or judge settings.
+# Full-bank recall is flattened and deduplicated into atomic user turns before
+# applying the 160-turn / 48k-token evidence budget. Extraction sees turns in
+# retrieval-relevance order; source date and turn metadata are retained for a
+# separate ordering pass. Chronological evidence order caused the extractor to
+# harvest the start of the history even when the query's named thread was
+# present later in the prompt.
+# `YDB_BENCH_SYNTH_ORACLE_TURNS=4,60,...` is a diagnostic-only filter over
+# recalled turn ids. Synthesis failures return empty context with an explicit
+# status/error instead of silently evaluating raw evidence blocks.
+
+# Query-9 oracle result (2026-08-19): five exact gold turns scored 0.9, while
+# a hand-identified mentor/advice concern cluster scored 0.4. Adding a
+# cross-session coverage instruction scored 0.2. Extraction, event dates, and
+# ordering therefore have a high ceiling once the exact subset is supplied;
+# the unresolved failure is selecting the rubric's five milestones from many
+# semantically valid milestones inside the same concern.
+
+# Full event-ordering results (40 queries, 2026-08-19):
+#   baseline                              0.2817
+#   global synthesis, chronological input 0.2535
+#   global synthesis, relevance-first     0.3003  (+0.0186 vs baseline)
+#   evidence selector + relevance-first   0.3397  (+0.0580 vs baseline)
+# The relevance-first arm completed without synthesis/JSON failures, with
+# median 0.20, 7 zeros, 10 queries >= 0.5, 6.8s average retrieval, and 312
+# answer-context tokens. It proves query-time global synthesis can lift some
+# named/technical threads, but the aggregate gain is too small and variable
+# to justify write-time cross-session synthesis yet. The remaining bottleneck
+# is canonical subset selection among several valid milestones, especially for
+# diffuse narrative concerns.
+
+# Evidence-selector arm (40 queries, 2026-08-19): median 0.345, 7 zeros,
+# 12 queries >= 0.5, 6.0s average retrieval, and 317 answer-context tokens.
+# Against relevance-first it improved 16 queries, tied 11, and regressed 13.
+# This validates concern-focused evidence selection as the next lever, but the
+# arm remains opt-in: model variance and broad narrative concern boundaries
+# still make write-time permanent synthesis premature.
+
+# Evidence-preserving hybrid frozen artifact (unjudged, 2026-08-20): appending
+# those query-focused candidate timelines to the 40 role-aware user contexts
+# retained all 236/242 date/number gold values and moved word coverage from
+# 0.818 to 0.827. Synthesis-only retained 222/242. This passes the deterministic
+# no-loss gate, but it is not a score claim until the paired frozen-context arm
+# is judged with the same answerer and judge.
+
+# Role-aware chronological artifact (unjudged, 2026-08-20): the V3 arm is a
+# pure presentation permutation of V2. Across 40 event-ordering queries it
+# retains the same 5,070 documents and relevance-selection traces, reorders all
+# 40 rows, parses every date/turn prefix, and leaves word coverage at 0.818 and
+# date/number coverage at 236/242. The frozen artifact SHA-256 is
+# bfe5c3d522da4b934ade67d61d3ec8f96af670ca95dc6b62e3c43f796b5e534f.
+# Its separate V2-vs-V3 manifest preflight reports 1,050,939 synthetic context
+# tokens, 80 answer calls, and 80 judge calls. This is not a score claim until
+# that paired arm is run.
+
+# Pre-registered paired evaluation order and interpretation:
+#   1. V1 mixed-speaker vs V2 user-only asks whether provenance routing helps.
+#   2. V2 user-only vs V2+candidate hybrid asks whether item assembly adds value.
+#   3. Separately, V2 user-only vs chronological V3 asks whether ordering the
+#      unchanged selected evidence helps the reader reconstruct sequence.
+# Do not select the best of three after seeing scores. Each comparison stands
+# alone. A benchmark lift requires the paired bootstrap 95% interval to exclude
+# zero. A mean gain >= 0.03 with more wins than losses is only a reason for a
+# broader follow-up, not a score claim. V2 may still ship for attribution
+# correctness when the score comparison is non-inferior or inconclusive.
+# Preflight validates both artifact hashes, ordered query IDs, row/token counts,
+# model, and projected call budget. It exits before importing the LLM client.
+uv run python paired_frozen_context_eval.py \
+  --contexts-a /path/to/role-aware-event40-mixed-v1.json \
+  --contexts-b /path/to/role-aware-event40-user-only.json \
+  --manifest /path/to/external-eval-manifest-v1-v2.json \
+  --label-a role-aware-v1 --label-b role-aware-v2 \
+  --workers 2 --judge-repeats 1 \
+  --preflight-only
+
+# Remove --preflight-only only after reviewing its exact payload/call report.
+# Checkpoints are bound to the manifest, artifacts, and run configuration;
+# --resume rejects mismatched or legacy partial files.
+uv run python paired_frozen_context_eval.py \
+  --contexts-a /path/to/role-aware-event40-mixed-v1.json \
+  --contexts-b /path/to/role-aware-event40-user-only.json \
+  --manifest /path/to/external-eval-manifest-v1-v2.json \
+  --label-a role-aware-v1 --label-b role-aware-v2 \
+  --workers 2 --judge-repeats 1 \
+  --out outputs/paired-role-aware-v1-v2.json
+
+### Paired provenance result (2026-08-20)
+
+The authorized V1 mixed-speaker versus V2 user-only run completed all 40
+event-ordering pairs with `deepseek-v4-flash:0731-cloud` as both answerer and
+judge. The pre-registered prediction that V2 would be at least as accurate was
+not supported:
+
+| context arm | mean rubric |
+|---|---:|
+| V1 mixed-speaker | 0.29347 |
+| V2 user-only | 0.28684 |
+
+Paired delta (V2 - V1): **-0.00664**, bootstrap 95% CI
+**[-0.05948, +0.04763]**; V2 wins / ties / V1 wins = **14 / 11 / 15**.
+This is a null accuracy result, not a lift and not evidence that assistant
+turns are generally harmful. V2 does preserve essentially the same score with
+41% less context (14,529 to 8,580 mean words), so its supported benefits are
+speaker-attribution correctness and context efficiency.
+
+The paired instrument is itself a useful result: its roughly +/-0.05 interval
+is about three times sharper than the earlier unpaired synthesis comparison.
+The V2-versus-hybrid item-assembly arm remains unrun and retains its own
+pre-registered decision rule; this result does not authorize or predict it.
+The immutable result is
+`benchmarks/amb/artifacts/paired-v1-v2-result.json` under manifest SHA-256
+`396164f5880e6ac6e90153534c7a52a16f40be51a0bd5aa86ab060e58b672e7d`.
 
 # 2. Frozen-context conditions — same answerer + judge for all three
 uv run python frozen_context_eval.py \

@@ -31,6 +31,24 @@ impl Drop for CorrectionEpochGuard<'_> {
 }
 
 impl YantrikDB {
+    pub(crate) fn invalidate_synthesis_dependents_in_tx(
+        tx: &rusqlite::Transaction<'_>,
+        source_rid: &str,
+    ) -> Result<Vec<String>> {
+        let mut stmt = tx.prepare(
+            "UPDATE memories SET synthesis_state = 'invalidated' \
+             WHERE synthesis_state = 'verified' \
+               AND rid IN ( \
+                   SELECT synthesis_rid FROM synthesis_dependencies \
+                   WHERE namespace = (SELECT namespace FROM memories WHERE rid = ?1) \
+                     AND source_rid = ?1 \
+               ) \
+             RETURNING rid",
+        )?;
+        let rows = stmt.query_map(params![source_rid], |row| row.get(0))?;
+        Ok(rows.collect::<std::result::Result<_, _>>()?)
+    }
+
     /// Enter the correction seqlock (v0.10 Item 3). Call AFTER acquiring
     /// the serialized conn lock and BEFORE the reservation/SQL mutation;
     /// hold the returned guard across SQL commit + vector publish + cache
@@ -672,16 +690,21 @@ impl YantrikDB {
 
         let ts_secs = (ts_micros as f64) / 1_000_000.0;
 
-        // Resolve namespace + execute the UPDATE in a single conn block.
-        // forget() lookup case: SELECT before UPDATE (the UPDATE may zero
-        // changes when the row is missing or already tombstoned, so we
-        // can't rely on RETURNING — and namespace doesn't change on
-        // tombstone, so a separate SELECT is correct and cheap).
-        let (was_newly_tombstoned, ns_to_bump): (bool, Option<String>) = {
+        // Every durable projection of a forget belongs to one transaction.
+        // A crash may leave the in-memory indexes stale until reopen, but SQL
+        // can no longer expose a tombstoned memory with live entity/chunk/link
+        // projections or without its replication intent.
+        let (was_newly_tombstoned, ns_to_bump, chunk_idxs, invalidated_syntheses): (
+            bool,
+            Option<String>,
+            Vec<i64>,
+            Vec<String>,
+        ) = {
             let conn = self.conn();
+            let tx = conn.unchecked_transaction()?;
             let resolved_ns: Option<String> = match namespace {
                 Some(ns) => Some(ns.to_string()),
-                None => conn
+                None => tx
                     .query_row(
                         "SELECT namespace FROM memories WHERE rid = ?1",
                         params![rid],
@@ -689,13 +712,64 @@ impl YantrikDB {
                     )
                     .ok(),
             };
-            let changes = conn.execute(
+            let changes = tx.execute(
                 "UPDATE memories SET consolidation_status = 'tombstoned', \
                  updated_at = ?1, tombstone_reason = ?2 \
                  WHERE rid = ?3 AND consolidation_status != 'tombstoned'",
                 params![ts_secs, reason, rid],
             )?;
-            (changes > 0, resolved_ns)
+            let was_newly_tombstoned = changes > 0;
+
+            let chunk_idxs: Vec<i64> = {
+                let mut stmt = tx.prepare("SELECT chunk_idx FROM memory_chunks WHERE rid = ?1")?;
+                let rows = stmt.query_map(params![rid], |r| r.get(0))?;
+                rows.collect::<std::result::Result<_, _>>()?
+            };
+            tx.execute("DELETE FROM memory_chunks WHERE rid = ?1", params![rid])?;
+
+            let invalidated_syntheses = if was_newly_tombstoned {
+                Self::invalidate_synthesis_dependents_in_tx(&tx, rid)?
+            } else {
+                Vec::new()
+            };
+
+            if was_newly_tombstoned {
+                tx.execute(
+                    "DELETE FROM memory_entities WHERE memory_rid = ?1",
+                    params![rid],
+                )?;
+                tx.execute(
+                    "UPDATE record_links SET status = 'broken_source_forgotten' \
+                     WHERE source_rid = ?1 AND status = 'active'",
+                    params![rid],
+                )?;
+                tx.execute(
+                    "UPDATE record_links SET status = 'broken_target_forgotten' \
+                     WHERE target_rid = ?1 AND status = 'active'",
+                    params![rid],
+                )?;
+                self.log_op_in_tx(
+                    &tx,
+                    "forget",
+                    Some(rid),
+                    &serde_json::json!({
+                        "rid": rid,
+                        "updated_at_unix_micros": ts_micros,
+                        "reason": reason,
+                    }),
+                    None,
+                    None,
+                    self.search_state.load().generation as i64,
+                    None,
+                )?;
+            }
+            tx.commit()?;
+            (
+                was_newly_tombstoned,
+                resolved_ns,
+                chunk_idxs,
+                invalidated_syntheses,
+            )
         };
 
         // Always emit a delta tombstone so search() filters it out even
@@ -710,9 +784,12 @@ impl YantrikDB {
         // Chunked embeddings: the index matches keys by exact string, so
         // tombstoning the parent does NOT cover its `{rid}#c{idx}` window
         // keys — each needs its own marker or the windows keep serving a
-        // dead record. On the always-emit side for the same reason the
-        // parent marker is; also drops the rows (idempotent on replay).
-        self.purge_chunks(rid, seq)?;
+        // dead record. Their durable rows were deleted in the transaction
+        // above; only the infallible index markers remain here.
+        for idx in chunk_idxs {
+            let key = crate::vector::chunk::chunk_key(rid, idx as usize);
+            self.search_state.load().vec_index.tombstone(&key, seq);
+        }
         if let Some(ns) = &ns_to_bump {
             self.bump_visible_seq(ns, seq);
         }
@@ -721,56 +798,8 @@ impl YantrikDB {
         // (replay-safe: no double-emit on idempotent re-apply).
         if was_newly_tombstoned {
             self.graph_index.write().unlink_memory(rid);
-            // The DURABLE half of the unlink. The in-memory unlink alone
-            // left memory_entities rows behind, and the graph-index rebuild
-            // loads them with no tombstone filter — so every restart (or
-            // maintenance rebuild) resurrected the forgotten record's
-            // links: graph expansion re-proposed it, entity hints named
-            // it, and only the scoring-cache absence hid it — protection
-            // by coincidence. correct() got both halves (its resync at the
-            // revision path); forget() had only this one. 2026-08-15
-            // surface audit.
-            {
-                let conn = self.conn();
-                conn.execute(
-                    "DELETE FROM memory_entities WHERE memory_rid = ?1",
-                    rusqlite::params![rid],
-                )?;
-            }
             self.cache_remove(rid);
-
-            // **Issue #48.** Mark record_links touching this rid as broken
-            // rather than deleting them — the audit trail (this link
-            // existed before the endpoint was forgotten) is retained, and
-            // traversal/recall filter on status='active'. Outbound links
-            // from the forgotten rid => broken_source_forgotten; inbound
-            // links to it => broken_target_forgotten. No oplog op is
-            // emitted: the existing 'forget' op replays this same status
-            // transition on followers via the deterministic SQL below.
-            {
-                let conn = self.conn();
-                conn.execute(
-                    "UPDATE record_links SET status = 'broken_source_forgotten' \
-                     WHERE source_rid = ?1 AND status = 'active'",
-                    params![rid],
-                )?;
-                conn.execute(
-                    "UPDATE record_links SET status = 'broken_target_forgotten' \
-                     WHERE target_rid = ?1 AND status = 'active'",
-                    params![rid],
-                )?;
-            }
-
-            self.log_op(
-                "forget",
-                Some(rid),
-                &serde_json::json!({
-                    "rid": rid,
-                    "updated_at_unix_micros": ts_micros,
-                    "reason": reason,
-                }),
-                None,
-            )?;
+            self.cache_invalidate_syntheses(&invalidated_syntheses);
         }
 
         Ok(was_newly_tombstoned)
@@ -1169,6 +1198,8 @@ impl YantrikDB {
         // with the mutation it counts.
         Self::bump_writes_since_think_on(&tx, 1)?;
 
+        let invalidated_syntheses = Self::invalidate_synthesis_dependents_in_tx(&tx, rid)?;
+
         tx.commit()?;
 
         // 4a.6b: the correction is durable — a warn-mode flag counts now.
@@ -1186,6 +1217,7 @@ impl YantrikDB {
                 row.last_access = ts;
             }
         }
+        self.cache_invalidate_syntheses(&invalidated_syntheses);
         // Epoch guard (borrows conn) drops BEFORE conn — restores an even
         // epoch while this correction still holds conn, so no second
         // correction can overlap into a falsely-even window (sol r5 #1).
@@ -1643,6 +1675,7 @@ impl YantrikDB {
             // (old windows the corrected text no longer has) are tombstoned
             // post-commit, and only a committed tx knows the true prior set.
             let mut old_chunk_idxs: Vec<i64> = Vec::new();
+            let mut invalidated_syntheses: Vec<String> = Vec::new();
             let commit_result: Result<i64> =
                 (|| {
                     let tx = conn.unchecked_transaction()?;
@@ -1867,6 +1900,7 @@ impl YantrikDB {
                     // path — same rationale as the metadata/scalar path's
                     // count, same in-tx atomicity.
                     Self::bump_writes_since_think_on(&tx, 1)?;
+                    invalidated_syntheses = Self::invalidate_synthesis_dependents_in_tx(&tx, rid)?;
                     tx.commit()?;
                     let _ = (new_importance_val, new_valence_val); // used in the UPDATE above
                     Ok(n)
@@ -1922,6 +1956,7 @@ impl YantrikDB {
                     }
                 }
             }
+            self.cache_invalidate_syntheses(&invalidated_syntheses);
 
             // 4a.6b: durable — a warn-mode flag counts now. Set on every path
             // that reaches the commit (the gate runs before any tx write).
@@ -2245,6 +2280,7 @@ impl YantrikDB {
             }
 
             let mut old_chunk_idxs: Vec<i64> = Vec::new();
+            let mut invalidated_syntheses: Vec<String> = Vec::new();
             let commit: Result<()> = (|| {
                 let tx = conn.unchecked_transaction()?;
                 tx.execute(
@@ -2340,6 +2376,7 @@ impl YantrikDB {
                      (rid, op_type, source_actor, applied_at) VALUES (?1, 'correct', ?2, ?3)",
                     params![rid, source_actor, applied_at],
                 )?;
+                invalidated_syntheses = Self::invalidate_synthesis_dependents_in_tx(&tx, rid)?;
                 tx.commit()?;
                 Ok(())
             })();
@@ -2373,6 +2410,7 @@ impl YantrikDB {
                     row.valence = new_valence;
                 }
             }
+            self.cache_invalidate_syntheses(&invalidated_syntheses);
             // Release the epoch (restores even) then conn — both held across
             // commit + publish + cache like the leader — BEFORE the graph
             // resync re-locks conn. Then propagate the durable stale-link drop

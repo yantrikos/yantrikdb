@@ -466,6 +466,25 @@ recency become insertion-order noise, and `recall_as_of` / `time_window`
 filter on a timeline that never existed. Omit it and the engine stamps
 `now()`, exactly as before.
 
+For timelines assembled from evidence across sessions, keep `created_at` as
+the time the synthesized item became available and store the earliest evidence
+time in `metadata.first_mention_at`. Recall still selects the relevant top-k;
+`order="first_mention"` (or `order="chronological"`) then presents those items
+oldest-first. Records without `first_mention_at` fall back to `created_at`.
+
+Query-independent topic and concern organization is available from
+`yantrikdb.organize`. `organize_evidence` accepts an application-owned topic
+discovery callback, completes bounded evidence assignments deterministically,
+and persists evidence-versioned rollups. `organize_concerns` applies the same
+trust boundary to answer-sized `ConcernItem` values: every item must cite known
+evidence, evidence reuse is bounded, and `persist_concerns` records the full
+first-mention timeline through `record_synthesis`. `recall_organized` returns
+rollups for summary queries and expands them to concern or evidence items for
+list and timeline queries. Its default `order="auto"` uses
+`first_mention_turn` for questions about when something was brought up in
+conversation, while real-world timelines use `first_mention_at` and then
+`created_at` as a fallback.
+
 ## Full API
 
 | Operation | Methods |

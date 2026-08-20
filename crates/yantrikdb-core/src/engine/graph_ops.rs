@@ -510,6 +510,17 @@ impl YantrikDB {
         entity_type: Option<&str>,
         limit: usize,
     ) -> Result<Vec<Entity>> {
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        // SQL contains legacy rows intentionally retained for auditability.
+        // Overfetch before intersecting with the active in-memory graph so
+        // suppressed headings and folded possessive aliases cannot occupy the
+        // caller's entire result window.
+        let query_limit = limit
+            .saturating_mul(20)
+            .min(10_000.max(limit))
+            .min(i64::MAX as usize);
         let (sql, params_vec): (String, Vec<Box<dyn rusqlite::types::ToSql>>) =
             match (pattern, entity_type) {
                 (Some(p), Some(t)) => (
@@ -520,7 +531,7 @@ impl YantrikDB {
                     vec![
                         Box::new(format!("%{}%", p)) as Box<dyn rusqlite::types::ToSql>,
                         Box::new(t.to_string()),
-                        Box::new(limit as i64),
+                        Box::new(query_limit as i64),
                     ],
                 ),
                 (Some(p), None) => (
@@ -530,7 +541,7 @@ impl YantrikDB {
                         .to_string(),
                     vec![
                         Box::new(format!("%{}%", p)) as Box<dyn rusqlite::types::ToSql>,
-                        Box::new(limit as i64),
+                        Box::new(query_limit as i64),
                     ],
                 ),
                 (None, Some(t)) => (
@@ -540,14 +551,14 @@ impl YantrikDB {
                         .to_string(),
                     vec![
                         Box::new(t.to_string()) as Box<dyn rusqlite::types::ToSql>,
-                        Box::new(limit as i64),
+                        Box::new(query_limit as i64),
                     ],
                 ),
                 (None, None) => (
                     "SELECT name, entity_type, first_seen, last_seen, mention_count \
                  FROM entities ORDER BY last_seen DESC LIMIT ?1"
                         .to_string(),
-                    vec![Box::new(limit as i64) as Box<dyn rusqlite::types::ToSql>],
+                    vec![Box::new(query_limit as i64) as Box<dyn rusqlite::types::ToSql>],
                 ),
             };
 
@@ -555,7 +566,7 @@ impl YantrikDB {
         let mut stmt = conn.prepare(&sql)?;
         let param_refs: Vec<&dyn rusqlite::types::ToSql> =
             params_vec.iter().map(|p| p.as_ref()).collect();
-        let entities = stmt
+        let mut entities = stmt
             .query_map(param_refs.as_slice(), |row| {
                 Ok(Entity {
                     name: row.get("name")?,
@@ -566,6 +577,15 @@ impl YantrikDB {
                 })
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
+
+        let admitted: std::collections::HashSet<String> = self
+            .graph_index
+            .read()
+            .all_entity_names()
+            .into_iter()
+            .collect();
+        entities.retain(|entity| admitted.contains(&entity.name));
+        entities.truncate(limit);
 
         Ok(entities)
     }
@@ -1049,5 +1069,42 @@ impl YantrikDB {
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         Ok(claims)
+    }
+}
+
+#[cfg(test)]
+mod entity_search_tests {
+    use crate::YantrikDB;
+
+    #[test]
+    fn search_entities_hides_legacy_rows_suppressed_from_the_active_graph() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        db.relate("Alice", "Acme", "works_with", 1.0).unwrap();
+
+        // Simulate a heading retained from an older extractor. It is newer
+        // than Alice and would occupy a LIMIT 1 raw SQL result.
+        db.conn()
+            .execute(
+                "INSERT INTO entities (name, entity_type, first_seen, last_seen, mention_count) \
+                 VALUES ('Alice MUST UPDATE MCP CONFIG', 'unknown', 9e18, 9e18, 1)",
+                [],
+            )
+            .unwrap();
+
+        let found = db.search_entities(Some("Alice"), None, 1).unwrap();
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "Alice");
+    }
+
+    #[test]
+    fn search_entities_accepts_limits_above_the_overfetch_cap() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        db.relate("Alice", "Acme", "works_with", 1.0).unwrap();
+
+        let above_cap = db.search_entities(None, None, 10_001).unwrap();
+        assert_eq!(above_cap.len(), 2);
+
+        let maximum = db.search_entities(None, None, usize::MAX).unwrap();
+        assert_eq!(maximum.len(), 2);
     }
 }

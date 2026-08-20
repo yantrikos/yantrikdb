@@ -123,6 +123,19 @@ pub fn recall_response_to_dict(
     summary.set_item("candidate_count", r.retrieval_summary.candidate_count)?;
     dict.set_item("retrieval_summary", summary)?;
 
+    let limits = PyDict::new(py);
+    limits.set_item("requested_top_k", r.retrieval_limits.requested_top_k)?;
+    limits.set_item(
+        "requested_candidates",
+        r.retrieval_limits.requested_candidates,
+    )?;
+    limits.set_item("candidate_cap", r.retrieval_limits.candidate_cap)?;
+    limits.set_item("fetch_k", r.retrieval_limits.fetch_k)?;
+    limits.set_item("index_len", r.retrieval_limits.index_len)?;
+    limits.set_item("has_post_filters", r.retrieval_limits.has_post_filters)?;
+    limits.set_item("cap_bound", r.retrieval_limits.cap_bound)?;
+    dict.set_item("retrieval_limits", limits)?;
+
     let hints_list = pyo3::types::PyList::empty(py);
     for h in &r.hints {
         let hd = PyDict::new(py);
@@ -224,6 +237,40 @@ pub fn stats_to_dict(py: Python<'_>, s: &yantrikdb_core::Stats) -> PyResult<PyOb
         "superseded_served_since_boot",
         s.superseded_served_since_boot,
     )?;
+    dict.set_item("recall_candidate_cap", s.recall_candidate_cap)?;
+    dict.set_item(
+        "recall_candidate_cap_namespace_capacity",
+        s.recall_candidate_cap_namespace_capacity,
+    )?;
+    dict.set_item(
+        "recall_candidate_cap_bound_since_boot",
+        s.recall_candidate_cap_bound_since_boot,
+    )?;
+    dict.set_item(
+        "recall_candidate_cap_bound_by_namespace_since_boot",
+        &s.recall_candidate_cap_bound_by_namespace_since_boot,
+    )?;
+    dict.set_item(
+        "recall_candidate_cap_namespace_stats_truncated_since_boot",
+        s.recall_candidate_cap_namespace_stats_truncated_since_boot,
+    )?;
+    dict.set_item("synthesis_fanout_cap", s.synthesis_fanout_cap)?;
+    dict.set_item(
+        "synthesis_fanout_refused_since_boot",
+        s.synthesis_fanout_refused_since_boot,
+    )?;
+    dict.set_item(
+        "synthesis_fanout_current_high_water",
+        s.synthesis_fanout_current_high_water,
+    )?;
+    dict.set_item(
+        "synthesis_fanout_sources_at_cap",
+        s.synthesis_fanout_sources_at_cap,
+    )?;
+    dict.set_item(
+        "synthesis_fanout_sources_over_cap",
+        s.synthesis_fanout_sources_over_cap,
+    )?;
     // v0.10 Item 4a.4: anti-laundering gate adoption surface. `mode` is
     // off|warn|enforce; `flagged` counts writes the gate would refuse under
     // enforce but allowed under warn — the migration nudge a legacy DB's
@@ -233,6 +280,14 @@ pub fn stats_to_dict(py: Python<'_>, s: &yantrikdb_core::Stats) -> PyResult<PyOb
         "provenance_flagged_since_boot",
         s.provenance_flagged_since_boot,
     )?;
+    dict.set_item("provenance_verified_records", s.provenance_verified_records)?;
+    dict.set_item(
+        "unverified_user_source_records",
+        s.unverified_user_source_records,
+    )?;
+    dict.set_item("provenance_source_counts", &s.provenance_source_counts)?;
+    dict.set_item("provenance_method_counts", &s.provenance_method_counts)?;
+    dict.set_item("unverified_source_counts", &s.unverified_source_counts)?;
     // Embedder-window truncation surface (detector, commit 043e580) and
     // its fix half (chunked embeddings): the window in chars once probed,
     // overflows lost vs overflows chunked, and the durable window-vector

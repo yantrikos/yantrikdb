@@ -53,6 +53,20 @@ def get_tools() -> list[dict]:
                             "type": "string",
                             "description": "Memory namespace for isolation. Default: default.",
                         },
+                        "source": {
+                            "type": "string",
+                            "enum": [
+                                "user",
+                                "assistant",
+                                "system",
+                                "document",
+                                "inference",
+                            ],
+                            "description": (
+                                "Who originally supplied the claim. Use user only for facts "
+                                "explicitly stated by the user. Default: assistant."
+                            ),
+                        },
                     },
                     "required": ["text"],
                 },
@@ -81,6 +95,10 @@ def get_tools() -> list[dict]:
                         "namespace": {
                             "type": "string",
                             "description": "Filter by namespace. Omit for all.",
+                        },
+                        "source": {
+                            "type": "string",
+                            "description": "Filter by claim origin. Omit to search all sources.",
                         },
                     },
                     "required": ["query"],
@@ -181,13 +199,17 @@ def handle_tool_call(db: Any, name: str, arguments: dict) -> Any:
         The result of the tool call.
     """
     if name == "memory_record":
+        metadata = dict(arguments.get("metadata") or {})
+        metadata.setdefault("provenance_verified", False)
+        metadata.setdefault("provenance_method", "agent_declared_source_v1")
         rid = db.record(
             text=arguments["text"],
             memory_type=arguments.get("memory_type", "episodic"),
             importance=arguments.get("importance", 0.5),
             valence=arguments.get("valence", 0.0),
-            metadata=arguments.get("metadata"),
+            metadata=metadata,
             namespace=arguments.get("namespace", "default"),
+            source=arguments.get("source", "assistant"),
         )
         return {"rid": rid}
 
@@ -197,6 +219,7 @@ def handle_tool_call(db: Any, name: str, arguments: dict) -> Any:
             top_k=arguments.get("top_k", 10),
             memory_type=arguments.get("memory_type"),
             namespace=arguments.get("namespace"),
+            source=arguments.get("source"),
         )
         return {"memories": results}
 

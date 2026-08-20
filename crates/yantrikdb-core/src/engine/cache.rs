@@ -13,7 +13,8 @@ impl YantrikDB {
         let mut stmt = conn.prepare(
             "SELECT rid, created_at, importance, half_life, last_access, \
              valence, consolidation_status, type, namespace, access_count, \
-             certainty, domain, source, emotional_state \
+             certainty, domain, source, emotional_state, synthesis_state, \
+             synthesis_axis, synthesis_granularity \
              FROM memories \
              WHERE consolidation_status != 'tombstoned'",
         )?;
@@ -35,6 +36,9 @@ impl YantrikDB {
                     domain: row.get(11)?,
                     source: row.get(12)?,
                     emotional_state: row.get(13)?,
+                    synthesis_state: row.get(14)?,
+                    synthesis_axis: row.get(15)?,
+                    synthesis_granularity: row.get(16)?,
                 },
             ))
         })?;
@@ -55,6 +59,33 @@ impl YantrikDB {
     /// Remove a scoring row from the in-memory cache.
     pub fn cache_remove(&self, rid: &str) {
         self.scoring_cache.write().remove(rid);
+    }
+
+    pub(crate) fn cache_invalidate_syntheses(&self, rids: &[String]) {
+        let mut cache = self.scoring_cache.write();
+        for rid in rids {
+            if let Some(row) = cache.get_mut(rid) {
+                row.synthesis_state = Some("invalidated".to_string());
+            }
+        }
+    }
+
+    pub(crate) fn cache_verify_syntheses(&self, rids: &[String]) {
+        let mut cache = self.scoring_cache.write();
+        for rid in rids {
+            if let Some(row) = cache.get_mut(rid) {
+                row.synthesis_state = Some("verified".to_string());
+            }
+        }
+    }
+
+    pub(crate) fn cache_supersede_syntheses(&self, rids: &[String]) {
+        let mut cache = self.scoring_cache.write();
+        for rid in rids {
+            if let Some(row) = cache.get_mut(rid) {
+                row.synthesis_state = Some("superseded".to_string());
+            }
+        }
     }
 
     /// Mark a memory as consolidated in the cache and reduce its importance.

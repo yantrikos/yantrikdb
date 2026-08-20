@@ -52,6 +52,9 @@ def main() -> int:
     ap.add_argument("--split", default="100k")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--judge-repeats", type=int, default=1,
+                    help="judge each answer m times and take the MEDIAN; suppresses "
+                         "the Bernoulli judge spike quadratically (m=3 -> 5.6x sd cut)")
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
 
@@ -89,7 +92,23 @@ def main() -> int:
             gold_answers=q.gold_answers, correct=False, judge_reason="", meta=meta,
         )
         try:
-            r.score = ds.score_result(r, judge_llm)
+            # Judge noise is a Bernoulli SPIKE, not Gaussian: 97.3% of repeat
+            # judgements are identical and 2.7% jump ~0.47 (2,283 identical-
+            # answer pairs, gate_power.py). A median only fails when ceil(m/2)
+            # samples spike together, so p -> ~3p^2 -- quadratic suppression,
+            # a 5.6x cut in per-query sd at m=3, where Gaussian theory would
+            # predict a pi/2 PENALTY. Without it, "no category may regress"
+            # has a 100% family-wise false-alarm rate at n=40 x 10 categories.
+            #
+            # This lives HERE, upstream, not in the AMB checkout: install.py
+            # overwrites the checkout's copy, and editing it downstream has
+            # silently destroyed this feature twice (and --judge-model once).
+            if a.judge_repeats > 1:
+                votes = [ds.score_result(r, judge_llm) for _ in range(a.judge_repeats)]
+                r.score = sorted(votes)[len(votes) // 2]
+                r.meta["judge_votes"] = votes
+            else:
+                r.score = ds.score_result(r, judge_llm)
         except Exception as e:
             print(f"  {qid}: judge failed {str(e)[:80]}", file=sys.stderr, flush=True)
             return None

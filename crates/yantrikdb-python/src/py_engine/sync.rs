@@ -349,6 +349,7 @@ impl PyYantrikDB {
         dict.set_item("dry_run", report.dry_run)?;
         dict.set_item("pending_before", report.pending_before)?;
         dict.set_item("expired_overdue", report.expired_overdue)?;
+        dict.set_item("expired_stale", report.expired_stale)?;
         dict.set_item("expired_over_cap", report.expired_over_cap)?;
         dict.set_item("pending_after", report.pending_after)?;
         Ok(dict.into())

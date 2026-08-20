@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use rusqlite::OptionalExtension;
 
@@ -6,6 +6,12 @@ use crate::engine::YantrikDB;
 use crate::error::Result;
 use crate::serde_helpers::{deserialize_f32, serialize_f32};
 use crate::types::*;
+
+const CONSOLIDATION_SCAN_OFFSET_META: &str = "consolidation_scan_offset";
+const CONSOLIDATION_SCAN_MULTIPLIER: usize = 20;
+const CONSOLIDATION_SCAN_FLOOR: usize = 100;
+const CONSOLIDATION_SCAN_CEILING: usize = 500;
+const CONSOLIDATION_SCAN_OVERLAP: usize = 25;
 
 /// Compute cosine similarity between two vectors.
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f64 {
@@ -204,7 +210,14 @@ pub fn consolidate_cluster(
         crate::validate::validate_embedding("consolidate_cluster", v, db.embedding_dim())?;
     }
     let members = load_cluster_members(db, source_rids)?;
-    commit_consolidation(db, &members, text, embedding.map(|v| v.to_vec()), false)
+    commit_consolidation(
+        db,
+        &members,
+        text,
+        embedding.map(|v| v.to_vec()),
+        false,
+        None,
+    )
 }
 
 /// Store a synthesis of `source_rids` BESIDE them, leaving every source live.
@@ -252,7 +265,215 @@ pub fn summarize_cluster(
         crate::validate::validate_embedding("summarize_cluster", v, db.embedding_dim())?;
     }
     let members = load_cluster_members(db, source_rids)?;
-    commit_consolidation(db, &members, text, embedding.map(|v| v.to_vec()), true)
+    commit_consolidation(
+        db,
+        &members,
+        text,
+        embedding.map(|v| v.to_vec()),
+        true,
+        None,
+    )
+}
+
+struct SynthesisWrite<'a> {
+    axis: &'a str,
+    granularity: &'a str,
+    metadata: &'a serde_json::Value,
+    idempotency_key: &'a str,
+}
+
+fn build_synthesis_admission(
+    db: &YantrikDB,
+    cluster: &[MemoryWithEmbedding],
+    write: &SynthesisWrite<'_>,
+) -> Result<SynthesisAdmission> {
+    let namespace = cluster
+        .first()
+        .map(|memory| memory.namespace.as_str())
+        .unwrap_or("default");
+    let conn = db.conn();
+    let current_revision = |rid: &str| -> Result<i64> {
+        Ok(conn.query_row(
+            "SELECT COALESCE(MAX(revision_num), 0) FROM record_revisions WHERE rid = ?1",
+            rusqlite::params![rid],
+            |row| row.get(0),
+        )?)
+    };
+    let mut closure: BTreeMap<String, SynthesisDependency> = BTreeMap::new();
+
+    for direct in cluster {
+        let state: Option<String> = conn.query_row(
+            "SELECT synthesis_state FROM memories WHERE rid = ?1",
+            rusqlite::params![&direct.rid],
+            |row| row.get(0),
+        )?;
+        if state.as_deref().is_some_and(|state| state != "verified") {
+            return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                "record_synthesis: direct source {} has synthesis_state {:?}",
+                direct.rid, state
+            )));
+        }
+        closure.insert(
+            direct.rid.clone(),
+            SynthesisDependency {
+                source_rid: direct.rid.clone(),
+                source_revision_num: current_revision(&direct.rid)?,
+                is_direct: true,
+            },
+        );
+
+        let inherited: Vec<SynthesisDependency> = {
+            let mut stmt = conn.prepare(
+                "SELECT source_rid, source_revision_num, namespace \
+                 FROM synthesis_dependencies WHERE synthesis_rid = ?1 \
+                 ORDER BY source_rid",
+            )?;
+            let rows = stmt.query_map(rusqlite::params![&direct.rid], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })?;
+            let mut dependencies = Vec::new();
+            for row in rows {
+                let (source_rid, source_revision_num, dependency_namespace) = row?;
+                if dependency_namespace != namespace {
+                    return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                        "record_synthesis: inherited source {source_rid} crosses namespace boundary"
+                    )));
+                }
+                let (status, actual_namespace): (String, String) = conn.query_row(
+                    "SELECT consolidation_status, namespace FROM memories WHERE rid = ?1",
+                    rusqlite::params![&source_rid],
+                    |row| Ok((row.get(0)?, row.get(1)?)),
+                )?;
+                let observed_revision = current_revision(&source_rid)?;
+                if status != "active"
+                    || actual_namespace != namespace
+                    || observed_revision != source_revision_num
+                {
+                    return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                        "record_synthesis: inherited source {source_rid} is no longer valid"
+                    )));
+                }
+                dependencies.push(SynthesisDependency {
+                    source_rid,
+                    source_revision_num,
+                    is_direct: false,
+                });
+            }
+            dependencies
+        };
+        if state.is_some() && inherited.is_empty() {
+            return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                "record_synthesis: synthesized source {} has no authoritative dependencies",
+                direct.rid
+            )));
+        }
+        for dependency in inherited {
+            closure
+                .entry(dependency.source_rid.clone())
+                .and_modify(|existing| {
+                    existing.is_direct |= dependency.is_direct;
+                })
+                .or_insert(dependency);
+        }
+    }
+
+    let dependencies: Vec<SynthesisDependency> = closure.into_values().collect();
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"yantrikdb:synthesis-evidence:v1\0");
+    for dependency in &dependencies {
+        hasher.update(dependency.source_rid.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(&dependency.source_revision_num.to_le_bytes());
+    }
+    Ok(SynthesisAdmission {
+        axis: write.axis.to_string(),
+        granularity: write.granularity.to_string(),
+        logical_key: write.idempotency_key.to_string(),
+        evidence_version: hasher.finalize().to_hex().to_string(),
+        dependencies,
+    })
+}
+
+/// Persist one query-independent synthesized item beside its evidence.
+///
+/// `axis` names the representation this item belongs to (for example
+/// `asked`, `contributed`, `decided`, or `who_said`). Multiple axes may point
+/// at the same evidence; recall chooses among them later. `granularity` is
+/// either `atomic` or `rollup`, so fine children remain first-class even when
+/// a coarser node is also stored.
+///
+/// The caller must provide a stable `idempotency_key` for the logical item.
+/// A retry over identical evidence returns the original record and rejects a
+/// changed model output. When the authoritative evidence set changes, the
+/// engine writes a new generation and atomically supersedes the older logical
+/// generation; syntheses depending on the retired generation are invalidated.
+#[allow(clippy::too_many_arguments)]
+pub fn record_synthesis(
+    db: &YantrikDB,
+    source_rids: &[String],
+    text: &str,
+    embedding: Option<&[f32]>,
+    axis: &str,
+    granularity: &str,
+    metadata: &serde_json::Value,
+    idempotency_key: &str,
+) -> Result<serde_json::Value> {
+    if source_rids.is_empty() {
+        return Err(crate::error::YantrikDbError::InvalidInput(
+            "record_synthesis: source_rids is empty".into(),
+        ));
+    }
+    if text.trim().is_empty() {
+        return Err(crate::error::YantrikDbError::InvalidInput(
+            "record_synthesis: text is empty".into(),
+        ));
+    }
+    let valid_axis = !axis.is_empty()
+        && axis.len() <= 64
+        && axis
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
+    if !valid_axis {
+        return Err(crate::error::YantrikDbError::InvalidInput(
+            "record_synthesis: axis must be 1-64 lowercase ASCII letters, digits, '_' or '-'"
+                .into(),
+        ));
+    }
+    if !matches!(granularity, "atomic" | "rollup") {
+        return Err(crate::error::YantrikDbError::InvalidInput(
+            "record_synthesis: granularity must be 'atomic' or 'rollup'".into(),
+        ));
+    }
+    if !metadata.is_object() && !metadata.is_null() {
+        return Err(crate::error::YantrikDbError::InvalidInput(
+            "record_synthesis: metadata must be an object or null".into(),
+        ));
+    }
+    if let Some(v) = embedding {
+        crate::validate::validate_embedding("record_synthesis", v, db.embedding_dim())?;
+    }
+    let mut canonical_rids = source_rids.to_vec();
+    canonical_rids.sort();
+    canonical_rids.dedup();
+    let members = load_cluster_members(db, &canonical_rids)?;
+    let write = SynthesisWrite {
+        axis,
+        granularity,
+        metadata,
+        idempotency_key,
+    };
+    commit_consolidation(
+        db,
+        &members,
+        text,
+        embedding.map(|v| v.to_vec()),
+        true,
+        Some(&write),
+    )
 }
 
 /// Load the named memories, refusing anything that would make the
@@ -368,6 +589,41 @@ pub fn find_consolidation_candidates(
     limit: usize,
     require_entity_overlap: bool,
 ) -> Result<Vec<Vec<MemoryWithEmbedding>>> {
+    find_consolidation_candidates_page(
+        db,
+        sim_threshold,
+        time_window_days,
+        min_cluster_size,
+        limit,
+        0,
+        require_entity_overlap,
+    )
+    .map(|(clusters, _)| clusters)
+}
+
+/// Scan one stable, time-ordered page of consolidation inputs.
+///
+/// `offset` belongs to the maintenance cursor, while `scan_limit` is the
+/// number of new rows examined by this page. A small look-behind keeps
+/// clusters that straddle adjacent pages discoverable without preventing the
+/// cursor from moving through a large corpus.
+fn find_consolidation_candidates_page(
+    db: &YantrikDB,
+    sim_threshold: f64,
+    time_window_days: f64,
+    min_cluster_size: usize,
+    scan_limit: usize,
+    offset: usize,
+    require_entity_overlap: bool,
+) -> Result<(Vec<Vec<MemoryWithEmbedding>>, usize)> {
+    if scan_limit == 0 {
+        return Ok((Vec::new(), 0));
+    }
+
+    let overlap = offset.min(CONSOLIDATION_SCAN_OVERLAP);
+    let page_offset = offset - overlap;
+    let page_limit = scan_limit.saturating_add(overlap);
+
     // Phase 1: query rows while holding the conn lock, then drop it.
     // Scope is explicit so the guard CANNOT live across the subsequent
     // calls to db.decrypt_text / db.decrypt_embedding in Phase 2. See
@@ -390,35 +646,37 @@ pub fn find_consolidation_candidates(
     );
     let raw_rows: Vec<RawRow> = {
         let conn = db.conn();
-        let sql = format!(
-            "SELECT rid, type, text, embedding, created_at, importance, valence, \
+        let sql = "SELECT rid, type, text, embedding, created_at, importance, valence, \
              half_life, last_access, metadata, namespace \
              FROM memories \
              WHERE consolidation_status = 'active' \
              AND storage_tier = 'hot' \
              AND type IN ('episodic', 'semantic') \
-             LIMIT {}",
-            limit
-        );
+             ORDER BY namespace ASC, created_at ASC, rid ASC \
+             LIMIT ?1 OFFSET ?2";
         let mut stmt = conn.prepare(&sql)?;
-        let mapped = stmt.query_map([], |row| {
-            Ok((
-                row.get::<_, String>("rid")?,
-                row.get::<_, String>("type")?,
-                row.get::<_, String>("text")?,
-                row.get::<_, Vec<u8>>("embedding")?,
-                row.get::<_, f64>("created_at")?,
-                row.get::<_, f64>("importance")?,
-                row.get::<_, f64>("valence")?,
-                row.get::<_, f64>("half_life")?,
-                row.get::<_, f64>("last_access")?,
-                row.get::<_, String>("metadata")?,
-                row.get::<_, String>("namespace")?,
-            ))
-        })?;
+        let mapped = stmt.query_map(
+            rusqlite::params![page_limit as i64, page_offset as i64],
+            |row| {
+                Ok((
+                    row.get::<_, String>("rid")?,
+                    row.get::<_, String>("type")?,
+                    row.get::<_, String>("text")?,
+                    row.get::<_, Vec<u8>>("embedding")?,
+                    row.get::<_, f64>("created_at")?,
+                    row.get::<_, f64>("importance")?,
+                    row.get::<_, f64>("valence")?,
+                    row.get::<_, f64>("half_life")?,
+                    row.get::<_, f64>("last_access")?,
+                    row.get::<_, String>("metadata")?,
+                    row.get::<_, String>("namespace")?,
+                ))
+            },
+        )?;
         let collected: std::result::Result<Vec<RawRow>, _> = mapped.collect();
         collected?
     }; // conn, stmt, mapped all dropped here before Phase 2
+    let scanned_count = raw_rows.len();
 
     // Phase 2: decrypt. Safe to call `db.decrypt_*` now because no conn
     // guard is held.
@@ -531,7 +789,16 @@ pub fn find_consolidation_candidates(
         }
     }
 
-    Ok(result)
+    result.sort_by(|a, b| {
+        let a = &a[0];
+        let b = &b[0];
+        a.namespace
+            .cmp(&b.namespace)
+            .then_with(|| a.created_at.total_cmp(&b.created_at))
+            .then_with(|| a.rid.cmp(&b.rid))
+    });
+
+    Ok((result, scanned_count))
 }
 
 /// Run the full consolidation pipeline.
@@ -544,14 +811,49 @@ pub fn consolidate(
     require_entity_overlap: bool,
     dry_run: bool,
 ) -> Result<Vec<serde_json::Value>> {
-    let clusters = find_consolidation_candidates(
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+
+    // `limit` remains the maximum number of consolidations this call may
+    // commit. Candidate discovery gets a wider bounded window so the default
+    // limit of five can actually find pairs, and a durable offset prevents
+    // every think() call from examining the same first five rows forever.
+    let scan_limit = limit
+        .saturating_mul(CONSOLIDATION_SCAN_MULTIPLIER)
+        .clamp(CONSOLIDATION_SCAN_FLOOR, CONSOLIDATION_SCAN_CEILING);
+    let (offset, eligible_count): (usize, usize) = {
+        let conn = db.conn();
+        let stored_offset = conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [CONSOLIDATION_SCAN_OFFSET_META],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(0);
+        let count = conn.query_row(
+            "SELECT COUNT(*) FROM memories \
+             WHERE consolidation_status = 'active' \
+             AND storage_tier = 'hot' \
+             AND type IN ('episodic', 'semantic')",
+            [],
+            |row| row.get::<_, i64>(0),
+        )? as usize;
+        (stored_offset.min(count), count)
+    };
+
+    let (mut clusters, _scanned_count) = find_consolidation_candidates_page(
         db,
         sim_threshold,
         time_window_days,
         min_cluster_size,
-        limit,
+        scan_limit,
+        offset,
         require_entity_overlap,
     )?;
+    clusters.truncate(limit);
 
     if dry_run {
         return Ok(clusters
@@ -580,8 +882,19 @@ pub fn consolidate(
             &summary_text,
             Some(mean_emb),
             false,
+            None,
         )?);
     }
+
+    let next_offset = if offset.saturating_add(scan_limit) >= eligible_count {
+        0
+    } else {
+        offset + scan_limit
+    };
+    db.conn().execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+        rusqlite::params![CONSOLIDATION_SCAN_OFFSET_META, next_offset.to_string()],
+    )?;
 
     Ok(results)
 }
@@ -606,6 +919,7 @@ fn commit_consolidation(
     // ADDITIVE mode keeps the sources fully live: the synthesis is stored
     // beside them rather than over them. See `summarize_cluster`.
     additive: bool,
+    synthesis: Option<&SynthesisWrite<'_>>,
 ) -> Result<serde_json::Value> {
     let ts = crate::time::now_secs();
     {
@@ -623,37 +937,151 @@ fn commit_consolidation(
         let max_half_life = cluster.iter().map(|m| m.half_life).fold(0.0f64, f64::max);
         let consolidated_half_life = max_half_life * 1.5;
 
-        // 4. Record the new consolidated memory
-        let meta = serde_json::json!({
-            "consolidated_from": source_rids,
-            "cluster_size": cluster.len(),
-            "consolidation_time": ts,
-        });
-
         let cluster_namespace = cluster
             .first()
             .map(|m| m.namespace.as_str())
             .unwrap_or("default");
 
-        // EVENT time of the synthesis: the end of the span it abstracts,
-        // not the wall clock of the maintenance run. A summary stamped
-        // now() is invisible to `recall_as_of` / time-window queries on
-        // any backdated corpus (historical import, BEAM) — the abstraction
-        // exists precisely for those reads, and it described nothing that
-        // happened after its newest source. `consolidation_time` in the
-        // metadata still records when the synthesis ran.
-        let span_end = cluster
+        let admission = synthesis
+            .map(|write| build_synthesis_admission(db, cluster, write))
+            .transpose()?;
+        let effective_idempotency_key = admission.as_ref().map(|admission| {
+            format!(
+                "{}:evidence-v1:{}",
+                admission.logical_key, admission.evidence_version
+            )
+        });
+
+        // Availability time is the newest evidence member. The synthesis
+        // must not appear in recall_as_of before all evidence it depends on
+        // existed. First mention is a separate clock in metadata; collapsing
+        // the two either leaks future evidence or misorders the item.
+        let cluster_span_end = cluster
             .iter()
             .map(|m| m.created_at)
             .fold(f64::NEG_INFINITY, f64::max);
-        let summary_created_at = if span_end.is_finite() {
-            Some(span_end)
+        let (first_mention_at, evidence_span_end_at, evidence_ids) =
+            if let Some(admission) = &admission {
+                let conn = db.conn();
+                let mut first = f64::INFINITY;
+                let mut last = f64::NEG_INFINITY;
+                let mut ids = Vec::with_capacity(admission.dependencies.len());
+                for dependency in &admission.dependencies {
+                    let (created_at, synthesis_state): (f64, Option<String>) = conn.query_row(
+                        "SELECT created_at, synthesis_state FROM memories WHERE rid = ?1",
+                        rusqlite::params![&dependency.source_rid],
+                        |row| Ok((row.get(0)?, row.get(1)?)),
+                    )?;
+                    first = first.min(created_at);
+                    last = last.max(created_at);
+                    if synthesis_state.is_none() {
+                        ids.push(dependency.source_rid.clone());
+                    }
+                }
+                (first, last, ids)
+            } else {
+                let first = cluster
+                    .iter()
+                    .map(|m| {
+                        m.metadata
+                            .get("first_mention_at")
+                            .and_then(serde_json::Value::as_f64)
+                            .filter(|v| v.is_finite())
+                            .unwrap_or(m.created_at)
+                    })
+                    .fold(f64::INFINITY, f64::min);
+                let last = cluster
+                    .iter()
+                    .map(|m| {
+                        m.metadata
+                            .get("evidence_span_end_at")
+                            .and_then(serde_json::Value::as_f64)
+                            .filter(|v| v.is_finite())
+                            .unwrap_or(m.created_at)
+                    })
+                    .fold(f64::NEG_INFINITY, f64::max);
+                let mut ids: Vec<String> = cluster.iter().map(|m| m.rid.clone()).collect();
+                ids.sort();
+                ids.dedup();
+                (first, last, ids)
+            };
+        let span_end = if admission.is_some() {
+            evidence_span_end_at
+        } else {
+            cluster_span_end
+        };
+        let summary_created_at = span_end.is_finite().then_some(span_end);
+
+        // Caller metadata is additive. Reserved provenance and clock fields
+        // are engine-owned so a synthesis cannot claim evidence it was not
+        // actually linked to or move its first-mention/availability clocks.
+        let mut meta = synthesis
+            .map(|s| s.metadata.clone())
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}));
+        let meta_obj = meta
+            .as_object_mut()
+            .expect("record_synthesis normalized metadata to an object");
+        meta_obj.insert("consolidated_from".into(), serde_json::json!(source_rids));
+        meta_obj.insert("evidence_ids".into(), serde_json::json!(evidence_ids));
+        meta_obj.insert("cluster_size".into(), serde_json::json!(cluster.len()));
+        meta_obj.insert(
+            "first_mention_at".into(),
+            serde_json::json!(first_mention_at),
+        );
+        meta_obj.insert(
+            "evidence_span_end_at".into(),
+            serde_json::json!(evidence_span_end_at),
+        );
+        if let Some(s) = synthesis {
+            meta_obj.insert(
+                "synthesis_kind".into(),
+                serde_json::json!("multi_axis_item"),
+            );
+            meta_obj.insert("synthesis_axis".into(), serde_json::json!(s.axis));
+            meta_obj.insert("granularity".into(), serde_json::json!(s.granularity));
+            meta_obj.insert("synthesis_version".into(), serde_json::json!(1));
+            meta_obj.insert("synthesis_available_at".into(), serde_json::json!(span_end));
+            let admission = admission
+                .as_ref()
+                .expect("synthesis write always builds an admission descriptor");
+            meta_obj.insert(
+                "synthesis_logical_key".into(),
+                serde_json::json!(admission.logical_key),
+            );
+            meta_obj.insert(
+                "synthesis_evidence_version".into(),
+                serde_json::json!(admission.evidence_version),
+            );
+        } else {
+            // Legacy unkeyed consolidation keeps its maintenance timestamp.
+            // Keyed synthesis omits wall time because metadata participates in
+            // the idempotency digest and must be byte-stable across retries.
+            meta_obj.insert("consolidation_time".into(), serde_json::json!(ts));
+        }
+
+        let idempotency_key = effective_idempotency_key.as_deref();
+        let record_source = if synthesis.is_some() {
+            "inference"
+        } else {
+            "user"
+        };
+        let preexisting_rid: Option<String> = if let Some(key) = idempotency_key {
+            db.conn()
+                .query_row(
+                    "SELECT rid FROM memories \
+                     WHERE origin_actor = ?1 AND namespace = ?2 \
+                       AND idempotency_key = ?3 LIMIT 1",
+                    rusqlite::params![db.actor_id(), cluster_namespace, key],
+                    |row| row.get(0),
+                )
+                .optional()?
         } else {
             None
         };
 
         let consolidated_rid = match &embedding {
-            Some(emb) => db.record_with_idempotency(
+            Some(emb) => db.record_with_idempotency_sync_only(
                 summary_text,
                 "semantic",
                 consolidated_importance,
@@ -664,13 +1092,14 @@ fn commit_consolidation(
                 cluster_namespace,
                 0.8,
                 "general",
-                "user",
+                record_source,
                 None,
-                None,
+                idempotency_key,
                 summary_created_at,
+                admission.as_ref(),
             )?,
             // Engine-embedded: the vector comes from the synthesis itself.
-            None => db.record_text_with_idempotency(
+            None => db.record_text_with_idempotency_sync_only(
                 summary_text,
                 "semantic",
                 consolidated_importance,
@@ -680,12 +1109,35 @@ fn commit_consolidation(
                 cluster_namespace,
                 0.8,
                 "general",
-                "user",
+                record_source,
                 None,
-                None,
+                idempotency_key,
                 summary_created_at,
+                admission.as_ref(),
             )?,
         };
+
+        // The record call above is still required on a retry: it verifies the
+        // canonical payload digest and rejects a changed model output under
+        // the same logical key. Once that succeeds, every remaining side
+        // effect was already committed by the first attempt.
+        if let Some(existing) = preexisting_rid {
+            debug_assert_eq!(existing, consolidated_rid);
+            return Ok(serde_json::json!({
+                "consolidated_rid": consolidated_rid,
+                "source_rids": source_rids,
+                "evidence_ids": evidence_ids,
+                "cluster_size": cluster.len(),
+                "summary": summary_text,
+                "importance": consolidated_importance,
+                "embedded_from_text": embedding.is_none(),
+                "first_mention_at": first_mention_at,
+                "evidence_span_end_at": evidence_span_end_at,
+                "synthesis_logical_key": admission.as_ref().map(|a| &a.logical_key),
+                "synthesis_evidence_version": admission.as_ref().map(|a| &a.evidence_version),
+                "idempotent_replay": true,
+            }));
+        }
 
         // 5. Transfer entity relationships
         let mut all_entities = std::collections::HashSet::new();
@@ -767,6 +1219,10 @@ fn commit_consolidation(
                 "valence": mean_valence,
                 "half_life": consolidated_half_life,
                 "metadata": meta,
+                "idempotency_key": idempotency_key,
+                "synthesis": admission,
+                "additive": additive,
+                "record_source": record_source,
                 "summary_preview": &summary_text[..summary_text.floor_char_boundary(200)],
             }),
             Some(&emb_hash),
@@ -775,11 +1231,15 @@ fn commit_consolidation(
         Ok(serde_json::json!({
             "consolidated_rid": consolidated_rid,
             "source_rids": source_rids,
+            "evidence_ids": evidence_ids,
             "cluster_size": cluster.len(),
             "summary": summary_text,
             "importance": consolidated_importance,
             "entities_linked": all_entities.len(),
             "embedded_from_text": embedding.is_none(),
+            "first_mention_at": first_mention_at,
+            "evidence_span_end_at": evidence_span_end_at,
+            "idempotent_replay": false,
         }))
     }
 }
@@ -996,6 +1456,83 @@ mod tests {
         ];
         let mean = mean_embedding(&mems);
         assert_eq!(mean, vec![2.0, 3.0, 4.0]);
+    }
+
+    #[test]
+    fn bounded_consolidation_advances_past_an_unproductive_first_page() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let embedding = vec![1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let ten_days = 10.0 * 86400.0;
+
+        // The first 100 records are too far apart to cluster. The only valid
+        // pair is beyond that page, reproducing the starvation caused by the
+        // old unordered `LIMIT 5` query.
+        for i in 0..102 {
+            let created_at = if i == 101 {
+                100.0 * ten_days + 1.0
+            } else {
+                i as f64 * ten_days
+            };
+            db.record_with_idempotency(
+                &format!("memory {i}"),
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &embedding,
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+                None,
+                Some(created_at),
+            )
+            .unwrap();
+        }
+
+        let first = consolidate(&db, 0.99, 7.0, 2, 1, false, false).unwrap();
+        assert!(
+            first.is_empty(),
+            "the first page intentionally has no cluster"
+        );
+        let cursor: String = db
+            .conn()
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [CONSOLIDATION_SCAN_OFFSET_META],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(cursor, "100", "a real pass advances the scan cursor");
+
+        let preview = consolidate(&db, 0.99, 7.0, 2, 1, false, true).unwrap();
+        assert_eq!(preview.len(), 1, "the second page exposes the distant pair");
+        let cursor_after_preview: String = db
+            .conn()
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [CONSOLIDATION_SCAN_OFFSET_META],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            cursor_after_preview, "100",
+            "dry-run preview must not consume the page"
+        );
+
+        let second = consolidate(&db, 0.99, 7.0, 2, 1, false, false).unwrap();
+        assert_eq!(second.len(), 1);
+        let wrapped: String = db
+            .conn()
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [CONSOLIDATION_SCAN_OFFSET_META],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(wrapped, "0", "the cursor wraps after reaching the tail");
     }
 }
 

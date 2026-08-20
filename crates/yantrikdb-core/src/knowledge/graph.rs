@@ -463,10 +463,23 @@ fn extract_heuristic_entities_inner(text: &str) -> Vec<String> {
         .split(|c: char| !c.is_alphanumeric() && c != '\'')
         .filter(|s| !s.is_empty())
     {
-        let first = word.chars().next().unwrap();
+        // A possessive clitic belongs to the grammar around a name, not to
+        // the entity's identity. End the current chunk at the owner so
+        // "Sol's Q2 plan" yields "Sol" and "Q2", rather than minting the
+        // phantom compound "Sol's Q2". Internal apostrophes remain intact:
+        // O'Brien stays O'Brien, and O'Brien's canonicalizes to O'Brien.
+        let possessive = word
+            .strip_suffix("'s")
+            .or_else(|| word.strip_suffix("'S"))
+            .or_else(|| word.strip_suffix('\''))
+            .filter(|bare| !bare.is_empty());
+        let entity_word = possessive.unwrap_or(word);
+        let first = entity_word.chars().next().unwrap();
         let starts_upper = first.is_uppercase();
-        let is_all_caps =
-            word.len() > 1 && word.chars().all(|c| !c.is_alphabetic() || c.is_uppercase());
+        let is_all_caps = entity_word.len() > 1
+            && entity_word
+                .chars()
+                .all(|c| !c.is_alphabetic() || c.is_uppercase());
 
         let joins_chunk = if chunk.is_empty() {
             // Open a new chunk only on capitalized or all-caps tokens.
@@ -474,11 +487,14 @@ fn extract_heuristic_entities_inner(text: &str) -> Vec<String> {
         } else {
             // Continue an existing chunk on capitalized words or short letter-suffixes
             // (e.g., "Series A", "Version B").
-            starts_upper || is_all_caps || (word.len() == 1 && first.is_ascii_uppercase())
+            starts_upper || is_all_caps || (entity_word.len() == 1 && first.is_ascii_uppercase())
         };
 
         if joins_chunk {
-            chunk.push(word.to_string());
+            chunk.push(entity_word.to_string());
+            if possessive.is_some() {
+                flush(&mut chunk, &mut entities);
+            }
         } else {
             flush(&mut chunk, &mut entities);
         }
@@ -2045,5 +2061,44 @@ mod prose_run_tests {
             ents.iter().any(|e| e.contains("NASA JPL")),
             "two-token acronym name lost -> {ents:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod possessive_entity_tests {
+    use super::*;
+
+    #[test]
+    fn possessives_are_canonicalized_before_becoming_entities() {
+        let ents = extract_heuristic_entities(
+            "Pranab's benchmark compared Reddit's API with Sol's Q2 plan.",
+        );
+        for canonical in ["Pranab", "Reddit", "Sol", "Q2"] {
+            assert!(
+                ents.iter().any(|e| e == canonical),
+                "canonical {canonical:?} missing from {ents:?}"
+            );
+        }
+        assert!(
+            ents.iter()
+                .all(|e| !e.ends_with("'s") && !e.ends_with('\'')),
+            "possessive phantom survived: {ents:?}"
+        );
+    }
+
+    #[test]
+    fn apostrophes_inside_names_are_preserved() {
+        let ents = extract_heuristic_entities("O'Brien met D'Arcy about O'Brien's release.");
+        assert!(ents.iter().any(|e| e == "O'Brien"), "{ents:?}");
+        assert!(ents.iter().any(|e| e == "D'Arcy"), "{ents:?}");
+        assert!(!ents.iter().any(|e| e == "O'Brien's"), "{ents:?}");
+    }
+
+    #[test]
+    fn capitalized_contractions_do_not_create_bare_phantoms() {
+        let ents = extract_heuristic_entities("Let's begin. It's ready. What's next?");
+        for bad in ["Let", "It", "What"] {
+            assert!(!ents.iter().any(|e| e == bad), "{bad:?} survived: {ents:?}");
+        }
     }
 }

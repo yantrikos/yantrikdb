@@ -155,7 +155,8 @@ impl PyYantrikDB {
         source: Option<&str>,
         // Issue #46: confidence first-class on recall. `certainty_min`
         // filters candidates whose `certainty < min`. `order` re-sorts
-        // the final top_k: "relevance" (default) | "certainty" | "recency".
+        // the final top_k: "relevance" (default) | "certainty" | "recency" |
+        // "first_mention" (ascending; "chronological" is an alias).
         certainty_min: Option<f64>,
         order: Option<&str>,
         // v0.10 Item 1: re-admit superseded records (stamped with
@@ -217,7 +218,7 @@ impl PyYantrikDB {
             }
             if !results.is_empty() {
                 // Cut against the MAX score, not results[0] —
-                // order="certainty"/"recency" re-sorts the list. The
+                // Non-relevance order modes re-sort the list. The
                 // max-scoring result passes its own floor whenever
                 // scores are non-negative (the practical case); if the
                 // floor would somehow orphan everything, trim nothing.
@@ -1210,6 +1211,43 @@ impl PyYantrikDB {
         d.set_item("window_floor", report.window_floor)?;
         d.set_item("candidate_count", report.candidate_count)?;
         d.set_item("candidate_rids", report.candidate_rids)?;
+        Ok(d.into())
+    }
+
+    /// Read-only audit of active verified syntheses against their recorded
+    /// evidence revisions and provenance shape.
+    #[pyo3(signature = (namespace=None, max_issues=100))]
+    fn audit_synthesis_evidence(
+        &self,
+        py: Python<'_>,
+        namespace: Option<&str>,
+        max_issues: usize,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let report = db
+            .audit_synthesis_evidence(namespace, max_issues)
+            .map_err(map_err)?;
+        let d = PyDict::new(py);
+        d.set_item("verified_active_count", report.verified_active_count)?;
+        d.set_item("candidate_count", report.candidate_count)?;
+        d.set_item("orphan_dependency_count", report.orphan_dependency_count)?;
+        d.set_item("sources_over_fanout_cap", report.sources_over_fanout_cap)?;
+        d.set_item("dependency_cycle_count", report.dependency_cycle_count)?;
+        d.set_item(
+            "duplicate_logical_key_group_count",
+            report.duplicate_logical_key_group_count,
+        )?;
+        let issues = report
+            .issues
+            .into_iter()
+            .map(|issue| {
+                let item = PyDict::new(py);
+                item.set_item("synthesis_rid", issue.synthesis_rid)?;
+                item.set_item("reasons", issue.reasons)?;
+                Ok::<PyObject, pyo3::PyErr>(item.into())
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        d.set_item("issues", issues)?;
         Ok(d.into())
     }
 

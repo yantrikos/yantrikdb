@@ -627,6 +627,113 @@ fn forget_still_works_after_refactor() {
 }
 
 #[test]
+fn forget_rolls_back_every_durable_projection_when_oplog_insert_fails() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid = db
+        .record(
+            "forget must be atomic",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let target_rid = db
+        .record(
+            "link target",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(2.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let oplog_before: i64;
+    {
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO memory_entities (memory_rid, entity_name) VALUES (?1, 'AtomicityMarker')",
+            rusqlite::params![&rid],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO memory_chunks (rid, chunk_idx, embedding) VALUES (?1, 1, X'00')",
+            rusqlite::params![&rid],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO record_links \
+             (link_id, source_rid, target_rid, link_type, status, selection_state, \
+              created_at, hlc, origin_actor) \
+             VALUES ('atomic-forget-link', ?1, ?2, 'DerivedFrom', 'active', \
+                     'selected', 1.0, X'00', 'test')",
+            rusqlite::params![&rid, &target_rid],
+        )
+        .unwrap();
+        oplog_before = conn
+            .query_row("SELECT COUNT(*) FROM oplog", [], |row| row.get(0))
+            .unwrap();
+        conn.execute_batch(
+            "CREATE TRIGGER fail_forget_op BEFORE INSERT ON oplog \
+             WHEN NEW.op_type = 'forget' BEGIN \
+                 SELECT RAISE(ABORT, 'forced forget oplog failure'); \
+             END;",
+        )
+        .unwrap();
+    }
+
+    let error = db
+        .forget(&rid)
+        .expect_err("forced oplog failure must escape");
+    assert!(format!("{error}").contains("forced forget oplog failure"));
+
+    let conn = db.conn();
+    let status: String = conn
+        .query_row(
+            "SELECT consolidation_status FROM memories WHERE rid = ?1",
+            rusqlite::params![&rid],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(status, "active");
+    for (table, predicate) in [("memory_entities", "memory_rid"), ("memory_chunks", "rid")] {
+        let count: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {table} WHERE {predicate} = ?1"),
+                rusqlite::params![&rid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1, "{table} deletion escaped the rollback");
+    }
+    let link_status: String = conn
+        .query_row(
+            "SELECT status FROM record_links WHERE link_id = 'atomic-forget-link'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(link_status, "active");
+    let oplog_after: i64 = conn
+        .query_row("SELECT COUNT(*) FROM oplog", [], |row| row.get(0))
+        .unwrap();
+    assert_eq!(oplog_after, oplog_before);
+}
+
+#[test]
 fn tombstone_with_rid_hides_from_recall() {
     // After tombstone_with_rid, the rid must not appear in recall results.
     let db = YantrikDB::new(":memory:", 64).unwrap();

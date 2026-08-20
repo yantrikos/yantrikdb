@@ -7,7 +7,7 @@
 //! - Forget: Tombstone always wins (irreversible)
 //! - Consolidation: Set-union via consolidation_members table
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::engine::YantrikDB;
@@ -31,7 +31,7 @@ pub(crate) fn decode_oplog_payload_with(
     }
 }
 use crate::hlc::HLCTimestamp;
-use crate::types::ScoringRow;
+use crate::types::{ScoringRow, SynthesisAdmission};
 
 /// An oplog entry for replication.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -391,11 +391,12 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
         // payload is materialize_record-compatible (created_at handled in
         // materialize_record), and INSERT OR IGNORE keeps re-apply idempotent.
         "record" | "record_with_rid" => {
-            materialize_record(
+            let synthesis_changes = materialize_record(
                 &*db.conn(),
                 &op.payload,
                 db.embedding_dim(),
                 &op.origin_actor,
+                &op.hlc,
             )?;
             // Update scoring cache with new record. created_at is carried as
             // `created_at` (record) or `created_at_unix_micros`
@@ -408,35 +409,54 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             });
             let rid = op.payload["rid"].as_str().unwrap_or_default();
             if !rid.is_empty() {
-                db.cache_insert(
-                    rid.to_string(),
-                    ScoringRow {
-                        created_at: created_at.unwrap_or(0.0),
-                        importance: op.payload["importance"].as_f64().unwrap_or(0.5),
-                        half_life: op.payload["half_life"].as_f64().unwrap_or(604800.0),
-                        last_access: created_at.unwrap_or(0.0),
-                        access_count: 0,
-                        valence: op.payload["valence"].as_f64().unwrap_or(0.0),
-                        consolidation_status: "active".to_string(),
-                        memory_type: op.payload["type"]
-                            .as_str()
-                            .unwrap_or("episodic")
-                            .to_string(),
-                        namespace: op.payload["namespace"]
-                            .as_str()
-                            .unwrap_or("default")
-                            .to_string(),
-                        certainty: op.payload["certainty"].as_f64().unwrap_or(0.8),
-                        domain: op.payload["domain"]
-                            .as_str()
-                            .unwrap_or("general")
-                            .to_string(),
-                        source: op.payload["source"].as_str().unwrap_or("user").to_string(),
-                        emotional_state: op.payload["emotional_state"]
-                            .as_str()
-                            .map(|s| s.to_string()),
-                    },
-                );
+                let synthesis_descriptor: Option<(Option<String>, Option<String>, Option<String>)> =
+                    db.conn()
+                        .query_row(
+                            "SELECT synthesis_state, synthesis_axis, synthesis_granularity \
+                         FROM memories WHERE rid = ?1",
+                            params![rid],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        )
+                        .optional()?;
+                if let Some((synthesis_state, synthesis_axis, synthesis_granularity)) =
+                    synthesis_descriptor
+                {
+                    db.cache_insert(
+                        rid.to_string(),
+                        ScoringRow {
+                            created_at: created_at.unwrap_or(0.0),
+                            importance: op.payload["importance"].as_f64().unwrap_or(0.5),
+                            half_life: op.payload["half_life"].as_f64().unwrap_or(604800.0),
+                            last_access: created_at.unwrap_or(0.0),
+                            access_count: 0,
+                            valence: op.payload["valence"].as_f64().unwrap_or(0.0),
+                            consolidation_status: "active".to_string(),
+                            synthesis_state,
+                            synthesis_axis,
+                            synthesis_granularity,
+                            memory_type: op.payload["type"]
+                                .as_str()
+                                .unwrap_or("episodic")
+                                .to_string(),
+                            namespace: op.payload["namespace"]
+                                .as_str()
+                                .unwrap_or("default")
+                                .to_string(),
+                            certainty: op.payload["certainty"].as_f64().unwrap_or(0.8),
+                            domain: op.payload["domain"]
+                                .as_str()
+                                .unwrap_or("general")
+                                .to_string(),
+                            source: op.payload["source"].as_str().unwrap_or("user").to_string(),
+                            emotional_state: op.payload["emotional_state"]
+                                .as_str()
+                                .map(|s| s.to_string()),
+                        },
+                    );
+                }
+                db.cache_verify_syntheses(&synthesis_changes.verified);
+                db.cache_supersede_syntheses(&synthesis_changes.superseded);
+                db.cache_invalidate_syntheses(&synthesis_changes.invalidated);
             }
         }
         "relate" => {
@@ -465,7 +485,7 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             }
         }
         "forget" => {
-            materialize_forget(&*db.conn(), &op.payload)?;
+            let invalidated_syntheses = materialize_forget(&*db.conn(), &op.payload)?;
             // Remove from scoring cache + vec index + graph index
             let rid = op.payload["rid"].as_str().unwrap_or_default();
             if !rid.is_empty() {
@@ -503,6 +523,7 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
                 // (exact-string matching), same as the leader's forget.
                 db.purge_chunks(rid, _seq)?;
                 db.graph_index.write().unlink_memory(rid);
+                db.cache_invalidate_syntheses(&invalidated_syntheses);
             }
         }
         "consolidate" => {
@@ -510,33 +531,56 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             // Cache: insert consolidated memory + mark sources
             let consolidated_rid = op.payload["consolidated_rid"].as_str().unwrap_or_default();
             let text = op.payload["text"].as_str().unwrap_or("");
-            if !consolidated_rid.is_empty() && !text.is_empty() {
-                db.cache_insert(
-                    consolidated_rid.to_string(),
-                    ScoringRow {
-                        created_at: op.timestamp,
-                        importance: op.payload["importance"].as_f64().unwrap_or(0.5),
-                        half_life: op.payload["half_life"].as_f64().unwrap_or(604800.0),
-                        last_access: op.timestamp,
-                        access_count: 0,
-                        valence: op.payload["valence"].as_f64().unwrap_or(0.0),
-                        consolidation_status: "active".to_string(),
-                        memory_type: "semantic".to_string(),
-                        namespace: op.payload["namespace"]
-                            .as_str()
-                            .unwrap_or("default")
-                            .to_string(),
-                        certainty: 0.8,
-                        domain: "general".to_string(),
-                        source: "user".to_string(),
-                        emotional_state: None,
-                    },
-                );
+            let typed_synthesis = op
+                .payload
+                .get("synthesis")
+                .is_some_and(|value| !value.is_null());
+            let additive = op.payload["additive"].as_bool().unwrap_or(false);
+            if !typed_synthesis && !consolidated_rid.is_empty() && !text.is_empty() {
+                let synthesis_descriptor: Option<(Option<String>, Option<String>, Option<String>)> =
+                    db.conn()
+                        .query_row(
+                            "SELECT synthesis_state, synthesis_axis, synthesis_granularity \
+                         FROM memories WHERE rid = ?1",
+                            params![consolidated_rid],
+                            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                        )
+                        .optional()?;
+                if let Some((synthesis_state, synthesis_axis, synthesis_granularity)) =
+                    synthesis_descriptor
+                {
+                    db.cache_insert(
+                        consolidated_rid.to_string(),
+                        ScoringRow {
+                            created_at: op.timestamp,
+                            importance: op.payload["importance"].as_f64().unwrap_or(0.5),
+                            half_life: op.payload["half_life"].as_f64().unwrap_or(604800.0),
+                            last_access: op.timestamp,
+                            access_count: 0,
+                            valence: op.payload["valence"].as_f64().unwrap_or(0.0),
+                            consolidation_status: "active".to_string(),
+                            synthesis_state,
+                            synthesis_axis,
+                            synthesis_granularity,
+                            memory_type: "semantic".to_string(),
+                            namespace: op.payload["namespace"]
+                                .as_str()
+                                .unwrap_or("default")
+                                .to_string(),
+                            certainty: 0.8,
+                            domain: "general".to_string(),
+                            source: "user".to_string(),
+                            emotional_state: None,
+                        },
+                    );
+                }
             }
-            if let Some(source_rids) = op.payload["source_rids"].as_array() {
-                for rid_val in source_rids {
-                    if let Some(rid) = rid_val.as_str() {
-                        db.cache_mark_consolidated(rid, 0.3);
+            if !additive {
+                if let Some(source_rids) = op.payload["source_rids"].as_array() {
+                    for rid_val in source_rids {
+                        if let Some(rid) = rid_val.as_str() {
+                            db.cache_mark_consolidated(rid, 0.3);
+                        }
                     }
                 }
             }
@@ -610,12 +654,137 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
 }
 
 /// Materialize a "record" op: INSERT OR IGNORE into memories.
+#[derive(Default)]
+struct SynthesisStateChanges {
+    verified: Vec<String>,
+    superseded: Vec<String>,
+    invalidated: Vec<String>,
+}
+
+impl SynthesisStateChanges {
+    fn merge(&mut self, mut other: Self) {
+        self.verified.append(&mut other.verified);
+        self.superseded.append(&mut other.superseded);
+        self.invalidated.append(&mut other.invalidated);
+    }
+}
+
+fn reverify_synthesis_dependents_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    source_rid: &str,
+) -> Result<SynthesisStateChanges> {
+    let mut frontier = std::collections::VecDeque::from([source_rid.to_string()]);
+    let mut visited = std::collections::HashSet::new();
+    let mut changes = SynthesisStateChanges::default();
+
+    while let Some(changed_rid) = frontier.pop_front() {
+        if !visited.insert(changed_rid.clone()) {
+            continue;
+        }
+        let candidates: Vec<(String, String, String, String)> = {
+            let mut stmt = tx.prepare(
+                "SELECT DISTINCT m.rid, m.namespace, m.synthesis_evidence_version, \
+                                 m.synthesis_logical_key \
+                 FROM memories m \
+                 JOIN synthesis_dependencies d ON d.synthesis_rid = m.rid \
+                 WHERE d.source_rid = ?1 AND m.synthesis_state = 'unverified' \
+                 ORDER BY m.rid",
+            )?;
+            let rows = stmt.query_map(params![changed_rid], |row| {
+                Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+            })?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+
+        for (synthesis_rid, namespace, evidence_version, logical_key) in candidates {
+            let dependencies: Vec<(String, i64, bool)> = {
+                let mut stmt = tx.prepare(
+                    "SELECT source_rid, source_revision_num, is_direct \
+                     FROM synthesis_dependencies WHERE synthesis_rid = ?1 \
+                     ORDER BY source_rid",
+                )?;
+                let rows = stmt.query_map(params![synthesis_rid], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get::<_, i64>(2)? != 0))
+                })?;
+                rows.collect::<std::result::Result<_, _>>()?
+            };
+            if dependencies.is_empty() || !dependencies.iter().any(|dependency| dependency.2) {
+                continue;
+            }
+
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(b"yantrikdb:synthesis-evidence:v1\0");
+            let mut sources_match = true;
+            let mut has_leaf_dependency = false;
+            for (dependency_rid, expected_revision, _) in &dependencies {
+                hasher.update(dependency_rid.as_bytes());
+                hasher.update(b"\0");
+                hasher.update(&expected_revision.to_le_bytes());
+                let current: Option<(String, String, Option<String>, i64)> = tx
+                    .query_row(
+                        "SELECT m.namespace, m.consolidation_status, m.synthesis_state, \
+                                COALESCE((SELECT MAX(r.revision_num) FROM record_revisions r \
+                                          WHERE r.rid = m.rid), 0) \
+                         FROM memories m WHERE m.rid = ?1",
+                        params![dependency_rid],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                    )
+                    .optional()?;
+                has_leaf_dependency |= current
+                    .as_ref()
+                    .is_some_and(|(_, _, state, _)| state.is_none());
+                if !matches!(
+                    current,
+                    Some((ref source_namespace, ref status, ref state, revision_num))
+                        if source_namespace == &namespace
+                            && status == "active"
+                            && state.as_deref().is_none_or(|value| value == "verified")
+                            && revision_num == *expected_revision
+                ) {
+                    sources_match = false;
+                    break;
+                }
+            }
+            if !sources_match
+                || !has_leaf_dependency
+                || hasher.finalize().to_hex().as_str() != evidence_version
+            {
+                continue;
+            }
+            if tx.execute(
+                "UPDATE memories SET synthesis_state = 'verified' \
+                 WHERE rid = ?1 AND synthesis_state = 'unverified'",
+                params![synthesis_rid],
+            )? > 0
+            {
+                let (winner, superseded) =
+                    YantrikDB::refold_synthesis_generations_in_tx(tx, &namespace, &logical_key)?;
+                for previous_rid in &superseded {
+                    changes
+                        .invalidated
+                        .extend(YantrikDB::invalidate_synthesis_dependents_in_tx(
+                            tx,
+                            previous_rid,
+                        )?);
+                }
+                changes.superseded.extend(superseded);
+                if winner.as_deref() == Some(synthesis_rid.as_str()) {
+                    frontier.push_back(synthesis_rid.clone());
+                    changes.verified.push(synthesis_rid);
+                }
+            }
+        }
+    }
+    Ok(changes)
+}
+
 fn materialize_record(
     conn: &Connection,
     payload: &serde_json::Value,
     _embedding_dim: usize,
     source_actor: &str,
-) -> Result<()> {
+    generation_hlc: &[u8],
+) -> Result<SynthesisStateChanges> {
     let rid = payload["rid"].as_str().unwrap_or_default();
     let mem_type = payload["type"].as_str().unwrap_or("episodic");
     let text = payload["text"].as_str().unwrap_or("");
@@ -640,7 +809,7 @@ fn materialize_record(
         .unwrap_or_else(|| "{}".to_string());
 
     if rid.is_empty() {
-        return Ok(()); // Can't materialize without a rid
+        return Ok(SynthesisStateChanges::default()); // Can't materialize without a rid
     }
 
     let namespace = payload["namespace"].as_str().unwrap_or("default");
@@ -664,13 +833,92 @@ fn materialize_record(
     let idempotency_key = payload["idempotency_key"].as_str();
     let claim_origin_actor = payload["origin_actor"].as_str();
 
+    let synthesis_present = payload
+        .get("synthesis")
+        .is_some_and(|value| !value.is_null());
+    let synthesis = payload
+        .get("synthesis")
+        .filter(|value| !value.is_null())
+        .and_then(|value| serde_json::from_value::<SynthesisAdmission>(value.clone()).ok());
+    let synthesis_shape_valid = synthesis.as_ref().is_some_and(|descriptor| {
+        !descriptor.axis.trim().is_empty()
+            && matches!(descriptor.granularity.as_str(), "atomic" | "rollup")
+            && !descriptor.logical_key.trim().is_empty()
+            && !descriptor.evidence_version.trim().is_empty()
+            && !descriptor.dependencies.is_empty()
+            && descriptor
+                .dependencies
+                .iter()
+                .any(|dependency| dependency.is_direct)
+            && descriptor
+                .dependencies
+                .iter()
+                .map(|dependency| dependency.source_rid.as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .len()
+                == descriptor.dependencies.len()
+    });
+    let synthesis_verified = if synthesis_shape_valid {
+        let descriptor = synthesis.as_ref().expect("shape-valid descriptor");
+        let mut dependencies = descriptor.dependencies.clone();
+        dependencies.sort_by(|a, b| a.source_rid.cmp(&b.source_rid));
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(b"yantrikdb:synthesis-evidence:v1\0");
+        for dependency in &dependencies {
+            hasher.update(dependency.source_rid.as_bytes());
+            hasher.update(b"\0");
+            hasher.update(&dependency.source_revision_num.to_le_bytes());
+        }
+        let version_matches = hasher.finalize().to_hex().as_str() == descriptor.evidence_version;
+        let mut sources_match = true;
+        let mut has_leaf_dependency = false;
+        for dependency in &dependencies {
+            let current: Option<(String, String, Option<String>, i64)> = conn
+                .query_row(
+                    "SELECT m.namespace, m.consolidation_status, m.synthesis_state, \
+                            COALESCE((SELECT MAX(r.revision_num) FROM record_revisions r \
+                                      WHERE r.rid = m.rid), 0) \
+                     FROM memories m WHERE m.rid = ?1",
+                    params![dependency.source_rid],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+                )
+                .optional()?;
+            has_leaf_dependency |= current
+                .as_ref()
+                .is_some_and(|(_, _, state, _)| state.is_none());
+            if !matches!(
+                current,
+                Some((ref source_namespace, ref status, ref state, revision_num))
+                    if source_namespace == namespace
+                        && status == "active"
+                        && state.as_deref().is_none_or(|value| value == "verified")
+                        && revision_num == dependency.source_revision_num
+            ) {
+                sources_match = false;
+                break;
+            }
+        }
+        version_matches && sources_match && has_leaf_dependency
+    } else {
+        false
+    };
+    let synthesis_state = synthesis_present.then_some(if synthesis_verified {
+        "verified"
+    } else {
+        "unverified"
+    });
+
     // Add-Wins Set: INSERT OR IGNORE means first writer wins (UUIDv7 = no collisions)
-    conn.execute(
+    let tx = conn.unchecked_transaction()?;
+    let inserted = tx.execute(
         "INSERT OR IGNORE INTO memories \
          (rid, type, text, created_at, updated_at, importance, \
           half_life, last_access, valence, metadata, namespace, \
-          certainty, domain, source, emotional_state, idempotency_key, origin_actor) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+          certainty, domain, source, emotional_state, idempotency_key, origin_actor, \
+          synthesis_axis, synthesis_granularity, synthesis_logical_key, \
+          synthesis_evidence_version, synthesis_generation_hlc, synthesis_state) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
+                 ?18, ?19, ?20, ?21, ?22, ?23)",
         params![
             rid,
             mem_type,
@@ -689,8 +937,47 @@ fn materialize_record(
             emotional_state,
             idempotency_key,
             claim_origin_actor,
+            synthesis
+                .as_ref()
+                .filter(|_| synthesis_shape_valid)
+                .map(|s| s.axis.as_str()),
+            synthesis
+                .as_ref()
+                .filter(|_| synthesis_shape_valid)
+                .map(|s| s.granularity.as_str()),
+            synthesis
+                .as_ref()
+                .filter(|_| synthesis_shape_valid)
+                .map(|s| s.logical_key.as_str()),
+            synthesis
+                .as_ref()
+                .filter(|_| synthesis_shape_valid)
+                .map(|s| s.evidence_version.as_str()),
+            synthesis_shape_valid.then_some(generation_hlc),
+            synthesis_state,
         ],
     )?;
+
+    if inserted > 0 && synthesis_shape_valid {
+        for dependency in &synthesis
+            .as_ref()
+            .expect("shape-valid descriptor")
+            .dependencies
+        {
+            tx.execute(
+                "INSERT INTO synthesis_dependencies \
+                 (synthesis_rid, source_rid, source_revision_num, namespace, is_direct) \
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    rid,
+                    dependency.source_rid,
+                    dependency.source_revision_num,
+                    namespace,
+                    i64::from(dependency.is_direct),
+                ],
+            )?;
+        }
+    }
 
     // **v0.7.19 replication audit (postmortem 2026-05-20).** Stamp a
     // row in replication_apply_log so audit queries can distinguish
@@ -698,17 +985,37 @@ fn materialize_record(
     // base/schema.rs::MIGRATE_V28_TO_V29 for the three-population
     // audit query shape.
     let applied_at = crate::time::now_secs();
-    let _ = conn.execute(
+    let _ = tx.execute(
         "INSERT OR IGNORE INTO replication_apply_log (rid, op_type, source_actor, applied_at) \
          VALUES (?1, 'record', ?2, ?3)",
         params![rid, source_actor, applied_at],
     );
+    let mut synthesis_changes = SynthesisStateChanges::default();
+    if inserted > 0 && synthesis_verified {
+        let descriptor = synthesis.as_ref().expect("verified synthesis descriptor");
+        let (winner, superseded) =
+            YantrikDB::refold_synthesis_generations_in_tx(&tx, namespace, &descriptor.logical_key)?;
+        for previous_rid in &superseded {
+            synthesis_changes
+                .invalidated
+                .extend(YantrikDB::invalidate_synthesis_dependents_in_tx(
+                    &tx,
+                    previous_rid,
+                )?);
+        }
+        synthesis_changes.superseded.extend(superseded);
+        if winner.as_deref() == Some(rid) {
+            synthesis_changes.verified.push(rid.to_string());
+        }
+    }
+    synthesis_changes.merge(reverify_synthesis_dependents_in_tx(&tx, rid)?);
+    tx.commit()?;
 
     // Note: we can't insert into the HNSW vec index without the actual embedding data.
     // The oplog only stores the embedding_hash. The rebuild_vec_index() function
     // can be used as fallback to rebuild the index from the memories table.
 
-    Ok(())
+    Ok(synthesis_changes)
 }
 
 /// Materialize a "relate" op: LWW on (src, dst, rel_type), higher HLC wins.
@@ -752,36 +1059,60 @@ fn materialize_relate(conn: &Connection, payload: &serde_json::Value) -> Result<
 }
 
 /// Materialize a "forget" op: tombstone always wins.
-fn materialize_forget(conn: &Connection, payload: &serde_json::Value) -> Result<()> {
+fn materialize_forget(conn: &Connection, payload: &serde_json::Value) -> Result<Vec<String>> {
     let rid = payload["rid"].as_str().unwrap_or_default();
-    let updated_at = payload["updated_at"].as_f64().unwrap_or(0.0);
+    let updated_at = payload["updated_at"]
+        .as_f64()
+        .or_else(|| {
+            payload["updated_at_unix_micros"]
+                .as_f64()
+                .map(|micros| micros / 1_000_000.0)
+        })
+        .unwrap_or(0.0);
 
     if rid.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
 
+    let tx = conn.unchecked_transaction()?;
     // Tombstone always wins — even if the memory doesn't exist locally yet
-    conn.execute(
+    tx.execute(
         "UPDATE memories SET consolidation_status = 'tombstoned', updated_at = ?1 WHERE rid = ?2",
         params![updated_at, rid],
     )?;
 
+    let invalidated_syntheses: Vec<String> = {
+        let mut stmt = tx.prepare(
+            "UPDATE memories SET synthesis_state = 'invalidated' \
+             WHERE synthesis_state = 'verified' \
+               AND rid IN ( \
+                   SELECT synthesis_rid FROM synthesis_dependencies \
+                   WHERE namespace = (SELECT namespace FROM memories WHERE rid = ?1) \
+                     AND source_rid = ?1 \
+               ) \
+             RETURNING rid",
+        )?;
+        let rows = stmt.query_map(params![rid], |row| row.get(0))?;
+        rows.collect::<std::result::Result<_, _>>()?
+    };
+
     // **Issue #48.** Replay the link-status transition the leader applied
     // in tombstone_inner so followers' record_links stay in lockstep.
-    conn.execute(
+    tx.execute(
         "UPDATE record_links SET status = 'broken_source_forgotten' \
          WHERE source_rid = ?1 AND status = 'active'",
         params![rid],
     )?;
-    conn.execute(
+    tx.execute(
         "UPDATE record_links SET status = 'broken_target_forgotten' \
          WHERE target_rid = ?1 AND status = 'active'",
         params![rid],
     )?;
+    tx.commit()?;
 
     // HNSW vec index removal is handled by the materialize_op dispatcher
 
-    Ok(())
+    Ok(invalidated_syntheses)
 }
 
 /// Materialize a "consolidate" op: insert into consolidation_members (set-union).
@@ -800,6 +1131,7 @@ fn materialize_consolidate(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    let additive = payload["additive"].as_bool().unwrap_or(false);
 
     if consolidated_rid.is_empty() || source_rids.is_empty() {
         return Ok(());
@@ -807,7 +1139,11 @@ fn materialize_consolidate(
 
     // Also materialize the consolidated memory itself if present in payload
     let text = payload["text"].as_str().unwrap_or("");
-    if !text.is_empty() {
+    if !text.is_empty()
+        && !payload
+            .get("synthesis")
+            .is_some_and(|value| !value.is_null())
+    {
         let importance = payload["importance"].as_f64().unwrap_or(0.5);
         let valence = payload["valence"].as_f64().unwrap_or(0.0);
         let half_life = payload["half_life"].as_f64().unwrap_or(604800.0);
@@ -855,14 +1191,16 @@ fn materialize_consolidate(
         )?;
 
         // Mark source memories as consolidated (if they exist locally)
-        conn.execute(
-            "UPDATE memories \
-             SET consolidation_status = 'consolidated', \
-                 consolidated_into = ?1, \
-                 importance = importance * 0.3 \
-             WHERE rid = ?2 AND consolidation_status = 'active'",
-            params![consolidated_rid, source_rid],
-        )?;
+        if !additive {
+            conn.execute(
+                "UPDATE memories \
+                 SET consolidation_status = 'consolidated', \
+                     consolidated_into = ?1, \
+                     importance = importance * 0.3 \
+                 WHERE rid = ?2 AND consolidation_status = 'active'",
+                params![consolidated_rid, source_rid],
+            )?;
+        }
     }
 
     Ok(())
@@ -1499,6 +1837,366 @@ mod tests {
     }
     fn ops_of(db: &YantrikDB) -> Vec<OplogEntry> {
         extract_ops_since(&db.conn(), None, None, None, 100).unwrap()
+    }
+
+    #[test]
+    fn synthesis_replication_verifies_complete_evidence_and_fails_closed_out_of_order() {
+        let origin = YantrikDB::new_with_actor(":memory:", 8, "origin").unwrap();
+        let source_rids = [
+            rec(&origin, "first evidence"),
+            rec(&origin, "second evidence"),
+        ];
+        let synthesis = crate::consolidate::record_synthesis(
+            &origin,
+            &source_rids,
+            "combined item",
+            Some(&vec_seed(3.0, 8)),
+            "asked",
+            "atomic",
+            &empty_meta(),
+            "synth:replication:item-1",
+        )
+        .unwrap();
+        let synthesis_rid = synthesis["consolidated_rid"].as_str().unwrap();
+        let origin_ops = ops_of(&origin);
+        let consolidate_op = origin_ops
+            .iter()
+            .find(|op| op.op_type == "consolidate")
+            .unwrap()
+            .clone();
+        let record_ops: Vec<OplogEntry> = origin_ops
+            .into_iter()
+            .filter(|op| op.op_type == "record")
+            .collect();
+        let synthesis_op = record_ops
+            .iter()
+            .find(|op| op.payload["rid"] == synthesis_rid)
+            .unwrap()
+            .clone();
+
+        let complete = YantrikDB::new_with_actor(":memory:", 8, "complete").unwrap();
+        apply_ops(&complete, &record_ops).unwrap();
+        let complete_state: String = complete
+            .conn()
+            .query_row(
+                "SELECT synthesis_state FROM memories WHERE rid = ?1",
+                params![synthesis_rid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(complete_state, "verified");
+        {
+            let cache = complete.scoring_cache.read();
+            let row = cache.get(synthesis_rid).unwrap();
+            assert_eq!(row.synthesis_axis.as_deref(), Some("asked"));
+            assert_eq!(row.synthesis_granularity.as_deref(), Some("atomic"));
+        }
+        assert_eq!(
+            complete
+                .stats(None)
+                .unwrap()
+                .synthesis_fanout_current_high_water,
+            1
+        );
+        let dependency_count: i64 = complete
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM synthesis_dependencies WHERE synthesis_rid = ?1",
+                params![synthesis_rid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(dependency_count, 2);
+        apply_ops(&complete, &[consolidate_op]).unwrap();
+        for source_rid in &source_rids {
+            let status: String = complete
+                .conn()
+                .query_row(
+                    "SELECT consolidation_status FROM memories WHERE rid = ?1",
+                    params![source_rid],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(
+                status, "active",
+                "additive synthesis must not retire evidence"
+            );
+        }
+
+        let out_of_order = YantrikDB::new_with_actor(":memory:", 8, "out-of-order").unwrap();
+        apply_ops(&out_of_order, &[synthesis_op.clone()]).unwrap();
+        let out_of_order_state: String = out_of_order
+            .conn()
+            .query_row(
+                "SELECT synthesis_state FROM memories WHERE rid = ?1",
+                params![synthesis_rid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(out_of_order_state, "unverified");
+        assert_eq!(
+            out_of_order
+                .stats(None)
+                .unwrap()
+                .synthesis_fanout_current_high_water,
+            0,
+            "unverified out-of-order synthesis must not consume current fan-out"
+        );
+        let source_ops: Vec<OplogEntry> = record_ops
+            .iter()
+            .filter(|op| op.payload["rid"] != synthesis_rid)
+            .cloned()
+            .collect();
+        apply_ops(&out_of_order, &source_ops).unwrap();
+        let promoted_state: String = out_of_order
+            .conn()
+            .query_row(
+                "SELECT synthesis_state FROM memories WHERE rid = ?1",
+                params![synthesis_rid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(promoted_state, "verified");
+        {
+            let cache = out_of_order.scoring_cache.read();
+            let row = cache.get(synthesis_rid).unwrap();
+            assert_eq!(row.synthesis_state.as_deref(), Some("verified"));
+            assert_eq!(row.synthesis_axis.as_deref(), Some("asked"));
+            assert_eq!(row.synthesis_granularity.as_deref(), Some("atomic"));
+        }
+        assert_eq!(
+            out_of_order
+                .stats(None)
+                .unwrap()
+                .synthesis_fanout_current_high_water,
+            1,
+            "promotion after evidence arrival must consume current fan-out"
+        );
+
+        let malformed_target = YantrikDB::new_with_actor(":memory:", 8, "malformed").unwrap();
+        let malformed_rid = crate::id::new_id();
+        let mut malformed_op = synthesis_op;
+        malformed_op.op_id = crate::id::new_id();
+        malformed_op.target_rid = Some(malformed_rid.clone());
+        malformed_op.payload["rid"] = serde_json::json!(malformed_rid);
+        malformed_op.payload["synthesis"]["dependencies"] = serde_json::json!([]);
+        apply_ops(&malformed_target, &[malformed_op]).unwrap();
+        let malformed_state: String = malformed_target
+            .conn()
+            .query_row(
+                "SELECT synthesis_state FROM memories WHERE rid = ?1",
+                params![malformed_rid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(malformed_state, "unverified");
+        let malformed_dependency_count: i64 = malformed_target
+            .conn()
+            .query_row(
+                "SELECT COUNT(*) FROM synthesis_dependencies WHERE synthesis_rid = ?1",
+                params![malformed_rid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(malformed_dependency_count, 0);
+
+        let corrected = YantrikDB::new_with_actor(":memory:", 8, "corrected").unwrap();
+        apply_ops(&corrected, &record_ops).unwrap();
+        assert_eq!(
+            corrected
+                .stats(None)
+                .unwrap()
+                .synthesis_fanout_current_high_water,
+            1
+        );
+        origin
+            .correct(
+                &source_rids[1],
+                None,
+                Some(&serde_json::json!({"corrected": true})),
+                None,
+                None,
+                "replicated source correction",
+            )
+            .unwrap();
+        let correct_op = ops_of(&origin)
+            .into_iter()
+            .find(|op| op.op_type == "correct" && op.payload["rid"] == source_rids[1])
+            .unwrap();
+        apply_ops(&corrected, &[correct_op]).unwrap();
+        assert_eq!(
+            corrected
+                .stats(None)
+                .unwrap()
+                .synthesis_fanout_current_high_water,
+            0,
+            "replicated correction must release current fan-out"
+        );
+
+        origin.forget(&source_rids[0]).unwrap();
+        let forget_op = ops_of(&origin)
+            .into_iter()
+            .find(|op| op.op_type == "forget" && op.payload["rid"] == source_rids[0])
+            .unwrap();
+        apply_ops(&complete, &[forget_op]).unwrap();
+        let invalidated_state: String = complete
+            .conn()
+            .query_row(
+                "SELECT synthesis_state FROM memories WHERE rid = ?1",
+                params![synthesis_rid],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(invalidated_state, "invalidated");
+        assert_eq!(
+            complete
+                .stats(None)
+                .unwrap()
+                .synthesis_fanout_current_high_water,
+            0,
+            "replicated forget must release current fan-out"
+        );
+    }
+
+    #[test]
+    fn synthesis_replication_refolds_logical_generations_independent_of_arrival_order() {
+        let origin = YantrikDB::new_with_actor(":memory:", 8, "origin").unwrap();
+        let source_rids = [
+            rec(&origin, "first evidence"),
+            rec(&origin, "later evidence"),
+        ];
+        let first = crate::consolidate::record_synthesis(
+            &origin,
+            &source_rids[..1],
+            "topic from first evidence",
+            Some(&vec_seed(3.0, 8)),
+            "topic",
+            "rollup",
+            &empty_meta(),
+            "synth:replication:logical-topic",
+        )
+        .unwrap();
+        let second = crate::consolidate::record_synthesis(
+            &origin,
+            &source_rids,
+            "topic with later evidence",
+            Some(&vec_seed(3.0, 8)),
+            "topic",
+            "rollup",
+            &empty_meta(),
+            "synth:replication:logical-topic",
+        )
+        .unwrap();
+        let first_rid = first["consolidated_rid"].as_str().unwrap();
+        let second_rid = second["consolidated_rid"].as_str().unwrap();
+        let ops = ops_of(&origin);
+        let source_ops: Vec<_> = ops
+            .iter()
+            .filter(|op| {
+                op.op_type == "record"
+                    && source_rids
+                        .iter()
+                        .any(|rid| op.payload["rid"].as_str() == Some(rid))
+            })
+            .cloned()
+            .collect();
+        let first_op = ops
+            .iter()
+            .find(|op| op.op_type == "record" && op.payload["rid"] == first_rid)
+            .unwrap()
+            .clone();
+        let second_op = ops
+            .iter()
+            .find(|op| op.op_type == "record" && op.payload["rid"] == second_rid)
+            .unwrap()
+            .clone();
+
+        for synthesis_ops in [
+            vec![first_op.clone(), second_op.clone()],
+            vec![second_op, first_op],
+        ] {
+            let replica = YantrikDB::new_with_actor(":memory:", 8, "replica").unwrap();
+            apply_ops(&replica, &source_ops).unwrap();
+            apply_ops(&replica, &synthesis_ops).unwrap();
+
+            let state = |rid: &str| -> String {
+                replica
+                    .conn()
+                    .query_row(
+                        "SELECT synthesis_state FROM memories WHERE rid = ?1",
+                        params![rid],
+                        |row| row.get(0),
+                    )
+                    .unwrap()
+            };
+            assert_eq!(state(first_rid), "superseded");
+            assert_eq!(state(second_rid), "verified");
+            assert_eq!(
+                replica
+                    .audit_synthesis_evidence(None, 10)
+                    .unwrap()
+                    .duplicate_logical_key_group_count,
+                0
+            );
+        }
+    }
+
+    #[test]
+    fn replicated_synthesis_converges_over_local_fanout_cap_and_is_observable() {
+        let origin = YantrikDB::new_with_actor(":memory:", 8, "fanout-origin").unwrap();
+        origin.set_synthesis_fanout_cap(2).unwrap();
+        let source_rid = rec(&origin, "shared evidence");
+        for index in 1..=2 {
+            crate::consolidate::record_synthesis(
+                &origin,
+                std::slice::from_ref(&source_rid),
+                &format!("origin synthesis {index}"),
+                Some(&vec_seed(index as f32 + 1.0, 8)),
+                "asked",
+                "atomic",
+                &empty_meta(),
+                &format!("synth:replicated-fanout:{index}"),
+            )
+            .unwrap();
+        }
+
+        let follower = YantrikDB::new_with_actor(":memory:", 8, "fanout-follower").unwrap();
+        follower.set_synthesis_fanout_cap(1).unwrap();
+        apply_ops(&follower, &ops_of(&origin)).unwrap();
+
+        let stats = follower.stats(None).unwrap();
+        assert_eq!(stats.synthesis_fanout_cap, 1);
+        assert_eq!(stats.synthesis_fanout_current_high_water, 2);
+        assert_eq!(stats.synthesis_fanout_sources_at_cap, 0);
+        assert_eq!(stats.synthesis_fanout_sources_over_cap, 1);
+        assert_eq!(stats.synthesis_fanout_refused_since_boot, 0);
+
+        let error = crate::consolidate::record_synthesis(
+            &follower,
+            std::slice::from_ref(&source_rid),
+            "local synthesis must wait",
+            Some(&vec_seed(5.0, 8)),
+            "asked",
+            "atomic",
+            &empty_meta(),
+            "synth:replicated-fanout:local",
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error,
+            crate::error::YantrikDbError::SynthesisFanoutLimit {
+                current: 2,
+                limit: 1,
+                ..
+            }
+        ));
+        assert_eq!(
+            follower
+                .stats(None)
+                .unwrap()
+                .synthesis_fanout_refused_since_boot,
+            1
+        );
     }
 
     #[test]
