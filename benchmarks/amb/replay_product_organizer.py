@@ -42,6 +42,10 @@ _load_workspace_module(
     "memory_bench.memory.topic_card_presentation",
     _HERE / "topic_card_presentation.py",
 )
+_load_workspace_module(
+    "memory_bench.memory.temporal_summary_intent",
+    _HERE / "temporal_summary_intent.py",
+)
 _ORGANIZER_MODULE = _load_workspace_module(
     "memory_bench.memory._global_organizer_probe",
     _HERE / "global_organizer_probe.py",
@@ -52,6 +56,14 @@ _PROVIDER_MODULE = _load_workspace_module(
 )
 Provider = _PROVIDER_MODULE.YantrikDBWriteTimeSynthesisMemoryProvider
 RawFirstProvider = _PROVIDER_MODULE.YantrikDBRawFirstOrganizerMemoryProvider
+TemporalSummaryProvider = (
+    _PROVIDER_MODULE.YantrikDBTemporalSummaryOrganizerMemoryProvider
+)
+_ORGANIZER_RETRIEVAL_MODES = {
+    "raw-first-summaries": RawFirstProvider,
+    "temporal-summary-organizer": TemporalSummaryProvider,
+}
+_RAW_SOURCE_MODE = "raw-source"
 
 
 def _artifact_plan(atomics: list[dict], artifact: dict) -> tuple[OrganizationPlan, str]:
@@ -120,7 +132,7 @@ def main() -> int:
     parser.add_argument("--skip-persist", action="store_true")
     parser.add_argument(
         "--retrieval-mode",
-        choices=("organized", "raw-first-summaries"),
+        choices=("organized", _RAW_SOURCE_MODE, *_ORGANIZER_RETRIEVAL_MODES),
         default="organized",
     )
     parser.add_argument("--out", type=Path)
@@ -130,7 +142,10 @@ def main() -> int:
         if args.top_k is not None
         else (
             _PROVIDER_MODULE._RAW_FIRST_ORGANIZER_TOP_K
-            if args.retrieval_mode == "raw-first-summaries"
+            if args.retrieval_mode in {
+                _RAW_SOURCE_MODE,
+                *_ORGANIZER_RETRIEVAL_MODES,
+            }
             else 40
         )
     )
@@ -142,11 +157,11 @@ def main() -> int:
     atomics = _ORGANIZER_MODULE._load_atomics(db_path)
     plan, digest = _artifact_plan(atomics, artifact)
 
-    provider = (
-        RawFirstProvider()
-        if args.retrieval_mode == "raw-first-summaries"
-        else Provider()
+    provider_class = _ORGANIZER_RETRIEVAL_MODES.get(
+        args.retrieval_mode,
+        RawFirstProvider if args.retrieval_mode == _RAW_SOURCE_MODE else Provider,
     )
+    provider = provider_class()
     provider.prepare(args.store, {args.unit}, False)
     output = []
     try:
@@ -171,7 +186,34 @@ def main() -> int:
             and query.meta.get("question_category") in categories
         ]
         for query in queries:
-            if args.retrieval_mode == "raw-first-summaries":
+            if args.retrieval_mode == _RAW_SOURCE_MODE:
+                raw_hits = provider._recall_source(
+                    query.query, top_k, query.user_id
+                )
+                docs = provider._to_documents(raw_hits, query.user_id)
+                trace = {
+                    "read_time_generation": False,
+                    "selection_mode": "raw_source_control",
+                    "raw_documents": len(docs),
+                    "topic_card_documents": 0,
+                    "returned": len(docs),
+                }
+                output.append(
+                    {
+                        "query_id": query.id,
+                        "query": query.query,
+                        "gold_answers": query.gold_answers,
+                        "selection": trace,
+                        "context": "\n\n".join(
+                            f"## Memory {index}\n{doc.content}"
+                            for index, doc in enumerate(docs, 1)
+                        ),
+                        "documents": [doc.content for doc in docs],
+                    }
+                )
+                print(f"{query.id}: raw={len(docs)} returned={len(docs)}")
+                continue
+            if args.retrieval_mode in _ORGANIZER_RETRIEVAL_MODES:
                 docs, trace = provider.retrieve(
                     query.query, top_k, query.user_id
                 )

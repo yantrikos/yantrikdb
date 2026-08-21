@@ -442,6 +442,19 @@ YDB_BENCH_TURN_AWARE=1 YDB_BENCH_TOPK=40 \
 # the unresolved failure is selecting the rubric's five milestones from many
 # semantically valid milestones inside the same concern.
 
+# Query-9 concern-transfer result (2026-08-21): a fresh DeepSeek answer over
+# the frozen ydb-0151 context of 40 retrieved excerpts (18,680 tokens) again
+# chose five plausible generic refinement milestones and received three judge
+# votes of 0.0. Replaying the same query through the persisted concern-thread
+# selector returned five source-backed items (484 tokens); the identical
+# answerer named the exact Bryan -> Shawn -> Bryan -> Matthew -> Matthew
+# sequence and received three judge votes of 1.0. The companion family-support
+# query also scored 1.0 on all three votes from five selected concern items.
+# This is a two-query mechanism result, not a full-category score claim. It
+# isolates query-dependent item selection and representation as the Q9 gap:
+# adding more raw evidence or another ordering pass does not choose the
+# canonical five-item concern thread.
+
 # Full event-ordering results (40 queries, 2026-08-19):
 #   baseline                              0.2817
 #   global synthesis, chronological input 0.2535

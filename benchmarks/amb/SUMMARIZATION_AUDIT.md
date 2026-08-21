@@ -190,3 +190,30 @@ raw-only on a gate miss, raw followed by every persisted dated card on a match,
 and a trace containing the classifier evidence. This is a defensible narrow
 win, but the four-query intent cohort is small and should be expanded on an
 independent dataset before making it a default runtime policy.
+
+## Public-API Transfer And Storage Bounds
+
+The four gated queries were then replayed from disposable copies of the live
+unit-18 and unit-20 stores through public `persist_organization` and the actual
+`yantrikdb-temporal-summary-organizer` provider. The treatment's raw prefix was
+byte-for-byte identical to a same-store current-version raw control, and its
+card suffix matched the bounded organizer artifact presentation exactly.
+
+The paired repeated-judge run scored `0.8042` for the product provider versus
+`0.6479` for its raw control: mean delta `+0.1563`, three wins, one tie, no
+losses, and bootstrap 95% CI `[+0.0500, +0.2563]`. The per-query deltas were
+`+0.2000`, `0.0000`, `+0.1250`, and `+0.3000`. This transfers the temporal
+summary mechanism through real persistence and retrieval rather than relying
+on frozen context concatenation.
+
+That replay also exposed a contract defect in the probe artifacts. The public
+API admits at most 12 evidence items per handle and three handle memberships
+per evidence item, but the 20 generated artifacts contained 25 overfull
+handles, 33 overmembered evidence IDs, one 102-evidence handle, and 16 exact
+duplicate handles in unit 20. The probe now applies deterministic final bounds:
+duplicate stable identities are removed, narrower handles win membership
+contention, overfull handles retain a temporally stratified sample, and any
+dropped sole assignments become source-preserving singleton handles. The
+bounded unit-18 and unit-20 artifacts persisted without invalid references or
+unassigned evidence. These bounds are a storage-compatibility repair, not a new
+score mechanism.

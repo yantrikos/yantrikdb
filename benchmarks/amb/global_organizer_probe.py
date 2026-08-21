@@ -206,6 +206,107 @@ def _normalize_handles(
     return normalized, sorted(set(misplaced_anchor_ids))
 
 
+def _enforce_organization_bounds(
+    handles: list[dict],
+    known: dict[str, dict],
+    max_evidence_per_handle: int = 12,
+    max_handle_memberships: int = 3,
+) -> dict:
+    """Make model-discovered handles compatible with the public organizer API."""
+    if max_evidence_per_handle < 1 or max_handle_memberships < 1:
+        raise ValueError("organization bounds must be positive")
+    valid_ids = set(known)
+    deduplicated = []
+    seen_handles = set()
+    for handle in handles:
+        identity = (
+            handle.get("label") or "",
+            tuple(sorted(handle.get("evidence_ids") or [])),
+        )
+        if identity in seen_handles:
+            continue
+        seen_handles.add(identity)
+        deduplicated.append(handle)
+    duplicate_handles_removed = len(handles) - len(deduplicated)
+    handles[:] = deduplicated
+    source_order = {evidence_id: index for index, evidence_id in enumerate(known)}
+    original_sizes = [
+        sum(evidence_id in valid_ids for evidence_id in handle["evidence_ids"])
+        for handle in handles
+    ]
+    owners: dict[str, list[int]] = {}
+    for handle_index, handle in enumerate(handles):
+        for evidence_id in handle["evidence_ids"]:
+            if evidence_id in valid_ids:
+                owners.setdefault(evidence_id, []).append(handle_index)
+
+    permitted_owners = {
+        evidence_id: set(
+            sorted(
+                handle_indexes,
+                key=lambda index: (original_sizes[index], index),
+            )[:max_handle_memberships]
+        )
+        for evidence_id, handle_indexes in owners.items()
+    }
+    membership_references_removed = 0
+    capacity_references_removed = 0
+    dropped_ids = set()
+    bounded = []
+    for handle_index, handle in enumerate(handles):
+        valid = [
+            evidence_id
+            for evidence_id in handle["evidence_ids"]
+            if evidence_id in valid_ids
+            and handle_index in permitted_owners[evidence_id]
+        ]
+        membership_references_removed += sum(
+            evidence_id in valid_ids
+            and handle_index not in permitted_owners[evidence_id]
+            for evidence_id in handle["evidence_ids"]
+        )
+        if len(valid) > max_evidence_per_handle:
+            ordered = sorted(valid, key=source_order.__getitem__)
+            indexes = [
+                round(index * (len(ordered) - 1) / (max_evidence_per_handle - 1))
+                if max_evidence_per_handle > 1
+                else 0
+                for index in range(max_evidence_per_handle)
+            ]
+            selected = {ordered[index] for index in indexes}
+            capacity_references_removed += len(valid) - len(selected)
+            dropped_ids.update(set(valid) - selected)
+            valid = [evidence_id for evidence_id in ordered if evidence_id in selected]
+        invalid = [
+            evidence_id
+            for evidence_id in handle["evidence_ids"]
+            if evidence_id not in valid_ids
+        ]
+        evidence_ids = [*valid, *invalid]
+        if evidence_ids:
+            handle["evidence_ids"] = evidence_ids
+            bounded.append(handle)
+    empty_handles_removed = len(handles) - len(bounded)
+    handles[:] = bounded
+    return {
+        "mode": "public_organizer_bounds_v1",
+        "max_evidence_per_handle": max_evidence_per_handle,
+        "max_handle_memberships": max_handle_memberships,
+        "duplicate_handles_removed": duplicate_handles_removed,
+        "overfull_handles_before": sum(
+            size > max_evidence_per_handle for size in original_sizes
+        ),
+        "overmembered_evidence_before": sum(
+            len(handle_indexes) > max_handle_memberships
+            for handle_indexes in owners.values()
+        ),
+        "membership_references_removed": membership_references_removed,
+        "capacity_references_removed": capacity_references_removed,
+        "dropped_evidence_ids": sorted(dropped_ids),
+        "empty_handles_removed": empty_handles_removed,
+    }
+
+
 def _apply_assignments(
     handles: list[dict],
     assignments: list[dict],
@@ -542,6 +643,7 @@ def main() -> int:
     }
     raw_response = None
     response_recovery = None
+    organization_bounds = None
     prior_singleton_fallback_ids = []
     prior_rejected_invalid_ids = []
     if args.resume_artifact:
@@ -689,6 +791,7 @@ def main() -> int:
             "singleton_fallback_count": len(singleton_fallback_ids),
             "singleton_fallback_evidence_ids": singleton_fallback_ids,
             "response_recovery": response_recovery,
+            "organization_bounds": organization_bounds,
             "input_items": artifact_rows,
             "handles": handles,
         }
@@ -957,11 +1060,23 @@ def main() -> int:
         )
         write_checkpoint()
 
+    organization_bounds = _enforce_organization_bounds(handles, known)
+    assigned_ids = {
+        evidence_id
+        for handle in handles
+        for evidence_id in handle.get("evidence_ids", [])
+        if evidence_id in known
+    }
+    unassigned_ids = sorted(set(known) - assigned_ids)
+
     if unassigned_ids and args.complete_singletons:
-        singleton_fallback_ids = _complete_singleton_handles(
+        new_singleton_fallback_ids = _complete_singleton_handles(
             handles, known, unassigned_ids
         )
-        assigned_ids.update(singleton_fallback_ids)
+        singleton_fallback_ids = sorted(
+            set(singleton_fallback_ids).union(new_singleton_fallback_ids)
+        )
+        assigned_ids.update(new_singleton_fallback_ids)
         unassigned_ids = sorted(set(known) - assigned_ids)
 
     write_checkpoint()

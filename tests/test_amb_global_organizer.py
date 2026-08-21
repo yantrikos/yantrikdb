@@ -9,6 +9,7 @@ from benchmarks.amb.global_organizer_probe import (
     _complete_singleton_handles,
     _discovered_handle_count,
     _drop_invalid_evidence_ids,
+    _enforce_organization_bounds,
     _normalize_handles,
     _recover_truncated_handles,
     _require_top_level_key,
@@ -88,6 +89,49 @@ def test_normalize_handles_removes_evidence_ids_from_anchor_entities():
     assert handles[0]["anchor_entities"] == ["Carla"]
     assert handles[0]["evidence_ids"] == ["A0001", "A0002"]
     assert misplaced == ["A0001"]
+
+
+def test_enforce_organization_bounds_prefers_specific_handles_and_spans_time():
+    known = {f"A{index:02d}": {} for index in range(1, 21)}
+    handles = [
+        {
+            "label": "broad",
+            "evidence_ids": list(known),
+        },
+        {"label": "specific-1", "evidence_ids": ["A01", "A02"]},
+        {"label": "specific-2", "evidence_ids": ["A01", "A03"]},
+        {"label": "specific-3", "evidence_ids": ["A01", "A04"]},
+    ]
+
+    trace = _enforce_organization_bounds(
+        handles,
+        known,
+        max_evidence_per_handle=4,
+        max_handle_memberships=3,
+    )
+
+    assert "A01" not in handles[0]["evidence_ids"]
+    assert handles[0]["evidence_ids"] == ["A02", "A08", "A14", "A20"]
+    assert all(len(handle["evidence_ids"]) <= 4 for handle in handles)
+    memberships = sum("A01" in handle["evidence_ids"] for handle in handles)
+    assert memberships == 3
+    assert trace["overfull_handles_before"] == 1
+    assert trace["overmembered_evidence_before"] == 1
+    assert trace["membership_references_removed"] == 1
+    assert trace["capacity_references_removed"] == 15
+
+
+def test_enforce_organization_bounds_removes_duplicate_stable_handle_identity():
+    handles = [
+        {"label": "Writing", "summary": "first", "evidence_ids": ["A1", "A2"]},
+        {"label": "Writing", "summary": "second", "evidence_ids": ["A2", "A1"]},
+    ]
+
+    trace = _enforce_organization_bounds(handles, {"A1": {}, "A2": {}})
+
+    assert len(handles) == 1
+    assert handles[0]["summary"] == "first"
+    assert trace["duplicate_handles_removed"] == 1
 
 
 def test_require_top_level_key_rejects_nested_partial_json():
