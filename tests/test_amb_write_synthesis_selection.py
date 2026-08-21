@@ -1,4 +1,5 @@
 from benchmarks.amb.write_synthesis_selection import (
+    cap_temporal_span_items,
     deduplicate_thread_items,
     is_relationship_role_timeline,
     is_relationship_support_query,
@@ -6,6 +7,28 @@ from benchmarks.amb.write_synthesis_selection import (
     select_entity_timeline_children,
     select_relationship_support_children,
 )
+
+
+def test_temporal_span_caps_apply_before_flattening():
+    extracted = {
+        "q1_items": ["early-1", "early-2", "early-overflow"],
+        "q2_items": ["middle-1", "middle-2", "middle-overflow"],
+        "q3_items": ["late-1", "late-2", "late-overflow"],
+        "q4_items": "malformed",
+    }
+
+    capped = cap_temporal_span_items(
+        extracted,
+        ["q1_items", "q2_items", "q3_items", "q4_items"],
+        per_span_target=2,
+    )
+
+    assert capped == {
+        "q1_items": ["early-1", "early-2"],
+        "q2_items": ["middle-1", "middle-2"],
+        "q3_items": ["late-1", "late-2"],
+        "q4_items": [],
+    }
 
 
 def _hit(

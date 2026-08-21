@@ -45,6 +45,7 @@ from ..utils import chunk_text, count_tokens
 from .base import MemoryProvider
 from .chronological_presentation import chronological_hit_key
 from .write_synthesis_selection import (
+    cap_temporal_span_items,
     deduplicate_thread_items,
     is_relationship_role_timeline,
     is_relationship_support_query,
@@ -1583,14 +1584,13 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
         extracted_by_span: dict[str, list] = {}
         for sample_index in range(_SYNTH_SAMPLES):
             extracted = llm.generate(extract_prompt, extract_schema)
-            extracted_by_span = {
-                key: (
-                    extracted.get(key, [])[:per_span_target]
-                    if span_keys and isinstance(extracted.get(key, []), list)
-                    else extracted.get(key, [])
+            extracted_by_span = (
+                cap_temporal_span_items(
+                    extracted, span_keys, per_span_target
                 )
-                for key in extract_keys
-            }
+                if span_keys
+                else {"items": extracted.get("items", [])}
+            )
             extracted_items = [
                 item
                 for key in extract_keys
@@ -2062,6 +2062,13 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
             "span_candidate_counts": {
                 key: len(value) if isinstance(value, list) else 0
                 for key, value in extracted_by_span.items()
+            },
+            "evidence_block_turns": {
+                block_id: sorted({
+                    int(turn)
+                    for turn in _TURN_RE.findall(text)
+                })
+                for block_id, text in block_texts.items()
             },
             "results": [
                 {

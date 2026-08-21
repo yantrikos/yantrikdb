@@ -34,6 +34,27 @@ _THREAD_DEDUP_STOPWORDS = {
 }
 
 
+def cap_temporal_span_items(
+    extracted: dict,
+    span_keys: list[str],
+    per_span_target: int,
+) -> dict[str, list]:
+    """Apply each temporal quota before spans are flattened.
+
+    Structured model output can exceed the requested array size. Capping only
+    after concatenation lets early arrays consume the global item budget and
+    silently removes late-session evidence.
+    """
+    return {
+        key: (
+            value[:per_span_target]
+            if isinstance((value := extracted.get(key)), list)
+            else []
+        )
+        for key in span_keys
+    }
+
+
 def is_relationship_support_query(query: str) -> bool:
     """Return true only when both relationship and support intent are explicit."""
     return bool(
