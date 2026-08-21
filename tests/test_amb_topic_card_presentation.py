@@ -1,7 +1,13 @@
+import pytest
+
 from benchmarks.amb.topic_card_presentation import (
     load_persisted_topic_cards,
     topic_card_document,
 )
+from yantrikdb import (
+    load_persisted_topic_cards as public_load_persisted_topic_cards,
+)
+from yantrikdb import topic_card_document as public_topic_card_document
 
 
 def _topic(rid, label="Writing", summary="Revised the draft."):
@@ -51,6 +57,27 @@ def test_topic_card_document_carries_storage_dates_and_turn_bounds():
     )
 
 
+def test_benchmark_path_reexports_public_topic_card_api():
+    assert load_persisted_topic_cards is public_load_persisted_topic_cards
+    assert topic_card_document is public_topic_card_document
+
+
+def test_topic_card_document_ignores_invalid_chronology_metadata():
+    record = _topic("topic")
+    record["metadata"].update(
+        {
+            "first_mention_at": float("nan"),
+            "evidence_span_end_at": float("inf"),
+            "organizer_evidence_timeline": [
+                {"first_mention_turn": "unknown"},
+                {"first_mention_turn": -1},
+            ],
+        }
+    )
+
+    assert topic_card_document(record) == "Topic: Writing\nRevised the draft."
+
+
 def test_load_persisted_topic_cards_pages_orders_and_deduplicates():
     db = _PagedDB()
 
@@ -66,3 +93,12 @@ def test_load_persisted_topic_cards_pages_orders_and_deduplicates():
         "duplicate_cards_removed": 1,
         "cards_returned": 2,
     }
+
+
+def test_load_persisted_topic_cards_rejects_non_advancing_cursor():
+    class StalledDB:
+        def list_records(self, **kwargs):
+            return {"records": [], "next_cursor": "same"}
+
+    with pytest.raises(RuntimeError, match="non-advancing cursor"):
+        load_persisted_topic_cards(StalledDB(), page_size=1)

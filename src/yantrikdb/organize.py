@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from typing import Callable, Iterable, Mapping, Sequence
 
 from yantrikdb.consolidate import record_synthesis
@@ -321,6 +322,132 @@ def _get_for_organization(db, rid: str):
     """Read organizer evidence without emitting a downstream-use label."""
     get_memory = getattr(db, "get_memory", None)
     return get_memory(rid) if get_memory is not None else db.get(rid)
+
+
+def _organization_date(value: object) -> str | None:
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(timestamp):
+        return None
+    try:
+        return datetime.fromtimestamp(timestamp, tz=UTC).date().isoformat()
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _organization_turns(metadata: Mapping) -> list[int]:
+    values = [
+        occurrence.get("first_mention_turn")
+        for occurrence in metadata.get("organizer_evidence_timeline") or []
+        if isinstance(occurrence, Mapping)
+    ]
+    values.extend(
+        metadata.get(key)
+        for key in ("organizer_first_turn", "organizer_last_turn")
+    )
+    turns = set()
+    for value in values:
+        try:
+            turn = int(value)
+        except (TypeError, ValueError, OverflowError):
+            continue
+        if turn >= 0:
+            turns.add(turn)
+    return sorted(turns)
+
+
+def topic_card_document(record: Mapping) -> str:
+    """Render one persisted topic handle with evidence-backed chronology."""
+    metadata = record.get("metadata") or {}
+    label = str(metadata.get("organizer_label") or "Topic trajectory").strip()
+    text = str(record.get("text") or "").strip()
+    summary = str(metadata.get("organizer_summary") or "").strip()
+    if not summary:
+        prefix = f"Topic trajectory: {label}."
+        summary = text[len(prefix):].strip() if text.startswith(prefix) else text
+    if not summary:
+        return ""
+
+    first = _organization_date(metadata.get("first_mention_at"))
+    last = _organization_date(metadata.get("evidence_span_end_at"))
+    span = []
+    if first:
+        span.append(
+            f"recorded {first}"
+            if not last or first == last
+            else f"recorded {first} to {last}"
+        )
+    turns = _organization_turns(metadata)
+    if turns:
+        span.append(
+            f"turn {turns[0]}"
+            if turns[0] == turns[-1]
+            else f"turns {turns[0]}-{turns[-1]}"
+        )
+    heading = f"Topic: {label}" + (f" ({'; '.join(span)})" if span else "")
+    return f"{heading}\n{summary}"
+
+
+def load_persisted_topic_cards(
+    db, namespace: str | None = None, *, page_size: int = 500
+) -> tuple[list[dict], dict]:
+    """Enumerate every active topic handle without similarity top-k loss."""
+    if page_size < 1:
+        raise ValueError("page_size must be positive")
+
+    records = []
+    cursor = None
+    pages = 0
+    scanned = 0
+    while True:
+        page = db.list_records(
+            namespace=namespace,
+            since_rid=cursor,
+            limit=page_size,
+            order="asc",
+        )
+        pages += 1
+        page_records = page.get("records") or []
+        scanned += len(page_records)
+        records.extend(
+            record
+            for record in page_records
+            if (record.get("metadata") or {}).get("organizer_kind")
+            == "query_independent_topic"
+            or (record.get("metadata") or {}).get("thread_builder")
+            == "llm_topic_organizer_v1"
+        )
+        next_cursor = page.get("next_cursor")
+        if not next_cursor:
+            break
+        if next_cursor == cursor:
+            raise RuntimeError("list_records returned a non-advancing cursor")
+        cursor = next_cursor
+
+    records.sort(key=lambda record: str(record.get("rid") or ""))
+    cards = []
+    seen_documents = set()
+    duplicate_count = 0
+    for record in records:
+        document = topic_card_document(record)
+        if not document:
+            continue
+        if document in seen_documents:
+            duplicate_count += 1
+            continue
+        seen_documents.add(document)
+        card = dict(record)
+        card["content"] = document
+        cards.append(card)
+    return cards, {
+        "pages": pages,
+        "records_scanned": scanned,
+        "organizer_records": len(records),
+        "duplicate_cards_removed": duplicate_count,
+        "cards_returned": len(cards),
+    }
 
 
 def _evidence_occurrence(memory: Mapping, evidence_id: str) -> dict:
@@ -1233,11 +1360,13 @@ __all__ = [
     "OrganizationPlan",
     "TopicHandle",
     "assign_evidence_to_handles",
+    "load_persisted_topic_cards",
     "organize_evidence",
     "organize_concerns",
     "persist_concerns",
     "persist_organization",
     "recall_organized",
+    "topic_card_document",
     "validate_topic_handles",
     "validate_concern_items",
 ]

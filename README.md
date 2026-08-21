@@ -485,6 +485,12 @@ list and timeline queries. Its default `order="auto"` uses
 conversation, while real-world timelines use `first_mention_at` and then
 `created_at` as a fallback.
 
+For applications that need a complete consolidation checklist after their raw
+evidence, `load_persisted_topic_cards` enumerates every active topic handle by
+namespace without similarity top-k loss. `topic_card_document` renders each
+handle with its evidence-backed recorded date and turn span. This path is
+explicit: callers retain control over when the extra summary context is useful.
+
 Organized recall also records a local rollup outcome ledger. A
 surfaced rollup gets an immutable impression ID with its hashed query, rank,
 score, namespace, requested item count, and coarse query shape; expansion
