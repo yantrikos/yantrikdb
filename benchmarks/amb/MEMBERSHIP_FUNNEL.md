@@ -218,6 +218,67 @@ other literal autocomplete implementation concerns. The historical city answer
 still scores `0.7`, demonstrating that source-turn identity and rubric coverage
 can disagree in either direction.
 
+## Full-Category Organizer Membership Ceiling
+
+A later query-independent organizer audit expands the structural measurement to
+all 40 event-ordering queries and all 20 dialogue units. It uses the selected
+DeepSeek organizer artifacts that were frozen for the full summarization run.
+The query and `source_chat_ids` are withheld from organization; gold turn IDs
+are joined only after generation to measure the best source membership available
+from one, two, or three stored handles.
+
+| Available collections | Mean source-turn recall | Exact query sets | At least 80% |
+| --- | ---: | ---: | ---: |
+| One topic handle | 56.7% | 1/40 | 7/40 |
+| Two topic handles | 80.8% | 14/40 | 27/40 |
+| Three topic handles | 91.8% | 27/40 | 34/40 |
+| One topic or virtual anchor union | 68.3% | 11/40 | 16/40 |
+| Two topics or virtual anchor unions | 87.9% | 21/40 | 32/40 |
+| Three topics or virtual anchor unions | 94.9% | 31/40 | 35/40 |
+
+The report contains 230 query-level source-turn references. Virtual anchor
+unions group topic handles by their organizer-declared `anchor_entities`; they
+are an oracle hierarchy diagnostic, not a persisted or query-selected product
+arm. Report SHA-256:
+`41a31216b4a8211b8bbf13db39a1919e3c0b0cfce98ae3404a8a5c208904d077`.
+
+This moves the structural diagnosis. A single topic handle usually cannot
+represent the hidden answer partition, while a small union usually contains it.
+The remaining problem is selecting and compressing that union without admitting
+the much larger set of equally literal adjacent milestones.
+
+### Anchor-Hierarchy Rejection
+
+An opt-in two-level product prototype persisted bounded anchor collections over
+the existing Q9 and Q10 topic handles and recursively hydrated them. The local
+four-query source-identity preflight regressed from `12/22` with flat public
+organization to `9/22` with the anchor hierarchy:
+
+| Query | Flat organizer | Anchor hierarchy |
+| --- | ---: | ---: |
+| Q9 broad personal statement | 1/6 | 1/6 |
+| Q9 family support | 5/5 | 4/5 |
+| Q10 broad writing journey | 3/5 | 0/5 |
+| Q10 Carla collaboration | 3/6 | 4/6 |
+
+The prototype was removed rather than shipped. Its oracle gain did not survive
+actual handle ranking and bounded child selection. As a separate control, Q9's
+complete 69-item synthesized child pool contained every gold turn in only 2,919
+tokens, yet DeepSeek still chose the earliest generic drafting milestones and
+scored `0.2`. More evidence, recursive hydration, and anchor grouping are inert
+for the broad query unless storage first emits answer-sized cross-session
+concerns that encode the latent event thread.
+
+Reproduce the structural report with:
+
+```powershell
+python benchmarks/amb/analyze_organizer_membership.py `
+  --beam-source C:\path\to\agent-memory-benchmark\.datasets\beam\100k.json `
+  --context-artifact benchmarks/amb/artifacts/summarization-full40-topic-card-contexts-dated-v9.json `
+  --artifacts-dir benchmarks/amb/artifacts `
+  --out benchmarks/amb/artifacts/event40-organizer-membership-v1.json
+```
+
 Therefore Q9 is no longer a sound target for more retrieval expansion or prompt
 tuning, and the same stopping rule applies to similarly underidentified
 event-ordering prompts. The evidence-backed product changes to retain are
