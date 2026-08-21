@@ -1879,6 +1879,45 @@ fn existing_store_keeps_its_dimension_when_the_default_changes() {
 
 #[cfg(feature = "bundled-embedder")]
 #[test]
+fn explicit_wrong_dimension_cannot_open_an_existing_store_with_an_empty_index() {
+    use crate::embedder::BUNDLED_EMBEDDER_DIM;
+    use crate::error::YantrikDbError;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("wrong-explicit-dimension.db");
+    let p = path.to_str().unwrap();
+    {
+        let db = YantrikDB::new(p, BUNDLED_EMBEDDER_DIM).unwrap();
+        db.record_text(
+            "the deploy key is id_yantrikdb_web_deploy",
+            "semantic",
+            0.9,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    }
+
+    let wrong = BUNDLED_EMBEDDER_DIM / 2;
+    let error = match YantrikDB::new(p, wrong) {
+        Ok(_) => panic!("wrong explicit dimension unexpectedly opened the store"),
+        Err(error) => error,
+    };
+    assert!(matches!(
+        error,
+        YantrikDbError::EmbeddingDimensionMismatch { expected, got }
+            if expected == wrong && got == BUNDLED_EMBEDDER_DIM
+    ));
+}
+
+#[cfg(feature = "bundled-embedder")]
+#[test]
 fn existing_dimension_is_detected_without_an_embedder_identity() {
     // Databases whose vectors were supplied by the caller never stamp an
     // embedder identity — `record()` takes the vector directly. Those are

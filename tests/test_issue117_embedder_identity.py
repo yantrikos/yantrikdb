@@ -178,7 +178,10 @@ def test_a_recorded_identity_contradicting_the_vectors_does_not_brick_the_db(
     false_identity,
 ):
     """The CT128 regression: a false row must not be grounds for refusal."""
-    with pytest.warns(UserWarning, match="recorded identity is wrong"):
+    # Match the semantic core, not the prose: the wording of this warning has
+    # already been revised once, and a test that pins the sentence fails on
+    # edits that change nothing about the behaviour.
+    with pytest.warns(UserWarning, match="provenance is UNVERIFIED"):
         db = YantrikDB(db_path=false_identity, embedding_dim=DIM, embedder=_Hostile())
     try:
         db.record("written after attaching", namespace="n")
@@ -220,3 +223,14 @@ def test_a_consistent_identity_still_refuses(built):
         assert "vectors were built by" in str(e.value)
     finally:
         db.close()
+
+
+def test_wrong_constructor_dimension_cannot_hide_every_stored_vector(tmp_path):
+    """A caller setting is not evidence about vectors already on disk."""
+    db_path = str(tmp_path / "wrong_open_dimension.db")
+    db = YantrikDB(db_path=db_path, embedding_dim=DIM)
+    db.record("the deploy key for node4 is id_deploy", namespace="n")
+    db.close()
+
+    with pytest.raises(RuntimeError, match=rf"expected {DIM // 2}, got {DIM}"):
+        YantrikDB(db_path=db_path, embedding_dim=DIM // 2)

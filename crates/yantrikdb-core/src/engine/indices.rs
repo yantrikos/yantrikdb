@@ -2,6 +2,7 @@ use crate::encryption::EncryptionProvider;
 use crate::error::Result;
 use crate::hnsw::HnswIndex;
 use crate::serde_helpers::deserialize_f32;
+use rusqlite::OptionalExtension;
 
 use super::YantrikDB;
 
@@ -13,6 +14,9 @@ impl YantrikDB {
         enc: Option<&EncryptionProvider>,
     ) -> Result<HnswIndex> {
         let mut index = HnswIndex::new(embedding_dim);
+        let mut compatible_vectors = 0usize;
+        let mut mismatched_vectors = 0usize;
+        let mut first_mismatched_dim = None;
         let mut stmt = conn.prepare(
             // v0.10 Phase 0 determinism seam: ORDER BY rid so the rebuild
             // inserts rows in a stable order — without it, reopening the
@@ -48,6 +52,10 @@ impl YantrikDB {
             };
             if embedding.len() == embedding_dim {
                 index.insert(&rid, &embedding)?;
+                compatible_vectors += 1;
+            } else {
+                mismatched_vectors += 1;
+                first_mismatched_dim.get_or_insert(embedding.len());
             }
         }
         // Chunked embeddings: window vectors for long records, indexed
@@ -98,8 +106,28 @@ impl YantrikDB {
                 if embedding.len() == embedding_dim && idx >= 1 {
                     let key = crate::vector::chunk::chunk_key(&rid, idx as usize);
                     index.insert(&key, &embedding)?;
+                    compatible_vectors += 1;
+                } else if embedding.len() != embedding_dim {
+                    mismatched_vectors += 1;
+                    first_mismatched_dim.get_or_insert(embedding.len());
                 }
             }
+        }
+        if compatible_vectors == 0 {
+            if let Some(got) = first_mismatched_dim {
+                return Err(crate::error::YantrikDbError::EmbeddingDimensionMismatch {
+                    expected: embedding_dim,
+                    got,
+                });
+            }
+        } else if mismatched_vectors > 0 {
+            tracing::warn!(
+                expected_dim = embedding_dim,
+                first_mismatched_dim,
+                mismatched_vectors,
+                compatible_vectors,
+                "vector index rebuild skipped stored vectors with a different dimension"
+            );
         }
         // Distance-only pruning can leave a node with no incoming layer-0
         // edges — stored, active, and unfindable by any search. Found
@@ -111,6 +139,40 @@ impl YantrikDB {
             tracing::warn!(rescued, "vec index rebuild reconnected unreachable nodes");
         }
         Ok(index)
+    }
+
+    /// Decode one indexed stored vector and report its authoritative width.
+    ///
+    /// Unlike `embedding_dim()`, this value comes from durable vector bytes,
+    /// not constructor configuration or an embedder-identity claim. It is
+    /// primarily a provenance diagnostic for hosts attaching external
+    /// embedders to legacy databases.
+    pub fn stored_vector_dim(&self) -> Result<Option<usize>> {
+        let conn = self.conn.lock();
+        let blob = conn
+            .query_row(
+                "SELECT embedding FROM memories \
+                 WHERE consolidation_status IN ('active', 'consolidated') \
+                 AND storage_tier = 'hot' AND embedding IS NOT NULL \
+                 ORDER BY rid LIMIT 1",
+                [],
+                |row| row.get::<_, Vec<u8>>(0),
+            )
+            .optional()?;
+        let Some(blob) = blob else {
+            return Ok(None);
+        };
+        let raw = if let Some(enc) = self.enc.as_ref() {
+            enc.decrypt_bytes(&blob)?
+        } else {
+            blob
+        };
+        let embedding = if crate::compression::is_compressed(&raw) {
+            crate::compression::decompress_embedding(&raw)
+        } else {
+            deserialize_f32(&raw)
+        };
+        Ok(Some(embedding.len()))
     }
 
     /// Build without encryption (backward-compatible helper).

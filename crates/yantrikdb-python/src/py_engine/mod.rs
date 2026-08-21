@@ -101,13 +101,11 @@ impl PyYantrikDB {
         // vectors to `record()` never stamps an identity, but any incidental
         // `embed()` call stamps the attached model anyway.
         //
-        // `embedding_dim()` is the dimension the engine actually opened at,
-        // and `detect_existing_dim` derives that by MEASURING a stored vector
-        // whenever the file holds one. So a recorded dim that disagrees with
-        // it is not a difference of opinion — the named model cannot have
-        // produced vectors of a width it does not emit. The row is
-        // demonstrably false, and a false row carries no evidence about the
-        // embedder being attached now.
+        // `stored_vector_dim()` decodes a durable hot vector and measures its
+        // actual width. Do not substitute `embedding_dim()` here: the Python
+        // constructor accepts that value from its caller, so treating it as a
+        // measurement can turn a wrong open configuration into permission to
+        // attach an unrelated embedder.
         //
         // Refusing on it would be worse than useless: it bricks the database
         // (every call fails, lazily, after the service starts clean) on the
@@ -124,10 +122,10 @@ impl PyYantrikDB {
         // Unverified is where every pre-gate database already lived, so this
         // is no weaker than the release before it; it simply declines to
         // manufacture a verdict from a row known to be wrong. Loud, because
-        // the identity still needs repairing — see `reembed()` and the
-        // dimension reported below.
-        let measured_dim = inner.embedding_dim();
-        if recorded_dim != measured_dim {
+        // the identity still needs operator verification and repair.
+        let measured_dim = inner.stored_vector_dim().map_err(map_err)?;
+        if measured_dim.is_some_and(|dim| recorded_dim != dim) {
+            let measured_dim = measured_dim.expect("checked as Some above");
             let named = recorded_name
                 .clone()
                 .unwrap_or_else(|| "<unnamed>".to_string());
@@ -135,7 +133,14 @@ impl PyYantrikDB {
                 py,
                 &py.get_type::<pyo3::exceptions::PyUserWarning>(),
                 &std::ffi::CString::new(format!(
-                    "this database records its vectors as built by {named} (dim                      {recorded_dim}), but the vectors it holds are {measured_dim}-dim, so that                      model cannot have produced them and the recorded identity is wrong.                      Attaching without an identity check: provenance is UNVERIFIED, which is                      what it was before this check existed. To repair it, attach the embedder                      that did build them and call reembed(), or record a digest only after                      verifying it re-produces the stored vectors from their source text."
+                    "this database records its vectors as built by {named} (dim \
+                     {recorded_dim}), but the vectors it holds are {measured_dim}-dim, so \
+                     the recorded identity is wrong and does not describe them. Attaching \
+                     without an identity check: provenance is UNVERIFIED, which is what it \
+                     was before this \
+                     check existed. Before writing, independently verify that the attached \
+                     embedder reproduces the stored vectors from their source text; this \
+                     release does not provide an automated identity repair."
                 ))
                 .map_err(|e| PyValueError::new_err(e.to_string()))?,
                 0,
