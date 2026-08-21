@@ -11,7 +11,9 @@
 // v44 adds the expansion-outcome ledger. It is additive and is likewise
 // created by SCHEMA_SQL on every open. v45 adds exact outcome finalization so
 // missing telemetry remains unknown rather than becoming an implicit negative.
-pub const SCHEMA_VERSION: i32 = 45;
+// v46 keeps caller-added omissions distinct from children that were served and
+// freezes the query/child features needed for offline membership calibration.
+pub const SCHEMA_VERSION: i32 = 46;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -1194,6 +1196,10 @@ CREATE TABLE IF NOT EXISTS rollup_impressions (
     namespace TEXT NOT NULL,
     rank INTEGER NOT NULL CHECK (rank >= 0),
     score REAL NOT NULL,
+    requested_count INTEGER CHECK (requested_count IS NULL OR requested_count > 0),
+    query_shape TEXT CHECK (
+        query_shape IS NULL OR query_shape IN ('point', 'list', 'ordered_list', 'summary', 'other')
+    ),
     expansion_payload_hash TEXT,
     outcome_payload_hash TEXT,
     created_at REAL NOT NULL,
@@ -1209,6 +1215,7 @@ CREATE TABLE IF NOT EXISTS rollup_impression_children (
     impression_id TEXT NOT NULL,
     child_rid TEXT NOT NULL,
     rank INTEGER NOT NULL CHECK (rank >= 0),
+    score REAL CHECK (score IS NULL OR ABS(score) <= 1.7976931348623157e308),
     PRIMARY KEY (impression_id, child_rid),
     FOREIGN KEY (impression_id)
         REFERENCES rollup_impressions(impression_id) ON DELETE CASCADE
@@ -1228,6 +1235,35 @@ CREATE TABLE IF NOT EXISTS rollup_impression_outcomes (
 );
 CREATE INDEX IF NOT EXISTS idx_rollup_impression_outcomes_created
     ON rollup_impression_outcomes(created_at);
+CREATE TABLE IF NOT EXISTS rollup_impression_additions (
+    impression_id TEXT NOT NULL,
+    child_rid TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('caller_false_negative')),
+    created_at REAL NOT NULL,
+    PRIMARY KEY (impression_id, child_rid),
+    FOREIGN KEY (impression_id)
+        REFERENCES rollup_impressions(impression_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_rollup_impression_additions_child
+    ON rollup_impression_additions(child_rid, impression_id);
+CREATE TRIGGER IF NOT EXISTS trg_rollup_addition_not_returned
+BEFORE INSERT ON rollup_impression_additions
+WHEN EXISTS (
+    SELECT 1 FROM rollup_impression_children c
+    WHERE c.impression_id = NEW.impression_id AND c.child_rid = NEW.child_rid
+)
+BEGIN
+    SELECT RAISE(ABORT, 'rollup omission was already returned');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_rollup_returned_not_addition
+BEFORE INSERT ON rollup_impression_children
+WHEN EXISTS (
+    SELECT 1 FROM rollup_impression_additions a
+    WHERE a.impression_id = NEW.impression_id AND a.child_rid = NEW.child_rid
+)
+BEGIN
+    SELECT RAISE(ABORT, 'rollup child was already labeled as omitted');
+END;
 
 -- v0.10 Item 2 (schema v35): typed ranking labels, bound to impressions.
 -- Sources (sol ruling 1): 'explicit' (recall feedback, weight 1.0);
@@ -2939,4 +2975,34 @@ CREATE TABLE IF NOT EXISTS rollup_impressions (
 );
 ALTER TABLE rollup_impressions ADD COLUMN outcome_payload_hash TEXT;
 ALTER TABLE rollup_impressions ADD COLUMN outcome_finalized_at REAL;
+";
+
+pub const MIGRATE_V45_TO_V46: &str = "
+ALTER TABLE rollup_impressions ADD COLUMN requested_count INTEGER
+    CHECK (requested_count IS NULL OR requested_count > 0);
+ALTER TABLE rollup_impressions ADD COLUMN query_shape TEXT
+    CHECK (query_shape IS NULL OR query_shape IN ('point', 'list', 'ordered_list', 'summary', 'other'));
+-- v44 was additive SCHEMA_SQL. A database jumping from v43 reaches this
+-- migration before SCHEMA_SQL, so bootstrap the child table before ALTER.
+CREATE TABLE IF NOT EXISTS rollup_impression_children (
+    impression_id TEXT NOT NULL,
+    child_rid TEXT NOT NULL,
+    rank INTEGER NOT NULL CHECK (rank >= 0),
+    PRIMARY KEY (impression_id, child_rid),
+    FOREIGN KEY (impression_id)
+        REFERENCES rollup_impressions(impression_id) ON DELETE CASCADE
+);
+ALTER TABLE rollup_impression_children ADD COLUMN score REAL
+    CHECK (score IS NULL OR ABS(score) <= 1.7976931348623157e308);
+CREATE TABLE IF NOT EXISTS rollup_impression_additions (
+    impression_id TEXT NOT NULL,
+    child_rid TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('caller_false_negative')),
+    created_at REAL NOT NULL,
+    PRIMARY KEY (impression_id, child_rid),
+    FOREIGN KEY (impression_id)
+        REFERENCES rollup_impressions(impression_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_rollup_impression_additions_child
+    ON rollup_impression_additions(child_rid, impression_id);
 ";

@@ -593,6 +593,7 @@ const SCRUB_TABLES: &[&str] = &[
     "rollup_impressions",
     "rollup_impression_children",
     "rollup_impression_outcomes",
+    "rollup_impression_additions",
     "recall_demand",
     "conversation_turns",
     "learned_weights_history",

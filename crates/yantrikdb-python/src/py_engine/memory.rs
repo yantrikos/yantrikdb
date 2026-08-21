@@ -1453,6 +1453,32 @@ impl PyYantrikDB {
         .map_err(map_err)
     }
 
+    #[pyo3(signature = (rollup_rid, query_text, namespace=None, rank=0, score=0.0, requested_count=None, query_shape=None, impression_id=None))]
+    fn note_rollup_impression_features(
+        &self,
+        rollup_rid: &str,
+        query_text: &str,
+        namespace: Option<&str>,
+        rank: usize,
+        score: f64,
+        requested_count: Option<usize>,
+        query_shape: Option<&str>,
+        impression_id: Option<&str>,
+    ) -> PyResult<String> {
+        let db = self.get_inner()?;
+        db.note_rollup_impression_with_features(
+            rollup_rid,
+            query_text,
+            namespace,
+            rank,
+            score,
+            requested_count,
+            query_shape,
+            impression_id,
+        )
+        .map_err(map_err)
+    }
+
     fn note_rollup_expansion(
         &self,
         impression_id: &str,
@@ -1461,6 +1487,27 @@ impl PyYantrikDB {
         let db = self.get_inner()?;
         let refs: Vec<&str> = returned_child_rids.iter().map(String::as_str).collect();
         db.note_rollup_expansion(impression_id, &refs)
+            .map_err(map_err)
+    }
+
+    fn note_rollup_expansion_features(
+        &self,
+        impression_id: &str,
+        returned_child_rids: Vec<String>,
+        returned_child_scores: Vec<Option<f64>>,
+    ) -> PyResult<usize> {
+        if returned_child_rids.len() != returned_child_scores.len() {
+            return Err(PyValueError::new_err(
+                "returned_child_rids and returned_child_scores must have equal length",
+            ));
+        }
+        let db = self.get_inner()?;
+        let children: Vec<(&str, Option<f64>)> = returned_child_rids
+            .iter()
+            .zip(returned_child_scores)
+            .map(|(rid, score)| (rid.as_str(), score))
+            .collect();
+        db.note_rollup_expansion_with_scores(impression_id, &children)
             .map_err(map_err)
     }
 
@@ -1476,17 +1523,19 @@ impl PyYantrikDB {
             .map_err(map_err)
     }
 
-    #[pyo3(signature = (impression_id, selected_child_rids, corrected_child_rids=vec![]))]
+    #[pyo3(signature = (impression_id, selected_child_rids, corrected_child_rids=vec![], omitted_child_rids=vec![]))]
     fn finalize_rollup_outcome(
         &self,
         impression_id: &str,
         selected_child_rids: Vec<String>,
         corrected_child_rids: Vec<String>,
+        omitted_child_rids: Vec<String>,
     ) -> PyResult<usize> {
         let db = self.get_inner()?;
         let selected: Vec<&str> = selected_child_rids.iter().map(String::as_str).collect();
         let corrected: Vec<&str> = corrected_child_rids.iter().map(String::as_str).collect();
-        db.finalize_rollup_outcome(impression_id, &selected, &corrected)
+        let omitted: Vec<&str> = omitted_child_rids.iter().map(String::as_str).collect();
+        db.finalize_rollup_outcome_with_omissions(impression_id, &selected, &corrected, &omitted)
             .map_err(map_err)
     }
 
@@ -1525,6 +1574,51 @@ impl PyYantrikDB {
         let value = serde_json::to_value(examples).map_err(|error| {
             PyRuntimeError::new_err(format!(
                 "rollup outcome example serialization failed: {error}"
+            ))
+        })?;
+        json_to_py(py, &value)
+    }
+
+    #[pyo3(signature = (namespace=None, since=None))]
+    fn rollup_membership_report(
+        &self,
+        py: Python<'_>,
+        namespace: Option<&str>,
+        since: Option<f64>,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let report = db
+            .rollup_membership_report(namespace, since)
+            .map_err(map_err)?;
+        let value = serde_json::to_value(report).map_err(|error| {
+            PyRuntimeError::new_err(format!(
+                "rollup membership report serialization failed: {error}"
+            ))
+        })?;
+        json_to_py(py, &value)
+    }
+
+    #[pyo3(signature = (namespace=None, finalized_since=None, finalized_until=None, limit_impressions=1000))]
+    fn rollup_membership_examples(
+        &self,
+        py: Python<'_>,
+        namespace: Option<&str>,
+        finalized_since: Option<f64>,
+        finalized_until: Option<f64>,
+        limit_impressions: usize,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let examples = db
+            .rollup_membership_examples(
+                namespace,
+                finalized_since,
+                finalized_until,
+                limit_impressions,
+            )
+            .map_err(map_err)?;
+        let value = serde_json::to_value(examples).map_err(|error| {
+            PyRuntimeError::new_err(format!(
+                "rollup membership example serialization failed: {error}"
             ))
         })?;
         json_to_py(py, &value)

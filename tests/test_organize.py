@@ -478,6 +478,70 @@ def test_organized_recall_records_only_returned_handle_children():
     ]
 
 
+def test_organized_recall_records_query_shape_count_and_child_scores():
+    handle = _recall_hit(
+        "handle",
+        0.9,
+        metadata={
+            "organizer_kind": "query_independent_topic",
+            "organizer_handle_id": "topic",
+            "child_rids": ["best", "not-returned"],
+        },
+    )
+    best = _recall_hit("best", 0.81)
+    not_returned = _recall_hit("not-returned", 0.2)
+    db = RecallDB([handle, best, not_returned])
+    db.impressions = []
+    db.expansions = []
+    db.note_rollup_impression_features = (
+        lambda rid,
+        query,
+        namespace,
+        rank,
+        score,
+        requested_count,
+        query_shape: db.impressions.append(
+            (
+                rid,
+                query,
+                namespace,
+                rank,
+                score,
+                requested_count,
+                query_shape,
+            )
+        )
+        or "imp-features"
+    )
+    db.note_rollup_expansion_features = (
+        lambda impression_id, children, scores: db.expansions.append(
+            (impression_id, children, scores)
+        )
+    )
+
+    results = recall_organized(
+        db,
+        "List exactly five topic items in order across conversations",
+        top_k=1,
+        candidate_pool=10,
+        order="relevance",
+    )
+
+    assert [result["rid"] for result in results] == ["best"]
+    assert db.impressions == [
+        (
+            "handle",
+            "List exactly five topic items in order across conversations",
+            None,
+            0,
+            0.9,
+            5,
+            "ordered_list",
+        )
+    ]
+    assert db.expansions == [("imp-features", ["best"], [0.81])]
+
+
 def test_organized_recall_uses_turn_order_for_conversation_queries():
     handle = _recall_hit(
         "handle",

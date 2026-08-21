@@ -23,7 +23,8 @@ use rusqlite::{params, OptionalExtension};
 
 use crate::error::Result;
 use crate::types::{
-    RecallResult, RollupOutcomeExample, RollupOutcomeReport, RollupRankOutcomeStats,
+    RecallResult, RollupMembershipExample, RollupMembershipReport, RollupOutcomeExample,
+    RollupOutcomeReport, RollupRankOutcomeStats,
 };
 
 use super::YantrikDB;
@@ -171,9 +172,56 @@ impl YantrikDB {
         score: f64,
         impression_id: Option<&str>,
     ) -> Result<String> {
+        self.note_rollup_impression_with_features(
+            rollup_rid,
+            query_text,
+            namespace,
+            rank,
+            score,
+            None,
+            None,
+            impression_id,
+        )
+    }
+
+    /// Feature-aware rollup impression. Query shape is intentionally a small
+    /// non-text vocabulary so telemetry can distinguish exact/list requests
+    /// without persisting the query itself.
+    #[allow(clippy::too_many_arguments)]
+    pub fn note_rollup_impression_with_features(
+        &self,
+        rollup_rid: &str,
+        query_text: &str,
+        namespace: Option<&str>,
+        rank: usize,
+        score: f64,
+        requested_count: Option<usize>,
+        query_shape: Option<&str>,
+        impression_id: Option<&str>,
+    ) -> Result<String> {
         if rollup_rid.trim().is_empty() || query_text.trim().is_empty() || !score.is_finite() {
             return Err(crate::error::YantrikDbError::InvalidInput(
                 "rollup impression requires non-empty rollup_rid/query_text and a finite score"
+                    .to_string(),
+            ));
+        }
+        if requested_count == Some(0) {
+            return Err(crate::error::YantrikDbError::InvalidInput(
+                "rollup impression requested_count must be positive".to_string(),
+            ));
+        }
+        let query_shape = query_shape
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_ascii_lowercase);
+        if query_shape.as_deref().is_some_and(|value| {
+            !matches!(
+                value,
+                "point" | "list" | "ordered_list" | "summary" | "other"
+            )
+        }) {
+            return Err(crate::error::YantrikDbError::InvalidInput(
+                "rollup impression query_shape must be point, list, ordered_list, summary, or other"
                     .to_string(),
             ));
         }
@@ -201,8 +249,9 @@ impl YantrikDB {
         }
         conn.execute(
             "INSERT OR IGNORE INTO rollup_impressions \
-             (impression_id, rollup_rid, query_hash, namespace, rank, score, created_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             (impression_id, rollup_rid, query_hash, namespace, rank, score, \
+              requested_count, query_shape, created_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             params![
                 impression_id,
                 rollup_rid,
@@ -210,11 +259,22 @@ impl YantrikDB {
                 stored_namespace,
                 rank as i64,
                 score,
+                requested_count.map(|value| value as i64),
+                query_shape,
                 ts,
             ],
         )?;
-        let existing: (String, String, String, i64, f64) = conn.query_row(
-            "SELECT rollup_rid, query_hash, namespace, rank, score \
+        let existing: (
+            String,
+            String,
+            String,
+            i64,
+            f64,
+            Option<i64>,
+            Option<String>,
+        ) = conn.query_row(
+            "SELECT rollup_rid, query_hash, namespace, rank, score, \
+                    requested_count, query_shape \
              FROM rollup_impressions WHERE impression_id = ?1",
             params![impression_id],
             |row| {
@@ -224,6 +284,8 @@ impl YantrikDB {
                     row.get(2)?,
                     row.get(3)?,
                     row.get(4)?,
+                    row.get(5)?,
+                    row.get(6)?,
                 ))
             },
         )?;
@@ -234,6 +296,8 @@ impl YantrikDB {
                 stored_namespace,
                 rank as i64,
                 score,
+                requested_count.map(|value| value as i64),
+                query_shape,
             )
         {
             return Err(crate::error::YantrikDbError::InvalidInput(format!(
@@ -250,13 +314,53 @@ impl YantrikDB {
         impression_id: &str,
         returned_child_rids: &[&str],
     ) -> Result<usize> {
-        let mut clean = Vec::new();
-        for rid in returned_child_rids.iter().copied() {
-            if !rid.trim().is_empty() && !clean.contains(&rid) {
-                clean.push(rid);
+        let children: Vec<(&str, Option<f64>)> = returned_child_rids
+            .iter()
+            .copied()
+            .map(|rid| (rid, None))
+            .collect();
+        self.note_rollup_expansion_with_scores(impression_id, &children)
+    }
+
+    /// Bind returned children together with their immutable serve-time scores.
+    pub fn note_rollup_expansion_with_scores(
+        &self,
+        impression_id: &str,
+        returned_children: &[(&str, Option<f64>)],
+    ) -> Result<usize> {
+        let mut clean: Vec<(String, Option<f64>)> = Vec::new();
+        for (rid, score) in returned_children.iter().copied() {
+            let rid = rid.trim();
+            if score.is_some_and(|value| !value.is_finite()) {
+                return Err(crate::error::YantrikDbError::InvalidInput(
+                    "rollup expansion child scores must be finite".to_string(),
+                ));
+            }
+            if !rid.is_empty() && !clean.iter().any(|(existing, _)| existing == rid) {
+                clean.push((rid.to_string(), score));
             }
         }
-        let payload_hash = stable_text_hash(&clean.join("\u{0}"));
+        let payload = if clean.iter().all(|(_, score)| score.is_none()) {
+            clean
+                .iter()
+                .map(|(rid, _)| rid.as_str())
+                .collect::<Vec<_>>()
+                .join("\u{0}")
+        } else {
+            clean
+                .iter()
+                .map(|(rid, score)| {
+                    format!(
+                        "{rid}:{}",
+                        score
+                            .map(|value| format!("{:016x}", value.to_bits()))
+                            .unwrap_or_else(|| "none".to_string())
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\u{0}")
+        };
+        let payload_hash = stable_text_hash(&payload);
         let conn = self.conn();
         let tx = conn.unchecked_transaction()?;
         let existing_hash: Option<String> = tx
@@ -287,10 +391,10 @@ impl YantrikDB {
         )?;
         let mut stmt = tx.prepare_cached(
             "INSERT OR IGNORE INTO rollup_impression_children \
-             (impression_id, child_rid, rank) VALUES (?1, ?2, ?3)",
+             (impression_id, child_rid, rank, score) VALUES (?1, ?2, ?3, ?4)",
         )?;
-        for (rank, child_rid) in clean.iter().enumerate() {
-            stmt.execute(params![impression_id, child_rid, rank as i64])?;
+        for (rank, (child_rid, score)) in clean.iter().enumerate() {
+            stmt.execute(params![impression_id, child_rid, rank as i64, score])?;
         }
         drop(stmt);
         tx.commit()?;
@@ -361,6 +465,24 @@ impl YantrikDB {
         selected_child_rids: &[&str],
         corrected_child_rids: &[&str],
     ) -> Result<usize> {
+        self.finalize_rollup_outcome_with_omissions(
+            impression_id,
+            selected_child_rids,
+            corrected_child_rids,
+            &[],
+        )
+    }
+
+    /// Finalize an exact outcome while preserving caller-added omissions as a
+    /// separate class. Omitted children are explicit false-negative evidence;
+    /// they are never inserted into the served expansion.
+    pub fn finalize_rollup_outcome_with_omissions(
+        &self,
+        impression_id: &str,
+        selected_child_rids: &[&str],
+        corrected_child_rids: &[&str],
+        added_child_rids: &[&str],
+    ) -> Result<usize> {
         let mut selected: Vec<String> = selected_child_rids
             .iter()
             .map(|rid| rid.trim())
@@ -379,24 +501,43 @@ impl YantrikDB {
         let mut corrected = corrected;
         corrected.sort();
         corrected.dedup();
-        let payload = format!(
+        let mut added: Vec<String> = added_child_rids
+            .iter()
+            .map(|rid| rid.trim())
+            .filter(|rid| !rid.is_empty())
+            .map(str::to_string)
+            .collect();
+        added.sort();
+        added.dedup();
+        if added.iter().any(|rid| selected.contains(rid)) {
+            return Err(crate::error::YantrikDbError::InvalidInput(
+                "a rollup child cannot be both returned-selected and caller-omitted".to_string(),
+            ));
+        }
+        let legacy_payload = format!(
             "selected:{}\u{0}corrected:{}",
             selected.join("\u{0}"),
             corrected.join("\u{0}")
         );
+        let payload = if added.is_empty() {
+            legacy_payload
+        } else {
+            format!("{legacy_payload}\u{0}omitted:{}", added.join("\u{0}"))
+        };
         let payload_hash = stable_text_hash(&payload);
 
         let conn = self.conn();
         let tx = conn.unchecked_transaction()?;
-        let state: Option<(Option<String>, Option<f64>)> = tx
+        let state: Option<(Option<String>, Option<f64>, String, f64)> = tx
             .query_row(
-                "SELECT outcome_payload_hash, expanded_at FROM rollup_impressions \
+                "SELECT outcome_payload_hash, expanded_at, namespace, created_at \
+                 FROM rollup_impressions \
                  WHERE impression_id = ?1",
                 params![impression_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
             )
             .optional()?;
-        let Some((existing_hash, expanded_at)) = state else {
+        let Some((existing_hash, expanded_at, namespace, impression_created_at)) = state else {
             return Err(crate::error::YantrikDbError::NotFound(format!(
                 "rollup impression: {impression_id}"
             )));
@@ -414,6 +555,9 @@ impl YantrikDB {
                 "rollup impression {impression_id:?} was finalized with a different outcome"
             )));
         }
+        if existing_hash.as_deref() == Some(payload_hash.as_str()) {
+            return Ok(selected.len() + added.len());
+        }
 
         for child_rid in &selected {
             let returned: bool = tx.query_row(
@@ -425,6 +569,54 @@ impl YantrikDB {
             if !returned {
                 return Err(crate::error::YantrikDbError::InvalidInput(format!(
                     "child {child_rid:?} was not returned by rollup impression {impression_id:?}"
+                )));
+            }
+        }
+        for child_rid in &added {
+            let returned: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM rollup_impression_children \
+                 WHERE impression_id = ?1 AND child_rid = ?2)",
+                params![impression_id, child_rid],
+                |row| row.get(0),
+            )?;
+            if returned {
+                return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                    "omitted child {child_rid:?} was already returned by rollup impression {impression_id:?}"
+                )));
+            }
+            let child_state: Option<(String, String, Option<f64>)> = tx
+                .query_row(
+                    "SELECT m.namespace, m.consolidation_status, \
+                            COALESCE( \
+                                (SELECT MIN(r.applied_at) FROM replication_apply_log r \
+                                 WHERE r.rid = m.rid), \
+                                (SELECT MIN(o.timestamp) FROM oplog o \
+                                 WHERE o.target_rid = m.rid \
+                                   AND o.op_type IN ('record', 'record_with_rid')) \
+                            ) \
+                     FROM memories m WHERE m.rid = ?1",
+                    params![child_rid],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            let Some((child_namespace, child_status, available_at)) = child_state else {
+                return Err(crate::error::YantrikDbError::NotFound(format!(
+                    "omitted rollup child: {child_rid}"
+                )));
+            };
+            if child_namespace != namespace {
+                return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                    "omitted child {child_rid:?} belongs to namespace {child_namespace:?}, not {namespace:?}"
+                )));
+            }
+            if child_status != "active" {
+                return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                    "omitted child {child_rid:?} is not active"
+                )));
+            }
+            if available_at.is_none_or(|value| value > impression_created_at) {
+                return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                    "omitted child {child_rid:?} was not available when rollup impression {impression_id:?} was served"
                 )));
             }
         }
@@ -475,6 +667,15 @@ impl YantrikDB {
             ])?;
         }
         drop(insert);
+        let mut insert_addition = tx.prepare_cached(
+            "INSERT OR IGNORE INTO rollup_impression_additions \
+             (impression_id, child_rid, source, created_at) \
+             VALUES (?1, ?2, 'caller_false_negative', ?3)",
+        )?;
+        for child_rid in &added {
+            insert_addition.execute(params![impression_id, child_rid, now])?;
+        }
+        drop(insert_addition);
         tx.execute(
             "UPDATE rollup_impressions SET outcome_payload_hash = ?2, \
              outcome_finalized_at = COALESCE(outcome_finalized_at, ?3) \
@@ -482,7 +683,7 @@ impl YantrikDB {
             params![impression_id, payload_hash, now],
         )?;
         tx.commit()?;
-        Ok(selected.len())
+        Ok(selected.len() + added.len())
     }
 
     /// Summarize explicit rollup outcomes without mutating the ledger. Missing
@@ -552,7 +753,6 @@ impl YantrikDB {
             params![namespace, since],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )?;
-
         let max_group_count = |column: &str| -> Result<i64> {
             let sql = format!(
                 "SELECT COALESCE(MAX(group_count), 0) FROM (\
@@ -773,6 +973,216 @@ impl YantrikDB {
         Ok(examples)
     }
 
+    /// Report whether explicit false-negative telemetry is sufficiently broad
+    /// for an offline membership-rescue evaluation. This does not authorize a
+    /// production policy change.
+    pub fn rollup_membership_report(
+        &self,
+        namespace: Option<&str>,
+        since: Option<f64>,
+    ) -> Result<RollupMembershipReport> {
+        if since.is_some_and(|value| !value.is_finite()) {
+            return Err(crate::error::YantrikDbError::InvalidInput(
+                "rollup membership report since must be finite".to_string(),
+            ));
+        }
+        let conn = self.conn();
+        let (total_impressions, expanded_impressions, finalized_impressions): (i64, i64, i64) =
+            conn.query_row(
+                "SELECT COUNT(*), COALESCE(SUM(expanded_at IS NOT NULL), 0), \
+                        COALESCE(SUM(outcome_finalized_at IS NOT NULL), 0) \
+                 FROM rollup_impressions \
+                 WHERE (?1 IS NULL OR namespace = ?1) \
+                   AND (?2 IS NULL OR created_at >= ?2)",
+                params![namespace, since],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )?;
+        let (
+            finalized_added_children,
+            finalized_impressions_with_additions,
+            finalized_distinct_queries_with_additions,
+        ): (i64, i64, i64) = conn.query_row(
+            "SELECT COUNT(*), COUNT(DISTINCT a.impression_id), \
+                    COUNT(DISTINCT i.namespace || char(0) || i.query_hash) \
+             FROM rollup_impression_additions a \
+             JOIN rollup_impressions i USING (impression_id) \
+             WHERE i.outcome_finalized_at IS NOT NULL \
+               AND (?1 IS NULL OR i.namespace = ?1) \
+               AND (?2 IS NULL OR i.created_at >= ?2)",
+            params![namespace, since],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
+        let finalized_returned_children: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM rollup_impressions i \
+             JOIN rollup_impression_children c USING (impression_id) \
+             WHERE i.outcome_finalized_at IS NOT NULL \
+               AND (?1 IS NULL OR i.namespace = ?1) \
+               AND (?2 IS NULL OR i.created_at >= ?2)",
+            params![namespace, since],
+            |row| row.get(0),
+        )?;
+        let telemetry_completion_rate = ratio(finalized_impressions, expanded_impressions);
+        let added_child_rate = ratio(
+            finalized_added_children,
+            finalized_returned_children + finalized_added_children,
+        );
+
+        const MIN_ADDED_CHILDREN: i64 = 50;
+        const MIN_IMPRESSIONS_WITH_ADDITIONS: i64 = 30;
+        const MIN_QUERIES_WITH_ADDITIONS: i64 = 15;
+        const MIN_TELEMETRY_COMPLETION_RATE: f64 = 0.80;
+        let mut readiness_failures = Vec::new();
+        if finalized_added_children < MIN_ADDED_CHILDREN {
+            readiness_failures.push(format!(
+                "finalized_added_children requires at least {MIN_ADDED_CHILDREN} (observed {finalized_added_children})"
+            ));
+        }
+        if finalized_impressions_with_additions < MIN_IMPRESSIONS_WITH_ADDITIONS {
+            readiness_failures.push(format!(
+                "finalized_impressions_with_additions requires at least {MIN_IMPRESSIONS_WITH_ADDITIONS} (observed {finalized_impressions_with_additions})"
+            ));
+        }
+        if finalized_distinct_queries_with_additions < MIN_QUERIES_WITH_ADDITIONS {
+            readiness_failures.push(format!(
+                "finalized_distinct_queries_with_additions requires at least {MIN_QUERIES_WITH_ADDITIONS} (observed {finalized_distinct_queries_with_additions})"
+            ));
+        }
+        if telemetry_completion_rate.is_none_or(|rate| rate < MIN_TELEMETRY_COMPLETION_RATE) {
+            readiness_failures.push(format!(
+                "telemetry_completion_rate requires at least {MIN_TELEMETRY_COMPLETION_RATE:.2} (observed {:.4})",
+                telemetry_completion_rate.unwrap_or_default()
+            ));
+        }
+        let evidence_status = if total_impressions == 0 {
+            "no_data"
+        } else if readiness_failures.is_empty() {
+            "ready_for_offline_evaluation"
+        } else {
+            "insufficient_evidence"
+        };
+
+        Ok(RollupMembershipReport {
+            namespace: namespace.map(str::to_string),
+            since,
+            total_impressions,
+            expanded_impressions,
+            finalized_impressions,
+            finalized_added_children,
+            finalized_impressions_with_additions,
+            finalized_distinct_queries_with_additions,
+            telemetry_completion_rate,
+            added_child_rate,
+            evidence_status: evidence_status.to_string(),
+            readiness_failures,
+        })
+    }
+
+    /// Export complete finalized impression groups for membership calibration.
+    /// Bounds apply to finalization time, so labels created later cannot leak
+    /// into an earlier evaluation window. `limit_impressions` never splits a
+    /// group even when one impression has many children.
+    pub fn rollup_membership_examples(
+        &self,
+        namespace: Option<&str>,
+        finalized_since: Option<f64>,
+        finalized_until: Option<f64>,
+        limit_impressions: usize,
+    ) -> Result<Vec<RollupMembershipExample>> {
+        if finalized_since.is_some_and(|value| !value.is_finite())
+            || finalized_until.is_some_and(|value| !value.is_finite())
+        {
+            return Err(crate::error::YantrikDbError::InvalidInput(
+                "rollup membership examples require finite finalization bounds".to_string(),
+            ));
+        }
+        if finalized_since
+            .zip(finalized_until)
+            .is_some_and(|(start, end)| start > end)
+        {
+            return Err(crate::error::YantrikDbError::InvalidInput(
+                "rollup membership examples require finalized_since <= finalized_until".to_string(),
+            ));
+        }
+        if limit_impressions == 0 {
+            return Ok(Vec::new());
+        }
+        let bounded_limit = limit_impressions.min(10_000) as i64;
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "WITH bounded AS ( \
+                SELECT * FROM rollup_impressions i \
+                WHERE i.outcome_finalized_at IS NOT NULL \
+                  AND (?1 IS NULL OR i.namespace = ?1) \
+                  AND (?2 IS NULL OR i.outcome_finalized_at >= ?2) \
+                  AND (?3 IS NULL OR i.outcome_finalized_at <= ?3) \
+                ORDER BY i.outcome_finalized_at, i.impression_id \
+                LIMIT ?4 \
+             ), examples AS ( \
+                SELECT i.impression_id, i.query_hash, i.namespace, i.rollup_rid, \
+                    i.rank AS rollup_rank, i.score AS rollup_score, \
+                    i.requested_count, i.query_shape, c.child_rid, \
+                    c.rank AS child_rank, c.score AS child_score, \
+                    (SELECT COUNT(*) FROM rollup_impression_children all_children \
+                     WHERE all_children.impression_id = i.impression_id), \
+                    1 AS returned, 0 AS omitted_positive, \
+                    EXISTS(SELECT 1 FROM rollup_impression_outcomes selected \
+                           WHERE selected.impression_id = i.impression_id \
+                             AND selected.child_rid = c.child_rid \
+                             AND selected.source IN ('selected', 'corrected')), \
+                    EXISTS(SELECT 1 FROM rollup_impression_outcomes corrected \
+                           WHERE corrected.impression_id = i.impression_id \
+                             AND corrected.child_rid = c.child_rid \
+                             AND corrected.source = 'corrected'), \
+                    NULL AS omission_source, i.created_at, i.outcome_finalized_at \
+                FROM bounded i \
+                JOIN rollup_impression_children c USING (impression_id) \
+                UNION ALL \
+                SELECT i.impression_id, i.query_hash, i.namespace, i.rollup_rid, \
+                    i.rank, i.score, i.requested_count, i.query_shape, \
+                    a.child_rid, NULL, NULL, \
+                    (SELECT COUNT(*) FROM rollup_impression_children all_children \
+                     WHERE all_children.impression_id = i.impression_id), \
+                    0, 1, 1, 0, a.source, i.created_at, i.outcome_finalized_at \
+                FROM bounded i \
+                JOIN rollup_impression_additions a USING (impression_id) \
+             ) \
+             SELECT * FROM examples \
+             ORDER BY outcome_finalized_at, impression_id, returned DESC, child_rank, child_rid",
+        )?;
+        let examples = stmt
+            .query_map(
+                params![namespace, finalized_since, finalized_until, bounded_limit],
+                |row| {
+                    let query_hash: String = row.get(1)?;
+                    let namespace: String = row.get(2)?;
+                    Ok(RollupMembershipExample {
+                        export_schema_version: 1,
+                        impression_id: row.get(0)?,
+                        query_key: stable_text_hash(&format!("{namespace}\u{0}{query_hash}")),
+                        namespace,
+                        rollup_rid: row.get(3)?,
+                        rollup_rank: row.get::<_, i64>(4)? as usize,
+                        rollup_score: row.get(5)?,
+                        requested_count: row.get::<_, Option<i64>>(6)?.map(|value| value as usize),
+                        query_shape: row.get(7)?,
+                        child_rid: row.get(8)?,
+                        child_rank: row.get::<_, Option<i64>>(9)?.map(|value| value as usize),
+                        child_score: row.get(10)?,
+                        returned_child_count: row.get::<_, i64>(11)? as usize,
+                        returned: row.get::<_, i64>(12)? != 0,
+                        omitted_positive: row.get::<_, i64>(13)? != 0,
+                        positive: row.get::<_, i64>(14)? != 0,
+                        corrected: row.get::<_, i64>(15)? != 0,
+                        omission_source: row.get(16)?,
+                        impression_created_at: row.get(17)?,
+                        outcome_finalized_at: row.get(18)?,
+                    })
+                },
+            )?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(examples)
+    }
+
     /// v0.10 Item 2 — explicit rejection: the caller states that these
     /// served results were IRRELEVANT to the query they were served for
     /// (typically alongside a refine). This is deliberately a separate
@@ -883,7 +1293,30 @@ mod tests {
     }
 
     fn rec(db: &YantrikDB, text: &str, seed: f32) -> String {
+        rec_in(db, text, seed, "default")
+    }
+
+    fn rec_in(db: &YantrikDB, text: &str, seed: f32, namespace: &str) -> String {
         db.record(
+            text,
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            &vec_seed(seed, 8),
+            namespace,
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap()
+    }
+
+    fn rec_with_rid(db: &YantrikDB, rid: &str, text: &str, seed: f32) {
+        db.record_with_rid(
+            rid,
             text,
             "semantic",
             0.5,
@@ -896,8 +1329,13 @@ mod tests {
             "general",
             "user",
             None,
+            1_700_000_000_000_000,
+            &[],
+            "test-model.v1",
+            None,
+            crate::provenance::WriteAdmission::Origin,
         )
-        .unwrap()
+        .unwrap();
     }
 
     fn recall_all(db: &YantrikDB, seed: f32) -> Vec<RecallResult> {
@@ -1165,6 +1603,189 @@ mod tests {
     }
 
     #[test]
+    fn rollup_omissions_are_exact_positive_and_not_served_children() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let rollup = rec(&db, "topic rollup", 1.0);
+        let returned = rec(&db, "returned child", 2.0);
+        let added = rec(&db, "omitted positive child", 3.0);
+        let other_namespace = rec_in(&db, "other namespace child", 4.0, "other");
+        let inactive = rec(&db, "inactive child", 5.0);
+        db.conn()
+            .execute(
+                "UPDATE memories SET consolidation_status = 'tombstoned' WHERE rid = ?1",
+                [&inactive],
+            )
+            .unwrap();
+
+        let impression = db
+            .note_rollup_impression_with_features(
+                &rollup,
+                "List exactly two topic items",
+                None,
+                0,
+                0.9,
+                Some(2),
+                Some("list"),
+                Some("addition-example"),
+            )
+            .unwrap();
+        let late = rec(&db, "created after impression", 6.0);
+        db.conn()
+            .execute(
+                "UPDATE oplog SET timestamp = timestamp + 60.0 \
+                 WHERE target_rid = ?1 AND op_type = 'record'",
+                [&late],
+            )
+            .unwrap();
+        assert_eq!(
+            db.note_rollup_impression_with_features(
+                &rollup,
+                "List exactly two topic items",
+                None,
+                0,
+                0.9,
+                Some(2),
+                Some("LIST"),
+                Some("addition-example"),
+            )
+            .unwrap(),
+            impression
+        );
+        assert!(db
+            .note_rollup_impression_with_features(
+                &rollup,
+                "List exactly two topic items",
+                None,
+                0,
+                0.9,
+                Some(3),
+                Some("list"),
+                Some("addition-example"),
+            )
+            .is_err());
+        assert!(db
+            .note_rollup_impression_with_features(
+                &rollup,
+                "query",
+                None,
+                0,
+                0.9,
+                Some(0),
+                Some("unknown"),
+                None,
+            )
+            .is_err());
+
+        let returned_with_score = [(&returned[..], Some(0.73))];
+        assert_eq!(
+            db.note_rollup_expansion_with_scores(&impression, &returned_with_score)
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.note_rollup_expansion_with_scores(&impression, &returned_with_score)
+                .unwrap(),
+            1
+        );
+        assert!(db
+            .finalize_rollup_outcome_with_omissions(&impression, &[&returned], &[], &[&returned],)
+            .is_err());
+        assert!(db
+            .finalize_rollup_outcome_with_omissions(
+                &impression,
+                &[&returned],
+                &[],
+                &["missing-child"],
+            )
+            .is_err());
+        assert!(db
+            .finalize_rollup_outcome_with_omissions(
+                &impression,
+                &[&returned],
+                &[],
+                &[&other_namespace],
+            )
+            .is_err());
+        assert!(db
+            .finalize_rollup_outcome_with_omissions(&impression, &[&returned], &[], &[&inactive],)
+            .is_err());
+        assert!(db
+            .finalize_rollup_outcome_with_omissions(&impression, &[&returned], &[], &[&late],)
+            .is_err());
+        assert_eq!(
+            db.finalize_rollup_outcome_with_omissions(
+                &impression,
+                &[&returned],
+                &[],
+                &[&added, &added],
+            )
+            .unwrap(),
+            2
+        );
+        assert_eq!(
+            db.finalize_rollup_outcome_with_omissions(&impression, &[&returned], &[], &[&added],)
+                .unwrap(),
+            2,
+            "an exact addition retry must be idempotent"
+        );
+        db.conn()
+            .execute(
+                "UPDATE memories SET consolidation_status = 'tombstoned' WHERE rid = ?1",
+                [&added],
+            )
+            .unwrap();
+        assert_eq!(
+            db.finalize_rollup_outcome_with_omissions(&impression, &[&returned], &[], &[&added],)
+                .unwrap(),
+            2,
+            "an exact retry must not be invalidated by later memory state"
+        );
+        assert!(db
+            .finalize_rollup_outcome(&impression, &[&returned], &[])
+            .is_err());
+
+        let conn = db.conn();
+        let served: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rollup_impression_children WHERE impression_id = ?1",
+                [&impression],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let additions: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM rollup_impression_additions WHERE impression_id = ?1",
+                [&impression],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(served, 1, "an omission must not rewrite served history");
+        assert_eq!(additions, 1);
+        assert!(conn
+            .execute(
+                "INSERT INTO rollup_impression_additions \
+                 (impression_id, child_rid, source, created_at) \
+                 VALUES (?1, ?2, 'caller_false_negative', 0.0)",
+                params![impression, returned],
+            )
+            .is_err());
+        assert!(conn
+            .execute(
+                "INSERT INTO rollup_impression_children \
+                 (impression_id, child_rid, rank) VALUES (?1, ?2, 9)",
+                params![impression, added],
+            )
+            .is_err());
+        drop(conn);
+
+        let report = db.rollup_membership_report(None, None).unwrap();
+        assert_eq!(report.finalized_added_children, 1);
+        assert_eq!(report.finalized_impressions_with_additions, 1);
+        assert_eq!(report.finalized_distinct_queries_with_additions, 1);
+        assert_eq!(report.added_child_rate, Some(0.5));
+    }
+
+    #[test]
     fn rollup_expansion_requires_an_exact_impression() {
         let db = YantrikDB::new(":memory:", 8).unwrap();
         assert!(db.note_rollup_expansion("missing", &[]).is_err());
@@ -1175,6 +1796,46 @@ mod tests {
             .note_rollup_selection("missing", "child", "implicit")
             .is_err());
         assert!(db.finalize_rollup_outcome("missing", &[], &[]).is_err());
+    }
+
+    #[test]
+    fn rollup_omission_accepts_record_with_rid_only_when_preexisting() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let rollup = rec(&db, "topic rollup", 1.0);
+        let returned = rec(&db, "returned child", 2.0);
+        rec_with_rid(&db, "caller-rid-before", "preexisting omitted child", 3.0);
+
+        let impression = db
+            .note_rollup_impression(&rollup, "topic list", None, 0, 0.9, None)
+            .unwrap();
+        db.note_rollup_expansion(&impression, &[&returned]).unwrap();
+
+        rec_with_rid(&db, "caller-rid-after", "later omitted child", 4.0);
+        db.conn()
+            .execute(
+                "UPDATE oplog SET timestamp = timestamp + 60.0 \
+                 WHERE target_rid = 'caller-rid-after' AND op_type = 'record_with_rid'",
+                [],
+            )
+            .unwrap();
+        assert!(db
+            .finalize_rollup_outcome_with_omissions(
+                &impression,
+                &[&returned],
+                &[],
+                &["caller-rid-after"],
+            )
+            .is_err());
+        assert_eq!(
+            db.finalize_rollup_outcome_with_omissions(
+                &impression,
+                &[&returned],
+                &[],
+                &["caller-rid-before"],
+            )
+            .unwrap(),
+            2
+        );
     }
 
     #[test]
@@ -1255,6 +1916,7 @@ mod tests {
         let selected = rec(&db, "selected child", 20.0);
         let corrected = rec(&db, "corrected child", 21.0);
         let unselected = rec(&db, "unselected child", 22.0);
+        let added = rec(&db, "omitted positive child", 23.0);
 
         let unfinished = db
             .note_rollup_impression(&rollup, "unfinished topic", None, 2, 0.4, None)
@@ -1263,19 +1925,33 @@ mod tests {
             .unwrap();
 
         let finalized = db
-            .note_rollup_impression(
+            .note_rollup_impression_with_features(
                 &rollup,
                 "finalized topic",
                 None,
                 1,
                 0.75,
+                Some(4),
+                Some("ordered_list"),
                 Some("offline-example"),
             )
             .unwrap();
-        db.note_rollup_expansion(&finalized, &[&selected, &corrected, &unselected])
-            .unwrap();
-        db.finalize_rollup_outcome(&finalized, &[&selected], &[&corrected])
-            .unwrap();
+        db.note_rollup_expansion_with_scores(
+            &finalized,
+            &[
+                (&selected, Some(0.8)),
+                (&corrected, Some(0.7)),
+                (&unselected, None),
+            ],
+        )
+        .unwrap();
+        db.finalize_rollup_outcome_with_omissions(
+            &finalized,
+            &[&selected],
+            &[&corrected],
+            &[&added],
+        )
+        .unwrap();
 
         let count_before: i64 = db
             .conn()
@@ -1294,7 +1970,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(count_before, count_after, "the export must be read-only");
-        assert_eq!(examples.len(), 3, "unfinished interactions stay unknown");
+        assert_eq!(examples.len(), 3, "the v1 export remains returned-only");
         assert_eq!(examples[0].export_schema_version, 1);
         assert_eq!(examples[0].impression_id, "offline-example");
         assert_eq!(examples[0].query_hash, stable_text_hash("finalized topic"));
@@ -1312,6 +1988,43 @@ mod tests {
         assert_eq!(examples[2].child_rid, unselected);
         assert!(!examples[2].selected);
         assert!(!examples[2].corrected);
+        let membership = db
+            .rollup_membership_examples(Some("default"), None, None, 1)
+            .unwrap();
+        assert_eq!(
+            membership.len(),
+            4,
+            "the impression limit keeps groups whole"
+        );
+        assert!(membership.iter().all(|row| row.impression_id == finalized));
+        assert_eq!(membership[0].requested_count, Some(4));
+        assert_eq!(membership[0].query_shape.as_deref(), Some("ordered_list"));
+        assert_eq!(membership[0].child_rank, Some(0));
+        assert_eq!(membership[0].child_score, Some(0.8));
+        assert!(membership[0].returned);
+        assert!(!membership[0].omitted_positive);
+        assert!(membership[0].positive);
+        let omitted = membership.iter().find(|row| row.omitted_positive).unwrap();
+        assert_eq!(omitted.child_rid, added);
+        assert_eq!(omitted.child_rank, None);
+        assert_eq!(omitted.child_score, None);
+        assert!(!omitted.returned);
+        assert!(omitted.positive);
+        assert_eq!(
+            omitted.omission_source.as_deref(),
+            Some("caller_false_negative")
+        );
+        assert!(!omitted.corrected);
+        assert!(!db
+            .rollup_membership_examples(
+                None,
+                None,
+                Some(omitted.outcome_finalized_at - 0.000_001),
+                100,
+            )
+            .unwrap()
+            .iter()
+            .any(|row| row.impression_id == finalized));
         assert_eq!(
             db.rollup_outcome_examples(None, None, None, 2)
                 .unwrap()

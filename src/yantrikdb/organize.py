@@ -468,6 +468,21 @@ def _requested_item_count(query: str) -> int | None:
     return int(value) if value.isdigit() else _COUNT_WORDS[value]
 
 
+def _rollup_query_shape(query: str) -> str:
+    if _ROLLUP_QUERY_RE.search(query):
+        return "summary"
+    if _ITEM_QUERY_RE.search(query):
+        if _CONVERSATION_ORDER_RE.search(query) or re.search(
+            r"\b(order|ordered|sequence|timeline|stages)\b|"
+            r"\bwalk\s+me\s+through\b",
+            query,
+            re.IGNORECASE,
+        ):
+            return "ordered_list"
+        return "list"
+    return "point"
+
+
 def _query_focus_handles(query: str, handles: Sequence[Mapping]) -> list[Mapping]:
     query_tokens = _query_focus_tokens(query)
     if len(query_tokens) < 2:
@@ -576,27 +591,51 @@ def _note_rollup_impressions(
     results: Sequence[Mapping] | None = None,
 ):
     note_impression = getattr(db, "note_rollup_impression", None)
+    note_impression_features = getattr(db, "note_rollup_impression_features", None)
     note_expansion = getattr(db, "note_rollup_expansion", None)
-    if note_impression is None or (results is not None and note_expansion is None):
+    note_expansion_features = getattr(db, "note_rollup_expansion_features", None)
+    if note_impression is None and note_impression_features is None:
         return
-    returned_rids = [str(result.get("rid") or "") for result in results or []]
+    if results is not None and note_expansion is None and note_expansion_features is None:
+        return
+    requested_count = _requested_item_count(query)
+    query_shape = _rollup_query_shape(query)
     for rank, handle in enumerate(handles):
         metadata = handle.get("metadata") or {}
-        impression_id = note_impression(
+        impression_args = (
             str(handle.get("rid") or ""),
             query,
             handle.get("namespace"),
             rank,
             float(handle.get("score") or 0.0),
         )
+        if note_impression_features is not None:
+            impression_id = note_impression_features(
+                *impression_args,
+                requested_count,
+                query_shape,
+            )
+        else:
+            impression_id = note_impression(*impression_args)
         if results is None:
             handle_metadata = dict(metadata)
             handle_metadata["organization_rollup_impression_id"] = impression_id
             handle["metadata"] = handle_metadata
             continue
         child_rids = {str(rid) for rid in metadata.get("child_rids") or []}
-        returned_children = [rid for rid in returned_rids if rid in child_rids]
-        note_expansion(impression_id, returned_children)
+        returned_children = [
+            result
+            for result in results
+            if str(result.get("rid") or "") in child_rids
+        ]
+        returned_rids = [str(result.get("rid") or "") for result in returned_children]
+        if note_expansion_features is not None:
+            returned_scores = [
+                _finite_float(result.get("score")) for result in returned_children
+            ]
+            note_expansion_features(impression_id, returned_rids, returned_scores)
+        else:
+            note_expansion(impression_id, returned_rids)
         for result in results:
             if str(result.get("rid") or "") not in child_rids:
                 continue

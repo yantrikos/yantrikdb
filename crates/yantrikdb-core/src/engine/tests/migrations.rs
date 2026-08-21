@@ -459,13 +459,14 @@ fn schema_v43_fresh_install_has_typed_synthesis_lifecycle() {
 }
 
 #[test]
-fn schema_v45_fresh_install_has_rollup_outcome_ledger() {
+fn schema_v46_fresh_install_has_rollup_outcome_ledger() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
     let conn = db.conn();
     for table in [
         "rollup_impressions",
         "rollup_impression_children",
         "rollup_impression_outcomes",
+        "rollup_impression_additions",
     ] {
         assert_eq!(
             conn.query_row(
@@ -475,7 +476,7 @@ fn schema_v45_fresh_install_has_rollup_outcome_ledger() {
             )
             .unwrap(),
             1,
-            "v45 fresh schema missing {table}"
+            "v46 fresh schema missing {table}"
         );
     }
     for index in [
@@ -483,12 +484,81 @@ fn schema_v45_fresh_install_has_rollup_outcome_ledger() {
         "idx_rollup_impressions_query",
         "idx_rollup_impression_children_child",
         "idx_rollup_impression_outcomes_created",
+        "idx_rollup_impression_additions_child",
     ] {
         assert!(
             index_exists(&conn, index),
-            "v45 fresh schema missing {index}"
+            "v46 fresh schema missing {index}"
         );
     }
+    for expected in ["requested_count", "query_shape"] {
+        assert!(
+            table_columns(&conn, "rollup_impressions")
+                .iter()
+                .any(|column| column == expected),
+            "v46 fresh schema missing rollup_impressions.{expected}"
+        );
+    }
+    assert!(
+        table_columns(&conn, "rollup_impression_children")
+            .iter()
+            .any(|column| column == "score"),
+        "v46 fresh schema missing rollup_impression_children.score"
+    );
+}
+
+#[test]
+fn schema_v46_migration_adds_omission_features() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE rollup_impressions (impression_id TEXT PRIMARY KEY); \
+         CREATE TABLE rollup_impression_children ( \
+             impression_id TEXT NOT NULL, child_rid TEXT NOT NULL, rank INTEGER NOT NULL, \
+             PRIMARY KEY (impression_id, child_rid) \
+         );",
+    )
+    .unwrap();
+    conn.execute_batch(crate::base::schema::MIGRATE_V45_TO_V46)
+        .unwrap();
+
+    let impression_cols = table_columns(&conn, "rollup_impressions");
+    assert!(impression_cols.iter().any(|col| col == "requested_count"));
+    assert!(impression_cols.iter().any(|col| col == "query_shape"));
+    assert!(table_columns(&conn, "rollup_impression_children")
+        .iter()
+        .any(|col| col == "score"));
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            ["rollup_impression_additions"],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        1
+    );
+    assert!(index_exists(&conn, "idx_rollup_impression_additions_child"));
+}
+
+#[test]
+fn schema_v46_migration_bootstraps_child_ledger_skipped_by_v43() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(crate::base::schema::MIGRATE_V44_TO_V45)
+        .unwrap();
+    conn.execute_batch(crate::base::schema::MIGRATE_V45_TO_V46)
+        .unwrap();
+
+    assert!(table_columns(&conn, "rollup_impression_children")
+        .iter()
+        .any(|column| column == "score"));
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            ["rollup_impression_additions"],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        1
+    );
 }
 
 #[test]

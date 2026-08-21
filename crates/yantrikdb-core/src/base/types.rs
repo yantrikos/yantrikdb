@@ -482,6 +482,54 @@ pub struct RollupOutcomeExample {
     pub outcome_finalized_at: f64,
 }
 
+/// Coverage for explicit false-negative labels. This is deliberately separate
+/// from [`RollupOutcomeReport`], whose readiness only governs pruning returned
+/// children.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RollupMembershipReport {
+    pub namespace: Option<String>,
+    pub since: Option<f64>,
+    pub total_impressions: i64,
+    pub expanded_impressions: i64,
+    pub finalized_impressions: i64,
+    pub finalized_added_children: i64,
+    pub finalized_impressions_with_additions: i64,
+    pub finalized_distinct_queries_with_additions: i64,
+    pub telemetry_completion_rate: Option<f64>,
+    pub added_child_rate: Option<f64>,
+    /// `no_data`, `insufficient_evidence`, or
+    /// `ready_for_offline_evaluation`.
+    pub evidence_status: String,
+    pub readiness_failures: Vec<String>,
+}
+
+/// One child from a finalized membership example. Returned and omitted
+/// positives share an impression group but remain distinct classes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RollupMembershipExample {
+    pub export_schema_version: u32,
+    pub impression_id: String,
+    /// Namespace-scoped linkage key. It is not an anonymization boundary.
+    pub query_key: String,
+    pub namespace: String,
+    pub rollup_rid: String,
+    pub rollup_rank: usize,
+    pub rollup_score: f64,
+    pub requested_count: Option<usize>,
+    pub query_shape: Option<String>,
+    pub child_rid: String,
+    pub child_rank: Option<usize>,
+    pub child_score: Option<f64>,
+    pub returned_child_count: usize,
+    pub returned: bool,
+    pub omitted_positive: bool,
+    pub positive: bool,
+    pub corrected: bool,
+    pub omission_source: Option<String>,
+    pub impression_created_at: f64,
+    pub outcome_finalized_at: f64,
+}
+
 /// Engine statistics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Stats {

@@ -485,13 +485,20 @@ list and timeline queries. Its default `order="auto"` uses
 conversation, while real-world timelines use `first_mention_at` and then
 `created_at` as a fallback.
 
-Organized recall also records a privacy-preserving rollup outcome ledger. A
+Organized recall also records a local rollup outcome ledger. A
 surfaced rollup gets an immutable impression ID with its hashed query, rank,
-score, and namespace; expansion records the ordered children actually returned.
+score, namespace, requested item count, and coarse query shape; expansion
+records the ordered children actually returned and their serve-time scores.
 Applications can explicitly mark a returned child as `selected` or `corrected`
 with `note_rollup_selection`, then close the interaction with
 `finalize_rollup_outcome`. Finalization supplies the complete selected/corrected
 set; only then can an omitted returned child count as an explicit non-selection.
+Consumers may also pass `omitted_child_rids` when the user explicitly identifies
+an answer item retrieval failed to return. These are stored separately as
+`caller_false_negative` observations: they must have been active, same-namespace
+records available when the impression was served, and they never rewrite served
+history. The organizer cannot infer these labels itself; the application that
+observes the user's correction must finalize the interaction.
 Generic point reads, unfinished interactions, and ordinary corrections never
 infer a rollup outcome. `rollup_outcome_report` is a read-only, namespace/time
 scoped coverage report. `rollup_outcome_examples` exports bounded finalized
@@ -506,12 +513,17 @@ rollups, positive and negative children, at least 80% telemetry completion, and
 no dominant query or rollup. `ready_for_offline_evaluation` means only that an
 offline test is credible: these observations remain measurement data and are
 not ranker labels until their predictive value has been validated.
+`rollup_membership_report` has an independent readiness gate for false-negative
+rescue. `rollup_membership_examples` emits complete impression groups, including
+returned and explicit omitted-positive rows, bounded by finalization time so a
+later correction cannot leak into an earlier evaluation window. Its query key is
+namespace-scoped but remains linkable and must not be treated as anonymized.
 
 ## Full API
 
 | Operation | Methods |
 |-----------|---------|
-| **Core** | `record`, `record_batch`, `recall`, `recall_with_response`, `recall_refine`, `forget`, `correct`, `note_rollup_impression`, `note_rollup_expansion`, `note_rollup_selection`, `finalize_rollup_outcome`, `rollup_outcome_report`, `rollup_outcome_examples` |
+| **Core** | `record`, `record_batch`, `recall`, `recall_with_response`, `recall_refine`, `forget`, `correct`, `note_rollup_impression`, `note_rollup_impression_features`, `note_rollup_expansion`, `note_rollup_expansion_features`, `note_rollup_selection`, `finalize_rollup_outcome`, `rollup_outcome_report`, `rollup_outcome_examples`, `rollup_membership_report`, `rollup_membership_examples` |
 | **Knowledge Graph** | `relate`, `get_edges`, `search_entities`, `entity_profile`, `relationship_depth`, `link_memory_entity` |
 | **Cognition** | `think`, `get_patterns`, `scan_conflicts`, `resolve_conflict`, `derive_personality` |
 | **Triggers** | `get_pending_triggers`, `acknowledge_trigger`, `deliver_trigger`, `act_on_trigger`, `dismiss_trigger` |

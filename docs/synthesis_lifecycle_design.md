@@ -299,6 +299,25 @@ not anonymization, and an unselected row is a negative only within that
 impression's returned set. Offline splits must group by query or rollup, or use
 time windows, rather than randomly splitting child rows.
 
+Schema v46 adds a separate false-negative measurement plane without changing
+the v1 outcome report or export. Feature-aware impression and expansion methods
+freeze requested item count, a coarse query shape, and returned-child scores.
+`finalize_rollup_outcome(..., omitted_child_rids=[...])` accepts only explicit
+`caller_false_negative` observations: the RID must be active, in the same
+namespace, absent from the returned expansion, and locally available before the
+impression. Exact retries remain idempotent, while changed omission sets fail
+closed. The organizer records features but does not finalize automatically;
+only a consumer that observed a user correction has a valid label.
+
+`rollup_membership_report(namespace, since)` gates false-negative evaluation
+independently from returned-child pruning. `rollup_membership_examples` returns
+whole finalized impression groups with distinct `returned`, `omitted_positive`,
+and `positive` fields. Its bounds use `outcome_finalized_at`, preventing labels
+recorded later from leaking into an earlier training window, and its limit is in
+impressions rather than rows. The namespace-scoped query key is still linkable,
+not anonymized. This telemetry is intentionally node-local and excluded from
+packs and replication; offline promotion requires grouped or temporal holdouts.
+
 Local frozen-store probes show why the middle representation is required.
 Atomic records can split one concern into adjacent follow-up actions, while a
 topic handle can combine a dozen concerns. Hierarchical query-free discovery on
