@@ -9,13 +9,17 @@ labels are not converted into production supersession policy.
 from __future__ import annotations
 
 import argparse
+import gzip
 import json
 import re
+from collections import defaultdict
 from pathlib import Path
 
 
 VALUE_RE = re.compile(
-    r"\$\s?\d[\d,]*(?:\.\d+)?"
+    r"\b\d[\d,]*(?:\.\d+)?\s*-\s*\d[\d,]*(?:\.\d+)?\s*"
+    r"(?:days?|weeks?|months?|years?|hours?)\b"
+    r"|\$\s?\d[\d,]*(?:\.\d+)?"
     r"|\b\d[\d,]*(?:\.\d+)?\s?(?:%|percent|women|books?|cupcakes?|days?|hours?|words?)?\b"
     r"|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|"
     r"jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|"
@@ -23,13 +27,77 @@ VALUE_RE = re.compile(
     r"|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\b",
     re.IGNORECASE,
 )
+TURN_HEADER_RE = re.compile(
+    r"(?m)^\[(?:(?:[A-Z][a-z]+-\d{1,2}-\d{4})\s*\|\s*)?"
+    r"Turn (?P<turn>\d+)\](?: \(cont\.\))?\s+"
+    r"(?P<role>User|Assistant):\s*"
+)
 
 
 def value_tokens(text: str) -> set[str]:
-    return {
+    values = {
         re.sub(r"\s+", " ", match.group(0).replace(",", "").strip()).casefold()
         for match in VALUE_RE.finditer(text or "")
     }
+    return {
+        value for value in values if not re.fullmatch(r"(?:19|20)\d{2}", value)
+    }
+
+
+def load_json_rows(path: Path) -> list[dict]:
+    opener = gzip.open if path.suffix == ".gz" else open
+    with opener(path, "rt", encoding="utf-8") as handle:
+        payload = json.load(handle)
+    if not isinstance(payload, list):
+        raise ValueError(f"{path}: expected a JSON list")
+    return payload
+
+
+def parse_document_turns(content: str) -> list[dict]:
+    """Parse flattened BEAM document text into source-role turn fragments."""
+    matches = list(TURN_HEADER_RE.finditer(content or ""))
+    turns = []
+    for index, match in enumerate(matches):
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(content)
+        turns.append(
+            {
+                "id": int(match.group("turn")),
+                "role": match.group("role").casefold(),
+                "content": content[match.end() : end].strip(),
+            }
+        )
+    return turns
+
+
+def load_conversations(path: Path) -> dict[str, dict]:
+    """Load raw-generator conversations or the published flattened cache."""
+    rows = load_json_rows(path)
+    if all("conversation_id" in row for row in rows):
+        return {str(row["conversation_id"]): row for row in rows}
+    if not all("user_id" in row and "content" in row for row in rows):
+        raise ValueError(f"{path}: unsupported BEAM source schema")
+
+    fragments: dict[str, dict[tuple[int, str], list[str]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
+    for document in rows:
+        user_id = str(document["user_id"])
+        for turn in parse_document_turns(str(document.get("content") or "")):
+            key = (turn["id"], turn["role"])
+            fragments[user_id][key].append(turn["content"])
+
+    conversations = {}
+    for user_id, by_turn in fragments.items():
+        chat = [
+            {
+                "id": turn_id,
+                "role": role,
+                "content": " ".join(part for part in parts if part).strip(),
+            }
+            for (turn_id, role), parts in sorted(by_turn.items())
+        ]
+        conversations[user_id] = {"conversation_id": user_id, "chat": chat}
+    return conversations
 
 
 def iter_turns(chat: list) -> list[dict]:
@@ -48,11 +116,9 @@ def main() -> int:
     parser.add_argument("dataset", type=Path)
     args = parser.parse_args()
 
-    results = json.loads(args.results.read_text(encoding="utf-8"))["results"]
-    conversations = {
-        str(row["conversation_id"]): row
-        for row in json.loads(args.dataset.read_text(encoding="utf-8"))
-    }
+    result_payload = json.loads(args.results.read_text(encoding="utf-8"))
+    results = result_payload["results"]
+    conversations = load_conversations(args.dataset)
     failures = [
         row
         for row in results
