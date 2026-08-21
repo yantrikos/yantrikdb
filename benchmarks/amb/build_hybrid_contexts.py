@@ -31,7 +31,10 @@ def build_hybrid_rows(
     derived_rows: list[dict],
     raw_limit: int,
     derived_limit: int,
+    ordering: str = "derived_then_raw",
 ) -> list[dict]:
+    if ordering not in {"derived_then_raw", "raw_then_derived"}:
+        raise ValueError(f"unsupported hybrid ordering: {ordering!r}")
     raw_by_id = {
         str(row.get("query_id") or ""): row
         for row in raw_rows
@@ -54,7 +57,11 @@ def build_hybrid_rows(
             )
         derived_bodies = derived_bodies[:derived_limit]
         raw_bodies = split_memory_bodies(str(raw.get("context") or ""))[:raw_limit]
-        bodies = derived_bodies + raw_bodies
+        bodies = (
+            raw_bodies + derived_bodies
+            if ordering == "raw_then_derived"
+            else derived_bodies + raw_bodies
+        )
         if not bodies:
             raise ValueError(f"hybrid context is empty for {query_id!r}")
         row = dict(derived)
@@ -66,7 +73,7 @@ def build_hybrid_rows(
         row["hybrid"] = {
             "derived_documents": len(derived_bodies),
             "raw_documents": len(raw_bodies),
-            "ordering": "derived_then_raw",
+            "ordering": ordering,
         }
         output.append(row)
     return output
@@ -78,6 +85,11 @@ def main() -> int:
     parser.add_argument("--derived", type=Path, required=True)
     parser.add_argument("--raw-limit", type=int, default=20)
     parser.add_argument("--derived-limit", type=int, default=20)
+    parser.add_argument(
+        "--ordering",
+        choices=("derived_then_raw", "raw_then_derived"),
+        default="derived_then_raw",
+    )
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args()
     if args.raw_limit < 1 or args.derived_limit < 1:
@@ -88,6 +100,7 @@ def main() -> int:
         load_rows(args.derived),
         args.raw_limit,
         args.derived_limit,
+        args.ordering,
     )
     payload = {
         "config": {
@@ -95,7 +108,7 @@ def main() -> int:
             "derived_source": str(args.derived),
             "raw_limit": args.raw_limit,
             "derived_limit": args.derived_limit,
-            "ordering": "derived_then_raw",
+            "ordering": args.ordering,
         },
         "results": results,
     }

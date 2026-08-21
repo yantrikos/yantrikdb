@@ -1,6 +1,8 @@
 from benchmarks.amb.build_topic_card_contexts import (
     build_context_rows,
+    rank_topic_cards,
     render_topic_cards,
+    topic_index_document,
 )
 
 
@@ -62,6 +64,66 @@ def test_build_context_rows_filters_unit_and_records_provenance():
     assert rows[0]["selection"] == {
         "mode": "query_independent_topic_cards_v1",
         "handle_count": 2,
+        "selected_handle_count": 1,
+        "card_limit": None,
+        "topic_index_handle_count": 0,
+        "topic_index_includes_spans": False,
+        "ranking": [],
         "singleton_fallback_count": 0,
         "organizer_input_sha256": "abc",
     }
+
+
+def test_rank_topic_cards_combines_lexical_and_recorded_date_relevance():
+    artifact = {
+        "input_items": [
+            {"id": "A0001", "date": 1709251200.0, "turn": 1},
+            {"id": "A0002", "date": 1722470400.0, "turn": 2},
+            {"id": "A0003", "date": 1709251200.0, "turn": 3},
+        ],
+        "handles": [
+            {
+                "label": "Budget planning",
+                "summary": "Tracked expenses and savings.",
+                "evidence_ids": ["A0001"],
+            },
+            {
+                "label": "Writing progress",
+                "summary": "Improved drafting in August.",
+                "evidence_ids": ["A0002"],
+            },
+            {
+                "label": "Writing practice",
+                "summary": "Revised essays in March.",
+                "evidence_ids": ["A0003"],
+            },
+        ],
+    }
+
+    documents, trace = rank_topic_cards(
+        artifact, "Summarize my writing progress in March 2024", 1
+    )
+
+    assert "Writing practice" in documents[0]
+    assert trace[0]["temporal_score"] == 2.0
+    assert trace[0]["lexical_score"] > 0.0
+
+
+def test_render_topic_cards_deduplicates_exact_organizer_repeats():
+    artifact = _artifact()
+    artifact["handles"].append(dict(artifact["handles"][0]))
+
+    context = render_topic_cards(artifact)
+
+    assert context.count("Topic: Navbar fixes") == 1
+
+
+def test_topic_index_uses_discovered_labels_and_omits_singleton_fallbacks():
+    document, count = topic_index_document(_artifact())
+
+    assert count == 1
+    assert "Navbar fixes" in document
+    assert "Unclustered source item" not in document
+
+    undated, _ = topic_index_document(_artifact(), include_spans=False)
+    assert "recorded" not in undated

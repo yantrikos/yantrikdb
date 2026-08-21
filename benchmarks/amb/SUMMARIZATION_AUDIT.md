@@ -94,16 +94,45 @@ coverage fell to `66.93%`. Prepending every dated card to the unchanged raw
 context preserved evidence, raised lexical coverage from `83.47%` to `90.58%`,
 and reduced weak rubric items from `7/47` to `2/47`.
 
-The repeated-judge low-ten decision run scored `0.5358` versus `0.3892` raw,
-mean paired delta `+0.1467`, with six wins, two ties, two losses and bootstrap
-95% CI `[+0.0350, +0.2617]`. Context tokens increased 25.4%. A six-query
-companion regression cohort from the same units moved in the other direction:
-`-0.0972` mean delta, one win, one tie, four losses, CI
-`[-0.2347, +0.0181]`. Across all 16 tested rows the mean delta was `+0.0552`,
-but its CI crossed zero.
+The repeated-judge low-ten decision run with every card before the raw context
+scored `0.5358` versus `0.3892` raw, mean paired delta `+0.1467`, with six wins,
+two ties, two losses and bootstrap 95% CI `[+0.0350, +0.2617]`. Context tokens
+increased 25.4%. A six-query companion regression cohort from the same units
+moved in the other direction: `-0.0972` mean delta, one win, one tie, four
+losses, CI `[-0.2347, +0.0181]`. Across all 16 tested rows the mean delta was
+only `+0.0552`, and its CI crossed zero.
 
-Therefore topic cards are a promising salience index, not an unconditional
-summary-intent lane. The next experiment should select a small query-relevant
-subset of dated cards before the unchanged raw context. Runtime integration is
-blocked on a query-only or retrieval-feature gate that avoids the demonstrated
-regressions on already-strong answers.
+Two cheaper gates did not solve that regression. Query-ranked top-eight cards
+used only 4.4% more tokens and slightly raised low-ten lexical coverage from
+`83.47%` to `85.02%`, but judged delta was a null `+0.0008` (two wins, six ties,
+two losses; CI `[-0.0583, +0.0600]`). A labels-only topic index used 3.6% more
+tokens and raised lexical coverage to `85.64%`, but regressed by `-0.0458` (one
+win, four ties, five losses; CI `[-0.1025, +0.0150]`). A strict
+missing-query-term gate was also rejected: it selected 11 of 40 rows largely
+because generic verbs and pronouns were absent, including already-strong
+answers. These controls show that broad synthesis coverage matters and that
+compact labels can distract the answer model instead of guiding it.
+
+## Raw-First Ordering
+
+The same complete dated cards were then moved after the unchanged raw timeline.
+This is the only substantive difference from the prepended-card arm. On the
+low-ten decision cohort, raw-first ordering scored `0.5550` versus `0.3933` raw:
+mean paired delta `+0.1617`, five wins, four ties, one loss, bootstrap 95% CI
+`[+0.0442, +0.2900]`. Context tokens increased 24.5%. Lexical retrieval
+coverage was `90.58%`, with only `2/47` rubric items below 75%.
+
+The companion cohort no longer regressed: it scored `+0.0306`, with three wins,
+two ties, one loss and CI `[-0.0625, +0.1000]`. Across all 16 frozen rows,
+raw-first complete synthesis produced mean delta `+0.1125`, eight wins, six
+ties, two losses and bootstrap 95% CI `[+0.0292, +0.2063]`. This is the first
+broad statistically positive result in the summarization audit.
+
+The evidence supports a concrete retrieval contract: preserve exact source
+chronology first, then append complete query-independent, evidence-grounded
+dated topic cards as a consolidation checklist. Do not replace raw evidence,
+prepend the cards, top-k the cards, or substitute a labels-only index. Exact
+duplicate cards are removed while their evidence dates are unioned. The result
+is validated on 16 queries from eight units, not yet the full 40-query category;
+the next step is a production/replay provider arm followed by full-category
+validation before changing the default runtime path.

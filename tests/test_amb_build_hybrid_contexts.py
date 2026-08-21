@@ -50,3 +50,20 @@ def test_build_hybrid_rows_accepts_frozen_derived_context_without_documents():
     rows = build_hybrid_rows(raw, derived, raw_limit=1, derived_limit=1)
 
     assert rows[0]["documents"] == ["d1", "r1"]
+
+
+def test_build_hybrid_rows_can_put_raw_evidence_before_derived_context():
+    raw = [{"query_id": "q", "context": "## Memory 1\nr1"}]
+    derived = [{"query_id": "q", "documents": ["d1"]}]
+
+    rows = build_hybrid_rows(
+        raw, derived, raw_limit=1, derived_limit=1, ordering="raw_then_derived"
+    )
+
+    assert rows[0]["documents"] == ["r1", "d1"]
+    assert rows[0]["hybrid"]["ordering"] == "raw_then_derived"
+
+
+def test_build_hybrid_rows_rejects_unknown_ordering():
+    with pytest.raises(ValueError, match="unsupported hybrid ordering"):
+        build_hybrid_rows([], [], 1, 1, ordering="sideways")
