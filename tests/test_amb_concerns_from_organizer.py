@@ -1,7 +1,23 @@
 from benchmarks.amb.concerns_from_organizer import (
+    _handle_prompt,
     _normalize_handle_items,
+    _schema,
     merge_cross_handle_duplicates,
 )
+
+
+def test_thread_prompt_requires_query_free_exhaustive_chronological_grouping():
+    prompt = _handle_prompt(
+        {"label": "Mentorship", "summary": "Advice over time"},
+        [{"id": "A1", "turn": 4, "text": "Bryan advised storytelling."}],
+        8,
+    )
+
+    assert "1-8 narrow chronological concern threads" in prompt
+    assert "Cover every supplied evidence ID" in prompt
+    assert "No benchmark question or expected answer" in prompt
+    assert '{"items":[' in prompt
+    assert _schema(8)["properties"]["items"]["maxItems"] == 8
 
 
 def test_normalize_rejects_evidence_outside_handle():

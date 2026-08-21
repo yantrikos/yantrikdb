@@ -27,7 +27,7 @@ def _input_digest(atomics: list[dict]) -> str:
     return hashlib.sha256(serialized.encode()).hexdigest()
 
 
-def _handle_prompt(handle: dict, evidence: list[dict]) -> str:
+def _handle_prompt(handle: dict, evidence: list[dict], max_items: int = 6) -> str:
     payload = [
         {
             "id": item["id"],
@@ -37,18 +37,23 @@ def _handle_prompt(handle: dict, evidence: list[dict]) -> str:
         for item in evidence
     ]
     return (
-        "Before any future query is known, assemble the evidence below into 1-6 "
-        "answer-sized concern items within one globally discovered topic. Each item "
-        "must be one self-contained sentence about one concrete event, contribution, "
-        "decision, recurring issue, or milestone. Merge question/answer/follow-up "
-        "fragments that concern the same thing. Combine distant evidence only when it "
-        "updates the same concern. Split a compound evidence record when it contains "
-        "details that could independently answer different future questions; the same "
-        "evidence ID may support at most two such items. Do not emit profile facts or "
-        "broad topic summaries. Keep genuinely different concerns separate. Preserve "
-        "names, dates, quantities, artifacts, and actions. Use 1-6 supplied evidence IDs "
-        "per item and never invent an ID. No benchmark question or expected answer is "
-        "available. Return JSON only."
+        f"Before any future query is known, assemble the evidence below into 1-{max_items} "
+        "narrow chronological concern threads within one globally discovered topic. "
+        "Each output item is a durable record for one coherent concern, relationship, "
+        "artifact, or goal. When several events update the same concern over time, keep "
+        "their distinct milestones in chronological order inside one self-contained "
+        "item; do not flatten every event into a separate item. Merge question, answer, "
+        "and follow-up fragments about the same milestone. Keep unrelated concerns "
+        "separate even when they share the broad topic. Preserve names, dates, "
+        "quantities, artifacts, corrections, and specific actions. Cover every supplied "
+        "evidence ID in at least one output item. Use 1-6 supplied evidence IDs per item, "
+        "allow an ID in at most two items, and never invent an ID. Do not emit profile "
+        "facts, catch-all summaries, or filler. No benchmark question or expected answer "
+        "is available. Return ONLY one JSON object with exactly this shape and no "
+        "markdown: "
+        '{"items":[{"text":"chronological self-contained thread",'
+        '"anchor_entities":["name or artifact"],'
+        '"evidence_ids":["A0001","A0002"]}]}.'
         f"\n\nTOPIC: {handle.get('label')}\n"
         f"TOPIC SUMMARY: {handle.get('summary')}\n"
         "EVIDENCE:\n"
@@ -56,35 +61,36 @@ def _handle_prompt(handle: dict, evidence: list[dict]) -> str:
     )
 
 
-_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "items": {
-            "type": "array",
-            "minItems": 1,
-            "maxItems": 6,
+def _schema(max_items: int) -> dict:
+    return {
+        "type": "object",
+        "properties": {
             "items": {
-                "type": "object",
-                "properties": {
-                    "text": {"type": "string"},
-                    "anchor_entities": {
-                        "type": "array",
-                        "items": {"type": "string"},
+                "type": "array",
+                "minItems": 1,
+                "maxItems": max_items,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "text": {"type": "string"},
+                        "anchor_entities": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                        },
+                        "evidence_ids": {
+                            "type": "array",
+                            "items": {"type": "string"},
+                            "minItems": 1,
+                            "maxItems": 6,
+                            "uniqueItems": True,
+                        },
                     },
-                    "evidence_ids": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "minItems": 1,
-                        "maxItems": 6,
-                        "uniqueItems": True,
-                    },
+                    "required": ["text", "anchor_entities", "evidence_ids"],
                 },
-                "required": ["text", "anchor_entities", "evidence_ids"],
-            },
-        }
-    },
-    "required": ["items"],
-}
+            }
+        },
+        "required": ["items"],
+    }
 
 
 def _normalize_handle_items(
@@ -226,9 +232,14 @@ def main() -> int:
     parser.add_argument("--model", default="qwen3.5:9b")
     parser.add_argument("--host", default="http://127.0.0.1:11434")
     parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--max-items-per-handle", type=int, default=6)
+    parser.add_argument("--handle-index", type=int, action="append", default=[])
+    parser.add_argument("--require-exhaustive-handles", action="store_true")
     parser.add_argument("--num-predict", type=int, default=1800)
     parser.add_argument("--timeout", type=int, default=600)
     args = parser.parse_args()
+    if not 1 <= args.max_items_per_handle <= 12:
+        parser.error("--max-items-per-handle must be between 1 and 12")
 
     atomics = _load_atomics(args.db)
     known = {item["id"]: item for item in atomics}
@@ -239,6 +250,8 @@ def main() -> int:
 
     jobs = []
     for index, handle in enumerate(organizer.get("handles") or [], 1):
+        if args.handle_index and index not in args.handle_index:
+            continue
         evidence = [
             known[rid]
             for rid in dict.fromkeys(handle.get("evidence_ids") or [])
@@ -256,8 +269,8 @@ def main() -> int:
         result, response = _chat_json(
             host=args.host,
             model=args.model,
-            prompt=_handle_prompt(handle, evidence),
-            schema=_SCHEMA,
+            prompt=_handle_prompt(handle, evidence, args.max_items_per_handle),
+            schema=_schema(args.max_items_per_handle),
             num_predict=args.num_predict,
             timeout=args.timeout,
         )
@@ -267,37 +280,57 @@ def main() -> int:
             result.get("items") or [],
             {item["id"] for item in evidence},
         )
-        return index, items, bad, response
+        assigned = {rid for item in items for rid in item["evidence_ids"]}
+        missing = sorted({item["id"] for item in evidence} - assigned)
+        return (
+            index,
+            items,
+            bad,
+            missing,
+            response,
+            str((response.get("message") or {}).get("content") or ""),
+        )
 
     with ThreadPoolExecutor(max_workers=max(1, args.workers)) as executor:
         futures = {executor.submit(generate, job): job[0] for job in jobs}
         for future in as_completed(futures):
-            index, items, bad, response = future.result()
+            index, items, bad, missing, response, response_content = future.result()
             raw_items.extend(items)
             invalid.extend(f"handle={index}:{rid}" for rid in bad)
             responses.append(
                 {
                     "handle_index": index,
                     "item_count": len(items),
+                    "unassigned_evidence_ids": missing,
                     "eval_count": response.get("eval_count"),
                     "prompt_eval_count": response.get("prompt_eval_count"),
+                    "response_content": response_content,
                 }
             )
-            print(f"handle={index}/{len(jobs)} concerns={len(items)}")
+            print(
+                f"handle={index}/{len(jobs)} concerns={len(items)} "
+                f"unassigned={len(missing)}"
+            )
 
     items = merge_cross_handle_duplicates(raw_items)
     assigned = {rid for item in items for rid in item["evidence_ids"]}
+    selected_evidence = {
+        item["id"] for _, _, evidence in jobs for item in evidence
+    }
     artifact = {
         "model": args.model,
         "organization_level": "concern",
-        "generator": "global_topics_then_local_concerns_v2",
+        "generator": "global_topics_then_local_concern_threads_v3",
         "input_count": len(atomics),
         "input_sha256": digest,
         "topic_handle_count": len(jobs),
+        "selected_handle_indexes": [job[0] for job in jobs],
+        "selected_evidence_count": len(selected_evidence),
+        "max_items_per_handle": args.max_items_per_handle,
         "raw_item_count": len(raw_items),
         "item_count": len(items),
         "assigned_count": len(assigned),
-        "unassigned_evidence_ids": sorted(set(known) - assigned),
+        "unassigned_evidence_ids": sorted(selected_evidence - assigned),
         "invalid_evidence_ids": sorted(set(invalid)),
         "responses": sorted(responses, key=lambda row: row["handle_index"]),
         "items": items,
@@ -311,6 +344,20 @@ def main() -> int:
     print(f"wrote {args.output}")
     if invalid:
         raise ValueError(f"concern generation used invalid evidence: {invalid}")
+    incomplete_handles = [
+        response
+        for response in responses
+        if response["unassigned_evidence_ids"]
+    ]
+    if args.require_exhaustive_handles and incomplete_handles:
+        details = ", ".join(
+            f"{response['handle_index']}="
+            f"{len(response['unassigned_evidence_ids'])}"
+            for response in sorted(
+                incomplete_handles, key=lambda row: row["handle_index"]
+            )
+        )
+        raise ValueError(f"concern generation left handles incomplete: {details}")
     return 0
 
 

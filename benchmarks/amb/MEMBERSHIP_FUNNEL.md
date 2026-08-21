@@ -269,6 +269,73 @@ scored `0.2`. More evidence, recursive hydration, and anchor grouping are inert
 for the broad query unless storage first emits answer-sized cross-session
 concerns that encode the latent event thread.
 
+### Concern-Record Gate
+
+A query-blind source-membership audit over the existing hierarchical concern
+artifacts for Q9 and Q10 measured whether a bounded set of answer-sized records
+could contain each authoritative source set. Gold was joined only after concern
+generation:
+
+| Maximum concern records | Mean source-turn recall | Exact query sets |
+| --- | ---: | ---: |
+| One | 22.5% | 0/4 |
+| Three | 59.2% | 0/4 |
+| Five | 87.5% | 3/4 |
+
+The Q9 family query and both Q10 queries reached exact source coverage within
+their requested item budget. Broad Q9 reached only `3/6`: turns 108, 164, and
+166 were all assigned to the same 12-evidence mentorship topic, but the local
+concern generator was capped at six one-event outputs and silently omitted
+those three IDs. Report SHA-256:
+`11cf08e888aa06e4c8ffc997b5ec849cbcb9b23a61faf6b3fe455e52211ba816`.
+
+The generator probe now supports a single-handle preflight, records raw model
+output, states the exact JSON contract for cloud models that ignore Ollama's
+schema, and can fail closed when any selected-handle evidence is unassigned. A
+bounded DeepSeek rerun over only Q9's mentorship handle produced six coherent
+chronological concern records and covered all `12/12` supplied IDs. Artifact
+SHA-256:
+`b9f01462fac13db58d71f0c44a38fdfb014c7814b11ff90b6596e5860465f3b3`.
+
+That representation did not lift the answer score. With all six records in a
+clean public replay, DeepSeek again scored `0.2`. An additional isolated
+connected-trajectory control also scored `0.2`. The reason is correction
+semantics: the source history later says the user never met Bryan at the film
+festival and asks to correct the earlier claim, while Q9's gold still requires
+the earlier Bryan-advice event. The historical synthetic thread that scored
+`1.0` had filtered the correction out. Optimizing Q9 further would therefore
+reward stale-fact omission, which is unacceptable for the product. Judged
+artifact SHA-256s are
+`5ab46314b6605e13e22240531536cf68062bbe2dee7f8a3163156706b1d2b9d4`
+for the complete narrow-thread context and
+`da769a0aacbb23e67040f0249ed6e37306693823f106e16c90f7ccebc86fbf4f`
+for the isolated generated trajectory.
+
+Concern synthesis remains viable for the three non-conflicting local queries,
+but broad Q9 is now a hard stopping case: preserve corrections and move the
+score experiment to a query whose rubric agrees with the current memory state.
+
+The next bounded gate used Q10, where no correction conflict was found. Flat
+concern retrieval returned 40 records and scored `0.0` on the broad writing
+journey and `0.6` on the explicit Carla collaboration query. The existing
+grouped concern-topic path reduced the Carla context to exactly five records at
+turns 52, 78, 176, 228, and 230. Three independent DeepSeek answer-and-judge
+runs scored `0.8`, `0.8`, and `1.0` (median `0.8`). This is a real but narrow
+lift: entity/facet routing plus grouped chronological concerns helps when the
+query identifies its partition; it does not identify the hidden partition in a
+broad timeline query.
+
+Q10 judged artifact SHA-256s:
+
+- Flat broad concerns (`0.0`):
+  `ecff4d560db8cd66b93d2a0798bc42fdd0f4d0df01e83da3a24bea9505f04c70`.
+- Flat Carla concerns (`0.6`):
+  `9c41f85be82f3a59e9fa42f82264c0ca89bdb038955e9fca04b0495ad1c45da1`.
+- Grouped Carla concerns (`0.8`, `0.8`, `1.0`):
+  `50ca23d36a42ee66fa7c39e53cf88bdc9e90e5a32742d4536b93bd5db324e6ac`,
+  `65763420c028f28fc1d86d34ac172264456be43cfb04446b4df0754a278e1b5e`,
+  and `435f8d39041806e01c3953e598a71b5403e26b0ce79cc98954702bb09833de15`.
+
 Reproduce the structural report with:
 
 ```powershell
