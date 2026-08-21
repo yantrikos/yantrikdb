@@ -44,3 +44,27 @@ The experiment passes only when the mean delta is positive and the bootstrap
 interval crossing zero is directional evidence only and does not authorize a
 product change. Category-specific and wording-specific splits are exploratory
 because this holdout is too small to power them independently.
+
+## Result
+
+The frozen run completed all 18 pairs using the committed manifest:
+
+- Mean arm A: `0.7083`
+- Mean arm B: `0.7083`
+- Mean paired delta: `0.0000`
+- Paired bootstrap 95% interval: `[0.0000, 0.0000]`
+- Outcomes: 0 arm-B wins, 18 ties, 0 arm-A wins
+- Exact answer text: identical for 13 of 18 pairs
+- Median-of-three score: identical for all 18 pairs
+
+The five text differences were semantically immaterial formatting or wording
+changes, such as "52" versus "52 sources". Two pairs had different individual
+judge-vote vectors, but their medians were unchanged.
+
+## Decision
+
+The preregistered gate failed. Do not implement user-first presentation for
+count/set intent. Together with the uncertain multi-session exploratory result,
+this shows that speaker-block ordering is not a reliable score lever when the
+evidence set is held constant. Further work should target evidence identity,
+revision provenance, and item construction rather than presentation order.
