@@ -1,12 +1,92 @@
 from benchmarks.amb.write_synthesis_selection import (
     cap_temporal_span_items,
     deduplicate_thread_items,
+    first_beam_turn,
+    ground_synthesized_item_provenance,
     is_relationship_role_timeline,
     is_relationship_support_query,
     merge_organizer_rollup_shards,
     select_entity_timeline_children,
     select_relationship_support_children,
 )
+
+
+def test_synthesis_provenance_is_grounded_in_earliest_cited_block():
+    items = [{
+        "id": "I001",
+        "item": "A grounded event with invented model provenance.",
+        "first_mention_date": "2024-09-09",
+        "first_mention_turn": 164,
+        "first_mention_block_id": "B099",
+        "evidence_ids": ["B023", "B004", "missing"],
+    }]
+
+    grounded, events = ground_synthesized_item_provenance(
+        items,
+        {
+            "B004": ("2024-02-01", 60, 7),
+            "B023": ("2024-06-01", 166, 22),
+        },
+        {"B004": "2024-02-01", "B023": "2024-06-01"},
+    )
+
+    assert grounded[0]["first_mention_block_id"] == "B004"
+    assert grounded[0]["first_mention_turn"] == 60
+    assert grounded[0]["first_mention_date"] == "2024-02-01"
+    assert grounded[0]["evidence_ids"] == ["B023", "B004"]
+    assert events == [
+        {
+            "status": "dropped_invalid_evidence",
+            "item_id": "I001",
+            "invalid_evidence_ids": ["missing"],
+        },
+        {
+            "status": "corrected",
+            "item_id": "I001",
+            "before": {
+                "first_mention_block_id": "B099",
+                "first_mention_turn": 164,
+                "first_mention_date": "2024-09-09",
+            },
+            "after": {
+                "first_mention_block_id": "B004",
+                "first_mention_turn": 60,
+                "first_mention_date": "2024-02-01",
+            },
+        },
+    ]
+
+
+def test_synthesis_provenance_rejects_items_without_valid_evidence():
+    item = {
+        "first_mention_date": "2024-01-02",
+        "first_mention_turn": 12,
+        "first_mention_block_id": "B012",
+        "evidence_ids": ["missing"],
+    }
+
+    grounded, events = ground_synthesized_item_provenance(
+        [item], {"B001": ("2024-01-01", 1, 1)}, {"B001": "2024-01-01"}
+    )
+
+    assert grounded == []
+    assert events == [{
+        "status": "rejected_invalid_evidence",
+        "item_id": "",
+        "invalid_evidence_ids": ["missing"],
+    }]
+
+
+def test_first_turn_uses_beam_headers_not_body_mentions():
+    text = (
+        "[Turn 60] User: I compared this with the advice from Turn 4.\n\n"
+        "[June-14-2024 | Turn 62] Assistant: Follow-up."
+    )
+
+    assert first_beam_turn(text) == 60
+    assert first_beam_turn(
+        "This body mentions Turn 2 without a BEAM header."
+    ) is None
 
 
 def test_temporal_span_caps_apply_before_flattening():

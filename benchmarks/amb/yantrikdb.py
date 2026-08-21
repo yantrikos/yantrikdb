@@ -47,6 +47,8 @@ from .chronological_presentation import chronological_hit_key
 from .write_synthesis_selection import (
     cap_temporal_span_items,
     deduplicate_thread_items,
+    first_beam_turn,
+    ground_synthesized_item_provenance,
     is_relationship_role_timeline,
     is_relationship_support_query,
     merge_organizer_rollup_shards,
@@ -962,8 +964,7 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
 
     @staticmethod
     def _first_turn(text: str) -> int | None:
-        turns = [int(x) for x in _TURN_RE.findall(text)]
-        return min(turns) if turns else None
+        return first_beam_turn(text)
 
     @staticmethod
     def _normalize_items(raw: object) -> list[dict]:
@@ -1785,6 +1786,16 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
             for i, item in enumerate(items, 1):
                 item["id"] = f"I{i:03d}"
 
+        items, candidate_provenance_events = ground_synthesized_item_provenance(
+            items, block_temporal_keys, block_dates
+        )
+        provenance_events = [
+            {
+                "stage": "candidate",
+                **event,
+            }
+            for event in candidate_provenance_events
+        ]
         self._apply_date_fallbacks(items, block_dates, synthesized_at)
         for i, item in enumerate(items, 1):
             item["id"] = f"I{i:03d}"
@@ -1991,6 +2002,18 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
             )
             ordered_raw = llm.generate(order_prompt, order_schema)
             ordered = self._normalize_items(ordered_raw.get("ordered_items", []))
+            ordered, ordered_provenance_events = (
+                ground_synthesized_item_provenance(
+                    ordered, block_temporal_keys, block_dates
+                )
+            )
+            provenance_events.extend(
+                {
+                    "stage": "ordered",
+                    **event,
+                }
+                for event in ordered_provenance_events
+            )
             self._apply_date_fallbacks(ordered, block_dates, synthesized_at)
             for i, item in enumerate(ordered, 1):
                 item["id"] = f"F{i:03d}"
@@ -2000,11 +2023,14 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
                     if evidence_id in block_relevance
                 ]
                 item["best_retrieval_rank"] = min(ranks) if ranks else 999999
+            ordered.sort(key=self._item_sort_key)
             adaptive_rollup_valid = False
 
         # A malformed second pass should degrade to dated candidates, not raw
         # evidence blocks; pass one still performed useful global extraction.
-        if not ordered:
+        if not ordered or (
+            target_count is not None and len(ordered) < target_count
+        ):
             ordered = sorted(items, key=self._item_sort_key)
 
         if target_count is not None:
@@ -2043,6 +2069,7 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
             "entity_threads_used": bool(entity_thread_rows),
             "entity_closure_all": _SYNTH_ENTITY_CLOSURE_ALL,
             "entity_thread_index": entity_thread_rows,
+            "provenance_events": provenance_events,
             "sample_candidate_items": [
                 {
                     "id": item["id"],
@@ -2093,6 +2120,7 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
                     "first_mention_date": item["first_mention_date"],
                     "first_mention_turn": item["first_mention_turn"],
                     "first_mention_position": item["first_mention_position"],
+                    "first_mention_block_id": item["first_mention_block_id"],
                     "best_retrieval_rank": item["best_retrieval_rank"],
                     "evidence_ids": item["evidence_ids"],
                     "source_candidate_ids": item.get("source_candidate_ids", []),

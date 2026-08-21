@@ -32,6 +32,16 @@ _THREAD_DEDUP_STOPWORDS = {
     "a", "an", "and", "after", "asked", "by", "for", "from", "in",
     "of", "on", "the", "to", "user", "with",
 }
+_BEAM_TURN_HEADER_RE = re.compile(
+    r"\[(?:[A-Z][a-z]+-\d+-\d+ \| )?Turn (\d+)\]",
+    re.IGNORECASE,
+)
+
+
+def first_beam_turn(text: str) -> int | None:
+    """Return the earliest turn from an exact BEAM header, not body prose."""
+    turns = [int(match) for match in _BEAM_TURN_HEADER_RE.findall(text)]
+    return min(turns) if turns else None
 
 
 def cap_temporal_span_items(
@@ -53,6 +63,82 @@ def cap_temporal_span_items(
         )
         for key in span_keys
     }
+
+
+def ground_synthesized_item_provenance(
+    items: list[dict],
+    block_temporal_keys: dict[str, tuple],
+    block_dates: dict[str, str],
+) -> tuple[list[dict], list[dict]]:
+    """Derive first-mention provenance from each item's cited evidence.
+
+    Generators are allowed to extract item text, but block IDs are the
+    auditable source of chronology. This prevents a plausible-looking model
+    turn number or date from being accepted when it disagrees with the cited
+    evidence.
+    """
+    grounded_items = []
+    events = []
+    for item in items:
+        cited_evidence_ids = list(dict.fromkeys(
+            str(evidence_id).strip()
+            for evidence_id in item.get("evidence_ids", [])
+            if str(evidence_id).strip()
+        ))
+        evidence_ids = [
+            evidence_id
+            for evidence_id in cited_evidence_ids
+            if evidence_id in block_temporal_keys
+        ]
+        invalid_evidence_ids = [
+            evidence_id
+            for evidence_id in cited_evidence_ids
+            if evidence_id not in block_temporal_keys
+        ]
+        if not evidence_ids:
+            events.append({
+                "status": "rejected_invalid_evidence",
+                "item_id": item.get("id", ""),
+                "invalid_evidence_ids": invalid_evidence_ids,
+            })
+            continue
+        if invalid_evidence_ids:
+            events.append({
+                "status": "dropped_invalid_evidence",
+                "item_id": item.get("id", ""),
+                "invalid_evidence_ids": invalid_evidence_ids,
+            })
+
+        first_block = min(
+            evidence_ids,
+            key=lambda evidence_id: block_temporal_keys[evidence_id],
+        )
+        temporal_key = block_temporal_keys[first_block]
+        grounded_turn = temporal_key[1]
+        if grounded_turn == 999999:
+            grounded_turn = None
+        grounded_date = block_dates.get(first_block, "unknown")
+        before = {
+            "first_mention_block_id": item.get("first_mention_block_id", ""),
+            "first_mention_turn": item.get("first_mention_turn"),
+            "first_mention_date": item.get("first_mention_date", "unknown"),
+        }
+        after = {
+            "first_mention_block_id": first_block,
+            "first_mention_turn": grounded_turn,
+            "first_mention_date": grounded_date,
+        }
+        item["evidence_ids"] = evidence_ids
+        item.update(after)
+        if before != after:
+            events.append({
+                "status": "corrected",
+                "item_id": item.get("id", ""),
+                "before": before,
+                "after": after,
+            })
+        grounded_items.append(item)
+    return grounded_items, events
 
 
 def is_relationship_support_query(query: str) -> bool:

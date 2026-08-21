@@ -116,6 +116,15 @@ broad personal-statement query, remains at rank 106. This makes contextual
 reranking the next cheap intervention; expanding the cloud context to all 135
 turns is unnecessary unless the reranked 40-block probe fails.
 
+A local-generator replay over those reranked blocks also exposed an evaluator
+hazard: model-supplied source-turn metadata cannot establish that candidate text
+is supported. Candidate chronology is now deterministically grounded to the
+earliest valid cited evidence block, invalid citations are rejected, and every
+correction or rejection is emitted in synthesis telemetry. This still does not
+prove that item text is entailed by its citation. The next extraction probe must
+require exact source support (for example, a validated evidence quote) before a
+candidate can enter selection.
+
 ## Decision Gate
 
 Run one frozen-bank Q9 replay using the same DeepSeek generator but select its
