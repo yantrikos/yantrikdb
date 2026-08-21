@@ -78,3 +78,32 @@ because they improve lexical coverage. The remaining gap is mostly downstream
 answer selection; future work needs compact source-grounded items whose utility
 is demonstrated on a broad frozen cohort, with repeated judging to separate a
 real lift from model variance.
+
+## Dated Topic-Card Experiment
+
+A query-independent DeepSeek organizer was then tested over verbatim user-turn
+atomics. Every card retained source evidence IDs. Omitted items were preserved
+as deterministic verbatim singleton cards; invented IDs were rejected and
+audited. The card presentation added locally derived first/last recorded dates
+and turn spans. These are storage chronology, not model-inferred event dates.
+
+On four preflight queries, dated cards alone used 27.6% of the raw token budget
+and scored `0.6792` versus `0.4458` raw (`+0.2333`; three wins, one tie).
+Cards alone did not pass the broader lexical gate, however: low-ten retrieval
+coverage fell to `66.93%`. Prepending every dated card to the unchanged raw
+context preserved evidence, raised lexical coverage from `83.47%` to `90.58%`,
+and reduced weak rubric items from `7/47` to `2/47`.
+
+The repeated-judge low-ten decision run scored `0.5358` versus `0.3892` raw,
+mean paired delta `+0.1467`, with six wins, two ties, two losses and bootstrap
+95% CI `[+0.0350, +0.2617]`. Context tokens increased 25.4%. A six-query
+companion regression cohort from the same units moved in the other direction:
+`-0.0972` mean delta, one win, one tie, four losses, CI
+`[-0.2347, +0.0181]`. Across all 16 tested rows the mean delta was `+0.0552`,
+but its CI crossed zero.
+
+Therefore topic cards are a promising salience index, not an unconditional
+summary-intent lane. The next experiment should select a small query-relevant
+subset of dated cards before the unchanged raw context. Runtime integration is
+blocked on a query-only or retrieval-feature gate that avoids the demonstrated
+regressions on already-strong answers.

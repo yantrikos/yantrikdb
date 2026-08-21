@@ -41,3 +41,12 @@ def test_build_hybrid_rows_bounds_and_orders_both_lanes():
 def test_build_hybrid_rows_requires_matching_raw_context():
     with pytest.raises(ValueError, match="missing"):
         build_hybrid_rows([], [{"query_id": "q", "documents": ["d"]}], 1, 1)
+
+
+def test_build_hybrid_rows_accepts_frozen_derived_context_without_documents():
+    raw = [{"query_id": "q", "context": "## Memory 1\nr1"}]
+    derived = [{"query_id": "q", "context": "## Memory 1\nd1"}]
+
+    rows = build_hybrid_rows(raw, derived, raw_limit=1, derived_limit=1)
+
+    assert rows[0]["documents"] == ["d1", "r1"]

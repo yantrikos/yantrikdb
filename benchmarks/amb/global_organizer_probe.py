@@ -46,6 +46,12 @@ def _extract_json(text: str) -> dict:
     raise ValueError("organizer returned no JSON object")
 
 
+def _require_top_level_key(payload: dict, key: str) -> dict:
+    if key not in payload:
+        raise ValueError(f"organizer response is missing top-level {key!r}")
+    return payload
+
+
 def _load_atomics(db_path: Path) -> list[dict]:
     with sqlite3.connect(db_path) as db:
         rows = db.execute(
@@ -158,6 +164,54 @@ def _apply_assignments(
                 evidence_ids.append(evidence_id)
             assigned.add(evidence_id)
     return assigned, sorted(set(invalid))
+
+
+def _complete_singleton_handles(
+    handles: list[dict], known: dict[str, dict], unassigned_ids: list[str]
+) -> list[str]:
+    """Preserve residual source items as deterministic, verbatim handles."""
+    completed = []
+    for evidence_id in sorted(set(unassigned_ids)):
+        item = known.get(evidence_id)
+        if item is None:
+            continue
+        handles.append(
+            {
+                "label": f"Unclustered source item {evidence_id}",
+                "anchor_entities": [],
+                "summary": item["text"],
+                "evidence_ids": [evidence_id],
+                "selection_rationale": (
+                    "Deterministic fallback preserving source evidence that the "
+                    "query-independent organizer did not cluster."
+                ),
+            }
+        )
+        completed.append(evidence_id)
+    return completed
+
+
+def _drop_invalid_evidence_ids(
+    handles: list[dict], known: dict[str, dict]
+) -> list[str]:
+    """Remove invented references while retaining an explicit audit list."""
+    rejected = set()
+    for handle in handles:
+        evidence_ids = handle.get("evidence_ids") or []
+        rejected.update(value for value in evidence_ids if value not in known)
+        handle["evidence_ids"] = [value for value in evidence_ids if value in known]
+    return sorted(rejected)
+
+
+def _discovered_handle_count(handles: list[dict], fallback_ids: list[str]) -> int:
+    fallback = set(fallback_ids)
+    return sum(
+        not (
+            len(handle.get("evidence_ids") or []) == 1
+            and handle["evidence_ids"][0] in fallback
+        )
+        for handle in handles
+    )
 
 
 def _chat_json(
@@ -297,6 +351,22 @@ def main() -> int:
     )
     parser.add_argument("--assignment-embed-model", default="mxbai-embed-large")
     parser.add_argument("--allow-unassigned", action="store_true")
+    parser.add_argument(
+        "--complete-singletons",
+        action="store_true",
+        help="preserve each residual atomic item as a verbatim singleton handle",
+    )
+    parser.add_argument(
+        "--drop-invalid-evidence",
+        action="store_true",
+        help="reject invented evidence IDs, retain their audit list, and continue",
+    )
+    parser.add_argument(
+        "--record-rejected-evidence-id",
+        action="append",
+        default=[],
+        help="carry a previously observed rejected ID into a resumed audit artifact",
+    )
     parser.add_argument("--anchor", help="locally inspect handles for this entity")
     parser.add_argument("--expect-turns", help="local-only comma-separated turns")
     args = parser.parse_args()
@@ -382,11 +452,21 @@ def main() -> int:
         "required": ["handles"],
     }
     raw_response = None
+    prior_singleton_fallback_ids = []
+    prior_rejected_invalid_ids = []
     if args.resume_artifact:
         prior = json.loads(args.resume_artifact.read_text(encoding="utf-8"))
         if prior.get("input_sha256") != input_sha256:
             raise ValueError("resume artifact does not match the current atomic input")
         result = {"handles": prior.get("handles") or []}
+        prior_singleton_fallback_ids = list(
+            prior.get("singleton_fallback_evidence_ids") or []
+        )
+        prior_rejected_invalid_ids = list(
+            prior.get("rejected_invalid_evidence_ids")
+            or prior.get("invalid_evidence_ids")
+            or []
+        )
     else:
         try:
             result, raw_response = _chat_json(
@@ -397,6 +477,7 @@ def main() -> int:
                 num_predict=args.num_predict,
                 timeout=args.timeout,
             )
+            _require_top_level_key(result, "handles")
         except (ValueError, json.JSONDecodeError):
             raw_path = args.output.with_suffix(args.output.suffix + ".raw.json")
             raw_path.parent.mkdir(parents=True, exist_ok=True)
@@ -408,6 +489,9 @@ def main() -> int:
             raise
 
     known = {item["id"]: item for item in atomics}
+    artifact_rows = [
+        {**row, "date": known[row["id"]].get("date")} for row in model_rows
+    ]
     handles, misplaced_anchor_ids = _normalize_handles(
         result.get("handles", []), known
     )
@@ -419,6 +503,15 @@ def main() -> int:
             if evidence_id not in known
         }
     )
+    if invalid_ids and args.drop_invalid_evidence:
+        rejected = _drop_invalid_evidence_ids(handles, known)
+        if rejected != invalid_ids:
+            raise ValueError("invalid evidence audit changed during rejection")
+    rejected_invalid_ids = sorted(
+        set(prior_rejected_invalid_ids)
+        .union(args.record_rejected_evidence_id)
+        .union(invalid_ids if args.drop_invalid_evidence else [])
+    )
     assigned_ids = {
         evidence_id
         for handle in handles
@@ -428,6 +521,11 @@ def main() -> int:
     unassigned_ids = sorted(set(known) - assigned_ids)
     repair_attempts = []
     overflow_attempts = []
+    singleton_fallback_ids = sorted(
+        evidence_id
+        for evidence_id in set(prior_singleton_fallback_ids)
+        if evidence_id in known
+    )
 
     def write_checkpoint() -> dict:
         artifact = {
@@ -435,13 +533,19 @@ def main() -> int:
             "input_count": len(atomics),
             "input_sha256": input_sha256,
             "handle_count": len(handles),
+            "discovered_handle_count": _discovered_handle_count(
+                handles, singleton_fallback_ids
+            ),
             "invalid_evidence_ids": invalid_ids,
+            "rejected_invalid_evidence_ids": rejected_invalid_ids,
             "misplaced_anchor_ids": misplaced_anchor_ids,
             "assigned_count": len(assigned_ids),
             "unassigned_evidence_ids": unassigned_ids,
             "repair_attempts": repair_attempts,
             "overflow_attempts": overflow_attempts,
-            "input_items": model_rows,
+            "singleton_fallback_count": len(singleton_fallback_ids),
+            "singleton_fallback_evidence_ids": singleton_fallback_ids,
+            "input_items": artifact_rows,
             "handles": handles,
         }
         args.output.parent.mkdir(parents=True, exist_ok=True)
@@ -449,7 +553,10 @@ def main() -> int:
         return artifact
 
     write_checkpoint()
-    if not (args.min_handles <= len(handles) <= args.max_handles):
+    discovered_handle_count = _discovered_handle_count(
+        handles, singleton_fallback_ids
+    )
+    if not (args.min_handles <= discovered_handle_count <= args.max_handles):
         if raw_response is not None:
             raw_path = args.output.with_suffix(args.output.suffix + ".raw.json")
             raw_path.write_text(
@@ -459,7 +566,8 @@ def main() -> int:
             print(f"invalid organizer response={raw_path}")
         raise ValueError(
             "organizer handle count violates discovery bounds: "
-            f"expected {args.min_handles}-{args.max_handles}, got {len(handles)}"
+            f"expected {args.min_handles}-{args.max_handles}, "
+            f"got {discovered_handle_count}"
         )
     if args.assignment_mode == "embedding" and unassigned_ids:
         handle_texts = [
@@ -567,6 +675,7 @@ def main() -> int:
             num_predict=args.num_predict,
             timeout=args.timeout,
         )
+        _require_top_level_key(repair_result, "assignments")
         expected = set(unassigned_ids)
         repaired, invalid_assignments = _apply_assignments(
             handles, repair_result.get("assignments", []), expected
@@ -662,6 +771,7 @@ def main() -> int:
             num_predict=args.num_predict,
             timeout=args.timeout,
         )
+        _require_top_level_key(overflow_result, "handles")
         new_handles, new_misplaced = _normalize_handles(
             overflow_result.get("handles", []), known
         )
@@ -703,6 +813,13 @@ def main() -> int:
         )
         write_checkpoint()
 
+    if unassigned_ids and args.complete_singletons:
+        singleton_fallback_ids = _complete_singleton_handles(
+            handles, known, unassigned_ids
+        )
+        assigned_ids.update(singleton_fallback_ids)
+        unassigned_ids = sorted(set(known) - assigned_ids)
+
     write_checkpoint()
 
     print(
@@ -710,7 +827,7 @@ def main() -> int:
         f"invalid_ids={len(invalid_ids)} unassigned={len(unassigned_ids)}"
     )
     print(f"artifact={args.output}")
-    if invalid_ids:
+    if invalid_ids and not args.drop_invalid_evidence:
         raise ValueError(f"organizer returned invalid evidence IDs: {invalid_ids}")
     if unassigned_ids and not args.allow_unassigned:
         raise ValueError(

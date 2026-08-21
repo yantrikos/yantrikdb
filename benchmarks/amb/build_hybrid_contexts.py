@@ -47,7 +47,12 @@ def build_hybrid_rows(
             str(document).strip()
             for document in derived.get("documents") or []
             if str(document).strip()
-        ][:derived_limit]
+        ]
+        if not derived_bodies:
+            derived_bodies = split_memory_bodies(
+                str(derived.get("context") or "")
+            )
+        derived_bodies = derived_bodies[:derived_limit]
         raw_bodies = split_memory_bodies(str(raw.get("context") or ""))[:raw_limit]
         bodies = derived_bodies + raw_bodies
         if not bodies:
