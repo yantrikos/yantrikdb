@@ -27,6 +27,33 @@ def _input_digest(atomics: list[dict]) -> str:
     return hashlib.sha256(serialized.encode()).hexdigest()
 
 
+def _artifact_atomics(artifact: dict) -> list[dict]:
+    """Load the organizer's frozen model input without requiring its source DB."""
+    atomics = []
+    seen = set()
+    for index, value in enumerate(artifact.get("input_items") or [], 1):
+        if not isinstance(value, dict):
+            raise ValueError(f"input item {index} is not an object")
+        item_id = str(value.get("id") or "").strip()
+        text = str(value.get("text") or "").strip()
+        if not item_id or not text:
+            raise ValueError(f"input item {index} has an empty id or text")
+        if item_id in seen:
+            raise ValueError(f"duplicate input item id: {item_id}")
+        seen.add(item_id)
+        atomics.append(
+            {
+                "id": item_id,
+                "turn": value.get("turn"),
+                "axis": str(value.get("axis") or ""),
+                "text": text,
+            }
+        )
+    if not atomics:
+        raise ValueError("organizer artifact has no input_items")
+    return atomics
+
+
 def _handle_prompt(handle: dict, evidence: list[dict], max_items: int = 6) -> str:
     payload = [
         {
@@ -226,7 +253,7 @@ def merge_cross_handle_duplicates(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--db", type=Path, required=True)
+    parser.add_argument("--db", type=Path)
     parser.add_argument("--organizer", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--model", default="qwen3.5:9b")
@@ -241,9 +268,9 @@ def main() -> int:
     if not 1 <= args.max_items_per_handle <= 12:
         parser.error("--max-items-per-handle must be between 1 and 12")
 
-    atomics = _load_atomics(args.db)
-    known = {item["id"]: item for item in atomics}
     organizer = json.loads(args.organizer.read_text(encoding="utf-8"))
+    atomics = _load_atomics(args.db) if args.db else _artifact_atomics(organizer)
+    known = {item["id"]: item for item in atomics}
     digest = _input_digest(atomics)
     if digest != organizer.get("input_sha256"):
         raise ValueError("organizer artifact does not match atomic input")

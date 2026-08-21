@@ -107,6 +107,7 @@ _COUNT_WORDS = {
 _ENTITY_TOKEN_RE = re.compile(r"[^\W\d_]+", re.UNICODE)
 _QUERY_ENTITY_STOPWORDS = {
     "across",
+    "ai",
     "can",
     "conversations",
     "different",

@@ -1,9 +1,33 @@
 from benchmarks.amb.concerns_from_organizer import (
+    _artifact_atomics,
     _handle_prompt,
     _normalize_handle_items,
     _schema,
     merge_cross_handle_duplicates,
 )
+
+
+def test_artifact_atomics_loads_frozen_organizer_input():
+    assert _artifact_atomics(
+        {
+            "input_items": [
+                {
+                    "id": "A1",
+                    "turn": 8,
+                    "axis": "source_turn",
+                    "text": " Patrick shared advice. ",
+                    "date": 123.0,
+                }
+            ]
+        }
+    ) == [
+        {
+            "id": "A1",
+            "turn": 8,
+            "axis": "source_turn",
+            "text": "Patrick shared advice.",
+        }
+    ]
 
 
 def test_thread_prompt_requires_query_free_exhaustive_chronological_grouping():

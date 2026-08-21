@@ -3,6 +3,7 @@ from benchmarks.amb.analyze_organizer_membership import (
     anchor_turn_sets,
     best_cover,
     organizer_turn_sets,
+    query_matched_cover,
 )
 
 
@@ -70,7 +71,67 @@ def test_analysis_keeps_gold_out_of_construction_and_reports_oracle_lift():
 
     report = analyze(questions, {"1": _artifact()}, counts=(1, 2))
 
+    assert report["protocol"] == "organizer-membership-routing-audit-v2"
     assert report["gold_used_for_generation_or_retrieval"] is False
     assert report["topic_handles"]["1"]["mean_source_recall"] == 0.5
     assert report["topics_plus_virtual_anchors"]["1"]["mean_source_recall"] == 1.0
     assert report["topic_handles"]["2"]["exact_queries"] == 1
+
+
+def test_query_matched_cover_uses_product_focus_then_entity_routes():
+    collections = [
+        {
+            "kind": "topic_handle",
+            "label": "City autocomplete implementation",
+            "anchor_entities": ["Weather app"],
+            "turns": {2, 8},
+        },
+        {
+            "kind": "topic_handle",
+            "label": "Carla editing collaboration",
+            "anchor_entities": ["Carla"],
+            "turns": {50, 90},
+        },
+    ]
+
+    focused = query_matched_cover(
+        "List the city autocomplete feature stages in order", collections
+    )
+    assert focused["route"] == "focus"
+    assert focused["labels"] == ["City autocomplete implementation"]
+
+    entity = query_matched_cover(
+        "Walk me through my collaboration with Carla", collections
+    )
+    assert entity["route"] == "entity"
+    assert entity["labels"] == ["Carla editing collaboration"]
+
+    assert query_matched_cover("List my journey", collections)["route"] is None
+
+
+def test_entity_first_route_does_not_let_focus_drop_same_person_handles():
+    collections = [
+        {
+            "kind": "topic_handle",
+            "label": "Douglas shared entertainment interests",
+            "anchor_entities": ["Douglas"],
+            "turns": {2},
+        },
+        {
+            "kind": "topic_handle",
+            "label": "Douglas television plans",
+            "anchor_entities": ["Douglas"],
+            "turns": {8},
+        },
+    ]
+    query = "List my shared entertainment interests with Douglas"
+
+    focused_first = query_matched_cover(query, collections)
+    entity_first = query_matched_cover(query, collections, entity_first=True)
+
+    assert focused_first["labels"] == ["Douglas shared entertainment interests"]
+    assert entity_first["route"] == "entity"
+    assert entity_first["labels"] == [
+        "Douglas shared entertainment interests",
+        "Douglas television plans",
+    ]

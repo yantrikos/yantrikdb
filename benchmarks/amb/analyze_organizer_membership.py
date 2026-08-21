@@ -11,13 +11,25 @@ import argparse
 import hashlib
 import itertools
 import json
+import sys
 from pathlib import Path
 from statistics import fmean
 
-try:
+
+_HERE = Path(__file__).resolve().parent
+if __package__:
     from .analyze_membership_funnel import load_beam_event_sources
-except ImportError:  # Direct script execution.
+else:  # Direct script execution.
     from analyze_membership_funnel import load_beam_event_sources
+    sys.path = [
+        entry for entry in sys.path if Path(entry or ".").resolve() != _HERE
+    ]
+
+# Direct execution must remove the benchmark shim before importing the package.
+from yantrikdb.organize import (  # noqa: E402
+    _query_entity_handles,
+    _query_focus_handles,
+)
 
 
 def organizer_turn_sets(artifact: dict) -> list[dict]:
@@ -43,10 +55,61 @@ def organizer_turn_sets(artifact: dict) -> list[dict]:
                 {
                     "kind": "topic_handle",
                     "label": str(handle.get("label") or f"Handle {index}"),
+                    "anchor_entities": list(handle.get("anchor_entities") or []),
+                    "evidence_ids": evidence_ids,
                     "turns": turns,
                 }
             )
     return collections
+
+
+def query_matched_cover(
+    query: str, collections: list[dict], *, entity_first: bool = False
+) -> dict:
+    """Measure handles selected by product focus/entity metadata matching."""
+    hits = [
+        {
+            "metadata": {
+                "organizer_label": collection["label"],
+                "anchor_entities": collection.get("anchor_entities") or [],
+                "thread_entities": collection.get("anchor_entities") or [],
+            },
+            "_collection": collection,
+        }
+        for collection in collections
+    ]
+    focused = _query_focus_handles(query, hits)
+    entity = _query_entity_handles(query, hits)
+    if entity_first and entity:
+        route = "entity"
+        selected = entity
+    elif focused:
+        route = "focus"
+        selected = focused
+    elif entity:
+        route = "entity"
+        selected = entity
+    else:
+        route = None
+        selected = []
+    turns = (
+        set().union(*(hit["_collection"]["turns"] for hit in selected))
+        if selected
+        else set()
+    )
+    return {
+        "route": route,
+        "handle_count": len(selected),
+        "labels": [hit["_collection"]["label"] for hit in selected],
+        "evidence_ids": list(
+            dict.fromkeys(
+                evidence_id
+                for hit in selected
+                for evidence_id in hit["_collection"].get("evidence_ids") or []
+            )
+        ),
+        "turns": turns,
+    }
 
 
 def _sha256(path: Path) -> str:
@@ -143,6 +206,36 @@ def summarize(rows: list[dict], field: str, counts: tuple[int, ...]) -> dict:
     return summary
 
 
+def summarize_query_matched(rows: list[dict]) -> dict:
+    eligible = [
+        row["query_matched_handles"]
+        for row in rows
+        if row["query_matched_handles"]["route"] is not None
+    ]
+    return {
+        "eligible_queries": len(eligible),
+        "mean_source_recall": (
+            fmean(result["recall"] for result in eligible) if eligible else 0.0
+        ),
+        "exact_queries": sum(result["recall"] == 1.0 for result in eligible),
+        "by_route": {
+            route: {
+                "queries": sum(result["route"] == route for result in eligible),
+                "mean_source_recall": (
+                    fmean(
+                        result["recall"]
+                        for result in eligible
+                        if result["route"] == route
+                    )
+                    if any(result["route"] == route for result in eligible)
+                    else 0.0
+                ),
+            }
+            for route in ("focus", "entity")
+        },
+    }
+
+
 def analyze(
     questions: list[dict],
     artifacts: dict[str, dict],
@@ -158,12 +251,32 @@ def analyze(
         gold = set(question["source_turn_ids"])
         topics = organizer_turn_sets(artifact)
         anchors = anchor_turn_sets(artifact)
+        matched = query_matched_cover(question.get("query") or "", topics)
+        candidate_matched = query_matched_cover(
+            question.get("query") or "", topics, entity_first=True
+        )
+        matched_turns = matched.pop("turns")
+        matched_covered = matched_turns & gold
+        candidate_turns = candidate_matched.pop("turns")
+        candidate_covered = candidate_turns & gold
         rows.append(
             {
                 "query_id": question["query_id"],
                 "source_turns": sorted(gold),
                 "topic_handle_count": len(topics),
                 "virtual_anchor_union_count": len(anchors),
+                "query_matched_handles": {
+                    **matched,
+                    "covered": len(matched_covered),
+                    "recall": len(matched_covered) / len(gold) if gold else 0.0,
+                    "turns": sorted(matched_covered),
+                },
+                "query_entity_first_handles": {
+                    **candidate_matched,
+                    "covered": len(candidate_covered),
+                    "recall": len(candidate_covered) / len(gold) if gold else 0.0,
+                    "turns": sorted(candidate_covered),
+                },
                 "topic_handles": {
                     str(count): best_cover(gold, topics, count) for count in counts
                 },
@@ -174,13 +287,22 @@ def analyze(
             }
         )
     return {
-        "protocol": "query-independent-organizer-membership-oracle-v1",
+        "protocol": "organizer-membership-routing-audit-v2",
         "queries": len(rows),
         "source_turn_references": sum(len(row["source_turns"]) for row in rows),
         "gold_used_for_generation_or_retrieval": False,
         "topic_handles": summarize(rows, "topic_handles", counts),
         "topics_plus_virtual_anchors": summarize(
             rows, "topics_plus_virtual_anchors", counts
+        ),
+        "query_matched_handles": summarize_query_matched(rows),
+        "query_entity_first_handles": summarize_query_matched(
+            [
+                {
+                    "query_matched_handles": row["query_entity_first_handles"]
+                }
+                for row in rows
+            ]
         ),
         "results": rows,
     }

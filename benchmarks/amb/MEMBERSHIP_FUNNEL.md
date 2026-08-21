@@ -336,6 +336,60 @@ Q10 judged artifact SHA-256s:
   `65763420c028f28fc1d86d34ac172264456be43cfb04446b4df0754a278e1b5e`,
   and `435f8d39041806e01c3953e598a71b5403e26b0ce79cc98954702bb09833de15`.
 
+### Query-Route Cohort
+
+The organizer audit now also runs the product's query-only focus and entity
+metadata matchers over all 40 frozen event-ordering queries. Source IDs remain
+evaluation-only. After excluding the generic acronym `AI` from named-entity
+routing, 22/40 queries match at least one handle without semantic ranking:
+
+| Route | Queries | Mean source-turn recall |
+| --- | ---: | ---: |
+| Multi-token focus | 19 | 41.1% |
+| Explicit named entity | 3 | 100.0% |
+| Combined | 22 | 49.1% |
+
+Before the exclusion, `AI` was treated like a person's name and expanded 19
+different hiring handles. This was a real classifier bug: uppercase domain
+acronyms are not reliable named-entity anchors.
+
+An entity-first counterfactual raised combined source recall only from 49.1% to
+50.2%. It improved the Douglas entertainment query from `1/9` to `3/9` source
+turns by expanding three Douglas handles instead of one focus handle, but both
+frozen DeepSeek contexts scored `0.0`. The product routing-order change was
+therefore reverted. Focus-first and entity-first judged artifact SHA-256s:
+`810766a2e43d0d0749bbec924c137d026d5d713cac2c77bf87da925a5d794f0c`
+and `4b9c11e68c865dfdff89b3436ff5fa778f9eb57871cf9f936e16d1c0dcac7e28`.
+
+The other exact named-person routes show why source membership is necessary
+but not sufficient:
+
+- Patrick: the entity route contains all `6/6` source turns, but 29 raw items
+  score `0.5`. DeepSeek then generated 13 query-blind concerns with all `29/29`
+  selected evidence IDs assigned; the six Patrick-grounded concerns also score
+  `0.5`. The hidden answer requires one merge for the PMR discussion but splits
+  the interview/stress and leadership/implementation updates, a granularity
+  policy not stated by the query.
+- Douglas estate plans: the entity route contains the full source set, but 44
+  literal Douglas memories lead the answerer to the earliest five valid plans
+  and score `0.3`, not the benchmark's later five-item partition.
+
+The corresponding SHA-256s are
+`b1a3eb80c108449e068ff80ddd76dc4d70c1ba460a04ac26cc07e9573206627e`
+for Patrick raw,
+`a048bcd68abb1420d674cc5d930ed7c1b88cfdbf8ac89554536caddb73cc9a92`
+for Patrick concern generation,
+`9297ec305c137aaec8c904c5bb835702a3a85177d03baa1d816e0b0fd515fe25`
+for Patrick filtered concerns, and
+`ec518d71ab680263aa94590ef71fdd5ecc6456a1796648e014f0ef93817d2e75`
+for Douglas estate plans. The complete route report SHA-256 is
+`b42e30d9f6652d38423cd225e6acc2358271790129c41c9ea551aee4692a01da`.
+
+The keep/reject boundary is now sharper: keep exact entity routing, correction
+preservation, grouped concern chronology, and exhaustive generation checks.
+Reject broader entity expansion and query-time merge/split heuristics whose
+only justification is recovering an unstated benchmark partition.
+
 Reproduce the structural report with:
 
 ```powershell

@@ -684,6 +684,7 @@ def test_query_scaffolding_is_not_treated_as_entity_or_focus():
     )
 
     assert _query_handle_entity_tokens(query) == set()
+    assert _query_handle_entity_tokens("List how I used AI in hiring") == set()
     assert "three" not in _query_focus_tokens(query)
 
 
