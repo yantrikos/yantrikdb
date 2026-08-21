@@ -66,6 +66,7 @@ REGISTRY: dict[str, str] = {
     "yantrikdb-global-synthesis": "yantrikdb:YantrikDBGlobalSynthesisMemoryProvider",
     "yantrikdb-role-aware-synthesis": "yantrikdb:YantrikDBRoleAwareSynthesisMemoryProvider",
     "yantrikdb-write-synthesis": "yantrikdb:YantrikDBWriteTimeSynthesisMemoryProvider",
+    "yantrikdb-raw-first-organizer": "yantrikdb:YantrikDBRawFirstOrganizerMemoryProvider",
     "yantrikdb-cognitive": "yantrikdb:YantrikDBCognitiveMemoryProvider",
     "yantrikdb-rerank": "yantrikdb:YantrikDBRerankMemoryProvider",
 }
@@ -114,6 +115,10 @@ def main() -> int:
         HERE / "write_synthesis_selection.py",
         mem / "write_synthesis_selection.py",
     )
+    shutil.copy2(
+        HERE / "topic_card_presentation.py",
+        mem / "topic_card_presentation.py",
+    )
     shutil.copy2(HERE / "ollama.py", llm / "ollama.py")
     shutil.copy2(HERE / "frozen_context_eval.py", root / "frozen_context_eval.py")
     shutil.copy2(
@@ -124,6 +129,7 @@ def main() -> int:
     print(f"copied provider  -> {mem / 'yantrikdb.py'}")
     print(f"copied chronology -> {mem / 'chronological_presentation.py'}")
     print(f"copied selection  -> {mem / 'write_synthesis_selection.py'}")
+    print(f"copied topic cards -> {mem / 'topic_card_presentation.py'}")
     print(f"copied llm       -> {llm / 'ollama.py'}")
     print(f"copied evaluator -> {root / 'frozen_context_eval.py'}")
     print(f"copied paired    -> {root / 'paired_frozen_context_eval.py'}")

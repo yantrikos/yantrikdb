@@ -44,6 +44,7 @@ from ..models import Document
 from ..utils import chunk_text, count_tokens
 from .base import MemoryProvider
 from .chronological_presentation import chronological_hit_key
+from .topic_card_presentation import load_persisted_topic_cards
 from .write_synthesis_selection import (
     beam_header_turns,
     cap_temporal_span_items,
@@ -187,6 +188,9 @@ _WRITE_SYNTH_INPUT_TOKENS = int(
     os.environ.get("YDB_BENCH_WRITE_SYNTH_INPUT_TOKENS", "48000")
 )
 _WRITE_SYNTH_TOP_K = int(os.environ.get("YDB_BENCH_WRITE_SYNTH_TOPK", "40"))
+_RAW_FIRST_ORGANIZER_TOP_K = int(
+    os.environ.get("YDB_BENCH_RAW_FIRST_ORGANIZER_TOPK", "30")
+)
 _WRITE_SYNTH_RECALL_POOL = int(
     os.environ.get("YDB_BENCH_WRITE_SYNTH_RECALL_POOL", "1000")
 )
@@ -3793,6 +3797,97 @@ class YantrikDBWriteTimeSynthesisMemoryProvider(
             ],
         }
         return self._to_documents(selected, user_id), raw
+
+
+class YantrikDBRawFirstOrganizerMemoryProvider(
+    YantrikDBWriteTimeSynthesisMemoryProvider
+):
+    """Return exact raw evidence first, then every persisted topic summary."""
+
+    name = "yantrikdb-raw-first-organizer"
+    description = (
+        "YantrikDB raw source recall followed by the complete set of persisted, "
+        "query-independent dated organizer summaries. This is an opt-in AMB "
+        "validation arm; missing organizers degrade to raw recall."
+    )
+    variant = "raw-first-organizer"
+
+    def __init__(self):
+        super().__init__()
+        self._topic_card_cache: dict[str, tuple[list[dict], dict]] = {}
+
+    def prepare(
+        self,
+        store_dir: Path,
+        unit_ids: set[str] | None = None,
+        reset: bool = True,
+    ) -> None:
+        self._topic_card_cache.clear()
+        super().prepare(store_dir, unit_ids, reset)
+
+    def _persisted_topic_cards(
+        self, user_id: str | None
+    ) -> tuple[list[dict], dict]:
+        key = user_id if (self._per_unit and user_id) else self._namespace(user_id)
+        cached = self._topic_card_cache.get(key)
+        if cached is None:
+            cached = load_persisted_topic_cards(
+                self._db_for(user_id),
+                None if self._per_unit else self._namespace(user_id),
+            )
+            self._topic_card_cache[key] = cached
+        return cached
+
+    async def async_retrieve(
+        self,
+        query: str,
+        k: int = _RAW_FIRST_ORGANIZER_TOP_K,
+        user_id: str | None = None,
+        query_timestamp: str | None = None,
+    ):
+        import asyncio
+
+        return await asyncio.to_thread(
+            self.retrieve, query, k, user_id, query_timestamp
+        )
+
+    def retrieve(
+        self,
+        query: str,
+        k: int = _RAW_FIRST_ORGANIZER_TOP_K,
+        user_id: str | None = None,
+        query_timestamp: str | None = None,
+    ) -> tuple[list[Document], dict | None]:
+        raw_hits = self._recall_source(query, k, user_id)
+        raw_docs = self._to_documents(raw_hits, user_id)
+        cards, card_trace = self._persisted_topic_cards(user_id)
+        card_docs = [
+            Document(
+                id=card["rid"] or f"organizer-topic-{index}",
+                content=card["content"],
+                user_id=user_id,
+            )
+            for index, card in enumerate(cards, 1)
+        ]
+        return raw_docs + card_docs, {
+            "read_time_generation": False,
+            "selection_mode": "raw_source_then_complete_topic_summaries",
+            "ordering": "raw_then_topic_summaries",
+            "requested_k": k,
+            "provider_default_k": _RAW_FIRST_ORGANIZER_TOP_K,
+            "raw_documents": len(raw_docs),
+            "topic_card_documents": len(card_docs),
+            "returned": len(raw_docs) + len(card_docs),
+            "raw_results": [
+                {
+                    "rid": hit.get("rid"),
+                    "score": hit.get("score"),
+                    "created_at": hit.get("created_at"),
+                }
+                for hit in raw_hits
+            ],
+            "topic_card_scan": card_trace,
+        }
 
 
 class YantrikDBFloorMemoryProvider(YantrikDBMemoryProvider):

@@ -38,6 +38,10 @@ _load_workspace_module(
     "memory_bench.memory.write_synthesis_selection",
     _HERE / "write_synthesis_selection.py",
 )
+_load_workspace_module(
+    "memory_bench.memory.topic_card_presentation",
+    _HERE / "topic_card_presentation.py",
+)
 _ORGANIZER_MODULE = _load_workspace_module(
     "memory_bench.memory._global_organizer_probe",
     _HERE / "global_organizer_probe.py",
@@ -47,6 +51,7 @@ _PROVIDER_MODULE = _load_workspace_module(
     _HERE / "yantrikdb.py",
 )
 Provider = _PROVIDER_MODULE.YantrikDBWriteTimeSynthesisMemoryProvider
+RawFirstProvider = _PROVIDER_MODULE.YantrikDBRawFirstOrganizerMemoryProvider
 
 
 def _artifact_plan(atomics: list[dict], artifact: dict) -> tuple[OrganizationPlan, str]:
@@ -108,19 +113,40 @@ def main() -> int:
     parser.add_argument("--artifact", type=Path, required=True)
     parser.add_argument("--unit", required=True)
     parser.add_argument("--split", default="100k")
-    parser.add_argument("--top-k", type=int, default=40)
+    parser.add_argument("--categories", default="event_ordering")
+    parser.add_argument("--top-k", type=int)
     parser.add_argument("--max-handles", type=int, default=16)
     parser.add_argument("--handle-weight", type=float, default=0.0)
     parser.add_argument("--skip-persist", action="store_true")
+    parser.add_argument(
+        "--retrieval-mode",
+        choices=("organized", "raw-first-summaries"),
+        default="organized",
+    )
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
+    top_k = (
+        args.top_k
+        if args.top_k is not None
+        else (
+            _PROVIDER_MODULE._RAW_FIRST_ORGANIZER_TOP_K
+            if args.retrieval_mode == "raw-first-summaries"
+            else 40
+        )
+    )
+    if top_k < 1:
+        parser.error("--top-k must be positive")
 
     artifact = json.loads(args.artifact.read_text(encoding="utf-8"))
     db_path = args.store / "yantrikdb" / f"{args.unit}.db"
     atomics = _ORGANIZER_MODULE._load_atomics(db_path)
     plan, digest = _artifact_plan(atomics, artifact)
 
-    provider = Provider()
+    provider = (
+        RawFirstProvider()
+        if args.retrieval_mode == "raw-first-summaries"
+        else Provider()
+    )
     provider.prepare(args.store, {args.unit}, False)
     output = []
     try:
@@ -135,17 +161,42 @@ def main() -> int:
             )
         )
         print(f"persisted organizer handles={len(writes)}")
+        categories = {
+            value.strip() for value in args.categories.split(",") if value.strip()
+        }
         queries = [
             query
             for query in get_dataset("beam").load_queries(args.split)
             if query.user_id == args.unit
-            and query.meta.get("question_category") == "event_ordering"
+            and query.meta.get("question_category") in categories
         ]
         for query in queries:
+            if args.retrieval_mode == "raw-first-summaries":
+                docs, trace = provider.retrieve(
+                    query.query, top_k, query.user_id
+                )
+                row = {
+                    "query_id": query.id,
+                    "query": query.query,
+                    "gold_answers": query.gold_answers,
+                    "selection": trace,
+                    "context": "\n\n".join(
+                        f"## Memory {index}\n{doc.content}"
+                        for index, doc in enumerate(docs, 1)
+                    ),
+                    "documents": [doc.content for doc in docs],
+                }
+                output.append(row)
+                print(
+                    f"{query.id}: raw={trace['raw_documents']} "
+                    f"cards={trace['topic_card_documents']} "
+                    f"returned={trace['returned']}"
+                )
+                continue
             hits = recall_organized(
                 db,
                 query.query,
-                top_k=args.top_k,
+                top_k=top_k,
                 candidate_pool=1000,
                 max_handles=args.max_handles,
                 handle_weight=args.handle_weight,
@@ -164,6 +215,10 @@ def main() -> int:
                     for hit in hits
                 ],
             }
+            row["context"] = "\n\n".join(
+                f"## Memory {index}\n{document}"
+                for index, document in enumerate(row["documents"], 1)
+            )
             output.append(row)
             expanded = sum(
                 "organized_handle_expansion" in (hit.get("why_retrieved") or [])

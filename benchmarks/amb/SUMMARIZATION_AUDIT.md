@@ -136,3 +136,15 @@ duplicate cards are removed while their evidence dates are unioned. The result
 is validated on 16 queries from eight units, not yet the full 40-query category;
 the next step is a production/replay provider arm followed by full-category
 validation before changing the default runtime path.
+
+An opt-in provider replay then persisted the unit-3 organizer through the
+public organization API and structurally enumerated all 39 handles. Its dated
+card documents matched the winning frozen presentation exactly, including
+order. With 40 live raw records, the two-query transfer preflight scored
+`0.6250` versus `0.5250` frozen raw (`+0.1000`, one win, one tie), but context
+cost grew 62.0%. Reducing only the live raw lane to 30 records retained the
+`0.6250` candidate score and no-loss result (`+0.0500` versus a `0.5750`
+repeated baseline) while limiting context growth to 27.3%. The opt-in provider
+therefore defaults to 30 raw records plus every card. This replay is a narrow
+transfer check, not additional full-cohort evidence; the 16-query frozen result
+remains the decision basis until organizer artifacts cover all 20 units.
