@@ -18,7 +18,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 sys.path = [entry for entry in sys.path if Path(entry or ".").resolve() != HERE]
 
-from memory_bench.memory.yantrikdb import YantrikDBMemoryProvider
+from memory_bench.memory.yantrikdb import YantrikDBMemoryProvider  # noqa: E402
 
 
 VALUE_RE = re.compile(
@@ -76,6 +76,12 @@ def main() -> int:
     parser.add_argument("store", type=Path)
     parser.add_argument("--endpoint-k", type=int, default=3)
     parser.add_argument("--snippets", action="store_true")
+    parser.add_argument(
+        "--speaker",
+        choices=("user", "assistant", "any"),
+        default="user",
+        help="Constrain endpoint recall to trustworthy turn-level provenance.",
+    )
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
 
@@ -106,18 +112,14 @@ def main() -> int:
                 user_id = str((row.get("meta") or {})["conversation_id"])
                 seen = set()
                 for endpoint in pair:
-                    if args.snippets:
-                        lane = provider._db_for(user_id).recall(
-                            query=endpoint,
-                            top_k=args.endpoint_k,
-                            namespace=None,
-                            skip_reinforce=True,
-                            snippets=True,
-                        )
-                    else:
-                        lane = provider._recall(
-                            endpoint, args.endpoint_k, user_id
-                        )
+                    lane = provider._db_for(user_id).recall(
+                        query=endpoint,
+                        top_k=args.endpoint_k,
+                        namespace=None,
+                        source=None if args.speaker == "any" else args.speaker,
+                        skip_reinforce=True,
+                        snippets=args.snippets,
+                    )
                     lanes.append(lane)
                     for hit in lane:
                         rid = str(hit.get("rid") or "")
@@ -148,6 +150,7 @@ def main() -> int:
             result = {
                 "query_id": row["query_id"],
                 "score": row.get("score"),
+                "speaker_constraint": args.speaker,
                 "endpoints": list(pair) if pair else [],
                 "extra_rids": [hit.get("rid") for hit in extra_hits],
                 "gold_values": sorted(gold_values),
@@ -160,6 +163,8 @@ def main() -> int:
                     [
                         {
                             "rid": hit.get("rid"),
+                            "score": hit.get("score"),
+                            "source": hit.get("source"),
                             "text": hit.get("text", ""),
                             "best_span": hit.get("best_span"),
                         }
