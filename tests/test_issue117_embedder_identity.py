@@ -185,7 +185,14 @@ def test_a_recorded_identity_contradicting_the_vectors_does_not_brick_the_db(
         db = YantrikDB(db_path=false_identity, embedding_dim=DIM, embedder=_Hostile())
     try:
         db.record("written after attaching", namespace="n")
-        assert db.recall("deploy key", namespace="n") is not None
+        # `is not None` was the original assertion here and it was vacuous:
+        # recall returns a list, so an EMPTY list passed it. The test claimed
+        # reads still work and would have passed if recall returned nothing
+        # at all. Assert the rows themselves, and both sides of the attach —
+        # one written before the false identity was in play, one after.
+        got = {r["text"] for r in db.recall("deploy key", namespace="n")}
+        assert "the deploy key for node4 is id_deploy" in got, got
+        assert "written after attaching" in got, got
     finally:
         db.close()
 
