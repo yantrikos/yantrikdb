@@ -43,26 +43,38 @@ the 4B model was too slow for the full cohort. One completed 4B row confirmed
 two of five rubric items in context, consistent with partial rather than empty
 retrieval. Incomplete or invalid model runs are not used as evidence.
 
-## Coverage Routing Bug
+## Source-Turn Rollup Controls
 
-The persisted write-synthesis provider already has topic/thread rollups for
-broad coverage queries, but its inline classifier recognized only phrases such
-as "over time", "across", or "chronological". It classified just `17/40`
-summarization questions as coverage intent. Queries explicitly saying
-"summarize", "summary", "overview", "evolved", or "developed" could fall back
-to ordinary source top-k retrieval.
+A proposed intent expansion would have routed all `40/40` summarization
+questions to persisted rollups instead of the `17/40` carrying explicit
+coverage phrases such as "over time", "across", or "chronological". The
+proposal was tested before being retained. A fail-closed replay disabled all
+model-generated write-time axes, persisted verbatim user turns, and built
+query-independent semantic and global handles locally.
 
-The classifier is now centralized as `is_coverage_query` and recognizes all
-`40/40` summarization questions while excluding narrow current-value questions
-such as "What is my current monthly budget?" This routes summaries to persisted
-topic/thread expansion without changing the answer prompt or discarding source
-evidence.
+On three low-scoring preflight rows (13 rubric items), replacing raw context
+with semantic-handle children reduced source-normalized retrieval coverage from
+`81.52%` to `72.63%`; a global-handle replacement reached only `74.27%`.
+Bounded `20 derived + 20 raw` and `10 derived + 30 raw` hybrids also remained
+below baseline. A `5 derived + 35 raw` arm reached `82.67%` on the small cohort
+and scored `+0.025` over four DeepSeek pairs (`1` win, `3` ties), but failed to
+generalize: the full low-ten cohort fell from `83.47%` to `82.67%` and gained
+one additional weak item.
+
+Preserving the complete raw lane and prepending five derived turns raised the
+full low-ten lexical funnel to `84.39%` for `4.54%` more context tokens. Its
+four-pair DeepSeek control nevertheless regressed by `-0.05625` (`0` wins, `2`
+ties, `2` losses). The identical frozen baseline context also moved from
+`0.43125` in the preceding run to `0.4875`, confirming material answer/judge
+variance at this sample size. The broad intent expansion and augmentation arm
+are rejected.
 
 ## Decision
 
 Do not increase raw top-k globally: a 32.8% context increase recovered only
-3.45 percentage points of source-normalized rubric tokens. Route explicit
-summary intent to existing persisted rollups, then pair-score that arm before
-claiming a benchmark lift. The remaining gap is mostly downstream answer
-selection; memory-layer work should focus on compact, source-grounded topic
-items rather than more raw blocks.
+3.45 percentage points of source-normalized rubric tokens. Do not route generic
+"summary" wording to a rollup-only lane, and do not prepend derived turns merely
+because they improve lexical coverage. The remaining gap is mostly downstream
+answer selection; future work needs compact source-grounded items whose utility
+is demonstrated on a broad frozen cohort, with repeated judging to separate a
+real lift from model variance.

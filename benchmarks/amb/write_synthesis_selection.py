@@ -14,11 +14,6 @@ _SUPPORT_QUERY_RE = re.compile(
     r"\b(support\w*|help\w*|care|cared|encourag\w*)\b",
     re.IGNORECASE,
 )
-_COVERAGE_QUERY_RE = re.compile(
-    r"\b(?:summarize|summary|recap|overview|throughout|across|over time|"
-    r"during our conversations|in order|chronolog\w*|evolved|developed)\b",
-    re.IGNORECASE,
-)
 _RELATIONSHIP_ROLE_RE = re.compile(
     r"\b(famil(?:y|ies)|mom|mother|father|dad|parent|sister|brother|"
     r"wife|husband|spouse|partner|dating|boyfriend|girlfriend)\b",
@@ -47,11 +42,6 @@ _BEAM_TURN_HEADER_RE = re.compile(
 def beam_header_turns(text: str) -> list[int]:
     """Return turns from exact BEAM headers, excluding body references."""
     return [int(match) for match in _BEAM_TURN_HEADER_RE.findall(text)]
-
-
-def is_coverage_query(query: str) -> bool:
-    """Recognize broad trajectory/summary intent, not narrow current values."""
-    return bool(_COVERAGE_QUERY_RE.search(query or ""))
 
 
 def synthesized_item_evidence_sets(item: dict) -> tuple[list[str], list[str]]:

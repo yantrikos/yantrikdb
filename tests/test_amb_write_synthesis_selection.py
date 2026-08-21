@@ -5,7 +5,6 @@ from benchmarks.amb.write_synthesis_selection import (
     first_beam_turn,
     ground_ordered_items_to_candidates,
     ground_synthesized_item_provenance,
-    is_coverage_query,
     is_relationship_role_timeline,
     is_relationship_support_query,
     merge_organizer_rollup_shards,
@@ -16,23 +15,6 @@ from benchmarks.amb.write_synthesis_selection import (
     synthesized_item_evidence_sets,
     validate_synthesized_item_support_quotes,
 )
-
-
-def test_coverage_query_recognizes_summaries_and_trajectories():
-    queries = [
-        "Can you summarize how my plans developed?",
-        "Give me a summary of the project.",
-        "How did my strategy evolve across our conversations?",
-        "List the changes in chronological order.",
-        "Give me an overview of my progress.",
-    ]
-
-    assert all(is_coverage_query(query) for query in queries)
-
-
-def test_coverage_query_excludes_narrow_current_value_questions():
-    assert not is_coverage_query("What is my current monthly budget?")
-    assert not is_coverage_query("When is the final meeting scheduled?")
 
 
 def test_support_quote_must_be_literal_and_substantive():

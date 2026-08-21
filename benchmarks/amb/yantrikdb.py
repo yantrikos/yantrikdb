@@ -51,7 +51,6 @@ from .write_synthesis_selection import (
     first_beam_turn,
     ground_ordered_items_to_candidates,
     ground_synthesized_item_provenance,
-    is_coverage_query,
     is_relationship_role_timeline,
     is_relationship_support_query,
     merge_organizer_rollup_shards,
@@ -1441,7 +1440,11 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
             }
             extraction_blocks = [block_by_id[bid] for bid in selected_block_ids]
 
-        asks_for_coverage = is_coverage_query(query)
+        asks_for_coverage = bool(re.search(
+            r"\b(throughout|across|over time|during our conversations)\b",
+            query,
+            re.IGNORECASE,
+        ))
         temporal_span_instruction = ""
         span_keys: list[str] = []
         if asks_for_coverage and extraction_blocks:
@@ -3477,7 +3480,11 @@ class YantrikDBWriteTimeSynthesisMemoryProvider(
                 "global_source_timeline_v1",
             }
         ]
-        coverage_query = is_coverage_query(query)
+        coverage_query = bool(re.search(
+            r"\b(throughout|across|over time|in order|chronolog)\b",
+            query,
+            re.IGNORECASE,
+        ))
         requested_count = (
             self._requested_item_count(query) if coverage_query else None
         )

@@ -75,3 +75,29 @@ def test_replace_contexts_changes_only_context():
 
     assert replaced == [{"query_id": "q", "context": "new", "score": 0.2}]
     assert rows[0]["context"] == "old"
+
+
+def test_select_rows_can_freeze_a_query_id_preflight():
+    payload = {
+        "results": [
+            {
+                "query_id": "q1",
+                "score": 0.2,
+                "meta": {"question_category": "summarization"},
+            },
+            {
+                "query_id": "q2",
+                "score": 0.3,
+                "meta": {"question_category": "summarization"},
+            },
+            {
+                "query_id": "q3",
+                "score": 0.0,
+                "meta": {"question_category": "event_ordering"},
+            },
+        ]
+    }
+
+    assert _MODULE.select_rows(payload, 0.4, {"q2"}) == [
+        payload["results"][1]
+    ]

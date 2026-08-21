@@ -178,23 +178,42 @@ def replace_contexts(rows: list[dict], context_payload: dict) -> list[dict]:
     return output
 
 
+def select_rows(
+    payload: dict,
+    max_score: float,
+    query_ids: set[str] | None = None,
+) -> list[dict]:
+    """Select the frozen summarization cohort without reading rubric text."""
+    return [
+        row
+        for row in payload.get("results") or []
+        if (row.get("meta") or {}).get("question_category") == "summarization"
+        and float(row.get("score") or 0.0) <= max_score
+        and (query_ids is None or str(row.get("query_id") or "") in query_ids)
+    ]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("results", type=Path)
     parser.add_argument("documents", type=Path)
     parser.add_argument("--contexts", type=Path)
     parser.add_argument("--max-score", type=float, default=0.4)
+    parser.add_argument(
+        "--query-ids",
+        help="Optional comma-separated frozen query IDs for a preflight cohort.",
+    )
     parser.add_argument("--out", type=Path)
     args = parser.parse_args()
 
     payload = json.loads(args.results.read_text(encoding="utf-8-sig"))
     sources = load_source_documents(args.documents)
-    rows = [
-        row
-        for row in payload.get("results") or []
-        if (row.get("meta") or {}).get("question_category") == "summarization"
-        and float(row.get("score") or 0.0) <= args.max_score
-    ]
+    query_ids = (
+        {value.strip() for value in args.query_ids.split(",") if value.strip()}
+        if args.query_ids
+        else None
+    )
+    rows = select_rows(payload, args.max_score, query_ids)
     if args.contexts:
         context_payload = json.loads(args.contexts.read_text(encoding="utf-8-sig"))
         rows = replace_contexts(rows, context_payload)
