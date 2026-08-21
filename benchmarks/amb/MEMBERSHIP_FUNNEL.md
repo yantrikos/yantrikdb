@@ -207,12 +207,25 @@ paragraphs. Those are literal answers to "aspects of refining my personal
 statement," but the hidden rubric instead requires Bryan, Shawn, and Matthew.
 Neither the query nor the stored evidence identifies that latent partition.
 
+Two follow-up controls show that this is not unique to Q9. For the nine-item
+triangle-geometry query, contextual retrieval exposed five of ten historical
+source turns and the evidence bank preserved all five, but exact-N selection
+chose nine earlier, valid triangle concepts from turns 4-32 instead of the
+hidden late-session partition beginning at turn 116. For the narrower city-
+autocomplete query, contextual retrieval exposed four of five source turns and
+the bank again preserved all four; selection retained two while choosing three
+other literal autocomplete implementation concerns. The historical city answer
+still scores `0.7`, demonstrating that source-turn identity and rubric coverage
+can disagree in either direction.
+
 Therefore Q9 is no longer a sound target for more retrieval expansion or prompt
-tuning. The evidence-backed product changes to retain are relevance-first
-candidate presentation, role-sensitive query-blind organization, grouped child
-hydration, and explicit correction filtering. Cohort work should move to source
-losses where the requested facet is identifiable; otherwise optimization would
-teach the engine benchmark-specific preferences that make real answers worse.
+tuning, and the same stopping rule applies to similarly underidentified
+event-ordering prompts. The evidence-backed product changes to retain are
+relevance-first candidate presentation, role-sensitive query-blind organization,
+grouped child hydration, and explicit correction filtering. Cohort work should
+move to source losses where the requested facet is identifiable; otherwise
+optimization would teach the engine benchmark-specific preferences that make
+real answers worse.
 
 The reproducible funnel command writes the untracked detailed artifact
 `benchmarks/amb/artifacts/membership-funnel-v2-source-ids.json`:
