@@ -22,7 +22,9 @@
 use rusqlite::{params, OptionalExtension};
 
 use crate::error::Result;
-use crate::types::{RecallResult, RollupOutcomeReport, RollupRankOutcomeStats};
+use crate::types::{
+    RecallResult, RollupOutcomeExample, RollupOutcomeReport, RollupRankOutcomeStats,
+};
 
 use super::YantrikDB;
 
@@ -696,6 +698,81 @@ impl YantrikDB {
         })
     }
 
+    /// Export finalized per-child examples for offline calibration.
+    ///
+    /// Every feature was frozen when the rollup or expansion was served. The
+    /// export never joins mutable memory attributes and never exposes query
+    /// text. An omitted child is a negative only after exact finalization.
+    pub fn rollup_outcome_examples(
+        &self,
+        namespace: Option<&str>,
+        since: Option<f64>,
+        until: Option<f64>,
+        limit: usize,
+    ) -> Result<Vec<RollupOutcomeExample>> {
+        if since.is_some_and(|value| !value.is_finite())
+            || until.is_some_and(|value| !value.is_finite())
+        {
+            return Err(crate::error::YantrikDbError::InvalidInput(
+                "rollup outcome examples require finite time bounds".to_string(),
+            ));
+        }
+        if since.zip(until).is_some_and(|(start, end)| start > end) {
+            return Err(crate::error::YantrikDbError::InvalidInput(
+                "rollup outcome examples require since <= until".to_string(),
+            ));
+        }
+        if limit == 0 {
+            return Ok(Vec::new());
+        }
+        let bounded_limit = limit.min(10_000) as i64;
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT i.impression_id, i.query_hash, i.namespace, i.rollup_rid, \
+                    i.rank, i.score, c.child_rid, c.rank, \
+                    (SELECT COUNT(*) FROM rollup_impression_children all_children \
+                     WHERE all_children.impression_id = i.impression_id), \
+                    EXISTS(SELECT 1 FROM rollup_impression_outcomes selected \
+                           WHERE selected.impression_id = i.impression_id \
+                             AND selected.child_rid = c.child_rid \
+                             AND selected.source IN ('selected', 'corrected')), \
+                    EXISTS(SELECT 1 FROM rollup_impression_outcomes corrected \
+                           WHERE corrected.impression_id = i.impression_id \
+                             AND corrected.child_rid = c.child_rid \
+                             AND corrected.source = 'corrected'), \
+                    i.created_at, i.outcome_finalized_at \
+             FROM rollup_impressions i \
+             JOIN rollup_impression_children c USING (impression_id) \
+             WHERE i.outcome_finalized_at IS NOT NULL \
+               AND (?1 IS NULL OR i.namespace = ?1) \
+               AND (?2 IS NULL OR i.created_at >= ?2) \
+               AND (?3 IS NULL OR i.created_at <= ?3) \
+             ORDER BY i.created_at, i.impression_id, c.rank, c.child_rid \
+             LIMIT ?4",
+        )?;
+        let examples = stmt
+            .query_map(params![namespace, since, until, bounded_limit], |row| {
+                Ok(RollupOutcomeExample {
+                    export_schema_version: 1,
+                    impression_id: row.get(0)?,
+                    query_hash: row.get(1)?,
+                    namespace: row.get(2)?,
+                    rollup_rid: row.get(3)?,
+                    rollup_rank: row.get::<_, i64>(4)? as usize,
+                    rollup_score: row.get(5)?,
+                    child_rid: row.get(6)?,
+                    child_rank: row.get::<_, i64>(7)? as usize,
+                    returned_child_count: row.get::<_, i64>(8)? as usize,
+                    selected: row.get::<_, i64>(9)? != 0,
+                    corrected: row.get::<_, i64>(10)? != 0,
+                    created_at: row.get(11)?,
+                    outcome_finalized_at: row.get(12)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(examples)
+    }
+
     /// v0.10 Item 2 — explicit rejection: the caller states that these
     /// served results were IRRELEVANT to the query they were served for
     /// (typically alongside a refine). This is deliberately a separate
@@ -1169,6 +1246,96 @@ mod tests {
             "no_data"
         );
         assert!(db.rollup_outcome_report(None, Some(f64::NAN)).is_err());
+    }
+
+    #[test]
+    fn rollup_outcome_examples_export_only_frozen_finalized_children() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let rollup = rec(&db, "topic rollup", 1.0);
+        let selected = rec(&db, "selected child", 20.0);
+        let corrected = rec(&db, "corrected child", 21.0);
+        let unselected = rec(&db, "unselected child", 22.0);
+
+        let unfinished = db
+            .note_rollup_impression(&rollup, "unfinished topic", None, 2, 0.4, None)
+            .unwrap();
+        db.note_rollup_expansion(&unfinished, &[&unselected])
+            .unwrap();
+
+        let finalized = db
+            .note_rollup_impression(
+                &rollup,
+                "finalized topic",
+                None,
+                1,
+                0.75,
+                Some("offline-example"),
+            )
+            .unwrap();
+        db.note_rollup_expansion(&finalized, &[&selected, &corrected, &unselected])
+            .unwrap();
+        db.finalize_rollup_outcome(&finalized, &[&selected], &[&corrected])
+            .unwrap();
+
+        let count_before: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM rollup_impressions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let examples = db
+            .rollup_outcome_examples(Some("default"), None, None, 100)
+            .unwrap();
+        let count_after: i64 = db
+            .conn()
+            .query_row("SELECT COUNT(*) FROM rollup_impressions", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+
+        assert_eq!(count_before, count_after, "the export must be read-only");
+        assert_eq!(examples.len(), 3, "unfinished interactions stay unknown");
+        assert_eq!(examples[0].export_schema_version, 1);
+        assert_eq!(examples[0].impression_id, "offline-example");
+        assert_eq!(examples[0].query_hash, stable_text_hash("finalized topic"));
+        assert_eq!(examples[0].rollup_rid, rollup);
+        assert_eq!(examples[0].rollup_rank, 1);
+        assert_eq!(examples[0].rollup_score, 0.75);
+        assert_eq!(examples[0].returned_child_count, 3);
+        assert_eq!(examples[0].child_rid, selected);
+        assert_eq!(examples[0].child_rank, 0);
+        assert!(examples[0].selected);
+        assert!(!examples[0].corrected);
+        assert_eq!(examples[1].child_rid, corrected);
+        assert!(examples[1].selected, "correction implies selection");
+        assert!(examples[1].corrected);
+        assert_eq!(examples[2].child_rid, unselected);
+        assert!(!examples[2].selected);
+        assert!(!examples[2].corrected);
+        assert_eq!(
+            db.rollup_outcome_examples(None, None, None, 2)
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(db
+            .rollup_outcome_examples(None, None, None, 0)
+            .unwrap()
+            .is_empty());
+        assert!(db
+            .rollup_outcome_examples(None, Some(crate::time::now_secs() + 1.0), None, 100)
+            .unwrap()
+            .is_empty());
+        assert!(db
+            .rollup_outcome_examples(None, None, Some(0.0), 100)
+            .unwrap()
+            .is_empty());
+        assert!(db
+            .rollup_outcome_examples(None, Some(f64::NAN), None, 100)
+            .is_err());
+        assert!(db
+            .rollup_outcome_examples(None, Some(2.0), Some(1.0), 100)
+            .is_err());
     }
 
     #[test]

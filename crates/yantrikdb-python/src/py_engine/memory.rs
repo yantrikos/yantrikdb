@@ -1509,6 +1509,27 @@ impl PyYantrikDB {
         json_to_py(py, &value)
     }
 
+    #[pyo3(signature = (namespace=None, since=None, until=None, limit=1000))]
+    fn rollup_outcome_examples(
+        &self,
+        py: Python<'_>,
+        namespace: Option<&str>,
+        since: Option<f64>,
+        until: Option<f64>,
+        limit: usize,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let examples = db
+            .rollup_outcome_examples(namespace, since, until, limit)
+            .map_err(map_err)?;
+        let value = serde_json::to_value(examples).map_err(|error| {
+            PyRuntimeError::new_err(format!(
+                "rollup outcome example serialization failed: {error}"
+            ))
+        })?;
+        json_to_py(py, &value)
+    }
+
     /// v0.10 Item 2 — run the self-sufficient learning loop once and
     /// return its typed report as JSON (outcome, gates, losses,
     /// label_counts, semantic_anchor_drop_rate,

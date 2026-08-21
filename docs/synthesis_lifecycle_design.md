@@ -288,6 +288,17 @@ evaluation only. Promotion into ranking labels or learned features still
 requires evidence that the outcome predicts usefulness without introducing
 exposure bias.
 
+`rollup_outcome_examples(namespace, since, until, limit)` is the bounded offline data
+plane behind that evaluation. It emits one row per returned child only after
+exact finalization: hashed query, namespace, rollup and child IDs, frozen
+rollup rank/score, child rank and returned count, and explicit selected or
+corrected flags. It excludes query text and never reconstructs historical
+features from mutable memory rows. The export is measurement data, not an
+automatic production-learning input. Its stable query hash is a linkage key,
+not anonymization, and an unselected row is a negative only within that
+impression's returned set. Offline splits must group by query or rollup, or use
+time windows, rather than randomly splitting child rows.
+
 Local frozen-store probes show why the middle representation is required.
 Atomic records can split one concern into adjacent follow-up actions, while a
 topic handle can combine a dozen concerns. Hierarchical query-free discovery on

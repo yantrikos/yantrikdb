@@ -462,6 +462,26 @@ pub struct RollupOutcomeReport {
     pub readiness_failures: Vec<String>,
 }
 
+/// One immutable, finalized child example from the rollup outcome ledger.
+/// Query text and mutable memory features are deliberately excluded.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RollupOutcomeExample {
+    pub export_schema_version: u32,
+    pub impression_id: String,
+    pub query_hash: String,
+    pub namespace: String,
+    pub rollup_rid: String,
+    pub rollup_rank: usize,
+    pub rollup_score: f64,
+    pub child_rid: String,
+    pub child_rank: usize,
+    pub returned_child_count: usize,
+    pub selected: bool,
+    pub corrected: bool,
+    pub created_at: f64,
+    pub outcome_finalized_at: f64,
+}
+
 /// Engine statistics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Stats {
