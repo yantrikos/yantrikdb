@@ -1,14 +1,199 @@
 from benchmarks.amb.write_synthesis_selection import (
+    beam_header_turns,
     cap_temporal_span_items,
     deduplicate_thread_items,
     first_beam_turn,
+    ground_ordered_items_to_candidates,
     ground_synthesized_item_provenance,
     is_relationship_role_timeline,
     is_relationship_support_query,
     merge_organizer_rollup_shards,
+    merge_synthesized_evidence_sets,
     select_entity_timeline_children,
     select_relationship_support_children,
+    synthesized_item_evidence_sets,
+    validate_synthesized_item_support_quotes,
 )
+
+
+def test_support_quote_must_be_literal_and_substantive():
+    items = [
+        {
+            "id": "I001",
+            "evidence_ids": ["B001"],
+            "support_block_id": "B001",
+            "support_quote": (
+                "Matthew offered tips on adapting my statements for grant "
+                "applications"
+            ),
+        },
+        {
+            "id": "I002",
+            "evidence_ids": ["B001"],
+            "support_block_id": "B001",
+            "support_quote": (
+                "Wendy sent a care package with local spices and notes"
+            ),
+        },
+        {
+            "id": "I003",
+            "evidence_ids": ["B001"],
+            "support_block_id": "B001",
+            "support_quote": "[Turn 164] User:",
+        },
+        {
+            "id": "I004",
+            "evidence_ids": ["B001"],
+            "support_block_id": "B001",
+            "support_quote": " ".join(["word"] * 26),
+        },
+    ]
+
+    validated, events = validate_synthesized_item_support_quotes(
+        items,
+        {
+            "B001": (
+                "[Turn 164] User: Matthew offered tips on adapting my "
+                "statements for grant applications and global opportunities."
+            )
+        },
+    )
+
+    assert [item["id"] for item in validated] == ["I001"]
+    assert [event["status"] for event in events] == [
+        "rejected_quote_not_in_evidence",
+        "rejected_missing_substantive_quote",
+        "rejected_missing_substantive_quote",
+    ]
+
+
+def test_support_quote_can_correct_claimed_block_within_evidence_set():
+    item = {
+        "id": "I001",
+        "evidence_ids": ["B001", "missing", "B002"],
+        "support_block_id": "B001",
+        "support_quote": "career gap from 2022 could use some fine-tuning",
+    }
+
+    validated, events = validate_synthesized_item_support_quotes(
+        [item],
+        {
+            "B001": "A different source block with unrelated details.",
+            "B002": "The career gap from 2022 could use some fine-tuning.",
+        },
+    )
+
+    assert validated[0]["support_block_id"] == "B002"
+    assert validated[0]["evidence_ids"] == ["B002"]
+    assert validated[0]["chronology_evidence_ids"] == ["B001", "B002"]
+    assert events == [
+        {
+            "status": "dropped_invalid_evidence",
+            "item_id": "I001",
+            "evidence_ids": ["missing"],
+        },
+        {
+            "status": "unverified_chronology_evidence",
+            "item_id": "I001",
+            "evidence_ids": ["B001"],
+        },
+        {
+            "status": "corrected_support_block",
+            "item_id": "I001",
+            "before": "B001",
+            "after": "B002",
+        },
+    ]
+
+
+def test_quote_support_keeps_separate_earlier_chronology():
+    item = {
+        "id": "I001",
+        "evidence_ids": ["B002"],
+        "chronology_evidence_ids": ["B001", "B002"],
+        "first_mention_block_id": "B002",
+        "first_mention_turn": 20,
+        "first_mention_date": "2024-02-01",
+    }
+
+    grounded, _ = ground_synthesized_item_provenance(
+        [item],
+        {
+            "B001": ("2024-01-01", 10, 2),
+            "B002": ("2024-02-01", 20, 1),
+        },
+        {"B001": "2024-01-01", "B002": "2024-02-01"},
+    )
+
+    assert grounded[0]["evidence_ids"] == ["B002"]
+    assert grounded[0]["chronology_evidence_ids"] == ["B001", "B002"]
+    assert grounded[0]["first_mention_block_id"] == "B001"
+    assert grounded[0]["first_mention_turn"] == 10
+
+
+def test_synthesized_evidence_sets_preserve_separate_chronology():
+    evidence_ids, chronology_ids = synthesized_item_evidence_sets({
+        "evidence_ids": ["B002", "B002"],
+        "chronology_evidence_ids": ["B001", "B002", "B001"],
+    })
+
+    assert evidence_ids == ["B002"]
+    assert chronology_ids == ["B001", "B002"]
+
+
+def test_rollup_evidence_union_preserves_both_channels():
+    evidence_ids, chronology_ids = merge_synthesized_evidence_sets([
+        {
+            "evidence_ids": ["B002"],
+            "chronology_evidence_ids": ["B001", "B002"],
+        },
+        {"evidence_ids": ["B004"]},
+    ])
+
+    assert evidence_ids == ["B002", "B004"]
+    assert chronology_ids == ["B001", "B002", "B004"]
+
+
+def test_ordered_items_inherit_provenance_from_linked_candidates():
+    ordered, events = ground_ordered_items_to_candidates(
+        [{
+            "id": "F001",
+            "item": "Selected milestone",
+            "source_item_ids": ["I002", "missing"],
+            "evidence_ids": ["invented-valid-block"],
+            "chronology_evidence_ids": ["invented-valid-block"],
+        }],
+        [
+            {"id": "I001", "evidence_ids": ["B001"]},
+            {
+                "id": "I002",
+                "evidence_ids": ["B003"],
+                "chronology_evidence_ids": ["B002", "B003"],
+            },
+        ],
+    )
+
+    assert ordered[0]["source_item_ids"] == ["I002"]
+    assert ordered[0]["evidence_ids"] == ["B003"]
+    assert ordered[0]["chronology_evidence_ids"] == ["B002", "B003"]
+    assert events == [{
+        "status": "dropped_invalid_source_candidates",
+        "item_id": "F001",
+        "source_item_ids": ["missing"],
+    }]
+
+
+def test_ordered_items_without_valid_candidate_link_are_rejected():
+    ordered, events = ground_ordered_items_to_candidates(
+        [{"id": "F001", "item": "Ungrounded", "source_item_ids": ["missing"]}],
+        [{"id": "I001", "evidence_ids": ["B001"]}],
+    )
+
+    assert ordered == []
+    assert [event["status"] for event in events] == [
+        "dropped_invalid_source_candidates",
+        "rejected_missing_source_candidate",
+    ]
 
 
 def test_synthesis_provenance_is_grounded_in_earliest_cited_block():
@@ -87,6 +272,10 @@ def test_first_turn_uses_beam_headers_not_body_mentions():
     assert first_beam_turn(
         "This body mentions Turn 2 without a BEAM header."
     ) is None
+    assert first_beam_turn(
+        "This body cites [Turn 2] User: as prose, not a line header."
+    ) is None
+    assert beam_header_turns(text) == [60, 62]
 
 
 def test_temporal_span_caps_apply_before_flattening():

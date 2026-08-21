@@ -122,17 +122,51 @@ is supported. Candidate chronology is now deterministically grounded to the
 earliest valid cited evidence block, invalid citations are rejected, and every
 correction or rejection is emitted in synthesis telemetry. This still does not
 prove that item text is entailed by its citation. The next extraction probe must
-require exact source support (for example, a validated evidence quote) before a
-candidate can enter selection.
+first enforce literal citation integrity, then evaluate semantic support before
+a candidate can be treated as fully grounded.
+
+## Q9 Local Selection Controls
+
+The quote-gated local controls used `qwen3.5:9b` only; they are mechanism tests,
+not official AMB scores and not evidence about DeepSeek's selector quality.
+Every generated candidate had to provide a substantive literal quote found in a
+cited block. Contextual rank replaced the stale bundled-retriever rank before
+synthesis and the original rank remained available as telemetry.
+
+| Q9 arm | Gold turns in top 40 | Gold turns cited by candidates | Gold turns cited after selection |
+| --- | ---: | ---: | ---: |
+| Broad personal-statement query, generated candidates | 4/6 | 2/6 | 1/6 |
+| Broad query, evidence-preserving 40-candidate bank + entity labels | 4/6 | 4/6 | 1/6 |
+| Explicit family-support query, same evidence bank | 5/5 | 5/5 | 1/5 |
+| Family query with hard facet gate + visible source quotes | 5/5 | 5/5 | 1/5 |
+
+The evidence bank removes extraction omission for every source turn that reaches
+the input, yet Qwen still chooses an early generic prefix. The explicit family
+control rules out Q9's under-specified professional-advice partition as the only
+cause: selection itself is a binding failure for this local model. More temporal
+coverage, entity closure, or candidate expansion is therefore inert until the
+selector changes.
+
+The last two columns are source-membership diagnostics derived from exact BEAM
+headers in cited blocks. They do not claim that generated candidate or rollup
+text semantically represents every cited source turn.
+
+Literal quote membership also remains weaker than entailment. In the family
+control, one candidate described a care package while quoting the earlier
+handwritten resilience letter from the same valid block. The validator correctly
+proves citation membership, but a semantic support judge or extractive item
+representation is still required before generated text can be treated as fully
+grounded.
 
 ## Decision Gate
 
-Run one frozen-bank Q9 replay using the same DeepSeek generator but select its
-40 evidence blocks with the contextual reranker. Before judging, compare
-candidate provenance against Q9's exact source turns. If source survival
-improves, run a two-query paired judged replay. Only a positive paired result
-justifies implementing the reranker in the provider or starting a new full-40
-cycle.
+The next discriminating gate is selection-only: reuse the frozen grounded
+candidate artifacts with a stronger selector, without rerunning retrieval or
+extraction. Compare the broad Q9 query and its explicit family-support control.
+Only a selector that materially improves both should be combined with the
+contextual reranker in a paid two-query replay. A new DeepSeek payload requires
+separate authorization because its reranked evidence differs from the completed
+current-provider replay.
 
 The reproducible funnel command writes the untracked detailed artifact
 `benchmarks/amb/artifacts/membership-funnel-v2-source-ids.json`:

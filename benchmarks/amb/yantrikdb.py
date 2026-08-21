@@ -45,15 +45,20 @@ from ..utils import chunk_text, count_tokens
 from .base import MemoryProvider
 from .chronological_presentation import chronological_hit_key
 from .write_synthesis_selection import (
+    beam_header_turns,
     cap_temporal_span_items,
     deduplicate_thread_items,
     first_beam_turn,
+    ground_ordered_items_to_candidates,
     ground_synthesized_item_provenance,
     is_relationship_role_timeline,
     is_relationship_support_query,
     merge_organizer_rollup_shards,
+    merge_synthesized_evidence_sets,
     select_entity_timeline_children,
     select_relationship_support_children,
+    synthesized_item_evidence_sets,
+    validate_synthesized_item_support_quotes,
 )
 
 # BEAM's turn header, in every form its formatter emits:
@@ -141,6 +146,12 @@ _SYNTH_ENTITY_THREADS = (
 )
 _SYNTH_ENTITY_CLOSURE_ALL = (
     os.environ.get("YDB_BENCH_SYNTH_ENTITY_CLOSURE_ALL", "0") == "1"
+)
+_SYNTH_EVIDENCE_CANDIDATES = (
+    os.environ.get("YDB_BENCH_SYNTH_EVIDENCE_CANDIDATES", "0") == "1"
+)
+_SYNTH_SUPPORT_QUOTES = (
+    os.environ.get("YDB_BENCH_SYNTH_SUPPORT_QUOTES", "0") == "1"
 )
 _SYNTH_JUDGE_MODEL = os.environ.get(
     "YDB_BENCH_SYNTH_JUDGE_MODEL", _SYNTH_MODEL
@@ -985,11 +996,9 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
             text = str(item.get("item") or item.get("text") or "").strip()
             if not text:
                 continue
-            evidence = item.get("evidence_ids") or item.get("evidence") or []
-            if isinstance(evidence, str):
-                evidence = [evidence]
-            if not isinstance(evidence, list):
-                evidence = []
+            evidence_ids, chronology_evidence_ids = (
+                synthesized_item_evidence_sets(item)
+            )
             turn = item.get("first_mention_turn")
             if turn is None:
                 turn = item.get("turn")
@@ -1004,8 +1013,15 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
                 position = int(position) if position is not None else None
             except (TypeError, ValueError):
                 position = None
-            evidence_ids = list(dict.fromkeys(
-                str(e).strip() for e in evidence if str(e).strip()
+            source_item_ids = item.get("source_item_ids") or []
+            if isinstance(source_item_ids, str):
+                source_item_ids = [source_item_ids]
+            if not isinstance(source_item_ids, list):
+                source_item_ids = []
+            source_item_ids = list(dict.fromkeys(
+                str(source_id).strip()
+                for source_id in source_item_ids
+                if str(source_id).strip()
             ))
             out.append({
                 "id": str(item.get("id") or f"I{i:03d}"),
@@ -1023,6 +1039,12 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
                     or (evidence_ids[0] if evidence_ids else "")
                 ).strip(),
                 "evidence_ids": evidence_ids,
+                "chronology_evidence_ids": chronology_evidence_ids,
+                "source_item_ids": source_item_ids,
+                "support_quote": str(item.get("support_quote") or "").strip(),
+                "support_block_id": str(
+                    item.get("support_block_id") or ""
+                ).strip(),
             })
             if len(out) >= _SYNTH_MAX_ITEMS:
                 break
@@ -1146,11 +1168,9 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
             child_ids = [child["id"] for child in children]
             claimed_ids.update(child_ids)
             first = children[0]
-            evidence_ids = list(dict.fromkeys(
-                evidence_id
-                for child in children
-                for evidence_id in child.get("evidence_ids", [])
-            ))
+            evidence_ids, chronology_evidence_ids = (
+                merge_synthesized_evidence_sets(children)
+            )
             out.append({
                 "id": f"R{len(out) + 1:03d}",
                 # A one-child group changes cardinality by selection alone.
@@ -1163,6 +1183,7 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
                 "first_mention_position": first.get("first_mention_position"),
                 "first_mention_block_id": first.get("first_mention_block_id", ""),
                 "evidence_ids": evidence_ids,
+                "chronology_evidence_ids": chronology_evidence_ids,
                 "source_item_ids": child_ids,
                 "date_source": first.get("date_source", "source_created_at"),
                 "date_confidence": min(
@@ -1517,13 +1538,19 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
         # first-mention milestones, not broad topic summaries. The broad arm
         # collapsed four separately-scored combinatorics events into one and
         # scored 0.2862 at 21/40, indistinguishable from the 0.2817 baseline.
+        support_quote_shape = (
+            ',"support_block_id":"B001",'
+            '"support_quote":"exact source words"'
+            if _SYNTH_SUPPORT_QUOTES else
+            ""
+        )
         extract_json_shape = (
             "{" + ",".join(
                 f'"{key}":[{{"item":"specific milestone",'
                 '"first_mention_date":"YYYY-MM-DD",'
                 '"first_mention_turn":12,"first_mention_position":1,'
                 '"first_mention_block_id":"B001",'
-                '"evidence_ids":["B001"]}]'
+                f'"evidence_ids":["B001"]{support_quote_shape}}}]'
                 for key in span_keys
             ) + "}"
             if span_keys else
@@ -1531,7 +1558,15 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
             '"first_mention_date":"YYYY-MM-DD",'
             '"first_mention_turn":12,"first_mention_position":1,'
             '"first_mention_block_id":"B001",'
-            '"evidence_ids":["B001"]}]}'
+            f'"evidence_ids":["B001"]{support_quote_shape}}}]}}'
+        )
+        support_quote_instruction = (
+            "Also copy one substantive 8-25 word support_quote VERBATIM from "
+            "one cited block and return that block as support_block_id. The "
+            "quote must contain source words relevant to the candidate, not "
+            "only a turn header or generic topic phrase. "
+            if _SYNTH_SUPPORT_QUOTES else
+            ""
         )
         extract_prompt = (
             "You are assembling memory answer items from evidence blocks.\n"
@@ -1557,6 +1592,7 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
             "evidence. Return the session date, the exact Turn number visible "
             "in the block text, the block containing that first mention, and "
             "all supporting block ids. "
+            + support_quote_instruction
             + granularity_instruction
             + "\n\n"
             f"JSON shape: {extract_json_shape}\n\n"
@@ -1573,7 +1609,12 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
                     "type": "array",
                     "description": (
                         "Milestones from the matching temporal span, with item, "
-                        "first_mention_date, and evidence_ids."
+                        "first_mention_date and evidence_ids"
+                        + (
+                            ", plus support_block_id and a verbatim support_quote."
+                            if _SYNTH_SUPPORT_QUOTES else
+                            "."
+                        )
                     ),
                 }
                 for key in extract_keys
@@ -1582,6 +1623,7 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
         sample_items: list[dict] = []
         sample_hashes: list[str] = []
         sample_span_counts: list[dict[str, int]] = []
+        support_quote_events: list[dict] = []
         extracted_by_span: dict[str, list] = {}
         for sample_index in range(_SYNTH_SAMPLES):
             extracted = llm.generate(extract_prompt, extract_schema)
@@ -1599,6 +1641,19 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
                 if isinstance(extracted_by_span[key], list)
             ]
             normalized = self._normalize_items(extracted_items)
+            if _SYNTH_SUPPORT_QUOTES:
+                normalized, sample_support_events = (
+                    validate_synthesized_item_support_quotes(
+                        normalized, block_texts
+                    )
+                )
+                support_quote_events.extend(
+                    {
+                        "sample_index": sample_index + 1,
+                        **event,
+                    }
+                    for event in sample_support_events
+                )
             if entity_rows_by_name:
                 activated_entities = (
                     set(entity_rows_by_name)
@@ -1646,6 +1701,8 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
                             "first_mention_position": 1,
                             "first_mention_block_id": bid,
                             "evidence_ids": [bid],
+                            "support_block_id": bid,
+                            "support_quote": raw_text,
                             "thread_expansion_entity": row["entity"],
                             "thread_entities": [row["entity"]],
                         })
@@ -1654,6 +1711,51 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
                             break
                     if len(normalized) >= _SYNTH_MAX_ITEMS * 4:
                         break
+            if _SYNTH_EVIDENCE_CANDIDATES:
+                represented_blocks = {
+                    evidence_id
+                    for item in normalized
+                    for evidence_id in item.get("evidence_ids", [])
+                }
+                for bid in sorted(
+                    block_texts,
+                    key=lambda block_id: block_relevance[block_id],
+                ):
+                    if bid in represented_blocks or len(normalized) >= _SYNTH_MAX_ITEMS:
+                        continue
+                    raw_text = re.sub(
+                        rf"^{_HEADER}\s+User:\s*",
+                        "",
+                        block_texts[bid],
+                    )
+                    raw_text = raw_text.split("->->", 1)[0].strip()
+                    normalized.append({
+                        "item": raw_text,
+                        "first_mention_date": block_dates[bid],
+                        "first_mention_turn": (
+                            None
+                            if block_temporal_keys[bid][1] == 999999
+                            else block_temporal_keys[bid][1]
+                        ),
+                        "first_mention_position": 1,
+                        "first_mention_block_id": bid,
+                        "evidence_ids": [bid],
+                        "support_block_id": bid,
+                        "support_quote": raw_text,
+                        "evidence_fallback": True,
+                    })
+                    represented_blocks.add(bid)
+            if entity_thread_rows:
+                for item in normalized:
+                    evidence_ids = set(item.get("evidence_ids", []))
+                    item["thread_entities"] = list(dict.fromkeys([
+                        *item.get("thread_entities", []),
+                        *(
+                            row["entity"]
+                            for row in entity_thread_rows
+                            if evidence_ids.intersection(row["block_ids"])
+                        ),
+                    ]))
             for item_index, item in enumerate(normalized, 1):
                 item["id"] = f"S{sample_index + 1:02d}I{item_index:03d}"
                 item["sample_index"] = sample_index + 1
@@ -1767,6 +1869,14 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
                         for child in children
                         for evidence_id in child.get("evidence_ids", [])
                     )),
+                    "chronology_evidence_ids": list(dict.fromkeys(
+                        evidence_id
+                        for child in children
+                        for evidence_id in child.get(
+                            "chronology_evidence_ids",
+                            child.get("evidence_ids", []),
+                        )
+                    )),
                     "source_candidate_ids": source_ids,
                     "sample_support": len({
                         child["sample_index"] for child in children
@@ -1849,6 +1959,7 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
             f"position={it['first_mention_position'] if it['first_mention_position'] is not None else 'unknown'} | "
             f"first_block={it['first_mention_block_id'] or 'unknown'} | "
             f"evidence={','.join(it['evidence_ids']) or 'none'} | {it['item']}"
+            f" | chronology_evidence={','.join(it.get('chronology_evidence_ids', it['evidence_ids'])) or 'none'}"
             f" | thread_entities={','.join(it.get('thread_entities', [])) or 'none'}"
             for it in chronological_items
         )
@@ -1959,6 +2070,19 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
             )
             adaptive_rollup_valid = bool(ordered)
         else:
+            source_link_instruction = (
+                "PROVENANCE: every final record must list source_item_ids for "
+                "the supplied candidate or candidates it uses. These IDs are "
+                "mandatory and must be copied exactly; evidence provenance is "
+                "rebuilt from them after generation. "
+                if _SYNTH_SUPPORT_QUOTES else
+                ""
+            )
+            source_link_shape = (
+                ',"source_item_ids":["I001"]'
+                if _SYNTH_SUPPORT_QUOTES else
+                ""
+            )
             order_prompt = (
                 "Perform two phases. PHASE 1, SELECT: choose the candidates that "
                 "most directly form the coherent thread requested by the USER "
@@ -1972,6 +2096,7 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
                 "candidates. You MAY and SHOULD split a compound candidate into "
                 "multiple final items when it contains independently scorable "
                 "concepts or applications. "
+                + source_link_instruction
                 + selection_instruction
                 + coverage_instruction
                 + "PHASE 2, ORDER: only after selection, order that fixed subset "
@@ -1986,7 +2111,9 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
                 "\"one specific milestone\",\"first_mention_date\":"
                 "\"YYYY-MM-DD\",\"first_mention_turn\":12,"
                 "\"first_mention_position\":1,\"first_mention_block_id\":"
-                "\"B001\",\"evidence_ids\":[\"B001\"]}]}\n\n"
+                "\"B001\",\"evidence_ids\":[\"B001\"],"
+                "\"chronology_evidence_ids\":[\"B001\",\"B002\"]"
+                f"{source_link_shape}}}]}}\n\n"
                 "Return JSON only."
             )
             order_schema = self._schema(
@@ -2002,6 +2129,17 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
             )
             ordered_raw = llm.generate(order_prompt, order_schema)
             ordered = self._normalize_items(ordered_raw.get("ordered_items", []))
+            if _SYNTH_SUPPORT_QUOTES:
+                ordered, candidate_link_events = ground_ordered_items_to_candidates(
+                    ordered, chronological_items
+                )
+                provenance_events.extend(
+                    {
+                        "stage": "ordered_candidate_link",
+                        **event,
+                    }
+                    for event in candidate_link_events
+                )
             ordered, ordered_provenance_events = (
                 ground_synthesized_item_provenance(
                     ordered, block_temporal_keys, block_dates
@@ -2068,8 +2206,11 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
             "consensus_model": _SYNTH_JUDGE_MODEL if consensus_used else None,
             "entity_threads_used": bool(entity_thread_rows),
             "entity_closure_all": _SYNTH_ENTITY_CLOSURE_ALL,
+            "evidence_candidates_used": _SYNTH_EVIDENCE_CANDIDATES,
+            "support_quotes_used": _SYNTH_SUPPORT_QUOTES,
             "entity_thread_index": entity_thread_rows,
             "provenance_events": provenance_events,
+            "extraction_support_quote_events": support_quote_events,
             "sample_candidate_items": [
                 {
                     "id": item["id"],
@@ -2077,6 +2218,12 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
                     "item": item["item"],
                     "first_mention_turn": item["first_mention_turn"],
                     "evidence_ids": item["evidence_ids"],
+                    "chronology_evidence_ids": item.get(
+                        "chronology_evidence_ids", item["evidence_ids"]
+                    ),
+                    "support_block_id": item.get("support_block_id", ""),
+                    "support_quote": item.get("support_quote", ""),
+                    "evidence_fallback": item.get("evidence_fallback", False),
                     "thread_expansion_entity": item.get("thread_expansion_entity"),
                 }
                 for item in sample_items
@@ -2093,7 +2240,7 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
             "evidence_block_turns": {
                 block_id: sorted({
                     int(turn)
-                    for turn in _TURN_RE.findall(text)
+                    for turn in beam_header_turns(text)
                 })
                 for block_id, text in block_texts.items()
             },
@@ -2109,6 +2256,9 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
                     "date_confidence": item["date_confidence"],
                     "best_retrieval_rank": item["best_retrieval_rank"],
                     "evidence_ids": item["evidence_ids"],
+                    "chronology_evidence_ids": item.get(
+                        "chronology_evidence_ids", item["evidence_ids"]
+                    ),
                     "source_item_ids": item.get("source_item_ids", []),
                 }
                 for item in ordered
@@ -2123,6 +2273,12 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
                     "first_mention_block_id": item["first_mention_block_id"],
                     "best_retrieval_rank": item["best_retrieval_rank"],
                     "evidence_ids": item["evidence_ids"],
+                    "chronology_evidence_ids": item.get(
+                        "chronology_evidence_ids", item["evidence_ids"]
+                    ),
+                    "support_block_id": item.get("support_block_id", ""),
+                    "support_quote": item.get("support_quote", ""),
+                    "evidence_fallback": item.get("evidence_fallback", False),
                     "source_candidate_ids": item.get("source_candidate_ids", []),
                     "sample_support": item.get("sample_support"),
                     "thread_entities": item.get("thread_entities", []),

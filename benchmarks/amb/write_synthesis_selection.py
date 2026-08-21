@@ -33,14 +33,107 @@ _THREAD_DEDUP_STOPWORDS = {
     "of", "on", "the", "to", "user", "with",
 }
 _BEAM_TURN_HEADER_RE = re.compile(
-    r"\[(?:[A-Z][a-z]+-\d+-\d+ \| )?Turn (\d+)\]",
-    re.IGNORECASE,
+    r"^\[(?:[A-Z][a-z]+-\d+-\d+ \| )?Turn (\d+)\]"
+    r"(?: \(cont\.\))?\s+(?:User|Assistant):",
+    re.IGNORECASE | re.MULTILINE,
 )
+
+
+def beam_header_turns(text: str) -> list[int]:
+    """Return turns from exact BEAM headers, excluding body references."""
+    return [int(match) for match in _BEAM_TURN_HEADER_RE.findall(text)]
+
+
+def synthesized_item_evidence_sets(item: dict) -> tuple[list[str], list[str]]:
+    """Normalize semantic-support and chronology evidence without conflating them."""
+    evidence = item.get("evidence_ids") or item.get("evidence") or []
+    if isinstance(evidence, str):
+        evidence = [evidence]
+    if not isinstance(evidence, list):
+        evidence = []
+    evidence_ids = list(dict.fromkeys(
+        str(evidence_id).strip()
+        for evidence_id in evidence
+        if str(evidence_id).strip()
+    ))
+
+    chronology = item.get("chronology_evidence_ids")
+    if isinstance(chronology, str):
+        chronology = [chronology]
+    if not isinstance(chronology, list):
+        chronology = []
+    chronology_ids = list(dict.fromkeys(
+        str(evidence_id).strip()
+        for evidence_id in chronology
+        if str(evidence_id).strip()
+    )) or evidence_ids
+    return evidence_ids, chronology_ids
+
+
+def merge_synthesized_evidence_sets(
+    items: list[dict],
+) -> tuple[list[str], list[str]]:
+    """Union both evidence channels across selected source items."""
+    evidence_ids: list[str] = []
+    chronology_ids: list[str] = []
+    for item in items:
+        item_evidence, item_chronology = synthesized_item_evidence_sets(item)
+        evidence_ids.extend(item_evidence)
+        chronology_ids.extend(item_chronology)
+    return list(dict.fromkeys(evidence_ids)), list(dict.fromkeys(chronology_ids))
+
+
+def ground_ordered_items_to_candidates(
+    items: list[dict],
+    source_items: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """Replace model-emitted provenance with evidence from linked candidates."""
+    by_id = {
+        str(item.get("id") or "").strip(): item
+        for item in source_items
+        if str(item.get("id") or "").strip()
+    }
+    grounded = []
+    events = []
+    for item in items:
+        item_id = str(item.get("id") or "").strip()
+        source_ids = item.get("source_item_ids") or []
+        if isinstance(source_ids, str):
+            source_ids = [source_ids]
+        if not isinstance(source_ids, list):
+            source_ids = []
+        source_ids = list(dict.fromkeys(
+            str(source_id).strip()
+            for source_id in source_ids
+            if str(source_id).strip()
+        ))
+        invalid_ids = [source_id for source_id in source_ids if source_id not in by_id]
+        if invalid_ids:
+            events.append({
+                "status": "dropped_invalid_source_candidates",
+                "item_id": item_id,
+                "source_item_ids": invalid_ids,
+            })
+        source_ids = [source_id for source_id in source_ids if source_id in by_id]
+        if not source_ids:
+            events.append({
+                "status": "rejected_missing_source_candidate",
+                "item_id": item_id,
+            })
+            continue
+        evidence_ids, chronology_ids = merge_synthesized_evidence_sets([
+            by_id[source_id] for source_id in source_ids
+        ])
+        item["source_item_ids"] = source_ids
+        item["evidence_ids"] = evidence_ids
+        item["chronology_evidence_ids"] = chronology_ids
+        grounded.append(item)
+    return grounded, events
 
 
 def first_beam_turn(text: str) -> int | None:
     """Return the earliest turn from an exact BEAM header, not body prose."""
-    turns = [int(match) for match in _BEAM_TURN_HEADER_RE.findall(text)]
+    turns = beam_header_turns(text)
     return min(turns) if turns else None
 
 
@@ -109,8 +202,15 @@ def ground_synthesized_item_provenance(
                 "invalid_evidence_ids": invalid_evidence_ids,
             })
 
+        chronology_ids = list(dict.fromkeys(
+            str(evidence_id).strip()
+            for evidence_id in item.get(
+                "chronology_evidence_ids", evidence_ids
+            )
+            if str(evidence_id).strip() in block_temporal_keys
+        )) or evidence_ids
         first_block = min(
-            evidence_ids,
+            chronology_ids,
             key=lambda evidence_id: block_temporal_keys[evidence_id],
         )
         temporal_key = block_temporal_keys[first_block]
@@ -129,6 +229,8 @@ def ground_synthesized_item_provenance(
             "first_mention_date": grounded_date,
         }
         item["evidence_ids"] = evidence_ids
+        if "chronology_evidence_ids" in item:
+            item["chronology_evidence_ids"] = chronology_ids
         item.update(after)
         if before != after:
             events.append({
@@ -139,6 +241,108 @@ def ground_synthesized_item_provenance(
             })
         grounded_items.append(item)
     return grounded_items, events
+
+
+def validate_synthesized_item_support_quotes(
+    items: list[dict],
+    block_texts: dict[str, str],
+) -> tuple[list[dict], list[dict]]:
+    """Require a substantive verbatim quote from a cited evidence block.
+
+    Literal membership proves citation integrity, not semantic entailment. It
+    detects invalid quote-to-block assignments but cannot prove that the quote
+    supports the generated item text.
+    """
+    validated = []
+    events = []
+    normalized_blocks = {
+        block_id: " ".join(text.split()).casefold()
+        for block_id, text in block_texts.items()
+    }
+    for item in items:
+        item_id = item.get("id", "")
+        quote = str(item.get("support_quote") or "").strip()
+        normalized_quote = " ".join(quote.split()).casefold()
+        quote_body = _BEAM_TURN_HEADER_RE.sub("", quote)
+        quote_body = re.sub(
+            r"^\s*(?:User|Assistant)\s*:\s*", "", quote_body,
+            flags=re.IGNORECASE,
+        )
+        quote_words = re.findall(r"[a-z0-9]+", quote_body.casefold())
+        if (
+            len(normalized_quote) < 24
+            or len(quote_words) < 8
+            or len(quote_words) > 25
+        ):
+            events.append({
+                "status": "rejected_missing_substantive_quote",
+                "item_id": item_id,
+            })
+            continue
+
+        cited_evidence_ids = list(dict.fromkeys(
+            str(evidence_id).strip()
+            for evidence_id in item.get("evidence_ids", [])
+            if str(evidence_id).strip()
+        ))
+        invalid_evidence_ids = [
+            evidence_id
+            for evidence_id in cited_evidence_ids
+            if evidence_id not in normalized_blocks
+        ]
+        if invalid_evidence_ids:
+            events.append({
+                "status": "dropped_invalid_evidence",
+                "item_id": item_id,
+                "evidence_ids": invalid_evidence_ids,
+            })
+        evidence_ids = [
+            evidence_id
+            for evidence_id in cited_evidence_ids
+            if evidence_id in normalized_blocks
+        ]
+        supporting_ids = [
+            evidence_id
+            for evidence_id in evidence_ids
+            if normalized_quote in normalized_blocks[evidence_id]
+        ]
+        if not supporting_ids:
+            events.append({
+                "status": "rejected_quote_not_in_evidence",
+                "item_id": item_id,
+                "support_block_id": item.get("support_block_id", ""),
+            })
+            continue
+
+        unsupported_ids = [
+            evidence_id
+            for evidence_id in evidence_ids
+            if evidence_id not in supporting_ids
+        ]
+        if unsupported_ids:
+            events.append({
+                "status": "unverified_chronology_evidence",
+                "item_id": item_id,
+                "evidence_ids": unsupported_ids,
+            })
+
+        claimed_block = str(item.get("support_block_id") or "").strip()
+        support_block = (
+            claimed_block if claimed_block in supporting_ids else supporting_ids[0]
+        )
+        if claimed_block != support_block:
+            events.append({
+                "status": "corrected_support_block",
+                "item_id": item_id,
+                "before": claimed_block,
+                "after": support_block,
+            })
+        item["support_quote"] = quote
+        item["support_block_id"] = support_block
+        item["chronology_evidence_ids"] = evidence_ids
+        item["evidence_ids"] = supporting_ids
+        validated.append(item)
+    return validated, events
 
 
 def is_relationship_support_query(query: str) -> bool:
