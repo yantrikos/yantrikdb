@@ -52,6 +52,88 @@ def _require_top_level_key(payload: dict, key: str) -> dict:
     return payload
 
 
+def _recover_truncated_handles(raw_response: dict) -> list[dict]:
+    """Recover complete array elements only from a length-truncated response."""
+    if raw_response.get("done_reason") != "length":
+        return []
+    content = str((raw_response.get("message") or {}).get("content") or "")
+    marker = re.search(r'"handles"\s*:\s*\[', content)
+    if marker is None:
+        return []
+    decoder = json.JSONDecoder()
+    position = marker.end()
+    handles = []
+    required = {
+        "label",
+        "anchor_entities",
+        "summary",
+        "evidence_ids",
+        "selection_rationale",
+    }
+    while position < len(content):
+        while position < len(content) and content[position] in " \t\r\n,":
+            position += 1
+        if position >= len(content) or content[position] != "{":
+            break
+        try:
+            value, end = decoder.raw_decode(content, position)
+        except json.JSONDecodeError:
+            break
+        if not isinstance(value, dict) or not required.issubset(value):
+            break
+        handles.append(value)
+        position = end
+    return handles
+
+
+def _cap_recovered_handles(
+    handles: list[dict], valid_ids: set[str], limit: int
+) -> tuple[list[dict], dict]:
+    """Bound repetitive recovery by greedily preserving new evidence coverage."""
+    if len(handles) <= limit:
+        return handles, {
+            "pre_cap_handle_count": len(handles),
+            "post_cap_handle_count": len(handles),
+            "covered_evidence_count": len({
+                evidence_id
+                for handle in handles
+                for evidence_id in handle.get("evidence_ids") or []
+                if evidence_id in valid_ids
+            }),
+        }
+    remaining = list(enumerate(handles))
+    selected = []
+    covered = set()
+    while remaining and len(selected) < limit:
+        best_offset, (source_index, best) = max(
+            enumerate(remaining),
+            key=lambda candidate: (
+                len(
+                    set(candidate[1][1].get("evidence_ids") or [])
+                    .intersection(valid_ids)
+                    .difference(covered)
+                ),
+                -candidate[1][0],
+            ),
+        )
+        new_ids = (
+            set(best.get("evidence_ids") or [])
+            .intersection(valid_ids)
+            .difference(covered)
+        )
+        if not new_ids:
+            break
+        selected.append((source_index, best))
+        covered.update(new_ids)
+        remaining.pop(best_offset)
+    selected.sort(key=lambda item: item[0])
+    return [handle for _, handle in selected], {
+        "pre_cap_handle_count": len(handles),
+        "post_cap_handle_count": len(selected),
+        "covered_evidence_count": len(covered),
+    }
+
+
 def _load_atomics(db_path: Path) -> list[dict]:
     with sqlite3.connect(db_path) as db:
         rows = db.execute(
@@ -338,6 +420,11 @@ def main() -> int:
         type=Path,
         help="reuse discovered handles and run only validation/assignment repair",
     )
+    parser.add_argument(
+        "--resume-response",
+        type=Path,
+        help="reuse a saved raw transport response and rerun local validation",
+    )
     parser.add_argument("--min-handles", type=int, default=8)
     parser.add_argument("--max-handles", type=int, default=24)
     parser.add_argument("--num-predict", type=int, default=6000)
@@ -372,6 +459,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.min_handles < 1 or args.max_handles < args.min_handles:
         parser.error("handle bounds must satisfy 1 <= min-handles <= max-handles")
+    if args.resume_artifact and args.resume_response:
+        parser.error("--resume-artifact and --resume-response are mutually exclusive")
 
     atomics = _load_atomics(args.db)
     model_rows = [
@@ -452,6 +541,7 @@ def main() -> int:
         "required": ["handles"],
     }
     raw_response = None
+    response_recovery = None
     prior_singleton_fallback_ids = []
     prior_rejected_invalid_ids = []
     if args.resume_artifact:
@@ -467,6 +557,22 @@ def main() -> int:
             or prior.get("invalid_evidence_ids")
             or []
         )
+    elif args.resume_response:
+        raw_response = json.loads(args.resume_response.read_text(encoding="utf-8"))
+        try:
+            result = _require_top_level_key(
+                _extract_json(raw_response["message"]["content"]), "handles"
+            )
+        except (KeyError, ValueError, json.JSONDecodeError):
+            recovered = _recover_truncated_handles(raw_response)
+            if not recovered:
+                raise
+            result = {"handles": recovered}
+            response_recovery = {
+                "mode": "length_truncated_complete_handles_v1",
+                "recovered_handle_count": len(recovered),
+                "source": str(args.resume_response),
+            }
     else:
         try:
             result, raw_response = _chat_json(
@@ -479,14 +585,30 @@ def main() -> int:
             )
             _require_top_level_key(result, "handles")
         except (ValueError, json.JSONDecodeError):
+            recovered = (
+                _recover_truncated_handles(raw_response)
+                if raw_response is not None
+                else []
+            )
             raw_path = args.output.with_suffix(args.output.suffix + ".raw.json")
             raw_path.parent.mkdir(parents=True, exist_ok=True)
             raw_path.write_text(
                 json.dumps(raw_response, indent=2, ensure_ascii=True),
                 encoding="utf-8",
             )
-            print(f"unparseable organizer response={raw_path}")
-            raise
+            if not recovered:
+                print(f"unparseable organizer response={raw_path}")
+                raise
+            result = {"handles": recovered}
+            response_recovery = {
+                "mode": "length_truncated_complete_handles_v1",
+                "recovered_handle_count": len(recovered),
+                "source": str(raw_path),
+            }
+            print(
+                f"recovered complete handles={len(recovered)} "
+                f"raw_response={raw_path}"
+            )
 
     known = {item["id"]: item for item in atomics}
     artifact_rows = [
@@ -495,6 +617,27 @@ def main() -> int:
     handles, misplaced_anchor_ids = _normalize_handles(
         result.get("handles", []), known
     )
+    if (
+        raw_response is not None
+        and response_recovery is None
+        and len(handles) > args.max_handles
+    ):
+        raw_path = args.output.with_suffix(args.output.suffix + ".raw.json")
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        raw_path.write_text(
+            json.dumps(raw_response, indent=2, ensure_ascii=True),
+            encoding="utf-8",
+        )
+        response_recovery = {
+            "mode": "over_limit_complete_handles_v1",
+            "recovered_handle_count": len(handles),
+            "source": str(raw_path),
+        }
+    if response_recovery is not None:
+        handles, recovery_cap = _cap_recovered_handles(
+            handles, set(known), args.max_handles
+        )
+        response_recovery.update(recovery_cap)
     invalid_ids = sorted(
         {
             evidence_id
@@ -545,6 +688,7 @@ def main() -> int:
             "overflow_attempts": overflow_attempts,
             "singleton_fallback_count": len(singleton_fallback_ids),
             "singleton_fallback_evidence_ids": singleton_fallback_ids,
+            "response_recovery": response_recovery,
             "input_items": artifact_rows,
             "handles": handles,
         }

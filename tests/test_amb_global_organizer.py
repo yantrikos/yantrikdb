@@ -1,14 +1,73 @@
+import json
+
 import pytest
 
 from benchmarks.amb.global_organizer_probe import (
     _apply_assignments,
+    _cap_recovered_handles,
     _capacity_constrained_assignments,
     _complete_singleton_handles,
     _discovered_handle_count,
     _drop_invalid_evidence_ids,
     _normalize_handles,
+    _recover_truncated_handles,
     _require_top_level_key,
 )
+
+
+def test_recover_truncated_handles_keeps_only_complete_array_elements():
+    complete = {
+        "label": "Writing",
+        "anchor_entities": ["Essay"],
+        "summary": "The writing trajectory.",
+        "evidence_ids": ["A0001", "A0002", "A0003"],
+        "selection_rationale": "One coherent project.",
+    }
+    raw = {
+        "done_reason": "length",
+        "message": {
+            "content": (
+                '{"handles":['
+                + json.dumps(complete)
+                + ","
+                + json.dumps({**complete, "label": "Revision"})
+                + ',{"label":"truncated'
+            )
+        },
+    }
+
+    recovered = _recover_truncated_handles(raw)
+
+    assert [handle["label"] for handle in recovered] == ["Writing", "Revision"]
+
+
+def test_recover_truncated_handles_rejects_non_length_responses():
+    raw = {
+        "done_reason": "stop",
+        "message": {"content": '{"handles":[{"label":"partial"}'},
+    }
+
+    assert _recover_truncated_handles(raw) == []
+
+
+def test_cap_recovered_handles_maximizes_distinct_evidence_then_keeps_order():
+    handles = [
+        {"label": "narrow", "evidence_ids": ["A1"]},
+        {"label": "broad", "evidence_ids": ["A1", "A2"]},
+        {"label": "rare", "evidence_ids": ["A3"]},
+        {"label": "repeat", "evidence_ids": ["A1"]},
+    ]
+
+    selected, trace = _cap_recovered_handles(
+        handles, {"A1", "A2", "A3"}, limit=2
+    )
+
+    assert [handle["label"] for handle in selected] == ["broad", "rare"]
+    assert trace == {
+        "pre_cap_handle_count": 4,
+        "post_cap_handle_count": 2,
+        "covered_evidence_count": 3,
+    }
 
 
 def test_normalize_handles_removes_evidence_ids_from_anchor_entities():

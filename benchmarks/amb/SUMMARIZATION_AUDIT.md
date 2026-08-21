@@ -87,6 +87,16 @@ as deterministic verbatim singleton cards; invented IDs were rejected and
 audited. The card presentation added locally derived first/last recorded dates
 and turn spans. These are storage chronology, not model-inferred event dates.
 
+Organizer generation was extended to all 20 units with a fail-closed recovery
+protocol for long responses. Recovery is allowed only when the transport marks
+the response as length-truncated, and only fully decoded handle objects with the
+complete schema are retained; a partial tail is discarded. Complete responses
+that exceed the requested handle bound use the same deterministic cap, greedily
+maximizing distinct valid evidence coverage and then restoring model order.
+Raw responses and pre/post-cap telemetry remain in the audit artifacts. All 20
+selected artifacts pass their input hashes, contain no surviving invented IDs,
+assign every atomic item, and have no unassigned evidence.
+
 On four preflight queries, dated cards alone used 27.6% of the raw token budget
 and scored `0.6792` versus `0.4458` raw (`+0.2333`; three wins, one tie).
 Cards alone did not pass the broader lexical gate, however: low-ten retrieval
@@ -148,3 +158,35 @@ repeated baseline) while limiting context growth to 27.3%. The opt-in provider
 therefore defaults to 30 raw records plus every card. This replay is a narrow
 transfer check, not additional full-cohort evidence; the 16-query frozen result
 remains the decision basis until organizer artifacts cover all 20 units.
+
+## Full-Category Validation And Temporal Gate
+
+Organizer artifacts were completed for all 20 units and passed a strict local
+audit: their input hashes match, every atomic item is assigned, no invalid
+evidence reference survives, and no evidence is unassigned. The frozen
+full-category arm kept all 40 raw blocks first and appended every dated card.
+Across all 40 summarization questions it scored `0.5966` versus `0.5634` raw,
+for mean paired delta `+0.0332`, 13 wins, 19 ties, and 8 losses. The bootstrap
+95% CI `[-0.0205, +0.0851]` crosses zero, while context grew 22.6%. Complete
+cards therefore remain opt-in and must not become the generic default.
+
+The earlier 16-query cohort replicated inside this run at `+0.1281` (nine
+wins, five ties, two losses), but the 24 newly covered rows regressed by
+`-0.0301`. A query-only split exposed a narrower mechanism: the four requests
+that ask for a summary over explicit named calendar points scored `0.4750`
+raw versus `0.7542` with raw-first cards, delta `+0.2792`, with four wins and
+no losses. The classifier requires `summary` or `summarize` plus either a
+named month and year, at least two named months, or explicit ISO calendar
+points. It does not inspect query IDs, gold answers, scores, or retrieved text.
+
+This four-query lane was positive without a loss in two additional repeated-
+judge runs: `+0.2313` (three wins, one tie) in the prior frozen evaluation and
+`+0.1313` (two wins, two ties) in a fresh confirmation. Across the three runs
+the same mechanism produced nine wins, three ties, and zero losses. Applying
+the gate leaves 36/40 contexts byte-identical to raw and adds only 3.0% context
+tokens across the category, compared with 22.6% for generic complete cards.
+The new `yantrikdb-temporal-summary-organizer` provider is an opt-in candidate:
+raw-only on a gate miss, raw followed by every persisted dated card on a match,
+and a trace containing the classifier evidence. This is a defensible narrow
+win, but the four-query intent cohort is small and should be expanded on an
+independent dataset before making it a default runtime policy.

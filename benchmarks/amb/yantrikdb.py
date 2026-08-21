@@ -44,6 +44,7 @@ from ..models import Document
 from ..utils import chunk_text, count_tokens
 from .base import MemoryProvider
 from .chronological_presentation import chronological_hit_key
+from .temporal_summary_intent import bounded_calendar_summary_intent
 from .topic_card_presentation import load_persisted_topic_cards
 from .write_synthesis_selection import (
     beam_header_turns,
@@ -3887,6 +3888,61 @@ class YantrikDBRawFirstOrganizerMemoryProvider(
                 for hit in raw_hits
             ],
             "topic_card_scan": card_trace,
+        }
+
+
+class YantrikDBTemporalSummaryOrganizerMemoryProvider(
+    YantrikDBRawFirstOrganizerMemoryProvider
+):
+    """Append complete topic cards only for bounded calendar summaries."""
+
+    name = "yantrikdb-temporal-summary-organizer"
+    description = (
+        "YantrikDB raw source recall with complete dated organizer summaries "
+        "only for query-detected bounded calendar summary requests. Generic "
+        "queries and missing organizers degrade to raw recall."
+    )
+    variant = "temporal-summary-organizer"
+
+    def retrieve(
+        self,
+        query: str,
+        k: int = _RAW_FIRST_ORGANIZER_TOP_K,
+        user_id: str | None = None,
+        query_timestamp: str | None = None,
+    ) -> tuple[list[Document], dict | None]:
+        matched, gate = bounded_calendar_summary_intent(query)
+        if matched:
+            documents, trace = super().retrieve(
+                query, k, user_id, query_timestamp
+            )
+            trace = dict(trace or {})
+            trace["selection_mode"] = (
+                "raw_source_then_complete_topic_summaries_temporal_gate"
+            )
+            trace["temporal_summary_gate"] = gate
+            return documents, trace
+
+        raw_hits = self._recall_source(query, k, user_id)
+        raw_docs = self._to_documents(raw_hits, user_id)
+        return raw_docs, {
+            "read_time_generation": False,
+            "selection_mode": "raw_source_temporal_summary_gate_miss",
+            "ordering": "raw_only",
+            "requested_k": k,
+            "provider_default_k": _RAW_FIRST_ORGANIZER_TOP_K,
+            "raw_documents": len(raw_docs),
+            "topic_card_documents": 0,
+            "returned": len(raw_docs),
+            "raw_results": [
+                {
+                    "rid": hit.get("rid"),
+                    "score": hit.get("score"),
+                    "created_at": hit.get("created_at"),
+                }
+                for hit in raw_hits
+            ],
+            "temporal_summary_gate": gate,
         }
 
 
