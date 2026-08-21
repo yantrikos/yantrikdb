@@ -139,6 +139,8 @@ synthesis and the original rank remained available as telemetry.
 | Broad query, evidence-preserving 40-candidate bank + entity labels | 4/6 | 4/6 | 1/6 |
 | Explicit family-support query, same evidence bank | 5/5 | 5/5 | 1/5 |
 | Family query with hard facet gate + visible source quotes | 5/5 | 5/5 | 1/5 |
+| Broad query, same candidate bank, blinded Codex selector | 4/6 | 4/6 | 4/6 |
+| Family query, same candidate bank, blinded Codex selector | 5/5 | 5/5 | 3/5 |
 
 The evidence bank removes extraction omission for every source turn that reaches
 the input, yet Qwen still chooses an early generic prefix. The explicit family
@@ -146,6 +148,15 @@ control rules out Q9's under-specified professional-advice partition as the only
 cause: selection itself is a binding failure for this local model. More temporal
 coverage, entity closure, or candidate expansion is therefore inert until the
 selector changes.
+
+A fresh `gpt-5.6-sol` selection-only control was restricted to the query and
+`telemetry.candidate_items`; its prompt explicitly excluded gold metadata,
+prior selections, results, and the source database. It recovered every broad
+Q9 gold turn available in the bank (4/4 available, 4/6 total) and three of five
+family-support turns. This materially lifts both Qwen controls without changing
+retrieval or extraction, confirming selector capacity as a causal bottleneck.
+The remaining family miss shows that a stronger selector alone is not a complete
+solution.
 
 The last two columns are source-membership diagnostics derived from exact BEAM
 headers in cited blocks. They do not claim that generated candidate or rollup
@@ -160,13 +171,48 @@ grounded.
 
 ## Decision Gate
 
-The next discriminating gate is selection-only: reuse the frozen grounded
-candidate artifacts with a stronger selector, without rerunning retrieval or
-extraction. Compare the broad Q9 query and its explicit family-support control.
-Only a selector that materially improves both should be combined with the
-contextual reranker in a paid two-query replay. A new DeepSeek payload requires
-separate authorization because its reranked evidence differs from the completed
-current-provider replay.
+The selection-only gate passed, but the paid DeepSeek controls split the result
+by query specificity:
+
+| DeepSeek arm | Broad Q9 source turns | Explicit family source turns | Official score |
+| --- | ---: | ---: | ---: |
+| Chronological 40-item evidence bank | 0/4 available | 1/5 | diagnostic only |
+| Relevance-first 40-item evidence bank | 1/4 available | 4/5 | diagnostic only |
+| Flat concern context | not measured | not measured | broad `0.2` |
+| One coarse mentorship handle | 1/5 rubric events | n/a | broad `0.2` |
+| Two-stage person handles | 0/5 rubric events | 4/5 rubric events | broad `0.0`, family `0.8` |
+| Two-stage role collections | 0/5 rubric events | 4/5 rubric events | broad `0.0`, family `0.8` |
+
+The first two rows remain source-membership diagnostics, not official rubric
+scores. Broad top-40 retrieval contains only four of the six historical source
+turns, while the official answer has five rubric events; the two counts are not
+interchangeable.
+
+Relevance-first presentation is a real, general improvement for an explicit
+facet: it raises family membership from 1/5 to 4/5 without changing the bank.
+Grouped handle hydration then turns that evidence into an official `0.8` answer.
+Here `0.8` is mean rubric-nugget coverage, not exact correctness: BEAM's judge
+does not independently score ordering or the exact-N constraint.
+The missing family item is also ambiguous: the selector chooses an earlier,
+literal statement that partner Tanya supports the user's career instead of the
+gold's later pitch-rehearsal event. Both satisfy the wording, but only one is in
+the hidden rubric.
+
+The broad Q9 query has a stronger ambiguity ceiling. Query-blind organization
+successfully discovers separate drafting, academic-advisor, industry-mentor,
+professional-peer, friend-feedback, and family-support arcs. DeepSeek retrieves
+the relevant mentor/peer collections, then reasonably selects direct refinement
+events such as outlining, reducing word count, adapting versions, and condensing
+paragraphs. Those are literal answers to "aspects of refining my personal
+statement," but the hidden rubric instead requires Bryan, Shawn, and Matthew.
+Neither the query nor the stored evidence identifies that latent partition.
+
+Therefore Q9 is no longer a sound target for more retrieval expansion or prompt
+tuning. The evidence-backed product changes to retain are relevance-first
+candidate presentation, role-sensitive query-blind organization, grouped child
+hydration, and explicit correction filtering. Cohort work should move to source
+losses where the requested facet is identifiable; otherwise optimization would
+teach the engine benchmark-specific preferences that make real answers worse.
 
 The reproducible funnel command writes the untracked detailed artifact
 `benchmarks/amb/artifacts/membership-funnel-v2-source-ids.json`:

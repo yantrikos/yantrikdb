@@ -131,6 +131,32 @@ def ground_ordered_items_to_candidates(
     return grounded, events
 
 
+def order_synthesis_candidates_for_selection(
+    items: list[dict],
+    mode: str,
+) -> list[dict]:
+    """Choose prompt presentation order without changing final chronology."""
+    if mode != "relevance":
+        return list(items)
+
+    def relevance_key(item: dict) -> tuple:
+        try:
+            rank = int(item.get("best_retrieval_rank", 999999))
+        except (TypeError, ValueError):
+            rank = 999999
+        turn = item.get("first_mention_turn")
+        position = item.get("first_mention_position")
+        return (
+            rank,
+            str(item.get("first_mention_date") or "9999-99-99"),
+            turn if isinstance(turn, int) else 999999,
+            position if isinstance(position, int) else 999999,
+            str(item.get("id") or ""),
+        )
+
+    return sorted(items, key=relevance_key)
+
+
 def first_beam_turn(text: str) -> int | None:
     """Return the earliest turn from an exact BEAM header, not body prose."""
     turns = beam_header_turns(text)

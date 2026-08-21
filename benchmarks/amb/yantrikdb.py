@@ -55,6 +55,7 @@ from .write_synthesis_selection import (
     is_relationship_support_query,
     merge_organizer_rollup_shards,
     merge_synthesized_evidence_sets,
+    order_synthesis_candidates_for_selection,
     select_entity_timeline_children,
     select_relationship_support_children,
     synthesized_item_evidence_sets,
@@ -153,6 +154,13 @@ _SYNTH_EVIDENCE_CANDIDATES = (
 _SYNTH_SUPPORT_QUOTES = (
     os.environ.get("YDB_BENCH_SYNTH_SUPPORT_QUOTES", "0") == "1"
 )
+_SYNTH_SELECTION_ORDER = os.environ.get(
+    "YDB_BENCH_SYNTH_SELECTION_ORDER", "chronological"
+).strip().lower()
+if _SYNTH_SELECTION_ORDER not in {"chronological", "relevance"}:
+    raise ValueError(
+        "YDB_BENCH_SYNTH_SELECTION_ORDER must be chronological or relevance"
+    )
 _SYNTH_JUDGE_MODEL = os.environ.get(
     "YDB_BENCH_SYNTH_JUDGE_MODEL", _SYNTH_MODEL
 )
@@ -1952,6 +1960,10 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
             else ""
         )
         chronological_items = sorted(items, key=self._item_sort_key)
+        presentation_items = order_synthesis_candidates_for_selection(
+            chronological_items,
+            _SYNTH_SELECTION_ORDER,
+        )
         item_lines = "\n".join(
             f"{it['id']} | {it['first_mention_date']} | "
             f"best_retrieval_rank={it['best_retrieval_rank']} | "
@@ -1961,7 +1973,7 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
             f"evidence={','.join(it['evidence_ids']) or 'none'} | {it['item']}"
             f" | chronology_evidence={','.join(it.get('chronology_evidence_ids', it['evidence_ids'])) or 'none'}"
             f" | thread_entities={','.join(it.get('thread_entities', [])) or 'none'}"
-            for it in chronological_items
+            for it in presentation_items
         )
         adaptive_rollup_used = bool(
             _SYNTH_ADAPTIVE_ROLLUP and target_count is not None
@@ -2208,6 +2220,10 @@ class YantrikDBGlobalSynthesisMemoryProvider(YantrikDBTemporalMemoryProvider):
             "entity_closure_all": _SYNTH_ENTITY_CLOSURE_ALL,
             "evidence_candidates_used": _SYNTH_EVIDENCE_CANDIDATES,
             "support_quotes_used": _SYNTH_SUPPORT_QUOTES,
+            "selection_presentation_order": _SYNTH_SELECTION_ORDER,
+            "selection_presentation_ids": [
+                item["id"] for item in presentation_items
+            ],
             "entity_thread_index": entity_thread_rows,
             "provenance_events": provenance_events,
             "extraction_support_quote_events": support_quote_events,

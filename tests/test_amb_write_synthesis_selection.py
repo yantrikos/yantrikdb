@@ -9,6 +9,7 @@ from benchmarks.amb.write_synthesis_selection import (
     is_relationship_support_query,
     merge_organizer_rollup_shards,
     merge_synthesized_evidence_sets,
+    order_synthesis_candidates_for_selection,
     select_entity_timeline_children,
     select_relationship_support_children,
     synthesized_item_evidence_sets,
@@ -194,6 +195,20 @@ def test_ordered_items_without_valid_candidate_link_are_rejected():
         "dropped_invalid_source_candidates",
         "rejected_missing_source_candidate",
     ]
+
+
+def test_selection_candidates_can_be_presented_by_relevance_without_losing_ties():
+    items = [
+        {"id": "I001", "best_retrieval_rank": 20, "first_mention_turn": 2},
+        {"id": "I002", "best_retrieval_rank": 3, "first_mention_turn": 8},
+        {"id": "I003", "best_retrieval_rank": 3, "first_mention_turn": 4},
+        {"id": "I004", "best_retrieval_rank": "bad", "first_mention_turn": 1},
+    ]
+
+    assert order_synthesis_candidates_for_selection(items, "chronological") == items
+    assert [item["id"] for item in order_synthesis_candidates_for_selection(
+        items, "relevance"
+    )] == ["I003", "I002", "I001", "I004"]
 
 
 def test_synthesis_provenance_is_grounded_in_earliest_cited_block():
