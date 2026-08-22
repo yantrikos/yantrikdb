@@ -1,4 +1,4 @@
-from benchmarks.amb.audit_category_loss_funnel import analyze
+from benchmarks.amb.audit_category_loss_funnel import analyze, ceiling_estimate
 
 
 def _row(query_id, category, query, answer, gold, context, rubric=None):
@@ -110,3 +110,58 @@ def test_analyze_separates_retrieval_answer_label_and_provenance_losses():
         "unit": "zero_score_rows",
     }
     assert summaries["abstention"]["equal_weight_overall_points_lost"] == 10.0
+
+
+def test_ceiling_estimate_conserves_full_line_loss():
+    means = {
+        "abstention": 0.675,
+        "contradiction_resolution": 0.828125,
+        "event_ordering": 0.2907143,
+        "information_extraction": 0.7734375,
+        "instruction_following": 0.7875,
+        "knowledge_update": 0.63125,
+        "multi_session_reasoning": 0.6108333,
+        "preference_following": 0.9125,
+        "summarization": 0.5929911,
+        "temporal_reasoning": 0.4125,
+    }
+    payload = {
+        "results": [
+            {"score": score, "meta": {"question_category": category}}
+            for category, score in means.items()
+        ]
+    }
+    summaries = {
+        "summarization": {
+            "attribution": {
+                "ours": {"count": 22, "denominator": 195},
+                "reader": {"count": 131, "denominator": 195},
+            }
+        },
+        "knowledge_update": {
+            "attribution": {"label": {"count": 11, "denominator": 14}}
+        },
+        "multi_session_reasoning": {
+            "attribution": {
+                "reader": {"count": 30, "denominator": 40},
+                "synthesis_required": {"count": 2, "denominator": 40},
+            }
+        },
+        "abstention": {
+            "attribution": {
+                "ours": {"count": 7, "denominator": 13},
+                "reader": {"count": 6, "denominator": 13},
+            }
+        },
+    }
+
+    estimate = ceiling_estimate(payload, summaries)
+
+    assert estimate["complete_equal_weight_ten_category_line"] is True
+    assert estimate["baseline_score_percent"] == 65.148512
+    assert estimate["points_required_to_reach_90"] == 24.851488
+    assert estimate["optimistic_ceiling_percent"] == 96.908095
+    assert estimate["bucket_conservation_delta"] == 0.0
+    assert abs(
+        sum(estimate["buckets"].values()) - estimate["total_points_lost"]
+    ) <= 2e-6

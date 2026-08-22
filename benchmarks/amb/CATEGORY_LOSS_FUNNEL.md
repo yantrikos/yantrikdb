@@ -47,6 +47,37 @@ meet the stricter assistant-only-dominance rule. The retrieved contexts already
 label these blocks as assistant suggestions, but the reader often promotes them
 to user facts.
 
+## Ceiling And Recovery Budget
+
+The audit now emits a loss-conserving `ceiling_estimate` over all ten frozen
+categories. The `ydb-0151` baseline is `65.1485`, so the line loses `34.8515`
+points and needs `24.8515` points, not 28.9, to reach 90.
+
+| Mutually exclusive bucket | Points |
+|---|---:|
+| Dead or benchmark integrity | 3.092 |
+| Reader, potentially reachable through context shaping | 7.153 |
+| Direct engine mechanisms | 15.177 |
+| Undiagnosed four-category tail | 6.984 |
+| Residual inside audited categories | 2.445 |
+| **Total frozen loss** | **34.851** |
+
+The conservation delta is exactly zero. The optimistic ceiling is `96.9081`:
+it removes only the 11/14 knowledge-update zero-row label share and the 2/40
+multi-session answers whose derived gold form is unstated. Reaching 90 requires
+recovering `78.25%` of the remaining `31.7596` potentially recoverable points.
+It therefore requires broad success, but not literally every non-dead point.
+
+The conversion rules are explicit in the JSON. Reader points are the audited
+reader-count share of category loss for summarization, multi-session reasoning,
+and abstention. Direct-engine points include all event-ordering and temporal
+loss, plus the audited retrieval share of summarization and provenance share of
+abstention. Treating all temporal loss as directly product-addressable is an
+optimistic recovery assumption, not a causal finding; the temporal audit found
+reader arithmetic, revision ambiguity, and invalid gold calculations as well.
+The residual bucket prevents those uncertain and overlapping cases from being
+silently assigned twice.
+
 ## Decision
 
 Do not spend the next product cycle increasing generic top-k for summarization,

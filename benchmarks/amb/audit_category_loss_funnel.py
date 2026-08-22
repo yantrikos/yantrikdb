@@ -52,6 +52,13 @@ RUBRIC_PREFIX = re.compile(r"^LLM response should contain:\s*", re.IGNORECASE)
 SOURCE_SUPPORT_THRESHOLD = 0.75
 RETENTION_THRESHOLD = 0.75
 BEAM_CATEGORY_WEIGHT = 0.1
+BEAM_CATEGORY_COUNT = 10
+TAIL_CATEGORIES = (
+    "contradiction_resolution",
+    "information_extraction",
+    "instruction_following",
+    "preference_following",
+)
 
 
 def reference_items(row: dict) -> list[str]:
@@ -245,6 +252,107 @@ def category_attribution(
     }
 
 
+def _attribution_share(summary: dict, owner: str) -> float:
+    attribution = (summary.get("attribution") or {}).get(owner) or {}
+    denominator = int(attribution.get("denominator") or 0)
+    return float(attribution.get("count") or 0) / denominator if denominator else 0.0
+
+
+def ceiling_estimate(result_payload: dict, summaries: dict[str, dict]) -> dict:
+    """Build a conservative, loss-conserving recovery budget for the full line."""
+    scores_by_category: dict[str, list[float]] = {}
+    for row in result_payload.get("results") or []:
+        category = str((row.get("meta") or {}).get("question_category") or "")
+        if category:
+            scores_by_category.setdefault(category, []).append(
+                float(row.get("score") or 0.0)
+            )
+    category_losses = {
+        category: 100 * BEAM_CATEGORY_WEIGHT * (1.0 - _mean(scores))
+        for category, scores in scores_by_category.items()
+    }
+
+    def loss(category: str) -> float:
+        return category_losses.get(category, 0.0)
+
+    summarization = summaries.get("summarization") or {}
+    knowledge_update = summaries.get("knowledge_update") or {}
+    multi_session = summaries.get("multi_session_reasoning") or {}
+    abstention = summaries.get("abstention") or {}
+
+    dead = (
+        loss("knowledge_update") * _attribution_share(knowledge_update, "label")
+        + loss("multi_session_reasoning")
+        * _attribution_share(multi_session, "synthesis_required")
+    )
+    reader_shaping = (
+        loss("summarization") * _attribution_share(summarization, "reader")
+        + loss("multi_session_reasoning")
+        * _attribution_share(multi_session, "reader")
+        + loss("abstention") * _attribution_share(abstention, "reader")
+    )
+    ours_direct = (
+        loss("event_ordering")
+        + loss("temporal_reasoning")
+        + loss("summarization") * _attribution_share(summarization, "ours")
+        + loss("abstention") * _attribution_share(abstention, "ours")
+    )
+    undiagnosed_tail = sum(loss(category) for category in TAIL_CATEGORIES)
+    total_loss = sum(category_losses.values())
+    audited_residual = total_loss - (
+        dead + reader_shaping + ours_direct + undiagnosed_tail
+    )
+    if audited_residual < -1e-9:
+        raise ValueError("ceiling attribution double-counts benchmark loss")
+    audited_residual = max(audited_residual, 0.0)
+    buckets = {
+        "dead_or_benchmark_integrity": dead,
+        "reader_via_context_shaping": reader_shaping,
+        "ours_direct_engine": ours_direct,
+        "undiagnosed_tail": undiagnosed_tail,
+        "audited_residual": audited_residual,
+    }
+    bucket_total = sum(buckets.values())
+    complete_line = (
+        len(scores_by_category) == BEAM_CATEGORY_COUNT
+        and len({len(scores) for scores in scores_by_category.values()}) == 1
+    )
+    baseline_percent = 100.0 - total_loss
+    recoverable = total_loss - dead
+    recovery_to_90 = max(90.0 - baseline_percent, 0.0)
+    return {
+        "complete_equal_weight_ten_category_line": complete_line,
+        "baseline_score_percent": round(baseline_percent, 6),
+        "total_points_lost": round(total_loss, 6),
+        "category_points_lost": {
+            category: round(value, 6)
+            for category, value in sorted(category_losses.items())
+        },
+        "buckets": {name: round(value, 6) for name, value in buckets.items()},
+        "bucket_conservation_delta": round(total_loss - bucket_total, 12),
+        "optimistic_ceiling_percent": round(100.0 - dead, 6),
+        "points_required_to_reach_90": round(recovery_to_90, 6),
+        "recoverable_points": round(recoverable, 6),
+        "recoverable_share_required_to_reach_90": (
+            round(recovery_to_90 / recoverable, 6) if recoverable else None
+        ),
+        "assumptions": {
+            "dead": (
+                "knowledge-update label-defect share plus multi-session "
+                "unstated-derived-answer share"
+            ),
+            "reader_via_context_shaping": (
+                "reader-attributed summarization, multi-session, and abstention shares"
+            ),
+            "ours_direct_engine": (
+                "all event-ordering and temporal loss plus retrieval-attributed "
+                "summarization and provenance-attributed abstention shares"
+            ),
+            "optimistic_ceiling": "full recovery of every point not classified dead",
+        },
+    }
+
+
 def analyze(
     result_payload: dict,
     sources: dict[str, str],
@@ -322,12 +430,13 @@ def analyze(
         }
 
     return {
-        "protocol": "beam-category-loss-funnel-v1",
+        "protocol": "beam-category-loss-funnel-v2",
         "thresholds": {
             "source_support": SOURCE_SUPPORT_THRESHOLD,
             "context_and_answer_retention": RETENTION_THRESHOLD,
         },
         "categories": summaries,
+        "ceiling_estimate": ceiling_estimate(result_payload, summaries),
         "results": per_query,
     }
 
