@@ -18,12 +18,16 @@ a replacement benchmark score.
 
 ## Results
 
-| Category | Mean score | Source support | Context retention | Answer retention | Dominant finding |
+| Category | Mean score | Overall points lost | Context retention | Answer retention | Primary attribution |
 |---|---:|---:|---:|---:|---|
-| summarization | 0.593 | 0.944 | 0.869 | 0.555 | 131/195 reference items fail mainly after retrieval |
-| knowledge update | 0.631 | 0.988 | 0.988 | 0.608 | 11/14 zeroes are stale-label or absent-gold cases |
-| multi-session reasoning | 0.611 | 0.921 | 0.908 | 0.427 | 30/40 answers lose source-supported content |
-| abstention | 0.675 | n/a | n/a | n/a | 7/13 zeroes are dominated by assistant-only support |
+| summarization | 0.593 | 4.07 | 0.869 | 0.555 | reader compression |
+| knowledge update | 0.631 | 3.69 | 0.988 | 0.608 | benchmark labels |
+| multi-session reasoning | 0.611 | 3.89 | 0.908 | 0.427 | reader set assembly |
+| abstention | 0.675 | 3.25 | n/a | n/a | provenance rendering |
+
+`Overall points lost` assumes BEAM's ten equally weighted 40-query categories:
+`10 * (1 - category mean)`. It makes the rows additive with the full-line loss
+ledger without pretending that every lost point is product-recoverable.
 
 Summarization has 22 retrieval-loss items, 131 answer-loss items, 41 covered
 items, and one source/label mismatch. Multi-session reasoning has 30

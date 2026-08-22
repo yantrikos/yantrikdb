@@ -101,3 +101,12 @@ def test_analyze_separates_retrieval_answer_label_and_provenance_losses():
     assert summaries["knowledge_update"]["knowledge_update_zero_verdicts"] == {
         "gold_precedes_later_prediction": 1
     }
+    assert summaries["knowledge_update"]["attribution"]["primary"] == "benchmark_label"
+    assert summaries["knowledge_update"]["attribution"]["label"]["count"] == 1
+    assert summaries["summarization"]["attribution"]["reader"]["count"] == 0
+    assert summaries["abstention"]["attribution"]["ours"] == {
+        "count": 1,
+        "denominator": 1,
+        "unit": "zero_score_rows",
+    }
+    assert summaries["abstention"]["equal_weight_overall_points_lost"] == 10.0

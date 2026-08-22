@@ -51,6 +51,7 @@ DEFAULT_CATEGORIES = (
 RUBRIC_PREFIX = re.compile(r"^LLM response should contain:\s*", re.IGNORECASE)
 SOURCE_SUPPORT_THRESHOLD = 0.75
 RETENTION_THRESHOLD = 0.75
+BEAM_CATEGORY_WEIGHT = 0.1
 
 
 def reference_items(row: dict) -> list[str]:
@@ -186,6 +187,64 @@ def _sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def category_attribution(
+    category: str,
+    rows: list[dict],
+    items: list[dict],
+    stages: Counter,
+    knowledge_verdicts: Counter,
+) -> dict:
+    zero_rows = [row for row in rows if row["score"] == 0.0]
+    assistant_dominant = sum(
+        row["speaker_provenance"]["assistant_only_dominant"] for row in zero_rows
+    )
+    label_defects = (
+        knowledge_verdicts["gold_precedes_later_prediction"]
+        + knowledge_verdicts["gold_value_not_exact_in_user"]
+    )
+    if category == "summarization":
+        primary = "reader_compression"
+    elif category == "knowledge_update":
+        primary = "benchmark_label"
+    elif category == "multi_session_reasoning":
+        primary = "reader_set_assembly"
+    elif category == "abstention":
+        primary = "provenance_rendering"
+    else:
+        primary = "unclassified"
+    return {
+        "primary": primary,
+        "ours": {
+            "count": (
+                assistant_dominant
+                if category == "abstention"
+                else stages["retrieval_loss"]
+            ),
+            "denominator": len(zero_rows) if category == "abstention" else len(items),
+            "unit": "zero_score_rows" if category == "abstention" else "reference_items",
+        },
+        "label": {
+            "count": label_defects,
+            "denominator": len(zero_rows),
+            "unit": "zero_score_rows",
+        },
+        "reader": {
+            "count": (
+                max(len(zero_rows) - assistant_dominant, 0)
+                if category == "abstention"
+                else stages["answer_loss"]
+            ),
+            "denominator": len(zero_rows) if category == "abstention" else len(items),
+            "unit": "zero_score_rows" if category == "abstention" else "reference_items",
+        },
+        "synthesis_required": {
+            "count": stages["synthesis_required"],
+            "denominator": len(items),
+            "unit": "reference_items",
+        },
+    }
+
+
 def analyze(
     result_payload: dict,
     sources: dict[str, str],
@@ -227,9 +286,13 @@ def analyze(
             for row in zero_rows
             if "knowledge_update" in row
         )
+        mean_score = _mean([row["score"] for row in rows])
         summaries[category] = {
             "rows": len(rows),
-            "mean_score": _mean([row["score"] for row in rows]),
+            "mean_score": mean_score,
+            "equal_weight_overall_points_lost": round(
+                100 * BEAM_CATEGORY_WEIGHT * (1.0 - mean_score), 6
+            ),
             "zero_score_rows": len(zero_rows),
             "reference_items": len(items),
             "mean_source_coverage": _mean_or_none(
@@ -253,6 +316,9 @@ def analyze(
                 for row in zero_rows
             ),
             "knowledge_update_zero_verdicts": dict(sorted(knowledge_verdicts.items())),
+            "attribution": category_attribution(
+                category, rows, items, stages, knowledge_verdicts
+            ),
         }
 
     return {
