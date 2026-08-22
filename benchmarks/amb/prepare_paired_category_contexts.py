@@ -59,10 +59,13 @@ def main() -> int:
     parser.add_argument("--label-a", required=True)
     parser.add_argument("--label-b", required=True)
     parser.add_argument("--model", default="deepseek-v4-flash:0731-cloud")
+    parser.add_argument("--answer-repeats", type=int, default=1)
     parser.add_argument("--judge-repeats", type=int, default=1)
     args = parser.parse_args()
     if args.judge_repeats < 1 or args.judge_repeats % 2 == 0:
         parser.error("--judge-repeats must be a positive odd number")
+    if args.answer_repeats < 1 or args.answer_repeats % 2 == 0:
+        parser.error("--answer-repeats must be a positive odd number")
 
     arm_a, arm_b = select_common_rows(
         _rows(args.contexts_a), _rows(args.contexts_b), args.category
@@ -95,10 +98,11 @@ def main() -> int:
         "synthetic_benchmark_data_only": True,
         "real_companion_memories_included": False,
         "model": args.model,
+        "answer_repeats": args.answer_repeats,
         "judge_repeats": args.judge_repeats,
         "total_context_tokens": sum(arm["context_tokens"] for arm in arms),
-        "answer_calls": row_count * 2,
-        "judge_calls": row_count * 2 * args.judge_repeats,
+        "answer_calls": row_count * 2 * args.answer_repeats,
+        "judge_calls": row_count * 2 * args.answer_repeats * args.judge_repeats,
         "category": args.category,
         "labels": [args.label_a, args.label_b],
         "source_files": [str(args.contexts_a), str(args.contexts_b)],

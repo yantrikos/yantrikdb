@@ -67,12 +67,15 @@ def main() -> int:
         help="Use endpoint lanes alone or prepend them to unchanged baseline context.",
     )
     parser.add_argument("--model", default="deepseek-v4-flash:0731-cloud")
+    parser.add_argument("--answer-repeats", type=int, default=1)
     parser.add_argument("--judge-repeats", type=int, default=1)
     args = parser.parse_args()
     if args.hits_per_endpoint < 1:
         parser.error("--hits-per-endpoint must be positive")
     if args.judge_repeats < 1 or args.judge_repeats % 2 == 0:
         parser.error("--judge-repeats must be a positive odd number")
+    if args.answer_repeats < 1 or args.answer_repeats % 2 == 0:
+        parser.error("--answer-repeats must be a positive odd number")
 
     baseline_payload = json.loads(args.baseline.read_text(encoding="utf-8-sig"))
     baseline_rows = {
@@ -138,10 +141,11 @@ def main() -> int:
         "synthetic_benchmark_data_only": True,
         "real_companion_memories_included": False,
         "model": args.model,
+        "answer_repeats": args.answer_repeats,
         "judge_repeats": args.judge_repeats,
         "total_context_tokens": sum(arm["context_tokens"] for arm in arms),
-        "answer_calls": row_count * 2,
-        "judge_calls": row_count * 2 * args.judge_repeats,
+        "answer_calls": row_count * 2 * args.answer_repeats,
+        "judge_calls": row_count * 2 * args.answer_repeats * args.judge_repeats,
         "arms": arms,
         "decomposition_file": str(args.decomposition),
         "hits_per_endpoint": args.hits_per_endpoint,

@@ -523,6 +523,7 @@ def main() -> int:
         action="store_true",
         help="mark the pinned answer/judge model as comparable to the target line",
     )
+    parser.add_argument("--answer-repeats", type=int, default=1)
     parser.add_argument("--judge-repeats", type=int, default=3)
     parser.add_argument(
         "--context-mode",
@@ -552,6 +553,8 @@ def main() -> int:
     args = parser.parse_args()
     if args.judge_repeats < 1 or args.judge_repeats % 2 == 0:
         parser.error("--judge-repeats must be a positive odd number")
+    if args.answer_repeats < 1 or args.answer_repeats % 2 == 0:
+        parser.error("--answer-repeats must be a positive odd number")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     modes = (
@@ -585,9 +588,10 @@ def main() -> int:
         "model": args.model,
         "judge_model": args.model,
         "is_line_comparable": args.line_comparable,
+        "answer_repeats": args.answer_repeats,
         "judge_repeats": args.judge_repeats,
-        "answer_calls": 2,
-        "judge_calls": 2 * args.judge_repeats,
+        "answer_calls": 2 * args.answer_repeats,
+        "judge_calls": 2 * args.answer_repeats * args.judge_repeats,
         "total_context_tokens": sum(
             arm["context_tokens"] for arm in arms
         ),
