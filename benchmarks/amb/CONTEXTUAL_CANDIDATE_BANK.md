@@ -95,7 +95,7 @@ parent links, and stored source provenance. It selected Robert, retained eight
 source rows across five `source_doc_id` groups, and preserved all `5/5` source
 turns. It did not generate, merge, or rewrite any memory.
 
-| Frozen arm | Rows / groups | Context tokens | Median score | Judge votes |
+| Frozen arm | Rows / groups | Context tokens | Observed single-answer score | Judge votes |
 | --- | ---: | ---: | ---: | --- |
 | Raw bridge bank | 44 rows | 3007 | `0.00` | `0.00, 0.00, 0.00` |
 | Relationship thread | 8 rows / 5 groups | 624 | `0.70` | `0.70, 0.70, 0.70` |
@@ -107,8 +107,32 @@ from the prior null run. The grouped arm SHA-256 was
 the paired manifest SHA-256 was
 `290e576b007665e32ac23258db52cb4477dc51a6171e904e6554dba8e1958d70`.
 The model snapshot was `deepseek-v4-flash:0731-cloud` for both answering and
-three repeated judgments. The paired delta is internally comparable, but these
-scores are not line-comparable to runs judged by the rolling `:cloud` tag.
+three repeated judgments. Only the judge was repeated; each arm used one answer
+draw. These scores are not line-comparable to runs judged by the rolling
+`:cloud` tag.
+
+### Answer-variance retro-grade
+
+A later A/A calibration answered the exact same 624-token relationship-thread
+context five times in each arm, with three judge votes per answer. The byte-
+identical arms tied at median `0.50`; their complete answer-score distributions
+were `0.30, 0.40, 0.50, 0.60, 0.60` and
+`0.50, 0.30, 0.70, 0.50, 0.50`. Draw-level signs were three wins for one arm
+and two for the other, while judge votes were nearly always unanimous. The
+`0.30-0.70` spread is answer-generation variance, not judge instability or a
+context effect. The pooled sample standard deviation is about `0.13`; under an
+independent-draw approximation, averaging 40 category queries reduces that term
+to roughly `0.02` standard error. Category-level discovery runs can therefore
+use one draw per query, while any claim about one query still requires repeated
+answers.
+
+Therefore the historical `0.70` above is one observed draw, not the value of
+the relationship-thread arm. Its calibrated center is about `0.50`, with an
+observed range of `0.30-0.70`. The replicated raw-bank zero versus a nonzero
+distribution centered near `0.50` still supports query-dependent thread
+selection. Fine-grained deltas between nonzero Q7 variants do not support a
+verdict unless they use at least five answer draws per arm and compare both
+median score and paired signs.
 
 This is evidence for query-dependent thread selection, not for write-time
 cross-session synthesis. The treatment still chose two early distractors from
@@ -144,28 +168,28 @@ The six-row treatment keeps turns `14, 64, 124, 170, 212, 214`, drops only
 The paired manifest SHA-256 is
 `3fdd24417b933d8c5938026ceb6ffff6e68d6e4b05269fb5a76368d5c77fb2f8`.
 
-The preregistered hypothesis is that removing the two same-source distractors
-raises Q7 above the control's unanimous `0.70`. The null is a median paired
-delta of `0.00`; any negative delta is a failed arm. Answering and three repeated
-judgments use the pinned `deepseek-v4-flash:0731-cloud` snapshot. The result is
-internally paired but not line-comparable to the rolling `:cloud` benchmark.
-No other query will be judged for this residual.
+The preregistered hypothesis was that removing the two same-source distractors
+would raise Q7 above the control's observed `0.70` draw. The original protocol
+repeated the judge but not the answer, so its negative-delta rule predates the
+answer-variance calibration. The result is not line-comparable to the rolling
+`:cloud` benchmark.
 
-The frozen run rejected the hypothesis:
+The frozen run produced this single-answer observation:
 
-| Frozen arm | Rows | Context tokens | Median score | Judge votes |
+| Frozen arm | Rows | Context tokens | Observed single-answer score | Judge votes |
 | --- | ---: | ---: | ---: | --- |
 | Relationship thread control | 8 | 624 | `0.70` | `0.70, 0.70, 0.70` |
 | Within-source representatives | 6 | 489 | `0.50` | `0.40, 0.50, 0.50` |
 
-The paired delta was `-0.20`, a preregistered failed arm. No rerun was made.
+The observed single-draw delta was `-0.20`; no rerun was made. The protocol at
+the time labeled this a failed arm, but the later A/A calibration shows that the
+numeric delta is not a reliable effect estimate.
 The treatment answer identified the five broad stages, but compressed away exact
 rubric details such as the Zoom-call context, improving the essay before the
-conference paper, and follow-up Zoom/conference planning. This result rejects
-raw-row deletion as the residual fix. It points back to representation: a source
-stage needs an answer-sized synthesized item that preserves its distinguishing
-detail. The representative selector remains opt-in experimental harness code
-and must not be promoted to a product default.
+conference paper, and follow-up Zoom/conference planning. The observed failure
+mode motivated the representation probe, but does not by itself prove that
+raw-row deletion lowers expected score. The representative selector remains
+opt-in experimental harness code and must not be promoted to a product default.
 
 ### Global stage-record result
 
@@ -190,25 +214,26 @@ and
 The paired manifest SHA-256 was
 `a7aab531232e2be20bf60d05b8e32ba838b15458c8c06d167e851a6e2a8d0c49`.
 
-The frozen run rejected compact prose stage records:
+The frozen run produced this single-answer observation:
 
-| Frozen arm | Rows | Context tokens | Median score | Judge votes |
+| Frozen arm | Rows | Context tokens | Observed single-answer score | Judge votes |
 | --- | ---: | ---: | ---: | --- |
 | Relationship thread control | 8 | 624 | `0.60` | `0.60, 0.60, 0.70` |
 | Global stage records | 5 | 331 | `0.20` | `0.20, 0.20, 0.20` |
 
-The paired delta was `-0.40`; no rerun was made. The model converted the
-first-person concern about meeting Robert and making a good impression into a
-third-person fact. The answerer then explicitly excluded that record as not an
-academic-work aspect and split the June record into separate journal and
-conference items. The synthesis also omitted the central June decision to
-strengthen the essay before the conference paper and compressed the July
-confidence and conference-planning details into generic next steps.
+The observed single-draw delta was `-0.40`; no rerun was made. It is retained as
+a mechanism observation, not a calibrated score-effect estimate. The model
+converted the first-person concern about meeting Robert and making a good
+impression into a third-person fact. The answerer then explicitly excluded that
+record as not an academic-work aspect and split the June record into separate
+journal and conference items. The synthesis also omitted the central June
+decision to strengthen the essay before the conference paper and compressed
+the July confidence and conference-planning details into generic next steps.
 
-This rejects untyped compact prose for this arm and motivates a subsequent
-hypothesis that preserves speaker perspective and separately encodes the
-user's goal/concern/decision, event facts, and outcome or follow-up. Q7 is now
-a development case for that schema, not untouched validation.
+This keeps untyped compact prose out of the product path and motivates a
+subsequent hypothesis that preserves speaker perspective and separately encodes
+the user's goal/concern/decision, event facts, and outcome or follow-up. Q7 is
+now a development case for that schema, not untouched validation.
 
 ### Untouched holdout
 
