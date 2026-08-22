@@ -1,4 +1,9 @@
-from benchmarks.amb.audit_category_loss_funnel import analyze, ceiling_estimate
+from benchmarks.amb.audit_category_loss_funnel import (
+    analyze,
+    behavior_target_funnel,
+    ceiling_estimate,
+    reference_items,
+)
 
 
 def _row(query_id, category, query, answer, gold, context, rubric=None):
@@ -15,6 +20,73 @@ def _row(query_id, category, query, answer, gold, context, rubric=None):
             "rubric": rubric or [],
         },
     }
+
+
+def test_reference_items_use_rubric_claims_for_tail_categories():
+    for category in (
+        "information_extraction",
+        "instruction_following",
+        "preference_following",
+    ):
+        row = _row(
+            f"1_{category}_0",
+            category,
+            "Question",
+            "Answer",
+            ["coarse gold"],
+            "context",
+            [
+                "LLM response should contain: first claim",
+                "LLM response should state: second claim",
+                "LLM response should mention: third claim",
+            ],
+        )
+        assert reference_items(row) == [
+            "first claim",
+            "second claim",
+            "third claim",
+        ]
+
+    contradiction = _row(
+        "1_contradiction_resolution_0",
+        "contradiction_resolution",
+        "Question",
+        "Answer",
+        [],
+        "context",
+        [
+            "LLM response should state: conflicting information",
+            "LLM response should mention: first evidence claim",
+            "LLM response should mention: second evidence claim",
+            "LLM response should mention: which statement is correct?",
+        ],
+    )
+    assert reference_items(contradiction) == [
+        "first evidence claim",
+        "second evidence claim",
+    ]
+
+
+def test_behavior_target_funnel_uses_canonical_instruction():
+    row = _row(
+        "1_instruction_following_0",
+        "instruction_following",
+        "Question",
+        "Answer",
+        [],
+        "## Memory 1\nAlways use APA 7th edition citations when formatting references.",
+    )
+    row["meta"]["instruction_being_tested"] = (
+        "Always use APA 7th edition citations when formatting references."
+    )
+
+    target = behavior_target_funnel(
+        row, "User: Always use APA 7th edition citations when formatting references."
+    )
+
+    assert target is not None
+    assert target["stage"] == "target_retrieved"
+    assert target["source_coverage"] == 1.0
 
 
 def test_analyze_separates_retrieval_answer_label_and_provenance_losses():
@@ -171,3 +243,40 @@ def test_ceiling_estimate_conserves_full_line_loss():
     assert abs(
         sum(estimate["buckets"].values()) - estimate["total_points_lost"]
     ) <= 2e-6
+
+    full_summaries = {
+        **summaries,
+        "contradiction_resolution": {
+            "attribution": {
+                "ours": {"count": 1, "denominator": 80},
+                "reader": {"count": 32, "denominator": 80},
+            }
+        },
+        "information_extraction": {
+            "attribution": {
+                "ours": {"count": 4, "denominator": 92},
+                "reader": {"count": 41, "denominator": 92},
+            }
+        },
+        "instruction_following": {
+            "attribution": {
+                "ours": {"count": 3.5, "denominator": 8.5},
+                "reader": {"count": 5.0, "denominator": 8.5},
+            }
+        },
+        "preference_following": {
+            "attribution": {
+                "ours": {"count": 1.0, "denominator": 3.5},
+                "reader": {"count": 2.5, "denominator": 3.5},
+            }
+        },
+    }
+    full_estimate = ceiling_estimate(payload, full_summaries)
+    assert full_estimate["buckets"] == {
+        "dead_or_benchmark_integrity": 3.091905,
+        "reader_via_context_shaping": 10.725196,
+        "ours_direct_engine": 16.422036,
+        "undiagnosed_tail": 0,
+        "audited_residual": 4.612351,
+    }
+    assert full_estimate["reader_shaping_recovery_sensitivity"]["0.5"] == 91.545497

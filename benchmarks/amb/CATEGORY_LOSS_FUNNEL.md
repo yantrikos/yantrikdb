@@ -2,8 +2,8 @@
 
 ## Scope
 
-This judge-free audit examines the four largest non-temporal loss buckets in
-the frozen `ydb-0151` BEAM-100K run. It measures distinctive reference-token
+This judge-free audit examines all eight non-temporal categories in the frozen
+`ydb-0151` BEAM-100K run. It measures distinctive reference-token
 support in the source conversation, retention in retrieved context, retention
 in the final answer, exact knowledge-update value chronology, and answer tokens
 supported only by explicitly assistant-authored memory blocks.
@@ -24,6 +24,10 @@ a replacement benchmark score.
 | knowledge update | 0.631 | 3.69 | 0.988 | 0.608 | benchmark labels |
 | multi-session reasoning | 0.611 | 3.89 | 0.908 | 0.427 | reader set assembly |
 | abstention | 0.675 | 3.25 | n/a | n/a | provenance rendering |
+| contradiction resolution | 0.828 | 1.72 | 0.978 | 0.733 | reader conflict resolution |
+| information extraction | 0.773 | 2.27 | 0.948 | 0.697 | reader fact selection |
+| instruction following | 0.788 | 2.13 | 0.794 | 0.259 | standing-instruction salience |
+| preference following | 0.913 | 0.88 | 0.824 | 0.378 | preference salience |
 
 `Overall points lost` assumes BEAM's ten equally weighted 40-query categories:
 `10 * (1 - category mean)`. It makes the rows additive with the full-line loss
@@ -47,6 +51,20 @@ meet the stricter assistant-only-dominance rule. The retrieved contexts already
 label these blocks as assistant suggestions, but the reader often promotes them
 to user facts.
 
+For contradiction resolution, only the two conflicting evidence claims are
+treated as retrieval targets; the rubric's conflict-acknowledgement and verdict
+directives are reader requirements. Of 80 evidence claims, 46 are covered, 32
+are lost in the answer, one is lost in retrieval, and one is a source mismatch.
+Information extraction is similarly reader-heavy: only 4/92 claims are lost in
+retrieval, versus 41 answer losses and 45 covered claims.
+
+Instruction and preference rows expose their canonical standing behavior in
+`instruction_being_tested` and `preference_being_tested`. The exact instruction
+is source-backed in all 40 rows and retrieved in 36; the exact preference is
+retrieved in 36/40. Partitioning actual row-score deficits assigns `3.5/8.5`
+instruction deficit units and `1.0/3.5` preference deficit units to retrieval;
+the remaining `5.0` and `2.5` units occur after the target is already present.
+
 ## Ceiling And Recovery Budget
 
 The audit now emits a loss-conserving `ceiling_estimate` over all ten frozen
@@ -64,10 +82,10 @@ anchor configuration and should use a repeated full-line median.
 | Mutually exclusive bucket | Points |
 |---|---:|
 | Dead or benchmark integrity | 3.092 |
-| Reader, potentially reachable through context shaping | 7.153 |
-| Direct engine mechanisms | 15.177 |
-| Undiagnosed four-category tail | 6.984 |
-| Residual inside audited categories | 2.445 |
+| Reader, potentially reachable through context shaping | 10.725 |
+| Direct engine mechanisms | 16.422 |
+| Undiagnosed category tail | 0.000 |
+| Residual inside audited categories | 4.612 |
 | **Total frozen loss** | **34.851** |
 
 The conservation delta is exactly zero. The optimistic ceiling is `96.9081`:
@@ -76,24 +94,24 @@ multi-session answers whose derived gold form is unstated. Reaching 90 requires
 recovering `78.25%` of the remaining `31.7596` potentially recoverable points.
 It therefore requires broad success, but not literally every non-dead point.
 
-The conversion rules are explicit in the JSON. Reader points are the audited
-reader-count share of category loss for summarization, multi-session reasoning,
-and abstention. Direct-engine points include all event-ordering and temporal
-loss, plus the audited retrieval share of summarization and provenance share of
-abstention. Treating all temporal loss as directly product-addressable is an
-optimistic recovery assumption, not a causal finding; the temporal audit found
-reader arithmetic, revision ambiguity, and invalid gold calculations as well.
-The residual bucket prevents those uncertain and overlapping cases from being
-silently assigned twice.
+The conversion rules are explicit in the JSON. Reader points use audited shares
+in all eight categories. Instruction and preference shares use actual row-score
+deficits; fact-selection and conflict shares use reference-item counts. Direct
+engine points include all event-ordering and temporal loss plus every audited
+retrieval or provenance share. Treating all temporal loss as directly
+product-addressable is an optimistic recovery assumption, not a causal finding;
+the temporal audit found reader arithmetic, revision ambiguity, and invalid
+gold calculations as well. The residual bucket prevents uncertain and
+overlapping cases from being silently assigned twice.
 
 The machine-readable sensitivity table varies only reader-shaping recovery and
 optimistically recovers every other non-dead bucket:
 
 | Reader-attributed loss recovered | Projected score |
 |---:|---:|
-| 0% | 89.755 |
-| 50% | 93.332 |
-| 70% | 94.762 |
+| 0% | 86.183 |
+| 50% | 91.545 |
+| 70% | 93.691 |
 | 100% | 96.908 |
 
 This is not a forecast: 50% and 70% are scenario parameters, while the evidence

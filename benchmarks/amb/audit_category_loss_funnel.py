@@ -47,8 +47,14 @@ DEFAULT_CATEGORIES = (
     "knowledge_update",
     "multi_session_reasoning",
     "abstention",
+    "contradiction_resolution",
+    "information_extraction",
+    "instruction_following",
+    "preference_following",
 )
-RUBRIC_PREFIX = re.compile(r"^LLM response should contain:\s*", re.IGNORECASE)
+RUBRIC_PREFIX = re.compile(
+    r"^LLM response should (?:contain|state|mention):\s*", re.IGNORECASE
+)
 SOURCE_SUPPORT_THRESHOLD = 0.75
 RETENTION_THRESHOLD = 0.75
 BEAM_CATEGORY_WEIGHT = 0.1
@@ -59,6 +65,13 @@ TAIL_CATEGORIES = (
     "instruction_following",
     "preference_following",
 )
+RUBRIC_REFERENCE_CATEGORIES = {
+    "contradiction_resolution",
+    "information_extraction",
+    "instruction_following",
+    "preference_following",
+    "summarization",
+}
 
 
 def reference_items(row: dict) -> list[str]:
@@ -66,11 +79,15 @@ def reference_items(row: dict) -> list[str]:
     category = str((row.get("meta") or {}).get("question_category") or "")
     if category == "abstention":
         return []
-    if category == "summarization":
-        return [
+    if category in RUBRIC_REFERENCE_CATEGORIES:
+        items = [
             RUBRIC_PREFIX.sub("", str(item)).strip()
             for item in (row.get("meta") or {}).get("rubric") or []
+            if str(item).strip()
         ]
+        # The first and fourth contradiction rubrics are response directives;
+        # only the middle pair are claims that should be present in memory.
+        return items[1:3] if category == "contradiction_resolution" else items
     return [str(item).strip() for item in row.get("gold_answers") or [] if str(item).strip()]
 
 
@@ -109,6 +126,41 @@ def lexical_funnel(row: dict, source: str) -> list[dict]:
             }
         )
     return output
+
+
+def behavior_target_funnel(row: dict, source: str) -> dict | None:
+    """Measure retrieval of the canonical standing instruction or preference."""
+    metadata = row.get("meta") or {}
+    category = str(metadata.get("question_category") or "")
+    target_key = {
+        "instruction_following": "instruction_being_tested",
+        "preference_following": "preference_being_tested",
+    }.get(category)
+    if target_key is None:
+        return None
+    target = str(metadata.get(target_key) or "").strip()
+    if not target:
+        return None
+    target_tokens = tokens(target)
+    source_tokens = tokens(source)
+    source_supported = target_tokens & source_tokens
+    source_coverage = token_coverage(target_tokens, source_tokens)
+    context_retention = token_coverage(
+        source_supported, tokens(str(row.get("context") or ""))
+    )
+    if source_coverage < SOURCE_SUPPORT_THRESHOLD:
+        stage = "source_or_label_mismatch"
+    elif context_retention < RETENTION_THRESHOLD:
+        stage = "retrieval_loss"
+    else:
+        stage = "target_retrieved"
+    return {
+        "target_key": target_key,
+        "target": target,
+        "source_coverage": source_coverage,
+        "source_normalized_context_retention": context_retention,
+        "stage": stage,
+    }
 
 
 def speaker_provenance(row: dict) -> dict:
@@ -217,8 +269,44 @@ def category_attribution(
         primary = "reader_set_assembly"
     elif category == "abstention":
         primary = "provenance_rendering"
+    elif category == "contradiction_resolution":
+        primary = "reader_conflict_resolution"
+    elif category == "information_extraction":
+        primary = "reader_fact_selection"
+    elif category == "instruction_following":
+        primary = "standing_instruction_salience"
+    elif category == "preference_following":
+        primary = "preference_salience"
     else:
         primary = "unclassified"
+    if category in {"instruction_following", "preference_following"}:
+        deficits = Counter()
+        for row in rows:
+            deficit = 1.0 - float(row["score"])
+            target = row.get("behavior_target") or {}
+            owner = {
+                "retrieval_loss": "ours",
+                "source_or_label_mismatch": "label",
+                "target_retrieved": "reader",
+            }.get(target.get("stage"), "reader")
+            deficits[owner] += deficit
+        denominator = sum(deficits.values())
+        return {
+            "primary": primary,
+            **{
+                owner: {
+                    "count": round(deficits[owner], 6),
+                    "denominator": round(denominator, 6),
+                    "unit": "row_score_deficit",
+                }
+                for owner in ("ours", "label", "reader")
+            },
+            "synthesis_required": {
+                "count": 0,
+                "denominator": round(denominator, 6),
+                "unit": "row_score_deficit",
+            },
+        }
     return {
         "primary": primary,
         "ours": {
@@ -254,7 +342,7 @@ def category_attribution(
 
 def _attribution_share(summary: dict, owner: str) -> float:
     attribution = (summary.get("attribution") or {}).get(owner) or {}
-    denominator = int(attribution.get("denominator") or 0)
+    denominator = float(attribution.get("denominator") or 0)
     return float(attribution.get("count") or 0) / denominator if denominator else 0.0
 
 
@@ -279,6 +367,9 @@ def ceiling_estimate(result_payload: dict, summaries: dict[str, dict]) -> dict:
     knowledge_update = summaries.get("knowledge_update") or {}
     multi_session = summaries.get("multi_session_reasoning") or {}
     abstention = summaries.get("abstention") or {}
+    tail_summaries = {
+        category: summaries.get(category) or {} for category in TAIL_CATEGORIES
+    }
 
     dead = (
         loss("knowledge_update") * _attribution_share(knowledge_update, "label")
@@ -290,14 +381,26 @@ def ceiling_estimate(result_payload: dict, summaries: dict[str, dict]) -> dict:
         + loss("multi_session_reasoning")
         * _attribution_share(multi_session, "reader")
         + loss("abstention") * _attribution_share(abstention, "reader")
+        + sum(
+            loss(category) * _attribution_share(summary, "reader")
+            for category, summary in tail_summaries.items()
+        )
     )
     ours_direct = (
         loss("event_ordering")
         + loss("temporal_reasoning")
         + loss("summarization") * _attribution_share(summarization, "ours")
         + loss("abstention") * _attribution_share(abstention, "ours")
+        + sum(
+            loss(category) * _attribution_share(summary, "ours")
+            for category, summary in tail_summaries.items()
+        )
     )
-    undiagnosed_tail = sum(loss(category) for category in TAIL_CATEGORIES)
+    undiagnosed_tail = sum(
+        loss(category)
+        for category, summary in tail_summaries.items()
+        if not summary
+    )
     total_loss = sum(category_losses.values())
     audited_residual = total_loss - (
         dead + reader_shaping + ours_direct + undiagnosed_tail
@@ -350,11 +453,11 @@ def ceiling_estimate(result_payload: dict, summaries: dict[str, dict]) -> dict:
                 "unstated-derived-answer share"
             ),
             "reader_via_context_shaping": (
-                "reader-attributed summarization, multi-session, and abstention shares"
+                "reader-attributed shares in every audited category"
             ),
             "ours_direct_engine": (
                 "all event-ordering and temporal loss plus retrieval-attributed "
-                "summarization and provenance-attributed abstention shares"
+                "shares in audited categories"
             ),
             "optimistic_ceiling": "full recovery of every point not classified dead",
             "reader_shaping_sensitivity": (
@@ -389,6 +492,9 @@ def analyze(
             "items": item_funnel,
             "speaker_provenance": speaker_provenance(row),
         }
+        behavior_target = behavior_target_funnel(row, sources[conversation_id])
+        if behavior_target is not None:
+            analyzed["behavior_target"] = behavior_target
         if category == "knowledge_update" and score == 0.0:
             analyzed["knowledge_update"] = knowledge_update_verdict(
                 row, conversations[conversation_id]
@@ -406,6 +512,10 @@ def analyze(
             for row in zero_rows
             if "knowledge_update" in row
         )
+        behavior_targets = [
+            row["behavior_target"] for row in rows if "behavior_target" in row
+        ]
+        behavior_stages = Counter(target["stage"] for target in behavior_targets)
         mean_score = _mean([row["score"] for row in rows])
         summaries[category] = {
             "rows": len(rows),
@@ -436,6 +546,17 @@ def analyze(
                 for row in zero_rows
             ),
             "knowledge_update_zero_verdicts": dict(sorted(knowledge_verdicts.items())),
+            "behavior_target_rows": len(behavior_targets),
+            "mean_behavior_target_source_coverage": _mean_or_none(
+                [target["source_coverage"] for target in behavior_targets]
+            ),
+            "mean_behavior_target_context_retention": _mean_or_none(
+                [
+                    target["source_normalized_context_retention"]
+                    for target in behavior_targets
+                ]
+            ),
+            "behavior_target_stages": dict(sorted(behavior_stages.items())),
             "attribution": category_attribution(
                 category, rows, items, stages, knowledge_verdicts
             ),
