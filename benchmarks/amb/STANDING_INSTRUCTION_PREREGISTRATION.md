@@ -47,3 +47,30 @@ The point floor is below the prior `+0.075` discovery gate because the audited
 retrieval-owned category headroom is `0.0875`. Failure leaves product behavior
 unchanged. This arm tests standing-instruction storage and salience; it does not
 authorize heuristic preference extraction.
+
+## Discovery Result
+
+The frozen discovery run passed both gates:
+
+| arm | mean rubric score |
+|---|---:|
+| frozen `ydb-0151` control | 0.800 |
+| standing-instruction treatment | 0.900 |
+
+Treatment minus control was `+0.100`, with 7 wins, 32 ties, and 1 loss. The
+paired bootstrap 95% interval was `[+0.01875, +0.20000]`. The run completed all
+40 pairs in 533.7 seconds. Its result SHA-256 is
+`431497ec889e8ff5e33c7a601072323537b527d8ea518d87df227d1064b9b178`.
+
+Five of the seven winning rows lacked the exact canonical instruction in the
+control context. The other two already contained the user instruction, so
+their improvements are consistent with a salience benefit rather than
+retrieval repair. The sole losing row also lacked its canonical instruction in
+control, but treatment still failed to follow it; repeated answers are needed
+to distinguish generation variance from a stable regression.
+
+This is a successful discovery result, not yet a production score claim. The
+next stage must freeze its confirmation cohort and interpretation before making
+more model calls. In particular, an outcome-selected discordant subset may test
+whether row-level direction persists, but must not be used to re-estimate the
+40-row category mean.
