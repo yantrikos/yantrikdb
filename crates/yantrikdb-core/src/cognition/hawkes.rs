@@ -380,22 +380,50 @@ impl EventTypeModel {
 
     /// Record a new event observation and update the model.
     pub fn observe(&mut self, timestamp: f64) {
-        // Update inter-event statistics
-        if let Some(&last) = self.recent_events.last() {
-            let dt = timestamp - last;
-            if dt > 0.0 {
+        // Keep the history ordered even when historical events arrive late.
+        // If the late event falls between two retained observations, split
+        // their existing interval so the online moments remain exact.
+        let insert_at = self.recent_events.partition_point(|&t| t <= timestamp);
+        let history_is_complete = self.total_observations == self.recent_events.len() as u64;
+        match (
+            insert_at.checked_sub(1).map(|i| self.recent_events[i]),
+            self.recent_events.get(insert_at).copied(),
+        ) {
+            (Some(previous), None) => {
+                let dt = timestamp - previous;
+                if dt > 0.0 {
+                    self.sum_inter_event += dt;
+                    self.sum_inter_event_sq += dt * dt;
+                    self.inter_event_count += 1;
+                }
+            }
+            (Some(previous), Some(next)) if timestamp > previous && timestamp < next => {
+                let old_dt = next - previous;
+                let left_dt = timestamp - previous;
+                let right_dt = next - timestamp;
+                self.sum_inter_event_sq = (self.sum_inter_event_sq - old_dt * old_dt
+                    + left_dt * left_dt
+                    + right_dt * right_dt)
+                    .max(0.0);
+                self.inter_event_count += 1;
+            }
+            (None, Some(next)) if history_is_complete && timestamp < next => {
+                let dt = next - timestamp;
                 self.sum_inter_event += dt;
                 self.sum_inter_event_sq += dt * dt;
                 self.inter_event_count += 1;
             }
+            _ => {}
         }
 
-        self.recent_events.push(timestamp);
+        self.recent_events.insert(insert_at, timestamp);
         self.total_observations += 1;
 
-        // Prune old events outside excitation window
+        // Prune relative to the newest observation, not the arriving event.
+        // A stale backfill must never move the retention horizon backwards.
+        let latest = self.recent_events.last().copied().unwrap_or(timestamp);
         let window = self.params.excitation_window();
-        let cutoff = timestamp - window;
+        let cutoff = latest - window;
         self.recent_events.retain(|&t| t >= cutoff);
 
         // Enforce max history
@@ -408,9 +436,9 @@ impl EventTypeModel {
         self.circadian.observe(timestamp, 0.05);
 
         // Periodically re-estimate parameters
-        if timestamp - self.last_refit_at >= self.refit_interval && self.inter_event_count >= 10 {
+        if latest - self.last_refit_at >= self.refit_interval && self.inter_event_count >= 10 {
             self.refit_parameters();
-            self.last_refit_at = timestamp;
+            self.last_refit_at = latest;
         }
     }
 
@@ -970,6 +998,46 @@ mod tests {
         }
         assert_eq!(model.total_observations, 20);
         assert!(!model.recent_events.is_empty());
+    }
+
+    #[test]
+    fn test_model_observe_repairs_out_of_order_interval() {
+        let mut model = EventTypeModel::new("test");
+        model.observe(1000.0);
+        model.observe(1100.0);
+        model.observe(1050.0);
+        model.observe(1150.0);
+
+        assert_eq!(model.recent_events, vec![1000.0, 1050.0, 1100.0, 1150.0]);
+        assert_eq!(model.inter_event_count, 3);
+        assert_eq!(model.sum_inter_event, 150.0);
+        assert_eq!(model.sum_inter_event_sq, 7500.0);
+    }
+
+    #[test]
+    fn test_stale_observation_does_not_move_retention_horizon_backwards() {
+        let mut model = EventTypeModel::new("test");
+        model.max_history = 2;
+        model.observe(1000.0);
+        model.observe(1100.0);
+        model.observe(1200.0);
+        let moments_before = (
+            model.inter_event_count,
+            model.sum_inter_event,
+            model.sum_inter_event_sq,
+        );
+
+        model.observe(500.0);
+
+        assert_eq!(model.recent_events, vec![1100.0, 1200.0]);
+        assert_eq!(
+            (
+                model.inter_event_count,
+                model.sum_inter_event,
+                model.sum_inter_event_sq,
+            ),
+            moments_before
+        );
     }
 
     #[test]
