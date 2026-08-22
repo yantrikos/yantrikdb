@@ -5,7 +5,7 @@ import time
 
 import pytest
 
-from yantrikdb import YantrikDB
+from yantrikdb import YantrikDB, record_synthesis
 from yantrikdb.consolidate import (
     _cosine_similarity,
     _extractive_summary,
@@ -109,6 +109,35 @@ class TestExtractiveSummary:
 
 
 class TestConsolidate:
+    def test_record_synthesis_public_api_preserves_sources_and_clocks(self, db):
+        rid1 = db.record(
+            "Bryan shared storytelling advice",
+            embedding=_vec(1.0),
+            created_at=1_000.0,
+        )
+        rid2 = db.record(
+            "Shawn added storytelling-impact detail",
+            embedding=_vec(2.0),
+            created_at=2_000.0,
+        )
+
+        result = record_synthesis(
+            db,
+            [rid2, rid1],
+            "The user incorporated storytelling input from Bryan and Shawn",
+            "contributed",
+            "test:contributed:storytelling",
+            embedding=_vec(3.0),
+        )
+        synthesis = db.get(result["consolidated_rid"])
+
+        assert synthesis["source"] == "inference"
+        assert synthesis["created_at"] == 2_000.0
+        assert synthesis["metadata"]["first_mention_at"] == 1_000.0
+        assert set(synthesis["metadata"]["evidence_ids"]) == {rid1, rid2}
+        assert db.get(rid1)["consolidation_status"] == "active"
+        assert db.get(rid2)["consolidation_status"] == "active"
+
     def test_dry_run(self, db):
         # Record similar memories
         db.record("Python is a great language", importance=0.7, embedding=_vec(1.0))

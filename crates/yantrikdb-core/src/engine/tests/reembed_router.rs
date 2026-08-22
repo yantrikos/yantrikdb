@@ -967,13 +967,14 @@ fn schema_v27_migration_from_v26_is_additive_only() {
     let path = tmp.path().to_str().unwrap();
 
     let planted_rid = "01900000-0000-7000-8000-00000000c027";
+    let planted_embedding = vec![0_u8; 8 * std::mem::size_of::<f32>()];
     {
         let db = YantrikDB::new(path, 8).unwrap();
         let conn = db.conn();
         conn.execute(
             "INSERT INTO memories (rid, type, text, embedding, created_at, updated_at, last_access, source) \
-             VALUES (?1, 'episodic', 'planted under v27 schema', X'01020304', 0.0, 0.0, 0.0, 'user')",
-            params![planted_rid],
+             VALUES (?1, 'episodic', 'planted under v27 schema', ?2, 0.0, 0.0, 0.0, 'user')",
+            params![planted_rid, planted_embedding],
         )
         .unwrap();
     }
@@ -1279,13 +1280,14 @@ fn schema_v28_migration_from_v27_is_additive_and_idempotent() {
     let path = tmp.path().to_str().unwrap();
 
     let planted_rid = "01900000-0000-7000-8000-00000000c028";
+    let planted_embedding = vec![0_u8; 8 * std::mem::size_of::<f32>()];
     {
         let db = YantrikDB::new(path, 8).unwrap();
         let conn = db.conn();
         conn.execute(
             "INSERT INTO memories (rid, type, text, embedding, created_at, updated_at, last_access, source, embedding_generation) \
-             VALUES (?1, 'episodic', 'planted under v28 schema', X'01020304', 0.0, 0.0, 0.0, 'user', 42)",
-            params![planted_rid],
+             VALUES (?1, 'episodic', 'planted under v28 schema', ?2, 0.0, 0.0, 0.0, 'user', 42)",
+            params![planted_rid, planted_embedding],
         )
         .unwrap();
     }

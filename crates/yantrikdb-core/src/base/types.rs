@@ -230,6 +230,20 @@ pub struct ExplainPoolRow {
     pub selected: bool,
 }
 
+/// Per-call retrieval-limit diagnostics. This distinguishes a small result
+/// set caused by a small index from one caused by the engine inspecting a
+/// bounded candidate pool.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RetrievalLimits {
+    pub requested_top_k: usize,
+    pub requested_candidates: usize,
+    pub candidate_cap: usize,
+    pub fetch_k: usize,
+    pub index_len: usize,
+    pub has_post_filters: bool,
+    pub cap_bound: bool,
+}
+
 /// v0.13.1 — the recall explain surface (co-iteration wheel 2, spec
 /// locked with hermes 2026-08-06).
 ///
@@ -249,6 +263,9 @@ pub struct ExplainPoolRow {
 /// pool is the admission record, results are the selection record.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RecallExplain {
+    /// Exact HNSW candidate request and whether its safety ceiling bound.
+    #[serde(default)]
+    pub retrieval_limits: RetrievalLimits,
     /// The one ranking comparator (folded item: it no longer varies by
     /// site, so it is named once per response, not per row).
     pub comparator: String,
@@ -295,6 +312,9 @@ pub struct RecallResponse {
     /// pre-v0.10 serialized responses still deserialize.
     #[serde(default)]
     pub coverage: SearchCoverage,
+    /// Exact HNSW candidate request and whether its safety ceiling bound.
+    #[serde(default)]
+    pub retrieval_limits: RetrievalLimits,
 }
 
 /// Summary of how retrieval was performed.
@@ -400,6 +420,116 @@ pub struct Entity {
     pub mention_count: i64,
 }
 
+/// Per-rank outcome coverage for caller-side organization rollups.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RollupRankOutcomeStats {
+    pub rank: usize,
+    pub impressions: i64,
+    pub expanded_impressions: i64,
+    pub finalized_impressions: i64,
+    pub finalized_returned_children: i64,
+    pub finalized_selected_children: i64,
+    pub finalized_corrected_children: i64,
+    pub explicit_child_selection_rate: Option<f64>,
+}
+
+/// Read-only telemetry report for deciding whether rollup outcomes are ready
+/// for an offline evaluation. This does not authorize production learning.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RollupOutcomeReport {
+    pub namespace: Option<String>,
+    pub since: Option<f64>,
+    pub total_impressions: i64,
+    pub distinct_queries: i64,
+    pub distinct_rollups: i64,
+    pub expanded_impressions: i64,
+    pub finalized_impressions: i64,
+    pub finalized_distinct_queries: i64,
+    pub finalized_distinct_rollups: i64,
+    pub finalized_returned_children: i64,
+    pub finalized_selected_children: i64,
+    pub finalized_corrected_children: i64,
+    pub explicitly_unselected_children: i64,
+    pub expansion_rate: Option<f64>,
+    pub telemetry_completion_rate: Option<f64>,
+    pub explicit_child_selection_rate: Option<f64>,
+    pub max_finalized_query_share: Option<f64>,
+    pub max_finalized_rollup_share: Option<f64>,
+    pub per_rank: Vec<RollupRankOutcomeStats>,
+    /// `no_data`, `insufficient_evidence`, or
+    /// `ready_for_offline_evaluation`.
+    pub evidence_status: String,
+    pub readiness_failures: Vec<String>,
+}
+
+/// One immutable, finalized child example from the rollup outcome ledger.
+/// Query text and mutable memory features are deliberately excluded.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RollupOutcomeExample {
+    pub export_schema_version: u32,
+    pub impression_id: String,
+    pub query_hash: String,
+    pub namespace: String,
+    pub rollup_rid: String,
+    pub rollup_rank: usize,
+    pub rollup_score: f64,
+    pub child_rid: String,
+    pub child_rank: usize,
+    pub returned_child_count: usize,
+    pub selected: bool,
+    pub corrected: bool,
+    pub created_at: f64,
+    pub outcome_finalized_at: f64,
+}
+
+/// Coverage for explicit false-negative labels. This is deliberately separate
+/// from [`RollupOutcomeReport`], whose readiness only governs pruning returned
+/// children.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RollupMembershipReport {
+    pub namespace: Option<String>,
+    pub since: Option<f64>,
+    pub total_impressions: i64,
+    pub expanded_impressions: i64,
+    pub finalized_impressions: i64,
+    pub finalized_added_children: i64,
+    pub finalized_impressions_with_additions: i64,
+    pub finalized_distinct_queries_with_additions: i64,
+    pub telemetry_completion_rate: Option<f64>,
+    pub added_child_rate: Option<f64>,
+    /// `no_data`, `insufficient_evidence`, or
+    /// `ready_for_offline_evaluation`.
+    pub evidence_status: String,
+    pub readiness_failures: Vec<String>,
+}
+
+/// One child from a finalized membership example. Returned and omitted
+/// positives share an impression group but remain distinct classes.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RollupMembershipExample {
+    pub export_schema_version: u32,
+    pub impression_id: String,
+    /// Namespace-scoped linkage key. It is not an anonymization boundary.
+    pub query_key: String,
+    pub namespace: String,
+    pub rollup_rid: String,
+    pub rollup_rank: usize,
+    pub rollup_score: f64,
+    pub requested_count: Option<usize>,
+    pub query_shape: Option<String>,
+    pub child_rid: String,
+    pub child_rank: Option<usize>,
+    pub child_score: Option<f64>,
+    pub returned_child_count: usize,
+    pub returned: bool,
+    pub omitted_positive: bool,
+    pub positive: bool,
+    pub corrected: bool,
+    pub omission_source: Option<String>,
+    pub impression_created_at: f64,
+    pub outcome_finalized_at: f64,
+}
+
 /// Engine statistics.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Stats {
@@ -436,6 +566,48 @@ pub struct Stats {
     /// `set_status_read_policy(true)`.
     #[serde(default)]
     pub superseded_served_since_boot: u64,
+    /// Maximum oversampled HNSW candidate pool used by ordinary recall.
+    /// A caller asking for more than this many final results raises the
+    /// effective ceiling to `top_k`, so requested results are never clipped.
+    #[serde(default)]
+    pub recall_candidate_cap: usize,
+    /// Maximum number of distinct named namespaces retained in the
+    /// since-boot recall-cap telemetry map. Cross-namespace calls (`"*"`)
+    /// and the bounded overflow bucket (`"<other>"`) are reserved separately.
+    #[serde(default)]
+    pub recall_candidate_cap_namespace_capacity: usize,
+    /// Recalls since boot where the candidate ceiling reduced the HNSW pool
+    /// that would otherwise have been inspected. Non-zero means a retrieval
+    /// quality limit bound and deserves review for the workload in question.
+    #[serde(default)]
+    pub recall_candidate_cap_bound_since_boot: u64,
+    /// Same counter grouped by recall namespace. `"*"` means the call
+    /// searched across namespaces (`namespace=None`).
+    #[serde(default)]
+    pub recall_candidate_cap_bound_by_namespace_since_boot: HashMap<String, u64>,
+    /// True once more distinct namespaces bound the candidate cap than the
+    /// telemetry map can retain. Additional namespaces are counted under
+    /// `"<other>"`; the global total remains exact.
+    #[serde(default)]
+    pub recall_candidate_cap_namespace_stats_truncated_since_boot: bool,
+    /// Maximum verified synthesis generations one evidence record may back
+    /// through local admission. Replication remains convergence-first and may
+    /// surface a remote over-cap state in the counters below.
+    #[serde(default)]
+    pub synthesis_fanout_cap: usize,
+    /// Local synthesis admissions refused at the fan-out boundary since open.
+    #[serde(default)]
+    pub synthesis_fanout_refused_since_boot: u64,
+    /// Largest current verified-synthesis fan-out of any evidence record.
+    #[serde(default)]
+    pub synthesis_fanout_current_high_water: usize,
+    /// Evidence records whose current verified fan-out exactly equals the cap.
+    #[serde(default)]
+    pub synthesis_fanout_sources_at_cap: i64,
+    /// Evidence records above the local cap, possible only through replication
+    /// or a later explicit cap reduction. Non-zero requires operator review.
+    #[serde(default)]
+    pub synthesis_fanout_sources_over_cap: i64,
     /// **v0.10 Item 4a.4** — active anti-laundering gate mode
     /// (`off` | `warn` | `enforce`).
     #[serde(default)]
@@ -446,6 +618,28 @@ pub struct Stats {
     /// consider `set_provenance_gate_mode(Enforce)` once callers are fixed.
     #[serde(default)]
     pub provenance_flagged_since_boot: u64,
+    /// Non-tombstoned records carrying an explicit, caller-supplied
+    /// `metadata.provenance_verified = true` marker. This is an audit signal,
+    /// not an engine assertion: the engine cannot reconstruct authorship.
+    #[serde(default)]
+    pub provenance_verified_records: i64,
+    /// Non-tombstoned `source = "user"` records without the explicit marker.
+    /// These are unknown, not presumed wrong; migrated databases can use this
+    /// count to distinguish legacy attribution from newly verified writes.
+    #[serde(default)]
+    pub unverified_user_source_records: i64,
+    /// Non-tombstoned records grouped by their declared source label.
+    #[serde(default)]
+    pub provenance_source_counts: HashMap<String, i64>,
+    /// Non-tombstoned records grouped by `metadata.provenance_method`.
+    /// Missing, empty, or malformed metadata is reported as `unmarked`.
+    #[serde(default)]
+    pub provenance_method_counts: HashMap<String, i64>,
+    /// Records without `metadata.provenance_verified = true`, grouped by
+    /// declared source. This identifies which integration needs an audit;
+    /// it does not presume that unverified legacy records are incorrect.
+    #[serde(default)]
+    pub unverified_source_counts: HashMap<String, i64>,
     /// Detected embedder input window in characters, or `None` if the
     /// probe has not run (`detect_embedder_window()`) or found no
     /// truncation. Text beyond it is stored but never embedded.
@@ -538,6 +732,24 @@ pub struct DecayedMemory {
     pub days_since_access: f64,
 }
 
+/// One engine-grounded source observed when a synthesized memory is admitted.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub(crate) struct SynthesisDependency {
+    pub source_rid: String,
+    pub source_revision_num: i64,
+    pub is_direct: bool,
+}
+
+/// Typed lifecycle descriptor committed atomically with a synthesized memory.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct SynthesisAdmission {
+    pub axis: String,
+    pub granularity: String,
+    pub logical_key: String,
+    pub evidence_version: String,
+    pub dependencies: Vec<SynthesisDependency>,
+}
+
 /// Lightweight scoring fields cached in memory for fast recall scoring.
 /// These are the only fields needed to compute composite_score() during recall.
 #[derive(Debug, Clone)]
@@ -549,6 +761,13 @@ pub struct ScoringRow {
     pub access_count: u32,
     pub valence: f64,
     pub consolidation_status: String,
+    /// NULL for ordinary memories; synthesized rows are eligible only when
+    /// this is exactly `verified`.
+    pub synthesis_state: Option<String>,
+    /// Query-facing representation labels for verified synthesized rows.
+    /// Ordinary memories leave both fields NULL and retain their legacy rank.
+    pub synthesis_axis: Option<String>,
+    pub synthesis_granularity: Option<String>,
     pub memory_type: String,
     pub namespace: String,
     // Cognitive dimensions (V10)
@@ -913,6 +1132,28 @@ pub struct LeakAuditReport {
     /// Up to `max_rids` candidate rids (the count is exact; this is a
     /// bounded sample for investigation).
     pub candidate_rids: Vec<String>,
+}
+
+/// One active verified synthesis whose evidence no longer satisfies the
+/// admission invariants. Reasons are stable machine-readable strings with
+/// source-specific context appended after `:`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SynthesisEvidenceAuditIssue {
+    pub synthesis_rid: String,
+    pub reasons: Vec<String>,
+}
+
+/// Read-only integrity report for evidence-versioned synthesis records.
+/// `candidate_count` is exact; `issues` is a bounded diagnostic sample.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SynthesisEvidenceAuditReport {
+    pub verified_active_count: usize,
+    pub candidate_count: usize,
+    pub orphan_dependency_count: usize,
+    pub sources_over_fanout_cap: usize,
+    pub dependency_cycle_count: usize,
+    pub duplicate_logical_key_group_count: usize,
+    pub issues: Vec<SynthesisEvidenceAuditIssue>,
 }
 
 // ── Cognition types (V3) ──

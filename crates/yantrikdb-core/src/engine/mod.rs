@@ -109,9 +109,10 @@ use crate::schema::{
     MIGRATE_V25_TO_V26, MIGRATE_V26_TO_V27, MIGRATE_V27_TO_V28, MIGRATE_V28_TO_V29,
     MIGRATE_V29_TO_V30, MIGRATE_V2_TO_V3, MIGRATE_V30_TO_V31, MIGRATE_V31_TO_V32,
     MIGRATE_V32_TO_V33, MIGRATE_V33_TO_V34, MIGRATE_V34_TO_V35, MIGRATE_V35_TO_V36,
-    MIGRATE_V36_TO_V37, MIGRATE_V37_TO_V38, MIGRATE_V3_TO_V4, MIGRATE_V40_TO_V41, MIGRATE_V4_TO_V5,
-    MIGRATE_V5_TO_V6, MIGRATE_V6_TO_V7, MIGRATE_V7_TO_V8, MIGRATE_V8_TO_V9, MIGRATE_V9_TO_V10,
-    SCHEMA_SQL, SCHEMA_VERSION,
+    MIGRATE_V36_TO_V37, MIGRATE_V37_TO_V38, MIGRATE_V3_TO_V4, MIGRATE_V40_TO_V41,
+    MIGRATE_V41_TO_V42, MIGRATE_V42_TO_V43, MIGRATE_V44_TO_V45, MIGRATE_V45_TO_V46,
+    MIGRATE_V4_TO_V5, MIGRATE_V5_TO_V6, MIGRATE_V6_TO_V7, MIGRATE_V7_TO_V8, MIGRATE_V8_TO_V9,
+    MIGRATE_V9_TO_V10, SCHEMA_SQL, SCHEMA_VERSION,
 };
 use crate::types::*;
 
@@ -206,6 +207,19 @@ pub struct YantrikDB {
     /// would have excluded before opting in. In-memory by design — a
     /// durable counter would put a write on the recall hot path.
     pub(crate) superseded_served_since_boot: std::sync::atomic::AtomicU64,
+    /// Since-boot count of recalls whose desired HNSW candidate pool exceeded
+    /// the engine's bounded oversampling ceiling. This makes a quality-relevant
+    /// cap visible without adding persistence or a write to the recall path.
+    pub(crate) recall_candidate_cap_bound_since_boot:
+        parking_lot::Mutex<std::collections::HashMap<String, u64>>,
+    /// True once namespace-level recall-cap telemetry has folded a new
+    /// namespace into the bounded overflow bucket.
+    pub(crate) recall_candidate_cap_namespace_stats_truncated_since_boot:
+        std::sync::atomic::AtomicBool,
+    /// Local cap refusals since open. In-memory by design: the rejected
+    /// transaction must remain side-effect-free; durable current pressure is
+    /// independently visible from `synthesis_dependencies` in `stats()`.
+    pub(crate) synthesis_fanout_refused_since_boot: std::sync::atomic::AtomicU64,
     /// **Embedder input window, detected empirically** (see
     /// `engine::embedder_window`). The `Embedder` trait cannot declare a
     /// window — a BYO or Python-callable embedder is opaque — so the
@@ -378,6 +392,12 @@ const _: () = {
 pub(crate) fn now() -> f64 {
     crate::time::now_secs()
 }
+
+/// Default maximum number of verified synthesis generations backed by one
+/// evidence record. The measured BEAM write-synthesis cohort normally emits
+/// two atomic axes per source; 64 leaves room for additional axes, rollups,
+/// and regeneration while bounding correction/forget invalidation work.
+pub const DEFAULT_SYNTHESIS_FANOUT_CAP: usize = 64;
 
 /// Compute BLAKE3 hash of an embedding blob.
 pub(crate) fn embedding_hash(embedding: &[f32]) -> Vec<u8> {
@@ -832,6 +852,10 @@ impl YantrikDB {
             // v38-v40 were code-only. v41 voids fits made against the old
             // meaning of `f_decay` — see MIGRATE_V40_TO_V41.
             (40, MIGRATE_V40_TO_V41),
+            (41, MIGRATE_V41_TO_V42),
+            (42, MIGRATE_V42_TO_V43),
+            (44, MIGRATE_V44_TO_V45),
+            (45, MIGRATE_V45_TO_V46),
         ];
         if let Some(v) = existing_version {
             for &(from_v, sql) in migrations {
@@ -1263,6 +1287,11 @@ impl YantrikDB {
         )?
         .as_u8();
 
+        // Missing is the v42-upgrade-compatible default. A malformed or zero
+        // persisted value fails open() loudly: silently disabling a write-
+        // amplification bound is the wrong failure direction.
+        Self::synthesis_fanout_cap_from_conn(&conn)?;
+
         // **Packs / issue #117.** Restore durable embedder identity.
         //
         // Before this read existed, `SearchState::initial` reconstructed
@@ -1299,6 +1328,12 @@ impl YantrikDB {
             pending_op_count: std::sync::atomic::AtomicI64::new(initial_pending),
             exclude_superseded_reads: std::sync::atomic::AtomicBool::new(exclude_superseded_reads),
             superseded_served_since_boot: std::sync::atomic::AtomicU64::new(0),
+            recall_candidate_cap_bound_since_boot: parking_lot::Mutex::new(
+                std::collections::HashMap::new(),
+            ),
+            recall_candidate_cap_namespace_stats_truncated_since_boot:
+                std::sync::atomic::AtomicBool::new(false),
+            synthesis_fanout_refused_since_boot: std::sync::atomic::AtomicU64::new(0),
             embedder_window_chars: std::sync::atomic::AtomicUsize::new(0),
             embedder_truncated_writes: std::sync::atomic::AtomicU64::new(0),
             embedder_chunked_writes: std::sync::atomic::AtomicU64::new(0),
@@ -1551,6 +1586,48 @@ impl YantrikDB {
         )?;
         self.exclude_superseded_reads
             .store(exclude_superseded, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
+    }
+
+    /// Maximum verified synthesis generations one evidence record may back
+    /// through local admission. Replicated durable writes are never discarded;
+    /// `stats().synthesis_fanout_sources_over_cap` exposes those exceptions.
+    pub fn synthesis_fanout_cap(&self) -> Result<usize> {
+        let conn = self.conn();
+        Self::synthesis_fanout_cap_from_conn(&conn)
+    }
+
+    pub(crate) fn synthesis_fanout_cap_from_conn(conn: &Connection) -> Result<usize> {
+        match Self::get_meta(conn, "synthesis_fanout_cap")? {
+            None => Ok(DEFAULT_SYNTHESIS_FANOUT_CAP),
+            Some(value) => value
+                .parse::<usize>()
+                .ok()
+                .filter(|cap| *cap > 0 && *cap <= i64::MAX as usize)
+                .ok_or_else(|| {
+                    crate::error::YantrikDbError::InvalidInput(format!(
+                        "meta.synthesis_fanout_cap must be in 1..={}, got {value:?}",
+                        i64::MAX
+                    ))
+                }),
+        }
+    }
+
+    /// Durably configure the local synthesis fan-out admission ceiling.
+    /// Lowering below the current high-water is allowed and blocks new local
+    /// generations until invalidation/supersession brings pressure under it.
+    pub fn set_synthesis_fanout_cap(&self, cap: usize) -> Result<()> {
+        if cap == 0 || cap > i64::MAX as usize {
+            return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                "synthesis fan-out cap must be in 1..={}",
+                i64::MAX
+            )));
+        }
+        let conn = self.conn();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('synthesis_fanout_cap', ?1)",
+            params![cap.to_string()],
+        )?;
         Ok(())
     }
 
@@ -2301,6 +2378,83 @@ impl YantrikDB {
         idempotency_key: Option<&str>,
         created_at: Option<f64>,
     ) -> Result<String> {
+        self.record_text_with_idempotency_routed(
+            text,
+            memory_type,
+            importance,
+            valence,
+            half_life,
+            metadata,
+            namespace,
+            certainty,
+            domain,
+            source,
+            emotional_state,
+            idempotency_key,
+            created_at,
+            true,
+            None,
+        )
+    }
+
+    /// Sync-only variant for callers that must attach durable side effects to
+    /// the materialized memory row before returning success.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_text_with_idempotency_sync_only(
+        &self,
+        text: &str,
+        memory_type: &str,
+        importance: f64,
+        valence: f64,
+        half_life: f64,
+        metadata: &serde_json::Value,
+        namespace: &str,
+        certainty: f64,
+        domain: &str,
+        source: &str,
+        emotional_state: Option<&str>,
+        idempotency_key: Option<&str>,
+        created_at: Option<f64>,
+        synthesis: Option<&SynthesisAdmission>,
+    ) -> Result<String> {
+        self.record_text_with_idempotency_routed(
+            text,
+            memory_type,
+            importance,
+            valence,
+            half_life,
+            metadata,
+            namespace,
+            certainty,
+            domain,
+            source,
+            emotional_state,
+            idempotency_key,
+            created_at,
+            false,
+            synthesis,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_text_with_idempotency_routed(
+        &self,
+        text: &str,
+        memory_type: &str,
+        importance: f64,
+        valence: f64,
+        half_life: f64,
+        metadata: &serde_json::Value,
+        namespace: &str,
+        certainty: f64,
+        domain: &str,
+        source: &str,
+        emotional_state: Option<&str>,
+        idempotency_key: Option<&str>,
+        created_at: Option<f64>,
+        allow_queued_route: bool,
+        synthesis: Option<&SynthesisAdmission>,
+    ) -> Result<String> {
         // v0.9.3 contract gate: scalars validated BEFORE calibration mutates
         // the namespace's running distribution. (The embedding is engine-
         // generated below and validated inside the embed step.)
@@ -2323,12 +2477,14 @@ impl YantrikDB {
         // too (T06 coverage). A warn-mode Flagged verdict is carried to the
         // routed path and counted only after the write commits (4a.6b).
         let gate_verdict = self.gate_provenance(source, metadata)?;
-        // **Issue #117 / packs.** This is the engine-embeds-the-text
-        // path, so the vector about to be stored provably comes from the
-        // attached embedder — the one moment this database can honestly
-        // claim an embedding-space identity. One relaxed atomic load
-        // after the first write.
-        self.stamp_embedder_identity_once();
+        // **Issue #117 / packs.** Public writes preserve the historical
+        // early stamp. The sync-only consolidation route delays it until
+        // after acquiring and revalidating the sync guard: a queue-mode
+        // deferral must not mutate durable metadata while claiming that no
+        // durable state changed.
+        if allow_queued_route {
+            self.stamp_embedder_identity_once();
+        }
         // Task 29 (Ingest Integrity): strip any leaked tool-call
         // serialization tail BEFORE embedding, so both the computed vector
         // and the stored text reflect the real memory rather than the
@@ -2475,6 +2631,9 @@ impl YantrikDB {
             let sync_guard = match self.write_router.try_enter_sync_writer() {
                 Some(g) => g,
                 None => {
+                    if !allow_queued_route {
+                        return Err(YantrikDbError::ConsolidationDeferredDuringReembed);
+                    }
                     // Queueing state — reembed cutover is in
                     // flight. Route to the queued path. The
                     // pre-computed embedding is discarded; the
@@ -2526,6 +2685,10 @@ impl YantrikDB {
                 continue;
             }
 
+            if !allow_queued_route {
+                self.stamp_embedder_identity_once();
+            }
+
             // Step 6: commit. The shared post-guard helper handles
             // SQL insert + vec_index.append + log_op (which itself
             // stamps applied_generation = state.generation).
@@ -2549,6 +2712,7 @@ impl YantrikDB {
                 gate_verdict,
                 idem,
                 created_at,
+                synthesis,
             );
         }
     }

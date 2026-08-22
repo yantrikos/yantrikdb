@@ -8,7 +8,12 @@
 // v40 adds `memory_chunks` (chunked embeddings — one record, N window
 // vectors; docs/chunked_embeddings_design.md). Same v39 shape: a new
 // CREATE TABLE IF NOT EXISTS in SCHEMA_SQL, no migration constant.
-pub const SCHEMA_VERSION: i32 = 41;
+// v44 adds the expansion-outcome ledger. It is additive and is likewise
+// created by SCHEMA_SQL on every open. v45 adds exact outcome finalization so
+// missing telemetry remains unknown rather than becoming an implicit negative.
+// v46 keeps caller-added omissions distinct from children that were served and
+// freezes the query/child features needed for offline membership calibration.
+pub const SCHEMA_VERSION: i32 = 46;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -101,6 +106,21 @@ CREATE TABLE IF NOT EXISTS memories (
     confidence_basis TEXT,
     idempotency_key TEXT,
     origin_actor TEXT,
+
+    -- v42: engine-owned synthesis lifecycle. NULL on ordinary memories.
+    -- These remain typed beside encrypted metadata so recall can fail closed
+    -- without decrypting or joining the evidence graph on its hot path.
+    synthesis_axis TEXT,
+    synthesis_granularity TEXT
+        CHECK (synthesis_granularity IS NULL OR synthesis_granularity IN ('atomic', 'rollup')),
+    synthesis_logical_key TEXT,
+    synthesis_evidence_version TEXT,
+    -- HLC of the authoritative record op. This is the deterministic
+    -- generation order used to select one verified logical synthesis.
+    synthesis_generation_hlc BLOB,
+    synthesis_state TEXT
+        CHECK (synthesis_state IS NULL OR synthesis_state IN
+               ('verified', 'invalidated', 'unverified', 'superseded')),
 
     -- v32 (structural query / list_records): indexed generated columns that
     -- extract JSON metadata fields for typed enumeration without scanning the
@@ -879,6 +899,23 @@ CREATE TABLE IF NOT EXISTS consolidation_members (
     PRIMARY KEY (consolidation_rid, source_rid)
 );
 
+-- v42: authoritative synthesis provenance. Unlike consolidation_members,
+-- this records the observed revision of each direct source and flattened raw
+-- leaf, allowing one indexed correction/forget invalidation with no recursive
+-- query on recall.
+CREATE TABLE IF NOT EXISTS synthesis_dependencies (
+    synthesis_rid TEXT NOT NULL,
+    source_rid TEXT NOT NULL,
+    source_revision_num INTEGER NOT NULL CHECK (source_revision_num >= 0),
+    namespace TEXT NOT NULL,
+    is_direct INTEGER NOT NULL CHECK (is_direct IN (0, 1)),
+    PRIMARY KEY (synthesis_rid, source_rid)
+);
+CREATE INDEX IF NOT EXISTS idx_synthesis_dependencies_source
+    ON synthesis_dependencies(namespace, source_rid, synthesis_rid);
+CREATE INDEX IF NOT EXISTS idx_synthesis_dependencies_synthesis
+    ON synthesis_dependencies(synthesis_rid, is_direct, source_rid);
+
 -- Conflict tracking (first-class data)
 CREATE TABLE IF NOT EXISTS conflicts (
     conflict_id TEXT PRIMARY KEY,           -- UUIDv7
@@ -1148,6 +1185,85 @@ CREATE TABLE IF NOT EXISTS recall_impressions (
 );
 CREATE INDEX IF NOT EXISTS idx_impressions_rid ON recall_impressions(rid, created_at);
 CREATE INDEX IF NOT EXISTS idx_impressions_created ON recall_impressions(created_at);
+
+-- v44: observable rollup outcomes for caller-side organization layers. These
+-- are separate from raw recall_impressions because organizer candidate recall
+-- is internal and must not be logged as though the whole pool was served.
+CREATE TABLE IF NOT EXISTS rollup_impressions (
+    impression_id TEXT PRIMARY KEY,
+    rollup_rid TEXT NOT NULL,
+    query_hash TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    rank INTEGER NOT NULL CHECK (rank >= 0),
+    score REAL NOT NULL,
+    requested_count INTEGER CHECK (requested_count IS NULL OR requested_count > 0),
+    query_shape TEXT CHECK (
+        query_shape IS NULL OR query_shape IN ('point', 'list', 'ordered_list', 'summary', 'other')
+    ),
+    expansion_payload_hash TEXT,
+    outcome_payload_hash TEXT,
+    created_at REAL NOT NULL,
+    expanded_at REAL,
+    outcome_finalized_at REAL,
+    FOREIGN KEY (rollup_rid) REFERENCES memories(rid) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_rollup_impressions_rollup
+    ON rollup_impressions(rollup_rid, created_at);
+CREATE INDEX IF NOT EXISTS idx_rollup_impressions_query
+    ON rollup_impressions(query_hash, created_at);
+CREATE TABLE IF NOT EXISTS rollup_impression_children (
+    impression_id TEXT NOT NULL,
+    child_rid TEXT NOT NULL,
+    rank INTEGER NOT NULL CHECK (rank >= 0),
+    score REAL CHECK (score IS NULL OR ABS(score) <= 1.7976931348623157e308),
+    PRIMARY KEY (impression_id, child_rid),
+    FOREIGN KEY (impression_id)
+        REFERENCES rollup_impressions(impression_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_rollup_impression_children_child
+    ON rollup_impression_children(child_rid, impression_id);
+CREATE TABLE IF NOT EXISTS rollup_impression_outcomes (
+    outcome_id TEXT PRIMARY KEY,
+    impression_id TEXT NOT NULL,
+    child_rid TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('selected', 'corrected')),
+    created_at REAL NOT NULL,
+    UNIQUE (impression_id, child_rid, source),
+    FOREIGN KEY (impression_id, child_rid)
+        REFERENCES rollup_impression_children(impression_id, child_rid)
+        ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_rollup_impression_outcomes_created
+    ON rollup_impression_outcomes(created_at);
+CREATE TABLE IF NOT EXISTS rollup_impression_additions (
+    impression_id TEXT NOT NULL,
+    child_rid TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('caller_false_negative')),
+    created_at REAL NOT NULL,
+    PRIMARY KEY (impression_id, child_rid),
+    FOREIGN KEY (impression_id)
+        REFERENCES rollup_impressions(impression_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_rollup_impression_additions_child
+    ON rollup_impression_additions(child_rid, impression_id);
+CREATE TRIGGER IF NOT EXISTS trg_rollup_addition_not_returned
+BEFORE INSERT ON rollup_impression_additions
+WHEN EXISTS (
+    SELECT 1 FROM rollup_impression_children c
+    WHERE c.impression_id = NEW.impression_id AND c.child_rid = NEW.child_rid
+)
+BEGIN
+    SELECT RAISE(ABORT, 'rollup omission was already returned');
+END;
+CREATE TRIGGER IF NOT EXISTS trg_rollup_returned_not_addition
+BEFORE INSERT ON rollup_impression_children
+WHEN EXISTS (
+    SELECT 1 FROM rollup_impression_additions a
+    WHERE a.impression_id = NEW.impression_id AND a.child_rid = NEW.child_rid
+)
+BEGIN
+    SELECT RAISE(ABORT, 'rollup child was already labeled as omitted');
+END;
 
 -- v0.10 Item 2 (schema v35): typed ranking labels, bound to impressions.
 -- Sources (sol ruling 1): 'explicit' (recall feedback, weight 1.0);
@@ -2810,4 +2926,83 @@ UPDATE learned_weights SET
 WHERE id = 1;
 INSERT OR REPLACE INTO meta (key, value)
     VALUES ('ranking_feature_epoch', CAST(strftime('%s','now') AS TEXT));
+";
+
+/// v42: fail-closed, evidence-versioned synthesis lifecycle. Ordinary rows
+/// migrate to NULL typed fields; generated rows are admitted with a complete
+/// dependency closure by the engine's record transaction.
+pub const MIGRATE_V41_TO_V42: &str = "
+ALTER TABLE memories ADD COLUMN synthesis_axis TEXT;
+ALTER TABLE memories ADD COLUMN synthesis_granularity TEXT
+    CHECK (synthesis_granularity IS NULL OR synthesis_granularity IN ('atomic', 'rollup'));
+ALTER TABLE memories ADD COLUMN synthesis_logical_key TEXT;
+ALTER TABLE memories ADD COLUMN synthesis_evidence_version TEXT;
+ALTER TABLE memories ADD COLUMN synthesis_state TEXT
+    CHECK (synthesis_state IS NULL OR synthesis_state IN
+           ('verified', 'invalidated', 'unverified', 'superseded'));
+CREATE TABLE IF NOT EXISTS synthesis_dependencies (
+    synthesis_rid TEXT NOT NULL,
+    source_rid TEXT NOT NULL,
+    source_revision_num INTEGER NOT NULL CHECK (source_revision_num >= 0),
+    namespace TEXT NOT NULL,
+    is_direct INTEGER NOT NULL CHECK (is_direct IN (0, 1)),
+    PRIMARY KEY (synthesis_rid, source_rid)
+);
+CREATE INDEX IF NOT EXISTS idx_synthesis_dependencies_source
+    ON synthesis_dependencies(namespace, source_rid, synthesis_rid);
+CREATE INDEX IF NOT EXISTS idx_synthesis_dependencies_synthesis
+    ON synthesis_dependencies(synthesis_rid, is_direct, source_rid);
+";
+
+pub const MIGRATE_V42_TO_V43: &str = "
+ALTER TABLE memories ADD COLUMN synthesis_generation_hlc BLOB;
+";
+
+pub const MIGRATE_V44_TO_V45: &str = "
+-- v44 was additive SCHEMA_SQL with no migration. Because migrations run before
+-- SCHEMA_SQL, a database jumping directly from v43 must bootstrap that table.
+CREATE TABLE IF NOT EXISTS rollup_impressions (
+    impression_id TEXT PRIMARY KEY,
+    rollup_rid TEXT NOT NULL,
+    query_hash TEXT NOT NULL,
+    namespace TEXT NOT NULL,
+    rank INTEGER NOT NULL CHECK (rank >= 0),
+    score REAL NOT NULL,
+    expansion_payload_hash TEXT,
+    created_at REAL NOT NULL,
+    expanded_at REAL,
+    FOREIGN KEY (rollup_rid) REFERENCES memories(rid) ON DELETE CASCADE
+);
+ALTER TABLE rollup_impressions ADD COLUMN outcome_payload_hash TEXT;
+ALTER TABLE rollup_impressions ADD COLUMN outcome_finalized_at REAL;
+";
+
+pub const MIGRATE_V45_TO_V46: &str = "
+ALTER TABLE rollup_impressions ADD COLUMN requested_count INTEGER
+    CHECK (requested_count IS NULL OR requested_count > 0);
+ALTER TABLE rollup_impressions ADD COLUMN query_shape TEXT
+    CHECK (query_shape IS NULL OR query_shape IN ('point', 'list', 'ordered_list', 'summary', 'other'));
+-- v44 was additive SCHEMA_SQL. A database jumping from v43 reaches this
+-- migration before SCHEMA_SQL, so bootstrap the child table before ALTER.
+CREATE TABLE IF NOT EXISTS rollup_impression_children (
+    impression_id TEXT NOT NULL,
+    child_rid TEXT NOT NULL,
+    rank INTEGER NOT NULL CHECK (rank >= 0),
+    PRIMARY KEY (impression_id, child_rid),
+    FOREIGN KEY (impression_id)
+        REFERENCES rollup_impressions(impression_id) ON DELETE CASCADE
+);
+ALTER TABLE rollup_impression_children ADD COLUMN score REAL
+    CHECK (score IS NULL OR ABS(score) <= 1.7976931348623157e308);
+CREATE TABLE IF NOT EXISTS rollup_impression_additions (
+    impression_id TEXT NOT NULL,
+    child_rid TEXT NOT NULL,
+    source TEXT NOT NULL CHECK (source IN ('caller_false_negative')),
+    created_at REAL NOT NULL,
+    PRIMARY KEY (impression_id, child_rid),
+    FOREIGN KEY (impression_id)
+        REFERENCES rollup_impressions(impression_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_rollup_impression_additions_child
+    ON rollup_impression_additions(child_rid, impression_id);
 ";

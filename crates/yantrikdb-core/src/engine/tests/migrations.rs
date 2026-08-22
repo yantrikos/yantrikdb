@@ -418,3 +418,231 @@ fn schema_v26_migration_replay_is_idempotent() {
     )
     .unwrap();
 }
+
+#[test]
+fn schema_v43_fresh_install_has_typed_synthesis_lifecycle() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let conn = db.conn();
+    let cols = table_columns(&conn, "memories");
+    for required in [
+        "synthesis_axis",
+        "synthesis_granularity",
+        "synthesis_logical_key",
+        "synthesis_evidence_version",
+        "synthesis_generation_hlc",
+        "synthesis_state",
+    ] {
+        assert!(
+            cols.iter().any(|col| col == required),
+            "v43 fresh schema missing memories.{required}"
+        );
+    }
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type = 'table' AND name = 'synthesis_dependencies'",
+            [],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        1
+    );
+    for index in [
+        "idx_synthesis_dependencies_source",
+        "idx_synthesis_dependencies_synthesis",
+    ] {
+        assert!(
+            index_exists(&conn, index),
+            "v42 fresh schema missing {index}"
+        );
+    }
+}
+
+#[test]
+fn schema_v46_fresh_install_has_rollup_outcome_ledger() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let conn = db.conn();
+    for table in [
+        "rollup_impressions",
+        "rollup_impression_children",
+        "rollup_impression_outcomes",
+        "rollup_impression_additions",
+    ] {
+        assert_eq!(
+            conn.query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |row| row.get::<_, i64>(0),
+            )
+            .unwrap(),
+            1,
+            "v46 fresh schema missing {table}"
+        );
+    }
+    for index in [
+        "idx_rollup_impressions_rollup",
+        "idx_rollup_impressions_query",
+        "idx_rollup_impression_children_child",
+        "idx_rollup_impression_outcomes_created",
+        "idx_rollup_impression_additions_child",
+    ] {
+        assert!(
+            index_exists(&conn, index),
+            "v46 fresh schema missing {index}"
+        );
+    }
+    for expected in ["requested_count", "query_shape"] {
+        assert!(
+            table_columns(&conn, "rollup_impressions")
+                .iter()
+                .any(|column| column == expected),
+            "v46 fresh schema missing rollup_impressions.{expected}"
+        );
+    }
+    assert!(
+        table_columns(&conn, "rollup_impression_children")
+            .iter()
+            .any(|column| column == "score"),
+        "v46 fresh schema missing rollup_impression_children.score"
+    );
+}
+
+#[test]
+fn schema_v46_migration_adds_omission_features() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE rollup_impressions (impression_id TEXT PRIMARY KEY); \
+         CREATE TABLE rollup_impression_children ( \
+             impression_id TEXT NOT NULL, child_rid TEXT NOT NULL, rank INTEGER NOT NULL, \
+             PRIMARY KEY (impression_id, child_rid) \
+         );",
+    )
+    .unwrap();
+    conn.execute_batch(crate::base::schema::MIGRATE_V45_TO_V46)
+        .unwrap();
+
+    let impression_cols = table_columns(&conn, "rollup_impressions");
+    assert!(impression_cols.iter().any(|col| col == "requested_count"));
+    assert!(impression_cols.iter().any(|col| col == "query_shape"));
+    assert!(table_columns(&conn, "rollup_impression_children")
+        .iter()
+        .any(|col| col == "score"));
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            ["rollup_impression_additions"],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        1
+    );
+    assert!(index_exists(&conn, "idx_rollup_impression_additions_child"));
+}
+
+#[test]
+fn schema_v46_migration_bootstraps_child_ledger_skipped_by_v43() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(crate::base::schema::MIGRATE_V44_TO_V45)
+        .unwrap();
+    conn.execute_batch(crate::base::schema::MIGRATE_V45_TO_V46)
+        .unwrap();
+
+    assert!(table_columns(&conn, "rollup_impression_children")
+        .iter()
+        .any(|column| column == "score"));
+    assert_eq!(
+        conn.query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+            ["rollup_impression_additions"],
+            |row| row.get::<_, i64>(0),
+        )
+        .unwrap(),
+        1
+    );
+}
+
+#[test]
+fn schema_v45_migration_adds_rollup_outcome_finalization() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute(
+        "CREATE TABLE rollup_impressions (impression_id TEXT PRIMARY KEY)",
+        [],
+    )
+    .unwrap();
+    conn.execute_batch(crate::base::schema::MIGRATE_V44_TO_V45)
+        .unwrap();
+
+    let cols = table_columns(&conn, "rollup_impressions");
+    assert!(cols.iter().any(|col| col == "outcome_payload_hash"));
+    assert!(cols.iter().any(|col| col == "outcome_finalized_at"));
+}
+
+#[test]
+fn schema_v45_migration_bootstraps_ledger_skipped_by_v43() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(crate::base::schema::MIGRATE_V44_TO_V45)
+        .unwrap();
+
+    let cols = table_columns(&conn, "rollup_impressions");
+    for expected in [
+        "rollup_rid",
+        "expansion_payload_hash",
+        "outcome_payload_hash",
+        "outcome_finalized_at",
+    ] {
+        assert!(cols.iter().any(|col| col == expected), "missing {expected}");
+    }
+}
+
+#[test]
+fn schema_v43_migration_adds_synthesis_generation_clock() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute("CREATE TABLE memories (rid TEXT PRIMARY KEY)", [])
+        .unwrap();
+    conn.execute_batch(crate::base::schema::MIGRATE_V42_TO_V43)
+        .unwrap();
+
+    let cols = table_columns(&conn, "memories");
+    assert!(cols.iter().any(|col| col == "synthesis_generation_hlc"));
+}
+
+#[test]
+fn schema_v42_migration_adds_the_same_synthesis_surface() {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute("CREATE TABLE memories (rid TEXT PRIMARY KEY)", [])
+        .unwrap();
+    conn.execute_batch(crate::base::schema::MIGRATE_V41_TO_V42)
+        .unwrap();
+
+    let cols = table_columns(&conn, "memories");
+    for required in [
+        "synthesis_axis",
+        "synthesis_granularity",
+        "synthesis_logical_key",
+        "synthesis_evidence_version",
+        "synthesis_state",
+    ] {
+        assert!(cols.iter().any(|col| col == required));
+    }
+    assert!(index_exists(&conn, "idx_synthesis_dependencies_source"));
+    assert!(index_exists(&conn, "idx_synthesis_dependencies_synthesis"));
+
+    conn.execute(
+        "INSERT INTO memories (rid, synthesis_granularity, synthesis_state) \
+         VALUES ('ordinary', NULL, NULL), ('synth', 'atomic', 'verified')",
+        [],
+    )
+    .unwrap();
+    assert!(conn
+        .execute(
+            "INSERT INTO memories (rid, synthesis_granularity) VALUES ('bad-g', 'session')",
+            [],
+        )
+        .is_err());
+    assert!(conn
+        .execute(
+            "INSERT INTO memories (rid, synthesis_state) VALUES ('bad-s', 'active')",
+            [],
+        )
+        .is_err());
+}

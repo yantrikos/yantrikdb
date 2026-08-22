@@ -155,7 +155,8 @@ impl PyYantrikDB {
         source: Option<&str>,
         // Issue #46: confidence first-class on recall. `certainty_min`
         // filters candidates whose `certainty < min`. `order` re-sorts
-        // the final top_k: "relevance" (default) | "certainty" | "recency".
+        // the final top_k: "relevance" (default) | "certainty" | "recency" |
+        // "first_mention" (ascending; "chronological" is an alias).
         certainty_min: Option<f64>,
         order: Option<&str>,
         // v0.10 Item 1: re-admit superseded records (stamped with
@@ -217,7 +218,7 @@ impl PyYantrikDB {
             }
             if !results.is_empty() {
                 // Cut against the MAX score, not results[0] —
-                // order="certainty"/"recency" re-sorts the list. The
+                // Non-relevance order modes re-sort the list. The
                 // max-scoring result passes its own floor whenever
                 // scores are non-negative (the practical case); if the
                 // floor would somehow orphan everything, trim nothing.
@@ -1213,6 +1214,43 @@ impl PyYantrikDB {
         Ok(d.into())
     }
 
+    /// Read-only audit of active verified syntheses against their recorded
+    /// evidence revisions and provenance shape.
+    #[pyo3(signature = (namespace=None, max_issues=100))]
+    fn audit_synthesis_evidence(
+        &self,
+        py: Python<'_>,
+        namespace: Option<&str>,
+        max_issues: usize,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let report = db
+            .audit_synthesis_evidence(namespace, max_issues)
+            .map_err(map_err)?;
+        let d = PyDict::new(py);
+        d.set_item("verified_active_count", report.verified_active_count)?;
+        d.set_item("candidate_count", report.candidate_count)?;
+        d.set_item("orphan_dependency_count", report.orphan_dependency_count)?;
+        d.set_item("sources_over_fanout_cap", report.sources_over_fanout_cap)?;
+        d.set_item("dependency_cycle_count", report.dependency_cycle_count)?;
+        d.set_item(
+            "duplicate_logical_key_group_count",
+            report.duplicate_logical_key_group_count,
+        )?;
+        let issues = report
+            .issues
+            .into_iter()
+            .map(|issue| {
+                let item = PyDict::new(py);
+                item.set_item("synthesis_rid", issue.synthesis_rid)?;
+                item.set_item("reasons", issue.reasons)?;
+                Ok::<PyObject, pyo3::PyErr>(item.into())
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        d.set_item("issues", issues)?;
+        Ok(d.into())
+    }
+
     fn record_batch(
         &self,
         py: Python<'_>,
@@ -1391,6 +1429,199 @@ impl PyYantrikDB {
         let db = self.get_inner()?;
         let refs: Vec<&str> = rids.iter().map(|s| s.as_str()).collect();
         db.reject_recalled(&refs).map_err(map_err)
+    }
+
+    #[pyo3(signature = (rollup_rid, query_text, namespace=None, rank=0, score=0.0, impression_id=None))]
+    fn note_rollup_impression(
+        &self,
+        rollup_rid: &str,
+        query_text: &str,
+        namespace: Option<&str>,
+        rank: usize,
+        score: f64,
+        impression_id: Option<&str>,
+    ) -> PyResult<String> {
+        let db = self.get_inner()?;
+        db.note_rollup_impression(
+            rollup_rid,
+            query_text,
+            namespace,
+            rank,
+            score,
+            impression_id,
+        )
+        .map_err(map_err)
+    }
+
+    #[pyo3(signature = (rollup_rid, query_text, namespace=None, rank=0, score=0.0, requested_count=None, query_shape=None, impression_id=None))]
+    fn note_rollup_impression_features(
+        &self,
+        rollup_rid: &str,
+        query_text: &str,
+        namespace: Option<&str>,
+        rank: usize,
+        score: f64,
+        requested_count: Option<usize>,
+        query_shape: Option<&str>,
+        impression_id: Option<&str>,
+    ) -> PyResult<String> {
+        let db = self.get_inner()?;
+        db.note_rollup_impression_with_features(
+            rollup_rid,
+            query_text,
+            namespace,
+            rank,
+            score,
+            requested_count,
+            query_shape,
+            impression_id,
+        )
+        .map_err(map_err)
+    }
+
+    fn note_rollup_expansion(
+        &self,
+        impression_id: &str,
+        returned_child_rids: Vec<String>,
+    ) -> PyResult<usize> {
+        let db = self.get_inner()?;
+        let refs: Vec<&str> = returned_child_rids.iter().map(String::as_str).collect();
+        db.note_rollup_expansion(impression_id, &refs)
+            .map_err(map_err)
+    }
+
+    fn note_rollup_expansion_features(
+        &self,
+        impression_id: &str,
+        returned_child_rids: Vec<String>,
+        returned_child_scores: Vec<Option<f64>>,
+    ) -> PyResult<usize> {
+        if returned_child_rids.len() != returned_child_scores.len() {
+            return Err(PyValueError::new_err(
+                "returned_child_rids and returned_child_scores must have equal length",
+            ));
+        }
+        let db = self.get_inner()?;
+        let children: Vec<(&str, Option<f64>)> = returned_child_rids
+            .iter()
+            .zip(returned_child_scores)
+            .map(|(rid, score)| (rid.as_str(), score))
+            .collect();
+        db.note_rollup_expansion_with_scores(impression_id, &children)
+            .map_err(map_err)
+    }
+
+    #[pyo3(signature = (impression_id, child_rid, source="selected"))]
+    fn note_rollup_selection(
+        &self,
+        impression_id: &str,
+        child_rid: &str,
+        source: &str,
+    ) -> PyResult<bool> {
+        let db = self.get_inner()?;
+        db.note_rollup_selection(impression_id, child_rid, source)
+            .map_err(map_err)
+    }
+
+    #[pyo3(signature = (impression_id, selected_child_rids, corrected_child_rids=vec![], omitted_child_rids=vec![]))]
+    fn finalize_rollup_outcome(
+        &self,
+        impression_id: &str,
+        selected_child_rids: Vec<String>,
+        corrected_child_rids: Vec<String>,
+        omitted_child_rids: Vec<String>,
+    ) -> PyResult<usize> {
+        let db = self.get_inner()?;
+        let selected: Vec<&str> = selected_child_rids.iter().map(String::as_str).collect();
+        let corrected: Vec<&str> = corrected_child_rids.iter().map(String::as_str).collect();
+        let omitted: Vec<&str> = omitted_child_rids.iter().map(String::as_str).collect();
+        db.finalize_rollup_outcome_with_omissions(impression_id, &selected, &corrected, &omitted)
+            .map_err(map_err)
+    }
+
+    #[pyo3(signature = (namespace=None, since=None))]
+    fn rollup_outcome_report(
+        &self,
+        py: Python<'_>,
+        namespace: Option<&str>,
+        since: Option<f64>,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let report = db
+            .rollup_outcome_report(namespace, since)
+            .map_err(map_err)?;
+        let value = serde_json::to_value(report).map_err(|error| {
+            PyRuntimeError::new_err(format!(
+                "rollup outcome report serialization failed: {error}"
+            ))
+        })?;
+        json_to_py(py, &value)
+    }
+
+    #[pyo3(signature = (namespace=None, since=None, until=None, limit=1000))]
+    fn rollup_outcome_examples(
+        &self,
+        py: Python<'_>,
+        namespace: Option<&str>,
+        since: Option<f64>,
+        until: Option<f64>,
+        limit: usize,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let examples = db
+            .rollup_outcome_examples(namespace, since, until, limit)
+            .map_err(map_err)?;
+        let value = serde_json::to_value(examples).map_err(|error| {
+            PyRuntimeError::new_err(format!(
+                "rollup outcome example serialization failed: {error}"
+            ))
+        })?;
+        json_to_py(py, &value)
+    }
+
+    #[pyo3(signature = (namespace=None, since=None))]
+    fn rollup_membership_report(
+        &self,
+        py: Python<'_>,
+        namespace: Option<&str>,
+        since: Option<f64>,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let report = db
+            .rollup_membership_report(namespace, since)
+            .map_err(map_err)?;
+        let value = serde_json::to_value(report).map_err(|error| {
+            PyRuntimeError::new_err(format!(
+                "rollup membership report serialization failed: {error}"
+            ))
+        })?;
+        json_to_py(py, &value)
+    }
+
+    #[pyo3(signature = (namespace=None, finalized_since=None, finalized_until=None, limit_impressions=1000))]
+    fn rollup_membership_examples(
+        &self,
+        py: Python<'_>,
+        namespace: Option<&str>,
+        finalized_since: Option<f64>,
+        finalized_until: Option<f64>,
+        limit_impressions: usize,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let examples = db
+            .rollup_membership_examples(
+                namespace,
+                finalized_since,
+                finalized_until,
+                limit_impressions,
+            )
+            .map_err(map_err)?;
+        let value = serde_json::to_value(examples).map_err(|error| {
+            PyRuntimeError::new_err(format!(
+                "rollup membership example serialization failed: {error}"
+            ))
+        })?;
+        json_to_py(py, &value)
     }
 
     /// v0.10 Item 2 — run the self-sufficient learning loop once and

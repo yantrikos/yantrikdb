@@ -37,6 +37,7 @@ from .base import LLM, Schema
 _MAX_RETRIES = 4
 _RETRY_BASE_DELAY = 3
 _TIMEOUT = int(os.environ.get("OLLAMA_TIMEOUT", "600"))
+_SEED = int(os.environ.get("OMB_OLLAMA_SEED", "0"))
 
 _JSON_TYPES = {"boolean", "integer", "number"}
 
@@ -61,44 +62,48 @@ def _host() -> str:
     return h.rstrip("/")
 
 
-def _extract_json(text: str) -> dict | None:
-    """Best-effort JSON out of a model response (bare, fenced, or embedded)."""
+def _extract_json(text: str) -> dict | list | None:
+    """Best-effort JSON value out of a response (bare, fenced, or embedded)."""
     text = text.strip()
     try:
         v = json.loads(text)
-        return v if isinstance(v, dict) else None
+        return v if isinstance(v, (dict, list)) else None
     except json.JSONDecodeError:
         pass
     fenced = re.search(r"```(?:json)?\s*(.+?)\s*```", text, re.S)
     if fenced:
         try:
             v = json.loads(fenced.group(1))
-            return v if isinstance(v, dict) else None
+            return v if isinstance(v, (dict, list)) else None
         except json.JSONDecodeError:
             pass
-    # First balanced object in the text.
-    start = text.find("{")
-    while start != -1:
-        depth = 0
-        for i in range(start, len(text)):
-            if text[i] == "{":
-                depth += 1
-            elif text[i] == "}":
-                depth -= 1
-                if depth == 0:
-                    try:
-                        v = json.loads(text[start:i + 1])
-                        if isinstance(v, dict):
-                            return v
-                    except json.JSONDecodeError:
-                        break
-        start = text.find("{", start + 1)
+    # First decodable object or array embedded in prose. ``raw_decode``
+    # handles brackets inside strings, unlike manual delimiter counting.
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r"[\[{]", text):
+        try:
+            v, _ = decoder.raw_decode(text[match.start():])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(v, (dict, list)):
+            return v
     return None
 
 
 class OllamaLLM(LLM):
-    def __init__(self, model: str = "gpt-oss-backup:20b"):
+    def __init__(
+        self,
+        model: str = "gpt-oss-backup:20b",
+        *,
+        think: bool | None = None,
+        num_predict: int | None = None,
+        num_ctx: int | None = None,
+    ):
         self._model = model
+        self._think = think
+        self._num_predict = num_predict
+        self._num_ctx = num_ctx
+        self.last_response_content = ""
 
     @property
     def model_id(self) -> str:
@@ -119,10 +124,18 @@ class OllamaLLM(LLM):
         )
 
     def generate(self, prompt: str, schema: Schema) -> dict:
+        # Cloud and local routes can otherwise choose different samples even
+        # at temperature zero. A fixed seed makes policy comparisons testable;
+        # callers can override it for deliberate variance measurements.
+        options = {"temperature": 0.0, "seed": _SEED}
+        if self._num_predict is not None:
+            options["num_predict"] = self._num_predict
+        if self._num_ctx is not None:
+            options["num_ctx"] = self._num_ctx
         body = {
             "model": self._model,
             "stream": False,
-            "options": {"temperature": 0.0},
+            "options": options,
             # Sent even though cloud routing ignores it: local models DO
             # honour it, and it costs nothing where it is dropped.
             "format": {
@@ -132,6 +145,8 @@ class OllamaLLM(LLM):
             },
             "messages": [{"role": "user", "content": prompt + self._instruction(schema)}],
         }
+        if self._think is not None:
+            body["think"] = self._think
         data = json.dumps(body).encode()
         typed = [
             k for k in schema.required
@@ -157,9 +172,16 @@ class OllamaLLM(LLM):
                 with urllib.request.urlopen(req, timeout=_TIMEOUT) as r:
                     resp = json.load(r)
                 content = resp["message"]["content"]
+                self.last_response_content = content
                 parsed = _extract_json(content)
-                if parsed is not None and all(k in parsed for k in schema.required):
+                if isinstance(parsed, dict) and all(
+                    k in parsed for k in schema.required
+                ):
                     return parsed
+                if isinstance(parsed, list) and len(schema.required) == 1:
+                    key = schema.required[0]
+                    if schema.properties.get(key, {}).get("type") == "array":
+                        return {key: parsed}
                 # Unusable content. Retry only when we cannot fall back —
                 # i.e. when a typed verdict field is required, or nothing at
                 # all came back. Prose for an all-string schema is fine.
@@ -192,6 +214,6 @@ class OllamaLLM(LLM):
         out = {k: "" for k in schema.required}
         primary = "answer" if "answer" in schema.required else schema.required[-1]
         out[primary] = content.strip()
-        if parsed:
+        if isinstance(parsed, dict):
             out.update({k: v for k, v in parsed.items() if k in out})
         return out

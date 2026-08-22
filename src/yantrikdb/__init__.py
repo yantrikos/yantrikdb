@@ -14,7 +14,24 @@ from yantrikdb._yantrikdb_rust import (
     TenantManager,
     YantrikDB,
 )
-from yantrikdb.consolidate import consolidate
+from yantrikdb.consolidate import consolidate, record_synthesis
+from yantrikdb.organize import (
+    ConcernItem,
+    ConcernPlan,
+    EvidenceAssignment,
+    OrganizationPlan,
+    TopicHandle,
+    assign_evidence_to_handles,
+    load_persisted_topic_cards,
+    organize_evidence,
+    organize_concerns,
+    persist_concerns,
+    persist_organization,
+    recall_organized,
+    topic_card_document,
+    validate_topic_handles,
+    validate_concern_items,
+)
 from yantrikdb.rerank import recall_reranked, rerank_hits
 from yantrikdb.triggers import check_all_triggers
 
@@ -37,6 +54,22 @@ __all__ = [
     "AIDB",
     "TenantManager",
     "consolidate",
+    "record_synthesis",
+    "ConcernItem",
+    "ConcernPlan",
+    "TopicHandle",
+    "EvidenceAssignment",
+    "OrganizationPlan",
+    "validate_topic_handles",
+    "assign_evidence_to_handles",
+    "load_persisted_topic_cards",
+    "persist_organization",
+    "organize_evidence",
+    "organize_concerns",
+    "persist_concerns",
+    "recall_organized",
+    "topic_card_document",
+    "validate_concern_items",
     "check_all_triggers",
     "recall_reranked",
     "rerank_hits",

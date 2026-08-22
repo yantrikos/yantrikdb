@@ -52,6 +52,13 @@ fn explain_pool_is_a_superset_of_results_and_marks_selection() {
         .recall_text_explained("Who does Taylor report to?", 5, None, false, true)
         .unwrap();
 
+    assert_eq!(explain.retrieval_limits.requested_top_k, 5);
+    assert_eq!(explain.retrieval_limits.requested_candidates, 100);
+    assert_eq!(explain.retrieval_limits.index_len, 40);
+    assert_eq!(explain.retrieval_limits.fetch_k, 40);
+    assert!(!explain.retrieval_limits.has_post_filters);
+    assert!(!explain.retrieval_limits.cap_bound);
+
     assert!(!results.is_empty(), "seeded corpus must return results");
     assert!(
         explain.pool.len() >= results.len(),

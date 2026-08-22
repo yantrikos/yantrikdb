@@ -466,11 +466,70 @@ recency become insertion-order noise, and `recall_as_of` / `time_window`
 filter on a timeline that never existed. Omit it and the engine stamps
 `now()`, exactly as before.
 
+For timelines assembled from evidence across sessions, keep `created_at` as
+the time the synthesized item became available and store the earliest evidence
+time in `metadata.first_mention_at`. Recall still selects the relevant top-k;
+`order="first_mention"` (or `order="chronological"`) then presents those items
+oldest-first. Records without `first_mention_at` fall back to `created_at`.
+
+Query-independent topic and concern organization is available from
+`yantrikdb.organize`. `organize_evidence` accepts an application-owned topic
+discovery callback, completes bounded evidence assignments deterministically,
+and persists evidence-versioned rollups. `organize_concerns` applies the same
+trust boundary to answer-sized `ConcernItem` values: every item must cite known
+evidence, evidence reuse is bounded, and `persist_concerns` records the full
+first-mention timeline through `record_synthesis`. `recall_organized` returns
+rollups for summary queries and expands them to concern or evidence items for
+list and timeline queries. Its default `order="auto"` uses
+`first_mention_turn` for questions about when something was brought up in
+conversation, while real-world timelines use `first_mention_at` and then
+`created_at` as a fallback.
+
+For applications that need a complete consolidation checklist after their raw
+evidence, `load_persisted_topic_cards` enumerates every active topic handle by
+namespace without similarity top-k loss. `topic_card_document` renders each
+handle with its evidence-backed recorded date and turn span. This path is
+explicit: callers retain control over when the extra summary context is useful.
+
+Organized recall also records a local rollup outcome ledger. A
+surfaced rollup gets an immutable impression ID with its hashed query, rank,
+score, namespace, requested item count, and coarse query shape; expansion
+records the ordered children actually returned and their serve-time scores.
+Applications can explicitly mark a returned child as `selected` or `corrected`
+with `note_rollup_selection`, then close the interaction with
+`finalize_rollup_outcome`. Finalization supplies the complete selected/corrected
+set; only then can an omitted returned child count as an explicit non-selection.
+Consumers may also pass `omitted_child_rids` when the user explicitly identifies
+an answer item retrieval failed to return. These are stored separately as
+`caller_false_negative` observations: they must have been active, same-namespace
+records available when the impression was served, and they never rewrite served
+history. The organizer cannot infer these labels itself; the application that
+observes the user's correction must finalize the interaction.
+Generic point reads, unfinished interactions, and ordinary corrections never
+infer a rollup outcome. `rollup_outcome_report` is a read-only, namespace/time
+scoped coverage report. `rollup_outcome_examples` exports bounded finalized
+per-child examples for offline calibration, with hashed queries and immutable
+serve-time rank/score features only; it never exposes query text or rebuilds
+features from mutable memory state. The stable query hash is a local linkage
+identifier, not anonymization, so exported artifacts should remain scoped and
+must not be published as de-identified data. Unselected means only that a
+returned child was omitted from the exact finalized set, not that an unseen
+memory was globally irrelevant. The readiness gate requires enough finalized queries,
+rollups, positive and negative children, at least 80% telemetry completion, and
+no dominant query or rollup. `ready_for_offline_evaluation` means only that an
+offline test is credible: these observations remain measurement data and are
+not ranker labels until their predictive value has been validated.
+`rollup_membership_report` has an independent readiness gate for false-negative
+rescue. `rollup_membership_examples` emits complete impression groups, including
+returned and explicit omitted-positive rows, bounded by finalization time so a
+later correction cannot leak into an earlier evaluation window. Its query key is
+namespace-scoped but remains linkable and must not be treated as anonymized.
+
 ## Full API
 
 | Operation | Methods |
 |-----------|---------|
-| **Core** | `record`, `record_batch`, `recall`, `recall_with_response`, `recall_refine`, `forget`, `correct` |
+| **Core** | `record`, `record_batch`, `recall`, `recall_with_response`, `recall_refine`, `forget`, `correct`, `note_rollup_impression`, `note_rollup_impression_features`, `note_rollup_expansion`, `note_rollup_expansion_features`, `note_rollup_selection`, `finalize_rollup_outcome`, `rollup_outcome_report`, `rollup_outcome_examples`, `rollup_membership_report`, `rollup_membership_examples` |
 | **Knowledge Graph** | `relate`, `get_edges`, `search_entities`, `entity_profile`, `relationship_depth`, `link_memory_entity` |
 | **Cognition** | `think`, `get_patterns`, `scan_conflicts`, `resolve_conflict`, `derive_personality` |
 | **Triggers** | `get_pending_triggers`, `acknowledge_trigger`, `deliver_trigger`, `act_on_trigger`, `dismiss_trigger` |
