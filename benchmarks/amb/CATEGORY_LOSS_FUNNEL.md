@@ -58,6 +58,31 @@ arm for the discovery pass; require at least `+0.075` mean lift and more wins
 than losses before a repeated-answer confirmation. A failed or merely neutral
 arm leaves mixed-speaker retrieval unchanged.
 
+## Equal-Budget Abstention Result
+
+The discovery arm completed all 40 pairs under manifest SHA-256
+`394d074ee3b6316409c90196d14d224fd404fc8b81346f75123b2190a65844f1`.
+The role-aware treatment used `553,969` context tokens versus `583,816` for the
+baseline. Each arm used one answer and one judge call per query with
+`deepseek-v4-flash:0731-cloud`.
+
+| Context arm | Mean rubric |
+|---|---:|
+| frozen `ydb-0151` | 0.650 |
+| equal-budget role-aware | 0.700 |
+
+The paired delta was `+0.050`, with four treatment wins, 34 ties, and two
+baseline wins. The paired bootstrap 95% interval was `[-0.075, +0.175]`.
+This misses the preregistered `+0.075` lift gate, so no repeated-answer
+confirmation or product-default change is authorized.
+
+The six discordant rows also reinforce the answer-variance finding. Two rows
+that scored `1.0` in the original frozen line scored `0.0` when the identical
+baseline context was re-answered, while one original zero scored `1.0`.
+Role-aware retrieval fixed three abstention failures in units 4 and 5 but
+introduced failures in units 1 and 9. The split is not identifiable from query
+wording alone and must not become a post-hoc routing rule.
+
 ## Reproduction
 
 ```powershell
