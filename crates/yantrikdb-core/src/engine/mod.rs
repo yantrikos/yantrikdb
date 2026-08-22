@@ -748,7 +748,32 @@ impl YantrikDB {
         actor_id: Option<String>,
         master_key: Option<&[u8; 32]>,
     ) -> Result<Self> {
-        let conn = Connection::open(db_path)?;
+        // Stage-tag every SQL call in the open path (issue #146). A
+        // truncated-statement parse error reaches us as a bare
+        // `SqliteFailure(_, "incomplete input")` — SQLite reports the
+        // truncation at the end of input, `sqlite3_error_offset()` is -1
+        // there, so rusqlite never builds the SQL-carrying variant. The
+        // one observed occurrence therefore named nothing. These tags make
+        // the next one name its stage.
+        fn at<T>(stage: &str, r: std::result::Result<T, rusqlite::Error>) -> Result<T> {
+            r.map_err(|source| YantrikDbError::DatabaseAt {
+                stage: stage.to_owned(),
+                source,
+            })
+        }
+        // Same, for callees that already return the crate error: re-tag
+        // only the untagged `Database` case, pass everything else through.
+        fn rewrap<T>(stage: &str, r: Result<T>) -> Result<T> {
+            r.map_err(|e| match e {
+                YantrikDbError::Database(source) => YantrikDbError::DatabaseAt {
+                    stage: stage.to_owned(),
+                    source,
+                },
+                other => other,
+            })
+        }
+
+        let conn = at("open", Connection::open(db_path))?;
 
         // Enforce SQLite pragmas for durability + performance.
         // See CONCURRENCY.md and ops/runbooks/disk-full.md.
@@ -765,12 +790,15 @@ impl YantrikDB {
         //   under concurrent access (e.g., oplog GC + consolidation).
         // wal_autocheckpoint=1000: auto-checkpoint after 1000 pages (~4MB).
         //   Prevents unbounded WAL growth under sustained write load.
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL; \
-             PRAGMA synchronous=NORMAL; \
-             PRAGMA foreign_keys=ON; \
-             PRAGMA busy_timeout=5000; \
-             PRAGMA wal_autocheckpoint=1000;",
+        at(
+            "pragmas",
+            conn.execute_batch(
+                "PRAGMA journal_mode=WAL; \
+                 PRAGMA synchronous=NORMAL; \
+                 PRAGMA foreign_keys=ON; \
+                 PRAGMA busy_timeout=5000; \
+                 PRAGMA wal_autocheckpoint=1000;",
+            ),
         )?;
 
         // Verify critical pragmas actually took effect. SQLite silently
@@ -860,19 +888,28 @@ impl YantrikDB {
         if let Some(v) = existing_version {
             for &(from_v, sql) in migrations {
                 if v <= from_v {
-                    Self::run_migration_idempotent(&conn, sql)?;
+                    rewrap(
+                        &format!("migration v{}->v{}", from_v, from_v + 1),
+                        Self::run_migration_idempotent(&conn, sql),
+                    )?;
                 }
             }
         }
 
-        conn.execute_batch(SCHEMA_SQL)?;
+        at("schema_sql", conn.execute_batch(SCHEMA_SQL))?;
 
         // Populate seed substitution categories (idempotent)
-        crate::distributed::seed_categories::populate_seed_categories(&conn)?;
+        rewrap(
+            "seed_categories",
+            crate::distributed::seed_categories::populate_seed_categories(&conn),
+        )?;
 
         // RFC 008 M5b: seed move_type_registry + inference_basis_registry
         // with canonical vocabulary (idempotent INSERT OR IGNORE).
-        crate::engine::moves::seed_registries_inner(&conn)?;
+        rewrap(
+            "seed_registries",
+            crate::engine::moves::seed_registries_inner(&conn),
+        )?;
 
         // Set schema version — never downgrade.
         //
@@ -891,9 +928,12 @@ impl YantrikDB {
         // with run_migration_idempotent below, both prevents new occurrences
         // (forward) and heals existing corrupted-meta deployments (replay).
         let stamp = std::cmp::max(existing_version.unwrap_or(0), SCHEMA_VERSION);
-        conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
-            params![stamp.to_string()],
+        at(
+            "version_stamp",
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
+                params![stamp.to_string()],
+            ),
         )?;
 
         // **v0.10 Item 1.** Fresh installs default to the status-led read
@@ -1520,7 +1560,18 @@ impl YantrikDB {
                         );
                         continue;
                     }
-                    return Err(e.into());
+                    // This runner is the ONE place open-path SQL is
+                    // derived rather than constant (split on `;`, line
+                    // comments stripped) — i.e. the one place a
+                    // truncated statement could be of our own making.
+                    // A parse error like "incomplete input" carries no
+                    // SQL of its own (issue #146), so attach the exact
+                    // statement we handed to SQLite.
+                    let shown: String = stmt.chars().take(200).collect();
+                    return Err(YantrikDbError::DatabaseAt {
+                        stage: format!("migration statement `{shown}`"),
+                        source: e,
+                    });
                 }
             }
         }

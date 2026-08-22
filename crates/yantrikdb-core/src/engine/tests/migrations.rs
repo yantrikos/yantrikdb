@@ -646,3 +646,58 @@ fn schema_v42_migration_adds_the_same_synthesis_surface() {
         )
         .is_err());
 }
+
+// =====================================================================
+// Issue #146 — a failing migration statement must name itself.
+//
+// CI produced `database error: incomplete input` from inside the
+// constructor, once, on one platform. That message names nothing: SQLite
+// reports a truncated statement at the END of the input, so
+// `sqlite3_error_offset()` returns -1 and rusqlite falls back from the
+// SQL-carrying SqlInputError to a bare SqliteFailure. The migration
+// runner is the one open-path site where SQL is DERIVED (split on `;`,
+// line comments stripped) rather than constant — the one place a
+// truncated statement could be of our own making — so a propagated
+// error there must carry the statement text.
+// =====================================================================
+
+#[test]
+fn failing_migration_statement_names_itself_in_the_error() {
+    use rusqlite::Connection;
+    let conn = Connection::open_in_memory().unwrap();
+    // The table must EXIST for the truncation to be the reported error:
+    // on a bare connection the same statement fails with "no such table:
+    // memories" — SQLite resolves the ALTER target before finishing the
+    // parse — and that message is in the idempotent-replay swallow list,
+    // so the runner silently succeeds. (First version of this test found
+    // that out the hard way. It also means the swallow list can mask a
+    // genuinely broken statement whose table is absent — acceptable for
+    // replay-resilience, but worth knowing.)
+    conn.execute("CREATE TABLE memories (rid TEXT PRIMARY KEY)", [])
+        .unwrap();
+    // `ALTER TABLE memories ADD` is a prefix of a valid statement —
+    // prepare fails with exactly the "incomplete input" from #146, and
+    // that message is not in the swallow list.
+    let err = YantrikDB::run_migration_idempotent(&conn, "ALTER TABLE memories ADD")
+        .expect_err("a truncated statement must not succeed");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("migration statement"),
+        "error must be stage-tagged, got: {msg}"
+    );
+    assert!(
+        msg.contains("ALTER TABLE memories ADD"),
+        "error must carry the statement it choked on, got: {msg}"
+    );
+}
+
+#[test]
+fn swallowed_replay_errors_still_do_not_leak_a_stage_error() {
+    // The other direction: the idempotent-replay swallow list must be
+    // unaffected by the stage-tagging change. "no such table" is on the
+    // list; the batch must succeed even though its statement fails.
+    use rusqlite::Connection;
+    let conn = Connection::open_in_memory().unwrap();
+    YantrikDB::run_migration_idempotent(&conn, "DROP TABLE definitely_not_a_table;")
+        .expect("swallowed replay errors must not become failures");
+}
