@@ -72,3 +72,43 @@ def test_build_contexts_rejects_units_without_standing_instructions():
             {"1": {"chat": [{"id": 1, "role": "user", "content": "Fact"}]}},
             lambda value: len(value.split()),
         )
+
+
+def test_build_contexts_can_transform_all_categories():
+    context = (
+        "## Memory 1\nfirst raw memory with several words\n\n"
+        "## Memory 2\nsecond raw memory with several words\n\n"
+        "## Memory 3\nthird raw memory with several words\n\n"
+        "## Memory 4\nfourth raw memory with several words\n\n"
+    )
+    rows = [
+        {
+            "query_id": "1_instruction_following_0",
+            "context": context,
+            "meta": {
+                "question_category": "instruction_following",
+                "conversation_id": "1",
+            },
+        },
+        {
+            "query_id": "1_temporal_reasoning_0",
+            "context": context,
+            "meta": {
+                "question_category": "temporal_reasoning",
+                "conversation_id": "1",
+            },
+        },
+    ]
+
+    payload = build_contexts(
+        rows,
+        {"1": _conversation()},
+        lambda value: len(value.split()),
+        category=None,
+    )
+
+    assert payload["artifact_transform"]["category"] == "all"
+    assert [row["query_id"] for row in payload["results"]] == [
+        "1_instruction_following_0",
+        "1_temporal_reasoning_0",
+    ]

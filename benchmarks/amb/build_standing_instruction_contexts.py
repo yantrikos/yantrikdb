@@ -79,14 +79,14 @@ def build_contexts(
     rows: list[dict],
     conversations: dict[str, dict],
     token_counter: Callable[[str], int],
-    category: str = "instruction_following",
+    category: str | None = "instruction_following",
 ) -> dict:
     output = []
     total_reference_tokens = 0
     total_treatment_tokens = 0
     for row in rows:
         metadata = row.get("meta") or {}
-        if metadata.get("question_category") != category:
+        if category is not None and metadata.get("question_category") != category:
             continue
         query_id = str(row.get("query_id") or "")
         conversation_id = str(metadata.get("conversation_id") or "")
@@ -124,7 +124,7 @@ def build_contexts(
     return {
         "protocol": "standing-user-instruction-context-v1",
         "artifact_transform": {
-            "category": category,
+            "category": category or "all",
             "rows": len(output),
             "selection_changed": True,
             "query_or_gold_used_for_instruction_extraction": False,
@@ -153,9 +153,17 @@ def main() -> int:
     parser.add_argument("results", type=Path)
     parser.add_argument("documents", type=Path)
     parser.add_argument("output", type=Path)
+    parser.add_argument(
+        "--category",
+        default="instruction_following",
+        help="question category to transform, or 'all' for the full cohort",
+    )
     args = parser.parse_args()
     payload = build_contexts(
-        load_rows(args.results), load_conversations(args.documents), count_tokens
+        load_rows(args.results),
+        load_conversations(args.documents),
+        count_tokens,
+        None if args.category == "all" else args.category,
     )
     payload["artifact_transform"].update(
         {
