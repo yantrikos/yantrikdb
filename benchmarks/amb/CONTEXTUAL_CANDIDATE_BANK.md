@@ -145,6 +145,34 @@ rules as a product default; production integration should consume organizer
 entities, relationship roles, provenance, and query intent from structured
 metadata, with the benchmark regexes retained only in this experimental harness.
 
+## Full-Cohort Routing Gate
+
+The first judge-free routing audit exposed one false fire: treating
+`professional connections` as a single-person timeline selected Greg for
+`8_event_ordering_1` and retained `0/5` source turns. That broad rule was
+rejected before scoring. The final classifier fires only for explicit
+mentorship/advisor intent or explicit family-support intent; all other prompts
+fall back to the unchanged candidate bank.
+
+The final audit ran over the same frozen 18-query cohort, SHA-256
+`3f442beb0cf5b91c72fe1a1685f7092866e0e8ea538ad37444f26a7e9e48521f`:
+
+| Measure | Result |
+| --- | ---: |
+| Selector fires | 2/18 (11.1%) |
+| Selector abstains | 16/18 (88.9%) |
+| Gold retained in fired queries | 10/10 (100%) |
+| Cohort source turns before / after routing | 60/95 / 60/95 |
+| Fired payload rows before / after | 92 / 13 |
+| Fired payload reduction | 85.9% |
+| Queries with a negative source-turn delta | 0 |
+
+The deterministic audit SHA-256 was
+`f8c3f9e5a5d58ee3af0b1818a00c098e3420badca7af97ce57c3cf017c279613`.
+This clears the judge-free fire/abstention and gold-retention gate for the two
+narrow intents. It does not clear the full score cohort or no-category-regression
+operator gate required before default promotion.
+
 ## Reproduction
 
 ```powershell

@@ -16,9 +16,7 @@ except ImportError:  # pragma: no cover - direct script execution
 
 
 _RELATIONSHIP_TIMELINE_QUERY_RE = re.compile(
-    r"\b(mentor(?:ship)?|advis(?:or|er|ing)|collaborat\w*|"
-    r"professional connections?|network(?:ing)?|relationships?|"
-    r"famil(?:y|ies)|partner|spouse|parents?|support\w*)\b",
+    r"\b(mentor(?:ship)?|advis(?:or|er))\b",
     re.IGNORECASE,
 )
 _MENTOR_ROLE_RE = re.compile(
