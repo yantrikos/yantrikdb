@@ -31,7 +31,7 @@ def _sha256_json(value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def audit_query(row: dict) -> dict:
+def audit_query(row: dict, *, relationship_representatives: bool = False) -> dict:
     """Route one query, falling back to the unchanged bank on abstention."""
     query = row.get("query") or ""
     bank_ceiling = row.get("bank_ceiling") or (
@@ -48,7 +48,9 @@ def audit_query(row: dict) -> dict:
             _, selector_audit = render_relationship_support_stages(row)
         elif _RELATIONSHIP_TIMELINE_QUERY_RE.search(query):
             route = "relationship_thread"
-            _, selector_audit = render_relationship_thread(row)
+            _, selector_audit = render_relationship_thread(
+                row, representative_per_source=relationship_representatives
+            )
     except ValueError as exc:
         route = "abstain"
         error = str(exc)
@@ -130,6 +132,7 @@ def main() -> int:
     parser.add_argument("--cohort", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--expect-cohort-sha256")
+    parser.add_argument("--relationship-representatives", action="store_true")
     args = parser.parse_args()
 
     cohort = json.loads(args.cohort.read_text(encoding="utf-8"))
@@ -139,9 +142,19 @@ def main() -> int:
             f"cohort hash mismatch: expected {args.expect_cohort_sha256}, "
             f"got {cohort_sha256}"
         )
-    rows = [audit_query(row) for row in cohort.get("queries") or []]
+    rows = [
+        audit_query(
+            row,
+            relationship_representatives=args.relationship_representatives,
+        )
+        for row in cohort.get("queries") or []
+    ]
     artifact = {
-        "protocol": "query-dependent-relationship-stage-cohort-audit-v1",
+        "protocol": (
+            "query-dependent-relationship-stage-representative-audit-v1"
+            if args.relationship_representatives
+            else "query-dependent-relationship-stage-cohort-audit-v1"
+        ),
         "answer_calls": 0,
         "judge_calls": 0,
         "cohort_sha256": cohort_sha256,

@@ -62,6 +62,36 @@ def test_family_support_route_selects_one_active_stage_per_source():
     assert result["source_turn_delta"] == 0
 
 
+def test_representative_audit_preserves_gold_and_reduces_same_source_rows():
+    evidence = [
+        _evidence("setup", 10, "Robert gave academic feedback.", "s1", 0.9),
+        _evidence(
+            "decision",
+            12,
+            "I decided whether to focus on Robert's academic feedback.",
+            "s1",
+            0.8,
+        ),
+        _evidence("followup", 20, "Robert reviewed my academic draft.", "s2", 0.7),
+    ]
+
+    result = audit_query(
+        _row(
+            "mentor",
+            "List my academic work and mentorship in order.",
+            evidence,
+            [12, 20],
+        ),
+        relationship_representatives=True,
+    )
+
+    assert result["route"] == "relationship_thread"
+    assert result["selected_row_count"] == 2
+    assert result["selected_source_turns"] == [12, 20]
+    assert result["source_turn_delta"] == 0
+    assert result["selector"]["dropped_turns"] == [10]
+
+
 def test_aggregate_reports_fire_abstention_retention_and_reduction():
     rows = [
         {

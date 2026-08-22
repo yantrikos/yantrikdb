@@ -50,6 +50,10 @@ _ACTIVE_RELATIONSHIP_SUPPORT_RE = re.compile(
     r"care package|letters?|rehears\w*|concern\w*|check-ins?)\b",
     re.IGNORECASE,
 )
+_DECISION_CUE_RE = re.compile(
+    r"\b(decid\w*|whether|prioriti[sz]\w*|focus\w*|approach\w*)\b",
+    re.IGNORECASE,
+)
 
 
 def _sha256_bytes(payload: bytes) -> str:
@@ -192,11 +196,52 @@ def select_relationship_thread(artifact: dict) -> dict:
     return selected
 
 
-def render_relationship_thread(artifact: dict) -> tuple[str, dict]:
+def _representative_rank_key(row: dict) -> tuple:
+    """Rank answer-bearing events inside one source conversation."""
+    return (
+        len(_DECISION_CUE_RE.findall(row.get("text") or "")),
+        row.get("contextual_score") or 0.0,
+        -(row.get("turn") or 0),
+        row.get("identity") or "",
+    )
+
+
+def _representative_thread_groups(thread: dict) -> dict:
+    """Keep one direct mention per source plus its linked context bridges."""
+    mention = re.compile(
+        rf"\b{re.escape(thread['anchor'])}\b", re.IGNORECASE
+    )
+    groups = {}
+    for group_key, members in thread["groups"].items():
+        direct = [
+            row for row in members if mention.search(row.get("text") or "")
+        ]
+        if not direct:
+            continue
+        representative = max(direct, key=_representative_rank_key)
+        selected = [representative]
+        selected.extend(
+            row
+            for row in members
+            if row.get("reason") == "context_bridge"
+            and row.get("parent_turn") == representative.get("turn")
+        )
+        groups[group_key] = selected
+    return groups
+
+
+def render_relationship_thread(
+    artifact: dict, *, representative_per_source: bool = False
+) -> tuple[str, dict]:
     """Render one selected person timeline as source-conversation buckets."""
     thread = select_relationship_thread(artifact)
+    groups = (
+        _representative_thread_groups(thread)
+        if representative_per_source
+        else thread["groups"]
+    )
     ordered_groups = sorted(
-        thread["groups"].items(),
+        groups.items(),
         key=lambda item: (
             min(
                 row.get("created_at")
@@ -235,17 +280,20 @@ def render_relationship_thread(artifact: dict) -> tuple[str, dict]:
     gold_turns = set(ceiling.get("available_source_turns") or []) | set(
         ceiling.get("missing_source_turns") or []
     )
+    selected_rows = [row for rows in groups.values() for row in rows]
     selected_turns = {
-        row.get("turn") for row in thread["members"] if row.get("turn") is not None
+        row.get("turn") for row in selected_rows if row.get("turn") is not None
     }
     selection_payload = {
         "anchor": thread["anchor"],
         "groups": source_groups,
     }
+    if representative_per_source:
+        selection_payload["representative_per_source"] = True
     audit = {
         "selected_anchor": thread["anchor"],
         "role_matches": thread["role_matches"],
-        "selected_row_count": len(thread["members"]),
+        "selected_row_count": len(selected_rows),
         "source_group_count": len(source_groups),
         "selected_turns": sorted(selected_turns),
         "selected_gold_turns": sorted(gold_turns & selected_turns),
@@ -258,6 +306,23 @@ def render_relationship_thread(artifact: dict) -> tuple[str, dict]:
         ).encode("utf-8")),
         "source_groups": source_groups,
     }
+    if representative_per_source:
+        original_turns = {
+            row.get("turn")
+            for row in thread["members"]
+            if row.get("turn") is not None
+        }
+        audit.update({
+            "representative_per_source": True,
+            "dropped_turns": sorted(original_turns - selected_turns),
+            "decision_cue_counts": {
+                str(row.get("turn")): len(
+                    _DECISION_CUE_RE.findall(row.get("text") or "")
+                )
+                for row in thread["members"]
+                if row.get("turn") is not None
+            },
+        })
     return "\n\n".join(memories), audit
 
 
@@ -299,7 +364,7 @@ def render_relationship_support_stages(artifact: dict) -> tuple[str, dict]:
     if not groups:
         raise ValueError("no active family-support stages")
 
-    representatives = [
+    legacy_representatives = [
         max(
             members,
             key=lambda row: (
@@ -310,6 +375,11 @@ def render_relationship_support_stages(artifact: dict) -> tuple[str, dict]:
         )
         for members in groups.values()
     ]
+    representative_candidates = [
+        max(members, key=_representative_rank_key)
+        for members in groups.values()
+    ]
+    representatives = legacy_representatives
     representatives.sort(key=lambda row: (
         row.get("created_at")
         if row.get("created_at") is not None else float("inf"),
@@ -341,6 +411,12 @@ def render_relationship_support_stages(artifact: dict) -> tuple[str, dict]:
         "anchors": sorted(anchors),
         "source_groups": source_groups,
     }
+    legacy_identities = sorted(
+        row.get("identity") or "" for row in legacy_representatives
+    )
+    representative_candidate_identities = sorted(
+        row.get("identity") or "" for row in representative_candidates
+    )
     audit = {
         "selected_anchors": sorted(anchors),
         "selected_row_count": len(representatives),
@@ -348,6 +424,13 @@ def render_relationship_support_stages(artifact: dict) -> tuple[str, dict]:
         "selected_turns": sorted(selected_turns),
         "selected_gold_turns": sorted(gold_turns & selected_turns),
         "missing_gold_turns": sorted(gold_turns - selected_turns),
+        "legacy_selected_identities": legacy_identities,
+        "representative_candidate_identities": (
+            representative_candidate_identities
+        ),
+        "representative_selection_identity_unchanged": (
+            legacy_identities == representative_candidate_identities
+        ),
         "selection_sha256": _sha256_bytes(json.dumps(
             selection_payload,
             sort_keys=True,
@@ -374,6 +457,10 @@ def context_row(
         context = render_selected_evidence(preflight)
     elif context_mode == "relationship-thread":
         context, thread_audit = render_relationship_thread(artifact)
+    elif context_mode == "relationship-thread-representatives":
+        context, thread_audit = render_relationship_thread(
+            artifact, representative_per_source=True
+        )
     elif context_mode == "relationship-support-stages":
         context, thread_audit = render_relationship_support_stages(artifact)
     else:
@@ -441,6 +528,7 @@ def main() -> int:
         "--context-mode",
         choices=(
             "synthesis", "selected-evidence", "relationship-thread",
+            "relationship-thread-representatives",
             "relationship-support-stages",
         ),
         default="synthesis",
@@ -449,6 +537,7 @@ def main() -> int:
         "--context-mode-a",
         choices=(
             "synthesis", "selected-evidence", "relationship-thread",
+            "relationship-thread-representatives",
             "relationship-support-stages",
         ),
     )
@@ -456,6 +545,7 @@ def main() -> int:
         "--context-mode-b",
         choices=(
             "synthesis", "selected-evidence", "relationship-thread",
+            "relationship-thread-representatives",
             "relationship-support-stages",
         ),
     )

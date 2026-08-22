@@ -147,6 +147,90 @@ def test_relationship_thread_renders_one_memory_per_source_conversation():
     assert audit["missing_gold_turns"] == []
 
 
+def test_relationship_thread_representatives_drop_only_same_source_distractors():
+    artifact = {
+        "query": (
+            "List my academic work and mentorship in order. Mention only five items."
+        ),
+        "preflight": {
+            "source_evidence_ceiling": {
+                "available_source_turns": [14, 64, 124, 170, 214],
+                "missing_source_turns": [],
+            },
+            "evidence_ledger": [
+                {
+                    "identity": "meet", "turn": 14, "created_at": 100.0,
+                    "source_doc_id": "s0", "contextual_score": 0.55,
+                    "status": "kept",
+                    "text": "[Turn 14] I met my mentor Robert.",
+                },
+                {
+                    "identity": "essay", "turn": 64, "created_at": 200.0,
+                    "source_doc_id": "s1", "contextual_score": 0.55,
+                    "status": "kept",
+                    "text": "[Turn 64] Robert shared his academic essay.",
+                },
+                {
+                    "identity": "feedback", "turn": 124, "created_at": 300.0,
+                    "source_doc_id": "s2", "contextual_score": 0.52,
+                    "status": "kept",
+                    "text": (
+                        "[Turn 124] I am deciding whether to prioritize and focus "
+                        "on Robert's review feedback."
+                    ),
+                },
+                {
+                    "identity": "confidence", "turn": 156, "created_at": 300.0,
+                    "source_doc_id": "s2", "contextual_score": 0.49,
+                    "status": "kept",
+                    "text": "[Turn 156] Robert's feedback improved my confidence.",
+                },
+                {
+                    "identity": "schedule", "turn": 168, "created_at": 400.0,
+                    "source_doc_id": "s3", "contextual_score": 0.59,
+                    "status": "kept",
+                    "text": "[Turn 168] I prioritized a schedule Robert recommended.",
+                },
+                {
+                    "identity": "choice", "turn": 170, "created_at": 400.0,
+                    "source_doc_id": "s3", "contextual_score": 0.57,
+                    "status": "kept",
+                    "text": (
+                        "[Turn 170] I am deciding how to approach and focus on "
+                        "Robert's essay advice before the conference paper."
+                    ),
+                },
+                {
+                    "identity": "grade", "turn": 212, "created_at": 500.0,
+                    "source_doc_id": "s4", "contextual_score": 0.54,
+                    "status": "kept",
+                    "text": "[Turn 212] Robert and I discussed next steps after my grade.",
+                },
+                {
+                    "identity": "bridge", "turn": 214, "created_at": 500.0,
+                    "source_doc_id": "s4", "contextual_score": 0.53,
+                    "status": "kept", "reason": "context_bridge",
+                    "parent_turn": 212,
+                    "text": "[Turn 214] I planned our follow-up meeting.",
+                },
+            ],
+        },
+    }
+
+    legacy_context, legacy_audit = render_relationship_thread(artifact)
+    context, audit = render_relationship_thread(
+        artifact, representative_per_source=True
+    )
+
+    assert legacy_context.count("[Turn") == 8
+    assert legacy_audit["selected_row_count"] == 8
+    assert context.count("[Turn") == 6
+    assert audit["selected_turns"] == [14, 64, 124, 170, 212, 214]
+    assert audit["selected_gold_turns"] == [14, 64, 124, 170, 214]
+    assert audit["missing_gold_turns"] == []
+    assert audit["dropped_turns"] == [156, 168]
+
+
 def test_family_support_stages_choose_one_active_event_per_conversation():
     artifact = {
         "query": "How did my family support me across our conversations?",
@@ -205,3 +289,8 @@ def test_family_support_stages_choose_one_active_event_per_conversation():
     assert "Turn 32" not in context
     assert audit["selected_anchors"] == ["tanya", "wendy"]
     assert audit["selected_gold_turns"] == [12, 30]
+    assert audit["representative_selection_identity_unchanged"] is True
+    assert (
+        audit["representative_candidate_identities"]
+        == audit["legacy_selected_identities"]
+    )
