@@ -74,3 +74,16 @@ next stage must freeze its confirmation cohort and interpretation before making
 more model calls. In particular, an outcome-selected discordant subset may test
 whether row-level direction persists, but must not be used to re-estimate the
 40-row category mean.
+
+## Replication Preregistration
+
+The confirmation is one independent, fresh-process replication over the same
+full 40-row cohort and unchanged manifest
+`a538f141c8e38b97293eac7b2b0e9e36973d39449ea793126c04d902ac04520c`.
+It uses one answer and one judge per arm per row, with a new output file and no
+resume checkpoint from discovery. This costs another 80 answers and 80 judges.
+
+Replication passes only if treatment minus control is at least `+0.05` and its
+paired bootstrap 95% interval excludes zero. The result is reported regardless
+of outcome. This design tests category-level replication across model sessions;
+it does not claim stable verdicts for individual rows.
