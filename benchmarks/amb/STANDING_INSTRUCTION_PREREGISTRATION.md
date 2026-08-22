@@ -87,3 +87,32 @@ Replication passes only if treatment minus control is at least `+0.05` and its
 paired bootstrap 95% interval excludes zero. The result is reported regardless
 of outcome. This design tests category-level replication across model sessions;
 it does not claim stable verdicts for individual rows.
+
+## Replication Result
+
+The fresh-process replication passed both gates:
+
+| arm | discovery | replication |
+|---|---:|---:|
+| frozen `ydb-0151` control | 0.80000 | 0.75000 |
+| standing-instruction treatment | 0.90000 | 0.89375 |
+| treatment minus control | +0.10000 | +0.14375 |
+
+Replication produced 9 wins, 30 ties, and 1 loss. Its paired bootstrap 95%
+interval was `[+0.05625, +0.24375]`; all 40 pairs completed in 512.5 seconds.
+The replication result SHA-256 is
+`f7d2a4b507337148fb0ef81cb0326ba7eeffbf783c37e448589748aa7ffc8237`.
+
+Four treatment wins repeated across both runs, while neither losing row did.
+Two rows reversed direction between sessions. That is consistent with the
+known row-level generation variance and supports the category-level replication
+design: the treatment mean stayed nearly fixed (`0.90000` to `0.89375`) while
+the control moved by `-0.05000`. Mean treatment lift across the two independent
+runs was `+0.121875`.
+
+The two-of-two result promotes authoritative standing instructions from a
+benchmark hypothesis to a product candidate. Product behavior should preserve
+the tested mechanism: user-authored provenance, typed `standing_instruction`
+records, source turn/evidence links, namespace isolation, and recall-time
+salience ahead of ordinary memories. It must not promote assistant
+acknowledgements or infer general preferences from this narrow detector.
