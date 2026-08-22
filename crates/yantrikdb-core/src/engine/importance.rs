@@ -316,24 +316,16 @@ impl YantrikDB {
         // Apply durably in one transaction.
         {
             let conn = self.conn();
-            conn.execute_batch("SAVEPOINT importance_recal")?;
-            let apply: Result<()> = (|| {
-                for (rid, corrected) in &pending {
-                    conn.execute(
-                        "UPDATE memories SET importance = ?1 WHERE rid = ?2",
-                        params![corrected, rid],
-                    )?;
-                }
-                Ok(())
-            })();
-            match apply {
-                Ok(()) => conn.execute_batch("RELEASE importance_recal")?,
-                Err(e) => {
-                    let _ = conn
-                        .execute_batch("ROLLBACK TO importance_recal; RELEASE importance_recal");
-                    return Err(e);
-                }
+            let sp = crate::engine::savepoint::SavepointGuard::new(&conn, "importance_recal")?;
+
+            for (rid, corrected) in &pending {
+                conn.execute(
+                    "UPDATE memories SET importance = ?1 WHERE rid = ?2",
+                    params![corrected, rid],
+                )?;
             }
+
+            sp.release()?;
         }
 
         // Keep the scoring cache in step so recall reflects the new prior at

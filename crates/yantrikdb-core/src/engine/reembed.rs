@@ -1024,40 +1024,31 @@ impl YantrikDB {
             // batch wrote on the prior attempt.
             {
                 let conn = self.conn();
-                conn.execute_batch("SAVEPOINT reembed_encoding_batch")?;
-                let write_result: Result<()> = (|| {
-                    for (rid, encrypted, read_text) in &encoded_pairs {
-                        // **v0.10 Item 3 review finding 3.** Guard the staging
-                        // write on the text we ACTUALLY encoded. If a text
-                        // correction changed the row between our read and this
-                        // write, `text` no longer matches → zero rows updated,
-                        // leaving `embedding_new` NULL (the correction cleared
-                        // it) so the reembed tail catch-up re-encodes the row
-                        // from the NEW text instead of promoting our stale
-                        // OLD-text vector at swap.
-                        conn.execute(
-                            "UPDATE memories SET embedding_new = ?1, embedding_new_model = ?2 \
+                let sp =
+                    crate::engine::savepoint::SavepointGuard::new(&conn, "reembed_encoding_batch")?;
+
+                for (rid, encrypted, read_text) in &encoded_pairs {
+                    // **v0.10 Item 3 review finding 3.** Guard the staging
+                    // write on the text we ACTUALLY encoded. If a text
+                    // correction changed the row between our read and this
+                    // write, `text` no longer matches → zero rows updated,
+                    // leaving `embedding_new` NULL (the correction cleared
+                    // it) so the reembed tail catch-up re-encodes the row
+                    // from the NEW text instead of promoting our stale
+                    // OLD-text vector at swap.
+                    conn.execute(
+                        "UPDATE memories SET embedding_new = ?1, embedding_new_model = ?2 \
                              WHERE rid = ?3 AND text = ?4",
-                            params![
-                                encrypted,
-                                new_embedder_name_resolved.as_str(),
-                                rid,
-                                read_text
-                            ],
-                        )?;
-                    }
-                    Ok(())
-                })();
-                match write_result {
-                    Ok(()) => {
-                        conn.execute_batch("RELEASE reembed_encoding_batch")?;
-                    }
-                    Err(e) => {
-                        let _ = conn.execute_batch("ROLLBACK TO reembed_encoding_batch");
-                        let _ = conn.execute_batch("RELEASE reembed_encoding_batch");
-                        return Err(e);
-                    }
+                        params![
+                            encrypted,
+                            new_embedder_name_resolved.as_str(),
+                            rid,
+                            read_text
+                        ],
+                    )?;
                 }
+
+                sp.release()?;
             }
 
             processed += encoded_pairs.len() as u64;
@@ -1331,7 +1322,7 @@ impl YantrikDB {
         // attempt.
         let total_swapped: i64 = {
             let conn = self.conn();
-            conn.execute_batch("SAVEPOINT reembed_swap")?;
+            let sp = crate::engine::savepoint::SavepointGuard::new(&conn, "reembed_swap")?;
 
             let result: Result<i64> = (|| {
                 conn.execute(
@@ -1385,12 +1376,11 @@ impl YantrikDB {
 
             match result {
                 Ok(n) => {
-                    conn.execute_batch("RELEASE reembed_swap")?;
+                    sp.release()?;
                     n
                 }
                 Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK TO reembed_swap");
-                    let _ = conn.execute_batch("RELEASE reembed_swap");
+                    drop(sp);
                     self.write_router.switch_to_normal();
                     return Err(e);
                 }
