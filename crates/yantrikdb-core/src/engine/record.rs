@@ -1,4 +1,4 @@
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use std::sync::Arc;
 
 use crate::error::Result;
@@ -27,7 +27,40 @@ pub(crate) fn normalize_namespace(ns: &str) -> &str {
     }
 }
 
+/// Select the sole current generation for one logical synthesis. Generation
+/// HLCs are big-endian, so SQLite BLOB ordering matches causal HLC ordering;
+/// `rid` is the deterministic final tie-breaker.
 impl YantrikDB {
+    pub(crate) fn refold_synthesis_generations_in_tx(
+        tx: &rusqlite::Connection,
+        namespace: &str,
+        logical_key: &str,
+    ) -> Result<(Option<String>, Vec<String>)> {
+        let candidates: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT rid FROM memories \
+             WHERE namespace = ?1 AND synthesis_logical_key = ?2 \
+               AND synthesis_state = 'verified' \
+               AND consolidation_status = 'active' \
+             ORDER BY synthesis_generation_hlc DESC, rid DESC",
+            )?;
+            let rows = stmt.query_map(params![namespace, logical_key], |row| row.get(0))?;
+            rows.collect::<std::result::Result<_, _>>()?
+        };
+        let Some(winner) = candidates.first().cloned() else {
+            return Ok((None, Vec::new()));
+        };
+        let superseded = candidates.into_iter().skip(1).collect::<Vec<_>>();
+        for rid in &superseded {
+            tx.execute(
+                "UPDATE memories SET synthesis_state = 'superseded' \
+             WHERE rid = ?1 AND synthesis_state = 'verified'",
+                params![rid],
+            )?;
+        }
+        Ok((Some(winner), superseded))
+    }
+
     /// Store a new memory and return its RID.
     ///
     /// **Issue #41 layer 3 — WriteRouter gating.** At entry, the writer
@@ -136,6 +169,88 @@ impl YantrikDB {
         emotional_state: Option<&str>,
         idempotency_key: Option<&str>,
         created_at: Option<f64>,
+    ) -> Result<String> {
+        self.record_with_idempotency_routed(
+            text,
+            memory_type,
+            importance,
+            valence,
+            half_life,
+            metadata,
+            embedding,
+            namespace,
+            certainty,
+            domain,
+            source,
+            emotional_state,
+            idempotency_key,
+            created_at,
+            true,
+            None,
+        )
+    }
+
+    /// Consolidation needs the record row before it can attach durable
+    /// provenance. Unlike the public record surface, it must not return a rid
+    /// whose only durable representation is a queued re-embedding op.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_with_idempotency_sync_only(
+        &self,
+        text: &str,
+        memory_type: &str,
+        importance: f64,
+        valence: f64,
+        half_life: f64,
+        metadata: &serde_json::Value,
+        embedding: &[f32],
+        namespace: &str,
+        certainty: f64,
+        domain: &str,
+        source: &str,
+        emotional_state: Option<&str>,
+        idempotency_key: Option<&str>,
+        created_at: Option<f64>,
+        synthesis: Option<&SynthesisAdmission>,
+    ) -> Result<String> {
+        self.record_with_idempotency_routed(
+            text,
+            memory_type,
+            importance,
+            valence,
+            half_life,
+            metadata,
+            embedding,
+            namespace,
+            certainty,
+            domain,
+            source,
+            emotional_state,
+            idempotency_key,
+            created_at,
+            false,
+            synthesis,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn record_with_idempotency_routed(
+        &self,
+        text: &str,
+        memory_type: &str,
+        importance: f64,
+        valence: f64,
+        half_life: f64,
+        metadata: &serde_json::Value,
+        embedding: &[f32],
+        namespace: &str,
+        certainty: f64,
+        domain: &str,
+        source: &str,
+        emotional_state: Option<&str>,
+        idempotency_key: Option<&str>,
+        created_at: Option<f64>,
+        allow_queued_route: bool,
+        synthesis: Option<&SynthesisAdmission>,
     ) -> Result<String> {
         // v0.9.3 contract gate: validate before anything else. (Historically
         // "before any side effect" because importance calibration used to
@@ -270,6 +385,9 @@ impl YantrikDB {
         // RAII at function return, panic-safe.
         let sync_guard = self.write_router.try_enter_sync_writer();
         if sync_guard.is_none() {
+            if !allow_queued_route {
+                return Err(crate::error::YantrikDbError::ConsolidationDeferredDuringReembed);
+            }
             // Queueing state — take the queued path. Reembed cutover
             // is in flight; writes go to oplog and the post-swap
             // materializer applies them under the new embedder.
@@ -330,6 +448,7 @@ impl YantrikDB {
             gate_verdict,
             idem,
             created_at,
+            synthesis,
         )
     }
 
@@ -371,6 +490,7 @@ impl YantrikDB {
         gate_verdict: crate::provenance::GateVerdict,
         idem: Option<(&str, [u8; 32])>,
         created_at: Option<f64>,
+        synthesis: Option<&SynthesisAdmission>,
     ) -> Result<String> {
         let rid = crate::id::new_id();
         // Caller-supplied event time (validated finite at entry) or the
@@ -466,6 +586,7 @@ impl YantrikDB {
         }
 
         let emb_hash = embedding_hash(embedding);
+        let record_hlc = self.tick_hlc().to_bytes().to_vec();
         let record_payload = serde_json::json!({
             "rid": rid,
             "type": memory_type,
@@ -488,6 +609,7 @@ impl YantrikDB {
             // keyless writes; peers on older payloads default to NULL.
             "idempotency_key": idem.as_ref().map(|(k, _)| *k),
             "origin_actor": idem.as_ref().map(|_| self.actor_id.as_str()),
+            "synthesis": synthesis,
         });
         // **Phase 4.3 Commit B (saga task 3, 2026-05-08).** The unbounded entity
         // / memory_entities / claims loops that used to run inline are enqueued
@@ -597,6 +719,9 @@ impl YantrikDB {
         // none is. Returns Some(existing_rid) on an idempotent hit, in which
         // case the transaction is dropped un-committed (it wrote nothing — the
         // claim lost its ON CONFLICT and everything else comes after).
+        let mut superseded_syntheses = Vec::new();
+        let mut invalidated_synthesis_dependents = Vec::new();
+        let mut committed_synthesis_state = synthesis.map(|_| "verified".to_string());
         let committed = (|| -> Result<Option<String>> {
             let tx = conn.unchecked_transaction()?;
             // 4a.6c: the claim is the FIRST statement — a dup must resolve to a
@@ -626,9 +751,11 @@ impl YantrikDB {
                  (rid, type, text, embedding, created_at, updated_at, importance, \
                   half_life, last_access, valence, metadata, namespace, \
                   certainty, domain, source, emotional_state, embedding_generation, \
-                  idempotency_key, origin_actor) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-                         ?18, ?19)",
+                  idempotency_key, origin_actor, synthesis_axis, synthesis_granularity, \
+                  synthesis_logical_key, synthesis_evidence_version, synthesis_generation_hlc, \
+                  synthesis_state) \
+                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
+                          ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
                 params![
                     rid,
                     memory_type,
@@ -653,8 +780,116 @@ impl YantrikDB {
                     // claims-table PK.
                     idem.as_ref().map(|(k, _)| *k),
                     idem.as_ref().map(|_| self.actor_id.as_str()),
+                    synthesis.map(|s| s.axis.as_str()),
+                    synthesis.map(|s| s.granularity.as_str()),
+                    synthesis.map(|s| s.logical_key.as_str()),
+                    synthesis.map(|s| s.evidence_version.as_str()),
+                    synthesis.map(|_| record_hlc.as_slice()),
+                    synthesis.map(|_| "verified"),
                 ],
             )?;
+
+            if let Some(synthesis) = synthesis {
+                if synthesis.dependencies.is_empty() {
+                    return Err(crate::error::YantrikDbError::InvalidInput(
+                        "synthesis admission requires at least one dependency".into(),
+                    ));
+                }
+                if !synthesis
+                    .dependencies
+                    .iter()
+                    .any(|dependency| dependency.is_direct)
+                {
+                    return Err(crate::error::YantrikDbError::InvalidInput(
+                        "synthesis admission requires at least one direct dependency".into(),
+                    ));
+                }
+                // Read the durable value inside this write transaction. This
+                // keeps already-open handles and other processes coherent with
+                // a cap changed through another connection.
+                let synthesis_fanout_cap = Self::synthesis_fanout_cap_from_conn(&tx)?;
+                let mut has_leaf_dependency = false;
+                for dependency in &synthesis.dependencies {
+                    let current: Option<(String, String, Option<String>, i64, i64)> = tx
+                        .query_row(
+                            "SELECT m.namespace, m.consolidation_status, m.synthesis_state, \
+                                    COALESCE((SELECT MAX(r.revision_num) \
+                                              FROM record_revisions r WHERE r.rid = m.rid), 0), \
+                                    (SELECT COUNT(DISTINCT d.synthesis_rid) \
+                                     FROM synthesis_dependencies d \
+                                     JOIN memories sm ON sm.rid = d.synthesis_rid \
+                                     WHERE d.namespace = m.namespace \
+                                       AND d.source_rid = m.rid \
+                                       AND sm.synthesis_state = 'verified' \
+                                       AND sm.consolidation_status = 'active' \
+                                       AND (sm.synthesis_logical_key IS NULL \
+                                            OR sm.synthesis_logical_key <> ?2)) \
+                             FROM memories m WHERE m.rid = ?1",
+                            params![dependency.source_rid, synthesis.logical_key],
+                            |row| {
+                                Ok((
+                                    row.get(0)?,
+                                    row.get(1)?,
+                                    row.get(2)?,
+                                    row.get(3)?,
+                                    row.get(4)?,
+                                ))
+                            },
+                        )
+                        .optional()?;
+                    let Some((
+                        source_namespace,
+                        source_status,
+                        source_synthesis_state,
+                        source_revision_num,
+                        live_synthesis_fanout,
+                    )) = current
+                    else {
+                        return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                            "synthesis dependency {} no longer exists",
+                            dependency.source_rid
+                        )));
+                    };
+                    if source_namespace != namespace
+                        || source_status != "active"
+                        || source_synthesis_state
+                            .as_deref()
+                            .is_some_and(|state| state != "verified")
+                        || source_revision_num != dependency.source_revision_num
+                    {
+                        return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                            "synthesis dependency {} changed before admission",
+                            dependency.source_rid
+                        )));
+                    }
+                    let live_synthesis_fanout = live_synthesis_fanout.max(0) as usize;
+                    if live_synthesis_fanout >= synthesis_fanout_cap {
+                        return Err(crate::error::YantrikDbError::SynthesisFanoutLimit {
+                            source_rid: dependency.source_rid.clone(),
+                            current: live_synthesis_fanout,
+                            limit: synthesis_fanout_cap,
+                        });
+                    }
+                    has_leaf_dependency |= source_synthesis_state.is_none();
+                    tx.execute(
+                        "INSERT INTO synthesis_dependencies \
+                         (synthesis_rid, source_rid, source_revision_num, namespace, is_direct) \
+                         VALUES (?1, ?2, ?3, ?4, ?5)",
+                        params![
+                            rid,
+                            dependency.source_rid,
+                            dependency.source_revision_num,
+                            namespace,
+                            i64::from(dependency.is_direct),
+                        ],
+                    )?;
+                }
+                if !has_leaf_dependency {
+                    return Err(crate::error::YantrikDbError::InvalidInput(
+                        "synthesis admission requires at least one raw leaf dependency".into(),
+                    ));
+                }
+            }
 
             // Chunked embeddings: the window rows commit in the SAME
             // transaction as the memories row — either the record and
@@ -711,7 +946,7 @@ impl YantrikDB {
             // wake. `applied_generation` is the guard-pinned snapshot generation,
             // which is the generation the reserved delta entry was written
             // against.
-            self.log_op_in_tx(
+            self.log_op_at_hlc_in_tx(
                 &tx,
                 "record",
                 Some(&rid),
@@ -722,7 +957,35 @@ impl YantrikDB {
                 // The claim (if any) already bound to this id as its recovery
                 // evidence — the op and the claim must agree.
                 Some(&record_op_id),
+                &record_hlc,
             )?;
+
+            if let Some(synthesis) = synthesis {
+                let (winner, superseded) = Self::refold_synthesis_generations_in_tx(
+                    &tx,
+                    namespace,
+                    &synthesis.logical_key,
+                )?;
+                committed_synthesis_state = Some(
+                    if winner.as_deref() == Some(rid.as_str()) {
+                        "verified"
+                    } else {
+                        "superseded"
+                    }
+                    .to_string(),
+                );
+                for previous_rid in &superseded {
+                    invalidated_synthesis_dependents.extend(
+                        Self::invalidate_synthesis_dependents_in_tx(&tx, previous_rid)?,
+                    );
+                }
+                committed_synthesis_state = tx.query_row(
+                    "SELECT synthesis_state FROM memories WHERE rid = ?1",
+                    params![rid],
+                    |row| row.get(0),
+                )?;
+                superseded_syntheses = superseded;
+            }
 
             // Plain INSERT: if this cannot land, the whole write must fail
             // rather than commit a record whose entity materialization is owed
@@ -761,6 +1024,13 @@ impl YantrikDB {
                 // Nothing durable exists. `reservation` drops here and removes the
                 // entry — a removal, NOT a tombstone (a tombstone would suppress
                 // the rid and hide a still-valid older vector).
+                if matches!(
+                    &e,
+                    crate::error::YantrikDbError::SynthesisFanoutLimit { .. }
+                ) {
+                    self.synthesis_fanout_refused_since_boot
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                }
                 drop(conn);
                 return Err(e);
             }
@@ -819,6 +1089,9 @@ impl YantrikDB {
                 access_count: 0,
                 valence,
                 consolidation_status: "active".to_string(),
+                synthesis_state: committed_synthesis_state,
+                synthesis_axis: synthesis.map(|value| value.axis.clone()),
+                synthesis_granularity: synthesis.map(|value| value.granularity.clone()),
                 memory_type: memory_type.to_string(),
                 namespace: namespace.to_string(),
                 certainty,
@@ -827,6 +1100,8 @@ impl YantrikDB {
                 emotional_state: emotional_state.map(|s| s.to_string()),
             },
         );
+        self.cache_supersede_syntheses(&superseded_syntheses);
+        self.cache_invalidate_syntheses(&invalidated_synthesis_dependents);
 
         // LAST: a read-your-write waiter must not wake against a half-applied
         // record (CONCURRENCY.md: bump visible_seq AFTER the delta append).
@@ -1611,6 +1886,9 @@ impl YantrikDB {
                         access_count: 0,
                         valence: input.valence,
                         consolidation_status: "active".to_string(),
+                        synthesis_state: None,
+                        synthesis_axis: None,
+                        synthesis_granularity: None,
                         memory_type: input.memory_type.clone(),
                         namespace: namespaces[idx].to_string(),
                         certainty: input.certainty,
@@ -2070,6 +2348,9 @@ impl YantrikDB {
                     access_count: 0,
                     valence,
                     consolidation_status: "active".to_string(),
+                    synthesis_state: None,
+                    synthesis_axis: None,
+                    synthesis_granularity: None,
                     memory_type: memory_type.to_string(),
                     namespace: namespace.to_string(),
                     certainty,

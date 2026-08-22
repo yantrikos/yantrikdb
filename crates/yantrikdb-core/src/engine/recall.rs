@@ -18,26 +18,95 @@ use super::{now, TextMetadataRow, YantrikDB};
 /// - `Recency`: re-sort the top_k by `created_at` descending. Useful for
 ///   "what did I write about this recently?" The candidate set is still
 ///   the MMR-diverse relevance pool, but presentation is recency-first.
+/// - `FirstMention`: re-sort the top_k by engine-owned
+///   `metadata.first_mention_at` ascending, falling back to `created_at`.
+///   This presents a relevance-selected synthesized-item set chronologically
+///   without confusing evidence availability with first mention.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecallOrder {
     Relevance,
     Certainty,
     Recency,
+    FirstMention,
 }
 
 /// Parse the `order` string from the engine `recall()` surface. Accepts:
-/// `"relevance"`, `"certainty"`, `"recency"`. `None` and `Some("relevance")`
-/// both map to `Relevance` so the default is stable. Unknown strings
-/// return a typed error so callers see the typo immediately.
+/// `"relevance"`, `"certainty"`, `"recency"`, `"first_mention"`, and the
+/// `"chronological"` alias. `None` and `Some("relevance")` both map to
+/// `Relevance` so the default is stable. Unknown strings return a typed error
+/// so callers see the typo immediately.
 pub(crate) fn parse_recall_order(order: Option<&str>) -> Result<RecallOrder> {
     match order {
         None | Some("relevance") => Ok(RecallOrder::Relevance),
         Some("certainty") => Ok(RecallOrder::Certainty),
         Some("recency") => Ok(RecallOrder::Recency),
+        Some("first_mention" | "chronological") => Ok(RecallOrder::FirstMention),
         Some(other) => Err(YantrikDbError::InvalidInput(format!(
             "recall: invalid `order` value {other:?}; expected one of \
-             \"relevance\" (default) | \"certainty\" | \"recency\""
+             \"relevance\" (default) | \"certainty\" | \"recency\" | \
+             \"first_mention\" | \"chronological\""
         ))),
+    }
+}
+
+pub(super) const MAX_OVERSAMPLED_RECALL_CANDIDATES: usize = 10_000;
+pub(super) const MAX_TRACKED_RECALL_LIMIT_NAMESPACES: usize = 1_024;
+const RECALL_LIMIT_NAMESPACE_OVERFLOW: &str = "<other>";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RecallFetchPlan {
+    pub(super) fetch_k: usize,
+    pub(super) requested_candidates: usize,
+    pub(super) candidate_cap: usize,
+    pub(super) cap_bound: bool,
+}
+
+impl RecallFetchPlan {
+    fn report(
+        self,
+        requested_top_k: usize,
+        index_len: usize,
+        has_post_filters: bool,
+    ) -> crate::types::RetrievalLimits {
+        crate::types::RetrievalLimits {
+            requested_top_k,
+            requested_candidates: self.requested_candidates,
+            candidate_cap: self.candidate_cap,
+            fetch_k: self.fetch_k,
+            index_len,
+            has_post_filters,
+            cap_bound: self.cap_bound,
+        }
+    }
+}
+
+pub(super) fn recall_fetch_plan(
+    top_k: usize,
+    index_len: usize,
+    has_post_filters: bool,
+) -> RecallFetchPlan {
+    if top_k == 0 {
+        return RecallFetchPlan {
+            fetch_k: 0,
+            requested_candidates: 0,
+            candidate_cap: MAX_OVERSAMPLED_RECALL_CANDIDATES.max(top_k),
+            cap_bound: false,
+        };
+    }
+    let ceiling = MAX_OVERSAMPLED_RECALL_CANDIDATES.max(top_k);
+    let mut requested_candidates = top_k.saturating_mul(20);
+    if has_post_filters {
+        // Filtering happens after HNSW candidate generation. Exhaust small
+        // indexes so a dense unqualified prefix cannot hide every eligible row.
+        requested_candidates = requested_candidates.max(index_len);
+    }
+    let uncapped_fetch = requested_candidates.min(index_len);
+    let fetch_k = uncapped_fetch.min(ceiling);
+    RecallFetchPlan {
+        fetch_k,
+        requested_candidates,
+        candidate_cap: ceiling,
+        cap_bound: fetch_k < uncapped_fetch,
     }
 }
 
@@ -211,6 +280,9 @@ pub(crate) fn passes_recall_filters(
     source: Option<&str>,
     certainty_min: Option<f64>,
 ) -> bool {
+    if !synthesis_lifecycle_allows(row) {
+        return false;
+    }
     let status_ok = if include_consolidated {
         row.consolidation_status == "active" || row.consolidation_status == "consolidated"
     } else {
@@ -250,6 +322,163 @@ pub(crate) fn passes_recall_filters(
         }
     }
     true
+}
+
+fn synthesis_lifecycle_allows(row: &crate::types::ScoringRow) -> bool {
+    row.synthesis_state
+        .as_deref()
+        .is_none_or(|state| state == "verified")
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SynthesisGranularityIntent {
+    Atomic,
+    Rollup,
+    Conflict,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SynthesisRepresentationIntent {
+    axis: Option<&'static str>,
+    granularity: Option<SynthesisGranularityIntent>,
+}
+
+fn query_contains_phrase(words: &[String], phrase: &[&str]) -> bool {
+    words
+        .windows(phrase.len())
+        .any(|window| window.iter().map(String::as_str).eq(phrase.iter().copied()))
+}
+
+fn synthesis_representation_intent(
+    query_text: Option<&str>,
+) -> Option<SynthesisRepresentationIntent> {
+    // Punctuation is a boundary by design. Apostrophized and hyphenated
+    // compounds therefore become multiple words; add future patterns in that
+    // tokenized form rather than expecting a punctuation-bearing literal.
+    let words: Vec<String> = query_text?
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(str::to_lowercase)
+        .collect();
+    if words.is_empty() {
+        return None;
+    }
+
+    let has_word =
+        |candidates: &[&str]| words.iter().any(|word| candidates.contains(&word.as_str()));
+    let has_phrase = |phrase: &[&str]| query_contains_phrase(&words, phrase);
+
+    let asks_for_atomic = has_word(&[
+        "list", "order", "ordered", "sequence", "timeline", "stages", "items", "aspects",
+    ]) || has_phrase(&["walk", "me", "through"]);
+    let asks_for_rollup = has_word(&[
+        "summarize",
+        "summarise",
+        "summary",
+        "overview",
+        "recap",
+        "theme",
+        "themes",
+        "pattern",
+        "patterns",
+        "overall",
+        "broadly",
+    ]);
+    let granularity = match (asks_for_atomic, asks_for_rollup) {
+        (true, false) => Some(SynthesisGranularityIntent::Atomic),
+        (false, true) => Some(SynthesisGranularityIntent::Rollup),
+        // A mixed "summarize these items as a list" request does not give
+        // enough evidence to prefer either stored tier.
+        (true, true) => Some(SynthesisGranularityIntent::Conflict),
+        (false, false) => None,
+    };
+
+    // The axes are intentionally phrase-led. A bare "ask" in "can you ask
+    // the database" must not select the user's historical `asked` view.
+    let axis = if has_phrase(&["who", "said"])
+        || has_phrase(&["who", "told"])
+        || has_phrase(&["who", "mentioned"])
+        || has_phrase(&["who", "shared"])
+    {
+        Some("who_said")
+    } else if has_phrase(&["i", "asked"])
+        || has_phrase(&["i", "ask"])
+        || has_phrase(&["did", "i", "ask"])
+        || has_phrase(&["what", "i", "asked"])
+        || has_phrase(&["questions", "i", "asked"])
+        || has_phrase(&["my", "questions"])
+    {
+        Some("asked")
+    } else if has_phrase(&["i", "brought", "up"])
+        || has_phrase(&["i", "raised"])
+        || has_phrase(&["i", "mentioned"])
+        || has_phrase(&["i", "shared"])
+        || has_phrase(&["i", "told"])
+        || has_phrase(&["my", "contributions"])
+        || has_phrase(&["my", "ideas"])
+        || has_phrase(&["my", "input"])
+        || has_word(&["contributions"])
+    {
+        Some("contributed")
+    } else {
+        None
+    };
+
+    (axis.is_some() || granularity.is_some())
+        .then_some(SynthesisRepresentationIntent { axis, granularity })
+}
+
+/// Prefer the stored representation that matches the shape of the request.
+///
+/// This is a match-only preference, never a filter or mismatch penalty. Raw
+/// memories and unlabelled queries keep their old scores exactly, while a bad
+/// heuristic classification cannot suppress otherwise relevant evidence.
+fn apply_synthesis_representation_preference(
+    scored: &mut [RecallResult],
+    cache: &HashMap<String, crate::types::ScoringRow>,
+    query_text: Option<&str>,
+) {
+    const GRANULARITY_MATCH_MULTIPLIER: f64 = 1.06;
+    const AXIS_MATCH_MULTIPLIER: f64 = 1.04;
+
+    let Some(intent) = synthesis_representation_intent(query_text) else {
+        return;
+    };
+
+    for result in scored {
+        let Some(row) = cache.get(&result.rid) else {
+            continue;
+        };
+        if row.synthesis_state.as_deref() != Some("verified") {
+            continue;
+        }
+
+        let granularity_match = match intent.granularity {
+            Some(SynthesisGranularityIntent::Atomic) => {
+                row.synthesis_granularity.as_deref() == Some("atomic")
+            }
+            Some(SynthesisGranularityIntent::Rollup) => {
+                row.synthesis_granularity.as_deref() == Some("rollup")
+            }
+            Some(SynthesisGranularityIntent::Conflict) => false,
+            None => false,
+        };
+        if granularity_match {
+            result.score *= GRANULARITY_MATCH_MULTIPLIER;
+            result.why_retrieved.push(format!(
+                "representation_match:granularity={}",
+                row.synthesis_granularity.as_deref().unwrap_or_default()
+            ));
+        }
+
+        if intent.axis.is_some() && row.synthesis_axis.as_deref() == intent.axis {
+            result.score *= AXIS_MATCH_MULTIPLIER;
+            result.why_retrieved.push(format!(
+                "representation_match:axis={}",
+                row.synthesis_axis.as_deref().unwrap_or_default()
+            ));
+        }
+    }
 }
 
 /// Content words of a chunk, for novelty scoring.
@@ -544,6 +773,32 @@ fn apply_lane_agreement(
 }
 
 impl YantrikDB {
+    pub(super) fn note_recall_candidate_cap_bound(&self, namespace: Option<&str>) {
+        let key = namespace.unwrap_or("*");
+        let mut counts = self.recall_candidate_cap_bound_since_boot.lock();
+        if let Some(count) = counts.get_mut(key) {
+            *count = count.saturating_add(1);
+            return;
+        }
+
+        let tracked_namespaces = counts
+            .keys()
+            .filter(|candidate| {
+                candidate.as_str() != "*" && candidate.as_str() != RECALL_LIMIT_NAMESPACE_OVERFLOW
+            })
+            .count();
+        let bucket =
+            if namespace.is_some() && tracked_namespaces >= MAX_TRACKED_RECALL_LIMIT_NAMESPACES {
+                self.recall_candidate_cap_namespace_stats_truncated_since_boot
+                    .store(true, std::sync::atomic::Ordering::Relaxed);
+                RECALL_LIMIT_NAMESPACE_OVERFLOW
+            } else {
+                key
+            };
+        let count = counts.entry(bucket.to_string()).or_insert(0);
+        *count = count.saturating_add(1);
+    }
+
     /// Retrieve memories using multi-signal fusion scoring.
     /// When `expand_entities` is true, graph edges are followed to pull in
     /// entity-connected memories that pure vector search would miss.
@@ -577,6 +832,43 @@ impl YantrikDB {
         order: Option<&str>,
         include_superseded: bool,
     ) -> Result<Vec<RecallResult>> {
+        self.recall_with_limits(
+            query_embedding,
+            top_k,
+            time_window,
+            memory_type,
+            include_consolidated,
+            expand_entities,
+            query_text,
+            skip_reinforce,
+            namespace,
+            domain,
+            source,
+            certainty_min,
+            order,
+            include_superseded,
+        )
+        .map(|(results, _)| results)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn recall_with_limits(
+        &self,
+        query_embedding: &[f32],
+        top_k: usize,
+        time_window: Option<(f64, f64)>,
+        memory_type: Option<&str>,
+        include_consolidated: bool,
+        expand_entities: bool,
+        query_text: Option<&str>,
+        skip_reinforce: bool,
+        namespace: Option<&str>,
+        domain: Option<&str>,
+        source: Option<&str>,
+        certainty_min: Option<f64>,
+        order: Option<&str>,
+        include_superseded: bool,
+    ) -> Result<(Vec<RecallResult>, crate::types::RetrievalLimits)> {
         // v0.10 Item 3 seqlock (sol r5): EVERY attempt validates — a result
         // is never returned without a passing epoch recheck (coherence is
         // never traded for a result). After the budget, surface a retryable
@@ -588,7 +880,7 @@ impl YantrikDB {
                 // Report attempts completed so far (sol r6: accurate count).
                 return Err(YantrikDbError::RecallContended { attempts: attempt });
             };
-            if let Some(results) = self.recall_inner(
+            if let Some((results, limits)) = self.recall_inner(
                 query_embedding,
                 top_k,
                 time_window,
@@ -603,10 +895,11 @@ impl YantrikDB {
                 certainty_min,
                 order,
                 include_superseded,
+                attempt == 0,
                 epoch0,
                 None,
             )? {
-                return Ok(results);
+                return Ok((results, limits));
             }
         }
         Err(YantrikDbError::RecallContended {
@@ -648,7 +941,7 @@ impl YantrikDB {
             let Some(epoch0) = self.correction_epoch_even() else {
                 return Err(YantrikDbError::RecallContended { attempts: attempt });
             };
-            if let Some(results) = self.recall_inner(
+            if let Some((results, _limits)) = self.recall_inner(
                 query_embedding,
                 top_k,
                 time_window,
@@ -663,6 +956,7 @@ impl YantrikDB {
                 certainty_min,
                 order,
                 include_superseded,
+                attempt == 0,
                 epoch0,
                 Some(&mut explain),
             )? {
@@ -708,6 +1002,10 @@ impl YantrikDB {
         // On legacy-policy databases this flag is a no-op (everything is
         // already included).
         include_superseded: bool,
+        // Since-boot limit telemetry counts public calls, not discarded
+        // seqlock attempts. Only the first attempt increments the counter;
+        // every binding attempt still emits its structured trace.
+        observe_limit_binding: bool,
         // v0.10 Item 3 seqlock: the even correction epoch snapshotted by the
         // wrapper before candidate generation, rechecked (with an Acquire
         // fence) after hydration. Returns Ok(None) on mismatch → wrapper
@@ -717,7 +1015,7 @@ impl YantrikDB {
         // through on the SUCCESS path only (a retried attempt overwrites,
         // a discarded one never assigns). None costs nothing.
         mut explain_sink: Option<&mut Option<crate::types::RecallExplain>>,
-    ) -> Result<Option<Vec<RecallResult>>> {
+    ) -> Result<Option<(Vec<RecallResult>, crate::types::RetrievalLimits)>> {
         // Validate `order` upfront so callers get a clear error rather
         // than silently falling back to relevance when they typo a value.
         let recall_order = parse_recall_order(order)?;
@@ -732,13 +1030,39 @@ impl YantrikDB {
             .unwrap_or(0.0);
 
         // Step 1: Vector candidate generation via HNSW
-        // Fetch a large pool to ensure diverse, high-quality candidates survive MMR filtering.
-        let fetch_k = top_k.saturating_mul(20).min(500);
         // **Issue #41 brainstorm-4 §1.** Snapshot SearchState once for
         // the full recall path so the HNSW search sees the same
         // generation-anchored index every time it's queried within
         // this call.
         let state = self.search_state.load_full();
+        // Fetch a large pool so selective post-filters and MMR do not silently
+        // underfill top_k. Namespace is the ordinary partition key, so making
+        // it exhaustive would turn the common scoped-recall path into a near
+        // full traversal; namespace-aware indexes are the durable fix there.
+        let has_post_filters = time_window.is_some()
+            || memory_type.is_some()
+            || domain.is_some()
+            || source.is_some()
+            || certainty_min.is_some();
+        let fetch_plan = recall_fetch_plan(top_k, state.vec_index.len(), has_post_filters);
+        let retrieval_limits = fetch_plan.report(top_k, state.vec_index.len(), has_post_filters);
+        if fetch_plan.cap_bound {
+            if observe_limit_binding {
+                self.note_recall_candidate_cap_bound(namespace);
+            }
+            tracing::debug!(
+                target: "yantrikdb::recall",
+                requested_top_k = top_k,
+                requested_candidates = fetch_plan.requested_candidates,
+                fetch_k = fetch_plan.fetch_k,
+                candidate_cap = fetch_plan.candidate_cap,
+                index_len = state.vec_index.len(),
+                has_post_filters,
+                counted_since_boot = observe_limit_binding,
+                "recall candidate cap bound"
+            );
+        }
+        let fetch_k = fetch_plan.fetch_k;
         // v0.9.3 contract gate: a caller-supplied NaN/wrong-dim QUERY vector
         // poisons every distance in the search. Typed rejection instead.
         // (recall_with_seq / recall_with_response / recall_refine all
@@ -772,7 +1096,10 @@ impl YantrikDB {
         let explain_on = explain_sink.is_some();
         let mut explain_fallback_rids: std::collections::HashSet<String> = Default::default();
         let mut explain_valence_rids: std::collections::HashSet<String> = Default::default();
-        let mut explain_pack_rids: std::collections::HashSet<String> = Default::default();
+        // Pack rows live in their pack's scoring cache, not the host cache.
+        // Track their provenance across the merged-pool lifecycle check; the
+        // pack collector has already applied the same lifecycle predicate.
+        let mut pack_rids: std::collections::HashSet<String> = Default::default();
         let mut explain_fts_ran = false;
         if crate::engine::capture::enabled() {
             crate::engine::capture::emit(
@@ -813,6 +1140,7 @@ impl YantrikDB {
                     },
                 );
                 *sink = Some(crate::types::RecallExplain {
+                    retrieval_limits: retrieval_limits.clone(),
                     comparator: "rank_cmp: score quantized at 1e-6 desc, rid asc".to_string(),
                     score_algebra: "empty index short-circuit — no scoring ran".to_string(),
                     query_sentiment: 0.0,
@@ -821,7 +1149,7 @@ impl YantrikDB {
                     pool: Vec::new(),
                 });
             }
-            return Ok(Some(vec![]));
+            return Ok(Some((vec![], retrieval_limits)));
         }
 
         // Candidate count BEFORE filtering, for the gate diagnostic: it
@@ -2508,9 +2836,7 @@ impl YantrikDB {
             )?;
             if !pack_candidates.is_empty() {
                 tracing::debug!(count = pack_candidates.len(), "merged pack candidates");
-                if explain_on {
-                    explain_pack_rids.extend(pack_candidates.iter().map(|r| r.rid.clone()));
-                }
+                pack_rids.extend(pack_candidates.iter().map(|r| r.rid.clone()));
                 scored.extend(pack_candidates);
             }
         }
@@ -2571,6 +2897,20 @@ impl YantrikDB {
         }
         apply_lane_agreement(&mut scored, &win_by_rid);
         crate::engine::lexical::apply_keyword_reserve(&mut scored, &lex_by_rid, top_k);
+
+        // Lifecycle eligibility is a result invariant, not a lane concern.
+        // Recheck the merged pool so a candidate cannot leak through an older
+        // lane that performed its own partial copy of the request filters.
+        {
+            let cache = self.scoring_cache.read();
+            scored.retain(|result| {
+                pack_rids.contains(&result.rid)
+                    || cache
+                        .get(&result.rid)
+                        .is_some_and(synthesis_lifecycle_allows)
+            });
+            apply_synthesis_representation_preference(&mut scored, &cache, query_text);
+        }
 
         // Step 4: MMR diversity selection
         //
@@ -2648,7 +2988,7 @@ impl YantrikDB {
                     if explain_valence_rids.contains(&r.rid) {
                         lanes.push("valence_scan".into());
                     }
-                    if explain_pack_rids.contains(&r.rid) {
+                    if pack_rids.contains(&r.rid) {
                         lanes.push("pack".into());
                     }
                     crate::types::ExplainPoolRow {
@@ -2756,12 +3096,12 @@ impl YantrikDB {
             lanes.insert(
                 "pack".to_string(),
                 lane(
-                    if explain_pack_rids.is_empty() {
+                    if pack_rids.is_empty() {
                         "ran_empty"
                     } else {
                         "ran"
                     },
-                    explain_pack_rids.len(),
+                    pack_rids.len(),
                     None,
                 ),
             );
@@ -2774,12 +3114,15 @@ impl YantrikDB {
             };
 
             explain_report = Some(crate::types::RecallExplain {
+                retrieval_limits: retrieval_limits.clone(),
                 comparator: "rank_cmp: score quantized at 1e-6 desc, rid asc (every recall-path \
                              selection)"
                     .to_string(),
                 score_algebra: "score = w_sim*similarity*freshness_mult(decay,recency) * \
                                 importance_mult * valence_multiplier, plus additive lane boosts \
                                 (keyword; graph is MULTIPLICATIVE via graph_mult since 2026-08-13) and reserve/claims lifts to cutoff+eps. \
+                                Verified synthesis records may then receive match-only \
+                                axis/granularity multipliers inferred from query text. \
                                 scores.contributions are per-signal DIAGNOSTIC MAGNITUDES on \
                                 these mixed terms and do NOT sum to score — do not derive \
                                 arithmetic from them."
@@ -2989,17 +3332,7 @@ impl YantrikDB {
             RecallOrder::Recency => {
                 scored.sort_by(|a, b| b.created_at.total_cmp(&a.created_at));
             }
-        }
-
-        if crate::engine::capture::enabled() {
-            crate::engine::capture::emit(
-                capture_inst,
-                "final",
-                serde_json::json!(scored
-                    .iter()
-                    .map(|r| (r.rid.as_str(), crate::engine::capture::bits(r.score)))
-                    .collect::<Vec<_>>()),
-            );
+            RecallOrder::FirstMention => {}
         }
 
         // Step 5: Hydrate final top_k with text + metadata from SQLite
@@ -3014,6 +3347,34 @@ impl YantrikDB {
                 result.metadata = serde_json::from_str(&tm.metadata)
                     .unwrap_or(serde_json::Value::Object(Default::default()));
             }
+        }
+
+        if recall_order == RecallOrder::FirstMention {
+            let first_mention_at = |result: &RecallResult| {
+                result
+                    .metadata
+                    .get("first_mention_at")
+                    .and_then(serde_json::Value::as_f64)
+                    .filter(|value| value.is_finite())
+                    .unwrap_or(result.created_at)
+            };
+            scored.sort_by(|a, b| {
+                first_mention_at(a)
+                    .total_cmp(&first_mention_at(b))
+                    .then_with(|| a.created_at.total_cmp(&b.created_at))
+                    .then_with(|| a.rid.cmp(&b.rid))
+            });
+        }
+
+        if crate::engine::capture::enabled() {
+            crate::engine::capture::emit(
+                capture_inst,
+                "final",
+                serde_json::json!(scored
+                    .iter()
+                    .map(|r| (r.rid.as_str(), crate::engine::capture::bits(r.score)))
+                    .collect::<Vec<_>>()),
+            );
         }
 
         // Step 5.5: snippet spans — report WHERE in each long record the
@@ -3109,7 +3470,7 @@ impl YantrikDB {
             }
         }
 
-        Ok(Some(scored))
+        Ok(Some((scored, retrieval_limits)))
     }
 
     /// Task 41 — annotate recall hits with trust signals so staleness is
@@ -3278,7 +3639,7 @@ impl YantrikDB {
         domain: Option<&str>,
         source: Option<&str>,
     ) -> Result<RecallResponse> {
-        let results = self.recall(
+        let (results, retrieval_limits) = self.recall_with_limits(
             query_embedding,
             top_k,
             time_window,
@@ -3485,6 +3846,7 @@ impl YantrikDB {
             retrieval_summary: summary,
             hints,
             coverage,
+            retrieval_limits,
         })
     }
 
@@ -3820,11 +4182,31 @@ impl YantrikDB {
         // ── Phase 1: Vector search (HNSW) ──
         let t_vec = Instant::now();
         let ts = now();
-        let fetch_k = top_k.saturating_mul(20).min(500);
         // **Issue #41 brainstorm-4 §1.** SearchState snapshot for the
         // profiled-recall variant. Same generation-anchoring contract
         // as `recall_ranked`.
         let state = self.search_state.load_full();
+        let has_post_filters = time_window.is_some()
+            || memory_type.is_some()
+            || domain.is_some()
+            || source.is_some()
+            || certainty_min.is_some();
+        let fetch_plan = recall_fetch_plan(top_k, state.vec_index.len(), has_post_filters);
+        if fetch_plan.cap_bound {
+            self.note_recall_candidate_cap_bound(namespace);
+            tracing::debug!(
+                target: "yantrikdb::recall",
+                requested_top_k = top_k,
+                requested_candidates = fetch_plan.requested_candidates,
+                fetch_k = fetch_plan.fetch_k,
+                candidate_cap = fetch_plan.candidate_cap,
+                index_len = state.vec_index.len(),
+                has_post_filters,
+                profiled = true,
+                "recall candidate cap bound"
+            );
+        }
+        let fetch_k = fetch_plan.fetch_k;
         // v0.9.3 contract gate — same as `recall` (profiled duplicate).
         crate::validate::validate_embedding("recall_profiled", query_embedding, state.dim())?;
         let vec_results = state
@@ -5350,6 +5732,18 @@ impl YantrikDB {
         apply_lane_agreement(&mut scored, &win_by_rid);
         crate::engine::lexical::apply_keyword_reserve(&mut scored, &lex_by_rid, top_k);
 
+        // Lifecycle eligibility is rechecked after all profiled lanes merge,
+        // matching the default recall path's final admission boundary.
+        {
+            let cache = self.scoring_cache.read();
+            scored.retain(|result| {
+                cache
+                    .get(&result.rid)
+                    .is_some_and(synthesis_lifecycle_allows)
+            });
+            apply_synthesis_representation_preference(&mut scored, &cache, query_text);
+        }
+
         // ── Phase 4: MMR diversity selection ──
         let t_sort = Instant::now();
         scored.sort_by(crate::engine::lexical::rank_cmp);
@@ -5744,6 +6138,86 @@ impl YantrikDB {
         )?;
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod synthesis_representation_tests {
+    use super::*;
+
+    #[test]
+    fn event_ordering_query_selects_atomic_contributed_view() {
+        assert_eq!(
+            synthesis_representation_intent(Some(
+                "Can you list the order in which I brought up these project aspects?"
+            )),
+            Some(SynthesisRepresentationIntent {
+                axis: Some("contributed"),
+                granularity: Some(SynthesisGranularityIntent::Atomic),
+            })
+        );
+    }
+
+    #[test]
+    fn summary_and_question_queries_select_their_distinct_views() {
+        assert_eq!(
+            synthesis_representation_intent(Some("Summarize what I asked about the project")),
+            Some(SynthesisRepresentationIntent {
+                axis: Some("asked"),
+                granularity: Some(SynthesisGranularityIntent::Rollup),
+            })
+        );
+        assert_eq!(
+            synthesis_representation_intent(Some("Who told me about the launch?")),
+            Some(SynthesisRepresentationIntent {
+                axis: Some("who_said"),
+                granularity: None,
+            })
+        );
+        assert_eq!(
+            synthesis_representation_intent(Some("Give me an overview of my decisions")),
+            Some(SynthesisRepresentationIntent {
+                axis: None,
+                granularity: Some(SynthesisGranularityIntent::Rollup),
+            })
+        );
+    }
+
+    #[test]
+    fn mixed_list_and_summary_request_is_a_neutral_granularity_conflict() {
+        assert_eq!(
+            synthesis_representation_intent(Some("Summarize these items as a list")),
+            Some(SynthesisRepresentationIntent {
+                axis: None,
+                granularity: Some(SynthesisGranularityIntent::Conflict),
+            })
+        );
+    }
+
+    #[test]
+    fn classifier_uses_boundaries_and_leaves_neutral_queries_alone() {
+        assert_eq!(
+            synthesis_representation_intent(Some("Show project status")),
+            None
+        );
+        assert_eq!(
+            synthesis_representation_intent(Some("The reorder buffer")),
+            None
+        );
+        assert_eq!(synthesis_representation_intent(Some("basket status")), None);
+        assert_eq!(
+            synthesis_representation_intent(Some("What details did I share?")),
+            None
+        );
+        assert_eq!(
+            synthesis_representation_intent(Some("Which examples were relevant?")),
+            None
+        );
+        assert_eq!(
+            synthesis_representation_intent(Some("What steps did I take?")),
+            None
+        );
+        assert_eq!(synthesis_representation_intent(None), None);
     }
 }
 

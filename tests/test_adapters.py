@@ -33,6 +33,41 @@ class TestLangChainAdapter:
         history = result[mem.memory_key]
         assert "Python" in history
 
+    def test_save_preserves_turn_speaker_provenance(self, db):
+        from yantrikdb.adapters.langchain import YantrikDBChatMemory
+
+        mem = YantrikDBChatMemory(db)
+        mem.save_context(
+            {"input": "I prefer compact status reports."},
+            {"output": "I will keep future reports compact."},
+        )
+
+        user_hits = db.recall(
+            query="compact status reports",
+            top_k=5,
+            source="user",
+            skip_reinforce=True,
+        )
+        assistant_hits = db.recall(
+            query="future reports compact",
+            top_k=5,
+            source="assistant",
+            skip_reinforce=True,
+        )
+
+        assert user_hits
+        assert all(hit["source"] == "user" for hit in user_hits)
+        assert user_hits[0]["metadata"]["speaker_role"] == "user"
+        assert assistant_hits
+        assert all(hit["source"] == "assistant" for hit in assistant_hits)
+        assert assistant_hits[0]["metadata"]["speaker_role"] == "assistant"
+        stats = db.stats()
+        assert stats["provenance_verified_records"] == 2
+        assert stats["unverified_user_source_records"] == 0
+        assert stats["provenance_source_counts"] == {"user": 1, "assistant": 1}
+        assert stats["provenance_method_counts"] == {"direct_turn_v1": 2}
+        assert stats["unverified_source_counts"] == {}
+
     def test_memory_variables_property(self, db):
         from yantrikdb.adapters.langchain import YantrikDBChatMemory
 
@@ -103,15 +138,31 @@ class TestOpenAIAgentsAdapter:
             "text": "The sky is blue",
             "memory_type": "semantic",
             "importance": 0.8,
+            "source": "user",
         })
         assert "rid" in result
 
         result = handle_tool_call(db, "memory_recall", {
             "query": "What color is the sky?",
             "top_k": 5,
+            "source": "user",
         })
         assert "memories" in result
         assert len(result["memories"]) >= 1
+        assert all(memory["source"] == "user" for memory in result["memories"])
+
+    def test_record_defaults_agent_authored_memory_to_assistant(self, db):
+        from yantrikdb.adapters.openai_agents import handle_tool_call
+
+        handle_tool_call(db, "memory_record", {"text": "Try the compact layout."})
+        result = handle_tool_call(db, "memory_recall", {
+            "query": "compact layout",
+            "source": "assistant",
+        })
+
+        assert len(result["memories"]) == 1
+        assert result["memories"][0]["source"] == "assistant"
+        assert result["memories"][0]["metadata"]["provenance_verified"] is False
 
     def test_handle_forget(self, db):
         from yantrikdb.adapters.openai_agents import handle_tool_call
@@ -161,6 +212,14 @@ class TestCrewAIAdapter:
         assert "score" in results[0]
         assert "context" in results[0]
         assert "3pm" in results[0]["context"]
+        stored = db.recall(
+            query="meeting 3pm",
+            top_k=5,
+            source="assistant",
+            skip_reinforce=True,
+        )
+        assert stored and stored[0]["metadata"]["speaker_role"] == "assistant"
+        assert stored[0]["metadata"]["provenance_verified"] is True
 
     def test_long_term_save_and_search(self, db):
         from yantrikdb.adapters.crewai import YantrikDBLongTermMemory

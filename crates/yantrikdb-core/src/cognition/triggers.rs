@@ -148,7 +148,9 @@ pub fn check_consolidation_triggers(
 
             triggers.push(Trigger {
                 trigger_type: "consolidation_ready".to_string(),
-                reason: format!("{unconsolidated} episodic memories could be consolidated"),
+                reason: format!(
+                    "{unconsolidated} active episodic memories are awaiting a bounded consolidation scan"
+                ),
                 urgency: (unconsolidated as f64 / 50.0).min(1.0),
                 source_rids: vec![],
                 suggested_action: "run_consolidation".to_string(),
@@ -809,6 +811,9 @@ pub struct TriggerPruneReport {
     pub pending_before: usize,
     /// Pending triggers expired for being past their `expires_at` (TTL).
     pub expired_overdue: usize,
+    /// Pending triggers expired because their underlying predicate is no
+    /// longer true or none of their source memories remain active.
+    pub expired_stale: usize,
     /// Pending triggers expired to keep the backlog under the cap.
     pub expired_over_cap: usize,
     /// Pending triggers remaining after the pass.
@@ -837,15 +842,54 @@ impl YantrikDB {
             params![ts],
             |r| r.get::<_, i64>(0),
         )? as usize;
-        let remaining_after_overdue = pending_before.saturating_sub(overdue);
-        let over_cap = remaining_after_overdue.saturating_sub(max_pending);
+        let open_conflicts: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM conflicts WHERE status = 'open'",
+            [],
+            |r| r.get(0),
+        )?;
+        let critical_aging: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM conflicts \
+             WHERE status = 'open' AND priority = 'critical' AND detected_at < ?1",
+            params![ts - 86400.0 * 3.0],
+            |r| r.get(0),
+        )?;
+        let conflict_escalation_active = open_conflicts > 5 || critical_aging;
+
+        // Predicate-aware expiry. Keep this deliberately narrow: trigger
+        // types whose truth cannot be reconstructed cheaply remain governed
+        // by TTL and operator action. Source-backed triggers are stale only
+        // when every source has left the active recall set.
+        let stale = conn.query_row(
+            "SELECT COUNT(*) FROM trigger_log t \
+             WHERE t.status = 'pending' \
+             AND NOT (t.expires_at IS NOT NULL AND t.expires_at < ?1) \
+             AND ( \
+               (t.trigger_type = 'conflict_escalation' AND ?2 = 0) \
+               OR ( \
+                 EXISTS (SELECT 1 FROM trigger_source_rids tsr \
+                         WHERE tsr.trigger_id = t.trigger_id) \
+                 AND NOT EXISTS ( \
+                   SELECT 1 FROM trigger_source_rids tsr \
+                   JOIN memories m ON m.rid = tsr.rid \
+                   WHERE tsr.trigger_id = t.trigger_id \
+                     AND m.consolidation_status = 'active' \
+                 ) \
+               ) \
+             )",
+            params![ts, conflict_escalation_active],
+            |r| r.get::<_, i64>(0),
+        )? as usize;
+
+        let remaining_after_stale = pending_before.saturating_sub(overdue).saturating_sub(stale);
+        let over_cap = remaining_after_stale.saturating_sub(max_pending);
 
         let mut report = TriggerPruneReport {
             dry_run,
             pending_before,
             expired_overdue: overdue,
+            expired_stale: stale,
             expired_over_cap: over_cap,
-            pending_after: remaining_after_overdue.saturating_sub(over_cap),
+            pending_after: remaining_after_stale.saturating_sub(over_cap),
         };
 
         if dry_run {
@@ -858,7 +902,25 @@ impl YantrikDB {
              WHERE status = 'pending' AND expires_at IS NOT NULL AND expires_at < ?1",
             params![ts],
         )?;
-        // 2) Over-cap eviction: lowest urgency, then oldest, from what remains.
+        // 2) Predicate/source revalidation.
+        conn.execute(
+            "UPDATE trigger_log SET status = 'expired' \
+             WHERE status = 'pending' AND ( \
+               (trigger_type = 'conflict_escalation' AND ?1 = 0) \
+               OR ( \
+                 EXISTS (SELECT 1 FROM trigger_source_rids tsr \
+                         WHERE tsr.trigger_id = trigger_log.trigger_id) \
+                 AND NOT EXISTS ( \
+                   SELECT 1 FROM trigger_source_rids tsr \
+                   JOIN memories m ON m.rid = tsr.rid \
+                   WHERE tsr.trigger_id = trigger_log.trigger_id \
+                     AND m.consolidation_status = 'active' \
+                 ) \
+               ) \
+             )",
+            params![conflict_escalation_active],
+        )?;
+        // 3) Over-cap eviction: lowest urgency, then oldest, from what remains.
         if over_cap > 0 {
             conn.execute(
                 "UPDATE trigger_log SET status = 'expired' WHERE trigger_id IN (\
@@ -1289,6 +1351,41 @@ mod tests {
 
         let pending = get_pending_triggers(&db, 10).unwrap();
         assert!(pending.is_empty());
+    }
+
+    #[test]
+    fn prune_expires_triggers_whose_live_predicate_is_gone() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let conflict = Trigger {
+            trigger_type: "conflict_escalation".to_string(),
+            reason: "26 open conflicts need attention".to_string(),
+            urgency: 1.0,
+            source_rids: vec![],
+            suggested_action: "review_conflicts".to_string(),
+            context: HashMap::from([("open_count".to_string(), serde_json::json!(26))]),
+        };
+        let missing_source = Trigger {
+            trigger_type: "decay_review".to_string(),
+            reason: "review missing source".to_string(),
+            urgency: 0.8,
+            source_rids: vec!["missing-rid".to_string()],
+            suggested_action: "review".to_string(),
+            context: HashMap::new(),
+        };
+        persist_trigger(&db, &conflict, now()).unwrap();
+        persist_trigger(&db, &missing_source, now()).unwrap();
+
+        let preview = db.prune_triggers(true, 64).unwrap();
+        assert_eq!(preview.expired_stale, 2);
+        assert_eq!(preview.pending_after, 0);
+        assert_eq!(get_pending_triggers(&db, 10).unwrap().len(), 2);
+
+        let applied = db.prune_triggers(false, 64).unwrap();
+        assert_eq!(applied.expired_stale, 2);
+        assert!(get_pending_triggers(&db, 10).unwrap().is_empty());
+
+        let again = db.prune_triggers(false, 64).unwrap();
+        assert_eq!(again.expired_stale, 0, "pruning is idempotent");
     }
 
     #[test]

@@ -60,6 +60,11 @@ impl PyYantrikDB {
     /// one — `fingerprint` or `digest`, a plain string attribute. Rules:
     ///
     /// * store has no recorded identity -> nothing to contradict, attach.
+    /// * recorded dim contradicts the width of the vectors actually stored
+    ///   -> the row is provably false (that model does not emit that width),
+    ///   so it is evidence of nothing. Attach, warn loudly. This is "cannot
+    ///   verify", NOT "verified mismatch" — the two must not collapse, or
+    ///   every database written before identities were recorded is bricked.
     /// * declared fingerprint equals the recorded digest -> attach.
     /// * declared fingerprint differs -> refuse. This is the provable
     ///   mismatch, and it is silent corruption if allowed: cosine distance
@@ -87,6 +92,61 @@ impl PyYantrikDB {
         let Some((recorded_name, recorded_digest, recorded_dim)) = recorded else {
             return Ok(()); // nothing recorded: nothing to contradict
         };
+
+        // **A stored vector is the authority, not the recorded identity.**
+        // The same ordering `detect_existing_dim` applies at open time, for
+        // the same reason: the identity row records what was ATTACHED when
+        // the engine first embedded, which is not necessarily what produced
+        // the vectors in the file. A caller that embeds externally and passes
+        // vectors to `record()` never stamps an identity, but any incidental
+        // `embed()` call stamps the attached model anyway.
+        //
+        // `stored_vector_dim()` decodes a durable hot vector and measures its
+        // actual width. Do not substitute `embedding_dim()` here: the Python
+        // constructor accepts that value from its caller, so treating it as a
+        // measurement can turn a wrong open configuration into permission to
+        // attach an unrelated embedder.
+        //
+        // Refusing on it would be worse than useless: it bricks the database
+        // (every call fails, lazily, after the service starts clean) on the
+        // strength of a value the engine elsewhere already refuses to trust,
+        // and the error names a model we can prove did not build the vectors.
+        // A gate that misreports provenance is worse than no gate.
+        //
+        // Found on a real 5,699-record production store recording
+        // `potion-base-2M / dim 64` while holding 1536-byte (384-dim) MiniLM
+        // vectors — the same store `detect_existing_dim`'s comment cites.
+        //
+        // This is "cannot verify", which is a DIFFERENT state from "verified
+        // mismatch" — collapsing the two is what bricks legacy databases.
+        // Unverified is where every pre-gate database already lived, so this
+        // is no weaker than the release before it; it simply declines to
+        // manufacture a verdict from a row known to be wrong. Loud, because
+        // the identity still needs operator verification and repair.
+        let measured_dim = inner.stored_vector_dim().map_err(map_err)?;
+        if measured_dim.is_some_and(|dim| recorded_dim != dim) {
+            let measured_dim = measured_dim.expect("checked as Some above");
+            let named = recorded_name
+                .clone()
+                .unwrap_or_else(|| "<unnamed>".to_string());
+            PyErr::warn(
+                py,
+                &py.get_type::<pyo3::exceptions::PyUserWarning>(),
+                &std::ffi::CString::new(format!(
+                    "this database records its vectors as built by {named} (dim \
+                     {recorded_dim}), but the vectors it holds are {measured_dim}-dim, so \
+                     the recorded identity is wrong and does not describe them. Attaching \
+                     without an identity check: provenance is UNVERIFIED, which is what it \
+                     was before this \
+                     check existed. Before writing, independently verify that the attached \
+                     embedder reproduces the stored vectors from their source text; this \
+                     release does not provide an automated identity repair."
+                ))
+                .map_err(|e| PyValueError::new_err(e.to_string()))?,
+                0,
+            )?;
+            return Ok(());
+        }
 
         let declared = ["fingerprint", "digest"].iter().find_map(|attr| {
             embedder
@@ -661,6 +721,18 @@ impl PyYantrikDB {
     fn set_status_read_policy(&self, exclude_superseded: bool) -> PyResult<()> {
         self.get_inner()?
             .set_status_read_policy(exclude_superseded)
+            .map_err(map_err)
+    }
+
+    /// Maximum local verified-synthesis fan-out per evidence record.
+    fn synthesis_fanout_cap(&self) -> PyResult<usize> {
+        self.get_inner()?.synthesis_fanout_cap().map_err(map_err)
+    }
+
+    /// Durably set the local synthesis fan-out admission ceiling.
+    fn set_synthesis_fanout_cap(&self, cap: usize) -> PyResult<()> {
+        self.get_inner()?
+            .set_synthesis_fanout_cap(cap)
             .map_err(map_err)
     }
 

@@ -148,6 +148,31 @@ class TestRecall:
         with pytest.raises(ValueError, match="Must provide"):
             db.recall(top_k=5)
 
+    def test_recall_orders_synthesized_items_by_first_mention(self, db):
+        rows = [
+            ("first concern", 300.0, {"first_mention_at": 100.0}),
+            ("second concern", 200.0, {}),
+            ("third concern", 100.0, {"first_mention_at": 250.0}),
+        ]
+        for text, created_at, metadata in rows:
+            db.record(
+                text,
+                source="inference",
+                metadata=metadata,
+                embedding=_vec(1.0),
+                created_at=created_at,
+            )
+
+        expected = ["first concern", "second concern", "third concern"]
+        for order in ("first_mention", "chronological"):
+            results = db.recall(
+                query_embedding=_vec(1.0),
+                top_k=3,
+                order=order,
+                skip_reinforce=True,
+            )
+            assert [result["text"] for result in results] == expected
+
 
 # ── relate() ────────────────────────────────────────────
 
@@ -263,8 +288,24 @@ class TestStats:
             # v0.10 Item 1: status-led read path adoption surface.
             "status_read_policy", "superseded_records",
             "superseded_served_since_boot",
+            # Retrieval-limit observability: configured candidate ceiling and
+            # the number of calls where it actually constrained the pool.
+            "recall_candidate_cap", "recall_candidate_cap_bound_since_boot",
+            "recall_candidate_cap_bound_by_namespace_since_boot",
+            "recall_candidate_cap_namespace_capacity",
+            "recall_candidate_cap_namespace_stats_truncated_since_boot",
+            # Evidence-versioned synthesis admission pressure.
+            "synthesis_fanout_cap", "synthesis_fanout_refused_since_boot",
+            "synthesis_fanout_current_high_water",
+            "synthesis_fanout_sources_at_cap",
+            "synthesis_fanout_sources_over_cap",
             # v0.10 Item 4a.4: anti-laundering gate adoption surface.
             "provenance_gate_mode", "provenance_flagged_since_boot",
+            # Provenance-origin census: explicitly verified records and
+            # legacy/user-source rows without an explicit verification marker.
+            "provenance_verified_records", "unverified_user_source_records",
+            "provenance_source_counts", "provenance_method_counts",
+            "unverified_source_counts",
             # v0.12.1: embedder-window truncation surface + chunked
             # embeddings (window in chars once probed, overflows lost vs
             # chunked, durable window-vector count).
@@ -279,6 +320,16 @@ class TestStats:
         assert s["status_read_policy"] == "exclude_superseded"
         assert s["superseded_records"] == 0
         assert s["superseded_served_since_boot"] == 0
+        assert s["recall_candidate_cap"] == 10_000
+        assert s["recall_candidate_cap_namespace_capacity"] == 1_024
+        assert s["recall_candidate_cap_bound_since_boot"] == 0
+        assert s["recall_candidate_cap_bound_by_namespace_since_boot"] == {}
+        assert s["recall_candidate_cap_namespace_stats_truncated_since_boot"] is False
+        assert s["synthesis_fanout_cap"] == 64
+        assert s["synthesis_fanout_refused_since_boot"] == 0
+        assert s["synthesis_fanout_current_high_water"] == 0
+        assert s["synthesis_fanout_sources_at_cap"] == 0
+        assert s["synthesis_fanout_sources_over_cap"] == 0
         # Fresh databases default to enforcing the provenance gate; migrated
         # ones default to "warn" (count + nudge, never refuse).
         assert s["provenance_gate_mode"] == "enforce"
@@ -288,6 +339,26 @@ class TestStats:
         assert s["embedder_truncated_writes"] == 0
         assert s["embedder_chunked_writes"] == 0
         assert s["chunk_vectors"] == 0
+
+    def test_synthesis_fanout_cap_is_configurable(self, db):
+        assert db.synthesis_fanout_cap() == 64
+        db.set_synthesis_fanout_cap(7)
+        assert db.synthesis_fanout_cap() == 7
+        assert db.stats()["synthesis_fanout_cap"] == 7
+        with pytest.raises(RuntimeError, match="must be in"):
+            db.set_synthesis_fanout_cap(0)
+
+    def test_synthesis_evidence_audit_empty_store(self, db):
+        report = db.audit_synthesis_evidence()
+        assert report == {
+            "verified_active_count": 0,
+            "candidate_count": 0,
+            "orphan_dependency_count": 0,
+            "sources_over_fanout_cap": 0,
+            "dependency_cycle_count": 0,
+            "duplicate_logical_key_group_count": 0,
+            "issues": [],
+        }
 
     def test_stats_tracks_operations(self, db):
         db.record("op1", embedding=_vec(1.0))
@@ -349,12 +420,27 @@ class TestStatusReadPath:
         assert cov["outcome"] == "no_matching_record"
         assert cov["candidate_count"] == 0
         assert cov["namespace"] == "empty_ns"
+        limits = resp["retrieval_limits"]
+        assert limits == {
+            "requested_top_k": 5,
+            "requested_candidates": 100,
+            "candidate_cap": 10_000,
+            "fetch_k": 0,
+            "index_len": 0,
+            "has_post_filters": False,
+            "cap_bound": False,
+        }
 
         db.record("a stored fact", embedding=_vec(1.0))
         resp = db.recall_with_response(query_embedding=_vec(1.0), top_k=5)
         cov = resp["coverage"]
         assert cov["outcome"] == "matched"
         assert cov["top_similarity"] >= cov["threshold_tau"] > 0.0
+        limits = resp["retrieval_limits"]
+        assert limits["requested_top_k"] == 5
+        assert limits["fetch_k"] == 1
+        assert limits["index_len"] == 1
+        assert limits["cap_bound"] is False
 
     def test_what_changed_since(self, db):
         import json

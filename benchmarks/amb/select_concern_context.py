@@ -1,0 +1,234 @@
+"""Prepare synthesized concern context for downstream answer selection.
+
+Exact preselection is useful as an experimental arm, but it can discard a
+gold-relevant concern before the answer model sees it.  Pool mode keeps a
+bounded set of synthesized candidates so answer selection remains downstream
+from memory retrieval. It deliberately preserves retrieval-relevance order;
+first-mention metadata lets the answerer order only its final selection.
+"""
+
+import argparse
+import importlib.util
+import json
+import re
+import sys
+from pathlib import Path
+
+
+_COUNT_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+    "twenty": 20,
+}
+
+
+def requested_count(query: str) -> int | None:
+    match = re.search(
+        r"\b(?:only(?:\s+and\s+only)?|exactly)\s+"
+        r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+        r"twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|"
+        r"nineteen|twenty)\b",
+        query,
+        re.IGNORECASE,
+    )
+    if not match:
+        return None
+    value = match.group(1).lower()
+    return int(value) if value.isdigit() else _COUNT_WORDS[value]
+
+
+def chronological_key(hit: dict) -> tuple:
+    metadata = hit.get("metadata") or {}
+    turn = metadata.get("first_mention_turn")
+    created_at = hit.get("created_at")
+    return (
+        float("inf") if created_at is None else float(created_at),
+        float("inf") if turn is None else float(turn),
+        str(hit.get("rid") or ""),
+    )
+
+
+def normalize_selected_ids(raw: dict, known_ids: set[str], count: int) -> list[str]:
+    values = raw.get("selected_ids") or []
+    if isinstance(values, str):
+        values = [values]
+    selected = []
+    for value in values:
+        candidate_id = str(value).strip().upper()
+        if candidate_id in known_ids and candidate_id not in selected:
+            selected.append(candidate_id)
+        if len(selected) >= count:
+            break
+    return selected
+
+
+def select_candidate_pool(hits: list[dict], pool_size: int) -> list[dict]:
+    """Keep a relevance-ranked pool, deduplicated by stable record id."""
+    if pool_size < 1:
+        raise ValueError("pool_size must be positive")
+    selected = []
+    seen = set()
+    for hit in hits:
+        rid = str(hit.get("rid") or "")
+        identity = rid or json.dumps(hit, sort_keys=True, default=str)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        selected.append(hit)
+        if len(selected) >= pool_size:
+            break
+    return selected
+
+
+def as_documents(hits: list[dict]) -> list[str]:
+    return [
+        f"[Turn {(hit.get('metadata') or {}).get('first_mention_turn')}] "
+        f"User: {hit.get('text') or ''}"
+        for hit in hits
+    ]
+
+
+def _load_ollama(path: Path):
+    name = "memory_bench.llm._workspace_ollama_concern_selector"
+    spec = importlib.util.spec_from_file_location(name, path)
+    if spec is None or spec.loader is None:
+        raise RuntimeError(f"cannot load Ollama provider from {path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module.OllamaLLM, module.Schema
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--replay", type=Path, required=True)
+    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--model", default="qwen3.5:9b")
+    parser.add_argument("--query-id", action="append")
+    parser.add_argument(
+        "--selection-mode",
+        choices=("exact", "pool"),
+        default="exact",
+        help="exact uses an LLM to preselect answer items; pool preserves candidates",
+    )
+    parser.add_argument(
+        "--pool-size",
+        type=int,
+        default=24,
+        help="maximum synthesized candidates retained by pool mode",
+    )
+    args = parser.parse_args()
+
+    if args.pool_size < 1:
+        parser.error("--pool-size must be positive")
+
+    rows = json.loads(args.replay.read_text(encoding="utf-8"))
+    selected_queries = set(args.query_id or ())
+    if selected_queries:
+        rows = [row for row in rows if row["query_id"] in selected_queries]
+
+    llm = Schema = None
+    if args.selection_mode == "exact":
+        OllamaLLM, Schema = _load_ollama(Path(__file__).with_name("ollama.py"))
+        llm = OllamaLLM(args.model, think=False, num_predict=1200, num_ctx=65536)
+    output = []
+    for row in rows:
+        count = requested_count(row["query"])
+        if count is None:
+            raise ValueError(f"cannot determine answer count for {row['query_id']}")
+        candidates = {f"C{index:03d}": hit for index, hit in enumerate(row["hits"], 1)}
+        if args.selection_mode == "pool":
+            hits = select_candidate_pool(list(candidates.values()), args.pool_size)
+            transformed = dict(row)
+            transformed["hits"] = hits
+            transformed["documents"] = as_documents(hits)
+            transformed["concern_selection"] = {
+                "mode": "candidate_pool",
+                "requested_answer_count": count,
+                "candidate_pool_size": len(hits),
+                "presentation_order": "retrieval_relevance",
+                "final_ordering": "downstream_first_mention",
+            }
+            output.append(transformed)
+            print(f"{row['query_id']}: pool={len(hits)} requested_answer_count={count}")
+            continue
+
+        lines = []
+        for candidate_id, hit in candidates.items():
+            metadata = hit.get("metadata") or {}
+            lines.append(
+                f"{candidate_id} | turn={metadata.get('first_mention_turn')} | "
+                f"{hit.get('text') or ''}"
+            )
+        prompt = (
+            "Select source-grounded memory concerns for an answer. Return IDs only; "
+            "do not answer or rewrite them. Infer the narrow semantic relation in the "
+            "user's wording and reject events that merely share its broad topic. For "
+            "example, a hardship involving family is not a way family provided support, "
+            "and a schedule or writing tool is not an aspect of refining prose. Prefer "
+            "concrete named advice, feedback, decisions, requests, or resulting changes "
+            "that form a coherent thread across conversations. Repeated discussion of "
+            "one concern counts once. Select by meaning first; dates and turns must not "
+            "influence membership because code will order the fixed selection later. "
+            f"Select exactly {count} distinct IDs.\n\n"
+            f"USER QUERY:\n{row['query']}\n\nCANDIDATES:\n"
+            + "\n".join(lines)
+            + '\n\nReturn JSON only: {"selected_ids":["C001"]}'
+        )
+        assert llm is not None and Schema is not None
+        raw = llm.generate(
+            prompt,
+            Schema(
+                required=["selected_ids"],
+                properties={"selected_ids": {"type": "array"}},
+            ),
+        )
+        selected_ids = normalize_selected_ids(raw, set(candidates), count)
+        if len(selected_ids) != count:
+            raise ValueError(
+                f"{row['query_id']}: selector returned {len(selected_ids)} valid IDs, "
+                f"expected {count}: {raw!r}"
+            )
+        hits = sorted(
+            (candidates[value] for value in selected_ids), key=chronological_key
+        )
+        transformed = dict(row)
+        transformed["hits"] = hits
+        transformed["documents"] = as_documents(hits)
+        transformed["concern_selection"] = {
+            "mode": "exact",
+            "model": args.model,
+            "selected_ids": selected_ids,
+            "presentation_order": "first_mention",
+        }
+        output.append(transformed)
+        print(
+            f"{row['query_id']}: selected={selected_ids} "
+            f"turns={[((hit.get('metadata') or {}).get('first_mention_turn')) for hit in hits]}"
+        )
+
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(output, indent=2), encoding="utf-8")
+    print(f"wrote {args.out}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

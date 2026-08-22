@@ -31,10 +31,8 @@ pub struct SessionDigestConfig {
     /// digest per tenant never mixes another tenant's memories in. `None`
     /// keeps the original explicit-global behavior (single-tenant embedded
     /// use, where the caller owns the whole database anyway). Pending
-    /// TRIGGERS remain global in both modes — `trigger_log` rows carry
-    /// engine-generated operational reasons keyed by rid, not memory text,
-    /// and namespace-scoping them requires a source_rids join deferred to
-    /// the v0.10 reliability program.
+    /// triggers are scoped through their source-rid join. Source-less global
+    /// maintenance triggers appear only in an explicitly global digest.
     pub namespace: Option<String>,
     pub max_decisions: usize,
     pub max_conflicts: usize,
@@ -337,25 +335,61 @@ impl YantrikDB {
             }
         }
 
-        // Pending triggers due + total count.
-        let triggers = crate::triggers::get_pending_triggers(self, config.max_triggers)?;
-        digest.pending_triggers = triggers
-            .into_iter()
-            .map(|t| DigestTrigger {
-                trigger_id: t.trigger_id,
-                trigger_type: t.trigger_type,
-                urgency: t.urgency,
-                reason: t.reason,
-            })
-            .collect();
-        digest.pending_trigger_count = {
-            let conn = self.conn();
-            conn.query_row(
-                "SELECT COUNT(*) FROM trigger_log WHERE status = 'pending'",
-                [],
-                |r| r.get::<_, i64>(0),
-            )? as usize
-        };
+        // Pending triggers due + total count. A scoped digest must not leak a
+        // reason assembled from another namespace's memories. Source-less
+        // alerts are global operational state and therefore belong only to
+        // the explicitly global view.
+        match config.namespace.as_deref() {
+            Some(ns) => {
+                let conn = self.conn();
+                let scope_predicate = "EXISTS (SELECT 1 FROM trigger_source_rids tsr \
+                     JOIN memories m ON m.rid = tsr.rid \
+                     WHERE tsr.trigger_id = t.trigger_id AND m.namespace = ?1)";
+                let mut stmt = conn.prepare(&format!(
+                    "SELECT t.trigger_id, t.trigger_type, t.urgency, t.reason \
+                     FROM trigger_log t WHERE t.status = 'pending' AND {scope_predicate} \
+                     ORDER BY t.urgency DESC LIMIT ?2"
+                ))?;
+                digest.pending_triggers = stmt
+                    .query_map(params![ns, config.max_triggers as i64], |r| {
+                        Ok(DigestTrigger {
+                            trigger_id: r.get(0)?,
+                            trigger_type: r.get(1)?,
+                            urgency: r.get(2)?,
+                            reason: r.get(3)?,
+                        })
+                    })?
+                    .collect::<std::result::Result<Vec<_>, _>>()?;
+                digest.pending_trigger_count = conn.query_row(
+                    &format!(
+                        "SELECT COUNT(*) FROM trigger_log t \
+                         WHERE t.status = 'pending' AND {scope_predicate}"
+                    ),
+                    params![ns],
+                    |r| r.get::<_, i64>(0),
+                )? as usize;
+            }
+            None => {
+                let triggers = crate::triggers::get_pending_triggers(self, config.max_triggers)?;
+                digest.pending_triggers = triggers
+                    .into_iter()
+                    .map(|t| DigestTrigger {
+                        trigger_id: t.trigger_id,
+                        trigger_type: t.trigger_type,
+                        urgency: t.urgency,
+                        reason: t.reason,
+                    })
+                    .collect();
+                digest.pending_trigger_count = {
+                    let conn = self.conn();
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM trigger_log WHERE status = 'pending'",
+                        [],
+                        |r| r.get::<_, i64>(0),
+                    )? as usize
+                };
+            }
+        }
 
         // When hygiene last ran.
         digest.last_maintenance = self.last_maintenance_cycle()?;

@@ -1,4 +1,5 @@
 use rusqlite::params;
+use std::collections::HashMap;
 
 use crate::error::Result;
 use crate::types::Stats;
@@ -133,6 +134,102 @@ impl YantrikDB {
             )
             .map(|n| n.max(0) as u64)
             .unwrap_or(0);
+        let provenance_verified_records = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM memories \
+                 WHERE consolidation_status != 'tombstoned' \
+                 AND json_valid(metadata) \
+                 AND json_extract(metadata, '$.provenance_verified') = 1{}",
+                ns_filter
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        let unverified_user_source_records = conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM memories \
+                 WHERE consolidation_status != 'tombstoned' \
+                 AND source = 'user' \
+                 AND COALESCE(\
+                   CASE WHEN json_valid(metadata) \
+                     THEN json_extract(metadata, '$.provenance_verified') END,\
+                   0\
+                 ) != 1{}",
+                ns_filter
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        let grouped_counts =
+            |value_sql: &str, extra_filter: &str| -> Result<HashMap<String, i64>> {
+                let sql = format!(
+                    "SELECT {value_sql}, COUNT(*) FROM memories \
+                 WHERE consolidation_status != 'tombstoned' \
+                 {extra_filter}{ns_filter} GROUP BY 1"
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let rows = stmt.query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+                })?;
+                let mut counts = HashMap::new();
+                for row in rows {
+                    let (value, count) = row?;
+                    counts.insert(value, count);
+                }
+                Ok(counts)
+            };
+        let provenance_source_counts =
+            grouped_counts("COALESCE(NULLIF(source, ''), 'unknown')", "")?;
+        let provenance_method_counts = grouped_counts(
+            "COALESCE(NULLIF(CASE WHEN json_valid(metadata) \
+               THEN CAST(json_extract(metadata, '$.provenance_method') AS TEXT) END, ''), \
+             'unmarked')",
+            "",
+        )?;
+        let unverified_source_counts = grouped_counts(
+            "COALESCE(NULLIF(source, ''), 'unknown')",
+            "AND COALESCE(CASE WHEN json_valid(metadata) \
+               THEN json_extract(metadata, '$.provenance_verified') END, 0) != 1 ",
+        )?;
+        let recall_candidate_cap_bound_by_namespace_since_boot: HashMap<String, u64> = self
+            .recall_candidate_cap_bound_since_boot
+            .lock()
+            .iter()
+            .filter(|(key, _)| namespace.map_or(true, |ns| key.as_str() == ns))
+            .map(|(key, count)| (key.clone(), *count))
+            .collect();
+        let recall_candidate_cap_bound_since_boot =
+            recall_candidate_cap_bound_by_namespace_since_boot
+                .values()
+                .copied()
+                .sum();
+        let synthesis_fanout_cap = Self::synthesis_fanout_cap_from_conn(&conn)?;
+        let synthesis_namespace_filter = namespace
+            .map(|ns| format!(" AND d.namespace = '{}'", ns.replace('\'', "''")))
+            .unwrap_or_default();
+        let (
+            synthesis_fanout_current_high_water,
+            synthesis_fanout_sources_at_cap,
+            synthesis_fanout_sources_over_cap,
+        ): (i64, i64, i64) = conn.query_row(
+            &format!(
+                "WITH fanout AS ( \
+                    SELECT d.source_rid, COUNT(DISTINCT d.synthesis_rid) AS n \
+                    FROM synthesis_dependencies d \
+                    JOIN memories s ON s.rid = d.synthesis_rid \
+                    WHERE s.synthesis_state = 'verified' \
+                      AND s.consolidation_status = 'active'{} \
+                    GROUP BY d.source_rid \
+                 ) \
+                 SELECT COALESCE(MAX(n), 0), \
+                        COALESCE(SUM(CASE WHEN n = ?1 THEN 1 ELSE 0 END), 0), \
+                        COALESCE(SUM(CASE WHEN n > ?1 THEN 1 ELSE 0 END), 0) \
+                 FROM fanout",
+                synthesis_namespace_filter
+            ),
+            rusqlite::params![synthesis_fanout_cap as i64],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )?;
         drop(conn);
 
         Ok(Stats {
@@ -160,10 +257,31 @@ impl YantrikDB {
             superseded_served_since_boot: self
                 .superseded_served_since_boot
                 .load(std::sync::atomic::Ordering::Relaxed),
+            recall_candidate_cap: super::recall::MAX_OVERSAMPLED_RECALL_CANDIDATES,
+            recall_candidate_cap_namespace_capacity:
+                super::recall::MAX_TRACKED_RECALL_LIMIT_NAMESPACES,
+            recall_candidate_cap_bound_since_boot,
+            recall_candidate_cap_bound_by_namespace_since_boot,
+            recall_candidate_cap_namespace_stats_truncated_since_boot: self
+                .recall_candidate_cap_namespace_stats_truncated_since_boot
+                .load(std::sync::atomic::Ordering::Relaxed),
+            synthesis_fanout_cap,
+            synthesis_fanout_refused_since_boot: self
+                .synthesis_fanout_refused_since_boot
+                .load(std::sync::atomic::Ordering::Relaxed),
+            synthesis_fanout_current_high_water: synthesis_fanout_current_high_water.max(0)
+                as usize,
+            synthesis_fanout_sources_at_cap,
+            synthesis_fanout_sources_over_cap,
             provenance_gate_mode: self.provenance_gate_mode().as_str().to_string(),
             provenance_flagged_since_boot: self
                 .provenance_flagged_since_boot
                 .load(std::sync::atomic::Ordering::Relaxed),
+            provenance_verified_records,
+            unverified_user_source_records,
+            provenance_source_counts,
+            provenance_method_counts,
+            unverified_source_counts,
             embedder_window_chars: self.embedder_window(),
             embedder_truncated_writes: self.embedder_truncated_write_count(),
             embedder_chunked_writes: self.embedder_chunked_write_count(),
@@ -257,11 +375,39 @@ impl YantrikDB {
         // op_id BEFORE the tx and passes it here; None keeps minting inline.
         preminted_op_id: Option<&str>,
     ) -> Result<String> {
+        let hlc_bytes = self.tick_hlc().to_bytes().to_vec();
+        self.log_op_at_hlc_in_tx(
+            tx,
+            op_type,
+            target_rid,
+            payload,
+            emb_hash,
+            embedding,
+            applied_generation,
+            preminted_op_id,
+            &hlc_bytes,
+        )
+    }
+
+    /// Variant used when a materialized row must carry the exact HLC of its
+    /// authoritative oplog operation in the same transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn log_op_at_hlc_in_tx(
+        &self,
+        tx: &rusqlite::Connection,
+        op_type: &str,
+        target_rid: Option<&str>,
+        payload: &serde_json::Value,
+        emb_hash: Option<&[u8]>,
+        embedding: Option<&[u8]>,
+        applied_generation: i64,
+        preminted_op_id: Option<&str>,
+        hlc_bytes: &[u8],
+    ) -> Result<String> {
         let op_id = match preminted_op_id {
             Some(id) => id.to_string(),
             None => crate::id::new_id(),
         };
-        let hlc_bytes = self.tick_hlc().to_bytes().to_vec();
         // 0.13.2: sealed on encrypted databases (see encode_oplog_payload).
         let payload_str = self.encode_oplog_payload(&serde_json::to_string(payload)?)?;
         tx.execute(
@@ -1099,6 +1245,9 @@ impl YantrikDB {
                 access_count: 0,
                 valence,
                 consolidation_status: "active".to_string(),
+                synthesis_state: None,
+                synthesis_axis: None,
+                synthesis_granularity: None,
                 memory_type: memory_type.to_string(),
                 namespace: namespace.to_string(),
                 certainty,

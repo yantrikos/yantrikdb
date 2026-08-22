@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Optional
+import re
+from typing import TYPE_CHECKING, Any
 
-from yantrikdb.agent.llm import LLMClient
+if TYPE_CHECKING:
+    from yantrikdb.agent.llm import LLMClient
 
 log = logging.getLogger("yantrik.learning")
 
@@ -15,6 +17,7 @@ EXTRACTION_PROMPT = """You are a memory extraction assistant. Given a conversati
 Output valid JSON with these fields:
 - should_remember: true/false
 - memory_text: concise summary of what to remember (1-2 sentences)
+- evidence_quote: an exact, verbatim quote from the User message supporting memory_text
 - memory_type: "episodic" (event), "semantic" (fact), or "procedural" (how-to)
 - importance: 0.0-1.0
 - valence: -1.0 (negative) to 1.0 (positive)
@@ -23,10 +26,25 @@ Output valid JSON with these fields:
 - is_open_topic: true if user mentioned something unresolved
 - topic_summary: if is_open_topic, what the unresolved item is
 
-Only set should_remember=true for substantive information (facts, preferences, events, plans).
+Only set should_remember=true for substantive information explicitly stated by the User
+(facts, preferences, events, plans). The Companion response is context only: never store
+its suggestions, examples, assumptions, or conclusions as facts about the User. Every
+remembered item must include a non-empty evidence_quote copied exactly from the User text.
 Skip small talk, greetings, and trivial exchanges.
 
 Respond ONLY with JSON, no other text."""
+
+
+def _grounded_user_quote(quote: Any, user_text: str) -> str | None:
+    """Return a canonical user quote only when it occurs verbatim modulo whitespace."""
+    if not isinstance(quote, str):
+        return None
+    quote = quote.strip()
+    normalized_quote = re.sub(r"\s+", " ", quote).strip()
+    if len(normalized_quote) < 8:
+        return None
+    normalized_user = re.sub(r"\s+", " ", user_text).strip()
+    return quote if normalized_quote in normalized_user else None
 
 
 async def extract_and_learn(
@@ -43,7 +61,13 @@ async def extract_and_learn(
     try:
         messages = [
             {"role": "system", "content": EXTRACTION_PROMPT},
-            {"role": "user", "content": f"User: {user_text}\nCompanion: {response_text}"},
+            {
+                "role": "user",
+                "content": (
+                    f"User message (the only admissible evidence):\n{user_text}\n\n"
+                    f"Companion response (context only; do not memorize):\n{response_text}"
+                ),
+            },
         ]
 
         resp = await llm.chat(messages, max_tokens=250)
@@ -61,15 +85,28 @@ async def extract_and_learn(
         if not parsed.get("should_remember", False):
             return
 
+        evidence_quote = _grounded_user_quote(parsed.get("evidence_quote"), user_text)
+        if evidence_quote is None:
+            log.warning("Rejected ungrounded memory extraction")
+            return
+
         # Store the memory
-        memory_text = parsed.get("memory_text", user_text)
+        memory_text = str(parsed.get("memory_text") or evidence_quote).strip()
+        provenance = {
+            "speaker_role": "user",
+            "extracted_by": "companion",
+            "evidence_quote": evidence_quote,
+            "provenance_verified": True,
+            "provenance_method": "user_quote_v1",
+        }
         db.record(
             text=memory_text,
             memory_type=parsed.get("memory_type", "episodic"),
             importance=parsed.get("importance", 0.5),
             valence=parsed.get("valence", 0.0),
             domain=parsed.get("domain", "general"),
-            source="companion",
+            metadata=provenance,
+            source="user",
         )
         log.info("Learned: %s", memory_text[:80])
 
@@ -89,8 +126,12 @@ async def extract_and_learn(
                 memory_type="episodic",
                 importance=0.6,
                 domain="topic",
-                source="companion",
-                metadata={"status": "open", "type": "unresolved_topic"},
+                source="user",
+                metadata={
+                    **provenance,
+                    "status": "open",
+                    "type": "unresolved_topic",
+                },
             )
             log.info("Open topic tracked: %s", parsed["topic_summary"][:60])
 

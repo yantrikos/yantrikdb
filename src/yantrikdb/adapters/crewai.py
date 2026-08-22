@@ -21,14 +21,24 @@ from typing import Any
 class YantrikDBShortTermMemory:
     """CrewAI short-term memory backed by YantrikDB episodic memories."""
 
-    def __init__(self, db: Any, top_k: int = 5, namespace: str = "default"):
+    def __init__(
+        self,
+        db: Any,
+        top_k: int = 5,
+        namespace: str = "default",
+        source: str = "assistant",
+    ):
         self.db = db
         self.top_k = top_k
         self.namespace = namespace
+        self.source = source
 
     def save(self, value: str, metadata: dict | None = None, agent: str | None = None) -> None:
         """Store a short-term memory (episodic)."""
-        meta = metadata or {}
+        meta = dict(metadata or {})
+        meta.setdefault("speaker_role", self.source)
+        meta.setdefault("provenance_verified", True)
+        meta.setdefault("provenance_method", "adapter_declared_source_v1")
         if agent:
             meta["agent"] = agent
         self.db.record(
@@ -37,6 +47,7 @@ class YantrikDBShortTermMemory:
             importance=0.4,
             metadata=meta,
             namespace=self.namespace,
+            source=self.source,
         )
 
     def search(self, query: str, limit: int | None = None) -> list[dict]:
@@ -58,14 +69,24 @@ class YantrikDBShortTermMemory:
 class YantrikDBLongTermMemory:
     """CrewAI long-term memory backed by YantrikDB semantic memories."""
 
-    def __init__(self, db: Any, top_k: int = 5, namespace: str = "default"):
+    def __init__(
+        self,
+        db: Any,
+        top_k: int = 5,
+        namespace: str = "default",
+        source: str = "assistant",
+    ):
         self.db = db
         self.top_k = top_k
         self.namespace = namespace
+        self.source = source
 
     def save(self, value: str, metadata: dict | None = None, agent: str | None = None) -> None:
         """Store a long-term memory (semantic)."""
-        meta = metadata or {}
+        meta = dict(metadata or {})
+        meta.setdefault("speaker_role", self.source)
+        meta.setdefault("provenance_verified", True)
+        meta.setdefault("provenance_method", "adapter_declared_source_v1")
         if agent:
             meta["agent"] = agent
         self.db.record(
@@ -74,6 +95,7 @@ class YantrikDBLongTermMemory:
             importance=0.7,
             metadata=meta,
             namespace=self.namespace,
+            source=self.source,
         )
 
     def search(self, query: str, limit: int | None = None) -> list[dict]:
@@ -95,10 +117,17 @@ class YantrikDBLongTermMemory:
 class YantrikDBEntityMemory:
     """CrewAI entity memory backed by YantrikDB knowledge graph."""
 
-    def __init__(self, db: Any, top_k: int = 5, namespace: str = "default"):
+    def __init__(
+        self,
+        db: Any,
+        top_k: int = 5,
+        namespace: str = "default",
+        source: str = "assistant",
+    ):
         self.db = db
         self.top_k = top_k
         self.namespace = namespace
+        self.source = source
 
     def save(self, value: str, metadata: dict | None = None, agent: str | None = None) -> None:
         """Store an entity observation.
@@ -106,7 +135,10 @@ class YantrikDBEntityMemory:
         If metadata contains 'entity' and 'relationship' keys,
         also creates a graph edge.
         """
-        meta = metadata or {}
+        meta = dict(metadata or {})
+        meta.setdefault("speaker_role", self.source)
+        meta.setdefault("provenance_verified", True)
+        meta.setdefault("provenance_method", "adapter_declared_source_v1")
         if agent:
             meta["agent"] = agent
 
@@ -116,6 +148,7 @@ class YantrikDBEntityMemory:
             importance=0.6,
             metadata=meta,
             namespace=self.namespace,
+            source=self.source,
         )
 
         # Auto-link entities if provided

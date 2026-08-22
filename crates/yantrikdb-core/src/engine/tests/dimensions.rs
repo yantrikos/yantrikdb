@@ -448,3 +448,216 @@ fn test_batch_record_with_dimensions() {
     assert_eq!(m2.source, "system");
     assert_eq!(m2.emotional_state, Some("calm".to_string()));
 }
+
+#[test]
+fn recall_top_k_above_legacy_candidate_cap_is_not_underfilled() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let inputs = (0..620)
+        .map(|index| RecordInput {
+            created_at: None,
+            idempotency_key: None,
+            text: format!("large recall item {index}"),
+            memory_type: "episodic".to_string(),
+            importance: 0.5,
+            valence: 0.0,
+            half_life: 604800.0,
+            metadata: serde_json::json!({}),
+            embedding: vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            namespace: "default".to_string(),
+            certainty: 0.8,
+            domain: "general".to_string(),
+            source: "user".to_string(),
+            emotional_state: None,
+        })
+        .collect::<Vec<_>>();
+    for chunk in inputs.chunks(256) {
+        db.record_batch(chunk).unwrap();
+        db.search_state.load().vec_index.compact().unwrap();
+    }
+
+    let results = db
+        .recall(
+            &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            600,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+    assert_eq!(results.len(), 600);
+}
+
+#[test]
+fn explicit_filter_exhausts_small_index_past_nearer_decoys() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let mut inputs = (0..520)
+        .map(|index| RecordInput {
+            created_at: None,
+            idempotency_key: None,
+            text: format!("near system decoy {index}"),
+            memory_type: "episodic".to_string(),
+            importance: 0.5,
+            valence: 0.0,
+            half_life: 604800.0,
+            metadata: serde_json::json!({}),
+            embedding: vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            namespace: "default".to_string(),
+            certainty: 0.8,
+            domain: "general".to_string(),
+            source: "system".to_string(),
+            emotional_state: None,
+        })
+        .collect::<Vec<_>>();
+    inputs.extend((0..20).map(|index| RecordInput {
+        created_at: None,
+        idempotency_key: None,
+        text: format!("eligible user item {index}"),
+        memory_type: "episodic".to_string(),
+        importance: 0.5,
+        valence: 0.0,
+        half_life: 604800.0,
+        metadata: serde_json::json!({}),
+        embedding: vec![0.99, 0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        namespace: "default".to_string(),
+        certainty: 0.8,
+        domain: "general".to_string(),
+        source: "user".to_string(),
+        emotional_state: None,
+    }));
+    for chunk in inputs.chunks(256) {
+        db.record_batch(chunk).unwrap();
+        db.search_state.load().vec_index.compact().unwrap();
+    }
+
+    let results = db
+        .recall(
+            &[1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            20,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            Some("user"),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+    assert_eq!(results.len(), 20);
+    assert!(results.iter().all(|result| result.source == "user"));
+}
+
+#[test]
+fn stats_distinguish_verified_provenance_from_legacy_user_source() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let input = |text: &str, source: &str, verified: bool| RecordInput {
+        created_at: None,
+        idempotency_key: None,
+        text: text.to_string(),
+        memory_type: "episodic".to_string(),
+        importance: 0.5,
+        valence: 0.0,
+        half_life: 604800.0,
+        metadata: if verified {
+            serde_json::json!({
+                "provenance_verified": true,
+                "provenance_method": "direct_turn_v1",
+            })
+        } else {
+            serde_json::json!({})
+        },
+        embedding: vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        namespace: "default".to_string(),
+        certainty: 0.8,
+        domain: "general".to_string(),
+        source: source.to_string(),
+        emotional_state: None,
+    };
+    let verified = input("verified user memory", "user", true);
+    let legacy = input("legacy user memory", "user", false);
+    let assistant = input("verified assistant memory", "assistant", true);
+    let mut other_namespace = input("verified document memory", "document", true);
+    other_namespace.namespace = "other".to_string();
+
+    db.record_batch(&[verified, legacy, assistant, other_namespace])
+        .unwrap();
+    let stats = db.stats(Some("default")).unwrap();
+
+    assert_eq!(stats.provenance_verified_records, 2);
+    assert_eq!(stats.unverified_user_source_records, 1);
+    assert_eq!(stats.provenance_source_counts.get("user"), Some(&2));
+    assert_eq!(stats.provenance_source_counts.get("assistant"), Some(&1));
+    assert!(!stats.provenance_source_counts.contains_key("document"));
+    assert_eq!(
+        stats.provenance_method_counts.get("direct_turn_v1"),
+        Some(&2)
+    );
+    assert_eq!(stats.provenance_method_counts.get("unmarked"), Some(&1));
+    assert_eq!(stats.unverified_source_counts.get("user"), Some(&1));
+}
+
+#[test]
+fn stats_scope_recall_cap_bindings_by_namespace() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    db.recall_candidate_cap_bound_since_boot.lock().extend(
+        [("default", 2), ("other", 3), ("*", 1)]
+            .into_iter()
+            .map(|(namespace, count)| (namespace.to_string(), count)),
+    );
+
+    let global = db.stats(None).unwrap();
+    assert_eq!(global.recall_candidate_cap_bound_since_boot, 6);
+    assert_eq!(
+        global
+            .recall_candidate_cap_bound_by_namespace_since_boot
+            .get("other"),
+        Some(&3)
+    );
+
+    let scoped = db.stats(Some("default")).unwrap();
+    assert_eq!(scoped.recall_candidate_cap_bound_since_boot, 2);
+    assert_eq!(
+        scoped.recall_candidate_cap_bound_by_namespace_since_boot,
+        std::collections::HashMap::from([("default".to_string(), 2)])
+    );
+    assert_eq!(global.recall_candidate_cap_namespace_capacity, 1_024);
+    assert!(!global.recall_candidate_cap_namespace_stats_truncated_since_boot);
+}
+
+#[test]
+fn recall_cap_namespace_stats_are_bounded_and_observable() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    for index in 0..=super::super::recall::MAX_TRACKED_RECALL_LIMIT_NAMESPACES {
+        db.note_recall_candidate_cap_bound(Some(&format!("tenant-{index}")));
+    }
+
+    let stats = db.stats(None).unwrap();
+    assert!(stats.recall_candidate_cap_namespace_stats_truncated_since_boot);
+    assert_eq!(stats.recall_candidate_cap_bound_since_boot, 1_025);
+    assert_eq!(
+        stats
+            .recall_candidate_cap_bound_by_namespace_since_boot
+            .get("<other>"),
+        Some(&1)
+    );
+    assert_eq!(
+        stats
+            .recall_candidate_cap_bound_by_namespace_since_boot
+            .len(),
+        1_025,
+        "1,024 named namespaces plus one bounded overflow bucket"
+    );
+}
