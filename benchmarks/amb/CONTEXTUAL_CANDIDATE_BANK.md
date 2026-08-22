@@ -167,6 +167,49 @@ stage needs an answer-sized synthesized item that preserves its distinguishing
 detail. The representative selector remains opt-in experimental harness code
 and must not be promoted to a product default.
 
+### Global stage-record result
+
+The next arm tested representation directly. Query influence entered through
+the accepted relationship selection stage; synthesis itself then made one
+query-blind global call over the selected eight-row Robert thread and required
+exactly one record for each of the five stored source conversations. The model
+could write only the stage sentence. The harness attached first-mention time,
+source conversation, turns, and all eight evidence IDs deterministically; full
+IDs remained in audit metadata instead of consuming answer context.
+
+The synthesis selection SHA-256 was
+`6b0ee0e74184740785c3decb4309524408d6fb271af4b024e54452882dfcd892`,
+the request SHA-256 was
+`e813693d86a49aed04e65890116bd74bd14c56e0b1a400032e4747290f1a1916`,
+and the response SHA-256 was
+`4edc534772bb19b440b7f619e1e323a08f5d77e325329b579c54e0af65c5e874`.
+The frozen control and treatment context SHA-256 values were respectively
+`0b09412744f477c6e095949f9a938271762978849d736e1805eb52f82efd9f17`
+and
+`f3229add21c6da073cdc766073c3c76129e467838dd9be40475ca489251abeb0`.
+The paired manifest SHA-256 was
+`a7aab531232e2be20bf60d05b8e32ba838b15458c8c06d167e851a6e2a8d0c49`.
+
+The frozen run rejected compact prose stage records:
+
+| Frozen arm | Rows | Context tokens | Median score | Judge votes |
+| --- | ---: | ---: | ---: | --- |
+| Relationship thread control | 8 | 624 | `0.60` | `0.60, 0.60, 0.70` |
+| Global stage records | 5 | 331 | `0.20` | `0.20, 0.20, 0.20` |
+
+The paired delta was `-0.40`; no rerun was made. The model converted the
+first-person concern about meeting Robert and making a good impression into a
+third-person fact. The answerer then explicitly excluded that record as not an
+academic-work aspect and split the June record into separate journal and
+conference items. The synthesis also omitted the central June decision to
+strengthen the essay before the conference paper and compressed the July
+confidence and conference-planning details into generic next steps.
+
+This rejects untyped compact prose for this arm and motivates a subsequent
+hypothesis that preserves speaker perspective and separately encodes the
+user's goal/concern/decision, event facts, and outcome or follow-up. Q7 is now
+a development case for that schema, not untouched validation.
+
 ### Untouched holdout
 
 The untouched Q9 family-support query provided that confirmation. Its raw bank
