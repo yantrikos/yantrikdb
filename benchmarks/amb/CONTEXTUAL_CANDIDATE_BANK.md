@@ -169,12 +169,13 @@ and must not be promoted to a product default.
 
 ### Global stage-record result
 
-The next arm tested representation directly. It made one query-blind global
-synthesis call over the accepted eight-row Robert thread and required exactly
-one record for each of the five stored source conversations. The model could
-write only the stage sentence. The harness attached first-mention time, source
-conversation, turns, and all eight evidence IDs deterministically; full IDs
-remained in audit metadata instead of consuming answer context.
+The next arm tested representation directly. Query influence entered through
+the accepted relationship selection stage; synthesis itself then made one
+query-blind global call over the selected eight-row Robert thread and required
+exactly one record for each of the five stored source conversations. The model
+could write only the stage sentence. The harness attached first-mention time,
+source conversation, turns, and all eight evidence IDs deterministically; full
+IDs remained in audit metadata instead of consuming answer context.
 
 The synthesis selection SHA-256 was
 `6b0ee0e74184740785c3decb4309524408d6fb271af4b024e54452882dfcd892`,
@@ -204,10 +205,10 @@ conference items. The synthesis also omitted the central June decision to
 strengthen the essay before the conference paper and compressed the July
 confidence and conference-planning details into generic next steps.
 
-This rejects untyped compact prose as the item representation. A subsequent
-arm must preserve speaker perspective and separately encode the user's
-goal/concern/decision, event facts, and outcome or follow-up. Q7 is now a
-development case for that schema, not untouched validation.
+This rejects untyped compact prose for this arm and motivates a subsequent
+hypothesis that preserves speaker perspective and separately encodes the
+user's goal/concern/decision, event facts, and outcome or follow-up. Q7 is now
+a development case for that schema, not untouched validation.
 
 ### Untouched holdout
 

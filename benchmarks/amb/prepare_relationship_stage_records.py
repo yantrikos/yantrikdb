@@ -260,6 +260,7 @@ def main() -> int:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--expect-selection-sha256")
     parser.add_argument("--expect-request-sha256")
+    parser.add_argument("--expect-response-sha256")
     parser.add_argument("--model", default="deepseek-v4-flash:0731-cloud")
     parser.add_argument(
         "--ollama-host",
@@ -336,6 +337,12 @@ def main() -> int:
             encoding="utf-8",
         )
         execution_model_calls = 1
+    response_sha256 = _sha256_json(response)
+    if args.expect_response_sha256 and response_sha256 != args.expect_response_sha256:
+        raise ValueError(
+            "response hash mismatch: expected "
+            f"{args.expect_response_sha256}, got {response_sha256}"
+        )
     records = materialize_records(response, preflight["groups"])
     context = render_records(preflight["anchor"], records)
     model_identity = _ollama_model_identity(args.model, ollama_host)
@@ -356,7 +363,7 @@ def main() -> int:
                     "evidence_row_count": preflight["evidence_row_count"],
                     "selection_sha256": preflight["selection_sha256"],
                     "request_sha256": preflight["request_sha256"],
-                    "response_sha256": _sha256_json(response),
+                    "response_sha256": response_sha256,
                     "records": records,
                 },
             }

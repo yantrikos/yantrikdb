@@ -2,6 +2,7 @@ import pytest
 
 from benchmarks.amb.prepare_relationship_stage_records import (
     _normalize_host,
+    _sha256_json,
     build_preflight,
     build_prompt,
     materialize_records,
@@ -133,3 +134,10 @@ def test_prompt_and_render_make_the_record_contract_explicit():
     assert "Evidence turns: 10, 12" in context
     assert "Evidence IDs:" not in context
     assert records[0]["evidence_ids"] == ["e1", "e2"]
+
+
+def test_response_hash_is_order_independent_for_replay_binding():
+    left = {"records": [{"source_group": "s1", "item": "One."}]}
+    right = {"records": [{"item": "One.", "source_group": "s1"}]}
+
+    assert _sha256_json(left) == _sha256_json(right)
