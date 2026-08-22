@@ -5,6 +5,27 @@ pub enum YantrikDbError {
     #[error("database error: {0}")]
     Database(#[from] rusqlite::Error),
 
+    /// A database error with the open-path stage (and, where the SQL is
+    /// derived rather than constant, the statement) that produced it.
+    ///
+    /// **Why this exists (issue #146).** A truncated-SQL parse error
+    /// surfaces from rusqlite as `SqliteFailure(_, "incomplete input")`
+    /// with no statement attached: SQLite reports the truncation at the
+    /// END of the input, `sqlite3_error_offset()` returns -1 for it, and
+    /// rusqlite only builds the SQL-carrying `SqlInputError` when the
+    /// offset is >= 0. The blanket `Database` conversion above then
+    /// erases which of the open path's many batches was even running —
+    /// CI produced exactly `database error: incomplete input` from
+    /// inside the constructor, once, on one platform, and the message
+    /// named nothing. Every open-path SQL call now tags its stage so a
+    /// recurrence localizes itself.
+    #[error("database error at {stage}: {source}")]
+    DatabaseAt {
+        stage: String,
+        #[source]
+        source: rusqlite::Error,
+    },
+
     #[error("No embedder configured. Pass an embedder to YantrikDB() or call set_embedder().")]
     NoEmbedder,
 

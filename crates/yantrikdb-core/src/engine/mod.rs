@@ -748,7 +748,32 @@ impl YantrikDB {
         actor_id: Option<String>,
         master_key: Option<&[u8; 32]>,
     ) -> Result<Self> {
-        let conn = Connection::open(db_path)?;
+        // Stage-tag every SQL call in the open path (issue #146). A
+        // truncated-statement parse error reaches us as a bare
+        // `SqliteFailure(_, "incomplete input")` — SQLite reports the
+        // truncation at the end of input, `sqlite3_error_offset()` is -1
+        // there, so rusqlite never builds the SQL-carrying variant. The
+        // one observed occurrence therefore named nothing. These tags make
+        // the next one name its stage.
+        fn at<T>(stage: &str, r: std::result::Result<T, rusqlite::Error>) -> Result<T> {
+            r.map_err(|source| YantrikDbError::DatabaseAt {
+                stage: stage.to_owned(),
+                source,
+            })
+        }
+        // Same, for callees that already return the crate error: re-tag
+        // only the untagged `Database` case, pass everything else through.
+        fn rewrap<T>(stage: &str, r: Result<T>) -> Result<T> {
+            r.map_err(|e| match e {
+                YantrikDbError::Database(source) => YantrikDbError::DatabaseAt {
+                    stage: stage.to_owned(),
+                    source,
+                },
+                other => other,
+            })
+        }
+
+        let conn = at("open", Connection::open(db_path))?;
 
         // Enforce SQLite pragmas for durability + performance.
         // See CONCURRENCY.md and ops/runbooks/disk-full.md.
@@ -765,12 +790,15 @@ impl YantrikDB {
         //   under concurrent access (e.g., oplog GC + consolidation).
         // wal_autocheckpoint=1000: auto-checkpoint after 1000 pages (~4MB).
         //   Prevents unbounded WAL growth under sustained write load.
-        conn.execute_batch(
-            "PRAGMA journal_mode=WAL; \
-             PRAGMA synchronous=NORMAL; \
-             PRAGMA foreign_keys=ON; \
-             PRAGMA busy_timeout=5000; \
-             PRAGMA wal_autocheckpoint=1000;",
+        at(
+            "pragmas",
+            conn.execute_batch(
+                "PRAGMA journal_mode=WAL; \
+                 PRAGMA synchronous=NORMAL; \
+                 PRAGMA foreign_keys=ON; \
+                 PRAGMA busy_timeout=5000; \
+                 PRAGMA wal_autocheckpoint=1000;",
+            ),
         )?;
 
         // Verify critical pragmas actually took effect. SQLite silently
@@ -860,19 +888,28 @@ impl YantrikDB {
         if let Some(v) = existing_version {
             for &(from_v, sql) in migrations {
                 if v <= from_v {
-                    Self::run_migration_idempotent(&conn, sql)?;
+                    rewrap(
+                        &format!("migration v{}->v{}", from_v, from_v + 1),
+                        Self::run_migration_idempotent(&conn, sql),
+                    )?;
                 }
             }
         }
 
-        conn.execute_batch(SCHEMA_SQL)?;
+        at("schema_sql", conn.execute_batch(SCHEMA_SQL))?;
 
         // Populate seed substitution categories (idempotent)
-        crate::distributed::seed_categories::populate_seed_categories(&conn)?;
+        rewrap(
+            "seed_categories",
+            crate::distributed::seed_categories::populate_seed_categories(&conn),
+        )?;
 
         // RFC 008 M5b: seed move_type_registry + inference_basis_registry
         // with canonical vocabulary (idempotent INSERT OR IGNORE).
-        crate::engine::moves::seed_registries_inner(&conn)?;
+        rewrap(
+            "seed_registries",
+            crate::engine::moves::seed_registries_inner(&conn),
+        )?;
 
         // Set schema version — never downgrade.
         //
@@ -891,9 +928,12 @@ impl YantrikDB {
         // with run_migration_idempotent below, both prevents new occurrences
         // (forward) and heals existing corrupted-meta deployments (replay).
         let stamp = std::cmp::max(existing_version.unwrap_or(0), SCHEMA_VERSION);
-        conn.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
-            params![stamp.to_string()],
+        at(
+            "version_stamp",
+            conn.execute(
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?1)",
+                params![stamp.to_string()],
+            ),
         )?;
 
         // **v0.10 Item 1.** Fresh installs default to the status-led read
@@ -905,10 +945,13 @@ impl YantrikDB {
         // shows them what the policy would have excluded. INSERT OR
         // IGNORE keeps any operator-set value authoritative.
         if existing_version.is_none() {
-            conn.execute(
-                "INSERT OR IGNORE INTO meta (key, value) \
-                 VALUES ('status_read_policy', 'exclude_superseded')",
-                [],
+            at(
+                "fresh_defaults",
+                conn.execute(
+                    "INSERT OR IGNORE INTO meta (key, value) \
+                     VALUES ('status_read_policy', 'exclude_superseded')",
+                    [],
+                ),
             )?;
         }
 
@@ -925,9 +968,12 @@ impl YantrikDB {
         // with an unreadable/missing schema_version as fresh and would hand it
         // `enforce` (sol 4a.4).
         let default_gate_mode = if db_was_empty { "enforce" } else { "warn" };
-        conn.execute(
-            "INSERT OR IGNORE INTO meta (key, value) VALUES ('provenance_gate_mode', ?1)",
-            params![default_gate_mode],
+        at(
+            "fresh_defaults",
+            conn.execute(
+                "INSERT OR IGNORE INTO meta (key, value) VALUES ('provenance_gate_mode', ?1)",
+                params![default_gate_mode],
+            ),
         )?;
 
         // **v28 (issue #41 brainstorm-4 §6).** Seed meta.active_generation
@@ -938,26 +984,35 @@ impl YantrikDB {
         // for the engine's entire lifetime, and pre-v28 rows whose
         // embedding_generation IS NULL are correctly treated as
         // "covered by generation 0."
-        conn.execute(
-            "INSERT OR IGNORE INTO meta (key, value) VALUES ('active_generation', '0')",
-            [],
+        at(
+            "fresh_defaults",
+            conn.execute(
+                "INSERT OR IGNORE INTO meta (key, value) VALUES ('active_generation', '0')",
+                [],
+            ),
         )?;
 
         // Resolve actor_id: explicit > stored in meta > generate new
         let actor_id = if let Some(id) = actor_id {
-            conn.execute(
-                "INSERT OR REPLACE INTO meta (key, value) VALUES ('actor_id', ?1)",
-                params![id],
+            at(
+                "actor_id",
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('actor_id', ?1)",
+                    params![id],
+                ),
             )?;
             id
         } else {
-            match Self::get_meta(&conn, "actor_id")? {
+            match rewrap("actor_id", Self::get_meta(&conn, "actor_id"))? {
                 Some(id) => id,
                 None => {
                     let id = crate::id::new_id();
-                    conn.execute(
-                        "INSERT OR REPLACE INTO meta (key, value) VALUES ('actor_id', ?1)",
-                        params![id],
+                    at(
+                        "actor_id",
+                        conn.execute(
+                            "INSERT OR REPLACE INTO meta (key, value) VALUES ('actor_id', ?1)",
+                            params![id],
+                        ),
                     )?;
                     id
                 }
@@ -980,9 +1035,12 @@ impl YantrikDB {
         // wrote '0') and pre-v28 DBs that haven't been touched by
         // the v28 migration yet (shouldn't happen — migration ran
         // above — but defensive).
-        let active_generation: u64 = Self::get_meta(&conn, "active_generation")?
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(0);
+        let active_generation: u64 = rewrap(
+            "reembed_recovery",
+            Self::get_meta(&conn, "active_generation"),
+        )?
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
 
         // **Layer 7 — crash recovery for in-flight reembed.**
         //
@@ -1043,12 +1101,18 @@ impl YantrikDB {
 
                 if active_generation < in_flight_gen {
                     // SQL swap didn't commit. Discard staging.
-                    conn.execute(
-                        "UPDATE memories SET embedding_new = NULL, \
-                         embedding_new_model = NULL WHERE embedding_new IS NOT NULL",
-                        [],
+                    at(
+                        "reembed_recovery",
+                        conn.execute(
+                            "UPDATE memories SET embedding_new = NULL, \
+                             embedding_new_model = NULL WHERE embedding_new IS NOT NULL",
+                            [],
+                        ),
                     )?;
-                    conn.execute("DELETE FROM meta WHERE key = 'reembed_state'", [])?;
+                    at(
+                        "reembed_recovery",
+                        conn.execute("DELETE FROM meta WHERE key = 'reembed_state'", []),
+                    )?;
                     let evt_payload = serde_json::json!({
                         "recovery": "discarded_staging",
                         "reason": format!(
@@ -1058,15 +1122,18 @@ impl YantrikDB {
                         ),
                         "active_generation_after": active_generation,
                     });
-                    conn.execute(
-                        "INSERT INTO reembed_events (generation, phase, timestamp, payload_json) \
-                         VALUES (?1, ?2, ?3, ?4)",
-                        params![
-                            in_flight_gen as i64,
-                            "Aborted",
-                            recovery_event_ts,
-                            serde_json::to_string(&evt_payload)?,
-                        ],
+                    at(
+                        "reembed_recovery",
+                        conn.execute(
+                            "INSERT INTO reembed_events (generation, phase, timestamp, payload_json) \
+                             VALUES (?1, ?2, ?3, ?4)",
+                            params![
+                                in_flight_gen as i64,
+                                "Aborted",
+                                recovery_event_ts,
+                                serde_json::to_string(&evt_payload)?,
+                            ],
+                        ),
                     )?;
                     Some(format!(
                         "discarded_staging (in-flight gen {in_flight_gen} phase {in_flight_phase})"
@@ -1077,12 +1144,18 @@ impl YantrikDB {
                     // read above). Defensive: clear any staging
                     // leftover; the swap transaction normally clears
                     // it but we don't trust a crashed transaction.
-                    conn.execute(
-                        "UPDATE memories SET embedding_new = NULL, \
-                         embedding_new_model = NULL WHERE embedding_new IS NOT NULL",
-                        [],
+                    at(
+                        "reembed_recovery",
+                        conn.execute(
+                            "UPDATE memories SET embedding_new = NULL, \
+                             embedding_new_model = NULL WHERE embedding_new IS NOT NULL",
+                            [],
+                        ),
                     )?;
-                    conn.execute("DELETE FROM meta WHERE key = 'reembed_state'", [])?;
+                    at(
+                        "reembed_recovery",
+                        conn.execute("DELETE FROM meta WHERE key = 'reembed_state'", []),
+                    )?;
                     let evt_payload = serde_json::json!({
                         "recovery": "completed_durable",
                         "reason": format!(
@@ -1093,15 +1166,18 @@ impl YantrikDB {
                         ),
                         "active_generation_after": active_generation,
                     });
-                    conn.execute(
-                        "INSERT INTO reembed_events (generation, phase, timestamp, payload_json) \
-                         VALUES (?1, ?2, ?3, ?4)",
-                        params![
-                            in_flight_gen as i64,
-                            "Completed",
-                            recovery_event_ts,
-                            serde_json::to_string(&evt_payload)?,
-                        ],
+                    at(
+                        "reembed_recovery",
+                        conn.execute(
+                            "INSERT INTO reembed_events (generation, phase, timestamp, payload_json) \
+                             VALUES (?1, ?2, ?3, ?4)",
+                            params![
+                                in_flight_gen as i64,
+                                "Completed",
+                                recovery_event_ts,
+                                serde_json::to_string(&evt_payload)?,
+                            ],
+                        ),
                     )?;
                     Some(format!(
                         "completed_durable (gen {in_flight_gen} phase {in_flight_phase})"
@@ -1120,16 +1196,19 @@ impl YantrikDB {
         }
 
         // Resolve node_id: stored in meta > generate random
-        let node_id: u32 = match Self::get_meta(&conn, "node_id")? {
+        let node_id: u32 = match rewrap("node_id", Self::get_meta(&conn, "node_id"))? {
             Some(s) => s.parse().unwrap_or_else(|_| {
                 let id: u32 = rand::thread_rng().gen();
                 id
             }),
             None => {
                 let id: u32 = rand::thread_rng().gen();
-                conn.execute(
-                    "INSERT OR REPLACE INTO meta (key, value) VALUES ('node_id', ?1)",
-                    params![id.to_string()],
+                at(
+                    "node_id",
+                    conn.execute(
+                        "INSERT OR REPLACE INTO meta (key, value) VALUES ('node_id', ?1)",
+                        params![id.to_string()],
+                    ),
                 )?;
                 id
             }
@@ -1137,7 +1216,8 @@ impl YantrikDB {
 
         // Initialize encryption (envelope pattern: master_key wraps DEK)
         let enc = if let Some(mk) = master_key {
-            let provider = match Self::get_meta(&conn, "encrypted_dek")? {
+            let provider = match rewrap("encryption_meta", Self::get_meta(&conn, "encrypted_dek"))?
+            {
                 Some(wrapped_b64) => {
                     // Existing DB: unwrap DEK
                     let wrapped = base64::engine::general_purpose::STANDARD
@@ -1151,13 +1231,19 @@ impl YantrikDB {
                     let dek = encryption::generate_key();
                     let wrapped = encryption::wrap_dek(mk, &dek)?;
                     let wrapped_b64 = base64::engine::general_purpose::STANDARD.encode(&wrapped);
-                    conn.execute(
-                        "INSERT OR REPLACE INTO meta (key, value) VALUES ('encrypted_dek', ?1)",
-                        params![wrapped_b64],
+                    at(
+                        "encryption_meta",
+                        conn.execute(
+                            "INSERT OR REPLACE INTO meta (key, value) VALUES ('encrypted_dek', ?1)",
+                            params![wrapped_b64],
+                        ),
                     )?;
-                    conn.execute(
-                        "INSERT OR REPLACE INTO meta (key, value) VALUES ('encryption_enabled', '1')",
-                        [],
+                    at(
+                        "encryption_meta",
+                        conn.execute(
+                            "INSERT OR REPLACE INTO meta (key, value) VALUES ('encryption_enabled', '1')",
+                            [],
+                        ),
                     )?;
                     EncryptionProvider::from_dek(&dek)
                 }
@@ -1165,7 +1251,13 @@ impl YantrikDB {
             Some(provider)
         } else {
             // Verify we're not opening an encrypted DB without a key
-            if Self::get_meta(&conn, "encryption_enabled")?.as_deref() == Some("1") {
+            if rewrap(
+                "encryption_meta",
+                Self::get_meta(&conn, "encryption_enabled"),
+            )?
+            .as_deref()
+                == Some("1")
+            {
                 return Err(YantrikDbError::Encryption(
                     "database is encrypted but no master_key provided".into(),
                 ));
@@ -1173,17 +1265,20 @@ impl YantrikDB {
             None
         };
 
-        let scoring_cache = Self::load_scoring_cache(&conn)?;
-        let vec_index = Self::build_vec_index_with_enc(&conn, embedding_dim, enc.as_ref())?;
+        let scoring_cache = rewrap("load_scoring_cache", Self::load_scoring_cache(&conn))?;
+        let vec_index = rewrap(
+            "build_vec_index",
+            Self::build_vec_index_with_enc(&conn, embedding_dim, enc.as_ref()),
+        )?;
         // C5b: heal possessive-pollution BEFORE the graph index builds,
         // so the very first build folds phantom entities into their
         // canonicals. Idempotent and cheap; best-effort by design (a
         // failed census must never fail an open).
         let _ = graph_ops::migrate_possessive_aliases(&conn);
-        let graph_index = GraphIndex::build_from_db(&conn)?;
+        let graph_index = rewrap("graph_index", GraphIndex::build_from_db(&conn))?;
 
         // Load active sessions from DB
-        let active_sessions = Self::load_active_sessions(&conn)?;
+        let active_sessions = rewrap("load_sessions", Self::load_active_sessions(&conn))?;
 
         // Build the read-connection pool. Each pooled connection opens
         // independently against the same SQLite file with WAL-mode
@@ -1207,12 +1302,15 @@ impl YantrikDB {
         };
         let mut read_conns = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
-            let rc = Connection::open(db_path)?;
-            rc.execute_batch(
-                "PRAGMA journal_mode=WAL; \
-                 PRAGMA synchronous=NORMAL; \
-                 PRAGMA foreign_keys=ON; \
-                 PRAGMA busy_timeout=5000;",
+            let rc = at("read_pool_open", Connection::open(db_path))?;
+            at(
+                "read_pool_pragmas",
+                rc.execute_batch(
+                    "PRAGMA journal_mode=WAL; \
+                     PRAGMA synchronous=NORMAL; \
+                     PRAGMA foreign_keys=ON; \
+                     PRAGMA busy_timeout=5000;",
+                ),
             )?;
             read_conns.push(Mutex::new(rc));
         }
@@ -1238,10 +1336,12 @@ impl YantrikDB {
         // A boot read that cannot be trusted must fail the open, not invent a
         // permissive answer. (Same class as the fail-open defaults in 4a.1 and
         // 4a.4.)
-        let initial_pending: i64 =
+        let initial_pending: i64 = at(
+            "oplog_pending_count",
             conn.query_row("SELECT COUNT(*) FROM oplog WHERE applied = 0", [], |row| {
                 row.get(0)
-            })?;
+            }),
+        )?;
 
         // Build the DeltaIndex once, wrap in Arc, and move it into the
         // initial `SearchState`. After issue #41 brainstorm-4 §1, the
@@ -1271,7 +1371,11 @@ impl YantrikDB {
         // as legacy (missing key on migrated DBs, or an operator writing
         // e.g. 'legacy' to switch the policy back off).
         let exclude_superseded_reads = matches!(
-            Self::get_meta(&conn, "status_read_policy")?.as_deref(),
+            rewrap(
+                "final_meta_reads",
+                Self::get_meta(&conn, "status_read_policy")
+            )?
+            .as_deref(),
             Some("exclude_superseded")
         );
 
@@ -1281,16 +1385,22 @@ impl YantrikDB {
         // Fail-CLOSED: a malformed persisted mode is a typed error (propagated),
         // never a silent `Off` (sol 4a.4).
         let provenance_gate_mode = crate::provenance::GateMode::parse(
-            Self::get_meta(&conn, "provenance_gate_mode")?
-                .as_deref()
-                .unwrap_or("warn"),
+            rewrap(
+                "final_meta_reads",
+                Self::get_meta(&conn, "provenance_gate_mode"),
+            )?
+            .as_deref()
+            .unwrap_or("warn"),
         )?
         .as_u8();
 
         // Missing is the v42-upgrade-compatible default. A malformed or zero
         // persisted value fails open() loudly: silently disabling a write-
         // amplification bound is the wrong failure direction.
-        Self::synthesis_fanout_cap_from_conn(&conn)?;
+        rewrap(
+            "final_meta_reads",
+            Self::synthesis_fanout_cap_from_conn(&conn),
+        )?;
 
         // **Packs / issue #117.** Restore durable embedder identity.
         //
@@ -1312,8 +1422,11 @@ impl YantrikDB {
         // Presence, not dim-match: a stored-but-mismatched identity
         // still means the write path has nothing new to stamp, and
         // re-stamping under a different dim is `reembed`'s job.
-        let persisted_embedder_present =
-            Self::get_meta(&conn, pack::META_EMBEDDER_DIGEST)?.is_some();
+        let persisted_embedder_present = rewrap(
+            "final_meta_reads",
+            Self::get_meta(&conn, pack::META_EMBEDDER_DIGEST),
+        )?
+        .is_some();
 
         Ok(Self {
             conn: Mutex::new(conn),
@@ -1520,7 +1633,18 @@ impl YantrikDB {
                         );
                         continue;
                     }
-                    return Err(e.into());
+                    // This runner is the ONE place open-path SQL is
+                    // derived rather than constant (split on `;`, line
+                    // comments stripped) — i.e. the one place a
+                    // truncated statement could be of our own making.
+                    // A parse error like "incomplete input" carries no
+                    // SQL of its own (issue #146), so attach the exact
+                    // statement we handed to SQLite.
+                    let shown: String = stmt.chars().take(200).collect();
+                    return Err(YantrikDbError::DatabaseAt {
+                        stage: format!("migration statement `{shown}`"),
+                        source: e,
+                    });
                 }
             }
         }
