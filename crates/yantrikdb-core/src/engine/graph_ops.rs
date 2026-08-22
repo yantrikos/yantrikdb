@@ -341,43 +341,33 @@ impl YantrikDB {
         // extractor, polarity, namespace) acts as a secondary filter.
         let was_new_row: bool = {
             let conn = self.conn();
-            conn.execute_batch("SAVEPOINT upsert_edge")?;
 
-            let result: Result<bool> = (|| {
-                let inserted = conn.execute(
-                    "INSERT OR IGNORE INTO claims \
+            let sp = crate::engine::savepoint::SavepointGuard::new(&conn, "upsert_edge")?;
+            let inserted = conn.execute(
+                "INSERT OR IGNORE INTO claims \
                      (claim_id, src, dst, rel_type, weight, created_at, namespace) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![edge_id, src, dst, rel_type, weight, ts_secs, namespace],
-                )?;
-                let was_new = inserted == 1;
+                params![edge_id, src, dst, rel_type, weight, ts_secs, namespace],
+            )?;
 
-                if was_new {
-                    // Ensure entities exist with classified entity_type.
-                    for (entity, etype) in [(src, src_type), (dst, dst_type)] {
-                        conn.execute(
+            let was_new = inserted == 1;
+
+            if was_new {
+                // Ensure entities exist with classified entity_type.
+                for (entity, etype) in [(src, src_type), (dst, dst_type)] {
+                    conn.execute(
                             "INSERT INTO entities (name, entity_type, first_seen, last_seen) \
                              VALUES (?1, ?2, ?3, ?3) \
                              ON CONFLICT(name) DO UPDATE SET last_seen = ?3, mention_count = mention_count + 1, \
                              entity_type = CASE WHEN entities.entity_type = 'unknown' THEN ?2 ELSE entities.entity_type END",
                             params![entity, etype, ts_secs],
                         )?;
-                    }
-                }
-                Ok(was_new)
-            })();
-
-            match result {
-                Ok(b) => {
-                    conn.execute_batch("RELEASE upsert_edge")?;
-                    b
-                }
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK TO upsert_edge");
-                    let _ = conn.execute_batch("RELEASE upsert_edge");
-                    return Err(e);
                 }
             }
+
+            sp.release()?;
+
+            was_new
         };
 
         // In-memory graph_index update only on first insert (idempotent on

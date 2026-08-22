@@ -307,54 +307,46 @@ impl YantrikDB {
         // 0.13.2: sealed on encrypted databases (see encode_oplog_payload).
         let payload_str = self.encode_oplog_payload(&serde_json::to_string(&payload)?)?;
 
-        conn.execute_batch("SAVEPOINT link_core_txn")?;
-        let txn: Result<()> = (|| {
-            conn.execute(
-                "INSERT INTO record_links \
+        let sp = crate::engine::savepoint::SavepointGuard::new(&conn, "link_core_txn")?;
+
+        conn.execute(
+            "INSERT INTO record_links \
                  (link_id, source_rid, target_rid, link_type, status, selection_state, \
                   created_at, hlc, origin_actor) \
                  VALUES (?1, ?2, ?3, ?4, 'active', 'selected', ?5, ?6, ?7)",
-                params![
-                    edge_id,
-                    source_rid,
-                    link.target_rid,
-                    link_type_str,
-                    ts,
-                    hlc_bytes,
-                    self.actor_id,
-                ],
-            )?;
-            // (Phase 0 failpoint "link.between_row_and_oplog" lands here with
-            // the `testing`-gated registry — the kill proof asserts NEITHER
-            // row survives a kill inside this savepoint.)
-            crate::testing::fail_point("link.between_row_and_oplog");
-            conn.execute(
-                "INSERT INTO oplog (op_id, op_type, timestamp, target_rid, payload, \
+            params![
+                edge_id,
+                source_rid,
+                link.target_rid,
+                link_type_str,
+                ts,
+                hlc_bytes,
+                self.actor_id,
+            ],
+        )?;
+        // (Phase 0 failpoint "link.between_row_and_oplog" lands here with
+        // the `testing`-gated registry — the kill proof asserts NEITHER
+        // row survives a kill inside this savepoint.)
+        crate::testing::fail_point("link.between_row_and_oplog");
+        conn.execute(
+            "INSERT INTO oplog (op_id, op_type, timestamp, target_rid, payload, \
                  actor_id, hlc, embedding_hash, origin_actor, applied, applied_generation) \
                  VALUES (?1, 'link', ?2, ?3, ?4, ?5, ?6, NULL, ?7, 1, ?8)",
-                params![
-                    edge_id,
-                    ts,
-                    source_rid,
-                    payload_str,
-                    self.actor_id,
-                    hlc_bytes,
-                    self.actor_id,
-                    applied_generation,
-                ],
-            )?;
-            Ok(())
-        })();
-        match txn {
-            Ok(()) => {
-                conn.execute_batch("RELEASE link_core_txn")?;
-                Ok((edge_id, true))
-            }
-            Err(e) => {
-                let _ = conn.execute_batch("ROLLBACK TO link_core_txn; RELEASE link_core_txn");
-                Err(e)
-            }
-        }
+            params![
+                edge_id,
+                ts,
+                source_rid,
+                payload_str,
+                self.actor_id,
+                hlc_bytes,
+                self.actor_id,
+                applied_generation,
+            ],
+        )?;
+
+        sp.release()?;
+
+        Ok((edge_id, true))
     }
 
     /// **v0.10 Phase 0 — the Supersedes integrity gate.** Caller holds the
