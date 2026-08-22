@@ -209,6 +209,60 @@ arm must preserve speaker perspective and separately encode the user's
 goal/concern/decision, event facts, and outcome or follow-up. Q7 is now a
 development case for that schema, not untouched validation.
 
+### Typed stage preregistration
+
+The development successor keeps the identical Q7 relationship selection but
+replaces the one prose field with five explicit facets: `goal_or_concern`,
+`event`, `decision`, `outcome`, and `follow_up`. It requires first-person
+perspective, rejects records that call the memory owner "the user", attaches
+dates and evidence provenance deterministically, and renders only non-empty
+facets. The synthesis call still receives no query or gold answer.
+
+The accepted selection SHA-256 remains
+`6b0ee0e74184740785c3decb4309524408d6fb271af4b024e54452882dfcd892`.
+The typed synthesis request SHA-256 is
+`14055837d0cf2e90f02ed254476d435c3fcc5a88b0d8908ec9756a892052fb88`.
+One global synthesis call is allowed. The generated response is inspected only
+for the preregistered structural contract, then frozen; there is no prompt
+tuning or generation rerun after seeing its content.
+
+Q7 is a development test, not validation. The arm passes development only if
+its median score is at least `0.70` and its paired delta over the unchanged
+eight-row relationship-thread control is at least `+0.10`. Otherwise it stops.
+Even a development pass cannot change the product schema: it must next avoid a
+material regression on Q9_1 and lift an untouched relationship-timeline
+holdout before any `ConcernItem` or persistence change is proposed.
+
+The frozen typed response passed the structural contract after the validator
+was corrected to recognize first-person contractions such as "I'm"; the same
+raw response was replayed offline, so generation remained one call. Its
+response SHA-256 was
+`f7ab72becb537e7c349bd6c152340c2b7ad806bb3c08091ab83368782d57ae85`.
+The treatment context had 509 tokens and SHA-256
+`23050eadc11311fc96a5cd82059e8f44ba95e80dca58815fb7966b39e32cf244`.
+The paired manifest SHA-256 was
+`d67390a5865449aacfc7bdc13af4774895388b555bf756f06b736ffc7febb208`.
+
+The typed arm did not pass development:
+
+| Frozen arm | Rows | Context tokens | Median score | Judge votes |
+| --- | ---: | ---: | ---: | --- |
+| Relationship thread control | 8 | 624 | `0.30` | `0.50, 0.20, 0.30` |
+| Typed global stage records | 5 | 509 | `0.40` | `0.40, 0.40, 0.40` |
+
+The paired delta met the relative threshold at `+0.10`, but the treatment
+missed the absolute `0.70` floor. No rerun or holdout was made. The answerer
+used the typed goal fields for all five stages but still generalized away the
+specific essay-before-conference decision and the confidence/follow-up Zoom
+details, despite their presence in separate rendered fields.
+
+This run also exposed answer variance that repeated judges do not control. The
+identical frozen control context has scored `0.70`, `0.60`, and `0.30` across
+the representative, prose-stage, and typed-stage pairs under the same pinned
+model tag. Each run generated only one answer per arm. Further single-query
+representation tuning is blocked on repeated-answer support or a demonstrably
+deterministic answer snapshot.
+
 ### Untouched holdout
 
 The untouched Q9 family-support query provided that confirmation. Its raw bank
