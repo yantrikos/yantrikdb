@@ -53,6 +53,14 @@ The audit now emits a loss-conserving `ceiling_estimate` over all ten frozen
 categories. The `ydb-0151` baseline is `65.1485`, so the line loses `34.8515`
 points and needs `24.8515` points, not 28.9, to reach 90.
 
+`ydb-0151` is the canonical anchor because every row-level attribution in this
+audit comes from that exact result (SHA-256 `43b8eb888adeb524caba70b013a8ca510c639bbf5312216e9b453d60185bcb8e`).
+The separate `ydb-final` run scored `61.0689` (SHA-256
+`048b38bd9a285ab788677d60815ec6533268a3fddf0a4d31e60fbf53a5b8b601`).
+That `4.0796`-point cross-run gap is replication evidence, not part of the
+anchor arithmetic. A future claim of reaching 90 means 90 on the declared
+anchor configuration and should use a repeated full-line median.
+
 | Mutually exclusive bucket | Points |
 |---|---:|
 | Dead or benchmark integrity | 3.092 |
@@ -77,6 +85,22 @@ optimistic recovery assumption, not a causal finding; the temporal audit found
 reader arithmetic, revision ambiguity, and invalid gold calculations as well.
 The residual bucket prevents those uncertain and overlapping cases from being
 silently assigned twice.
+
+The machine-readable sensitivity table varies only reader-shaping recovery and
+optimistically recovers every other non-dead bucket:
+
+| Reader-attributed loss recovered | Projected score |
+|---:|---:|
+| 0% | 89.755 |
+| 50% | 93.332 |
+| 70% | 94.762 |
+| 100% | 96.908 |
+
+This is not a forecast: 50% and 70% are scenario parameters, while the evidence
+currently includes one context-shaping win and one abstention arm that missed
+its gate. The Q7 A/A calibration also observed about `0.02` answer-generation
+standard error within a 40-query category. Threshold claims therefore require
+replication even when a single full run crosses 90.
 
 ## Decision
 

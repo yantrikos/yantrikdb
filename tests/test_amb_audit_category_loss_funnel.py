@@ -161,6 +161,12 @@ def test_ceiling_estimate_conserves_full_line_loss():
     assert estimate["baseline_score_percent"] == 65.148512
     assert estimate["points_required_to_reach_90"] == 24.851488
     assert estimate["optimistic_ceiling_percent"] == 96.908095
+    assert estimate["reader_shaping_recovery_sensitivity"] == {
+        "0.0": 89.75508,
+        "0.5": 93.331588,
+        "0.7": 94.762191,
+        "1.0": 96.908095,
+    }
     assert estimate["bucket_conservation_delta"] == 0.0
     assert abs(
         sum(estimate["buckets"].values()) - estimate["total_points_lost"]

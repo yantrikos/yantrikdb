@@ -320,6 +320,10 @@ def ceiling_estimate(result_payload: dict, summaries: dict[str, dict]) -> dict:
     baseline_percent = 100.0 - total_loss
     recoverable = total_loss - dead
     recovery_to_90 = max(90.0 - baseline_percent, 0.0)
+    shaping_sensitivity = {
+        f"{rate:.1f}": 100.0 - dead - reader_shaping * (1.0 - rate)
+        for rate in (0.0, 0.5, 0.7, 1.0)
+    }
     return {
         "complete_equal_weight_ten_category_line": complete_line,
         "baseline_score_percent": round(baseline_percent, 6),
@@ -336,6 +340,10 @@ def ceiling_estimate(result_payload: dict, summaries: dict[str, dict]) -> dict:
         "recoverable_share_required_to_reach_90": (
             round(recovery_to_90 / recoverable, 6) if recoverable else None
         ),
+        "reader_shaping_recovery_sensitivity": {
+            rate: round(projected, 6)
+            for rate, projected in shaping_sensitivity.items()
+        },
         "assumptions": {
             "dead": (
                 "knowledge-update label-defect share plus multi-session "
@@ -349,6 +357,10 @@ def ceiling_estimate(result_payload: dict, summaries: dict[str, dict]) -> dict:
                 "summarization and provenance-attributed abstention shares"
             ),
             "optimistic_ceiling": "full recovery of every point not classified dead",
+            "reader_shaping_sensitivity": (
+                "projected score at each reader-loss recovery rate, assuming full "
+                "recovery of every other non-dead bucket"
+            ),
         },
     }
 
