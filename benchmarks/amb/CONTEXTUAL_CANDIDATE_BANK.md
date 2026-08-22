@@ -116,6 +116,57 @@ otherwise correct source groups, so within-session representative selection is
 the residual gap. Keep this route experimental until an untouched relationship
 timeline query confirms the lift without a category regression.
 
+### Within-source representative preregistration
+
+The residual arm was frozen before scoring. Inside each selected source
+conversation, it ranks direct relationship mentions by a small decision-cue
+signal (`decide`, `whether`, `prioritize`, `focus`, or `approach`), then by the
+existing contextual score and chronology. It retains only the winner plus any
+`context_bridge` row whose stored `parent_turn` points to that winner. This cue
+lexicon is benchmark harness logic only; a product implementation must consume
+structured organizer intent rather than these words.
+
+The rule was derived from Q7, so Q7 alone is not validation. Before freezing the
+judged pair, the identical rank was applied to Q9_1's five family-support source
+groups. All cue counts were zero and the contextual-score fallback reproduced
+the exact prior identities and turns (`24, 76, 118, 208, 260`). The full frozen
+18-query audit retained `10/10` fired gold turns, preserved cohort reachability
+at `60/95`, had zero negative queries, and reduced fired rows from `92` to `11`.
+Its audit SHA-256 is
+`757e9a4226e156701146a89a0c705ca171123abf3495b22bcaaae87d90b7a0d3`.
+
+The Q7 control is the accepted eight-row relationship thread and exactly
+reproduces SHA-256
+`6dc0a4610ac2b9ca2bbc3fab4224ec4675bc4c80f41f72f670951b6cd3d29df7`.
+The six-row treatment keeps turns `14, 64, 124, 170, 212, 214`, drops only
+`156, 168`, and has SHA-256
+`2c8bd6368ca1bb4cd7a68de0edbe8679101c427efd59f12656d97595d6609494`.
+The paired manifest SHA-256 is
+`3fdd24417b933d8c5938026ceb6ffff6e68d6e4b05269fb5a76368d5c77fb2f8`.
+
+The preregistered hypothesis is that removing the two same-source distractors
+raises Q7 above the control's unanimous `0.70`. The null is a median paired
+delta of `0.00`; any negative delta is a failed arm. Answering and three repeated
+judgments use the pinned `deepseek-v4-flash:0731-cloud` snapshot. The result is
+internally paired but not line-comparable to the rolling `:cloud` benchmark.
+No other query will be judged for this residual.
+
+The frozen run rejected the hypothesis:
+
+| Frozen arm | Rows | Context tokens | Median score | Judge votes |
+| --- | ---: | ---: | ---: | --- |
+| Relationship thread control | 8 | 624 | `0.70` | `0.70, 0.70, 0.70` |
+| Within-source representatives | 6 | 489 | `0.50` | `0.40, 0.50, 0.50` |
+
+The paired delta was `-0.20`, a preregistered failed arm. No rerun was made.
+The treatment answer identified the five broad stages, but compressed away exact
+rubric details such as the Zoom-call context, improving the essay before the
+conference paper, and follow-up Zoom/conference planning. This result rejects
+raw-row deletion as the residual fix. It points back to representation: a source
+stage needs an answer-sized synthesized item that preserves its distinguishing
+detail. The representative selector remains opt-in experimental harness code
+and must not be promoted to a product default.
+
 ### Untouched holdout
 
 The untouched Q9 family-support query provided that confirmation. Its raw bank
