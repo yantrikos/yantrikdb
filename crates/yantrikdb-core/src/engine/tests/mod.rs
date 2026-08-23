@@ -23,6 +23,7 @@ mod encryption;
 // bytes rather than against the engine's own claim.
 #[cfg(feature = "bundled-embedder")]
 mod encryption_canary;
+mod event_time_columns;
 // The explain suite drives the full text path (record_text/
 // recall_text_explained), which needs the bundled embedder — slim
 // builds (--no-default-features) have no `with_default`.

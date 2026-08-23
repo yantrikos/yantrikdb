@@ -1127,6 +1127,11 @@ impl YantrikDB {
         // encrypt; just hand back as stored.
         let stored_text = text.to_string();
         let stored_meta = serde_json::to_string(&metadata)?;
+        // v48 (#149): event-time columns from the SAME value `stored_meta`
+        // is serialized from. On an encrypted store the queued payload's
+        // metadata is the stored (ciphertext-string) form; bounds are then
+        // None, matching a blob that exposes no extractable event time.
+        let (event_time_min, event_time_max) = crate::base::datetext::event_time_bounds(&metadata);
 
         let embedding_generation: i64 = state.generation as i64;
 
@@ -1141,9 +1146,9 @@ impl YantrikDB {
                  (rid, type, text, embedding, created_at, updated_at, importance, \
                   half_life, last_access, valence, metadata, namespace, \
                   certainty, domain, source, emotional_state, embedding_generation, \
-                  idempotency_key, origin_actor) \
+                  idempotency_key, origin_actor, event_time_min, event_time_max) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-                         ?18, ?19)",
+                         ?18, ?19, ?20, ?21)",
                 params![
                     rid,
                     memory_type,
@@ -1164,6 +1169,9 @@ impl YantrikDB {
                     embedding_generation,
                     idempotency_key,
                     origin_actor,
+                    // v48 (#149) event time.
+                    event_time_min,
+                    event_time_max,
                 ],
             )?;
         }

@@ -1119,6 +1119,11 @@ impl YantrikDB {
         let gate_verdict = self.gate_provenance(&original.source, &new_metadata_val)?;
         let stored_new_text = self.encrypt_text(&new_text_val)?;
         let stored_new_metadata = self.encrypt_text(&serde_json::to_string(&new_metadata_val)?)?;
+        // v48 (#149): re-stamp the event-time columns from the SAME plaintext
+        // value just serialized (pre-encryption) — a correction that rewrites
+        // metadata must never leave the columns describing the old JSON.
+        let (event_time_min, event_time_max) =
+            crate::base::datetext::event_time_bounds(&new_metadata_val);
 
         let next_revision_num: i64 = tx
             .query_row(
@@ -1156,7 +1161,7 @@ impl YantrikDB {
         tx.execute(
             "UPDATE memories \
              SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
-                 last_access = ?5 \
+                 last_access = ?5, event_time_min = ?7, event_time_max = ?8 \
              WHERE rid = ?6",
             params![
                 stored_new_text,
@@ -1165,6 +1170,9 @@ impl YantrikDB {
                 new_valence_val,
                 ts,
                 rid,
+                // v48 (#149) event time, from the merged plaintext metadata.
+                event_time_min,
+                event_time_max,
             ],
         )?;
 
@@ -1782,6 +1790,10 @@ impl YantrikDB {
                     let stored_new_text = self.encrypt_text(new_text)?;
                     let stored_new_metadata =
                         self.encrypt_text(&serde_json::to_string(&new_metadata_val)?)?;
+                    // v48 (#149): re-stamp the event-time columns from the
+                    // SAME plaintext value just serialized (pre-encryption).
+                    let (event_time_min, event_time_max) =
+                        crate::base::datetext::event_time_bounds(&new_metadata_val);
 
                     let n: i64 = tx
                         .query_row(
@@ -1825,7 +1837,8 @@ impl YantrikDB {
                      SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
                          embedding = ?5, embedding_generation = ?6, embedding_model = ?7, \
                          embedding_new = NULL, embedding_new_model = NULL, \
-                         updated_at = ?8, last_access = ?8 \
+                         updated_at = ?8, last_access = ?8, \
+                         event_time_min = ?10, event_time_max = ?11 \
                      WHERE rid = ?9",
                         params![
                             stored_new_text,
@@ -1837,6 +1850,10 @@ impl YantrikDB {
                             runtime_model,
                             ts,
                             rid,
+                            // v48 (#149) event time, from the merged
+                            // plaintext metadata.
+                            event_time_min,
+                            event_time_max,
                         ],
                     )?;
                     // **Entity-graph coherence — safety half (nuron finding).**
@@ -2206,6 +2223,10 @@ impl YantrikDB {
                 _ => ex_meta_val,
             };
             let stored_new_meta = self.encrypt_text(&serde_json::to_string(&new_meta_val)?)?;
+            // v48 (#149): re-stamp the event-time columns from the SAME
+            // plaintext value just serialized (pre-encryption).
+            let (event_time_min, event_time_max) =
+                crate::base::datetext::event_time_bounds(&new_meta_val);
 
             // Store the follower-local encrypted bytes (exact or re-embedded).
             let stored_emb: Option<Vec<u8>> = match &new_vec {
@@ -2310,7 +2331,8 @@ impl YantrikDB {
                         "UPDATE memories \
                          SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
                              embedding = ?5, embedding_model = ?6, embedding_generation = ?7, \
-                             embedding_new = NULL, embedding_new_model = NULL, last_access = ?8 \
+                             embedding_new = NULL, embedding_new_model = NULL, last_access = ?8, \
+                             event_time_min = ?10, event_time_max = ?11 \
                          WHERE rid = ?9",
                         params![
                             stored_new_text,
@@ -2322,13 +2344,17 @@ impl YantrikDB {
                             generation,
                             applied_at,
                             rid,
+                            // v48 (#149) event time, from the merged
+                            // plaintext metadata.
+                            event_time_min,
+                            event_time_max,
                         ],
                     )?;
                 } else {
                     tx.execute(
                         "UPDATE memories \
                          SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
-                             last_access = ?5 \
+                             last_access = ?5, event_time_min = ?7, event_time_max = ?8 \
                          WHERE rid = ?6",
                         params![
                             stored_new_text,
@@ -2337,6 +2363,10 @@ impl YantrikDB {
                             new_valence,
                             applied_at,
                             rid,
+                            // v48 (#149) event time, from the merged
+                            // plaintext metadata.
+                            event_time_min,
+                            event_time_max,
                         ],
                     )?;
                 }
