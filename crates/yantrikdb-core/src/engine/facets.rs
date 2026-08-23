@@ -727,3 +727,55 @@ mod lane_tests {
         assert!(db.recall_facets("other", 8).unwrap().facets.is_empty());
     }
 }
+
+#[cfg(all(test, feature = "bundled-embedder"))]
+mod replication_tests {
+    use super::*;
+    use crate::replication::{apply_ops, extract_ops_since};
+    use crate::YantrikDB;
+
+    /// Acceptance gate 1, replication leg — verified GREEN by Codex's cold
+    /// review before this test existed here; preserved as the permanent
+    /// regression per that review. A facet extracted on the origin must
+    /// arrive at a follower as a working facet: same text, evidence intact,
+    /// eligible in the follower's lane.
+    #[test]
+    fn replicated_facet_is_lane_eligible_on_the_follower() {
+        let origin = YantrikDB::with_default(":memory:").unwrap();
+        let follower = YantrikDB::with_default(":memory:").unwrap();
+
+        origin
+            .record_text(
+                "Always reply to me in French.",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                "n",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+        let audit = origin.extract_standing_instructions("n", false).unwrap();
+        assert_eq!(audit.accepted, 1);
+
+        let ops = extract_ops_since(&origin.conn(), None, None, None, 100).unwrap();
+        apply_ops(&follower, &ops).unwrap();
+
+        let lane = follower.recall_facets("n", 8).unwrap();
+        assert_eq!(
+            lane.facets.len(),
+            1,
+            "replicated facet must be lane-eligible on the follower"
+        );
+        assert_eq!(lane.facets[0].text, "Always reply to me in French.");
+        assert_eq!(
+            lane.facets[0].source_rids.len(),
+            1,
+            "evidence link must survive replication"
+        );
+    }
+}
