@@ -701,3 +701,274 @@ fn swallowed_replay_errors_still_do_not_leak_a_stage_error() {
     YantrikDB::run_migration_idempotent(&conn, "DROP TABLE definitely_not_a_table;")
         .expect("swallowed replay errors must not become failures");
 }
+
+// =====================================================================
+// Issue #146, SOLVED HALF — the migration splitter must not cut trigger
+// bodies. The first stage-tagged recurrence (PR #159 CI) named the exact
+// statement: `CREATE TRIGGER ... BEGIN INSERT ...` truncated before its
+// `; END` because run_migration_idempotent splits batches on bare `;`.
+// The runner's own doc flagged `;`-in-string-literals as the hazard;
+// trigger bodies were the case the caveat didn't name. Until this fix,
+// ANY migration replay crossing a trigger-bearing migration failed.
+// =====================================================================
+
+#[test]
+fn migration_splitter_keeps_trigger_bodies_intact() {
+    use rusqlite::Connection;
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, txt TEXT)", [])
+        .unwrap();
+    conn.execute("CREATE TABLE t_log (txt TEXT)", []).unwrap();
+    // A batch in exactly the shape that failed in CI: statements before and
+    // after a trigger whose body contains its own semicolons.
+    let batch = "
+        CREATE INDEX IF NOT EXISTS idx_t_txt ON t(txt);
+        CREATE TRIGGER IF NOT EXISTS t_insert AFTER INSERT ON t BEGIN
+            INSERT INTO t_log(txt) VALUES (new.txt);
+            UPDATE t SET txt = txt WHERE id = new.id;
+        END;
+        CREATE INDEX IF NOT EXISTS idx_t_id ON t(id);
+    ";
+    YantrikDB::run_migration_idempotent(&conn, batch)
+        .expect("a trigger body must survive the splitter");
+    // The trigger must actually work — not merely have parsed.
+    conn.execute("INSERT INTO t (txt) VALUES ('hello')", [])
+        .unwrap();
+    let logged: String = conn
+        .query_row("SELECT txt FROM t_log LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(logged, "hello");
+    // Replay safety unchanged: running the same batch again succeeds.
+    YantrikDB::run_migration_idempotent(&conn, batch)
+        .expect("replay of a trigger-bearing batch must stay idempotent");
+}
+
+// =====================================================================
+// #160 cold-review adversarials (found by Codex, empirically reproduced
+// against the first depth-scanner fix — both failed it). A quoted
+// identifier `"begin"` jammed the scanner's depth counter, grouping
+// statements so that a swallowed already-exists SILENTLY DROPPED the
+// rest of the group; and an identifier containing a semicolon split
+// mid-name. sqlite3_complete understands both because it is SQLite.
+// =====================================================================
+
+#[test]
+fn quoted_begin_identifier_does_not_group_statements() {
+    use rusqlite::Connection;
+    let conn = Connection::open_in_memory().unwrap();
+    // Precreate "begin" so the first statement hits already-exists and the
+    // swallow list eats it — the second statement must STILL run alone.
+    conn.execute("CREATE TABLE \"begin\" (id INTEGER)", [])
+        .unwrap();
+    let batch =
+        "CREATE TABLE \"begin\" (id INTEGER); CREATE TABLE applied_after_replay (id INTEGER);";
+    YantrikDB::run_migration_idempotent(&conn, batch).unwrap();
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'applied_after_replay'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        n, 1,
+        "statement after a swallowed error must not be silently lost"
+    );
+}
+
+#[test]
+fn semicolon_inside_quoted_identifier_does_not_split() {
+    use rusqlite::Connection;
+    let conn = Connection::open_in_memory().unwrap();
+    let batch = "CREATE TABLE \"semi;colon\" (id INTEGER); CREATE TABLE after_semi (id INTEGER);";
+    YantrikDB::run_migration_idempotent(&conn, batch).unwrap();
+    for t in ["semi;colon", "after_semi"] {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = ?1",
+                rusqlite::params![t],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "table {t:?} must exist");
+    }
+}
+
+#[test]
+fn block_comments_with_semicolons_do_not_split() {
+    use rusqlite::Connection;
+    let conn = Connection::open_in_memory().unwrap();
+    let batch =
+        "CREATE TABLE c1 (id INTEGER) /* note; with; semis */; CREATE TABLE c2 (id INTEGER);";
+    YantrikDB::run_migration_idempotent(&conn, batch).unwrap();
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('c1','c2')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 2);
+}
+
+// =====================================================================
+// v48 (#149) — valid time as first-class indexed columns.
+//
+// event_time_min / event_time_max move out of the metadata JSON into REAL
+// columns on `memories`, plus the partial index recall's range scans use.
+// Three paths, mirroring the v26/v46 suites:
+//   1. Fresh install has the columns and the index via SCHEMA_SQL.
+//   2. A v47 store upgrades: columns backfilled from the JSON, index created.
+//   3. The backfill's json_valid guard skips ciphertext metadata rows
+//      (encrypted stores) instead of erroring the migration.
+// =====================================================================
+
+#[test]
+fn schema_v48_fresh_install_has_event_time_columns_and_index() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let conn = db.conn();
+
+    let cols = table_columns(&conn, "memories");
+    for required in ["event_time_min", "event_time_max"] {
+        assert!(
+            cols.iter().any(|c| c == required),
+            "v48: fresh-install memories table missing column {required}"
+        );
+    }
+    assert!(
+        index_exists(&conn, "idx_memories_event_time"),
+        "v48: fresh-install missing partial index idx_memories_event_time"
+    );
+}
+
+#[test]
+fn schema_v48_migration_backfills_event_time_and_creates_index() {
+    // Simulate a v47 store carrying event time only in the metadata JSON:
+    // open at current schema, record a date-bearing memory (which stamps
+    // both the JSON and the columns), then NULL the columns (the exact
+    // post-ALTER state a real v47 table reaches), drop the index, rewind
+    // meta to 47, and reopen. MIGRATE_V47_TO_V48's ALTERs replay as no-ops
+    // (idempotent runner), the backfill must copy the JSON values into the
+    // columns, and the index must be recreated.
+    use tempfile::NamedTempFile;
+    let tmp = NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap();
+
+    let rid;
+    {
+        let db = YantrikDB::new(path, 8).unwrap();
+        rid = db
+            .record(
+                "met Alice on 2024-03-15",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &vec_seed(1.0, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+    }
+
+    {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute(
+            "UPDATE memories SET event_time_min = NULL, event_time_max = NULL",
+            [],
+        )
+        .unwrap();
+        conn.execute("DROP INDEX idx_memories_event_time", [])
+            .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '47')",
+            [],
+        )
+        .unwrap();
+    }
+
+    {
+        let db = YantrikDB::new(path, 8).unwrap();
+        let conn = db.conn();
+        let (col_min, json_min, col_max, json_max): (
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+        ) = conn
+            .query_row(
+                "SELECT event_time_min, json_extract(metadata, '$.event_time_min'), \
+                        event_time_max, json_extract(metadata, '$.event_time_max') \
+                 FROM memories WHERE rid = ?1",
+                [rid.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert!(
+            json_min.is_some(),
+            "precondition: the date-bearing record's metadata JSON carries event_time_min"
+        );
+        assert_eq!(
+            col_min, json_min,
+            "v48 backfill must copy event_time_min out of the metadata JSON"
+        );
+        assert_eq!(
+            col_max, json_max,
+            "v48 backfill must copy event_time_max out of the metadata JSON"
+        );
+        let idx: String = conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_memories_event_time'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, "idx_memories_event_time");
+    }
+}
+
+#[test]
+fn schema_v48_backfill_skips_ciphertext_metadata() {
+    // The json_valid guard is load-bearing: on encrypted stores the metadata
+    // column holds ciphertext, and an unguarded json_extract would error the
+    // whole migration. Ciphertext rows must keep NULL columns; valid-JSON
+    // rows must backfill; and the batch must not error.
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE memories (rid TEXT PRIMARY KEY, \
+             namespace TEXT NOT NULL DEFAULT 'default', metadata TEXT);",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO memories (rid, metadata) VALUES \
+         ('plain', '{\"event_time_min\": 100.5, \"event_time_max\": 200.5}'), \
+         ('cipher', 'AGEv1:definitely-not-json'), \
+         ('absent', NULL)",
+        [],
+    )
+    .unwrap();
+
+    conn.execute_batch(crate::base::schema::MIGRATE_V47_TO_V48)
+        .unwrap();
+
+    let get = |rid: &str| -> (Option<f64>, Option<f64>) {
+        conn.query_row(
+            "SELECT event_time_min, event_time_max FROM memories WHERE rid = ?1",
+            [rid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(get("plain"), (Some(100.5), Some(200.5)));
+    assert_eq!(
+        get("cipher"),
+        (None, None),
+        "ciphertext metadata must be skipped, not extracted"
+    );
+    assert_eq!(get("absent"), (None, None));
+    assert!(index_exists(&conn, "idx_memories_event_time"));
+}
