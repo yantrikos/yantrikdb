@@ -21,7 +21,11 @@ def select_common_rows(
     for row_a in rows_a:
         query_id = str(row_a.get("query_id") or "")
         row_category = (row_a.get("meta") or {}).get("question_category")
-        if row_category != category and marker not in query_id:
+        if (
+            category != "all"
+            and row_category != category
+            and marker not in query_id
+        ):
             continue
         row_b = by_id_b.get(query_id)
         if row_b is None:
