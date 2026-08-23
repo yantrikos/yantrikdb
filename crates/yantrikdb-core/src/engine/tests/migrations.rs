@@ -701,3 +701,44 @@ fn swallowed_replay_errors_still_do_not_leak_a_stage_error() {
     YantrikDB::run_migration_idempotent(&conn, "DROP TABLE definitely_not_a_table;")
         .expect("swallowed replay errors must not become failures");
 }
+
+// =====================================================================
+// Issue #146, SOLVED HALF — the migration splitter must not cut trigger
+// bodies. The first stage-tagged recurrence (PR #159 CI) named the exact
+// statement: `CREATE TRIGGER ... BEGIN INSERT ...` truncated before its
+// `; END` because run_migration_idempotent splits batches on bare `;`.
+// The runner's own doc flagged `;`-in-string-literals as the hazard;
+// trigger bodies were the case the caveat didn't name. Until this fix,
+// ANY migration replay crossing a trigger-bearing migration failed.
+// =====================================================================
+
+#[test]
+fn migration_splitter_keeps_trigger_bodies_intact() {
+    use rusqlite::Connection;
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, txt TEXT)", [])
+        .unwrap();
+    conn.execute("CREATE TABLE t_log (txt TEXT)", []).unwrap();
+    // A batch in exactly the shape that failed in CI: statements before and
+    // after a trigger whose body contains its own semicolons.
+    let batch = "
+        CREATE INDEX IF NOT EXISTS idx_t_txt ON t(txt);
+        CREATE TRIGGER IF NOT EXISTS t_insert AFTER INSERT ON t BEGIN
+            INSERT INTO t_log(txt) VALUES (new.txt);
+            UPDATE t SET txt = txt WHERE id = new.id;
+        END;
+        CREATE INDEX IF NOT EXISTS idx_t_id ON t(id);
+    ";
+    YantrikDB::run_migration_idempotent(&conn, batch)
+        .expect("a trigger body must survive the splitter");
+    // The trigger must actually work — not merely have parsed.
+    conn.execute("INSERT INTO t (txt) VALUES ('hello')", [])
+        .unwrap();
+    let logged: String = conn
+        .query_row("SELECT txt FROM t_log LIMIT 1", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(logged, "hello");
+    // Replay safety unchanged: running the same batch again succeeds.
+    YantrikDB::run_migration_idempotent(&conn, batch)
+        .expect("replay of a trigger-bearing batch must stay idempotent");
+}

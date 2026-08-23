@@ -1587,6 +1587,76 @@ impl YantrikDB {
     /// Diagnosed via yantrikdb-server v0.8.13 cluster upgrade incident
     /// (swarm msg 3467c556 → response fa070846, v0.7.3 commit a5de0f2) and
     /// extended for issue #10 view case in v0.7.8.
+    /// Split a migration batch into executable statements WITHOUT cutting
+    /// trigger bodies.
+    ///
+    /// **Issue #146, root cause.** The previous `batch.split(';')` truncated
+    /// `CREATE TRIGGER ... BEGIN stmt; stmt; END` at the first body
+    /// semicolon, handing SQLite an incomplete statement — the literal
+    /// `incomplete input` the stage instrumentation finally caught in CI.
+    /// The runner's doc had flagged `;`-inside-string-literals as the
+    /// hazard; trigger bodies were the unnamed case.
+    ///
+    /// The splitter is a small scanner, not a SQL parser:
+    /// - single-quoted strings are skipped verbatim (with `''` escapes), so
+    ///   a semicolon or keyword inside a literal never counts;
+    /// - `BEGIN` and `CASE` push a depth counter, `END` pops it (trigger
+    ///   bodies contain `CASE ... END`, so plain begin-flag tracking would
+    ///   close the trigger too early — our own LWW migration SQL has CASE);
+    /// - a `;` splits only at depth zero.
+    /// Line comments are already stripped by the caller.
+    fn split_sql_statements(batch: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut current = String::new();
+        let mut depth: u32 = 0;
+        let mut chars = batch.chars().peekable();
+        let mut word = String::new();
+
+        fn flush_word(word: &mut String, depth: &mut u32) {
+            match word.to_ascii_uppercase().as_str() {
+                "BEGIN" | "CASE" => *depth += 1,
+                "END" => *depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            word.clear();
+        }
+
+        while let Some(c) = chars.next() {
+            if c == '\'' {
+                // String literal: copy through, honoring '' escapes.
+                flush_word(&mut word, &mut depth);
+                current.push(c);
+                while let Some(sc) = chars.next() {
+                    current.push(sc);
+                    if sc == '\'' {
+                        if chars.peek() == Some(&'\'') {
+                            current.push(chars.next().unwrap());
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                continue;
+            }
+            if c.is_alphanumeric() || c == '_' {
+                word.push(c);
+                current.push(c);
+                continue;
+            }
+            flush_word(&mut word, &mut depth);
+            if c == ';' && depth == 0 {
+                out.push(std::mem::take(&mut current));
+                continue;
+            }
+            current.push(c);
+        }
+        flush_word(&mut word, &mut depth);
+        if !current.trim().is_empty() {
+            out.push(current);
+        }
+        out
+    }
+
     fn run_migration_idempotent(conn: &Connection, batch: &str) -> Result<()> {
         // Strip `-- ... \n` line comments before splitting on `;`. The
         // naive split otherwise breaks on comment text containing
@@ -1604,7 +1674,7 @@ impl YantrikDB {
             .collect::<Vec<_>>()
             .join("\n");
 
-        for raw in stripped.split(';') {
+        for raw in Self::split_sql_statements(&stripped) {
             let stmt = raw.trim();
             if stmt.is_empty() {
                 continue;
