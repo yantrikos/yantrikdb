@@ -2,6 +2,9 @@
 
 Status: mechanism and gates frozen before product preflight or external calls.
 
+The completed zero-call product preflight and paired artifact freeze are
+recorded in [FACET_APPLICABILITY_V4_PREFLIGHT.md](FACET_APPLICABILITY_V4_PREFLIGHT.md).
+
 ## Question
 
 Can a narrow, auditable rule-type versus answer-shape predicate preserve the
