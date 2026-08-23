@@ -23,6 +23,7 @@ mod embedder_window;
 mod evaluator;
 mod experimenter;
 mod extractor;
+pub mod facets;
 mod feedback;
 mod flywheel;
 pub mod graph_ops;
