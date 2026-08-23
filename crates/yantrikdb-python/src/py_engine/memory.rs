@@ -137,7 +137,7 @@ impl PyYantrikDB {
     // entity-linked noise sharing an entity name outranks genuinely
     // similar records. Neutral even on the synthetic connected corpus.
     // Opt in per-call for curated, dense entity graphs.
-    #[pyo3(signature = (query=None, query_embedding=None, top_k=10, time_window=None, memory_type=None, include_consolidated=false, expand_entities=false, skip_reinforce=false, namespace=None, domain=None, source=None, certainty_min=None, order=None, include_superseded=false, snippets=false, min_score_ratio=None))]
+    #[pyo3(signature = (query=None, query_embedding=None, top_k=10, time_window=None, memory_type=None, include_consolidated=false, expand_entities=false, skip_reinforce=false, namespace=None, domain=None, source=None, certainty_min=None, order=None, include_superseded=false, snippets=false, min_score_ratio=None, event_after=None, event_before=None))]
     #[allow(clippy::too_many_arguments)]
     fn recall(
         &self,
@@ -173,6 +173,12 @@ impl PyYantrikDB {
         // behavior for existing callers).
         snippets: bool,
         min_score_ratio: Option<f64>,
+        // #149 phase 2: valid-time bounds (epoch seconds). FILTER-FIRST —
+        // the window defines the eligible universe before ranking/top_k;
+        // NULL event-time rows are excluded when either bound is set;
+        // interval overlap is inclusive; after > before raises ValueError.
+        event_after: Option<f64>,
+        event_before: Option<f64>,
     ) -> PyResult<Vec<PyObject>> {
         let db = self
             .inner
@@ -207,6 +213,8 @@ impl PyYantrikDB {
                 certainty_min,
                 order,
                 include_superseded,
+                event_after,
+                event_before,
             )
             .map_err(map_err)?;
 
@@ -495,6 +503,8 @@ impl PyYantrikDB {
                     None,  // certainty_min (#46)
                     None,  // order (#46) — relevance default
                     false, // include_superseded (v0.10 Item 1)
+                    None,  // event_after (#149)
+                    None,  // event_before (#149)
                 )
                 .map_err(map_err)?;
             let out = pyo3::types::PyDict::new(py);
@@ -531,6 +541,8 @@ impl PyYantrikDB {
                 None,  // certainty_min (#46)
                 None,  // order (#46) — relevance default
                 false, // include_superseded (v0.10 Item 1) — policy default
+                None,  // event_after (#149)
+                None,  // event_before (#149)
             )
             .map_err(map_err)?;
 

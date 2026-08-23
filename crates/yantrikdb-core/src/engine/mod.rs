@@ -2919,6 +2919,8 @@ impl YantrikDB {
             None,  // certainty_min (#46)
             None,  // order (#46) — relevance
             false, // include_superseded (v0.10 Item 1) — policy default
+            None,  // event_after (#149)
+            None,  // event_before (#149)
         )
     }
 
@@ -2954,6 +2956,8 @@ impl YantrikDB {
             None,  // certainty_min
             None,  // order — relevance
             false, // include_superseded
+            None,  // event_after (#149)
+            None,  // event_before (#149)
         )
     }
 
@@ -2985,6 +2989,8 @@ impl YantrikDB {
             None,  // certainty_min (#46)
             None,  // order (#46) — relevance
             false, // include_superseded (v0.10 Item 1) — policy default
+            None,  // event_after (#149)
+            None,  // event_before (#149)
         )
     }
 }

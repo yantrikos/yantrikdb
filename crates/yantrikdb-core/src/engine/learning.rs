@@ -973,6 +973,8 @@ mod tests {
                 None,
                 None,
                 false,
+                None, // event_after (#149)
+                None, // event_before (#149)
             )
             .unwrap();
         }

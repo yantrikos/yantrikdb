@@ -270,6 +270,8 @@ fn test_recall_refine_excludes_originals() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert_eq!(first_results.len(), 2);

@@ -149,6 +149,8 @@ fn correct_reembed_updates_retrieval_vector_delta_and_cold() {
         let emb = db.embed(q).unwrap();
         db.recall(
             &emb, 10, None, None, false, false, None, true, None, None, None, None, None, false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap()
         .into_iter()
@@ -554,6 +556,8 @@ fn correct_then_forget_leaves_no_resurrected_vector() {
     let hits = db
         .recall(
             &q, 10, None, None, false, false, None, true, None, None, None, None, None, false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert!(
@@ -875,6 +879,8 @@ fn follower_replay_applies_corrected_embedding() {
     let hits = follower
         .recall(
             &q, 5, None, None, false, false, None, true, None, None, None, None, None, false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert!(

@@ -98,6 +98,8 @@ fn record(db: &YantrikDB, text: &str, emb: &[f32], ns: &str) -> String {
 fn recall_texts(db: &YantrikDB, query: &[f32], k: usize) -> Vec<String> {
     db.recall(
         query, k, None, None, false, false, None, true, None, None, None, None, None, false,
+        None, // event_after (#149)
+        None, // event_before (#149)
     )
     .unwrap()
     .into_iter()
@@ -202,6 +204,88 @@ fn embedder_identity_survives_reopen() {
             YantrikDbError::ChangeEmbedderDigestRequiresReembed { .. }
         ),
         "expected digest guard, got {err:?}"
+    );
+}
+
+/// #149 phase 2: bounded recall must EXCLUDE all mounted-pack rows.
+///
+/// Pack rows live outside the host's indexed event-time universe, so
+/// their event time is effectively unknown — the NULL-excluded rule
+/// extends to them. This is the review-blocker regression: before the
+/// gate, `collect_pack_candidates` merged unconditionally and a pack
+/// hit could appear despite `event_after`/`event_before`, bypassing
+/// both NULL-exclusion and filter-first. Full pack event-time support
+/// is a follow-up (the #164 v1.1 pack-lane pattern).
+#[test]
+fn bounded_recall_excludes_mounted_pack_rows() {
+    let dir = tmpdir("bounded");
+    let pack = dir.join("physics.ydbpack");
+    build_pack(
+        &dir,
+        pack.to_str().unwrap(),
+        "E0",
+        &[("gluons bind quarks", 3)],
+    );
+
+    let db = host(&dir, "E0");
+    // A dated host record inside the window, so the bounded recall has a
+    // legitimate result and the pack row's absence is attributable to the
+    // pack gate rather than an empty universe.
+    db.record_text(
+        "met the physicist on 2024-03-15",
+        "semantic",
+        0.6,
+        0.0,
+        604800.0,
+        &serde_json::json!({}),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+    db.mount_pack(pack.to_str().unwrap()).unwrap();
+
+    let query = vec_on(3, 0.05);
+    let unbounded = recall_texts(&db, &query, 5);
+    assert!(
+        unbounded.iter().any(|t| t.contains("gluons")),
+        "pack content must be retrievable in UNBOUNDED recall: {unbounded:?}"
+    );
+
+    // 2024-01-01..2024-12-31 — the dated host record overlaps; the pack
+    // row (unknown event time) must not appear.
+    let bounded: Vec<String> = db
+        .recall(
+            &query,
+            5,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            Some(1704067200.0),
+            Some(1735603200.0),
+        )
+        .unwrap()
+        .into_iter()
+        .map(|r| r.text)
+        .collect();
+    assert!(
+        !bounded.iter().any(|t| t.contains("gluons")),
+        "bounded recall must exclude mounted-pack rows: {bounded:?}"
+    );
+    assert!(
+        bounded.iter().any(|t| t.contains("physicist")),
+        "the in-window host record must still be returned: {bounded:?}"
     );
 }
 
@@ -508,6 +592,8 @@ fn host_correction_supersedes_pack_row() {
     let pack_rid = db
         .recall(
             &query, 5, None, None, false, false, None, true, None, None, None, None, None, false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap()
         .into_iter()
@@ -1220,6 +1306,8 @@ fn mounted_pack_reports_its_namespace() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert!(

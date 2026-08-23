@@ -49,6 +49,8 @@ impl YantrikDB {
             None,  // no certainty_min (#46)
             None,  // default relevance order (#46)
             false, // include_superseded (v0.10 Item 1) — policy default
+            None,  // event_after (#149)
+            None,  // event_before (#149)
         )
     }
 
