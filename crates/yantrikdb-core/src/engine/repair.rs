@@ -210,55 +210,48 @@ impl YantrikDB {
                    stripped_bytes INTEGER NOT NULL, \
                    repaired_at REAL NOT NULL)",
             )?;
-            conn.execute_batch("SAVEPOINT artifact_repair")?;
-            let apply: Result<()> = (|| {
-                for p in &pending {
-                    // Only update if the row still holds the exact ciphertext
-                    // we scanned — otherwise a concurrent write changed it and
-                    // we must not clobber it.
-                    let updated = conn.execute(
-                        "UPDATE memories \
+
+            let sp = crate::engine::savepoint::SavepointGuard::new(&conn, "artifact_repair")?;
+
+            for p in &pending {
+                // Only update if the row still holds the exact ciphertext
+                // we scanned — otherwise a concurrent write changed it and
+                // we must not clobber it.
+                let updated = conn.execute(
+                    "UPDATE memories \
                          SET text = ?1, embedding = ?2, embedding_generation = ?3, updated_at = ?4 \
                          WHERE rid = ?5 AND text = ?6",
-                        params![
-                            p.cleaned_ciphertext,
-                            p.new_embedding_blob,
-                            generation,
-                            repaired_at,
-                            p.rid,
-                            p.original_ciphertext,
-                        ],
-                    )?;
-                    if updated == 0 {
-                        report.skipped_concurrent_modification += 1;
-                        continue;
-                    }
-                    // Preserve the original for recoverability (same txn).
-                    conn.execute(
-                        "INSERT INTO artifact_repair_audit \
+                    params![
+                        p.cleaned_ciphertext,
+                        p.new_embedding_blob,
+                        generation,
+                        repaired_at,
+                        p.rid,
+                        p.original_ciphertext,
+                    ],
+                )?;
+                if updated == 0 {
+                    report.skipped_concurrent_modification += 1;
+                    continue;
+                }
+                // Preserve the original for recoverability (same txn).
+                conn.execute(
+                    "INSERT INTO artifact_repair_audit \
                          (rid, original_text, cleaned_text, stripped_bytes, repaired_at) \
                          VALUES (?1, ?2, ?3, ?4, ?5)",
-                        params![
-                            p.rid,
-                            p.original_ciphertext,
-                            p.cleaned_ciphertext,
-                            p.stripped_bytes as i64,
-                            repaired_at,
-                        ],
-                    )?;
-                    report.repaired += 1;
-                    report.stripped_bytes += p.stripped_bytes;
-                }
-                Ok(())
-            })();
-            match apply {
-                Ok(()) => conn.execute_batch("RELEASE artifact_repair")?,
-                Err(e) => {
-                    let _ =
-                        conn.execute_batch("ROLLBACK TO artifact_repair; RELEASE artifact_repair");
-                    return Err(e);
-                }
+                    params![
+                        p.rid,
+                        p.original_ciphertext,
+                        p.cleaned_ciphertext,
+                        p.stripped_bytes as i64,
+                        repaired_at,
+                    ],
+                )?;
+                report.repaired += 1;
+                report.stripped_bytes += p.stripped_bytes;
             }
+
+            sp.release()?;
         }
 
         // ── Phase 4: rebuild the vector index once so it reflects the updated

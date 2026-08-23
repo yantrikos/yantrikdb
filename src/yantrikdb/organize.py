@@ -67,6 +67,30 @@ _ITEM_QUERY_RE = re.compile(
     r"\bwalk\s+me\s+through\b",
     re.IGNORECASE,
 )
+_COUNT_TOKEN = (
+    r"\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
+    r"twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|"
+    r"nineteen|twenty"
+)
+_EXPLICIT_SET_TOKEN = (
+    r"two|three|four|five|six|seven|eight|nine|ten|eleven|twelve|"
+    r"thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|nineteen|twenty"
+)
+_EXPLICIT_SET_COUNT_RE = re.compile(
+    rf"\b(?:what|which)\s+(?:(?:are|were)\s+)?(?:the\s+)?"
+    rf"({_EXPLICIT_SET_TOKEN})\b",
+    re.IGNORECASE,
+)
+_HOW_MANY_SET_RE = re.compile(
+    r"\bhow\s+many\s+(?:(?:total|new)\s+)?(?:different|unique|distinct)\b|"
+    r"\bhow\s+many\s+(?:(?:total|new|different|unique|distinct)\s+)?"
+    r"(?:[^?\W]+\s+){0,3}(?:types?|kinds?|ways?|features?|concerns?|areas?)\b",
+    re.IGNORECASE,
+)
+_MENTION_FREQUENCY_RE = re.compile(
+    r"\bhow\s+many\s+times\b.*\b(?:say|said|mention|mentioned|ask|asked)\b",
+    re.IGNORECASE,
+)
 _ROLLUP_QUERY_RE = re.compile(
     r"\b(summarize|summarise|summary|overview|recap|themes?|patterns?|overall|"
     r"broadly)\b",
@@ -78,11 +102,10 @@ _CONVERSATION_ORDER_RE = re.compile(
 )
 _ITEM_COUNT_RE = re.compile(
     r"\b(?:only(?:\s+and\s+only)?|exactly)\s+"
-    r"(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|"
-    r"twelve|thirteen|fourteen|fifteen|sixteen|seventeen|eighteen|"
-    r"nineteen|twenty)\b",
+    rf"({_COUNT_TOKEN})\b",
     re.IGNORECASE,
 )
+_MAX_REQUESTED_ITEM_COUNT = 20
 _COUNT_WORDS = {
     "one": 1,
     "two": 2,
@@ -482,8 +505,18 @@ def _occurrence_key(occurrence: Mapping) -> tuple:
     )
 
 
+def _asks_for_countable_items(query: str) -> bool:
+    if _MENTION_FREQUENCY_RE.search(query):
+        return False
+    return bool(
+        _HOW_MANY_SET_RE.search(query) or _EXPLICIT_SET_COUNT_RE.search(query)
+    )
+
+
 def _organization_query_mode(query: str) -> str | None:
-    asks_for_items = bool(_ITEM_QUERY_RE.search(query))
+    asks_for_items = bool(_ITEM_QUERY_RE.search(query)) or _asks_for_countable_items(
+        query
+    )
     asks_for_rollup = bool(_ROLLUP_QUERY_RE.search(query))
     if asks_for_items == asks_for_rollup:
         return None
@@ -589,17 +622,19 @@ def _entity_focus_source(
 
 
 def _requested_item_count(query: str) -> int | None:
-    match = _ITEM_COUNT_RE.search(query)
+    match = _ITEM_COUNT_RE.search(query) or _EXPLICIT_SET_COUNT_RE.search(query)
     if match is None:
         return None
     value = match.group(1).casefold()
-    return int(value) if value.isdigit() else _COUNT_WORDS[value]
+    count = int(value) if value.isdigit() else _COUNT_WORDS[value]
+    # Expansion is deliberately bounded even when a query requests a huge list.
+    return min(count, _MAX_REQUESTED_ITEM_COUNT)
 
 
 def _rollup_query_shape(query: str) -> str:
     if _ROLLUP_QUERY_RE.search(query):
         return "summary"
-    if _ITEM_QUERY_RE.search(query):
+    if _ITEM_QUERY_RE.search(query) or _asks_for_countable_items(query):
         if _CONVERSATION_ORDER_RE.search(query) or re.search(
             r"\b(order|ordered|sequence|timeline|stages)\b|"
             r"\bwalk\s+me\s+through\b",

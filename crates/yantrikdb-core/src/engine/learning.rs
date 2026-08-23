@@ -780,58 +780,51 @@ impl YantrikDB {
     ) -> Result<()> {
         {
             let conn = self.conn();
-            conn.execute_batch("SAVEPOINT weight_swap")?;
-            let swap = (|| -> Result<()> {
-                conn.execute(
-                    "UPDATE learned_weights_history SET status = 'superseded' \
+            let sp = crate::engine::savepoint::SavepointGuard::new(&conn, "weight_swap")?;
+
+            conn.execute(
+                "UPDATE learned_weights_history SET status = 'superseded' \
                      WHERE status = 'active'",
-                    [],
-                )?;
-                conn.execute(
-                    "INSERT OR REPLACE INTO learned_weights_history \
+                [],
+            )?;
+            conn.execute(
+                "INSERT OR REPLACE INTO learned_weights_history \
                      (generation, weights_json, fitted_at, train_loss, validation_loss, \
                       champion_validation_loss, label_counts_json, distinct_queries, \
                       swap_reason, status, evidence_watermark) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'active', ?10)",
-                    params![
-                        candidate.generation,
-                        serde_json::to_string(candidate).unwrap_or_default(),
-                        now(),
-                        report.train_loss,
-                        report.validation_loss,
-                        report.champion_validation_loss,
-                        serde_json::to_string(&report.label_counts).unwrap_or_default(),
-                        report.distinct_episodes as i64,
-                        "held-out improvement",
-                        watermark,
-                    ],
-                )?;
-                conn.execute(
-                    "UPDATE learned_weights SET \
+                params![
+                    candidate.generation,
+                    serde_json::to_string(candidate).unwrap_or_default(),
+                    now(),
+                    report.train_loss,
+                    report.validation_loss,
+                    report.champion_validation_loss,
+                    serde_json::to_string(&report.label_counts).unwrap_or_default(),
+                    report.distinct_episodes as i64,
+                    "held-out improvement",
+                    watermark,
+                ],
+            )?;
+            conn.execute(
+                "UPDATE learned_weights SET \
                      w_sim = ?1, w_decay = ?2, w_recency = ?3, \
                      gate_tau = ?4, alpha_imp = ?5, keyword_boost = ?6, \
                      updated_at = ?7, generation = ?8 \
                      WHERE id = 1",
-                    params![
-                        candidate.w_sim,
-                        candidate.w_decay,
-                        candidate.w_recency,
-                        candidate.gate_tau,
-                        candidate.alpha_imp,
-                        candidate.keyword_boost,
-                        now(),
-                        candidate.generation,
-                    ],
-                )?;
-                Ok(())
-            })();
-            match swap {
-                Ok(()) => conn.execute_batch("RELEASE weight_swap")?,
-                Err(e) => {
-                    let _ = conn.execute_batch("ROLLBACK TO weight_swap; RELEASE weight_swap");
-                    return Err(e);
-                }
-            }
+                params![
+                    candidate.w_sim,
+                    candidate.w_decay,
+                    candidate.w_recency,
+                    candidate.gate_tau,
+                    candidate.alpha_imp,
+                    candidate.keyword_boost,
+                    now(),
+                    candidate.generation,
+                ],
+            )?;
+
+            sp.release()?;
         }
         Ok(())
     }

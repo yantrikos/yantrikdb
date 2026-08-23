@@ -4,7 +4,9 @@ import pytest
 
 from yantrikdb import YantrikDB
 from yantrikdb.organize import (
+    _organization_query_mode,
     _requested_item_count,
+    _rollup_query_shape,
     ConcernItem,
     ConcernPlan,
     OrganizationPlan,
@@ -856,6 +858,62 @@ def test_named_entity_focus_deduplicates_repeated_concern_wording():
 def test_named_entity_focus_parses_exact_count_through_twenty():
     assert _requested_item_count("List exactly twelve items about Carla") == 12
     assert _requested_item_count("Mention only twenty items about Carla") == 20
+
+
+def test_count_set_queries_route_to_atomic_items_conservatively():
+    assert _organization_query_mode("How many different shoe sizes did I mention?") == "items"
+    assert _organization_query_mode("How many total ways did I mention across sessions?") == "items"
+    assert _organization_query_mode("What are the two patent deadlines?") == "items"
+    assert _organization_query_mode("Which three events did David plan?") == "items"
+    assert _rollup_query_shape("How many different shoe sizes did I mention?") == "list"
+
+
+def test_count_set_auto_routing_selects_concerns_without_rerouting_duration():
+    raw = _recall_hit("raw", 0.9)
+    concern = _recall_hit(
+        "concern",
+        0.8,
+        metadata={"organizer_kind": "query_independent_concern"},
+    )
+    db = RecallDB([raw, concern])
+
+    count_results = recall_organized(
+        db,
+        "How many different shoe sizes did I mention?",
+        top_k=1,
+        candidate_pool=10,
+    )
+    duration_results = recall_organized(
+        db,
+        "How many days passed between the two deadlines?",
+        top_k=1,
+        candidate_pool=10,
+    )
+
+    assert [result["rid"] for result in count_results] == ["concern"]
+    assert [result["rid"] for result in duration_results] == ["raw"]
+
+
+@pytest.mark.parametrize(
+    "query",
+    [
+        "How many times did I mention revising my cover letter?",
+        "What are the reasons I changed projects?",
+        "How much did my accuracy improve?",
+        "How many days passed between the two deadlines?",
+        "How many commits have merged into main?",
+        "Which one is currently faster?",
+        "How many themes appear in my history summary?",
+    ],
+)
+def test_count_set_queries_abstain_on_ambiguous_forms(query):
+    assert _organization_query_mode(query) != "items"
+
+
+def test_requested_item_count_parses_explicit_sets_and_caps_expansion():
+    assert _requested_item_count("What are the two patent deadlines?") == 2
+    assert _requested_item_count("Which three events did David plan?") == 3
+    assert _requested_item_count("List exactly 999 items") == 20
 
 
 def test_organized_recall_focuses_a_multi_token_concern():
