@@ -151,6 +151,12 @@ impl YantrikDB {
     pub fn relate(&self, src: &str, dst: &str, rel_type: &str, weight: f64) -> Result<String> {
         let edge_id = crate::id::new_id();
         let ts = now();
+        // #148: the edge's causal timestamp, minted once and carried VERBATIM
+        // into both the claims row and the relate op payload (edge_hlc_hex),
+        // so every replica's LWW compares the same value — the record_links
+        // edge-identity pattern. Replication LWW compares THIS, not
+        // created_at: wall clocks skew between nodes.
+        let edge_hlc = self.tick_hlc().to_bytes().to_vec();
 
         // Classify entity types using relationship semantics
         let (src_type, dst_type) = crate::graph::classify_with_relationship(src, dst, rel_type);
@@ -160,12 +166,15 @@ impl YantrikDB {
             let conn = self.conn.lock();
             // Legacy relate() uses default extractor/polarity/namespace so the
             // effective unique key is (src, dst, rel_type, 'manual', 1, 'default').
+            // Local overwrite stays unconditional: local calls are
+            // serialized, and a fresh tick_hlc() happens-after any merged
+            // remote op, so the new edge_hlc is always the causal maximum.
             conn.execute(
-                "INSERT INTO claims (claim_id, src, dst, rel_type, weight, created_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+                "INSERT INTO claims (claim_id, src, dst, rel_type, weight, created_at, hlc) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
                  ON CONFLICT(src, dst, rel_type, extractor, polarity, namespace) \
-                 DO UPDATE SET weight = ?5, created_at = ?6",
-                params![edge_id, src, dst, rel_type, weight, ts],
+                 DO UPDATE SET weight = ?5, created_at = ?6, hlc = ?7",
+                params![edge_id, src, dst, rel_type, weight, ts, edge_hlc],
             )?;
 
             // Ensure entities exist with classified entity_type
@@ -204,6 +213,7 @@ impl YantrikDB {
                 "rel_type": rel_type,
                 "weight": weight,
                 "created_at": ts,
+                "edge_hlc_hex": hex::encode(&edge_hlc),
             }),
             None,
         )?;

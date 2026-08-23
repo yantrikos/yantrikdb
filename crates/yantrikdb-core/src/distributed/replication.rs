@@ -460,7 +460,7 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             }
         }
         "relate" => {
-            materialize_relate(&*db.conn(), &op.payload)?;
+            materialize_relate(&*db.conn(), &op.payload, &op.hlc)?;
             // Update graph index
             let src = op.payload["src"].as_str().unwrap_or_default();
             let dst = op.payload["dst"].as_str().unwrap_or_default();
@@ -1019,27 +1019,52 @@ fn materialize_record(
 }
 
 /// Materialize a "relate" op: LWW on (src, dst, rel_type), higher HLC wins.
-fn materialize_relate(conn: &Connection, payload: &serde_json::Value) -> Result<()> {
+///
+/// **#148:** the comparison is the edge's HLC, not the payload's wall-clock
+/// `created_at` — between nodes with clock skew, wall-clock LWW lets a stale
+/// edge from a fast clock beat a newer edge from a slow clock (silent
+/// resurrection of overwritten values, the exact anomaly HLC exists to
+/// prevent). The edge HLC is the leader's `edge_hlc_hex` carried VERBATIM in
+/// the payload (the record_links edge-identity pattern); legacy payloads
+/// (pre-#148 leaders) fall back to the op envelope's HLC. A local row with no
+/// HLC (pre-v47, or written by a non-replicating writer) is compared by
+/// `created_at`, preserving the old behavior for exactly the rows the old
+/// behavior wrote.
+fn materialize_relate(conn: &Connection, payload: &serde_json::Value, hlc: &[u8]) -> Result<()> {
     let edge_id = payload["edge_id"].as_str().unwrap_or_default();
     let src = payload["src"].as_str().unwrap_or_default();
     let dst = payload["dst"].as_str().unwrap_or_default();
     let rel_type = payload["rel_type"].as_str().unwrap_or_default();
     let weight = payload["weight"].as_f64().unwrap_or(1.0);
     let created_at = payload["created_at"].as_f64().unwrap_or(0.0);
+    let edge_hlc: Vec<u8> = payload["edge_hlc_hex"]
+        .as_str()
+        .and_then(crate::serde_helpers::hex_decode)
+        .unwrap_or_else(|| hlc.to_vec());
 
     if src.is_empty() || dst.is_empty() {
         return Ok(());
     }
 
-    // LWW: ON CONFLICT update if the incoming created_at is newer
+    // LWW: HLC bytes are big-endian, so BLOB memcmp = causal order. Equal
+    // HLC (idempotent re-apply of the same op) deliberately does NOT update.
     conn.execute(
-        "INSERT INTO claims (claim_id, src, dst, rel_type, weight, created_at) \
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+        "INSERT INTO claims (claim_id, src, dst, rel_type, weight, created_at, hlc) \
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
          ON CONFLICT(src, dst, rel_type, extractor, polarity, namespace) DO UPDATE SET \
-         weight = CASE WHEN ?6 > created_at THEN ?5 ELSE weight END, \
-         created_at = CASE WHEN ?6 > created_at THEN ?6 ELSE created_at END, \
-         claim_id = CASE WHEN ?6 > created_at THEN ?1 ELSE claim_id END",
-        params![edge_id, src, dst, rel_type, weight, created_at],
+         weight = CASE WHEN (claims.hlc IS NOT NULL AND ?7 > claims.hlc) \
+                         OR (claims.hlc IS NULL AND ?6 > claims.created_at) \
+                       THEN ?5 ELSE claims.weight END, \
+         created_at = CASE WHEN (claims.hlc IS NOT NULL AND ?7 > claims.hlc) \
+                             OR (claims.hlc IS NULL AND ?6 > claims.created_at) \
+                           THEN ?6 ELSE claims.created_at END, \
+         claim_id = CASE WHEN (claims.hlc IS NOT NULL AND ?7 > claims.hlc) \
+                           OR (claims.hlc IS NULL AND ?6 > claims.created_at) \
+                         THEN ?1 ELSE claims.claim_id END, \
+         hlc = CASE WHEN (claims.hlc IS NOT NULL AND ?7 > claims.hlc) \
+                      OR (claims.hlc IS NULL AND ?6 > claims.created_at) \
+                    THEN ?7 ELSE claims.hlc END",
+        params![edge_id, src, dst, rel_type, weight, created_at, edge_hlc],
     )?;
 
     // Ensure entities exist
@@ -2555,6 +2580,166 @@ mod tests {
         let edges = a.get_edges("X").unwrap();
         assert_eq!(edges.len(), 1);
         assert_eq!(edges[0].weight, 0.9);
+    }
+
+    // ------------------------------------------------------------------
+    // #148 — relate LWW must compare HLC, not wall-clock created_at.
+    // Every test here constructs ops where the two orderings DISAGREE:
+    // under the old created_at comparison each assertion fails, which is
+    // how the tests were verified before the fix was applied.
+    // ------------------------------------------------------------------
+
+    /// Hand-build a relate op with independently chosen wall clock and HLC —
+    /// the skew that only multi-node deployments produce.
+    fn relate_op_skewed(
+        edge_id: &str,
+        weight: f64,
+        created_at: f64,
+        hlc_millis: u64,
+        actor: &str,
+    ) -> OplogEntry {
+        let hlc = HLCTimestamp {
+            millis: hlc_millis,
+            logical: 0,
+            node_id: 1,
+        }
+        .to_bytes()
+        .to_vec();
+        OplogEntry {
+            op_id: format!("op-{edge_id}"),
+            op_type: "relate".to_string(),
+            timestamp: created_at,
+            target_rid: Some(edge_id.to_string()),
+            payload: serde_json::json!({
+                "edge_id": edge_id,
+                "src": "X",
+                "dst": "Y",
+                "rel_type": "linked",
+                "weight": weight,
+                "created_at": created_at,
+                "edge_hlc_hex": hex::encode(&hlc),
+            }),
+            actor_id: actor.to_string(),
+            hlc,
+            embedding_hash: None,
+            origin_actor: actor.to_string(),
+            embedding: None,
+        }
+    }
+
+    fn edge_row(db: &YantrikDB) -> (String, f64, Option<Vec<u8>>) {
+        db.conn()
+            .query_row(
+                "SELECT claim_id, weight, hlc FROM claims \
+                 WHERE src = 'X' AND dst = 'Y' AND rel_type = 'linked'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap()
+    }
+
+    #[test]
+    fn relate_lww_higher_hlc_wins_despite_older_wall_clock() {
+        // new-edge writer's clock is SLOW: causally later (hlc 2000) but a
+        // smaller created_at (100 < 200). Under wall-clock LWW the stale op
+        // from the fast clock would silently resurrect the old weight.
+        let newer_causal = relate_op_skewed("e-new", 0.9, 100.0, 2000, "slow-clock");
+        let stale_fast = relate_op_skewed("e-old", 0.1, 200.0, 1000, "fast-clock");
+
+        let db = YantrikDB::new_with_actor(":memory:", 8, "B").unwrap();
+        apply_ops(&db, &[newer_causal.clone()]).unwrap();
+        apply_ops(&db, &[stale_fast.clone()]).unwrap();
+        let (claim_id, weight, hlc) = edge_row(&db);
+        assert_eq!(claim_id, "e-new", "stale op must not overwrite claim_id");
+        assert_eq!(weight, 0.9, "stale op must not overwrite weight");
+        assert_eq!(hlc.as_deref(), Some(&newer_causal.hlc[..]));
+
+        // Arrival-order independence: reversed application converges to the
+        // same row.
+        let db2 = YantrikDB::new_with_actor(":memory:", 8, "C").unwrap();
+        apply_ops(&db2, &[stale_fast]).unwrap();
+        apply_ops(&db2, &[newer_causal]).unwrap();
+        assert_eq!(edge_row(&db2), edge_row(&db), "order must not matter");
+    }
+
+    #[test]
+    fn relate_lww_legacy_payload_falls_back_to_envelope_hlc() {
+        // Pre-#148 leaders send no edge_hlc_hex; the envelope HLC decides.
+        let mut newer = relate_op_skewed("e-new", 0.9, 100.0, 2000, "slow-clock");
+        let mut stale = relate_op_skewed("e-old", 0.1, 200.0, 1000, "fast-clock");
+        for op in [&mut newer, &mut stale] {
+            op.payload.as_object_mut().unwrap().remove("edge_hlc_hex");
+        }
+
+        let db = YantrikDB::new_with_actor(":memory:", 8, "B").unwrap();
+        apply_ops(&db, &[newer]).unwrap();
+        apply_ops(&db, &[stale]).unwrap();
+        let (claim_id, weight, _) = edge_row(&db);
+        assert_eq!(claim_id, "e-new");
+        assert_eq!(weight, 0.9);
+    }
+
+    #[test]
+    fn relate_lww_legacy_row_without_hlc_compares_created_at() {
+        // A pre-v47 row (hlc NULL) keeps the old wall-clock semantics: an
+        // incoming op with older created_at loses, newer created_at wins —
+        // exactly what the old code did for exactly the rows it wrote.
+        let db = YantrikDB::new_with_actor(":memory:", 8, "B").unwrap();
+        db.conn()
+            .execute(
+                "INSERT INTO claims (claim_id, src, dst, rel_type, weight, created_at) \
+                 VALUES ('e-legacy', 'X', 'Y', 'linked', 0.5, 150.0)",
+                [],
+            )
+            .unwrap();
+
+        // Older wall clock (100 < 150): must NOT overwrite, despite carrying
+        // an HLC (any HLC beats a NULL under naive COALESCE semantics — this
+        // pins the created_at fallback instead).
+        apply_ops(&db, &[relate_op_skewed("e-older", 0.1, 100.0, 2000, "A")]).unwrap();
+        let (claim_id, weight, _) = edge_row(&db);
+        assert_eq!(
+            claim_id, "e-legacy",
+            "older created_at must lose to legacy row"
+        );
+        assert_eq!(weight, 0.5);
+
+        // Newer wall clock (200 > 150): wins, and the row is HLC-stamped
+        // from here on.
+        let winner = relate_op_skewed("e-newer", 0.9, 200.0, 1000, "A");
+        apply_ops(&db, &[winner.clone()]).unwrap();
+        let (claim_id, weight, hlc) = edge_row(&db);
+        assert_eq!(claim_id, "e-newer");
+        assert_eq!(weight, 0.9);
+        assert_eq!(hlc.as_deref(), Some(&winner.hlc[..]));
+    }
+
+    #[test]
+    fn relate_replication_carries_edge_hlc_verbatim() {
+        // Leader mints the edge HLC once; the follower's row must hold the
+        // SAME bytes (record_links edge-identity pattern), so every replica
+        // sorts identically.
+        let a = YantrikDB::new_with_actor(":memory:", 8, "A").unwrap();
+        a.relate("X", "Y", "linked", 0.7).unwrap();
+        let (_, _, leader_hlc) = edge_row(&a);
+        let leader_hlc = leader_hlc.expect("leader relate() must stamp claims.hlc");
+
+        let ops = ops_of(&a);
+        let relate_op = ops.iter().find(|o| o.op_type == "relate").unwrap();
+        assert_eq!(
+            relate_op.payload["edge_hlc_hex"].as_str(),
+            Some(hex::encode(&leader_hlc).as_str()),
+            "payload must carry the stamped HLC verbatim"
+        );
+
+        let b = YantrikDB::new_with_actor(":memory:", 8, "B").unwrap();
+        apply_ops(&b, &[relate_op.clone()]).unwrap();
+        let (_, _, follower_hlc) = edge_row(&b);
+        assert_eq!(
+            follower_hlc.as_deref(),
+            Some(&leader_hlc[..]),
+            "follower row must hold the leader's exact HLC bytes"
+        );
     }
 
     #[test]
