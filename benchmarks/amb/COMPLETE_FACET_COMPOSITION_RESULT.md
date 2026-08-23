@@ -13,6 +13,11 @@ composition remains opt-in.
 The miss is `0.005486` beyond the floor. It is not rounded away or waived:
 the preregistered gate is binary by design.
 
+The preregistered zero-call follow-up found plausible facet collisions in four
+of the ten event-ordering loss rows. That exceeded the frozen stop threshold,
+so the byte-identical v3 replication was not run. See
+`COMPLETE_FACET_COMPOSITION_COLLISION_AUDIT.md` for the row-level evidence.
+
 ## Frozen Run
 
 - Model: `deepseek-v4-flash:0731-cloud`
@@ -84,3 +89,8 @@ No category-based router, larger repeat, or threshold adjustment is authorized
 from this result. A future mechanism may use product-valid intent or budget
 semantics, but it requires a new preregistration and must not select on these
 observed category outcomes.
+
+The collision audit narrows that future work: conditionally applicable facets
+need a principled rule-type versus answer-type compatibility check before
+composition. Complete-lane composition without that check remains permanently
+opt-in under the replication protocol.
