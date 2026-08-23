@@ -22,7 +22,10 @@ V3 reuses the exact v2 contexts and manifest:
   `43a222af04195cc2d18d3a2ad15124a73208afeb0df352c956e69e86c5c5d9fb`
 - Model: `deepseek-v4-flash:0731-cloud`
 - One answer and one judge per arm per query
-- Seed: `20260820`
+- Seed: `20260825`
+  This intentionally differs from the v2 run seed and pooled-bootstrap seed so
+  the replication preserves identical contexts while sampling independent
+  answer and judge randomness.
 - Synthetic BEAM data only; no real companion memories
 
 The run uses a new output and initially absent checkpoint. Checkpoint/resume is
