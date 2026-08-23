@@ -62,6 +62,33 @@ support. Because the split was selected after seeing results and remains
 uncertain, it must be pre-registered and tested on an independent cohort before
 it controls production retrieval.
 
+## Query-Independent Topic-Card Transfer
+
+A judge-free preflight tested whether existing query-independent dated topic
+cards could provide the missing set-assembly structure. For each of the 20
+conversation units, it transplanted the exact same card set from both
+summarization questions onto both multi-session questions. Context generation
+did not inspect multi-session queries, answers, scores, or gold text.
+
+- Topic-card artifact SHA-256:
+  `5070ff22bfff81141f8329c0dad867384b42855b1fe61b1ef575a8600ac881c1`
+- Frozen baseline SHA-256:
+  `43b8eb888adeb524caba70b013a8ca510c639bbf5312216e9b453d60185bcb8e`
+- Source-document SHA-256:
+  `fc0e64bac38fcde26eece776e818f70374338d4591ecc75346cb27b613d4c128`
+- Context tokens: `604,906` baseline versus `613,482` topic cards
+- Source-normalized reference retention: `0.9078` versus `0.6068`
+- Per-query retention outcomes: 3 topic-card wins, 5 ties, 32 losses
+- Funnel stages: 8 covered, 30 answer-loss, and 2 synthesis-required became
+  4 covered, 9 answer-loss, 2 synthesis-required, and 25 retrieval-loss items
+
+The 22 query-only count/set rows show the same failure: retention falls from
+`0.8844` to `0.6099`, with one win, four ties, and 17 losses. This is a decisive
+pre-model stop. Concern-level topic summaries are too coarse to preserve the
+distinct values, examples, and events needed for counting and set assembly.
+Future organizer work must expose grounded answer-sized concern items with
+evidence IDs; rendering broader topic labels and summaries is not a substitute.
+
 ## Decision
 
 Do not replace mixed-speaker retrieval with user-only evidence, and do not
@@ -71,3 +98,8 @@ count/set intent before retrieval, use stable user-first presentation only for
 that intent, and evaluate on an independent frozen cohort with repeated
 judging. Until that lifts, the current relevance-first presentation remains
 the evidence-backed default.
+
+The independent count/set confirmation later returned an exact null, and the
+topic-card transfer failed its deterministic retention preflight. The remaining
+product-shaped path is atomic concern-item construction and routing, not speaker
+ordering or concern-level summary cards.
