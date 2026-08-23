@@ -1587,6 +1587,53 @@ impl YantrikDB {
     /// Diagnosed via yantrikdb-server v0.8.13 cluster upgrade incident
     /// (swarm msg 3467c556 → response fa070846, v0.7.3 commit a5de0f2) and
     /// extended for issue #10 view case in v0.7.8.
+    /// Split a migration batch into executable statements using SQLite's
+    /// own grammar — `sqlite3_complete()` — instead of a hand-rolled lexer.
+    ///
+    /// **Issue #146, both generations of the bug.** The original
+    /// `batch.split(';')` truncated trigger bodies (`BEGIN stmt; stmt; END`),
+    /// producing the `incomplete input` the stage instrumentation caught in
+    /// CI. The first fix was a depth-tracking scanner — and cold review
+    /// reproduced two holes in it within the hour: a quoted identifier
+    /// `"begin"` counted as a keyword and jammed the depth counter (grouping
+    /// statements so a swallowed already-exists SILENTLY DROPPED the rest of
+    /// the group — migration loss), and `"semi;colon"` identifiers split
+    /// mid-name. A partial SQL lexer is the original sin repeated: every
+    /// unnamed case is a future #146.
+    ///
+    /// `sqlite3_complete` is the engine's own answer to "is this a complete
+    /// statement?" — it understands triggers, CASE/END, every string and
+    /// identifier quoting form, and comments, because it IS SQLite. We scan
+    /// forward and emit a statement at each `;` where the accumulated prefix
+    /// is complete; anything trailing without a terminator is emitted as-is
+    /// (execute_batch surfaces its error, which is correct for a malformed
+    /// migration).
+    fn split_sql_statements(batch: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        let mut start = 0usize;
+        let bytes = batch.as_bytes();
+        for i in 0..bytes.len() {
+            if bytes[i] == b';' {
+                let candidate = &batch[start..=i];
+                // sqlite3_complete needs a NUL-terminated C string; a
+                // candidate containing an interior NUL cannot be a valid
+                // migration statement, so treat it as incomplete.
+                if let Ok(c) = std::ffi::CString::new(candidate) {
+                    let complete = unsafe { rusqlite::ffi::sqlite3_complete(c.as_ptr()) } != 0;
+                    if complete {
+                        out.push(candidate.to_string());
+                        start = i + 1;
+                    }
+                }
+            }
+        }
+        let tail = batch[start..].trim();
+        if !tail.is_empty() {
+            out.push(tail.to_string());
+        }
+        out
+    }
+
     fn run_migration_idempotent(conn: &Connection, batch: &str) -> Result<()> {
         // Strip `-- ... \n` line comments before splitting on `;`. The
         // naive split otherwise breaks on comment text containing
@@ -1604,7 +1651,7 @@ impl YantrikDB {
             .collect::<Vec<_>>()
             .join("\n");
 
-        for raw in stripped.split(';') {
+        for raw in Self::split_sql_statements(&stripped) {
             let stmt = raw.trim();
             if stmt.is_empty() {
                 continue;
