@@ -156,12 +156,16 @@ def _run_fingerprint(config: dict) -> str:
     return _sha256_bytes(encoded)
 
 
+def _resolve_bootstrap_seed(run_seed: int, bootstrap_seed: int | None) -> int:
+    return run_seed if bootstrap_seed is None else bootstrap_seed
+
+
 def _load_resume_checkpoint(path: Path, run_fingerprint: str) -> dict[str, dict]:
     prior = json.loads(path.read_text(encoding="utf-8"))
     if prior.get("run_fingerprint") != run_fingerprint:
         raise ValueError(
             "resume checkpoint does not match the current manifest, contexts, "
-            "model, labels, split, seed, workers, and judge settings"
+            "model, labels, split, run/bootstrap seeds, workers, and judge settings"
         )
     pairs = prior.get("pairs", [])
     query_ids = [pair.get("query_id") for pair in pairs]
@@ -255,6 +259,7 @@ def main() -> int:
     parser.add_argument("--answer-repeats", type=int, default=1)
     parser.add_argument("--judge-repeats", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20260820)
+    parser.add_argument("--bootstrap-seed", type=int)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--out", type=Path)
     parser.add_argument("--resume", action="store_true")
@@ -264,6 +269,7 @@ def main() -> int:
         parser.error("--judge-repeats must be a positive odd number")
     if args.answer_repeats < 1 or args.answer_repeats % 2 == 0:
         parser.error("--answer-repeats must be a positive odd number")
+    bootstrap_seed = _resolve_bootstrap_seed(args.seed, args.bootstrap_seed)
     if args.limit is not None:
         parser.error("--limit is incompatible with a frozen manifest run")
     if not args.preflight_only and args.out is None:
@@ -338,6 +344,7 @@ def main() -> int:
         "answer_repeats": args.answer_repeats,
         "judge_repeats": args.judge_repeats,
         "seed": args.seed,
+        "bootstrap_seed": bootstrap_seed,
         "workers": args.workers,
     }
     run_fingerprint = _run_fingerprint(run_config)
@@ -496,13 +503,14 @@ def main() -> int:
         for pair in pairs
         for delta in pair["answer_repeat_comparison"]["deltas_b_minus_a"]
     ]
-    lower, upper = _paired_bootstrap_interval(deltas, args.seed)
+    lower, upper = _paired_bootstrap_interval(deltas, bootstrap_seed)
     summary = {
         "n": len(pairs),
         "mean_a": statistics.fmean(scores_a) if scores_a else 0.0,
         "mean_b": statistics.fmean(scores_b) if scores_b else 0.0,
         "mean_delta_b_minus_a": statistics.fmean(deltas) if deltas else 0.0,
         "paired_bootstrap_95_ci": [lower, upper],
+        "paired_bootstrap_seed": bootstrap_seed,
         "wins_b": sum(delta > 0 for delta in deltas),
         "ties": sum(delta == 0 for delta in deltas),
         "wins_a": sum(delta < 0 for delta in deltas),
@@ -540,6 +548,7 @@ def main() -> int:
         "answer_repeats": args.answer_repeats,
         "judge_repeats": args.judge_repeats,
         "seed": args.seed,
+        "bootstrap_seed": bootstrap_seed,
         "summary": summary,
         "pairs": pairs,
     }

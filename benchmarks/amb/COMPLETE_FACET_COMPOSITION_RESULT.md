@@ -36,6 +36,11 @@ so the byte-identical v3 replication was not run. See
 The preregistration and product preflight were committed and merged before
 scored results were inspected.
 
+Tooling note recorded after v2: evaluator seed `20260820` controlled both arm
+order and paired-bootstrap resampling. The bootstrap method and reported
+interval remain valid, but the two random streams were seed-coupled; v4 binds
+them independently.
+
 ## Overall Result
 
 | Arm | Mean rubric score |
