@@ -2,6 +2,8 @@
 
 Status: v2 protocol frozen after the v1 pre-call abort; product preflight
 passed and external scoring was authorized without changing the mechanism.
+The completed result and no-promotion decision are recorded in
+`COMPLETE_FACET_COMPOSITION_RESULT.md`.
 
 ## Question
 
