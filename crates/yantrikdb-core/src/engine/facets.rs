@@ -219,8 +219,14 @@ impl crate::YantrikDB {
                 }
                 FacetDetection::StandingInstruction { directive } => {
                     audit.candidates += 1;
+                    // Contract §Write-Time Detection rule 5, which the first
+                    // implementation DROPPED and cold review caught: the
+                    // idempotency key includes the SOURCE RID, so the same
+                    // directive uttered in two turns yields two facets, each
+                    // standing on its own evidence — forgetting one source
+                    // cannot erase a still-supported instruction.
                     let key = format!(
-                        "{STANDING_INSTRUCTION_DETECTOR}:{}",
+                        "{STANDING_INSTRUCTION_DETECTOR}:{rid}:{}",
                         normalize_directive(&directive)
                     );
                     if !seen_keys.insert(key.clone()) {
@@ -434,12 +440,14 @@ mod integration_tests {
         let audit = db.extract_standing_instructions("n", true).unwrap();
         assert!(audit.dry_run);
         assert_eq!(audit.user_turns_scanned, 7);
-        assert_eq!(audit.candidates, 3, "two directives + one duplicate form");
-        assert_eq!(audit.accepted, 2);
-        assert_eq!(audit.duplicate_candidates, 1);
+        assert_eq!(audit.candidates, 3, "two directives + one repeated form");
+        // Source-keyed idempotency (contract rule 5): the repeated directive
+        // comes from a DIFFERENT source turn, so it is its own facet.
+        assert_eq!(audit.accepted, 3);
+        assert_eq!(audit.duplicate_candidates, 0);
         assert_eq!(audit.rejected_unverified_provenance, 1);
         assert_eq!(audit.rejected_non_directive, 3);
-        assert_eq!(audit.would_write, 2);
+        assert_eq!(audit.would_write, 3);
         assert!(audit.written_rids.is_empty(), "dry run must not write");
 
         // The store is untouched: no synthesis rows, no dependencies.
@@ -464,8 +472,8 @@ mod integration_tests {
     fn live_run_persists_facets_with_evidence_and_replays_idempotently() {
         let db = seeded_store();
         let audit = db.extract_standing_instructions("n", false).unwrap();
-        assert_eq!(audit.accepted, 2, "full audit: {audit:?}");
-        assert_eq!(audit.written_rids.len(), 2);
+        assert_eq!(audit.accepted, 3, "full audit: {audit:?}");
+        assert_eq!(audit.written_rids.len(), 3);
 
         // Facets are real synthesis rows with engine-resolved dependencies.
         {
@@ -478,7 +486,7 @@ mod integration_tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(n, 2);
+            assert_eq!(n, 3);
             let deps: i64 = conn
                 .query_row("SELECT COUNT(*) FROM synthesis_dependencies", [], |r| {
                     r.get(0)
@@ -495,7 +503,10 @@ mod integration_tests {
         // persisted key and no rid is written.
         let replay = db.extract_standing_instructions("n", false).unwrap();
         assert_eq!(replay.accepted, 0, "replay must accept nothing new");
-        assert_eq!(replay.duplicate_candidates, 3);
+        assert_eq!(
+            replay.duplicate_candidates, 3,
+            "same-source replays are the only duplicates under source keying"
+        );
         assert!(replay.written_rids.is_empty());
     }
 
@@ -574,6 +585,9 @@ impl crate::YantrikDB {
                AND m.synthesis_state = 'verified' \
                AND m.consolidation_status = 'active' \
              GROUP BY m.rid, m.text, m.created_at \
+             HAVING SUM(CASE WHEN d.is_direct = 1 AND src.source != 'user' \
+                             THEN 1 ELSE 0 END) = 0 \
+                AND SUM(CASE WHEN d.is_direct = 1 THEN 1 ELSE 0 END) > 0 \
              ORDER BY first_mention_at ASC, m.rid ASC",
         )?;
         let rows: Vec<(String, String, f64, f64)> = stmt
