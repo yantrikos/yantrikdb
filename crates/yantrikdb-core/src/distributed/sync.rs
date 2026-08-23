@@ -543,7 +543,8 @@ mod tests {
         let a_results = a
             .recall(
                 &emb1, 2, None, None, false, false, None, false, None, None, None, None, None,
-                false,
+                false, None, // event_after (#149)
+                None, // event_before (#149)
             )
             .unwrap();
         assert!(!a_results.is_empty());

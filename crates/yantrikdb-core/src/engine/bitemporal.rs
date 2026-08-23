@@ -82,6 +82,8 @@ impl YantrikDB {
             None, // certainty_min
             None, // order
             true, // include_superseded: the as-of filter decides, not today's
+            None, // event_after (#149)
+            None, // event_before (#149)
         )?;
 
         // 1. Nothing that did not exist yet.

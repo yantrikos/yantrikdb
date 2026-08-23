@@ -1476,6 +1476,8 @@ fn recall_logs_demand_and_surfaces_gaps() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert!(

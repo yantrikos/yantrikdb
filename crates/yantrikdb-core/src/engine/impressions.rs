@@ -1354,6 +1354,8 @@ mod tests {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap()
     }
@@ -1408,6 +1410,8 @@ mod tests {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
         let after: i64 = db

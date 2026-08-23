@@ -269,8 +269,21 @@ fn irregular_verb_forms(word: &str) -> Option<&'static [&'static str]> {
 ///
 /// Filtering is a property of the REQUEST, not of the lane that happened
 /// to find the row, so there is one predicate and every lane calls it.
+///
+/// # Valid-time bounds (#149 phase 2)
+///
+/// `event_allow` is the ELIGIBLE UNIVERSE for a bounded recall: the rid
+/// set the SQL pre-query over `idx_memories_event_time` returned for the
+/// caller's `event_after`/`event_before` window. `Some(set)` means the
+/// caller set at least one bound — a row is eligible only if its rid is
+/// a member (rows with NULL `event_time_min` are never members, so the
+/// NULL-excluded contract falls out of membership). `None` means no
+/// bound was set and valid time does not constrain anything. Threading
+/// it through THIS predicate (rather than each lane checking) keeps the
+/// 2026-08-13 invariant: no lane can re-admit a row the request excluded.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn passes_recall_filters(
+    rid: &str,
     row: &crate::types::ScoringRow,
     include_consolidated: bool,
     memory_type: Option<&str>,
@@ -279,7 +292,13 @@ pub(crate) fn passes_recall_filters(
     domain: Option<&str>,
     source: Option<&str>,
     certainty_min: Option<f64>,
+    event_allow: Option<&std::collections::HashSet<String>>,
 ) -> bool {
+    if let Some(allow) = event_allow {
+        if !allow.contains(rid) {
+            return false;
+        }
+    }
     if !synthesis_lifecycle_allows(row) {
         return false;
     }
@@ -831,6 +850,13 @@ impl YantrikDB {
         certainty_min: Option<f64>,
         order: Option<&str>,
         include_superseded: bool,
+        // #149 phase 2: valid-time bounds (epoch seconds). When either is
+        // set, the temporal window defines the ELIGIBLE UNIVERSE before
+        // relevance ranking and top_k (filter-first); rows with NULL
+        // event_time_min are excluded; interval overlap is inclusive.
+        // `event_after > event_before` is a typed InvalidInput error.
+        event_after: Option<f64>,
+        event_before: Option<f64>,
     ) -> Result<Vec<RecallResult>> {
         self.recall_with_limits(
             query_embedding,
@@ -847,6 +873,8 @@ impl YantrikDB {
             certainty_min,
             order,
             include_superseded,
+            event_after,
+            event_before,
         )
         .map(|(results, _)| results)
     }
@@ -868,6 +896,8 @@ impl YantrikDB {
         certainty_min: Option<f64>,
         order: Option<&str>,
         include_superseded: bool,
+        event_after: Option<f64>,
+        event_before: Option<f64>,
     ) -> Result<(Vec<RecallResult>, crate::types::RetrievalLimits)> {
         // v0.10 Item 3 seqlock (sol r5): EVERY attempt validates — a result
         // is never returned without a passing epoch recheck (coherence is
@@ -895,6 +925,8 @@ impl YantrikDB {
                 certainty_min,
                 order,
                 include_superseded,
+                event_after,
+                event_before,
                 attempt == 0,
                 epoch0,
                 None,
@@ -934,6 +966,8 @@ impl YantrikDB {
         certainty_min: Option<f64>,
         order: Option<&str>,
         include_superseded: bool,
+        event_after: Option<f64>,
+        event_before: Option<f64>,
     ) -> Result<(Vec<RecallResult>, crate::types::RecallExplain)> {
         const MAX_ATTEMPTS: u32 = 8;
         let mut explain: Option<crate::types::RecallExplain> = None;
@@ -956,6 +990,8 @@ impl YantrikDB {
                 certainty_min,
                 order,
                 include_superseded,
+                event_after,
+                event_before,
                 attempt == 0,
                 epoch0,
                 Some(&mut explain),
@@ -1002,6 +1038,15 @@ impl YantrikDB {
         // On legacy-policy databases this flag is a no-op (everything is
         // already included).
         include_superseded: bool,
+        // #149 phase 2: valid-time bounds. FILTER-FIRST — when either is
+        // set the eligible universe is fetched from the indexed v48
+        // columns up front, every lane is constrained to it (via
+        // `passes_recall_filters`' allow-set), and a dedicated universe
+        // lane direct-scores every eligible row so an in-window record is
+        // reachable even when the unfiltered similarity pool would never
+        // surface it.
+        event_after: Option<f64>,
+        event_before: Option<f64>,
         // Since-boot limit telemetry counts public calls, not discarded
         // seqlock attempts. Only the first attempt increments the counter;
         // every binding attempt still emits its structured trace.
@@ -1019,6 +1064,46 @@ impl YantrikDB {
         // Validate `order` upfront so callers get a clear error rather
         // than silently falling back to relevance when they typo a value.
         let recall_order = parse_recall_order(order)?;
+        // #149 phase 2: an inverted valid-time window is a caller error,
+        // not an empty result — an empty result claims "nothing happened
+        // then", which is a different (and false) statement. Non-finite
+        // bounds are rejected first (repo-wide caller-scalar rule): NaN
+        // makes every comparison false, so it would silently pass the
+        // inversion check AND match nothing.
+        if let Some(after) = event_after {
+            crate::validate::validate_scalars("recall", &[("event_after", after)])?;
+        }
+        if let Some(before) = event_before {
+            crate::validate::validate_scalars("recall", &[("event_before", before)])?;
+        }
+        if let (Some(after), Some(before)) = (event_after, event_before) {
+            if after > before {
+                return Err(YantrikDbError::InvalidInput(format!(
+                    "event_after ({after}) must be <= event_before ({before})"
+                )));
+            }
+        }
+        // #149 phase 2 integration choice, documented per the contract:
+        // of the two robust shapes — (a) restrict the vector search to an
+        // allow-list, (b) direct-score the eligible set — this engine's
+        // HNSW surface has no allow-list parameter, but the importance-
+        // fallback lane already established the direct-scoring pattern
+        // (fetch embeddings by rid, cosine against the query, push into
+        // the pool pre-truncation). So: ONE SQL query over
+        // idx_memories_event_time builds the eligible universe as a rid
+        // set; `passes_recall_filters` gates every lane on membership
+        // (post-filtering a bounded pool is forbidden — that recreates
+        // the bounded-by-today's-top-k false negative this issue fixes);
+        // and the universe lane below direct-scores any eligible row no
+        // other lane admitted. Temporal windows are typically small, so
+        // direct scoring is cheap where it matters.
+        let event_allow_owned: Option<std::collections::HashSet<String>> =
+            if event_after.is_some() || event_before.is_some() {
+                Some(self.event_time_eligible_rids(namespace, event_after, event_before)?)
+            } else {
+                None
+            };
+        let event_allow = event_allow_owned.as_ref();
         let ts = now();
 
         // Load per-database learned weights (falls back to defaults if none learned yet)
@@ -1096,6 +1181,9 @@ impl YantrikDB {
         let explain_on = explain_sink.is_some();
         let mut explain_fallback_rids: std::collections::HashSet<String> = Default::default();
         let mut explain_valence_rids: std::collections::HashSet<String> = Default::default();
+        // #149 phase 2: rows admitted by the valid-time universe lane
+        // (direct-scored because no similarity lane surfaced them).
+        let mut explain_event_universe_rids: std::collections::HashSet<String> = Default::default();
         // Pack rows live in their pack's scoring cache, not the host cache.
         // Track their provenance across the merged-pool lifecycle check; the
         // pack collector has already applied the same lifecycle predicate.
@@ -1116,8 +1204,12 @@ impl YantrikDB {
         // candidate source, which mounting a pack falsifies. Taking it
         // with a pack mounted would make the flagship case — a database
         // with few or no memories of its own mounting a knowledge pack —
-        // return nothing at all.
-        if vec_results.is_empty() && self.packs.read().is_empty() {
+        // return nothing at all. A valid-time-bounded recall (#149
+        // phase 2) falsifies the premise the same way: its universe lane
+        // sources candidates from SQL over the v48 columns, so an empty
+        // vector pool (e.g. a freshly applied replication follower) must
+        // still fall through to the universe lane.
+        if vec_results.is_empty() && self.packs.read().is_empty() && event_allow.is_none() {
             // No candidates → no vector/text pairing to protect. Still
             // validate the epoch (sol r6): a successful recall must never be
             // returned during an unvalidated correction interval, even when
@@ -1219,6 +1311,16 @@ impl YantrikDB {
                     }
                 }
 
+                // Filter: valid-time eligible universe (#149 phase 2).
+                // Membership in the SQL-derived allow-set — NULL event
+                // times are never members, so they are excluded whenever
+                // a bound is set.
+                if let Some(allow) = event_allow {
+                    if !allow.contains(rid.as_str()) {
+                        continue;
+                    }
+                }
+
                 let sim_score = (1.0 - distance).max(0.0);
                 let decay = scoring::ranking_decay(row.importance, row.created_at, ts);
                 let age = ts - row.created_at;
@@ -1303,6 +1405,7 @@ impl YantrikDB {
                         row.importance >= high_imp_threshold
                             && !existing_rids.contains(rid.as_str())
                             && passes_recall_filters(
+                                rid,
                                 row,
                                 include_consolidated,
                                 memory_type,
@@ -1311,6 +1414,7 @@ impl YantrikDB {
                                 domain,
                                 source,
                                 certainty_min,
+                                event_allow,
                             )
                     })
                     .map(|(rid, _)| rid.clone())
@@ -1397,6 +1501,130 @@ impl YantrikDB {
                     .iter()
                     .map(|r| r.rid.clone()),
             );
+        }
+
+        // Step 2.6: valid-time UNIVERSE lane (#149 phase 2).
+        //
+        // When the caller set event_after/event_before, the temporal
+        // window defines the eligible universe — and every member must be
+        // REACHABLE, even one whose similarity rank sits far below the
+        // vector pool's fetch_k. Post-filtering the bounded pool cannot
+        // provide that (the bounded-by-today's-top-k false negative this
+        // issue exists to fix), so any eligible row no lane has admitted
+        // yet is direct-scored here: embed-once query cosine against the
+        // row's stored embedding, same composite scoring as every other
+        // lane, pushed into the pool BEFORE boosting/MMR/top_k
+        // truncation. Ranking then happens strictly WITHIN the universe
+        // (all other lanes are membership-gated on the same allow-set).
+        // Temporal windows are typically small, so the extra embedding
+        // fetch is proportional to the window, not the store.
+        if let Some(allow) = event_allow {
+            let missing_rids: Vec<String> = {
+                let existing_rids: std::collections::HashSet<&str> =
+                    scored.iter().map(|r| r.rid.as_str()).collect();
+                let cache = self.scoring_cache.read();
+                allow
+                    .iter()
+                    .filter(|rid| !existing_rids.contains(rid.as_str()))
+                    .filter(|rid| {
+                        cache.get(rid.as_str()).is_some_and(|row| {
+                            passes_recall_filters(
+                                rid,
+                                row,
+                                include_consolidated,
+                                memory_type,
+                                time_window,
+                                namespace,
+                                domain,
+                                source,
+                                certainty_min,
+                                event_allow,
+                            )
+                        })
+                    })
+                    .cloned()
+                    .collect()
+            };
+            if !missing_rids.is_empty() {
+                let rid_refs: Vec<&str> = missing_rids.iter().map(|r| r.as_str()).collect();
+                let emb_map = self.fetch_embeddings_by_rids(&rid_refs)?;
+                let cache = self.scoring_cache.read();
+                for rid in &missing_rids {
+                    let Some(row) = cache.get(rid) else { continue };
+                    // Deliberately NO similarity floor: eligibility comes
+                    // from the temporal window; similarity only RANKS
+                    // within it. A floor here would silently shrink the
+                    // universe — the exact false-negative class again. The
+                    // same principle covers a row with no readable vector
+                    // (a replication follower before vector sync): it is
+                    // admitted at similarity 0.0 rather than dropped, so
+                    // leader and follower agree on the eligible rid set.
+                    let sim_score = match emb_map.get(rid.as_str()) {
+                        Some(emb_blob) => {
+                            let mem_emb = crate::serde_helpers::deserialize_f32(emb_blob);
+                            crate::consolidate::cosine_similarity(query_embedding, &mem_emb) as f64
+                        }
+                        None => 0.0,
+                    };
+                    let decay = scoring::ranking_decay(row.importance, row.created_at, ts);
+                    let age = ts - row.created_at;
+                    let recency = scoring::recency_score(age);
+                    let composite = scoring::adaptive_composite_score(
+                        sim_score,
+                        decay,
+                        recency,
+                        row.importance,
+                        row.valence,
+                        query_sentiment,
+                        &learned_weights,
+                    );
+                    let mut why = scoring::build_why(sim_score, recency, decay, row.valence);
+                    why.push("event_time_window".to_string());
+                    let contributions = scoring::adaptive_contributions(
+                        sim_score,
+                        decay,
+                        recency,
+                        row.importance,
+                        &learned_weights,
+                    );
+                    let valence_multiplier =
+                        scoring::query_valence_boost(row.valence, query_sentiment);
+
+                    if explain_on {
+                        explain_event_universe_rids.insert(rid.clone());
+                    }
+                    scored.push(RecallResult {
+                        rid: rid.clone(),
+                        memory_type: row.memory_type.clone(),
+                        text: String::new(),
+                        created_at: row.created_at,
+                        importance: row.importance,
+                        valence: row.valence,
+                        score: composite,
+                        scores: ScoreBreakdown {
+                            similarity: sim_score,
+                            decay,
+                            recency,
+                            importance: row.importance,
+                            graph_proximity: 0.0,
+                            contributions,
+                            valence_multiplier,
+                        },
+                        why_retrieved: why,
+                        metadata: serde_json::Value::Null,
+                        namespace: row.namespace.clone(),
+                        certainty: row.certainty,
+                        domain: row.domain.clone(),
+                        source: row.source.clone(),
+                        emotional_state: row.emotional_state.clone(),
+                        current_status: Default::default(),
+                        superseded_by: None,
+                        disputed_with: Vec::new(),
+                        aged_last_verified: None,
+                        best_span: None,
+                    });
+                }
+            }
         }
 
         // rid → per-query lexical strength from FTS5 bm25 ranks (fusion:
@@ -1939,6 +2167,7 @@ impl YantrikDB {
                                 // record the caller excluded by domain, source or
                                 // certainty could be re-admitted here.
                                 if !passes_recall_filters(
+                                    rid,
                                     row,
                                     include_consolidated,
                                     memory_type,
@@ -1947,6 +2176,7 @@ impl YantrikDB {
                                     domain,
                                     source,
                                     certainty_min,
+                                    event_allow,
                                 ) {
                                     continue;
                                 }
@@ -2055,6 +2285,7 @@ impl YantrikDB {
             domain,
             source,
             certainty_min,
+            event_allow,
             &learned_weights,
             ts,
             query_sentiment,
@@ -2092,6 +2323,7 @@ impl YantrikDB {
                             // Same predicate as every other lane: this one
                             // used to omit domain, source and certainty.
                             && passes_recall_filters(
+                                rid,
                                 row,
                                 include_consolidated,
                                 memory_type,
@@ -2100,6 +2332,7 @@ impl YantrikDB {
                                 domain,
                                 source,
                                 certainty_min,
+                                event_allow,
                             )
                     })
                     .map(|(rid, row)| {
@@ -2374,6 +2607,7 @@ impl YantrikDB {
                                 // access_count, type and namespace, so domain,
                                 // source and certainty must be enforced here.
                                 if !passes_recall_filters(
+                                    rid,
                                     row,
                                     include_consolidated,
                                     memory_type,
@@ -2382,6 +2616,7 @@ impl YantrikDB {
                                     domain,
                                     source,
                                     certainty_min,
+                                    event_allow,
                                 ) {
                                     continue;
                                 }
@@ -2676,6 +2911,7 @@ impl YantrikDB {
                             // Graph-only admission used to skip domain,
                             // source and certainty; one predicate now.
                             if !passes_recall_filters(
+                                &rid,
                                 row,
                                 include_consolidated,
                                 memory_type,
@@ -2684,6 +2920,7 @@ impl YantrikDB {
                                 domain,
                                 source,
                                 certainty_min,
+                                event_allow,
                             ) {
                                 return None;
                             }
@@ -2817,7 +3054,15 @@ impl YantrikDB {
         //
         // Pack rows arrive already hydrated: their text lives in the
         // pack file, and step 5 hydrates only from the host.
-        {
+        //
+        // #149 phase 2: bounded recall EXCLUDES all pack candidates.
+        // Pack rows live outside the host's indexed event-time universe
+        // (idx_memories_event_time), so their event time is effectively
+        // unknown — NULL-excluded semantics extend to them. Post-filtering
+        // PackFilters instead would still miss dated pack rows outside
+        // pack_fetch_k, violating filter-first. Full pack event-time
+        // support is a follow-up (the #164 v1.1 pack-lane pattern).
+        if event_allow.is_none() {
             let pack_candidates = self.collect_pack_candidates(
                 query_embedding,
                 top_k,
@@ -2988,6 +3233,9 @@ impl YantrikDB {
                     if explain_valence_rids.contains(&r.rid) {
                         lanes.push("valence_scan".into());
                     }
+                    if explain_event_universe_rids.contains(&r.rid) {
+                        lanes.push("event_time_universe".into());
+                    }
                     if pack_rids.contains(&r.rid) {
                         lanes.push("pack".into());
                     }
@@ -3093,6 +3341,23 @@ impl YantrikDB {
                     None,
                 ),
             );
+            // #149 phase 2: reported only when the caller set a valid-time
+            // bound, so unbounded recalls keep their pre-phase-2 explain
+            // shape byte-for-byte.
+            if let Some(allow) = event_allow {
+                lanes.insert(
+                    "event_time_universe".to_string(),
+                    lane(
+                        if explain_event_universe_rids.is_empty() {
+                            "ran_empty"
+                        } else {
+                            "ran"
+                        },
+                        explain_event_universe_rids.len(),
+                        Some(format!("eligible_universe={}", allow.len())),
+                    ),
+                );
+            }
             lanes.insert(
                 "pack".to_string(),
                 lane(
@@ -3590,6 +3855,8 @@ impl YantrikDB {
             None,  // certainty_min (#46) — recall_with_seq path defers to caller-side filtering
             None,  // order (#46) — default relevance
             false, // include_superseded (v0.10 Item 1) — policy default; use query() builder for history
+            None,  // event_after (#149) — no valid-time bound
+            None,  // event_before (#149)
         )
     }
 
@@ -3618,6 +3885,8 @@ impl YantrikDB {
             q.certainty_min,
             q.order.as_deref(),
             q.include_superseded,
+            None, // event_after (#149) — not yet surfaced on the builder
+            None, // event_before (#149)
         )
     }
 
@@ -3654,6 +3923,8 @@ impl YantrikDB {
             None,  // certainty_min (#46) — recall_with_response defers to caller-side filtering
             None,  // order (#46) — default relevance
             false, // include_superseded (v0.10 Item 1) — policy default; use query() builder for history
+            None,  // event_after (#149) — no valid-time bound
+            None,  // event_before (#149)
         )?;
 
         // Determine which retrieval sources were used
@@ -4371,6 +4642,7 @@ impl YantrikDB {
                         row.importance >= high_imp_threshold
                             && !existing_rids.contains(rid.as_str())
                             && passes_recall_filters(
+                                rid,
                                 row,
                                 include_consolidated,
                                 memory_type,
@@ -4379,6 +4651,7 @@ impl YantrikDB {
                                 domain,
                                 source,
                                 certainty_min,
+                                None,
                             )
                     })
                     .map(|(rid, _)| rid.clone())
@@ -4927,6 +5200,7 @@ impl YantrikDB {
                                 // record the caller excluded by domain, source or
                                 // certainty could be re-admitted here.
                                 if !passes_recall_filters(
+                                    rid,
                                     row,
                                     include_consolidated,
                                     memory_type,
@@ -4935,6 +5209,7 @@ impl YantrikDB {
                                     domain,
                                     source,
                                     certainty_min,
+                                    None,
                                 ) {
                                     continue;
                                 }
@@ -5041,6 +5316,7 @@ impl YantrikDB {
             domain,
             source,
             certainty_min,
+            None, // #149: valid-time bounds are default-lane only (like explain)
             &learned_weights,
             ts,
             query_sentiment,
@@ -5303,6 +5579,7 @@ impl YantrikDB {
                                 // access_count, type and namespace, so domain,
                                 // source and certainty must be enforced here.
                                 if !passes_recall_filters(
+                                    rid,
                                     row,
                                     include_consolidated,
                                     memory_type,
@@ -5311,6 +5588,7 @@ impl YantrikDB {
                                     domain,
                                     source,
                                     certainty_min,
+                                    None,
                                 ) {
                                     continue;
                                 }
@@ -5591,6 +5869,7 @@ impl YantrikDB {
                             // Graph-only admission used to skip domain,
                             // source and certainty; one predicate now.
                             if !passes_recall_filters(
+                                &r,
                                 row,
                                 include_consolidated,
                                 memory_type,
@@ -5599,6 +5878,7 @@ impl YantrikDB {
                                 domain,
                                 source,
                                 certainty_min,
+                                None,
                             ) {
                                 return None;
                             }
@@ -6081,6 +6361,56 @@ impl YantrikDB {
             .into_iter()
             .map(|(rid, entry)| (rid, entry.bytes))
             .collect())
+    }
+
+    /// #149 phase 2 — the ELIGIBLE UNIVERSE for a valid-time-bounded
+    /// recall, fetched from the indexed v48 columns
+    /// (`idx_memories_event_time`), BEFORE any relevance ranking runs.
+    ///
+    /// Semantics (the reviewer-confirmed contract, verbatim):
+    /// - rows with NULL `event_time_min` are EXCLUDED whenever either
+    ///   bound is set (unknown-when is not in-window);
+    /// - inclusive interval overlap against `[event_time_min,
+    ///   event_time_max]`: `after` alone ⇒ `max >= after`; `before`
+    ///   alone ⇒ `min <= before`; both ⇒ the intervals overlap.
+    ///   Boundary equality is included (>=/<=). A row whose max is NULL
+    ///   is a point event at its min (`COALESCE(max, min)`).
+    ///
+    /// The result is consumed as an allow-SET passed into
+    /// `passes_recall_filters` (membership, never a textual
+    /// `RID IN (...)` list) plus the direct-scoring universe lane in
+    /// `recall_inner` — never as a post-filter over a bounded
+    /// similarity pool.
+    fn event_time_eligible_rids(
+        &self,
+        namespace: Option<&str>,
+        event_after: Option<f64>,
+        event_before: Option<f64>,
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut sql = String::from("SELECT rid FROM memories WHERE event_time_min IS NOT NULL");
+        let mut params: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+        if let Some(ns) = namespace {
+            sql.push_str(&format!(" AND namespace = ?{}", params.len() + 1));
+            params.push(Box::new(ns.to_string()));
+        }
+        if let Some(after) = event_after {
+            sql.push_str(&format!(
+                " AND COALESCE(event_time_max, event_time_min) >= ?{}",
+                params.len() + 1
+            ));
+            params.push(Box::new(after));
+        }
+        if let Some(before) = event_before {
+            sql.push_str(&format!(" AND event_time_min <= ?{}", params.len() + 1));
+            params.push(Box::new(before));
+        }
+        let conn = self.read_conn();
+        let mut stmt = conn.prepare(&sql)?;
+        let param_refs: Vec<&dyn rusqlite::ToSql> = params.iter().map(|p| p.as_ref()).collect();
+        let rids = stmt
+            .query_map(param_refs.as_slice(), |row| row.get::<_, String>(0))?
+            .collect::<std::result::Result<std::collections::HashSet<String>, _>>()?;
+        Ok(rids)
     }
 
     /// Reinforce a memory on access — increase half_life, update last_access,

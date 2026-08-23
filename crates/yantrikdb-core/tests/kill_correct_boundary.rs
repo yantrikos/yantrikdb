@@ -163,7 +163,8 @@ fn kill_after_correct_commit_keeps_sql_consistent_and_index_rebuilds() {
     let q = db.embed("financial revenue report").unwrap();
     let hits = db
         .recall(
-            &q, 5, None, None, false, false, None, true, None, None, None, None, None, false,
+            &q, 5, None, None, false, false, None, true, None, None, None, None, None, false, None,
+            None,
         )
         .unwrap();
     assert!(

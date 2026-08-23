@@ -120,6 +120,53 @@ its gate. The Q7 A/A calibration also observed about `0.02` answer-generation
 standard error within a 40-query category. Threshold claims therefore require
 replication even when a single full run crosses 90.
 
+### Direct-engine bucket decomposition
+
+The `16.422` direct-engine label is substantially more optimistic than its
+name suggests. The machine-readable audit now decomposes it:
+
+| Component | Points | Share of bucket | Basis |
+|---|---:|---:|---|
+| event ordering | 7.093 | 43.2% | whole category, optimistic |
+| temporal reasoning | 5.875 | 35.8% | whole category, optimistic |
+| abstention provenance | 1.750 | 10.7% | audited zero-row proxy |
+| instruction salience | 0.875 | 5.3% | audited score-deficit share |
+| summarization retrieval | 0.459 | 2.8% | audited item-retention proxy |
+| preference salience | 0.250 | 1.5% | audited score-deficit share |
+| information-extraction retrieval | 0.099 | 0.6% | audited item-retention proxy |
+| contradiction retrieval | 0.021 | 0.1% | audited item-retention proxy |
+
+Thus `12.968` points, or `79.0%` of the bucket, are not row-level engine
+attributions at all. They are the complete loss of two weak categories placed
+in the engine bucket as an optimistic ceiling assumption. This distinction is
+important when choosing work: a category being temporal does not prove an
+event-time index can recover its loss.
+
+The existing experiments narrow those two wholesale assignments further:
+
+- Event ordering's best complete concern-selected synthesis result is
+  `0.33969` versus the frozen `0.29071`, a measured recovery of `0.490` full
+  benchmark points, or only `6.9%` of the category's assigned loss. It remains
+  opt-in because 13/40 rows regressed and required query-dependent item
+  granularity; fixed write-time coarse synthesis is not valid.
+- Temporal reasoning exposes an explicit calendar date in only 1/40 queries,
+  for at most `0.250` full benchmark points under a perfect direct filter.
+  Three mechanically invalid gold calculations account for `0.750` points,
+  while endpoint-only retrieval regressed and endpoint-prepending was
+  inconclusive. The remainder is primarily operand selection, arithmetic,
+  and revision ambiguity, not yet an engine attribution.
+- The standing-instruction facet recovered `0.750` of its `0.875` attributed
+  points on the target slice. Its global-default failure came from composition
+  cost, now measured separately as whole-block displacement.
+- Equal-budget role-aware abstention recovered `0.500` points in its discovery
+  run but missed the preregistered lift gate and showed answer variance.
+
+Knowledge update and multi-session reasoning contribute exactly zero to the
+current direct-engine bucket. Their large losses are assigned to benchmark
+integrity, reader assembly, and residual shares. They may motivate product
+features, but they must not be cited as explaining the `16.422` direct-engine
+number without a new row-level attribution.
+
 ## Decision
 
 Do not spend the next product cycle increasing generic top-k for summarization,

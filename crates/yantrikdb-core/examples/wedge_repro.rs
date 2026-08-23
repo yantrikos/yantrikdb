@@ -300,7 +300,8 @@ fn run() {
                 let t = Instant::now();
                 let _ = db_c.recall(
                     &query, 10, None, None, false, false, None, false, None, None, None, None,
-                    None, false,
+                    None, false, None, // event_after (#149)
+                    None, // event_before (#149)
                 );
                 let dur_ns = t.elapsed().as_nanos() as u64;
                 let bucket = started.elapsed().as_secs();
