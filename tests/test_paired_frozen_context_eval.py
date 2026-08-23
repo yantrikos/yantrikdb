@@ -8,6 +8,8 @@ from benchmarks.amb.paired_frozen_context_eval import (
     _load_resume_checkpoint,
     _median_scored_result,
     _ordered_query_ids_sha256,
+    _paired_bootstrap_interval,
+    _resolve_bootstrap_seed,
     _run_fingerprint,
     _sha256_file,
     validate_manifest,
@@ -159,7 +161,7 @@ def test_repeated_answers_interleave_arms_and_select_median_score():
 
 def test_resume_checkpoint_is_bound_to_run_fingerprint(tmp_path):
     checkpoint = tmp_path / "run.partial"
-    fingerprint = _run_fingerprint({"model": "a", "seed": 7})
+    fingerprint = _run_fingerprint({"model": "a", "seed": 7, "bootstrap_seed": 11})
     _write_json(
         checkpoint,
         {
@@ -173,8 +175,21 @@ def test_resume_checkpoint_is_bound_to_run_fingerprint(tmp_path):
     with pytest.raises(ValueError, match="does not match"):
         _load_resume_checkpoint(
             checkpoint,
-            _run_fingerprint({"model": "b", "seed": 7}),
+            _run_fingerprint({"model": "b", "seed": 7, "bootstrap_seed": 11}),
         )
+
+
+def test_bootstrap_seed_is_independent_and_resume_bound():
+    deltas = [-1.0, 0.0, 0.0, 0.5, 1.0]
+    interval_a = _paired_bootstrap_interval(deltas, seed=7, samples=101)
+    interval_b = _paired_bootstrap_interval(deltas, seed=8, samples=101)
+
+    assert interval_a != interval_b
+    assert _run_fingerprint({"seed": 5, "bootstrap_seed": 7}) != _run_fingerprint(
+        {"seed": 5, "bootstrap_seed": 8}
+    )
+    assert _resolve_bootstrap_seed(5, None) == 5
+    assert _resolve_bootstrap_seed(5, 8) == 8
 
 
 def test_resume_checkpoint_rejects_duplicate_pairs(tmp_path):
