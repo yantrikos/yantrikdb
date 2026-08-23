@@ -1,8 +1,8 @@
 # AMB Standing-Instruction Full-400 Preregistration
 
-Status: frozen preflight only. No external calls have been made for this arm.
-Run only after the product persistence and recall replay reproduces the frozen
-treatment contract.
+Status: completed. Product replay passed, but the external acceptance run
+failed two of four preregistered gates. Global default-on promotion is rejected;
+the standing-instruction lane remains opt-in.
 
 ## Question
 
@@ -60,3 +60,58 @@ for all 400 query IDs, use only verified user evidence, stay within each frozen
 token budget, and preserve the manifest hashes above. If product behavior
 intentionally differs, it requires a new artifact and preregistration rather
 than silently reusing this arm.
+
+## Product Replay Result
+
+The requirement passed before any external calls. A database containing all
+5,732 raw turns from the 20 benchmark conversations persisted 90 source-keyed
+standing-instruction facets. The store was closed and reopened, then the public
+`recall_facets` lane reconstructed and whole-block-capped all 400 treatment
+contexts without query, gold, rubric, answer, or score access during
+extraction.
+
+All 400 contexts matched the frozen treatment byte for byte, with zero panel or
+context mismatches and identical ordered query IDs. The reconstructed artifact
+SHA-256 was
+`551662988effa63397928146b73775eac653fc0c37cf29ea23b018aded6838e3`,
+exactly matching the preregistered treatment arm. The replay made no model or
+network calls, so it did not consume or alter the external acceptance run.
+
+## Full-400 Acceptance Result
+
+The frozen run completed all 400 pairs in 7,020.5 seconds with no failed pairs.
+Its result SHA-256 is
+`0b30ebe5fbf045785a8c3dcbd33fbb4b1d117b456954a983eb208024a4948b64`.
+
+| cohort | control | treatment | delta | paired 95% CI | W/T/L |
+|---|---:|---:|---:|---:|---:|
+| all 400 | 0.62967 | 0.63182 | +0.00215 | [-0.02316, +0.02731] | 60/275/65 |
+| instruction following | 0.78750 | 0.86250 | +0.07500 | [+0.01250, +0.15000] | 5/34/1 |
+| other nine pooled | 0.61213 | 0.60619 | -0.00595 | [-0.03340, +0.02140] | 55/241/64 |
+
+The complete category result was:
+
+| category | control | treatment | delta | paired 95% CI | W/T/L |
+|---|---:|---:|---:|---:|---:|
+| abstention | 0.67500 | 0.65000 | -0.02500 | [-0.15000, +0.10000] | 3/33/4 |
+| contradiction resolution | 0.85313 | 0.85313 | +0.00000 | [-0.04063, +0.04375] | 5/29/6 |
+| event ordering | 0.27069 | 0.24997 | -0.02072 | [-0.06572, +0.02110] | 12/13/15 |
+| information extraction | 0.75677 | 0.74271 | -0.01406 | [-0.11198, +0.09063] | 7/25/8 |
+| instruction following | 0.78750 | 0.86250 | +0.07500 | [+0.01250, +0.15000] | 5/34/1 |
+| knowledge update | 0.51875 | 0.58125 | +0.06250 | [-0.03750, +0.17500] | 5/33/2 |
+| multi-session reasoning | 0.56458 | 0.55062 | -0.01396 | [-0.07792, +0.05208] | 5/26/9 |
+| preference following | 0.88750 | 0.86250 | -0.02500 | [-0.07500, +0.02500] | 2/34/4 |
+| summarization | 0.57025 | 0.54049 | -0.02976 | [-0.09223, +0.02545] | 11/16/13 |
+| temporal reasoning | 0.41250 | 0.42500 | +0.01250 | [-0.07500, +0.08750] | 5/32/3 |
+
+Gate 1 passed: instruction following improved by `+0.075`, with five wins
+against one loss. Gate 2 failed: the overall mean was non-negative, but the
+confidence-interval lower bound (`-0.02316`) was below the `-0.01` floor. Gate
+3 passed: the other-nine pooled delta was `-0.00595`. Gate 4 failed:
+summarization fell by `-0.02976`, below its `-0.025` floor.
+
+Per the frozen decision rule, the authoritative standing-instruction facet is
+validated for its target behavior but must not be globally injected by
+default. Product rollout remains explicit or query-scoped until a separately
+preregistered mechanism can preserve the instruction lift without paying the
+unrelated-category context cost.

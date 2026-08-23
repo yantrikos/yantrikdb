@@ -116,3 +116,33 @@ the tested mechanism: user-authored provenance, typed `standing_instruction`
 records, source turn/evidence links, namespace isolation, and recall-time
 salience ahead of ordinary memories. It must not promote assistant
 acknowledgements or infer general preferences from this narrow detector.
+
+## Product Replay Result
+
+The product-backed replay passed the final equivalence gate. The reviewed
+`standing_instruction` facet implementation was built as a Python wheel, then
+the frozen source histories were replayed through the public product surfaces:
+
+1. All 5,732 raw user and assistant turns from the 20 relevant conversations
+   were recorded with source role, namespace, source-turn metadata, and
+   deterministic historical ordering.
+2. `extract_standing_instructions` persisted 90 source-keyed facets and their
+   evidence dependencies at write time.
+3. The database was closed and reopened before `recall_facets`, proving the
+   result came from persisted product state rather than process-local objects.
+4. Facet source RIDs were mapped back to source turns, rendered with the frozen
+   panel format, and capped with the unchanged whole-block budget rule.
+
+All 40 treatment contexts matched the evaluated frozen contexts byte for byte,
+with zero panel or context mismatches. The reconstructed paired artifact's
+SHA-256 was
+`c3d7f8799cefcdd25b0b499de31b0ef4531b92e5881333b1153e868f6196aa87`,
+exactly matching the artifact used by both scored runs. Extraction did not
+receive queries, gold answers, rubrics, or scores, and the replay made no model
+or network calls.
+
+This closes the product-equivalence condition: the replicated category lift is
+reachable through persisted YantrikDB facets, not only through the original
+benchmark-side transform. It does not close the separately deferred typed
+submission API, turn-native recall metadata, auditable hit fields, or mounted
+pack support described by the product contract.
