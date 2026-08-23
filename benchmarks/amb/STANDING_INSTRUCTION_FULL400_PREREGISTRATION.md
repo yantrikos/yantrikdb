@@ -115,3 +115,32 @@ validated for its target behavior but must not be globally injected by
 default. Product rollout remains explicit or query-scoped until a separately
 preregistered mechanism can preserve the instruction lift without paying the
 unrelated-category context cost.
+
+## Post-Run Displacement Diagnosis
+
+This section is diagnostic only. It was written after the frozen acceptance
+result, makes no causal or promotion claim, and does not authorize threshold
+tuning against the full-400 scores.
+
+The equal-budget transform inserted one instruction panel and retained a
+prefix of the original memory blocks. A deterministic audit verified that
+relationship for every row and found that all 400 treatments displaced at
+least one original block: `1.155` blocks and `434.54` tokens per row on
+average. The target instruction cohort displaced `453.75` tokens per row but
+had no rows where a conservative gold-answer bigram appeared only in removed
+context. Summarization displaced `433.43` tokens per row and contained four of
+the seven such lexical source-loss cases across the full cohort.
+
+The lexical overlap is only a proxy: it neither proves that displacement
+caused a score change nor captures paraphrased evidence. Its value is that it
+confirms the proposed failure mechanism is reachable, including in the one
+category that crossed the preregistered harm floor. A post-hoc category oracle
+that uses treatment only for `instruction_following` and control everywhere
+else would score `0.63717`, or `+0.00750` over control, while preserving the
+observed `+0.075` target lift. That oracle is not deployable or fresh evidence;
+it identifies query-gated composition as the next mechanism to preregister.
+
+The reproducible audit is
+`benchmarks/amb/analyze_standing_instruction_displacement.py`; its full local
+row-level artifact is excluded from version control with the other model-run
+outputs.
