@@ -48,3 +48,30 @@ def test_select_common_rows_preserves_arm_a_order_and_category():
         "1_multi_session_reasoning_0",
     ]
     assert [row["context"] for row in arm_b] == ["B2", "B1"]
+
+
+def test_select_common_rows_accepts_full_cohort():
+    rows_a = [
+        {
+            "query_id": "1_instruction_following_0",
+            "context": "A1",
+            "meta": {"question_category": "instruction_following"},
+        },
+        {
+            "query_id": "1_temporal_reasoning_0",
+            "context": "A2",
+            "meta": {"question_category": "temporal_reasoning"},
+        },
+    ]
+    rows_b = [
+        {"query_id": "1_instruction_following_0", "context": "B1"},
+        {"query_id": "1_temporal_reasoning_0", "context": "B2"},
+    ]
+
+    arm_a, arm_b = _MODULE.select_common_rows(rows_a, rows_b, "all")
+
+    assert [row["query_id"] for row in arm_a] == [
+        "1_instruction_following_0",
+        "1_temporal_reasoning_0",
+    ]
+    assert [row["context"] for row in arm_b] == ["B1", "B2"]
