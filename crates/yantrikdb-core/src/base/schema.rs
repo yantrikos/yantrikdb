@@ -13,7 +13,8 @@
 // missing telemetry remains unknown rather than becoming an implicit negative.
 // v46 keeps caller-added omissions distinct from children that were served and
 // freezes the query/child features needed for offline membership calibration.
-pub const SCHEMA_VERSION: i32 = 46;
+// v47 adds claims.hlc so relate LWW compares causal order, not wall clocks (#148).
+pub const SCHEMA_VERSION: i32 = 47;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -668,6 +669,12 @@ CREATE TABLE IF NOT EXISTS claims (
     rel_type TEXT NOT NULL,              -- relationship type (e.g., \"ceo_of\", \"works_at\")
     weight REAL NOT NULL DEFAULT 1.0,    -- relationship strength [0, 1]
     created_at REAL NOT NULL,
+    -- v47 (#148): HLC of the authoritative relate op, big-endian 16 bytes so
+    -- BLOB memcmp = causal order. LWW on replication compares this, not
+    -- created_at — wall clocks skew between nodes. NULL on rows written by
+    -- non-replicating writers (auto_relate, claims lane) and pre-v47 rows;
+    -- LWW falls back to created_at against a NULL.
+    hlc BLOB,
     tombstoned INTEGER NOT NULL DEFAULT 0,
     -- RFC 006 claim qualifiers
     polarity INTEGER NOT NULL DEFAULT 1,           -- 1=positive, -1=negative, 0=unknown
@@ -3005,4 +3012,8 @@ CREATE TABLE IF NOT EXISTS rollup_impression_additions (
 );
 CREATE INDEX IF NOT EXISTS idx_rollup_impression_additions_child
     ON rollup_impression_additions(child_rid, impression_id);
+";
+
+pub const MIGRATE_V46_TO_V47: &str = "
+ALTER TABLE claims ADD COLUMN hlc BLOB;
 ";
