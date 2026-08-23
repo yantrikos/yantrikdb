@@ -270,6 +270,23 @@ pub fn merge_event_dates(metadata: &serde_json::Value, text: &str) -> serde_json
     m
 }
 
+/// The single source for stamping the v48 `memories.event_time_min` /
+/// `memories.event_time_max` columns (#149): every memories writer that
+/// persists the metadata column must bind the pair this returns, computed
+/// from the EXACT plaintext `serde_json::Value` it is about to serialize
+/// (before any encryption), so the columns and the JSON can never disagree.
+///
+/// Non-object metadata (including the ciphertext-as-string shape an
+/// encrypted payload passthrough can carry) and absent/non-numeric keys all
+/// yield `None`, which lands as NULL — consistent with a JSON blob that
+/// exposes no extractable event time.
+pub fn event_time_bounds(metadata: &serde_json::Value) -> (Option<f64>, Option<f64>) {
+    (
+        metadata.get("event_time_min").and_then(|v| v.as_f64()),
+        metadata.get("event_time_max").and_then(|v| v.as_f64()),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,5 +445,24 @@ mod tests {
         assert_eq!(e.epoch, 1_710_460_800.0);
         let e = &extract_event_dates("1970-01-01")[0];
         assert_eq!(e.epoch, 0.0);
+    }
+
+    /// v48 (#149): the column-stamping helper reads the pair, and every
+    /// non-object / keyless / non-numeric shape resolves to None (NULL
+    /// columns) rather than erroring — including the ciphertext-as-string
+    /// shape an encrypted payload passthrough can carry.
+    #[test]
+    fn event_time_bounds_reads_the_pair_and_tolerates_non_objects() {
+        let m = serde_json::json!({"event_time_min": 1.5, "event_time_max": 2.5});
+        assert_eq!(event_time_bounds(&m), (Some(1.5), Some(2.5)));
+        assert_eq!(event_time_bounds(&serde_json::json!({})), (None, None));
+        assert_eq!(
+            event_time_bounds(&serde_json::json!("AGEv1:ciphertext")),
+            (None, None)
+        );
+        assert_eq!(
+            event_time_bounds(&serde_json::json!({"event_time_min": "not-a-number"})),
+            (None, None)
+        );
     }
 }

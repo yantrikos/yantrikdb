@@ -810,3 +810,165 @@ fn block_comments_with_semicolons_do_not_split() {
         .unwrap();
     assert_eq!(n, 2);
 }
+
+// =====================================================================
+// v48 (#149) — valid time as first-class indexed columns.
+//
+// event_time_min / event_time_max move out of the metadata JSON into REAL
+// columns on `memories`, plus the partial index recall's range scans use.
+// Three paths, mirroring the v26/v46 suites:
+//   1. Fresh install has the columns and the index via SCHEMA_SQL.
+//   2. A v47 store upgrades: columns backfilled from the JSON, index created.
+//   3. The backfill's json_valid guard skips ciphertext metadata rows
+//      (encrypted stores) instead of erroring the migration.
+// =====================================================================
+
+#[test]
+fn schema_v48_fresh_install_has_event_time_columns_and_index() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let conn = db.conn();
+
+    let cols = table_columns(&conn, "memories");
+    for required in ["event_time_min", "event_time_max"] {
+        assert!(
+            cols.iter().any(|c| c == required),
+            "v48: fresh-install memories table missing column {required}"
+        );
+    }
+    assert!(
+        index_exists(&conn, "idx_memories_event_time"),
+        "v48: fresh-install missing partial index idx_memories_event_time"
+    );
+}
+
+#[test]
+fn schema_v48_migration_backfills_event_time_and_creates_index() {
+    // Simulate a v47 store carrying event time only in the metadata JSON:
+    // open at current schema, record a date-bearing memory (which stamps
+    // both the JSON and the columns), then NULL the columns (the exact
+    // post-ALTER state a real v47 table reaches), drop the index, rewind
+    // meta to 47, and reopen. MIGRATE_V47_TO_V48's ALTERs replay as no-ops
+    // (idempotent runner), the backfill must copy the JSON values into the
+    // columns, and the index must be recreated.
+    use tempfile::NamedTempFile;
+    let tmp = NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap();
+
+    let rid;
+    {
+        let db = YantrikDB::new(path, 8).unwrap();
+        rid = db
+            .record(
+                "met Alice on 2024-03-15",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &vec_seed(1.0, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+    }
+
+    {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute(
+            "UPDATE memories SET event_time_min = NULL, event_time_max = NULL",
+            [],
+        )
+        .unwrap();
+        conn.execute("DROP INDEX idx_memories_event_time", [])
+            .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '47')",
+            [],
+        )
+        .unwrap();
+    }
+
+    {
+        let db = YantrikDB::new(path, 8).unwrap();
+        let conn = db.conn();
+        let (col_min, json_min, col_max, json_max): (
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+            Option<f64>,
+        ) = conn
+            .query_row(
+                "SELECT event_time_min, json_extract(metadata, '$.event_time_min'), \
+                        event_time_max, json_extract(metadata, '$.event_time_max') \
+                 FROM memories WHERE rid = ?1",
+                [rid.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            )
+            .unwrap();
+        assert!(
+            json_min.is_some(),
+            "precondition: the date-bearing record's metadata JSON carries event_time_min"
+        );
+        assert_eq!(
+            col_min, json_min,
+            "v48 backfill must copy event_time_min out of the metadata JSON"
+        );
+        assert_eq!(
+            col_max, json_max,
+            "v48 backfill must copy event_time_max out of the metadata JSON"
+        );
+        let idx: String = conn
+            .query_row(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_memories_event_time'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(idx, "idx_memories_event_time");
+    }
+}
+
+#[test]
+fn schema_v48_backfill_skips_ciphertext_metadata() {
+    // The json_valid guard is load-bearing: on encrypted stores the metadata
+    // column holds ciphertext, and an unguarded json_extract would error the
+    // whole migration. Ciphertext rows must keep NULL columns; valid-JSON
+    // rows must backfill; and the batch must not error.
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    conn.execute_batch(
+        "CREATE TABLE memories (rid TEXT PRIMARY KEY, \
+             namespace TEXT NOT NULL DEFAULT 'default', metadata TEXT);",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO memories (rid, metadata) VALUES \
+         ('plain', '{\"event_time_min\": 100.5, \"event_time_max\": 200.5}'), \
+         ('cipher', 'AGEv1:definitely-not-json'), \
+         ('absent', NULL)",
+        [],
+    )
+    .unwrap();
+
+    conn.execute_batch(crate::base::schema::MIGRATE_V47_TO_V48)
+        .unwrap();
+
+    let get = |rid: &str| -> (Option<f64>, Option<f64>) {
+        conn.query_row(
+            "SELECT event_time_min, event_time_max FROM memories WHERE rid = ?1",
+            [rid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    };
+    assert_eq!(get("plain"), (Some(100.5), Some(200.5)));
+    assert_eq!(
+        get("cipher"),
+        (None, None),
+        "ciphertext metadata must be skipped, not extracted"
+    );
+    assert_eq!(get("absent"), (None, None));
+    assert!(index_exists(&conn, "idx_memories_event_time"));
+}

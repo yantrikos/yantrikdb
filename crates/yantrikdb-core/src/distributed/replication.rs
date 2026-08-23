@@ -807,6 +807,12 @@ fn materialize_record(
         .get("metadata")
         .map(|m| serde_json::to_string(m).unwrap_or_else(|_| "{}".to_string()))
         .unwrap_or_else(|| "{}".to_string());
+    // v48 (#149): event-time columns from the SAME payload value the
+    // metadata column text was serialized from, so column and JSON agree.
+    let (event_time_min, event_time_max) = payload
+        .get("metadata")
+        .map(crate::base::datetext::event_time_bounds)
+        .unwrap_or((None, None));
 
     if rid.is_empty() {
         return Ok(SynthesisStateChanges::default()); // Can't materialize without a rid
@@ -916,9 +922,10 @@ fn materialize_record(
           half_life, last_access, valence, metadata, namespace, \
           certainty, domain, source, emotional_state, idempotency_key, origin_actor, \
           synthesis_axis, synthesis_granularity, synthesis_logical_key, \
-          synthesis_evidence_version, synthesis_generation_hlc, synthesis_state) \
+          synthesis_evidence_version, synthesis_generation_hlc, synthesis_state, \
+          event_time_min, event_time_max) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-                 ?18, ?19, ?20, ?21, ?22, ?23)",
+                 ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
         params![
             rid,
             mem_type,
@@ -955,6 +962,9 @@ fn materialize_record(
                 .map(|s| s.evidence_version.as_str()),
             synthesis_shape_valid.then_some(generation_hlc),
             synthesis_state,
+            // v48 (#149) event time.
+            event_time_min,
+            event_time_max,
         ],
     )?;
 
@@ -1176,14 +1186,21 @@ fn materialize_consolidate(
             .get("metadata")
             .map(|m| serde_json::to_string(m).unwrap_or_else(|_| "{}".to_string()))
             .unwrap_or_else(|| "{}".to_string());
+        // v48 (#149): event-time columns from the SAME payload value the
+        // metadata column text was serialized from.
+        let (event_time_min, event_time_max) = payload
+            .get("metadata")
+            .map(crate::base::datetext::event_time_bounds)
+            .unwrap_or((None, None));
         let ts = crate::time::now_secs();
 
         let namespace = payload["namespace"].as_str().unwrap_or("default");
         conn.execute(
             "INSERT OR IGNORE INTO memories \
              (rid, type, text, created_at, updated_at, importance, \
-              half_life, last_access, valence, metadata, namespace) \
-             VALUES (?1, 'semantic', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+              half_life, last_access, valence, metadata, namespace, \
+              event_time_min, event_time_max) \
+             VALUES (?1, 'semantic', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 consolidated_rid,
                 text,
@@ -1195,6 +1212,9 @@ fn materialize_consolidate(
                 valence,
                 metadata,
                 namespace,
+                // v48 (#149) event time.
+                event_time_min,
+                event_time_max,
             ],
         )?;
 

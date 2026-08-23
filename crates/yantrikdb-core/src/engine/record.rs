@@ -502,6 +502,10 @@ impl YantrikDB {
         let ts = created_at.unwrap_or_else(now);
         let emb_blob = serialize_f32(embedding);
         let meta_str = serde_json::to_string(metadata)?;
+        // v48 (#149): the event-time columns are stamped from the SAME
+        // plaintext value serialized into `meta_str` (pre-encryption), so the
+        // columns and the JSON cannot disagree.
+        let (event_time_min, event_time_max) = crate::base::datetext::event_time_bounds(metadata);
         // Chunked embeddings: encrypt the window vectors up front (CPU
         // work outside the conn lock), mint their index keys once.
         let stored_chunks: Vec<(usize, String, Vec<u8>)> = chunks
@@ -753,9 +757,9 @@ impl YantrikDB {
                   certainty, domain, source, emotional_state, embedding_generation, \
                   idempotency_key, origin_actor, synthesis_axis, synthesis_granularity, \
                   synthesis_logical_key, synthesis_evidence_version, synthesis_generation_hlc, \
-                  synthesis_state) \
+                  synthesis_state, event_time_min, event_time_max) \
                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-                          ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+                          ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
                 params![
                     rid,
                     memory_type,
@@ -786,6 +790,10 @@ impl YantrikDB {
                     synthesis.map(|s| s.evidence_version.as_str()),
                     synthesis.map(|_| record_hlc.as_slice()),
                     synthesis.map(|_| "verified"),
+                    // v48 (#149): event time, from the same plaintext value
+                    // serialized above.
+                    event_time_min,
+                    event_time_max,
                 ],
             )?;
 
@@ -1610,6 +1618,10 @@ impl YantrikDB {
                 let stored_text = self.encrypt_text(sanitized_texts[idx].as_ref())?;
                 let stored_meta = self.encrypt_text(&meta_str)?;
                 let stored_emb = self.encrypt_embedding(&emb_blob)?;
+                // v48 (#149): event-time columns from the SAME plaintext
+                // value `meta_str` was serialized from (pre-encryption).
+                let (event_time_min, event_time_max) =
+                    crate::base::datetext::event_time_bounds(&merged_metas[idx]);
 
                 // **Issue #41 brainstorm-4 §6.** v28 embedding_generation
                 // stamped from the batch's snapshot.
@@ -1619,9 +1631,9 @@ impl YantrikDB {
                      (rid, type, text, embedding, created_at, updated_at, importance, \
                       half_life, last_access, valence, metadata, namespace, \
                       certainty, domain, source, emotional_state, embedding_generation, \
-                      idempotency_key, origin_actor) \
+                      idempotency_key, origin_actor, event_time_min, event_time_max) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-                             ?18, ?19)",
+                             ?18, ?19, ?20, ?21)",
                     params![rid, input.memory_type, stored_text, stored_emb, ts, ts,
                             calibrated, input.half_life, ts, input.valence, stored_meta,
                             namespaces[idx], input.certainty, input.domain, input.source,
@@ -1631,7 +1643,9 @@ impl YantrikDB {
                             // partial unique index ignores NULLs, so unkeyed
                             // behavior is unchanged).
                             input.idempotency_key.as_deref(),
-                            input.idempotency_key.as_ref().map(|_| self.actor_id.as_str())],
+                            input.idempotency_key.as_ref().map(|_| self.actor_id.as_str()),
+                            // v48 (#149) event time.
+                            event_time_min, event_time_max],
                 )?;
 
                 // The canonical "record" op, byte-for-byte what record() emits,
@@ -2116,6 +2130,9 @@ impl YantrikDB {
         let ts_secs = (created_at_unix_micros as f64) / 1_000_000.0;
         let emb_blob = serialize_f32(embedding);
         let meta_str = serde_json::to_string(metadata)?;
+        // v48 (#149): event-time columns from the SAME plaintext value
+        // serialized into `meta_str` (pre-encryption).
+        let (event_time_min, event_time_max) = crate::base::datetext::event_time_bounds(metadata);
 
         // Encryption is engine-side and deterministic given the same DEK +
         // same plaintext bytes (AES-GCM is non-deterministic across IVs but
@@ -2182,8 +2199,10 @@ impl YantrikDB {
              (rid, type, text, embedding, created_at, updated_at, importance, \
               half_life, last_access, valence, metadata, namespace, \
               certainty, domain, source, emotional_state, \
-              created_at_unix_micros, embedding_model, embedding_generation) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?5, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17)",
+              created_at_unix_micros, embedding_model, embedding_generation, \
+              event_time_min, event_time_max) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?5, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
+                     ?18, ?19)",
             params![
                 rid, memory_type, stored_text, stored_emb,
                 ts_secs,
@@ -2191,6 +2210,8 @@ impl YantrikDB {
                 certainty, domain, source, emotional_state,
                 created_at_unix_micros, embedding_model,
                 embedding_generation,
+                // v48 (#149) event time.
+                event_time_min, event_time_max,
             ],
         )?;
         let was_new_row = inserted_row == 1;

@@ -14,7 +14,8 @@
 // v46 keeps caller-added omissions distinct from children that were served and
 // freezes the query/child features needed for offline membership calibration.
 // v47 adds claims.hlc so relate LWW compares causal order, not wall clocks (#148).
-pub const SCHEMA_VERSION: i32 = 47;
+// v48 makes valid time reachable at recall: event_time_min/max columns + index (#149).
+pub const SCHEMA_VERSION: i32 = 48;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -123,6 +124,16 @@ CREATE TABLE IF NOT EXISTS memories (
         CHECK (synthesis_state IS NULL OR synthesis_state IN
                ('verified', 'invalidated', 'unverified', 'superseded')),
 
+    -- v48 (#149): valid time, first-class. `created_at` is transaction time
+    -- (when the row was written); these are event time (when the described
+    -- events happened), mirrored from metadata JSON event_time_min /
+    -- event_time_max by every writer that persists the metadata column (the
+    -- `event_time_bounds` helper in base::datetext is the single source).
+    -- NULL when the record carries no event time, and on encrypted stores
+    -- (metadata is ciphertext there, so nothing is extractable at rest).
+    event_time_min REAL,
+    event_time_max REAL,
+
     -- v32 (structural query / list_records): indexed generated columns that
     -- extract JSON metadata fields for typed enumeration without scanning the
     -- opaque metadata blob. VIRTUAL = computed on read; the secondary index
@@ -144,6 +155,12 @@ CREATE INDEX IF NOT EXISTS idx_memories_embedding_generation
 -- (initially) overwhelming majority of rows that are append-with-no-conflict.
 CREATE INDEX IF NOT EXISTS idx_memories_prior_rid ON memories(prior_rid) WHERE prior_rid IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_memories_resolution_kind ON memories(resolution_kind) WHERE resolution_kind IS NOT NULL;
+
+-- v48 (#149): recall-time valid-time range scans. Partial: rows with no
+-- event time (the majority) cost nothing.
+CREATE INDEX IF NOT EXISTS idx_memories_event_time
+    ON memories(namespace, event_time_min, event_time_max)
+    WHERE event_time_min IS NOT NULL;
 
 -- v37 (Item 4a): actor-scoped durable idempotency claims. The
 -- `INSERT ... ON CONFLICT` on the PK is the serialization point for same-key
@@ -3016,4 +3033,27 @@ CREATE INDEX IF NOT EXISTS idx_rollup_impression_additions_child
 
 pub const MIGRATE_V46_TO_V47: &str = "
 ALTER TABLE claims ADD COLUMN hlc BLOB;
+";
+
+/// v47 -> v48 (#149): valid time becomes first-class. `event_time_min` /
+/// `event_time_max` move out of the metadata JSON into indexed REAL columns
+/// so recall can range-scan event time without crawling (or decrypting) the
+/// blob. Statements stay idempotent-friendly: the runner is
+/// `run_migration_idempotent`, which swallows duplicate-column /
+/// already-exists errors on replay (the v0.7.3 contract).
+pub const MIGRATE_V47_TO_V48: &str = "
+ALTER TABLE memories ADD COLUMN event_time_min REAL;
+ALTER TABLE memories ADD COLUMN event_time_max REAL;
+-- Backfill from the metadata JSON. The json_valid guard is load-bearing: on
+-- encrypted stores the metadata column holds ciphertext, and json_extract
+-- against it would error the whole migration. Encrypted rows keep NULL
+-- columns here and fill on their next write (every writer stamps the columns
+-- from the plaintext metadata it is about to persist).
+UPDATE memories SET
+    event_time_min = json_extract(metadata, '$.event_time_min'),
+    event_time_max = json_extract(metadata, '$.event_time_max')
+WHERE metadata IS NOT NULL AND json_valid(metadata);
+CREATE INDEX IF NOT EXISTS idx_memories_event_time
+    ON memories(namespace, event_time_min, event_time_max)
+    WHERE event_time_min IS NOT NULL;
 ";
