@@ -742,3 +742,71 @@ fn migration_splitter_keeps_trigger_bodies_intact() {
     YantrikDB::run_migration_idempotent(&conn, batch)
         .expect("replay of a trigger-bearing batch must stay idempotent");
 }
+
+// =====================================================================
+// #160 cold-review adversarials (found by Codex, empirically reproduced
+// against the first depth-scanner fix — both failed it). A quoted
+// identifier `"begin"` jammed the scanner's depth counter, grouping
+// statements so that a swallowed already-exists SILENTLY DROPPED the
+// rest of the group; and an identifier containing a semicolon split
+// mid-name. sqlite3_complete understands both because it is SQLite.
+// =====================================================================
+
+#[test]
+fn quoted_begin_identifier_does_not_group_statements() {
+    use rusqlite::Connection;
+    let conn = Connection::open_in_memory().unwrap();
+    // Precreate "begin" so the first statement hits already-exists and the
+    // swallow list eats it — the second statement must STILL run alone.
+    conn.execute("CREATE TABLE \"begin\" (id INTEGER)", [])
+        .unwrap();
+    let batch =
+        "CREATE TABLE \"begin\" (id INTEGER); CREATE TABLE applied_after_replay (id INTEGER);";
+    YantrikDB::run_migration_idempotent(&conn, batch).unwrap();
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name = 'applied_after_replay'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        n, 1,
+        "statement after a swallowed error must not be silently lost"
+    );
+}
+
+#[test]
+fn semicolon_inside_quoted_identifier_does_not_split() {
+    use rusqlite::Connection;
+    let conn = Connection::open_in_memory().unwrap();
+    let batch = "CREATE TABLE \"semi;colon\" (id INTEGER); CREATE TABLE after_semi (id INTEGER);";
+    YantrikDB::run_migration_idempotent(&conn, batch).unwrap();
+    for t in ["semi;colon", "after_semi"] {
+        let n: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master WHERE name = ?1",
+                rusqlite::params![t],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 1, "table {t:?} must exist");
+    }
+}
+
+#[test]
+fn block_comments_with_semicolons_do_not_split() {
+    use rusqlite::Connection;
+    let conn = Connection::open_in_memory().unwrap();
+    let batch =
+        "CREATE TABLE c1 (id INTEGER) /* note; with; semis */; CREATE TABLE c2 (id INTEGER);";
+    YantrikDB::run_migration_idempotent(&conn, batch).unwrap();
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE name IN ('c1','c2')",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(n, 2);
+}

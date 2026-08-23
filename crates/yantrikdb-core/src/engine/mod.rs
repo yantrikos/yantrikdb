@@ -1587,72 +1587,49 @@ impl YantrikDB {
     /// Diagnosed via yantrikdb-server v0.8.13 cluster upgrade incident
     /// (swarm msg 3467c556 → response fa070846, v0.7.3 commit a5de0f2) and
     /// extended for issue #10 view case in v0.7.8.
-    /// Split a migration batch into executable statements WITHOUT cutting
-    /// trigger bodies.
+    /// Split a migration batch into executable statements using SQLite's
+    /// own grammar — `sqlite3_complete()` — instead of a hand-rolled lexer.
     ///
-    /// **Issue #146, root cause.** The previous `batch.split(';')` truncated
-    /// `CREATE TRIGGER ... BEGIN stmt; stmt; END` at the first body
-    /// semicolon, handing SQLite an incomplete statement — the literal
-    /// `incomplete input` the stage instrumentation finally caught in CI.
-    /// The runner's doc had flagged `;`-inside-string-literals as the
-    /// hazard; trigger bodies were the unnamed case.
+    /// **Issue #146, both generations of the bug.** The original
+    /// `batch.split(';')` truncated trigger bodies (`BEGIN stmt; stmt; END`),
+    /// producing the `incomplete input` the stage instrumentation caught in
+    /// CI. The first fix was a depth-tracking scanner — and cold review
+    /// reproduced two holes in it within the hour: a quoted identifier
+    /// `"begin"` counted as a keyword and jammed the depth counter (grouping
+    /// statements so a swallowed already-exists SILENTLY DROPPED the rest of
+    /// the group — migration loss), and `"semi;colon"` identifiers split
+    /// mid-name. A partial SQL lexer is the original sin repeated: every
+    /// unnamed case is a future #146.
     ///
-    /// The splitter is a small scanner, not a SQL parser:
-    /// - single-quoted strings are skipped verbatim (with `''` escapes), so
-    ///   a semicolon or keyword inside a literal never counts;
-    /// - `BEGIN` and `CASE` push a depth counter, `END` pops it (trigger
-    ///   bodies contain `CASE ... END`, so plain begin-flag tracking would
-    ///   close the trigger too early — our own LWW migration SQL has CASE);
-    /// - a `;` splits only at depth zero.
-    /// Line comments are already stripped by the caller.
+    /// `sqlite3_complete` is the engine's own answer to "is this a complete
+    /// statement?" — it understands triggers, CASE/END, every string and
+    /// identifier quoting form, and comments, because it IS SQLite. We scan
+    /// forward and emit a statement at each `;` where the accumulated prefix
+    /// is complete; anything trailing without a terminator is emitted as-is
+    /// (execute_batch surfaces its error, which is correct for a malformed
+    /// migration).
     fn split_sql_statements(batch: &str) -> Vec<String> {
         let mut out = Vec::new();
-        let mut current = String::new();
-        let mut depth: u32 = 0;
-        let mut chars = batch.chars().peekable();
-        let mut word = String::new();
-
-        fn flush_word(word: &mut String, depth: &mut u32) {
-            match word.to_ascii_uppercase().as_str() {
-                "BEGIN" | "CASE" => *depth += 1,
-                "END" => *depth = depth.saturating_sub(1),
-                _ => {}
-            }
-            word.clear();
-        }
-
-        while let Some(c) = chars.next() {
-            if c == '\'' {
-                // String literal: copy through, honoring '' escapes.
-                flush_word(&mut word, &mut depth);
-                current.push(c);
-                while let Some(sc) = chars.next() {
-                    current.push(sc);
-                    if sc == '\'' {
-                        if chars.peek() == Some(&'\'') {
-                            current.push(chars.next().unwrap());
-                        } else {
-                            break;
-                        }
+        let mut start = 0usize;
+        let bytes = batch.as_bytes();
+        for i in 0..bytes.len() {
+            if bytes[i] == b';' {
+                let candidate = &batch[start..=i];
+                // sqlite3_complete needs a NUL-terminated C string; a
+                // candidate containing an interior NUL cannot be a valid
+                // migration statement, so treat it as incomplete.
+                if let Ok(c) = std::ffi::CString::new(candidate) {
+                    let complete = unsafe { rusqlite::ffi::sqlite3_complete(c.as_ptr()) } != 0;
+                    if complete {
+                        out.push(candidate.to_string());
+                        start = i + 1;
                     }
                 }
-                continue;
             }
-            if c.is_alphanumeric() || c == '_' {
-                word.push(c);
-                current.push(c);
-                continue;
-            }
-            flush_word(&mut word, &mut depth);
-            if c == ';' && depth == 0 {
-                out.push(std::mem::take(&mut current));
-                continue;
-            }
-            current.push(c);
         }
-        flush_word(&mut word, &mut depth);
-        if !current.trim().is_empty() {
-            out.push(current);
+        let tail = batch[start..].trim();
+        if !tail.is_empty() {
+            out.push(tail.to_string());
         }
         out
     }
