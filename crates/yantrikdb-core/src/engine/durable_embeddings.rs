@@ -156,11 +156,20 @@ impl<'a> DurableEmbeddingStore<'a> {
 
         let conn = self.db.read_conn();
         let mut stmt = conn.prepare(&sql)?;
-        let rows: Vec<(String, Vec<u8>, i64)> = stmt
+        // `embedding` is read as Option: a NULL column (e.g. a replication
+        // follower materialized from record ops, whose oplog carries only
+        // the embedding HASH — replication.rs materialize_op note) means
+        // "this rid has no durable vector yet". Before #149 phase 2 that
+        // row was unreachable by every caller of this reader, so the NULL
+        // was never observed; the valid-time universe lane now reads
+        // eligible rows the vector index has never seen, and one NULL must
+        // mean an absent map key (the miss every caller already handles),
+        // not a hard error that fails the whole batched read.
+        let rows: Vec<(String, Option<Vec<u8>>, i64)> = stmt
             .query_map(params_ref.as_slice(), |row| {
                 Ok((
                     row.get::<_, String>(0)?,
-                    row.get::<_, Vec<u8>>(1)?,
+                    row.get::<_, Option<Vec<u8>>>(1)?,
                     row.get::<_, i64>(2)?,
                 ))
             })?
@@ -170,6 +179,9 @@ impl<'a> DurableEmbeddingStore<'a> {
 
         let mut map = HashMap::new();
         for (rid, stored_emb, generation) in rows {
+            let Some(stored_emb) = stored_emb else {
+                continue;
+            };
             // Decrypt under the engine's at-rest encryption (no-op
             // if encryption is disabled). The brainstorm-4 §5
             // contract: this module is the sole caller of

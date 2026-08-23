@@ -218,7 +218,7 @@ impl WasmYantrikDB {
         let results = self.inner
             .recall(
                 &embedding, top_k, None, None, false, false, None, false, None, None, None,
-                None, None, false,
+                None, None, false, None, None,
             )
             .map_err(|e| JsError::new(&e.to_string()))?;
 

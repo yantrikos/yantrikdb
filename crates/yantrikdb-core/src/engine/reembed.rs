@@ -2593,7 +2593,9 @@ mod tests {
         let query = vec![0.99_f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         let results = db
             .recall(
-                &query, 5, None, None, false, true, None, true, None, None, None, None, None, false,
+                &query, 5, None, None, false, true, None, true, None, None, None, None, None,
+                false, None, // event_after (#149)
+                None, // event_before (#149)
             )
             .unwrap();
         assert_eq!(

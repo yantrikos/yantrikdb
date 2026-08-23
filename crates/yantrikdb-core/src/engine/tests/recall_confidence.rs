@@ -83,6 +83,8 @@ fn recall_certainty_min_filters_low_certainty() {
             Some(0.5), // certainty_min
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
 
@@ -125,6 +127,8 @@ fn recall_order_certainty_returns_results_in_certainty_desc() {
             None,
             Some("certainty"),
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
 
@@ -167,6 +171,8 @@ fn recall_order_recency_returns_results_in_created_at_desc() {
             None,
             Some("recency"),
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
 
@@ -233,6 +239,8 @@ fn recall_order_first_mention_uses_metadata_then_created_at() {
                 None,
                 Some(order),
                 false,
+                None, // event_after (#149)
+                None, // event_before (#149)
             )
             .unwrap();
         assert_eq!(
@@ -269,6 +277,8 @@ fn recall_order_invalid_string_returns_invalid_input_error() {
             None,
             Some("most_relevant"), // typo / not a valid order
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .expect_err("invalid order string must return error");
 
@@ -307,6 +317,8 @@ fn recall_default_order_is_relevance_unchanged() {
             None,
             None, // default order = relevance
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
 

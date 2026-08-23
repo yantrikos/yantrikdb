@@ -140,6 +140,8 @@ fn top_rids(db: &YantrikDB, query: &str, k: usize) -> Vec<String> {
         None,
         None,
         false,
+        None, // event_after (#149)
+        None, // event_before (#149)
     )
     .expect("recall")
     .into_iter()
@@ -715,6 +717,8 @@ fn certainty_floor_holds_across_every_lane() {
             Some(0.8),
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert!(

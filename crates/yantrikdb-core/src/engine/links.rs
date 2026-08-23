@@ -908,6 +908,8 @@ impl YantrikDB {
             certainty_min,
             order,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )?;
 
         if expand_links == 0 {
@@ -1577,6 +1579,8 @@ mod tests {
                 None,
                 None,
                 true, // include_superseded — history query
+                None, // event_after (#149)
+                None, // event_before (#149)
             )
             .unwrap();
         let old_hit = results
@@ -1612,6 +1616,8 @@ mod tests {
             None,
             None,
             include_superseded,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap()
         .into_iter()
@@ -1659,6 +1665,8 @@ mod tests {
                 None,
                 None,
                 true,
+                None, // event_after (#149)
+                None, // event_before (#149)
             )
             .unwrap();
         let old_hit = results
@@ -1753,6 +1761,8 @@ mod tests {
                 None,
                 None,
                 false,
+                None, // event_after (#149)
+                None, // event_before (#149)
             )
             .unwrap();
 
@@ -1896,6 +1906,8 @@ mod tests {
                 None,
                 None,
                 include_superseded,
+                None, // event_after (#149)
+                None, // event_before (#149)
             )
             .unwrap()
         };
@@ -2233,7 +2245,8 @@ mod tests {
         let direct = db
             .recall(
                 &query, 5, None, None, false, false, None, true, None, None, None, None, None,
-                false,
+                false, None, // event_after (#149)
+                None, // event_before (#149)
             )
             .unwrap();
         assert_eq!(

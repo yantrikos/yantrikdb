@@ -231,16 +231,22 @@ fn test_recall_deterministic_with_skip_reinforce() {
     let r1 = db
         .recall(
             &query, 5, None, None, false, false, None, true, None, None, None, None, None, false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     let r2 = db
         .recall(
             &query, 5, None, None, false, false, None, true, None, None, None, None, None, false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     let r3 = db
         .recall(
             &query, 5, None, None, false, false, None, true, None, None, None, None, None, false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
 
@@ -299,6 +305,8 @@ fn test_reinforce_mutates_but_skip_does_not() {
         None,
         None,
         false,
+        None, // event_after (#149)
+        None, // event_before (#149)
     )
     .unwrap();
     let after_skip = db.get(&rid).unwrap().unwrap().half_life;
@@ -320,6 +328,8 @@ fn test_reinforce_mutates_but_skip_does_not() {
         None,
         None,
         false,
+        None, // event_after (#149)
+        None, // event_before (#149)
     )
     .unwrap();
     let after_reinforce = db.get(&rid).unwrap().unwrap().half_life;
@@ -382,6 +392,8 @@ fn test_graph_expansion_off_no_graph_results() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     for r in &results {
@@ -448,6 +460,8 @@ fn test_graph_expansion_on_boosts_connected_memory() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
 
@@ -559,6 +573,8 @@ fn test_recall_scores_bounded() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     for r in &results {
@@ -676,6 +692,8 @@ fn test_recall_top_k_respected_with_graph_expansion() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
 

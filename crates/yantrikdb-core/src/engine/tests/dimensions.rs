@@ -105,6 +105,8 @@ fn test_domain_filter() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert_eq!(
@@ -186,6 +188,8 @@ fn test_source_filter() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert_eq!(
@@ -282,6 +286,8 @@ fn test_domain_and_source_combined_filter() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert_eq!(
@@ -310,6 +316,8 @@ fn test_domain_and_source_combined_filter() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert_eq!(
@@ -491,6 +499,8 @@ fn recall_top_k_above_legacy_candidate_cap_is_not_underfilled() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert_eq!(results.len(), 600);
@@ -554,6 +564,8 @@ fn explicit_filter_exhausts_small_index_past_nearer_decoys() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert_eq!(results.len(), 20);

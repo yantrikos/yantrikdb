@@ -349,6 +349,8 @@ fn record_commits_row_and_both_oplog_ops_atomically() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert!(

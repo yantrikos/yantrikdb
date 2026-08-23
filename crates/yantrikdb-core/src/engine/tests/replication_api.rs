@@ -64,6 +64,8 @@ fn test_insert_vector_makes_recall_find_it() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
 
@@ -398,6 +400,8 @@ fn record_with_rid_makes_recall_find_it() {
     let results = db
         .recall(
             &emb, 5, None, None, false, false, None, true, None, None, None, None, None, false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert!(
@@ -759,6 +763,8 @@ fn tombstone_with_rid_hides_from_recall() {
     let r = db
         .recall(
             &emb, 5, None, None, false, false, None, true, None, None, None, None, None, false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert!(r.iter().any(|x| x.rid == rid), "visible before tombstone");
@@ -770,6 +776,8 @@ fn tombstone_with_rid_hides_from_recall() {
     let r2 = db
         .recall(
             &emb, 5, None, None, false, false, None, true, None, None, None, None, None, false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert!(!r2.iter().any(|x| x.rid == rid), "hidden after tombstone");

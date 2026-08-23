@@ -185,6 +185,8 @@ fn issue_8_tombstoned_memories_excluded_from_recall() {
     let before = db
         .recall(
             &emb, 5, None, None, false, false, None, true, None, None, None, None, None, false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert!(
@@ -198,6 +200,8 @@ fn issue_8_tombstoned_memories_excluded_from_recall() {
     let after = db
         .recall(
             &emb, 5, None, None, false, false, None, true, None, None, None, None, None, false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert!(
@@ -242,6 +246,8 @@ fn issue_8_tombstoned_persists_across_engine_reopen() {
         let after = db2
             .recall(
                 &emb, 5, None, None, false, false, None, true, None, None, None, None, None, false,
+                None, // event_after (#149)
+                None, // event_before (#149)
             )
             .unwrap();
         assert!(

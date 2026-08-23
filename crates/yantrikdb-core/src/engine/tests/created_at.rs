@@ -266,6 +266,8 @@ fn imported_event_time_reaches_recall_not_just_the_row() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     let hit = hits
@@ -464,6 +466,8 @@ fn future_created_at_scores_as_new_not_amplified() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert_eq!(

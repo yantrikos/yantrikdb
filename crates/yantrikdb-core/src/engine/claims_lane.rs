@@ -190,6 +190,11 @@ impl super::YantrikDB {
         domain: Option<&str>,
         source: Option<&str>,
         certainty_min: Option<f64>,
+        // #149 phase 2: valid-time eligible universe (allow-set). A claim
+        // may be exact while its source record sits outside the caller's
+        // temporal window — membership gating here keeps the lane from
+        // re-admitting it.
+        event_allow: Option<&std::collections::HashSet<String>>,
         learned_weights: &crate::types::LearnedWeights,
         ts: f64,
         query_sentiment: f64,
@@ -260,6 +265,7 @@ impl super::YantrikDB {
         for (rid, claim_why) in new_rids {
             let Some(row) = cache.get(rid) else { continue };
             if !crate::engine::recall::passes_recall_filters(
+                rid,
                 row,
                 include_consolidated,
                 memory_type,
@@ -268,6 +274,7 @@ impl super::YantrikDB {
                 domain,
                 source,
                 certainty_min,
+                event_allow,
             ) {
                 continue;
             }
