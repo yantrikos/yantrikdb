@@ -396,6 +396,43 @@ def ceiling_estimate(result_payload: dict, summaries: dict[str, dict]) -> dict:
             for category, summary in tail_summaries.items()
         )
     )
+    direct_engine_components = {
+        "event_ordering_whole_category": {
+            "points": loss("event_ordering"),
+            "basis": "whole_category_optimistic",
+        },
+        "temporal_reasoning_whole_category": {
+            "points": loss("temporal_reasoning"),
+            "basis": "whole_category_optimistic",
+        },
+        "summarization_retrieval_proxy": {
+            "points": loss("summarization")
+            * _attribution_share(summarization, "ours"),
+            "basis": "audited_retrieval_proxy",
+        },
+        "abstention_provenance_proxy": {
+            "points": loss("abstention") * _attribution_share(abstention, "ours"),
+            "basis": "audited_provenance_proxy",
+        },
+        **{
+            f"{category}_retrieval_proxy": {
+                "points": loss(category) * _attribution_share(summary, "ours"),
+                "basis": "audited_retrieval_proxy",
+            }
+            for category, summary in tail_summaries.items()
+        },
+    }
+    direct_engine_component_total = sum(
+        component["points"] for component in direct_engine_components.values()
+    )
+    if abs(direct_engine_component_total - ours_direct) > 1e-9:
+        raise ValueError("direct-engine component decomposition does not conserve")
+    wholesale_direct = sum(
+        component["points"]
+        for component in direct_engine_components.values()
+        if component["basis"] == "whole_category_optimistic"
+    )
+    audited_direct = ours_direct - wholesale_direct
     undiagnosed_tail = sum(
         loss(category)
         for category, summary in tail_summaries.items()
@@ -436,6 +473,28 @@ def ceiling_estimate(result_payload: dict, summaries: dict[str, dict]) -> dict:
             for category, value in sorted(category_losses.items())
         },
         "buckets": {name: round(value, 6) for name, value in buckets.items()},
+        "direct_engine_decomposition": {
+            "components": {
+                name: {
+                    **component,
+                    "points": round(component["points"], 6),
+                    "share_of_direct_engine": (
+                        round(component["points"] / ours_direct, 6)
+                        if ours_direct
+                        else None
+                    ),
+                }
+                for name, component in direct_engine_components.items()
+            },
+            "whole_category_optimistic_points": round(wholesale_direct, 6),
+            "whole_category_optimistic_share": (
+                round(wholesale_direct / ours_direct, 6) if ours_direct else None
+            ),
+            "audited_proxy_points": round(audited_direct, 6),
+            "audited_proxy_share": (
+                round(audited_direct / ours_direct, 6) if ours_direct else None
+            ),
+        },
         "bucket_conservation_delta": round(total_loss - bucket_total, 12),
         "optimistic_ceiling_percent": round(100.0 - dead, 6),
         "points_required_to_reach_90": round(recovery_to_90, 6),
@@ -458,6 +517,10 @@ def ceiling_estimate(result_payload: dict, summaries: dict[str, dict]) -> dict:
             "ours_direct_engine": (
                 "all event-ordering and temporal loss plus retrieval-attributed "
                 "shares in audited categories"
+            ),
+            "direct_engine_decomposition": (
+                "whole-category event/temporal assignments are optimistic buckets, "
+                "not row-level causal diagnoses"
             ),
             "optimistic_ceiling": "full recovery of every point not classified dead",
             "reader_shaping_sensitivity": (

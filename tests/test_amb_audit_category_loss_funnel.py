@@ -280,3 +280,14 @@ def test_ceiling_estimate_conserves_full_line_loss():
         "audited_residual": 4.612351,
     }
     assert full_estimate["reader_shaping_recovery_sensitivity"]["0.5"] == 91.545497
+    direct = full_estimate["direct_engine_decomposition"]
+    assert direct["whole_category_optimistic_points"] == 12.967857
+    assert direct["whole_category_optimistic_share"] == 0.789662
+    assert direct["audited_proxy_points"] == 3.454179
+    assert abs(
+        sum(component["points"] for component in direct["components"].values())
+        - full_estimate["buckets"]["ours_direct_engine"]
+    ) <= 2e-6
+    assert direct["components"]["event_ordering_whole_category"]["basis"] == (
+        "whole_category_optimistic"
+    )
