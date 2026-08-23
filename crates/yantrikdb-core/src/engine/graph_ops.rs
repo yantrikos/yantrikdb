@@ -173,7 +173,7 @@ impl YantrikDB {
                 "INSERT INTO claims (claim_id, src, dst, rel_type, weight, created_at, hlc) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
                  ON CONFLICT(src, dst, rel_type, extractor, polarity, namespace) \
-                 DO UPDATE SET weight = ?5, created_at = ?6, hlc = ?7",
+                 DO UPDATE SET claim_id = ?1, weight = ?5, created_at = ?6, hlc = ?7",
                 params![edge_id, src, dst, rel_type, weight, ts, edge_hlc],
             )?;
 
