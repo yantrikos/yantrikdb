@@ -116,6 +116,15 @@ No score, category, gold answer, rubric, answer text, or judge output was read
 by the census. General product behavior still defaults unparsed directives to
 inclusion; the frozen corpus's expected parse coverage is 100%.
 
+A second query-only check covered the four already-frozen collision rows. All
+`4/4` fall inside the 28-row suppression cohort. The exact named collision
+directive is suppressed on rows 6, 9, and 10. On row 20, the patent-process
+timeline rule remains included because the query explicitly requests stages of
+the patent process; two unrelated deadline/meeting rules are suppressed. This
+is the intended near-domain control, not an ID-specific exception: the same
+predicate retains any process-timeline rule when the query asks for a process
+timeline.
+
 ## Pre-Call Abort Gate
 
 `build_applicable_facet_contexts.py` must rebuild the treatment through the
@@ -143,7 +152,7 @@ new preregistration commit.
 - One answer and one judge per arm per query
 - Seed: `20260826`
 - Projected calls: 800 answers and 800 judges
-- Paired bootstrap: 20,000 resamples, seed `20260826`
+- Paired bootstrap: 20,000 resamples, seed `20260827`
 - Synthetic benchmark data only; no real companion memories
 - New output path and initially absent checkpoint; resume only after an
   interruption within this run
