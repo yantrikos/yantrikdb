@@ -101,6 +101,24 @@ pub(crate) fn detect_standing_instruction_v1(turn_text: &str) -> FacetDetection 
         return FacetDetection::Rejected("title_form");
     }
 
+    // Detector v3 — cold review reproduced three misses on v2: "Always on
+    // My Mind is a song." / "Always and Forever is a film." / "Always was a
+    // 1989 movie." all fired because their first body token is a lowercase
+    // FUNCTION WORD (preposition, conjunction, copula), not an imperative
+    // verb. Deliberately narrow: false-negatives acceptable, false-fires not.
+    // List shape verified independently by Codex against the adversarial
+    // corpus (its proven set, unioned with "my"). Includes the copula
+    // family (be/been/being), which narrows out genuine "Always be X"
+    // directives — accepted v1 false-negative: "Always Be Closing"-class
+    // titles in lowercase are otherwise indistinguishable from prose.
+    const NON_DIRECTIVE_LEADS: &[&str] = &[
+        "a", "an", "and", "are", "as", "at", "be", "been", "being", "but", "by", "for", "from",
+        "in", "is", "my", "of", "on", "or", "the", "to", "was", "were", "with",
+    ];
+    if NON_DIRECTIVE_LEADS.contains(&first_body.to_ascii_lowercase().as_str()) {
+        return FacetDetection::Rejected("title_form");
+    }
+
     FacetDetection::StandingInstruction {
         directive: trimmed.to_string(),
     }
@@ -604,9 +622,40 @@ impl crate::YantrikDB {
             )?
             .collect::<std::result::Result<_, _>>()?;
 
-        let total = rows.len();
+        // One directive is one instruction however many times it was said:
+        // source-keyed idempotency (contract rule 5) makes repetitions
+        // separate facets for evidence durability, so the lane merges by
+        // normalized directive — earliest first-mention wins. Merging is
+        // consolidation, not omission; only limit-truncation counts as
+        // omitted.
+        let mut merged: Vec<(String, String, f64, f64)> = Vec::new();
+        {
+            let mut seen: std::collections::HashMap<String, usize> =
+                std::collections::HashMap::new();
+            for row in rows {
+                let key = normalize_directive(&row.1);
+                match seen.get(&key) {
+                    Some(&i) => {
+                        if row.3 < merged[i].3 {
+                            merged[i] = row;
+                        }
+                    }
+                    None => {
+                        seen.insert(key, merged.len());
+                        merged.push(row);
+                    }
+                }
+            }
+        }
+        merged.sort_by(|a, b| {
+            a.3.partial_cmp(&b.3)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| a.0.cmp(&b.0))
+        });
+
+        let total = merged.len();
         let mut facets = Vec::with_capacity(total.min(limit));
-        for (rid, text, created_at, first_mention_at) in rows.into_iter().take(limit) {
+        for (rid, text, created_at, first_mention_at) in merged.into_iter().take(limit) {
             let mut dep = conn.prepare(
                 "SELECT source_rid FROM synthesis_dependencies \
                  WHERE synthesis_rid = ?1 AND is_direct = 1 \
@@ -777,5 +826,104 @@ mod replication_tests {
             1,
             "evidence link must survive replication"
         );
+    }
+}
+
+#[cfg(test)]
+mod cold_review_regressions {
+    use super::*;
+
+    /// Codex cold-review blocker 1, reproduced cases. These were CLAIMED
+    /// fixed in 0c64d7b's commit message while the fix was absent from the
+    /// commit — the patch script aborted after a failed anchor and the
+    /// commit was written against a green run that contained none of these
+    /// tests. Kept as a named module so the claim and the bytes can never
+    /// diverge silently again: the tests ARE the claim.
+    #[test]
+    fn rejects_prose_and_titles_with_function_word_leads() {
+        for t in [
+            "Always on My Mind is a song.",
+            "Always and Forever is a film.",
+            "Always was a 1989 movie.",
+            "Always in my heart, that trip.",
+            "Always the optimist, she said yes.",
+            "always be closing",
+        ] {
+            assert!(
+                !matches!(
+                    detect_standing_instruction_v1(t),
+                    FacetDetection::StandingInstruction { .. }
+                ),
+                "function-word lead must not fire: {t:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn genuine_directives_still_fire_after_stoplist() {
+        for t in [
+            "Always use the metric system.",
+            "Always reply to me in French.",
+            "Always, when summarizing, keep exact dates.",
+            "Always cite the source turn.",
+        ] {
+            assert!(
+                matches!(
+                    detect_standing_instruction_v1(t),
+                    FacetDetection::StandingInstruction { .. }
+                ),
+                "genuine directive must fire: {t:?}"
+            );
+        }
+    }
+}
+
+#[cfg(all(test, feature = "bundled-embedder"))]
+mod lane_merge_tests {
+    use super::*;
+    use crate::YantrikDB;
+
+    /// The repetition-merge behavior promised in review correspondence and
+    /// absent from 0c64d7b: the same directive uttered in two turns is TWO
+    /// facets (source-keyed durability) but ONE lane entry — merging is
+    /// consolidation, not omission, so `omitted` stays 0.
+    #[test]
+    fn repeated_directive_is_one_lane_entry_with_durable_evidence() {
+        let db = YantrikDB::with_default(":memory:").unwrap();
+        for text in [
+            "Always reply to me in French.",
+            "always  reply to me in FRENCH.",
+            "Always keep my calendar entries private.",
+        ] {
+            db.record_text(
+                text,
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                "n",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+        }
+        let audit = db.extract_standing_instructions("n", false).unwrap();
+        assert_eq!(
+            audit.accepted, 3,
+            "source-keyed: repetition is its own facet"
+        );
+
+        let lane = db.recall_facets("n", 8).unwrap();
+        assert_eq!(
+            lane.facets.len(),
+            2,
+            "lane merges repetitions by normalized directive: {:?}",
+            lane.facets.iter().map(|f| &f.text).collect::<Vec<_>>()
+        );
+        assert_eq!(lane.omitted, 0, "merging is consolidation, not omission");
+        assert!(lane.facets[0].text.to_lowercase().contains("french"));
     }
 }
