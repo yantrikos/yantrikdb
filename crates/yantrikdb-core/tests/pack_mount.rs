@@ -1228,3 +1228,56 @@ fn mounted_pack_reports_its_namespace() {
         scoped.iter().map(|r| &r.text).collect::<Vec<_>>()
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────
+// v1.1 ACCEPTANCE — mounted-pack facet lane visibility.
+//
+// Found by Codex's cold review of the standing-instruction facet
+// (feat/standing-instruction-facet): facet DATA survives seal/mount
+// (rows, dependencies, provenance, clocks all preserved — the first
+// half of the reviewer's test passed), but `recall_facets` queries
+// only the host connection, so a facet carried by a mounted pack is
+// invisible to the lane. Verdict (accepted by both reviewers): v1's
+// lane is HOST-STORE-ONLY by explicit contract narrowing; enabling
+// pack visibility requires deliberate design for trust-tier
+// interaction with facet salience and cross-namespace semantics under
+// mount — not a quick UNION. This ignored test is the named v1.1
+// acceptance: unignore it when that design lands, and it must pass
+// unchanged.
+// ─────────────────────────────────────────────────────────────────────
+#[test]
+#[ignore = "v1.1 acceptance: mounted-pack facet lane visibility (v1 lane is host-store-only by contract; requires trust-tier + cross-namespace design)"]
+fn mounted_pack_preserves_standing_instruction_facet_lane() {
+    let dir = tempfile::tempdir().unwrap();
+    let digest = "sha256:facetpack";
+    // A pack whose source store extracted one standing instruction.
+    let src = dir.path().join("facet-pack-src.db");
+    {
+        let mut db = YantrikDB::new(src.to_str().unwrap(), DIM).unwrap();
+        db.set_embedder(embedder(digest)).unwrap();
+        record(
+            &db,
+            "Always cite the source turn in answers.",
+            &vec_on(0, 0.05),
+            "physics",
+        );
+        db.adopt_embedder_identity().unwrap();
+        let audit = db.extract_standing_instructions("physics", false).unwrap();
+        assert_eq!(audit.accepted, 1, "extraction must write one facet");
+        db.seal_pack(
+            dir.path().join("facet.pack").to_str().unwrap(),
+            &manifest(Some(digest)),
+            Some("physics"),
+        )
+        .unwrap();
+    }
+    let host = host(dir.path(), digest);
+    host.mount_pack(dir.path().join("facet.pack").to_str().unwrap())
+        .unwrap();
+    let lane = host.recall_facets("physics", 8).unwrap();
+    assert_eq!(
+        lane.facets.len(),
+        1,
+        "v1.1: a mounted pack's preserved facet must be lane-visible"
+    );
+}
