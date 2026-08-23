@@ -158,6 +158,8 @@ fn test_encrypted_recall_roundtrip() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert_eq!(results.len(), 2);
@@ -237,6 +239,8 @@ fn test_encrypted_archive_hydrate() {
     let results = db
         .recall(
             &emb, 10, None, None, false, false, None, true, None, None, None, None, None, false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert!(results.iter().any(|r| r.rid == rid));

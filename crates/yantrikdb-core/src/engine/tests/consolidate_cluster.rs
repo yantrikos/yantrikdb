@@ -555,6 +555,8 @@ fn record_synthesis_new_evidence_supersedes_the_previous_logical_generation() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert!(!hits.iter().any(|memory| memory.rid == first_rid));
@@ -902,6 +904,8 @@ fn recall_prefers_matching_synthesis_representation_and_survives_reopen() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap()
     }

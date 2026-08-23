@@ -216,6 +216,8 @@ fn test_archive_memory() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert!(
@@ -258,6 +260,8 @@ fn test_hydrate_memory() {
     let results = db
         .recall(
             &emb, 10, None, None, false, false, None, true, None, None, None, None, None, false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert!(
@@ -379,6 +383,8 @@ fn test_evict() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     for r in &results {

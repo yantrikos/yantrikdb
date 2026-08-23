@@ -326,6 +326,8 @@ fn test_recall_basic() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert_eq!(results.len(), 2);
@@ -403,6 +405,8 @@ fn recall_survives_nan_embedding_in_candidate_pool() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .expect("recall must not panic with a NaN embedding in the candidate pool");
     assert!(
@@ -806,7 +810,8 @@ fn contract_gate_rejects_invalid_writes() {
         assert!(matches!(
             db.recall(
                 &bad_query, 5, None, None, false, false, None, true, None, None, None, None, None,
-                false,
+                false, None, // event_after (#149)
+                None, // event_before (#149)
             )
             .unwrap_err(),
             YantrikDbError::InvalidEmbedding { path: "recall", .. }
@@ -833,6 +838,8 @@ fn contract_gate_rejects_invalid_writes() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap()
         .len(),
@@ -860,6 +867,8 @@ fn test_recall_empty() {
             None,
             None,
             false,
+            None, // event_after (#149)
+            None, // event_before (#149)
         )
         .unwrap();
     assert!(results.is_empty());
