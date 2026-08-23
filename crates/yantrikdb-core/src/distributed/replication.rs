@@ -460,20 +460,23 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
             }
         }
         "relate" => {
-            materialize_relate(&*db.conn(), &op.payload, &op.hlc)?;
-            // Update graph index
+            let changed = materialize_relate(&*db.conn(), &op.payload, &op.hlc)?;
             let src = op.payload["src"].as_str().unwrap_or_default();
             let dst = op.payload["dst"].as_str().unwrap_or_default();
             let rel_type = op.payload["rel_type"].as_str().unwrap_or_default();
             let weight = op.payload["weight"].as_f64().unwrap_or(1.0);
             if !src.is_empty() && !dst.is_empty() {
-                let mut gi = db.graph_index.write();
-                let (src_type, dst_type) =
-                    crate::graph::classify_with_relationship(src, dst, rel_type);
-                gi.add_entity(src, src_type);
-                gi.add_entity(dst, dst_type);
-                gi.add_edge(src, dst, weight as f32);
-                drop(gi);
+                // The SQL row and graph index are one logical projection. A
+                // stale/equal HLC op that loses LWW must not overwrite the
+                // causal winner in the in-memory index.
+                if changed {
+                    let mut gi = db.graph_index.write();
+                    let (src_type, dst_type) =
+                        crate::graph::classify_with_relationship(src, dst, rel_type);
+                    gi.add_entity(src, src_type);
+                    gi.add_entity(dst, dst_type);
+                    gi.add_edge(src, dst, weight as f32);
+                }
                 // V2: detect edge conflicts during sync
                 let _ = crate::conflict::detect_edge_conflicts(
                     db,
@@ -1040,7 +1043,7 @@ fn materialize_record(
 /// HLC (pre-v47, or written by a non-replicating writer) is compared by
 /// `created_at`, preserving the old behavior for exactly the rows the old
 /// behavior wrote.
-fn materialize_relate(conn: &Connection, payload: &serde_json::Value, hlc: &[u8]) -> Result<()> {
+fn materialize_relate(conn: &Connection, payload: &serde_json::Value, hlc: &[u8]) -> Result<bool> {
     let edge_id = payload["edge_id"].as_str().unwrap_or_default();
     let src = payload["src"].as_str().unwrap_or_default();
     let dst = payload["dst"].as_str().unwrap_or_default();
@@ -1053,27 +1056,22 @@ fn materialize_relate(conn: &Connection, payload: &serde_json::Value, hlc: &[u8]
         .unwrap_or_else(|| hlc.to_vec());
 
     if src.is_empty() || dst.is_empty() {
-        return Ok(());
+        return Ok(false);
     }
 
-    // LWW: HLC bytes are big-endian, so BLOB memcmp = causal order. Equal
-    // HLC (idempotent re-apply of the same op) deliberately does NOT update.
-    conn.execute(
+    // LWW: one WHERE predicate controls the complete row update and exposes
+    // whether the op won to cache materialization. HLC bytes are big-endian,
+    // so BLOB memcmp = causal order. Equal HLC deliberately does not update.
+    let changed = conn.execute(
         "INSERT INTO claims (claim_id, src, dst, rel_type, weight, created_at, hlc) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) \
          ON CONFLICT(src, dst, rel_type, extractor, polarity, namespace) DO UPDATE SET \
-         weight = CASE WHEN (claims.hlc IS NOT NULL AND ?7 > claims.hlc) \
-                         OR (claims.hlc IS NULL AND ?6 > claims.created_at) \
-                       THEN ?5 ELSE claims.weight END, \
-         created_at = CASE WHEN (claims.hlc IS NOT NULL AND ?7 > claims.hlc) \
-                             OR (claims.hlc IS NULL AND ?6 > claims.created_at) \
-                           THEN ?6 ELSE claims.created_at END, \
-         claim_id = CASE WHEN (claims.hlc IS NOT NULL AND ?7 > claims.hlc) \
-                           OR (claims.hlc IS NULL AND ?6 > claims.created_at) \
-                         THEN ?1 ELSE claims.claim_id END, \
-         hlc = CASE WHEN (claims.hlc IS NOT NULL AND ?7 > claims.hlc) \
-                      OR (claims.hlc IS NULL AND ?6 > claims.created_at) \
-                    THEN ?7 ELSE claims.hlc END",
+         weight = excluded.weight, \
+         created_at = excluded.created_at, \
+         claim_id = excluded.claim_id, \
+         hlc = excluded.hlc \
+         WHERE (claims.hlc IS NOT NULL AND excluded.hlc > claims.hlc) \
+            OR (claims.hlc IS NULL AND excluded.created_at > claims.created_at)",
         params![edge_id, src, dst, rel_type, weight, created_at, edge_hlc],
     )?;
 
@@ -1090,7 +1088,7 @@ fn materialize_relate(conn: &Connection, payload: &serde_json::Value, hlc: &[u8]
         )?;
     }
 
-    Ok(())
+    Ok(changed != 0)
 }
 
 /// Materialize a "forget" op: tombstone always wins.
@@ -2658,6 +2656,15 @@ mod tests {
             .unwrap()
     }
 
+    fn indexed_edge_weight(db: &YantrikDB) -> f64 {
+        db.graph_index
+            .read()
+            .expand_bfs(&["X"], 1, 8)
+            .into_iter()
+            .find_map(|(name, hops, weight)| (name == "Y" && hops == 1).then_some(weight))
+            .expect("X -> Y must be present in the graph index")
+    }
+
     #[test]
     fn relate_lww_higher_hlc_wins_despite_older_wall_clock() {
         // new-edge writer's clock is SLOW: causally later (hlc 2000) but a
@@ -2680,6 +2687,63 @@ mod tests {
         apply_ops(&db2, &[stale_fast]).unwrap();
         apply_ops(&db2, &[newer_causal]).unwrap();
         assert_eq!(edge_row(&db2), edge_row(&db), "order must not matter");
+    }
+
+    #[test]
+    fn relate_lww_stale_op_does_not_poison_graph_index() {
+        let newer_causal = relate_op_skewed("e-new", 0.9, 100.0, 2000, "slow-clock");
+        let stale_fast = relate_op_skewed("e-old", 0.1, 200.0, 1000, "fast-clock");
+        let db = YantrikDB::new_with_actor(":memory:", 8, "B").unwrap();
+
+        apply_ops(&db, &[newer_causal]).unwrap();
+        apply_ops(&db, &[stale_fast]).unwrap();
+
+        assert_eq!(edge_row(&db).1, 0.9, "SQL row keeps the causal winner");
+        assert!(
+            (indexed_edge_weight(&db) - 0.9).abs() < 1e-6,
+            "a losing op must not replace the causal winner in graph_index"
+        );
+    }
+
+    #[test]
+    fn repeated_local_relate_keeps_claim_identity_equal_on_follower() {
+        let leader = YantrikDB::new_with_actor(":memory:", 8, "A").unwrap();
+        let first = leader.relate("X", "Y", "linked", 0.1).unwrap();
+        let second = leader.relate("X", "Y", "linked", 0.9).unwrap();
+        assert_ne!(first, second);
+
+        let follower = YantrikDB::new_with_actor(":memory:", 8, "B").unwrap();
+        apply_ops(&follower, &ops_of(&leader)).unwrap();
+
+        assert_eq!(
+            edge_row(&leader),
+            edge_row(&follower),
+            "leader and follower must agree on claim_id, weight, and HLC"
+        );
+    }
+
+    #[test]
+    fn relate_lww_equal_hlc_is_a_complete_payload_noop() {
+        let winner = relate_op_skewed("e-winner", 0.9, 100.0, 2000, "A");
+        let mut mutated = winner.clone();
+        mutated.target_rid = Some("e-mutated".to_string());
+        mutated.payload["edge_id"] = serde_json::json!("e-mutated");
+        mutated.payload["weight"] = serde_json::json!(0.1);
+        mutated.payload["created_at"] = serde_json::json!(999.0);
+
+        let db = YantrikDB::new_with_actor(":memory:", 8, "B").unwrap();
+        apply_ops(&db, &[winner.clone()]).unwrap();
+        apply_ops(&db, &[mutated]).unwrap();
+
+        assert_eq!(
+            edge_row(&db),
+            ("e-winner".to_string(), 0.9, Some(winner.hlc)),
+            "equal HLC must not partially mutate any persisted payload field"
+        );
+        assert!(
+            (indexed_edge_weight(&db) - 0.9).abs() < 1e-6,
+            "equal HLC must not mutate the graph index"
+        );
     }
 
     #[test]
