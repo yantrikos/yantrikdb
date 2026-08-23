@@ -1,3 +1,4 @@
+use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 type PyObject = pyo3::Py<pyo3::PyAny>;
@@ -238,5 +239,43 @@ impl PyYantrikDB {
         let db = self.get_inner()?;
         let conflicts = yantrikdb_core::scan_conflicts(db).map_err(map_err)?;
         conflicts.iter().map(|c| conflict_to_dict(py, c)).collect()
+    }
+}
+
+/// Typed facets (contract: docs/standing_instruction_facet_design.md).
+/// Names here are the contract's illustrative ones made concrete; behavior
+/// is normative and tested engine-side.
+#[pymethods]
+impl PyYantrikDB {
+    /// Extract standing-instruction facets from user-authored records.
+    ///
+    /// `dry_run=True` audits without writing anything — the contract's
+    /// false-fire audit surface. Returns the audit counters as a dict.
+    #[pyo3(signature = (namespace="default", dry_run=false))]
+    fn extract_standing_instructions(
+        &self,
+        py: Python<'_>,
+        namespace: &str,
+        dry_run: bool,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let audit = db
+            .extract_standing_instructions(namespace, dry_run)
+            .map_err(map_err)?;
+        let val =
+            serde_json::to_value(&audit).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        crate::py_types::json_to_py(py, &val)
+    }
+
+    /// The standing-instruction salience lane: verified facets for a
+    /// namespace in first-mention order, complete when within `limit`,
+    /// deterministic prefix with an explicit `omitted` count otherwise.
+    /// Ordinary `recall` is untouched; callers compose the two.
+    #[pyo3(signature = (namespace="default", limit=8))]
+    fn recall_facets(&self, py: Python<'_>, namespace: &str, limit: usize) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let out = db.recall_facets(namespace, limit).map_err(map_err)?;
+        let val = serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        crate::py_types::json_to_py(py, &val)
     }
 }

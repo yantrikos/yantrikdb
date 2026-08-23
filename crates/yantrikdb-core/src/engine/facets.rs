@@ -522,3 +522,194 @@ mod integration_tests {
         assert_eq!(here.accepted, 1);
     }
 }
+
+/// One standing-instruction facet as returned by the recall lane. An
+/// ordinary auditable result: real RID, verbatim text, clocks, and evidence
+/// links — the lane injects no hidden prompt text (contract §Recall Salience).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FacetHit {
+    pub rid: String,
+    pub text: String,
+    /// Earliest source occurrence time — the facet's ordering clock.
+    pub first_mention_at: f64,
+    pub created_at: f64,
+    /// Direct evidence RIDs, engine-resolved.
+    pub source_rids: Vec<String>,
+}
+
+/// Result of the facet lane: the selected set plus how many eligible facets
+/// the limit excluded. Silent truncation is a contract violation, so the
+/// omitted count is part of the type, not an optional extra.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FacetRecall {
+    pub facets: Vec<FacetHit>,
+    pub omitted: u64,
+}
+
+impl crate::YantrikDB {
+    /// The standing-instruction salience lane (contract §Recall Salience).
+    ///
+    /// A dedicated lane, not a re-rank: eligible facets are returned in
+    /// FIRST-MENTION order — the complete set when it fits `limit`, a
+    /// deterministic prefix (earliest first) with an exposed `omitted` count
+    /// when it does not. Eligibility is exactly: same namespace, axis
+    /// `standing_instruction`, lifecycle `verified`, consolidation `active`.
+    /// A facet whose evidence was corrected or forgotten leaves `verified`
+    /// through the existing lifecycle and drops out of this lane with no
+    /// facet-specific code.
+    ///
+    /// Existing `recall` behavior is untouched — callers opt in by calling
+    /// this lane and composing the results (default-on is gated on the
+    /// contract's acceptance runs).
+    pub fn recall_facets(&self, namespace: &str, limit: usize) -> Result<FacetRecall> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT m.rid, m.text, m.created_at, \
+                    MIN(src.created_at) AS first_mention_at \
+             FROM memories m \
+             JOIN synthesis_dependencies d ON d.synthesis_rid = m.rid \
+             JOIN memories src ON src.rid = d.source_rid \
+             WHERE m.namespace = ?1 \
+               AND m.synthesis_axis = ?2 \
+               AND m.synthesis_state = 'verified' \
+               AND m.consolidation_status = 'active' \
+             GROUP BY m.rid, m.text, m.created_at \
+             ORDER BY first_mention_at ASC, m.rid ASC",
+        )?;
+        let rows: Vec<(String, String, f64, f64)> = stmt
+            .query_map(
+                rusqlite::params![namespace, STANDING_INSTRUCTION_AXIS],
+                |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, f64>(2)?,
+                        r.get::<_, f64>(3)?,
+                    ))
+                },
+            )?
+            .collect::<std::result::Result<_, _>>()?;
+
+        let total = rows.len();
+        let mut facets = Vec::with_capacity(total.min(limit));
+        for (rid, text, created_at, first_mention_at) in rows.into_iter().take(limit) {
+            let mut dep = conn.prepare(
+                "SELECT source_rid FROM synthesis_dependencies \
+                 WHERE synthesis_rid = ?1 AND is_direct = 1 \
+                 ORDER BY source_rid",
+            )?;
+            let source_rids: Vec<String> = dep
+                .query_map(rusqlite::params![rid], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            drop(dep);
+            facets.push(FacetHit {
+                rid,
+                text,
+                first_mention_at,
+                created_at,
+                source_rids,
+            });
+        }
+        Ok(FacetRecall {
+            facets,
+            omitted: total.saturating_sub(limit).max(0) as u64,
+        })
+    }
+}
+
+#[cfg(all(test, feature = "bundled-embedder"))]
+mod lane_tests {
+    use super::*;
+    use crate::YantrikDB;
+
+    fn seed(db: &YantrikDB, text: &str) {
+        db.record_text(
+            text,
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            "n",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn lane_returns_complete_set_in_first_mention_order() {
+        let db = YantrikDB::with_default(":memory:").unwrap();
+        // Insertion order IS first-mention order here; the lane must
+        // preserve it even though extraction scans in the same order.
+        seed(&db, "Always reply to me in French.");
+        seed(&db, "Always keep my calendar entries private.");
+        seed(&db, "Always cite the source turn in answers.");
+        db.extract_standing_instructions("n", false).unwrap();
+
+        let out = db.recall_facets("n", 8).unwrap();
+        assert_eq!(out.facets.len(), 3);
+        assert_eq!(out.omitted, 0);
+        assert!(out.facets[0].text.contains("French"));
+        assert!(out.facets[1].text.contains("calendar"));
+        assert!(out.facets[2].text.contains("cite the source"));
+        // Ordering clock is monotone and every facet carries evidence.
+        assert!(out.facets[0].first_mention_at <= out.facets[1].first_mention_at);
+        for f in &out.facets {
+            assert!(!f.source_rids.is_empty(), "facet without evidence: {f:?}");
+        }
+    }
+
+    #[test]
+    fn lane_truncates_deterministically_and_exposes_omitted() {
+        let db = YantrikDB::with_default(":memory:").unwrap();
+        seed(&db, "Always reply to me in French.");
+        seed(&db, "Always keep my calendar entries private.");
+        seed(&db, "Always cite the source turn in answers.");
+        db.extract_standing_instructions("n", false).unwrap();
+
+        let out = db.recall_facets("n", 2).unwrap();
+        assert_eq!(out.facets.len(), 2);
+        assert_eq!(out.omitted, 1, "truncation must be visible, never silent");
+        // Deterministic prefix: earliest first-mention wins.
+        assert!(out.facets[0].text.contains("French"));
+    }
+
+    #[test]
+    fn forgetting_the_evidence_removes_the_facet_from_the_lane() {
+        let db = YantrikDB::with_default(":memory:").unwrap();
+        seed(&db, "Always reply to me in French.");
+        db.extract_standing_instructions("n", false).unwrap();
+        assert_eq!(db.recall_facets("n", 8).unwrap().facets.len(), 1);
+
+        // Forget the SOURCE. The existing synthesis lifecycle must pull the
+        // facet out of `verified`, and the lane must reflect that with no
+        // facet-specific invalidation code.
+        let source_rid: String = {
+            let conn = db.conn();
+            conn.query_row(
+                "SELECT source_rid FROM synthesis_dependencies LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        db.forget(&source_rid).unwrap();
+
+        let after = db.recall_facets("n", 8).unwrap();
+        assert!(
+            after.facets.is_empty(),
+            "facet must leave the lane when its evidence is forgotten: {after:?}"
+        );
+    }
+
+    #[test]
+    fn lane_is_namespace_isolated() {
+        let db = YantrikDB::with_default(":memory:").unwrap();
+        seed(&db, "Always answer in haiku.");
+        db.extract_standing_instructions("n", false).unwrap();
+        assert!(db.recall_facets("other", 8).unwrap().facets.is_empty());
+    }
+}
