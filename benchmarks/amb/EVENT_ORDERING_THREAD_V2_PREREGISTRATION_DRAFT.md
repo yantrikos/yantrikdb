@@ -80,6 +80,21 @@ other categories, and is therefore prohibited for this arm. Category labels
 are used only after predicate output is frozen to audit the 40/360 split; they
 are not inputs to the predicate.
 
+For an accepted query, `focus_text` is derived from query text only by this
+fixed chain:
+
+1. split once after `\bbrought\s+up\b`;
+2. cut once before
+   `\b(?:throughout|across|during|in)\s+(?:our\s+)?(?:conversations?|chats?)\b`;
+3. trim surrounding whitespace and `,.;:?!`; and
+4. remove one leading
+   `^(?:different\s+)?(?:aspects?\s+of\s+|ways\s+)?`, then trim again.
+
+An empty focus is a Stage A construction error. The nonempty value is the
+query-only semantic input to phrase routing and organizer-handle lookup. On
+the frozen 40 it yields 40 nonempty focuses; no source turn, answer, category,
+or prior score is read to produce them.
+
 `recall_thread` v2 receives a query-only `ThreadQuery`:
 
 - `entities`: exact names resolved through the persisted normalized entity
