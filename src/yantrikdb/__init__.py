@@ -36,7 +36,11 @@ from yantrikdb.organize import (
     validate_concern_items,
 )
 from yantrikdb.rerank import recall_reranked, rerank_hits
-from yantrikdb.thread import resolve_thread_topics
+from yantrikdb.thread import (
+    ThreadSelectionPolicyInfeasible,
+    resolve_thread_topics,
+    select_thread_evidence,
+)
 from yantrikdb.triggers import check_all_triggers
 
 # Backward-compat alias
@@ -78,6 +82,8 @@ __all__ = [
     "recall_reranked",
     "rerank_hits",
     "resolve_thread_topics",
+    "select_thread_evidence",
+    "ThreadSelectionPolicyInfeasible",
     "Backpressure",
     "BatchDeferredDuringReembed",
     "CorrectionDeferredDuringReembed",

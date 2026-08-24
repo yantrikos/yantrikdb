@@ -210,3 +210,204 @@ def resolve_thread_topics(
         "store_exhausted": store_exhausted,
         "candidate_cap_reached": candidate_cap_reached,
     }
+
+
+# ── Evidence selection: retrieve wide, then compress ─────────────────
+
+# The 100k dev demonstration measured the conversion failure this stage
+# exists to fix: widening retrieval raised source-turn coverage from
+# .29 to .71 while judged score moved only +.02, because gold-turn
+# PRECISION fell to .07 (92.65% distractor rows) — and precision was the
+# strongest score signal in the zero-call readout (delta-precision to
+# delta-score r=.56/.61, monotone across quartiles). Selection keeps the
+# wide thread's coverage and restores its density: rank rows by
+# relevance to the focus, keep a budget, present chronologically.
+
+# The cross-encoder scorer honors two MEASURED constraints from the
+# rerank module (do not "fix" without re-measuring): score the row's
+# TEXT HEAD (clip 1500 chars), never a matched snippet — snippet-fed
+# reranking scored WORSE than no reranking; and treat scores as a
+# RANKING, not calibrated probabilities.
+SELECTION_CLIP = 1500
+
+
+class ThreadSelectionPolicyInfeasible(ValueError):
+    """A selection policy cannot be satisfied within the budget.
+
+    Raised when ``min_per_topic`` reservations exceed ``budget`` or
+    exceed the rows available for a represented topic. Typed so harness
+    pregates can distinguish policy infeasibility from invalid input.
+    """
+
+
+def _validated_selection_int(name: str, value: Any, *, minimum: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError(f"{name} must be an int, got {type(value).__name__}")
+    if value < minimum:
+        raise ValueError(f"{name} must be >= {minimum}, got {value}")
+    return value
+
+
+def _validated_scores(raw: Any, expected: int) -> list[float]:
+    """Validate a scorer's output: exact count, finite non-bool numbers."""
+    scores = list(raw)
+    if len(scores) != expected:
+        raise ValueError(
+            f"scorer returned {len(scores)} scores for {expected} rows"
+        )
+    result = []
+    for index, value in enumerate(scores):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(
+                f"scorer returned a non-numeric score at row {index}: {value!r}"
+            )
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError(
+                f"scorer returned a non-finite score at row {index}: {value!r}"
+            )
+        result.append(value)
+    return result
+
+
+def _cross_encoder_scores(focus: str, texts: list[str]) -> list[float]:
+    from yantrikdb.rerank import DEFAULT_MODEL, _cross_encoder
+
+    ce = _cross_encoder(DEFAULT_MODEL)
+    pairs = [(focus, text[:SELECTION_CLIP]) for text in texts]
+    return [float(s) for s in ce.predict(pairs)]
+
+
+def select_thread_evidence(
+    thread: dict[str, Any],
+    focus: str,
+    *,
+    budget: int,
+    scorer: Any = "cross-encoder",
+    min_per_topic: int | None = None,
+) -> dict[str, Any]:
+    """Select the ``budget`` most focus-relevant rows of a v2 thread.
+
+    Pure selection over a :func:`recall_thread_v2`-shaped dict: never
+    retrieves, never rewrites rows, never invents order. Ranking is by
+    relevance score descending (deterministic tie-break: original
+    chronological position ascending); the KEPT rows are then presented
+    in the thread's original chronological order. The result keeps the
+    input's ``total``, sets ``returned`` to the kept count, and sets
+    ``omitted = total - returned`` so downstream completeness semantics
+    stay true; all selection detail lives in the additive
+    ``selection`` key, from which the ranking and reservations are
+    byte-recomputable without any row text.
+
+    ``scorer`` is ``"cross-encoder"`` (the rerank module's pinned
+    model; typed ImportError if the optional dependency is missing —
+    never a silent fallback) or a callable ``(focus, texts) ->
+    scores`` for injected/deterministic scoring. ``min_per_topic`` is
+    an explicit policy: when set, each represented topic's
+    ``min_per_topic`` top-scored rows are reserved first (deduped
+    across topics; rows without topic provenance create no
+    reservation); infeasible reservations raise
+    :class:`ThreadSelectionPolicyInfeasible`.
+
+    ``budget`` must satisfy ``1 <= budget <= len(items)``; equality is
+    the identity selection (flagged in diagnostics), larger is invalid.
+    No product default budget exists yet: the recommended value will be
+    dev-calibrated and labeled as such, exactly like the resolver's
+    ``floor=12``.
+    """
+    items = thread.get("items")
+    if not isinstance(items, list) or not items:
+        raise ValueError("select_thread_evidence requires a thread with items")
+    budget = _validated_selection_int("budget", budget, minimum=1)
+    if budget > len(items):
+        raise ValueError(
+            f"budget {budget} exceeds thread rows {len(items)}; "
+            "identity selection is budget == len(items)"
+        )
+    if min_per_topic is not None:
+        min_per_topic = _validated_selection_int(
+            "min_per_topic", min_per_topic, minimum=1
+        )
+
+    texts = [str(item.get("text") or "") for item in items]
+    if scorer == "cross-encoder":
+        scorer_id = "cross-encoder"
+        from yantrikdb.rerank import DEFAULT_MODEL as scorer_model
+
+        scores = _validated_scores(_cross_encoder_scores(focus, texts), len(items))
+    elif callable(scorer):
+        scorer_id = getattr(scorer, "__name__", "callable")
+        scorer_model = None
+        scores = _validated_scores(scorer(focus, texts), len(items))
+    else:
+        raise TypeError(
+            f"scorer must be 'cross-encoder' or a callable, got {scorer!r}"
+        )
+
+    # Ranking order: score desc, original chronological position asc.
+    ranked_indices = sorted(range(len(items)), key=lambda i: (-scores[i], i))
+
+    reserved: set[int] = set()
+    if min_per_topic is not None:
+        # DISTINCT indices per topic: a row listing the same topic twice
+        # (['A', 'A']) must count once, or floor feasibility silently lies.
+        by_topic: dict[str, list[int]] = {}
+        for index, item in enumerate(items):
+            for topic_rid in {str(t) for t in item.get("topic_rids") or []}:
+                by_topic.setdefault(topic_rid, []).append(index)
+        for topic_rid, indices in sorted(by_topic.items()):
+            if len(indices) < min_per_topic:
+                raise ThreadSelectionPolicyInfeasible(
+                    f"topic {topic_rid} has {len(indices)} rows, fewer than "
+                    f"min_per_topic={min_per_topic}"
+                )
+            top = sorted(indices, key=lambda i: (-scores[i], i))[:min_per_topic]
+            reserved.update(top)
+        if len(reserved) > budget:
+            raise ThreadSelectionPolicyInfeasible(
+                f"min_per_topic={min_per_topic} reserves {len(reserved)} "
+                f"unique rows, exceeding budget={budget}"
+            )
+
+    selected: list[int] = sorted(reserved)
+    chosen = set(reserved)
+    for index in ranked_indices:
+        if len(chosen) >= budget:
+            break
+        if index not in chosen:
+            chosen.add(index)
+    selected = sorted(chosen)  # chronological presentation
+
+    total = thread.get("total", len(items))
+    if isinstance(total, bool) or not isinstance(total, int):
+        raise ValueError(
+            f"thread total must be an int, got {type(total).__name__}"
+        )
+    if total < len(items):
+        raise ValueError(
+            f"thread total {total} is smaller than its {len(items)} items"
+        )
+    result = dict(thread)
+    result["items"] = [items[i] for i in selected]
+    result["returned"] = len(selected)
+    result["omitted"] = total - len(selected)
+    result["selection"] = {
+        "scorer": scorer_id,
+        "scorer_model": scorer_model,
+        "clip": SELECTION_CLIP if scorer_id == "cross-encoder" else None,
+        "budget": budget,
+        "min_per_topic": min_per_topic,
+        "identity_selection": budget == len(items),
+        "selected_indices": selected,
+        "reserved_indices": sorted(reserved),
+        "rows": [
+            {
+                "index": index,
+                "rid": str(items[index].get("rid") or ""),
+                "score": scores[index],
+                "topic_rids": list(items[index].get("topic_rids") or []),
+            }
+            for index in range(len(items))
+        ],
+    }
+    return result
