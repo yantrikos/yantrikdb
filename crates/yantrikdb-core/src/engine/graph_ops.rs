@@ -604,6 +604,7 @@ impl YantrikDB {
                     crate::engine::thread::normalize_entity_name(entity_name)
                 ],
             )?;
+            crate::engine::thread::repair_entity_norm(&conn, memory_rid, entity_name)?;
         } // conn dropped
 
         // Phase 2: Lock graph_index write for in-memory update
@@ -674,6 +675,7 @@ impl YantrikDB {
                         crate::engine::thread::normalize_entity_name(&c.entity)
                     ],
                 )?;
+                crate::engine::thread::repair_entity_norm(&conn, &c.rid, &c.entity)?;
             }
         } // conn dropped
 
@@ -759,6 +761,7 @@ impl YantrikDB {
                         crate::engine::thread::normalize_entity_name(&c.entity)
                     ],
                 )?;
+                crate::engine::thread::repair_entity_norm(&conn, &c.rid, &c.entity)?;
             }
         } // conn dropped
 

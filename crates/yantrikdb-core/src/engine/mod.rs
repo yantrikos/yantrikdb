@@ -913,22 +913,42 @@ impl YantrikDB {
         // but MIGRATE_V48_TO_V49 cannot backfill it in SQL: LOWER() is
         // ASCII-only and would diverge from crate::graph::tokenize's
         // Unicode lowercasing on non-ASCII names. So the engine backfills
-        // here, post-migration: guarded (only NULL rows are touched, so
-        // every open after the first is a single indexed probe), batched
-        // in one transaction, idempotent on crash/replay.
+        // here, post-migration, in KEYSET-PAGED batches: a large upgraded
+        // store must never materialize its whole entity join in RAM, so
+        // rows are fetched 10k at a time by ascending rowid and each batch
+        // commits in its own transaction. Crash-safe and idempotent:
+        // committed rows are no longer NULL and are never revisited, and
+        // on a store with nothing to do (every open after the first) the
+        // loop is a single indexed probe.
+        //
+        // Index tradeoff, documented deliberately: MIGRATE_V48_TO_V49
+        // creates idx_memory_entities_norm BEFORE this backfill runs, so
+        // the one-time backfill pays per-row index maintenance. Creating
+        // the index after the backfill would save that churn, but would
+        // split the index's existence across two owners (migration SQL vs
+        // engine code) and complicate the idempotent-replay contract —
+        // run_migration_idempotent re-runs the migration wholesale on
+        // rewound stores — so the migration keeps the CREATE INDEX.
         {
-            let pending: Vec<(i64, String)> = at("entity_norm_backfill", {
-                (|| {
-                    let mut stmt = conn.prepare(
-                        "SELECT rowid, entity_name FROM memory_entities \
-                         WHERE entity_name_norm IS NULL",
-                    )?;
-                    let rows =
-                        stmt.query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
-                    rows.collect::<std::result::Result<Vec<_>, _>>()
-                })()
-            })?;
-            if !pending.is_empty() {
+            const BACKFILL_BATCH: i64 = 10_000;
+            let mut last_rowid: i64 = 0;
+            loop {
+                let batch: Vec<(i64, String)> = at("entity_norm_backfill", {
+                    (|| {
+                        let mut stmt = conn.prepare(
+                            "SELECT rowid, entity_name FROM memory_entities \
+                             WHERE entity_name_norm IS NULL AND rowid > ?1 \
+                             ORDER BY rowid LIMIT ?2",
+                        )?;
+                        let rows = stmt.query_map(params![last_rowid, BACKFILL_BATCH], |r| {
+                            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                        })?;
+                        rows.collect::<std::result::Result<Vec<_>, _>>()
+                    })()
+                })?;
+                let Some(&(batch_last, _)) = batch.last() else {
+                    break;
+                };
                 let tx = at("entity_norm_backfill", conn.unchecked_transaction())?;
                 {
                     let mut update = at(
@@ -938,7 +958,7 @@ impl YantrikDB {
                              WHERE rowid = ?2",
                         ),
                     )?;
-                    for (rowid, name) in &pending {
+                    for (rowid, name) in &batch {
                         at(
                             "entity_norm_backfill",
                             update.execute(params![
@@ -949,6 +969,7 @@ impl YantrikDB {
                     }
                 }
                 at("entity_norm_backfill", tx.commit())?;
+                last_rowid = batch_last;
             }
         }
 

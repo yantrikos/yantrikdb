@@ -1747,6 +1747,7 @@ impl YantrikDB {
                             crate::engine::thread::normalize_entity_name(entity)
                         ],
                     )?;
+                    crate::engine::thread::repair_entity_norm(&conn, rid, entity)?;
                 }
             }
 

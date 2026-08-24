@@ -1082,15 +1082,21 @@ CREATE TABLE IF NOT EXISTS memory_chunks (
 CREATE TABLE IF NOT EXISTS memory_entities (
     memory_rid TEXT NOT NULL,
     entity_name TEXT NOT NULL,
-    -- v49: Rust str::to_lowercase() of entity_name (full Unicode fold; SQL
-    -- LOWER() is ASCII-only and must never produce this value). Stamped by
-    -- every writer via engine::thread::normalize_entity_name and backfilled
-    -- in Rust at open (the entity_norm_backfill stage) for migrated stores.
+    -- v49: Unicode lowercase of entity_name (Rust str::to_lowercase() —
+    -- deliberately NOT full Unicode case folding — in lockstep with
+    -- crate::graph::tokenize; SQL LOWER() is ASCII-only and must never
+    -- produce this value). Stamped by every writer via
+    -- engine::thread::normalize_entity_name and backfilled in Rust at open
+    -- (the entity_norm_backfill stage) for migrated stores.
     entity_name_norm TEXT,
     PRIMARY KEY (memory_rid, entity_name)
 );
 CREATE INDEX IF NOT EXISTS idx_memory_entities_entity ON memory_entities(entity_name);
 CREATE INDEX IF NOT EXISTS idx_memory_entities_rid ON memory_entities(memory_rid);
+-- Known scale caveat (deferred deliberately — see PR #190 review): this
+-- (entity_name_norm, memory_rid) index matches a name across ALL
+-- namespaces before the memories join filters namespace; a true
+-- tenant-bounded lookup would need namespace in the entity lookup index.
 CREATE INDEX IF NOT EXISTS idx_memory_entities_norm ON memory_entities(entity_name_norm, memory_rid);
 
 -- FTS5 for full-text search on memories
@@ -3082,7 +3088,13 @@ ALTER TABLE memory_entities ADD COLUMN entity_name_norm TEXT;
 -- 'MÜNSTER' would become 'mÜnster' — corrupting every non-ASCII entity
 -- name and diverging from crate::graph::tokenize's Unicode lowercasing.
 -- The ENGINE backfills post-migration in Rust (open()'s
--- entity_norm_backfill stage) with str::to_lowercase().
+-- entity_norm_backfill stage) with str::to_lowercase() — Unicode
+-- lowercase, deliberately NOT full Unicode case folding, in lockstep
+-- with crate::graph::tokenize.
+-- Known scale caveat (deferred deliberately — see PR #190 review): the
+-- (entity_name_norm, memory_rid) index matches a name across ALL
+-- namespaces before the memories join filters namespace; a true
+-- tenant-bounded lookup would need namespace in the entity lookup index.
 CREATE INDEX IF NOT EXISTS idx_memory_entities_norm
     ON memory_entities(entity_name_norm, memory_rid);
 ";

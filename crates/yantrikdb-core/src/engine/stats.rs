@@ -1375,6 +1375,10 @@ impl YantrikDB {
                         crate::engine::thread::normalize_entity_name(entity)
                     ],
                 )? > 0;
+                // Self-heal AFTER the first-mention read: the repair is a
+                // separate UPDATE precisely so it can never count as a
+                // mention (see repair_entity_norm).
+                crate::engine::thread::repair_entity_norm(&conn, rid, entity)?;
                 let inc: i64 = if first_mention { 1 } else { 0 };
                 conn.execute(
                     "INSERT INTO entities (name, entity_type, first_seen, last_seen, mention_count) \
@@ -1413,6 +1417,7 @@ impl YantrikDB {
                             crate::engine::thread::normalize_entity_name(entity)
                         ],
                     )?;
+                    crate::engine::thread::repair_entity_norm(&conn, rid, entity)?;
                 }
             }
             // graph_index in-memory update (idempotent — add_entity/link dedupe).
@@ -1575,6 +1580,7 @@ impl YantrikDB {
                         crate::engine::thread::normalize_entity_name(entity)
                     ],
                 )?;
+                crate::engine::thread::repair_entity_norm(&conn, rid, entity)?;
             }
         }
 
