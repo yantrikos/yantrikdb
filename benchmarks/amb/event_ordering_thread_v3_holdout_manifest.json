@@ -1,6 +1,9 @@
 {
   "protocol": "amb-event-ordering-thread-v3-holdout-seal-v1",
+  "status": "void",
   "sealed_at": "2026-08-24",
+  "voided_at": "2026-08-24",
+  "void_reason": "A delegated audit computed post-seal predicate membership and aggregate source-reference counts, exceeding the hash-only blind rule.",
   "dataset": "beam",
   "split": "500k",
   "holdout_units": [
@@ -72,6 +75,8 @@
     "holdout_content_inspected_before_seal": false,
     "gold_inspected_before_seal": false,
     "mutual_attestation": true,
+    "post_seal_rule_violated": true,
+    "eligible_for_confirmation": false,
     "codex_seal_message_id": "39bc6d5a-d6c1-44d7-8a8d-ec94cf78d06f",
     "core_countersign_message_id": "3727e922-259f-4b1c-89af-91c1c3d6e99e",
     "rule": "Units 16-35 remain content-blind until the fresh preregistration is frozen."

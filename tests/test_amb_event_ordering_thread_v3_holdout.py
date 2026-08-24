@@ -68,6 +68,7 @@ def _fixture(tmp_path: Path):
     holdout_documents = documents[:1]
     manifest = {
         "protocol": MODULE.PROTOCOL,
+        "status": "active",
         "holdout_units": ["2"],
         "event_category": "event_ordering",
         "expected": {
@@ -132,4 +133,12 @@ def test_verify_rejects_overlap_with_burned_event_queries(tmp_path):
     _write_gzip(burned, burned_rows)
 
     with pytest.raises(ValueError, match="overlap mismatch"):
+        MODULE.verify(manifest, queries, documents, burned)
+
+
+def test_verify_rejects_void_seal(tmp_path):
+    manifest, queries, documents, burned = _fixture(tmp_path)
+    manifest["status"] = "void"
+
+    with pytest.raises(ValueError, match="not active"):
         MODULE.verify(manifest, queries, documents, burned)

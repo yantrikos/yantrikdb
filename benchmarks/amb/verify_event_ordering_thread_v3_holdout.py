@@ -57,6 +57,8 @@ def verify(
 ) -> dict[str, Any]:
     if manifest.get("protocol") != PROTOCOL:
         raise ValueError("unexpected holdout manifest protocol")
+    if manifest.get("status") != "active":
+        raise ValueError("holdout seal is not active")
     source_hashes = manifest["source_sha256"]
     source_paths = {
         "queries.json.gz": queries_path,
