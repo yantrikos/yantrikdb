@@ -3,6 +3,9 @@
 Status: estimator, seeds, tooling, gates, and finality frozen before any v5
 external call.
 
+The completed evaluation and terminal opt-in decision are recorded in
+[FACET_APPLICABILITY_V5_RESULT.md](FACET_APPLICABILITY_V5_RESULT.md).
+
 ## Decision Question
 
 The unchanged `facet-form-conflict-v1` treatment produced a positive v4
