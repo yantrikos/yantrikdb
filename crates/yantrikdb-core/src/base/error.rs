@@ -541,6 +541,35 @@ pub enum YantrikDbError {
 
     #[error("invalid input: {0}")]
     InvalidInput(String),
+
+    /// A requested capability cannot be served under this engine's
+    /// configuration — fail closed, never a silent empty result. First
+    /// user (thread v2): `capability = "phrase_thread_route"` — the FTS
+    /// index on an encrypted store holds ciphertext, so a phrase MATCH
+    /// would return confident emptiness instead of matches.
+    #[error("capability unavailable: {capability}: {reason}")]
+    CapabilityUnavailable { capability: String, reason: String },
+
+    /// The query is valid but this store owes maintenance work before the
+    /// answer can be trusted; `operation` names the maintenance call to
+    /// run. First user (thread v2): a store whose `source_turn` columns
+    /// are not backfill-complete (encrypted stores pre-maintenance, or ANY
+    /// store staled by a raw SQL metadata write) cannot order a thread
+    /// strictly — run `maintain_source_turn_backfill`.
+    #[error("maintenance required: run {operation}: {reason}")]
+    MaintenanceRequired { operation: String, reason: String },
+
+    /// A `recall_thread_v2` topic rid did not resolve to a visible,
+    /// verified topic synthesis row in the queried namespace. The message
+    /// template is IDENTICAL regardless of cause — ordinary memory rid,
+    /// nonexistent rid, cross-namespace rid, inactive or unverified row —
+    /// so a cross-tenant probe learns nothing an invalid rid would not
+    /// (the no-existence-leakage contract).
+    #[error(
+        "invalid thread topic: topic rid '{topic_rid}' does not resolve to a \
+         visible topic synthesis row in this namespace"
+    )]
+    InvalidThreadTopic { topic_rid: String },
 }
 
 pub type Result<T> = std::result::Result<T, YantrikDbError>;

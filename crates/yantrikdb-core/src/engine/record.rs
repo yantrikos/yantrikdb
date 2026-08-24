@@ -506,6 +506,10 @@ impl YantrikDB {
         // plaintext value serialized into `meta_str` (pre-encryption), so the
         // columns and the JSON cannot disagree.
         let (event_time_min, event_time_max) = crate::base::datetext::event_time_bounds(metadata);
+        // v50: source_turn column from the SAME plaintext value serialized
+        // into `meta_str` (pre-encryption) — the shared extractor is the
+        // single source (engine::thread::extract_source_turn).
+        let source_turn = crate::engine::thread::extract_source_turn(metadata);
         // Chunked embeddings: encrypt the window vectors up front (CPU
         // work outside the conn lock), mint their index keys once.
         let stored_chunks: Vec<(usize, String, Vec<u8>)> = chunks
@@ -614,6 +618,10 @@ impl YantrikDB {
             "idempotency_key": idem.as_ref().map(|(k, _)| *k),
             "origin_actor": idem.as_ref().map(|_| self.actor_id.as_str()),
             "synthesis": synthesis,
+            // v50: the leader-derived canonical source_turn scalar. Followers
+            // use it directly (materialize_record); legacy payloads without
+            // the key fall back to parsing metadata via the shared extractor.
+            "source_turn": source_turn,
         });
         // **Phase 4.3 Commit B (saga task 3, 2026-05-08).** The unbounded entity
         // / memory_entities / claims loops that used to run inline are enqueued
@@ -750,6 +758,10 @@ impl YantrikDB {
                     ClaimAttempt::Hit { existing_rid } => return Ok(Some(existing_rid)),
                 }
             }
+            // v50: the marker's pre-write state, restored after the stamped
+            // INSERT (the schema trigger flips it on every memories insert;
+            // an engine write that stamps from plaintext is not staleness).
+            let marker_prior = crate::engine::thread::marker_snapshot(&tx)?;
             tx.execute(
                 "INSERT INTO memories \
                  (rid, type, text, embedding, created_at, updated_at, importance, \
@@ -757,9 +769,9 @@ impl YantrikDB {
                   certainty, domain, source, emotional_state, embedding_generation, \
                   idempotency_key, origin_actor, synthesis_axis, synthesis_granularity, \
                   synthesis_logical_key, synthesis_evidence_version, synthesis_generation_hlc, \
-                  synthesis_state, event_time_min, event_time_max) \
+                  synthesis_state, event_time_min, event_time_max, source_turn) \
                   VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-                          ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
+                          ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28)",
                 params![
                     rid,
                     memory_type,
@@ -794,8 +806,11 @@ impl YantrikDB {
                     // serialized above.
                     event_time_min,
                     event_time_max,
+                    // v50: source turn, same plaintext value.
+                    source_turn,
                 ],
             )?;
+            crate::engine::thread::marker_restore(&tx, &marker_prior)?;
 
             if let Some(synthesis) = synthesis {
                 if synthesis.dependencies.is_empty() {
@@ -1622,18 +1637,23 @@ impl YantrikDB {
                 // value `meta_str` was serialized from (pre-encryption).
                 let (event_time_min, event_time_max) =
                     crate::base::datetext::event_time_bounds(&merged_metas[idx]);
+                // v50: source_turn from the same plaintext value.
+                let source_turn = crate::engine::thread::extract_source_turn(&merged_metas[idx]);
 
                 // **Issue #41 brainstorm-4 §6.** v28 embedding_generation
                 // stamped from the batch's snapshot.
                 let embedding_generation: i64 = state.generation as i64;
+                // v50: preserve the marker across this stamped insert.
+                let marker_prior = crate::engine::thread::marker_snapshot(&conn)?;
                 conn.execute(
                     "INSERT INTO memories \
                      (rid, type, text, embedding, created_at, updated_at, importance, \
                       half_life, last_access, valence, metadata, namespace, \
                       certainty, domain, source, emotional_state, embedding_generation, \
-                      idempotency_key, origin_actor, event_time_min, event_time_max) \
+                      idempotency_key, origin_actor, event_time_min, event_time_max, \
+                      source_turn) \
                      VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-                             ?18, ?19, ?20, ?21)",
+                             ?18, ?19, ?20, ?21, ?22)",
                     params![rid, input.memory_type, stored_text, stored_emb, ts, ts,
                             calibrated, input.half_life, ts, input.valence, stored_meta,
                             namespaces[idx], input.certainty, input.domain, input.source,
@@ -1645,8 +1665,11 @@ impl YantrikDB {
                             input.idempotency_key.as_deref(),
                             input.idempotency_key.as_ref().map(|_| self.actor_id.as_str()),
                             // v48 (#149) event time.
-                            event_time_min, event_time_max],
+                            event_time_min, event_time_max,
+                            // v50 source turn.
+                            source_turn],
                 )?;
+                crate::engine::thread::marker_restore(&conn, &marker_prior)?;
 
                 // The canonical "record" op, byte-for-byte what record() emits,
                 // so peers materialize batch items through the existing, tested
@@ -1685,6 +1708,8 @@ impl YantrikDB {
                     // fields record() and record_queued emit.
                     "idempotency_key": input.idempotency_key.as_deref(),
                     "origin_actor": input.idempotency_key.as_ref().map(|_| self.actor_id.as_str()),
+                    // v50: leader-derived canonical scalar (see record()).
+                    "source_turn": source_turn,
                 });
                 let emb_hash = embedding_hash(&input.embedding);
                 self.log_op_in_tx(
@@ -2139,6 +2164,8 @@ impl YantrikDB {
         // v48 (#149): event-time columns from the SAME plaintext value
         // serialized into `meta_str` (pre-encryption).
         let (event_time_min, event_time_max) = crate::base::datetext::event_time_bounds(metadata);
+        // v50: source_turn from the same plaintext value (shared extractor).
+        let source_turn = crate::engine::thread::extract_source_turn(metadata);
 
         // Encryption is engine-side and deterministic given the same DEK +
         // same plaintext bytes (AES-GCM is non-deterministic across IVs but
@@ -2200,15 +2227,17 @@ impl YantrikDB {
         // **Issue #41 brainstorm-4 §6.** v28 embedding_generation
         // stamp from the SearchState snapshot loaded above.
         let embedding_generation: i64 = state.generation as i64;
+        // v50: preserve the marker across this stamped insert.
+        let marker_prior = crate::engine::thread::marker_snapshot(&conn)?;
         let inserted_row = conn.execute(
             "INSERT OR IGNORE INTO memories \
              (rid, type, text, embedding, created_at, updated_at, importance, \
               half_life, last_access, valence, metadata, namespace, \
               certainty, domain, source, emotional_state, \
               created_at_unix_micros, embedding_model, embedding_generation, \
-              event_time_min, event_time_max) \
+              event_time_min, event_time_max, source_turn) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?6, ?7, ?5, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-                     ?18, ?19)",
+                     ?18, ?19, ?20)",
             params![
                 rid, memory_type, stored_text, stored_emb,
                 ts_secs,
@@ -2218,8 +2247,11 @@ impl YantrikDB {
                 embedding_generation,
                 // v48 (#149) event time.
                 event_time_min, event_time_max,
+                // v50 source turn.
+                source_turn,
             ],
         )?;
+        crate::engine::thread::marker_restore(&conn, &marker_prior)?;
         let was_new_row = inserted_row == 1;
         debug_assert!(
             inserted || !was_new_row,
@@ -2283,6 +2315,8 @@ impl YantrikDB {
                     "emotional_state": emotional_state,
                     "embedding_model": embedding_model,
                     "extracted_entities": extracted_entities,
+                    // v50: leader-derived canonical scalar (see record()).
+                    "source_turn": source_turn,
                 }),
                 Some(&emb_hash),
                 None,
@@ -2462,6 +2496,14 @@ impl YantrikDB {
         // own writers (apply embedding bytes directly).
         let current_embedder_name = self.search_state.load().runtime_embedder_name.clone();
 
+        // v50: the queued op is a durable `op_type='record'` payload exactly
+        // like the sync/batch/record_with_rid ones, so it must carry the
+        // leader's canonical source_turn the same way — otherwise local
+        // materialization re-extracts while a follower takes the legacy
+        // absent-key fallback, and a queued write during rolling parser
+        // versions diverges between replicas.
+        let source_turn = crate::engine::thread::extract_source_turn(metadata);
+
         // Full record payload — what the materializer needs to
         // reconstruct the row.
         let payload = serde_json::json!({
@@ -2487,6 +2529,10 @@ impl YantrikDB {
             // materializer defaults both to NULL, so old rows are unchanged.
             "idempotency_key": idem.as_ref().map(|(k, _)| *k),
             "origin_actor": idem.as_ref().map(|_| self.actor_id.as_str()),
+            // v50: leader-derived canonical scalar (present-null means the
+            // leader saw no valid turn — authoritative None, not a fallback
+            // trigger). Same encoding as the sync route's payload.
+            "source_turn": source_turn,
         });
 
         // Write to oplog with applied=0. The v27 `embedding_model`

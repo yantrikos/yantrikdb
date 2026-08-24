@@ -53,6 +53,19 @@ fn _yantrikdb_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
         "PackSignatureInvalid",
         m.py().get_type::<py_errors::PackSignatureInvalid>(),
     )?;
+    m.add(
+        "PhraseRouteUnavailableError",
+        m.py().get_type::<py_errors::PhraseRouteUnavailableError>(),
+    )?;
+    m.add(
+        "SourceTurnMaintenanceRequiredError",
+        m.py()
+            .get_type::<py_errors::SourceTurnMaintenanceRequiredError>(),
+    )?;
+    m.add(
+        "InvalidThreadTopicError",
+        m.py().get_type::<py_errors::InvalidThreadTopicError>(),
+    )?;
 
     // Triggers
     m.add_class::<py_triggers::PyTrigger>()?;
