@@ -477,7 +477,9 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
                     gi.add_entity(dst, dst_type);
                     gi.add_edge(src, dst, weight as f32);
                 }
-                // V2: detect edge conflicts during sync
+                // Conflict detection intentionally stays outside the `changed` gate.
+                // An operation that loses LWW must not mutate the row or cache,
+                // but a losing concurrent edge may still reveal a conflict.
                 let _ = crate::conflict::detect_edge_conflicts(
                     db,
                     src,
