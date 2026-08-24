@@ -43,6 +43,7 @@ mod recall_graph;
 mod reembed_router;
 mod replication_api;
 mod ryw_visibility;
+mod source_turn_columns;
 mod storage_fts;
 mod trace_entities;
 mod write_stats;

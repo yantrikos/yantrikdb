@@ -113,9 +113,9 @@ use crate::schema::{
     MIGRATE_V32_TO_V33, MIGRATE_V33_TO_V34, MIGRATE_V34_TO_V35, MIGRATE_V35_TO_V36,
     MIGRATE_V36_TO_V37, MIGRATE_V37_TO_V38, MIGRATE_V3_TO_V4, MIGRATE_V40_TO_V41,
     MIGRATE_V41_TO_V42, MIGRATE_V42_TO_V43, MIGRATE_V44_TO_V45, MIGRATE_V45_TO_V46,
-    MIGRATE_V46_TO_V47, MIGRATE_V47_TO_V48, MIGRATE_V48_TO_V49, MIGRATE_V4_TO_V5, MIGRATE_V5_TO_V6,
-    MIGRATE_V6_TO_V7, MIGRATE_V7_TO_V8, MIGRATE_V8_TO_V9, MIGRATE_V9_TO_V10, SCHEMA_SQL,
-    SCHEMA_VERSION,
+    MIGRATE_V46_TO_V47, MIGRATE_V47_TO_V48, MIGRATE_V48_TO_V49, MIGRATE_V49_TO_V50,
+    MIGRATE_V4_TO_V5, MIGRATE_V5_TO_V6, MIGRATE_V6_TO_V7, MIGRATE_V7_TO_V8, MIGRATE_V8_TO_V9,
+    MIGRATE_V9_TO_V10, SCHEMA_SQL, SCHEMA_VERSION,
 };
 use crate::types::*;
 
@@ -890,6 +890,7 @@ impl YantrikDB {
             (46, MIGRATE_V46_TO_V47),
             (47, MIGRATE_V47_TO_V48),
             (48, MIGRATE_V48_TO_V49),
+            (49, MIGRATE_V49_TO_V50),
         ];
         if let Some(v) = existing_version {
             for &(from_v, sql) in migrations {
@@ -970,6 +971,92 @@ impl YantrikDB {
                 }
                 at("entity_norm_backfill", tx.commit())?;
                 last_rowid = batch_last;
+            }
+        }
+
+        // **v50 source_turn backfill — Rust, not SQL** (audit trap 3: no
+        // unbounded UPDATE in the migration). MIGRATE_V49_TO_V50 only adds
+        // the column + index; the ENGINE backfills here, post-migration,
+        // in KEYSET-PAGED 10k batches (one transaction per batch, ascending
+        // rowid, resumable across crashes — committed rows are non-NULL and
+        // never revisited), parsing each json_valid metadata blob through
+        // the ONE shared extractor (engine::thread::extract_source_turn).
+        // Non-json_valid (encrypted) rows are skipped: they cannot be
+        // parsed at rest, so their completeness is tracked by the
+        // meta 'source_turn_backfill_complete' marker (converged option b):
+        //   - fresh stores (no prior schema version): marker set '1'
+        //     immediately — every future row is stamped at write.
+        //   - unencrypted stores: marker set '1' when this backfill drains;
+        //     a marker staled to '0' by raw SQL (the schema triggers) is
+        //     healed by re-running the NULL-fill on the next open.
+        //   - encrypted stores: marker set '0' at (post-)migration; only
+        //     maintain_source_turn_backfill's decrypt-and-stamp completion
+        //     sets it '1'. Lazy write-time stamping continues but NEVER
+        //     sets the marker.
+        // The encryption probe checks BOTH the passed key and the persisted
+        // 'encryption_enabled' meta: an encrypted DB opened without a key
+        // fails later in this constructor, and the marker must not have
+        // been set '1' by then on the strength of "no key was passed".
+        {
+            let is_encrypted_store = master_key.is_some()
+                || matches!(
+                    rewrap(
+                        "source_turn_backfill",
+                        Self::get_meta(&conn, "encryption_enabled")
+                    )?
+                    .as_deref(),
+                    Some("1")
+                );
+            let marker = rewrap(
+                "source_turn_backfill",
+                Self::get_meta(&conn, crate::engine::thread::SOURCE_TURN_MARKER_KEY),
+            )?;
+            let set_marker = |value: &str| -> Result<()> {
+                at(
+                    "source_turn_backfill",
+                    conn.execute(
+                        "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+                        params![crate::engine::thread::SOURCE_TURN_MARKER_KEY, value],
+                    ),
+                )?;
+                Ok(())
+            };
+            if existing_version.is_none() {
+                // Fresh store: nothing predates the stamping writers.
+                if marker.is_none() {
+                    set_marker("1")?;
+                }
+            } else if marker.as_deref() != Some("1") {
+                if is_encrypted_store {
+                    if marker.is_none() {
+                        set_marker("0")?;
+                    }
+                } else {
+                    // Full RECOMPUTE (reviewer blocker — never a NULL-only
+                    // fill: raw SQL can change a turn 5->7 or remove it,
+                    // leaving a stale NON-NULL scalar a fill would skip),
+                    // through the ONE shared repair core the maintenance
+                    // op also uses: keyset-paged 10k batches, one
+                    // transaction each, resumable via the epoch-stamped
+                    // cursor (a crash mid-loop resumes; a raw write
+                    // invalidates the cursor and restarts the scan). The
+                    // core's completion — a drained full pass — is what
+                    // sets the marker '1'; plaintext parse happens through
+                    // the identity decrypt (this branch is unencrypted).
+                    loop {
+                        let progress = rewrap(
+                            "source_turn_backfill",
+                            crate::engine::thread::source_turn_repair_batch(
+                                &conn,
+                                |stored| Ok(stored.to_string()),
+                                10_000,
+                            ),
+                        )?;
+                        if progress.complete {
+                            break;
+                        }
+                    }
+                }
             }
         }
 

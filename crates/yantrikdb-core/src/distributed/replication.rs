@@ -816,6 +816,19 @@ fn materialize_record(
         .get("metadata")
         .map(crate::base::datetext::event_time_bounds)
         .unwrap_or((None, None));
+    // v50: the leader-derived CANONICAL source_turn scalar rides the op
+    // payload; a follower uses it directly (never re-derives from metadata
+    // when the leader already spoke — the leader's extraction is the
+    // authority). A legacy payload without the key falls back to parsing
+    // the payload metadata through the SAME shared extractor. A present-
+    // but-null scalar means the leader saw no valid turn: that is a
+    // canonical None, not a fallback trigger.
+    let source_turn: Option<i64> = match payload.get("source_turn") {
+        Some(v) => v.as_i64().filter(|t| *t >= 0),
+        None => payload
+            .get("metadata")
+            .and_then(crate::engine::thread::extract_source_turn),
+    };
 
     if rid.is_empty() {
         return Ok(SynthesisStateChanges::default()); // Can't materialize without a rid
@@ -919,6 +932,10 @@ fn materialize_record(
 
     // Add-Wins Set: INSERT OR IGNORE means first writer wins (UUIDv7 = no collisions)
     let tx = conn.unchecked_transaction()?;
+    // v50: preserve the completeness marker across this stamped apply (the
+    // payload metadata is the replication-plaintext form, so the stamp is
+    // faithful — an apply is an engine-supported write, not raw SQL).
+    let marker_prior = crate::engine::thread::marker_snapshot(&tx)?;
     let inserted = tx.execute(
         "INSERT OR IGNORE INTO memories \
          (rid, type, text, created_at, updated_at, importance, \
@@ -926,9 +943,9 @@ fn materialize_record(
           certainty, domain, source, emotional_state, idempotency_key, origin_actor, \
           synthesis_axis, synthesis_granularity, synthesis_logical_key, \
           synthesis_evidence_version, synthesis_generation_hlc, synthesis_state, \
-          event_time_min, event_time_max) \
+          event_time_min, event_time_max, source_turn) \
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-                 ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25)",
+                 ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
         params![
             rid,
             mem_type,
@@ -968,8 +985,24 @@ fn materialize_record(
             // v48 (#149) event time.
             event_time_min,
             event_time_max,
+            // v50: the canonical scalar (or legacy-fallback parse) above.
+            source_turn,
         ],
     )?;
+    // v50 replay repair: when the row already existed (OR IGNORE no-op —
+    // re-delivery, or a pre-v50 row) a NULL column may be FILLED from the
+    // canonical scalar, but a non-NULL value is NEVER overwritten — the
+    // existing value came from a write at least as new as this replay.
+    if inserted == 0 {
+        if let Some(turn) = source_turn {
+            tx.execute(
+                "UPDATE memories SET source_turn = ?1 \
+                 WHERE rid = ?2 AND source_turn IS NULL",
+                params![turn, rid],
+            )?;
+        }
+    }
+    crate::engine::thread::marker_restore(&tx, &marker_prior)?;
 
     if inserted > 0 && synthesis_shape_valid {
         for dependency in &synthesis
@@ -1190,15 +1223,22 @@ fn materialize_consolidate(
             .get("metadata")
             .map(crate::base::datetext::event_time_bounds)
             .unwrap_or((None, None));
+        // v50: source_turn from the same payload metadata, through the
+        // shared extractor (consolidate ops carry no canonical scalar).
+        let source_turn = payload
+            .get("metadata")
+            .and_then(crate::engine::thread::extract_source_turn);
         let ts = crate::time::now_secs();
 
         let namespace = payload["namespace"].as_str().unwrap_or("default");
-        conn.execute(
+        // v50: preserve the completeness marker across this stamped apply.
+        let marker_prior = crate::engine::thread::marker_snapshot(conn)?;
+        let inserted = conn.execute(
             "INSERT OR IGNORE INTO memories \
              (rid, type, text, created_at, updated_at, importance, \
               half_life, last_access, valence, metadata, namespace, \
-              event_time_min, event_time_max) \
-             VALUES (?1, 'semantic', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+              event_time_min, event_time_max, source_turn) \
+             VALUES (?1, 'semantic', ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
             params![
                 consolidated_rid,
                 text,
@@ -1213,8 +1253,22 @@ fn materialize_consolidate(
                 // v48 (#149) event time.
                 event_time_min,
                 event_time_max,
+                // v50 source turn.
+                source_turn,
             ],
         )?;
+        // v50 replay repair: fill NULL only, never overwrite (see
+        // materialize_record).
+        if inserted == 0 {
+            if let Some(turn) = source_turn {
+                conn.execute(
+                    "UPDATE memories SET source_turn = ?1 \
+                     WHERE rid = ?2 AND source_turn IS NULL",
+                    params![turn, consolidated_rid],
+                )?;
+            }
+        }
+        crate::engine::thread::marker_restore(conn, &marker_prior)?;
 
         // **v0.7.19 replication audit (postmortem 2026-05-20).**
         let _ = conn.execute(

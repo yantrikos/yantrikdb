@@ -17,7 +17,11 @@
 // v48 makes valid time reachable at recall: event_time_min/max columns + index (#149).
 // v49 persists the Unicode-lowercased entity key (memory_entities.entity_name_norm + index)
 // so recall_thread resolves names by indexed lookup instead of an O(V) vocabulary scan.
-pub const SCHEMA_VERSION: i32 = 49;
+// v50 makes conversational turn order queryable: memories.source_turn column + index,
+// stamped by every metadata-persisting writer via engine::thread::extract_source_turn,
+// so recall_thread's (created_at, source_turn, rid) order is expressed in SQL
+// (SQLite may sort the full eligible set — see the idx_memories_source_turn note).
+pub const SCHEMA_VERSION: i32 = 50;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -136,6 +140,16 @@ CREATE TABLE IF NOT EXISTS memories (
     event_time_min REAL,
     event_time_max REAL,
 
+    -- v50: the conversational turn a memory came from, mirrored from
+    -- metadata JSON `source_turn` (preferred) / `turn_id` by every writer
+    -- that persists the metadata column (the `extract_source_turn` helper
+    -- in engine::thread is the single source — valid non-negative integers
+    -- only, never invented). NULL when the record carries no turn, and on
+    -- encrypted stores until `maintain_source_turn_backfill` (or a lazy
+    -- re-stamp on write) fills it — completeness is tracked by the
+    -- meta `source_turn_backfill_complete` marker, not assumed.
+    source_turn INTEGER,
+
     -- v32 (structural query / list_records): indexed generated columns that
     -- extract JSON metadata fields for typed enumeration without scanning the
     -- opaque metadata blob. VIRTUAL = computed on read; the secondary index
@@ -163,6 +177,20 @@ CREATE INDEX IF NOT EXISTS idx_memories_resolution_kind ON memories(resolution_k
 CREATE INDEX IF NOT EXISTS idx_memories_event_time
     ON memories(namespace, event_time_min, event_time_max)
     WHERE event_time_min IS NOT NULL;
+
+-- v50: recall_thread's chronological scan. Honesty note (reviewer
+-- finding, resolution B): this index does NOT satisfy the v2 ORDER BY
+-- (created_at ASC, source_turn ASC NULLS LAST, rid ASC) — the NULLS-LAST
+-- expression key and the trailing rid are not index columns, and the v2
+-- query's shape (a materialized route UNION probed into memories by rid)
+-- defeats index-served ordering anyway: rows reach the sort in union
+-- order, not index order. SQLite therefore MAY SORT THE FULL ELIGIBLE
+-- SET — anchor counts are capped but one anchor can match arbitrarily
+-- many memories, so the sort cost is proportional to the union's size.
+-- Correctness is unaffected; the index's value is the (namespace,
+-- created_at) narrowing for plain chronological scans over the column.
+CREATE INDEX IF NOT EXISTS idx_memories_source_turn
+    ON memories(namespace, created_at, source_turn);
 
 -- v37 (Item 4a): actor-scoped durable idempotency claims. The
 -- `INSERT ... ON CONFLICT` on the PK is the serialization point for same-key
@@ -1112,6 +1140,38 @@ END;
 CREATE TRIGGER IF NOT EXISTS memories_fts_update AFTER UPDATE OF text ON memories BEGIN
     INSERT INTO memories_fts(memories_fts, rowid, text) VALUES ('delete', old.rowid, old.text);
     INSERT INTO memories_fts(rowid, text) VALUES (new.rowid, new.text);
+END;
+
+-- v50: the source_turn completeness marker's trigger invalidation. ANY
+-- write that could change a row's turn (an INSERT, or an UPDATE touching
+-- metadata or the column itself) flips meta.source_turn_backfill_complete
+-- to '0' AND bumps meta.source_turn_invalidation_epoch — a raw SQL write
+-- stales the marker (the strict ordering gate in recall_thread_v2 on an
+-- encrypted store then refuses rather than silently misorders) and the
+-- epoch bump invalidates any in-flight repair cursor so the recompute
+-- scan restarts from rowid 0 instead of certifying rows mutated behind
+-- it. Engine-supported write transactions stamp the column from the same
+-- plaintext metadata they serialize and then RESTORE the marker's AND
+-- epoch's pre-write state under the serialized writer lock
+-- (engine::thread::marker_snapshot / marker_restore): true stays true,
+-- and false is never waived by a normal write — only a FULL recompute
+-- pass draining (open()'s backfill on unencrypted stores,
+-- maintain_source_turn_backfill's completion otherwise) sets it.
+-- These statements also live in MIGRATE_V49_TO_V50 (belt and braces,
+-- the FTS-trigger precedent): an upgraded store must get them from the
+-- migration itself, not only from this batch running after it.
+CREATE TRIGGER IF NOT EXISTS memories_source_turn_marker_insert AFTER INSERT ON memories BEGIN
+    INSERT OR REPLACE INTO meta (key, value) VALUES ('source_turn_backfill_complete', '0');
+    INSERT OR REPLACE INTO meta (key, value) VALUES ('source_turn_invalidation_epoch',
+        CAST(COALESCE((SELECT CAST(value AS INTEGER) FROM meta
+                       WHERE key = 'source_turn_invalidation_epoch'), 0) + 1 AS TEXT));
+END;
+CREATE TRIGGER IF NOT EXISTS memories_source_turn_marker_update
+    AFTER UPDATE OF metadata, source_turn ON memories BEGIN
+    INSERT OR REPLACE INTO meta (key, value) VALUES ('source_turn_backfill_complete', '0');
+    INSERT OR REPLACE INTO meta (key, value) VALUES ('source_turn_invalidation_epoch',
+        CAST(COALESCE((SELECT CAST(value AS INTEGER) FROM meta
+                       WHERE key = 'source_turn_invalidation_epoch'), 0) + 1 AS TEXT));
 END;
 
 -- Normalized join tables for trigger/pattern JSON arrays
@@ -3097,4 +3157,54 @@ ALTER TABLE memory_entities ADD COLUMN entity_name_norm TEXT;
 -- tenant-bounded lookup would need namespace in the entity lookup index.
 CREATE INDEX IF NOT EXISTS idx_memory_entities_norm
     ON memory_entities(entity_name_norm, memory_rid);
+";
+
+/// v49 -> v50 (thread v2): the conversational turn becomes a queryable
+/// column (`memories.source_turn`) so `recall_thread`'s
+/// `(created_at, source_turn NULLS LAST, rid)` order is expressed in SQL
+/// instead of a decrypt-everything Rust sort. The index does NOT serve
+/// that ORDER BY (SQLite may sort the full eligible set — see the honest
+/// index comment in SCHEMA_SQL); what the column buys is ordering without
+/// decrypting, not ordering without sorting.
+///
+/// NO SQL backfill here, DELIBERATELY (the v48 UPDATE precedent does not
+/// transfer): the extraction semantics are richer than one json_extract —
+/// `source_turn` preferred, falling back to `turn_id` when `source_turn`
+/// is absent OR invalid, valid non-negative INTEGERS only (a float 5.0 or
+/// a string "5" must stay NULL, never be invented). Encoding that
+/// fallback-with-validity chain in SQL would create a SECOND
+/// implementation of the never-invent rule that could drift from
+/// `engine::thread::extract_source_turn` (the single source every writer
+/// stamps through). The ENGINE backfills post-migration in Rust (open()'s
+/// `source_turn_backfill` stage) in keyset-paged 10k batches, one
+/// transaction per batch, resumable — and an unbounded one-statement
+/// UPDATE over a large store inside the migration would also hold the
+/// write lock for the whole scan. Encrypted rows (metadata is ciphertext,
+/// json_valid false) cannot be parsed at rest at all: their completeness
+/// is tracked by the meta `source_turn_backfill_complete` marker and
+/// healed by `maintain_source_turn_backfill` (decrypt-and-stamp).
+/// Statements stay idempotent-friendly: the runner is
+/// `run_migration_idempotent` (the v0.7.3 contract).
+pub const MIGRATE_V49_TO_V50: &str = "
+ALTER TABLE memories ADD COLUMN source_turn INTEGER;
+CREATE INDEX IF NOT EXISTS idx_memories_source_turn
+    ON memories(namespace, created_at, source_turn);
+-- The marker-invalidation triggers MUST ship in the migration itself
+-- (reviewer finding): SCHEMA_SQL also carries them, but an upgraded
+-- store's protection cannot depend on a second batch happening to run
+-- after this one — a raw SQL write in the gap would leave marker=true
+-- while the store silently drifted. Identical statements to SCHEMA_SQL.
+CREATE TRIGGER IF NOT EXISTS memories_source_turn_marker_insert AFTER INSERT ON memories BEGIN
+    INSERT OR REPLACE INTO meta (key, value) VALUES ('source_turn_backfill_complete', '0');
+    INSERT OR REPLACE INTO meta (key, value) VALUES ('source_turn_invalidation_epoch',
+        CAST(COALESCE((SELECT CAST(value AS INTEGER) FROM meta
+                       WHERE key = 'source_turn_invalidation_epoch'), 0) + 1 AS TEXT));
+END;
+CREATE TRIGGER IF NOT EXISTS memories_source_turn_marker_update
+    AFTER UPDATE OF metadata, source_turn ON memories BEGIN
+    INSERT OR REPLACE INTO meta (key, value) VALUES ('source_turn_backfill_complete', '0');
+    INSERT OR REPLACE INTO meta (key, value) VALUES ('source_turn_invalidation_epoch',
+        CAST(COALESCE((SELECT CAST(value AS INTEGER) FROM meta
+                       WHERE key = 'source_turn_invalidation_epoch'), 0) + 1 AS TEXT));
+END;
 ";

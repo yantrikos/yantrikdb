@@ -115,3 +115,38 @@ create_exception!(
      signing or the signature is forged. There is no legitimate state that \
      produces this and no override — re-download the pack from its publisher."
 );
+
+create_exception!(
+    yantrikdb,
+    PhraseRouteUnavailableError,
+    PyRuntimeError,
+    "recall_thread's phrase route is unavailable on this engine: the FTS \
+     index on an encrypted store holds ciphertext, so a phrase MATCH would \
+     silently match nothing (the engine fails closed instead). Not \
+     retryable as-is: drop the phrases (entity and topic routes work under \
+     encryption) or query an unencrypted store."
+);
+
+create_exception!(
+    yantrikdb,
+    SourceTurnMaintenanceRequiredError,
+    PyRuntimeError,
+    "This store's source_turn columns are not known to mirror their \
+     metadata — an encrypted store that has not finished its backfill, or \
+     ANY store (plaintext included) staled by a raw SQL metadata write — so \
+     a strict chronological thread order cannot be guaranteed yet. \
+     Retryable after maintenance: call maintain_source_turn_backfill(batch) \
+     repeatedly until it reports complete, then reissue the identical query."
+);
+
+create_exception!(
+    yantrikdb,
+    InvalidThreadTopicError,
+    PyRuntimeError,
+    "A recall_thread topic rid did not resolve to a visible, verified topic \
+     synthesis row in the queried namespace. The message is identical \
+     regardless of cause (ordinary memory rid, nonexistent, cross-namespace, \
+     inactive, unverified) — deliberately leakage-free. Not retryable as-is: \
+     pass a topic synthesis rid from this namespace (e.g. from \
+     persist_organization / record_synthesis)."
+);

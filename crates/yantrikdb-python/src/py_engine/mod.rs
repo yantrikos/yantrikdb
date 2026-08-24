@@ -383,6 +383,15 @@ pub(crate) fn map_err(e: yantrikdb_core::YantrikDbError) -> PyErr {
         E::PackEmbedderMismatch { .. } => py_errors::PackEmbedderMismatch::new_err(e.to_string()),
         E::PackAlreadyMounted { .. } => py_errors::PackAlreadyMounted::new_err(e.to_string()),
         E::PackSignatureInvalid { .. } => py_errors::PackSignatureInvalid::new_err(e.to_string()),
+        // v50 thread v2: both variants are actionable — the first names
+        // the route to drop, the second the maintenance op to run.
+        E::CapabilityUnavailable { .. } => {
+            py_errors::PhraseRouteUnavailableError::new_err(e.to_string())
+        }
+        E::MaintenanceRequired { .. } => {
+            py_errors::SourceTurnMaintenanceRequiredError::new_err(e.to_string())
+        }
+        E::InvalidThreadTopic { .. } => py_errors::InvalidThreadTopicError::new_err(e.to_string()),
         E::NoEmbedder => PyRuntimeError::new_err(e.to_string()),
         E::NoQuery => PyValueError::new_err(e.to_string()),
         _ => PyRuntimeError::new_err(e.to_string()),
