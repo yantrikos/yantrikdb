@@ -15,6 +15,7 @@ import json
 import math
 import platform
 import re
+import sys
 from datetime import UTC, datetime
 from pathlib import Path
 from statistics import fmean
@@ -38,6 +39,13 @@ except ImportError:  # pragma: no cover - direct script execution
         event_ordering_focus,
         is_event_ordering_chronology_query,
     )
+
+# Direct script execution puts benchmarks/amb first on sys.path, where the
+# benchmark's yantrikdb.py provider shim would shadow the installed product.
+_HERE = Path(__file__).resolve().parent
+sys.path = [
+    entry for entry in sys.path if Path(entry or ".").resolve() != _HERE
+]
 
 
 PROTOCOL = "amb-event-ordering-thread-v2-stage-a-v1"
