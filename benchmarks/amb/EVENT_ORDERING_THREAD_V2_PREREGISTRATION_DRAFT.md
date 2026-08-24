@@ -113,6 +113,14 @@ its actual encryption mode and route capabilities; this arm is expected to use
 the same plaintext mode as its frozen control and makes no searchable-
 encryption claim.
 
+Both actionable errors remain typed across the public Python boundary: the
+phrase-capability and source-turn maintenance exceptions subclass
+`RuntimeError` for compatibility but do not collapse to a generic exception
+that callers must identify by matching message text. The existing Python call
+shape `recall_thread(namespace, entities, limit=100)` remains valid in both
+positional and keyword form; `phrases` and `topic_rids` are additive optional
+arguments.
+
 ## Stage A: Zero-Call Product Gate
 
 The complete 400-row artifact is built through the public product path. The
@@ -154,6 +162,10 @@ neither they nor their thresholds are inputs to the selector.
     prove an encrypted migrated store returns `MaintenanceRequired` before the
     named maintenance operation and exact positions after it; an unencrypted
     migration completes the marker before v2 can be queried.
+13. Python product tests prove both actionable failures cross the binding as
+    their exported typed exception classes (each still a `RuntimeError`
+    subclass), and that the pre-v2 positional and keyword `recall_thread`
+    calls return unchanged entity-only behavior.
 
 The Stage A thresholds require more than half of the structurally available
 coverage while leaving room for the unavoidable query-only selection gap. They
