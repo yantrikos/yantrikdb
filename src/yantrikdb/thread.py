@@ -11,9 +11,11 @@ the epistemics later):
 
 - ``floor=12`` is DEV-CALIBRATED: it was chosen from a coverage sweep on
   the 40 burned event-ordering dev queries (BEAM 100k) after the frozen
-  Stage A run failed with the historical fixed budget of 3. Its validity
-  for anything beyond that dev set rests on the sealed BEAM 500k holdout
-  evaluation, not on this module.
+  Stage A run failed with the historical fixed budget of 3. Its
+  generalization beyond that dev set is UNCONFIRMED: a BEAM 500k holdout
+  seal was invalidated before evaluation (helper contamination,
+  disclosed and voided same-day), so no valid holdout evaluation exists
+  yet — a future untouched, mutually sealed cohort has to supply it.
 - ``cap=16`` is a hard design ceiling on rid fan-out: it bounds the SQL
   union width and the resulting thread size. Dev evidence (non-binding):
   max observed thread length was ~80 rows at 12 topics.
