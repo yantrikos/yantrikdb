@@ -227,8 +227,6 @@ implementer and reviewer and are normative until amended:
 - **Explicit typed submission API** — the contract requires an
   application-submitted path that bypasses English detection under the
   same provenance rules; v1 is detector-admission only.
-- **`first_mention_turn`** — v1 captures `first_mention_at` only; turn
-  identity from source metadata is not yet extracted.
 - **Ordinary auditable hit fields** — lane results carry rid, text,
   clocks, and evidence links, but not yet `score`, `why_retrieved`, or
   an explicit `source_actor` field.
