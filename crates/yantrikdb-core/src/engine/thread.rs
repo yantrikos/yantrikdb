@@ -120,6 +120,43 @@ pub(crate) fn extract_source_turn(metadata: &serde_json::Value) -> Option<i64> {
     valid_turn(metadata, "source_turn").or_else(|| valid_turn(metadata, "turn_id"))
 }
 
+/// Three-way decode of the CANONICAL `source_turn` scalar riding a
+/// replicated op payload (record / batch / record_with_rid / queued /
+/// both correction shapes):
+///
+/// - **absent key** → `Ok(None)`: a legacy pre-v50 payload; the caller
+///   falls back to [`extract_source_turn`] over the payload (or merged)
+///   metadata.
+/// - **present JSON null** → `Ok(Some(None))`: the leader saw no valid
+///   turn — an AUTHORITATIVE None the follower must store (for a
+///   correction: clear), never a fallback trigger.
+/// - **present valid nonnegative i64** → `Ok(Some(Some(t)))`: the
+///   leader's value, used directly. It is deliberately NOT compared
+///   against local metadata — across parser versions the leader's
+///   extraction is the authority, and a follower "correcting" it is the
+///   divergence, not the defense.
+/// - **present anything else** (negative, float, string, object…) →
+///   typed `InvalidInput` error. Treating a malformed scalar as
+///   authoritative None would let a corrupt payload silently clear a
+///   real turn AND certify the store's completeness marker over the
+///   disagreement; rejection surfaces the data-integrity fault instead.
+pub(crate) fn decode_canonical_source_turn(
+    payload: &serde_json::Value,
+) -> crate::base::error::Result<Option<Option<i64>>> {
+    match payload.get("source_turn") {
+        None => Ok(None),
+        Some(serde_json::Value::Null) => Ok(Some(None)),
+        Some(v) => match v.as_i64() {
+            Some(t) if t >= 0 => Ok(Some(Some(t))),
+            _ => Err(crate::base::error::YantrikDbError::InvalidInput(format!(
+                "replicated payload carries a malformed canonical source_turn \
+                 ({v}): must be JSON null or a nonnegative integer; rejecting \
+                 the op rather than certifying a divergent column"
+            ))),
+        },
+    }
+}
+
 /// Meta key of the v50 source_turn completeness marker: `'1'` means every
 /// row's `source_turn` column faithfully mirrors its (plaintext) metadata,
 /// `'0'` means an encrypted store still owes `maintain_source_turn_backfill`

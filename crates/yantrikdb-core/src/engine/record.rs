@@ -2496,6 +2496,14 @@ impl YantrikDB {
         // own writers (apply embedding bytes directly).
         let current_embedder_name = self.search_state.load().runtime_embedder_name.clone();
 
+        // v50: the queued op is a durable `op_type='record'` payload exactly
+        // like the sync/batch/record_with_rid ones, so it must carry the
+        // leader's canonical source_turn the same way — otherwise local
+        // materialization re-extracts while a follower takes the legacy
+        // absent-key fallback, and a queued write during rolling parser
+        // versions diverges between replicas.
+        let source_turn = crate::engine::thread::extract_source_turn(metadata);
+
         // Full record payload — what the materializer needs to
         // reconstruct the row.
         let payload = serde_json::json!({
@@ -2521,6 +2529,10 @@ impl YantrikDB {
             // materializer defaults both to NULL, so old rows are unchanged.
             "idempotency_key": idem.as_ref().map(|(k, _)| *k),
             "origin_actor": idem.as_ref().map(|_| self.actor_id.as_str()),
+            // v50: leader-derived canonical scalar (present-null means the
+            // leader saw no valid turn — authoritative None, not a fallback
+            // trigger). Same encoding as the sync route's payload.
+            "source_turn": source_turn,
         });
 
         // Write to oplog with applied=0. The v27 `embedding_model`

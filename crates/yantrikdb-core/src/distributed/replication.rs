@@ -822,13 +822,16 @@ fn materialize_record(
     // authority). A legacy payload without the key falls back to parsing
     // the payload metadata through the SAME shared extractor. A present-
     // but-null scalar means the leader saw no valid turn: that is a
-    // canonical None, not a fallback trigger.
-    let source_turn: Option<i64> = match payload.get("source_turn") {
-        Some(v) => v.as_i64().filter(|t| *t >= 0),
-        None => payload
-            .get("metadata")
-            .and_then(crate::engine::thread::extract_source_turn),
-    };
+    // canonical None, not a fallback trigger — and a present NON-null
+    // value that is not a valid nonnegative i64 is a typed rejection
+    // (decode_canonical_source_turn), never silently certified as None.
+    let source_turn: Option<i64> =
+        match crate::engine::thread::decode_canonical_source_turn(payload)? {
+            Some(canonical) => canonical,
+            None => payload
+                .get("metadata")
+                .and_then(crate::engine::thread::extract_source_turn),
+        };
 
     if rid.is_empty() {
         return Ok(SynthesisStateChanges::default()); // Can't materialize without a rid

@@ -772,3 +772,202 @@ fn migration_from_v49_installs_column_backfill_and_triggers() {
         "the migrated store's INSERT trigger fires on a raw insert"
     );
 }
+
+/// Reviewer blocker 1 (final committed review): the QUEUED record op is a
+/// durable `op_type='record'` payload like the sync/batch/record_with_rid
+/// ones, and must carry the leader-derived canonical scalar the same way —
+/// valid turn as an integer, no-turn as PRESENT-NULL (authoritative None),
+/// and a follower applying the op uses the canonical value directly
+/// (leader authority across parser versions), never the metadata re-parse.
+#[test]
+fn queued_record_op_carries_canonical_scalar_with_follower_parity() {
+    use crate::replication::{apply_ops, extract_ops_since};
+
+    let leader = YantrikDB::new(":memory:", 8).unwrap();
+
+    // (a) Valid turn: the queued payload carries it as the canonical key.
+    let rid_turn = leader
+        .record_queued(
+            "queued row with a turn",
+            "episodic",
+            0.5,
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({"source_turn": 7}),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+            crate::provenance::GateVerdict::Clean,
+            None,
+            None,
+        )
+        .unwrap();
+
+    // (b) No turn anywhere: the key must still be PRESENT and null —
+    // the leader speaking "no valid turn", not a legacy absent-key payload.
+    let rid_none = leader
+        .record_queued(
+            "queued row without a turn",
+            "episodic",
+            0.5,
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({"note": "turnless"}),
+            &vec_seed(2.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+            crate::provenance::GateVerdict::Clean,
+            None,
+            None,
+        )
+        .unwrap();
+
+    let ops = extract_ops_since(&leader.conn(), None, None, None, 100).unwrap();
+    let op_turn = ops
+        .iter()
+        .find(|o| o.op_type == "record" && o.target_rid.as_deref() == Some(rid_turn.as_str()))
+        .expect("the queued record op exists")
+        .clone();
+    assert_eq!(
+        op_turn.payload["source_turn"], 7,
+        "the queued payload carries the canonical scalar like the sync route"
+    );
+    let op_none = ops
+        .iter()
+        .find(|o| o.op_type == "record" && o.target_rid.as_deref() == Some(rid_none.as_str()))
+        .expect("the turnless queued record op exists")
+        .clone();
+    assert_eq!(
+        op_none.payload.get("source_turn"),
+        Some(&serde_json::Value::Null),
+        "no valid turn is PRESENT-NULL (authoritative None), never an absent key"
+    );
+
+    // (c) Follower parity + leader authority: mutate the canonical scalar
+    // away from the metadata value; the follower must take the canonical
+    // one (a parser-version divergence is resolved in the leader's favor).
+    let mut divergent = op_turn.clone();
+    divergent.payload["source_turn"] = serde_json::json!(11);
+    let follower = YantrikDB::new(":memory:", 8).unwrap();
+    apply_ops(&follower, &[divergent, op_none.clone()]).unwrap();
+    assert_eq!(
+        column_turn(&follower, &rid_turn),
+        Some(11),
+        "the follower uses the queued op's canonical scalar, not a metadata re-parse"
+    );
+    assert_eq!(
+        column_turn(&follower, &rid_none),
+        None,
+        "present-null materializes as an (authoritative) NULL column"
+    );
+}
+
+/// Reviewer blocker 2 (final committed review): a PRESENT canonical
+/// scalar that is not JSON null and not a valid nonnegative i64 is a
+/// data-integrity fault. Coercing it to None would silently clear a real
+/// turn AND certify the store over the disagreement — so materialization
+/// REJECTS the op with a typed error instead, at both the record and the
+/// correction apply sites, leaving the follower without the row/change.
+#[test]
+fn malformed_canonical_scalar_is_rejected_not_coerced() {
+    use crate::replication::{apply_ops, extract_ops_since};
+
+    let leader = YantrikDB::new(":memory:", 8).unwrap();
+    let rid = leader
+        .record(
+            "malformed scalar probe",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({"source_turn": 5}),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    let record_op = extract_ops_since(&leader.conn(), None, None, None, 100)
+        .unwrap()
+        .into_iter()
+        .find(|o| o.op_type == "record" && o.target_rid.as_deref() == Some(rid.as_str()))
+        .expect("the record op exists");
+
+    for bad in [
+        serde_json::json!(-3),
+        serde_json::json!(5.5),
+        serde_json::json!("5"),
+        serde_json::json!({"turn": 5}),
+    ] {
+        let mut op = record_op.clone();
+        op.payload["source_turn"] = bad.clone();
+        let follower = YantrikDB::new(":memory:", 8).unwrap();
+        let err = apply_ops(&follower, &[op]).expect_err(&format!(
+            "a present malformed canonical scalar ({bad}) must be rejected"
+        ));
+        assert!(
+            matches!(
+                err,
+                crate::error::YantrikDbError::InvalidInput(ref msg)
+                    if msg.contains("malformed canonical source_turn")
+            ),
+            "typed InvalidInput naming the fault, got: {err:?}"
+        );
+        let rows: i64 = follower
+            .conn()
+            .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(rows, 0, "the rejected op must not have materialized a row");
+    }
+
+    // The correction-apply site rejects the same shapes: build a follower
+    // that HAS the row, then deliver a correction op whose canonical
+    // scalar is malformed.
+    let follower = YantrikDB::new(":memory:", 8).unwrap();
+    apply_ops(&follower, &[record_op.clone()]).unwrap();
+    assert_eq!(column_turn(&follower, &rid), Some(5));
+
+    leader
+        .correct(
+            &rid,
+            None,
+            Some(&serde_json::json!({"source_turn": 6})),
+            None,
+            None,
+            "reviewer blocker 2 probe",
+        )
+        .unwrap();
+    let correct_op = extract_ops_since(&leader.conn(), None, None, None, 100)
+        .unwrap()
+        .into_iter()
+        .find(|o| o.op_type.starts_with("correct") && o.target_rid.as_deref() == Some(rid.as_str()))
+        .expect("the correction op exists");
+
+    let mut bad_correct = correct_op;
+    bad_correct.payload["source_turn"] = serde_json::json!(-1);
+    let err = apply_ops(&follower, &[bad_correct])
+        .expect_err("a malformed canonical scalar on a correction op must be rejected");
+    assert!(
+        matches!(
+            err,
+            crate::error::YantrikDbError::InvalidInput(ref msg)
+                if msg.contains("malformed canonical source_turn")
+        ),
+        "typed InvalidInput at the correction apply site, got: {err:?}"
+    );
+    assert_eq!(
+        column_turn(&follower, &rid),
+        Some(5),
+        "the rejected correction must not have cleared or changed the column"
+    );
+}

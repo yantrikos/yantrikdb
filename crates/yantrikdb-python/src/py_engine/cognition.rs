@@ -294,10 +294,13 @@ impl PyYantrikDB {
     /// route fields, `total`, `omitted`), so pre-v2 callers are unbroken;
     /// any call passing phrases or topic_rids returns the richer v2 shape
     /// (items carry `routes`, matched `phrases`, matched `topic_rids`;
-    /// the result adds an explicit `returned`). A store whose
-    /// `source_turn` columns are stale raises
-    /// `SourceTurnMaintenanceRequiredError` — run
-    /// `maintain_source_turn_backfill` until complete.
+    /// the result adds an explicit `returned`). Only those V2-ROUTED calls
+    /// (phrases/topic_rids passed here, or any `recall_thread_v2` call)
+    /// can raise `SourceTurnMaintenanceRequiredError` on a store whose
+    /// `source_turn` columns are stale — run
+    /// `maintain_source_turn_backfill` until complete. An entity-only call
+    /// takes the legacy v1 path and NEVER raises it (v1 orders from
+    /// decrypt-derived turns, independent of the persisted columns).
     #[pyo3(signature = (namespace, entities, limit=100, phrases=None, topic_rids=None))]
     fn recall_thread(
         &self,

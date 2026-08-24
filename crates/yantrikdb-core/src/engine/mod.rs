@@ -976,19 +976,29 @@ impl YantrikDB {
 
         // **v50 source_turn backfill — Rust, not SQL** (audit trap 3: no
         // unbounded UPDATE in the migration). MIGRATE_V49_TO_V50 only adds
-        // the column + index; the ENGINE backfills here, post-migration,
-        // in KEYSET-PAGED 10k batches (one transaction per batch, ascending
-        // rowid, resumable across crashes — committed rows are non-NULL and
-        // never revisited), parsing each json_valid metadata blob through
-        // the ONE shared extractor (engine::thread::extract_source_turn).
-        // Non-json_valid (encrypted) rows are skipped: they cannot be
-        // parsed at rest, so their completeness is tracked by the
-        // meta 'source_turn_backfill_complete' marker (converged option b):
+        // the column + index + triggers; the ENGINE repairs here,
+        // post-migration, by looping the SAME full-recompute core the
+        // maintenance op uses (thread::source_turn_repair_batch) in 10k-row
+        // transactions: EVERY row beyond the epoch-stamped resumable cursor
+        // is compared against the ONE shared extractor
+        // (engine::thread::extract_source_turn) over its current metadata
+        // and rewritten in BOTH directions — including resetting a stale
+        // non-NULL column back to NULL. There is no "committed rows are
+        // never revisited" shortcut: a raw SQL write can mutate metadata
+        // behind any previously-stamped row, which is exactly why the
+        // schema triggers bump the invalidation epoch and stale the cursor
+        // (a NULL-only fill would certify those rows wrong — reviewer
+        // blocker 1 on this PR's build).
+        // Rows whose metadata cannot be parsed at rest (encrypted blobs)
+        // fall back per repair-core rules; store-level completeness is
+        // tracked by the meta 'source_turn_backfill_complete' marker
+        // (converged option b):
         //   - fresh stores (no prior schema version): marker set '1'
         //     immediately — every future row is stamped at write.
-        //   - unencrypted stores: marker set '1' when this backfill drains;
-        //     a marker staled to '0' by raw SQL (the schema triggers) is
-        //     healed by re-running the NULL-fill on the next open.
+        //   - unencrypted stores: marker set '1' when a repair pass drains
+        //     with its cursor epoch still current; a marker staled to '0'
+        //     by raw SQL (the schema triggers) is healed by re-running
+        //     this same full recompute on the next open.
         //   - encrypted stores: marker set '0' at (post-)migration; only
         //     maintain_source_turn_backfill's decrypt-and-stamp completion
         //     sets it '1'. Lazy write-time stamping continues but NEVER

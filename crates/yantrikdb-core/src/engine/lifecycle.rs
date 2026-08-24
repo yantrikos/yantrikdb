@@ -2261,10 +2261,14 @@ impl YantrikDB {
             // turn: this follower must CLEAR its column, not re-derive).
             // Only an ABSENT key (a legacy pre-v50 op) falls back to the
             // shared extractor over this follower's own merged metadata.
-            let source_turn: Option<i64> = match payload.get("source_turn") {
-                Some(v) => v.as_i64().filter(|t| *t >= 0),
-                None => crate::engine::thread::extract_source_turn(&new_meta_val),
-            };
+            // A present non-null value that is not a valid nonnegative i64
+            // is a typed rejection (decode_canonical_source_turn) — never
+            // silently coerced to a column-clearing None.
+            let source_turn: Option<i64> =
+                match crate::engine::thread::decode_canonical_source_turn(&payload)? {
+                    Some(canonical) => canonical,
+                    None => crate::engine::thread::extract_source_turn(&new_meta_val),
+                };
 
             // Store the follower-local encrypted bytes (exact or re-embedded).
             let stored_emb: Option<Vec<u8>> = match &new_vec {
