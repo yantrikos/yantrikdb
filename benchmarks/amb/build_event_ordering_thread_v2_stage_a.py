@@ -56,6 +56,7 @@ EXPECTED_TREATMENT_ROWS = 40
 THREAD_LIMIT = 100
 MAX_TOPICS = 3
 MAX_HANDLE_MEMBERSHIPS = 3
+MAX_EVIDENCE_PER_HANDLE = 12
 _NAME_RE = re.compile(r"\b[A-Z][a-z]{2,}\b")
 _GENERIC_NAMES = {
     "Across",
@@ -185,11 +186,13 @@ def _reset_db_path(path: Path) -> None:
 
 
 def bounded_handle_evidence(
-    raw_handles: list[dict], max_memberships: int = MAX_HANDLE_MEMBERSHIPS
+    raw_handles: list[dict],
+    max_memberships: int = MAX_HANDLE_MEMBERSHIPS,
+    max_evidence_per_handle: int = MAX_EVIDENCE_PER_HANDLE,
 ) -> list[tuple[int, dict, list[str]]]:
     """Apply the product's deterministic evidence-membership bound."""
-    if max_memberships < 1:
-        raise ValueError("max_memberships must be positive")
+    if max_memberships < 1 or max_evidence_per_handle < 1:
+        raise ValueError("organizer bounds must be positive")
     evidence_by_handle = [
         list(dict.fromkeys(str(value) for value in raw.get("evidence_ids") or []))
         for raw in raw_handles
@@ -216,7 +219,7 @@ def bounded_handle_evidence(
             evidence_id
             for evidence_id in evidence_ids
             if index - 1 in permitted[evidence_id]
-        ]
+        ][:max_evidence_per_handle]
         if kept:
             bounded.append((index, raw, kept))
     return bounded
@@ -282,6 +285,7 @@ def _persist_unit(db_path: Path, unit: str, artifact: dict) -> tuple[Any, list[d
         db,
         OrganizationPlan(tuple(handles)),
         idempotency_prefix=f"amb:thread-v2:{unit}:organizer",
+        max_evidence_per_handle=MAX_EVIDENCE_PER_HANDLE,
         max_handle_memberships=MAX_HANDLE_MEMBERSHIPS,
     )
     progress = db.maintain_source_turn_backfill(10_000)
@@ -473,6 +477,7 @@ def build(args: argparse.Namespace) -> dict:
         "thread_api": "recall_thread_v2",
         "thread_limit": THREAD_LIMIT,
         "max_topic_rids_per_query": MAX_TOPICS,
+        "max_evidence_per_handle": MAX_EVIDENCE_PER_HANDLE,
         "max_handle_memberships": MAX_HANDLE_MEMBERSHIPS,
         "row_count": len(artifact_rows),
         "treatment_row_count": len(selected_ids),

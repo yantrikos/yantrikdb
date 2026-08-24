@@ -140,6 +140,10 @@ def test_handle_membership_bound_is_query_free_and_deterministic():
         ["shared"],
     ]
 
+    long = [{"label": "long", "evidence_ids": [str(i) for i in range(14)]}]
+    bounded_long = bounded_handle_evidence(long, max_evidence_per_handle=12)
+    assert bounded_long[0][2] == [str(i) for i in range(12)]
+
 
 def test_thread_validation_and_rendering():
     items = [
