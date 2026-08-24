@@ -1,0 +1,79 @@
+{
+  "protocol": "amb-event-ordering-thread-v3-holdout-seal-v1",
+  "sealed_at": "2026-08-24",
+  "dataset": "beam",
+  "split": "500k",
+  "holdout_units": [
+    "16",
+    "17",
+    "18",
+    "19",
+    "20",
+    "21",
+    "22",
+    "23",
+    "24",
+    "25",
+    "26",
+    "27",
+    "28",
+    "29",
+    "30",
+    "31",
+    "32",
+    "33",
+    "34",
+    "35"
+  ],
+  "development_units": [
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "10",
+    "11",
+    "12",
+    "13",
+    "14",
+    "15"
+  ],
+  "event_category": "event_ordering",
+  "expected": {
+    "query_rows": 400,
+    "event_rows": 40,
+    "document_rows": 583,
+    "unit_count": 20,
+    "exact_event_query_overlap_with_beam_100k": 0
+  },
+  "source_sha256": {
+    "queries.json.gz": "fe4553ac89ffd7989d7d6dbcf4c3a4a0119244e784cdf13b8566fd11be29a69b",
+    "documents.json.gz": "1033f1a96b199992a4f2aea7a5ac56601902f6091eac98481a1e4bf59c32629e",
+    "categories.json.gz": "88e7abb2073ef3c4b388771d44bd77b44fa7980ffd2edb16638ca345fae57cb9",
+    "stats.json.gz": "825cb3d072331784b07513f1b2f87c3d815ce7b6ee69b0fe19d1a820cc644553"
+  },
+  "subset_sha256": {
+    "all_queries": "583a1878223a571cd9f149c1529eed193a055e8b16804527c75243579c6fa7e5",
+    "event_queries": "cf1d3d3c9041b404e471a1eb80b1eadc35054d6a75c35afb9a90211fd1e111b7",
+    "all_ordered_query_ids": "42b45b2a92841be1062687945cd237a2329a663ec7b3f3e3758887fa1143afb9",
+    "event_ordered_query_ids": "9a82c13d26a62ede29c15539664e536606e8d9b881cb1cb009e3fdd269a0c168",
+    "documents": "a56a4fa212657b5d6e161cb93f485bdc6d1a4fd0a98b31a8e1c14917d485116f"
+  },
+  "canonicalization": {
+    "rows": "source order",
+    "json": "sort_keys=true,separators=(',',':'),ensure_ascii=true",
+    "ordered_ids": "UTF-8 IDs joined by LF without a trailing LF"
+  },
+  "blind": {
+    "holdout_content_inspected_before_seal": false,
+    "gold_inspected_before_seal": false,
+    "mutual_attestation": true,
+    "codex_seal_message_id": "39bc6d5a-d6c1-44d7-8a8d-ec94cf78d06f",
+    "core_countersign_message_id": "3727e922-259f-4b1c-89af-91c1c3d6e99e",
+    "rule": "Units 16-35 remain content-blind until the fresh preregistration is frozen."
+  }
+}
