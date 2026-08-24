@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import math
+import platform
 import re
 from datetime import UTC, datetime
 from pathlib import Path
@@ -450,6 +451,10 @@ def build(args: argparse.Namespace) -> dict:
         "gold_source_turns_available_during_build": False,
         "predicate_frozen_before_category_join": True,
         "product_commit": args.product_commit,
+        "harness_commit": args.harness_commit,
+        "wheel_path": str(args.wheel),
+        "wheel_sha256": sha256_path(args.wheel),
+        "python_version": platform.python_version(),
         "control_path": str(args.control),
         "control_sha256": sha256_path(args.control),
         "organizer_manifest_sha256": sha256_path(args.organizer_manifest),
@@ -473,6 +478,8 @@ def build(args: argparse.Namespace) -> dict:
         "control_sha256": artifact["control_sha256"],
         "organizer_manifest_sha256": artifact["organizer_manifest_sha256"],
         "product_commit": args.product_commit,
+        "harness_commit": args.harness_commit,
+        "wheel_sha256": artifact["wheel_sha256"],
         "external_model_calls_before_freeze": 0,
     }
     write_json(args.freeze, freeze)
@@ -599,6 +606,8 @@ def parser() -> argparse.ArgumentParser:
     build_parser.add_argument("--organizer-root", type=Path, required=True)
     build_parser.add_argument("--work-dir", type=Path, required=True)
     build_parser.add_argument("--product-commit", required=True)
+    build_parser.add_argument("--harness-commit", required=True)
+    build_parser.add_argument("--wheel", type=Path, required=True)
     build_parser.add_argument("--output", type=Path, required=True)
     build_parser.add_argument("--freeze", type=Path, required=True)
 
