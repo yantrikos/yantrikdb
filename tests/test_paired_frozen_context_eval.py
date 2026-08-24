@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 
@@ -10,6 +11,7 @@ from benchmarks.amb.paired_frozen_context_eval import (
     _ordered_query_ids_sha256,
     _paired_bootstrap_interval,
     _resolve_bootstrap_seed,
+    _resolve_model_seed,
     _run_fingerprint,
     _sha256_file,
     validate_manifest,
@@ -190,6 +192,22 @@ def test_bootstrap_seed_is_independent_and_resume_bound():
     )
     assert _resolve_bootstrap_seed(5, None) == 5
     assert _resolve_bootstrap_seed(5, 8) == 8
+
+
+def test_model_seed_is_explicit_or_preserves_provider_default(monkeypatch):
+    monkeypatch.delenv("OMB_OLLAMA_SEED", raising=False)
+    assert _resolve_model_seed(None) == 0
+
+    monkeypatch.setenv("OMB_OLLAMA_SEED", "13")
+    assert _resolve_model_seed(None) == 13
+    assert _resolve_model_seed(17) == 17
+    assert os.environ["OMB_OLLAMA_SEED"] == "13"
+
+
+def test_model_seed_changes_run_fingerprint():
+    assert _run_fingerprint({"seed": 5, "model_seed": 7}) != _run_fingerprint(
+        {"seed": 5, "model_seed": 8}
+    )
 
 
 def test_resume_checkpoint_rejects_duplicate_pairs(tmp_path):
