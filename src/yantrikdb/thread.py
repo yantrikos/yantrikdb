@@ -411,3 +411,243 @@ def select_thread_evidence(
         ],
     }
     return result
+
+
+# ── Grouped temporal-spread selection ────────────────────────────────
+
+# Grid v1 measured why flat relevance selection fails event ordering:
+# gold evidence is temporally DISPERSED (topic-group source-turn span
+# median 104 turns), and per-row top-K keeps the locally similar rows
+# while amputating each group's endpoints and bridges — precision rose
+# .076->.107 but coverage fell .70->.47 and every flat policy lost
+# quality versus no selection at all. Grouped selection keeps each
+# admitted topic's SPAN by construction: endpoints first, then
+# largest-gap fill; relevance only breaks ties.
+
+
+def _group_mass(indices: list[int], scores: list[float]) -> float:
+    top = sorted((scores[i] for i in indices), reverse=True)[:3]
+    return sum(top) / len(top)
+
+
+def _spread_representatives(
+    indices: list[int], count: int, scores: list[float]
+) -> list[int]:
+    """Pick ``count`` rows from a group preserving its temporal span.
+
+    ``indices`` are original thread item indices ascending — the
+    temporal axis is the ORIGINAL ITEM INDEX (never source_turn, so
+    non-turn synthesis rows participate). The first two representatives
+    are the group's earliest and latest rows (the endpoints); each
+    further representative greedily maximises its minimum ordinal
+    distance to the chosen set (largest-gap fill), with row relevance
+    then earlier original index breaking ties. Anything else would
+    quietly hand the bridge slots back to flat relevance selection.
+    """
+    if count >= len(indices):
+        return list(indices)
+    chosen = [indices[0]]
+    if count >= 2:
+        chosen.append(indices[-1])
+    while len(chosen) < count:
+        best = None
+        best_key = None
+        for index in indices:
+            if index in chosen:
+                continue
+            min_distance = min(abs(index - c) for c in chosen)
+            key = (min_distance, scores[index], -index)
+            if best_key is None or key > best_key:
+                best_key = key
+                best = index
+        chosen.append(best)
+    return sorted(chosen)
+
+
+def select_thread_evidence_grouped(
+    thread: dict[str, Any],
+    focus: str,
+    *,
+    budget: int,
+    min_representatives: int = 2,
+    scorer: Any = "cross-encoder",
+) -> dict[str, Any]:
+    """Grouped temporal-spread selection over a wide v2 thread.
+
+    Same shape contract as :func:`select_thread_evidence` (v2 dict in
+    and out, ``total`` preserved and validated, additive ``selection``
+    diagnostics recomputable without text, chronological presentation),
+    but the selection unit is the TOPIC GROUP rather than the row:
+
+    1. Each raw topic's relevance mass is the mean of its top-3 member
+       row scores over ALL rows naming it (computed before any
+       assignment, avoiding circularity). Multi-topic rows are then
+       assigned to their highest-mass topic (ties: topic_rid
+       ascending). Rows without topics form one ``residual`` group
+       whose selected count is reported separately, because it is not
+       semantically coherent.
+    2. Groups are admitted in mass-rank order, STOPPING at the first
+       group whose floor (``min_representatives`` capped by group size)
+       exceeds the remaining budget; leftover budget is spent in
+       deterministic rounds over admitted groups in rank order, one
+       extra representative per group per round.
+    3. Within each admitted group, representatives preserve the span:
+       endpoints first, then greedy largest-gap fill; relevance is only
+       a tie-break (see :func:`_spread_representatives`).
+
+    Raises :class:`ThreadSelectionPolicyInfeasible` when the budget
+    cannot afford ``min_representatives`` (or the group's row count if
+    smaller) for even the single highest-mass group.
+    """
+    items = thread.get("items")
+    if not isinstance(items, list) or not items:
+        raise ValueError("select_thread_evidence_grouped requires items")
+    budget = _validated_selection_int("budget", budget, minimum=1)
+    if budget > len(items):
+        raise ValueError(
+            f"budget {budget} exceeds thread rows {len(items)}; "
+            "identity selection is budget == len(items)"
+        )
+    min_representatives = _validated_selection_int(
+        "min_representatives", min_representatives, minimum=1
+    )
+    total = thread.get("total", len(items))
+    if isinstance(total, bool) or not isinstance(total, int):
+        raise ValueError(
+            f"thread total must be an int, got {type(total).__name__}"
+        )
+    if total < len(items):
+        raise ValueError(
+            f"thread total {total} is smaller than its {len(items)} items"
+        )
+
+    texts = [str(item.get("text") or "") for item in items]
+    if scorer == "cross-encoder":
+        scorer_id = "cross-encoder"
+        from yantrikdb.rerank import DEFAULT_MODEL as scorer_model
+
+        scores = _validated_scores(_cross_encoder_scores(focus, texts), len(items))
+    elif callable(scorer):
+        scorer_id = getattr(scorer, "__name__", "callable")
+        scorer_model = None
+        scores = _validated_scores(scorer(focus, texts), len(items))
+    else:
+        raise TypeError(
+            f"scorer must be 'cross-encoder' or a callable, got {scorer!r}"
+        )
+
+    # (a) Raw topic mass over ALL rows naming each topic, BEFORE any
+    # assignment — assignment must not feed back into mass.
+    raw_topic_rows: dict[str, list[int]] = {}
+    for index, item in enumerate(items):
+        for topic_rid in {str(t) for t in item.get("topic_rids") or []}:
+            raw_topic_rows.setdefault(topic_rid, []).append(index)
+    topic_mass = {
+        topic: _group_mass(rows, scores)
+        for topic, rows in raw_topic_rows.items()
+    }
+
+    # Assign each row to one group: highest-mass topic, ties by
+    # ascending topic_rid; topic-less rows form the residual group.
+    groups: dict[str, list[int]] = {}
+    for index, item in enumerate(items):
+        topics = sorted({str(t) for t in item.get("topic_rids") or []})
+        if not topics:
+            groups.setdefault("residual", []).append(index)
+            continue
+        best_mass = max(topic_mass[t] for t in topics)
+        home = next(t for t in topics if topic_mass[t] == best_mass)
+        groups.setdefault(home, []).append(index)
+
+    group_mass = {
+        group: (
+            topic_mass[group]
+            if group != "residual"
+            else _group_mass(groups[group], scores)
+        )
+        for group in groups
+    }
+    group_order = sorted(groups, key=lambda g: (-group_mass[g], g))
+
+    # Admit groups in rank order; STOP at the first group whose floor
+    # exceeds the remaining budget — lower-ranked groups are not
+    # considered (frozen grid-v2 rule; strict-rank admission keeps the
+    # admitted set a prefix of the ranking, never a knapsack fit).
+    admitted: list[str] = []
+    committed = 0
+    for group in group_order:
+        floor_rows = min(min_representatives, len(groups[group]))
+        if committed + floor_rows > budget:
+            break
+        admitted.append(group)
+        committed += floor_rows
+    if not admitted:
+        raise ThreadSelectionPolicyInfeasible(
+            f"budget {budget} cannot afford min_representatives="
+            f"{min_representatives} for any group"
+        )
+
+    grants = {
+        group: min(min_representatives, len(groups[group]))
+        for group in admitted
+    }
+    # Leftover budget: deterministic ROUNDS over admitted groups in rank
+    # order, at most one extra representative per group per round, until
+    # the budget is spent or every admitted group is exhausted (frozen
+    # grid-v2 rule — egalitarian spread rather than mass-proportional).
+    leftover = budget - sum(grants.values())
+    while leftover > 0:
+        placed = False
+        for group in admitted:
+            if grants[group] < len(groups[group]):
+                grants[group] += 1
+                leftover -= 1
+                placed = True
+                if leftover == 0:
+                    break
+        if not placed:
+            break
+
+    per_group_selected: dict[str, list[int]] = {}
+    chosen: set[int] = set()
+    for group in admitted:
+        reps = _spread_representatives(sorted(groups[group]), grants[group], scores)
+        per_group_selected[group] = reps
+        chosen.update(reps)
+    selected = sorted(chosen)
+
+    result = dict(thread)
+    result["items"] = [items[i] for i in selected]
+    result["returned"] = len(selected)
+    result["omitted"] = total - len(selected)
+    result["selection"] = {
+        "strategy": "grouped-spread",
+        "scorer": scorer_id,
+        "scorer_model": scorer_model,
+        "clip": SELECTION_CLIP if scorer_id == "cross-encoder" else None,
+        "budget": budget,
+        "min_representatives": min_representatives,
+        "identity_selection": budget == len(items),
+        "selected_indices": selected,
+        "admitted_groups": [
+            {
+                "group": group,
+                "mass": group_mass[group],
+                "rows": sorted(groups[group]),
+                "granted": grants[group],
+                "selected": per_group_selected[group],
+            }
+            for group in admitted
+        ],
+        "residual_selected_count": len(per_group_selected.get("residual", [])),
+        "rows": [
+            {
+                "index": index,
+                "rid": str(items[index].get("rid") or ""),
+                "score": scores[index],
+                "topic_rids": list(items[index].get("topic_rids") or []),
+            }
+            for index in range(len(items))
+        ],
+    }
+    return result

@@ -40,6 +40,7 @@ from yantrikdb.thread import (
     ThreadSelectionPolicyInfeasible,
     resolve_thread_topics,
     select_thread_evidence,
+    select_thread_evidence_grouped,
 )
 from yantrikdb.triggers import check_all_triggers
 
@@ -83,6 +84,7 @@ __all__ = [
     "rerank_hits",
     "resolve_thread_topics",
     "select_thread_evidence",
+    "select_thread_evidence_grouped",
     "ThreadSelectionPolicyInfeasible",
     "Backpressure",
     "BatchDeferredDuringReembed",
