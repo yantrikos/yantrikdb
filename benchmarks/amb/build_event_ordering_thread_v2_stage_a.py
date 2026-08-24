@@ -285,7 +285,6 @@ def _persist_unit(db_path: Path, unit: str, artifact: dict) -> tuple[Any, list[d
         db,
         OrganizationPlan(tuple(handles)),
         idempotency_prefix=f"amb:thread-v2:{unit}:organizer",
-        max_evidence_per_handle=MAX_EVIDENCE_PER_HANDLE,
         max_handle_memberships=MAX_HANDLE_MEMBERSHIPS,
     )
     progress = db.maintain_source_turn_backfill(10_000)
