@@ -67,6 +67,19 @@ strata contain one query each and are descriptive only.
 
 ## Treatment
 
+The deterministic chronology-query predicate is a conjunction over query text
+only, matched case-insensitively:
+
+- `\bbrought\s+up\b`;
+- either `\bin\s+order\b` or `\border\s+in\s+which\b`; and
+- `\b(?:conversations?|chats?)\b`.
+
+On the frozen 400 queries this selects exactly the 40 event-ordering rows. The
+existing generic `ordered_list` query shape selects 55 rows, including 15 from
+other categories, and is therefore prohibited for this arm. Category labels
+are used only after predicate output is frozen to audit the 40/360 split; they
+are not inputs to the predicate.
+
 `recall_thread` v2 receives a query-only `ThreadQuery`:
 
 - `entities`: exact names resolved through the persisted normalized entity
@@ -155,7 +168,8 @@ neither they nor their thresholds are inputs to the selector.
 1. The exact 400 frozen query IDs are present once in control and treatment.
 2. Control contexts are byte-identical to frozen `ydb-0151`; all 360 non-event
    treatment contexts are byte-identical to their controls, and exactly the 40
-   event-ordering rows enter the deterministic chronology-query path.
+   event-ordering rows enter the exact three-clause query-text predicate above.
+   The artifact records predicate results before category labels are joined.
 3. Every event-ordering treatment row records its selected entities, phrases, topic RIDs,
    route provenance, `total`, `returned`, and `omitted`.
 4. Every treatment row has `omitted=0`, `returned=total`, continuous unique
