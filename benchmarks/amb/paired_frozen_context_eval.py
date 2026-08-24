@@ -255,6 +255,20 @@ def _write_checkpoint(path: Path, payload: dict) -> None:
     temporary.replace(path)
 
 
+def _publish_complete_output(
+    output_path: Path,
+    checkpoint_path: Path,
+    payload: dict,
+    cohort_complete: bool,
+) -> bool:
+    """Publish only complete cohorts; incomplete checkpoints stay resumable."""
+    if not cohort_complete:
+        return False
+    _write_checkpoint(output_path, payload)
+    checkpoint_path.unlink(missing_ok=True)
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--contexts-a", type=Path, required=True)
@@ -590,10 +604,15 @@ def main() -> int:
         "summary": summary,
         "pairs": pairs,
     }
-    _write_checkpoint(args.out, output)
-    checkpoint.unlink(missing_ok=True)
+    cohort_complete = len(pairs) == len(ids)
+    _publish_complete_output(args.out, checkpoint, output, cohort_complete)
+    if not cohort_complete:
+        print(
+            f"incomplete cohort: retained checkpoint at {checkpoint}",
+            file=sys.stderr,
+        )
     print(json.dumps(summary, indent=2))
-    return 0 if len(pairs) == len(ids) else 1
+    return 0 if cohort_complete else 1
 
 
 if __name__ == "__main__":
