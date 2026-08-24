@@ -1739,8 +1739,13 @@ impl YantrikDB {
                 }
                 for entity in candidates {
                     conn.execute(
-                        "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) VALUES (?1, ?2)",
-                        params![rid, entity],
+                        "INSERT OR IGNORE INTO memory_entities \
+                         (memory_rid, entity_name, entity_name_norm) VALUES (?1, ?2, ?3)",
+                        params![
+                            rid,
+                            entity,
+                            crate::engine::thread::normalize_entity_name(entity)
+                        ],
                     )?;
                 }
             }

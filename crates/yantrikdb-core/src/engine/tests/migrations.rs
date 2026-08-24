@@ -972,3 +972,131 @@ fn schema_v48_backfill_skips_ciphertext_metadata() {
     assert_eq!(get("absent"), (None, None));
     assert!(index_exists(&conn, "idx_memories_event_time"));
 }
+
+// =====================================================================
+// v49 — the persisted entity normalization key (entity_name_norm).
+//
+// Reviewer finding (#188 follow-up): recall_thread resolved requested
+// entity names by scanning SELECT DISTINCT entity_name FROM
+// memory_entities and Unicode-lowercasing EVERY name in Rust per request
+// — O(V) over the global entity vocabulary on every call. v49 persists
+// the normalized key; the backfill must run in RUST because SQL LOWER()
+// is ASCII-only and would corrupt non-ASCII names.
+// =====================================================================
+
+#[test]
+fn schema_v49_fresh_install_has_entity_norm_column_and_index() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let conn = db.conn();
+    let cols = table_columns(&conn, "memory_entities");
+    assert!(
+        cols.iter().any(|c| c == "entity_name_norm"),
+        "v49: fresh-install memory_entities table missing column entity_name_norm"
+    );
+    assert!(
+        index_exists(&conn, "idx_memory_entities_norm"),
+        "v49: fresh-install missing index idx_memory_entities_norm"
+    );
+}
+
+#[test]
+fn schema_v49_migration_backfills_unicode_lowercase_in_rust() {
+    // A store built at v48 has memory_entities rows with no
+    // entity_name_norm. SQL cannot backfill them: LOWER() is ASCII-only
+    // ('MÜNSTER' -> 'mÜnster'), so open() must do it in Rust (the
+    // entity_norm_backfill stage). Simulate: open at current schema,
+    // insert rows with NULL norm (the exact post-ALTER state a real v48
+    // table reaches), drop the index, rewind meta to 48, and reopen. The
+    // ALTER replays as a no-op (idempotent runner), the index is
+    // recreated, and the backfill must produce the correct Unicode
+    // lowercase.
+    use tempfile::NamedTempFile;
+    let tmp = NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap();
+
+    {
+        let _db = YantrikDB::new(path, 8).unwrap();
+    }
+    {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute(
+            "INSERT INTO memory_entities (memory_rid, entity_name) VALUES \
+             ('m1', 'Münster'), ('m2', 'MÜNSTER'), ('m3', 'Alpha')",
+            [],
+        )
+        .unwrap();
+        conn.execute("DROP INDEX idx_memory_entities_norm", [])
+            .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '48')",
+            [],
+        )
+        .unwrap();
+    }
+    {
+        let db = YantrikDB::new(path, 8).unwrap();
+        let conn = db.conn();
+        let get_norm = |rid: &str| -> Option<String> {
+            conn.query_row(
+                "SELECT entity_name_norm FROM memory_entities WHERE memory_rid = ?1",
+                [rid],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            get_norm("m1").as_deref(),
+            Some("münster"),
+            "backfill must be Rust to_lowercase, not ASCII-only SQL LOWER()"
+        );
+        assert_eq!(
+            get_norm("m2").as_deref(),
+            Some("münster"),
+            "'MÜNSTER' must fold to 'münster' — SQL LOWER() would give 'mÜnster'"
+        );
+        assert_eq!(get_norm("m3").as_deref(), Some("alpha"));
+        assert!(
+            index_exists(&conn, "idx_memory_entities_norm"),
+            "v49 migration replay must recreate idx_memory_entities_norm"
+        );
+    }
+}
+
+#[test]
+fn schema_v49_backfill_skips_already_stamped_rows() {
+    // The open()-time backfill is guarded on entity_name_norm IS NULL:
+    // rows already carrying a norm value are never rewritten, and a
+    // rewind-then-reopen replay must not error or clobber them.
+    use tempfile::NamedTempFile;
+    let tmp = NamedTempFile::new().unwrap();
+    let path = tmp.path().to_str().unwrap();
+    {
+        let _db = YantrikDB::new(path, 8).unwrap();
+    }
+    {
+        let conn = rusqlite::Connection::open(path).unwrap();
+        conn.execute(
+            "INSERT INTO memory_entities (memory_rid, entity_name, entity_name_norm) \
+             VALUES ('m1', 'Kept', 'kept')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', '48')",
+            [],
+        )
+        .unwrap();
+    }
+    {
+        let _db = YantrikDB::new(path, 8).unwrap();
+    }
+    let conn = rusqlite::Connection::open(path).unwrap();
+    let norm: Option<String> = conn
+        .query_row(
+            "SELECT entity_name_norm FROM memory_entities WHERE memory_rid = 'm1'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(norm.as_deref(), Some("kept"));
+}

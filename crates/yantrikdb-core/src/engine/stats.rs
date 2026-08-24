@@ -1367,9 +1367,13 @@ impl YantrikDB {
                 // Claim the mention first; Loop B's INSERT OR IGNORE below is a
                 // no-op for anything already claimed here.
                 let first_mention = conn.execute(
-                    "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) \
-                     VALUES (?1, ?2)",
-                    params![rid, entity],
+                    "INSERT OR IGNORE INTO memory_entities \
+                     (memory_rid, entity_name, entity_name_norm) VALUES (?1, ?2, ?3)",
+                    params![
+                        rid,
+                        entity,
+                        crate::engine::thread::normalize_entity_name(entity)
+                    ],
                 )? > 0;
                 let inc: i64 = if first_mention { 1 } else { 0 };
                 conn.execute(
@@ -1401,8 +1405,13 @@ impl YantrikDB {
                 let conn = self.conn();
                 for entity in &candidates {
                     conn.execute(
-                        "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) VALUES (?1, ?2)",
-                        params![rid, entity],
+                        "INSERT OR IGNORE INTO memory_entities \
+                         (memory_rid, entity_name, entity_name_norm) VALUES (?1, ?2, ?3)",
+                        params![
+                            rid,
+                            entity,
+                            crate::engine::thread::normalize_entity_name(entity)
+                        ],
                     )?;
                 }
             }
@@ -1558,8 +1567,13 @@ impl YantrikDB {
                     params![entity, entity_type, ts_secs, was_new_row],
                 )?;
                 conn.execute(
-                    "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) VALUES (?1, ?2)",
-                    params![rid, entity],
+                    "INSERT OR IGNORE INTO memory_entities \
+                     (memory_rid, entity_name, entity_name_norm) VALUES (?1, ?2, ?3)",
+                    params![
+                        rid,
+                        entity,
+                        crate::engine::thread::normalize_entity_name(entity)
+                    ],
                 )?;
             }
         }
