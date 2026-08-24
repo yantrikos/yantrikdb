@@ -152,9 +152,10 @@ The Stage A store contains source-turn atomics with `source="user"` and
 organizer handles with `source="inference"`, so topic lookup is a bounded
 semantic search over handle records rather than a global decrypting metadata
 scan. Existing query-independent artifacts are normalized to the product's
-three-handle-memberships-per-evidence cap before persistence: where an item
-has more owners, the three smallest source handles win, with source order as
-the tie break. This transformation has no query input.
+12-evidence-items-per-handle and three-handle-memberships-per-evidence caps
+before persistence. Source evidence order determines the first 12 retained
+items; where an item has more owners, the three smallest source handles win,
+with source order as the tie break. This transformation has no query input.
 
 Gold source turns, rubric text, answers, prior scores, and frozen route labels
 are unavailable to every step above. The selected routes are unioned in one
