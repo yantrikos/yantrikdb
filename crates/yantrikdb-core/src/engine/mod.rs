@@ -77,6 +77,7 @@ mod temporal_helpers;
 pub mod tenant;
 #[cfg(test)]
 mod tests;
+pub mod thread;
 mod tick;
 mod warrant;
 mod world_model;
