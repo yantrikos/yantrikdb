@@ -1,7 +1,7 @@
 # AMB Event-Ordering Thread v2 Preregistration Draft
 
 Status: **draft only**. The mechanism, product artifact, hashes, commands, and
-gates are not frozen until `recall_thread` v2 and its query-only selector exist,
+gates are not frozen until `recall_thread_v2` and its query-only selector exist,
 the zero-call preflight passes, and this document is committed before any
 external answer or judge call.
 
@@ -95,7 +95,7 @@ query-only semantic input to phrase routing and organizer-handle lookup. On
 the frozen 40 it yields 40 nonempty focuses; no source turn, answer, category,
 or prior score is read to produce them.
 
-`recall_thread` v2 receives a query-only `ThreadQuery`:
+`recall_thread_v2` receives a query-only `ThreadQuery`:
 
 - `entities`: exact names resolved through the persisted normalized entity
   key.
@@ -133,11 +133,35 @@ writes to the internal maintenance ledger itself are unsupported; the
 compatibility connection cannot make arbitrary operator tampering impossible,
 and this arm makes no such claim.
 
-The caller selects no more than three organizer topics from the query and
-persisted query-independent handle representations. Gold source turns, rubric
-text, answers, and prior scores are unavailable to selection. `AI` is a domain
-phrase, not a named entity. Topic labels or metadata must not be found by a
-global decrypting scan; the caller passes resolved synthesis RIDs.
+The frozen caller constructs all three routes from `focus_text`:
+
+1. `entities` is the first-occurrence-deduplicated set of title-case tokens
+   matching `\b[A-Z][a-z]{2,}\b`, excluding the fixed generic set `Across`,
+   `Can`, `Chats`, `Conversations`, `Different`, `During`, `Mention`, `Only`,
+   `Order`, `Throughout`, and `Walk`. All-uppercase tokens are excluded, so
+   `AI` is a domain phrase, not a named entity.
+2. `phrases` is the one-element list containing the exact nonempty
+   `focus_text`.
+3. `topic_rids` is at most three persisted organizer syntheses selected by
+   `recall(query=focus_text, top_k=3, namespace="default",
+   source="inference", include_consolidated=True, skip_reinforce=True)`,
+   retaining only records whose persisted `organizer_kind` is
+   `query_independent_topic`, in returned order.
+
+The Stage A store contains source-turn atomics with `source="user"` and
+organizer handles with `source="inference"`, so topic lookup is a bounded
+semantic search over handle records rather than a global decrypting metadata
+scan. Existing query-independent artifacts are normalized to the product's
+three-handle-memberships-per-evidence cap before persistence: where an item
+has more owners, the three smallest source handles win, with source order as
+the tie break. This transformation has no query input.
+
+Gold source turns, rubric text, answers, prior scores, and frozen route labels
+are unavailable to every step above. The selected routes are unioned in one
+and only one public call:
+
+`recall_thread_v2("default", entities=entities, limit=100,
+phrases=phrases, topic_rids=topic_rids)`.
 
 An inactive, unverified, nonexistent, or cross-namespace topic RID fails the
 whole query with one typed invalid-topic error that does not reveal whether a
@@ -169,7 +193,9 @@ phrase-capability and source-turn maintenance exceptions subclass
 that callers must identify by matching message text. The existing Python call
 shape `recall_thread(namespace, entities, limit=100)` remains valid in both
 positional and keyword form; `phrases` and `topic_rids` are additive optional
-arguments.
+arguments. This benchmark arm nevertheless uses only the explicit
+`recall_thread_v2` entry point, including entity-bearing queries, so the
+strict marker and rich response shape cannot depend on implicit routing.
 
 ## Stage A: Zero-Call Product Gate
 
@@ -181,13 +207,20 @@ The treatment and its hash are finalized before authoritative source turns are
 joined for membership scoring. Frozen route labels are evaluator strata only;
 neither they nor their thresholds are inputs to the selector.
 
+The build subcommand has no membership or gold argument. It writes the
+treatment artifact and a separate freeze file containing the artifact SHA-256.
+The audit subcommand is the first process allowed to accept authoritative
+membership; it refuses the join if the artifact bytes no longer match the
+freeze.
+
 1. The exact 400 frozen query IDs are present once in control and treatment.
 2. Control contexts are byte-identical to frozen `ydb-0151`; all 360 non-event
    treatment contexts are byte-identical to their controls, and exactly the 40
    event-ordering rows enter the exact three-clause query-text predicate above.
    The artifact records predicate results before category labels are joined.
-3. Every event-ordering treatment row records its selected entities, phrases, topic RIDs,
-   route provenance, `total`, `returned`, and `omitted`.
+3. Every event-ordering treatment row records its selected entities, phrases,
+   topic RIDs, topic labels and scores, route provenance, `total`, `returned`,
+   and `omitted`.
 4. Every treatment row has `omitted=0`, `returned=total`, continuous unique
    positions, and chronological `(created_at, source_turn, rid)` order.
 5. Namespace and visibility behavior matches default host recall; correction
