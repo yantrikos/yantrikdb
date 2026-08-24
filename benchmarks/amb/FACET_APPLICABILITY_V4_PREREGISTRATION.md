@@ -4,6 +4,8 @@ Status: mechanism and gates frozen before product preflight or external calls.
 
 The completed zero-call product preflight and paired artifact freeze are
 recorded in [FACET_APPLICABILITY_V4_PREFLIGHT.md](FACET_APPLICABILITY_V4_PREFLIGHT.md).
+The frozen evaluation and no-promotion decision are recorded in
+[FACET_APPLICABILITY_V4_RESULT.md](FACET_APPLICABILITY_V4_RESULT.md).
 
 ## Question
 
