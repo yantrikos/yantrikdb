@@ -248,6 +248,28 @@ def _validated_selection_int(name: str, value: Any, *, minimum: int) -> int:
     return value
 
 
+def _validated_scores(raw: Any, expected: int) -> list[float]:
+    """Validate a scorer's output: exact count, finite non-bool numbers."""
+    scores = list(raw)
+    if len(scores) != expected:
+        raise ValueError(
+            f"scorer returned {len(scores)} scores for {expected} rows"
+        )
+    result = []
+    for index, value in enumerate(scores):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            raise ValueError(
+                f"scorer returned a non-numeric score at row {index}: {value!r}"
+            )
+        value = float(value)
+        if not math.isfinite(value):
+            raise ValueError(
+                f"scorer returned a non-finite score at row {index}: {value!r}"
+            )
+        result.append(value)
+    return result
+
+
 def _cross_encoder_scores(focus: str, texts: list[str]) -> list[float]:
     from yantrikdb.rerank import DEFAULT_MODEL, _cross_encoder
 
@@ -312,15 +334,11 @@ def select_thread_evidence(
         scorer_id = "cross-encoder"
         from yantrikdb.rerank import DEFAULT_MODEL as scorer_model
 
-        scores = _cross_encoder_scores(focus, texts)
+        scores = _validated_scores(_cross_encoder_scores(focus, texts), len(items))
     elif callable(scorer):
         scorer_id = getattr(scorer, "__name__", "callable")
         scorer_model = None
-        scores = [float(s) for s in scorer(focus, texts)]
-        if len(scores) != len(items):
-            raise ValueError(
-                "scorer returned a score count that does not match the rows"
-            )
+        scores = _validated_scores(scorer(focus, texts), len(items))
     else:
         raise TypeError(
             f"scorer must be 'cross-encoder' or a callable, got {scorer!r}"
@@ -331,10 +349,12 @@ def select_thread_evidence(
 
     reserved: set[int] = set()
     if min_per_topic is not None:
+        # DISTINCT indices per topic: a row listing the same topic twice
+        # (['A', 'A']) must count once, or floor feasibility silently lies.
         by_topic: dict[str, list[int]] = {}
         for index, item in enumerate(items):
-            for topic_rid in item.get("topic_rids") or []:
-                by_topic.setdefault(str(topic_rid), []).append(index)
+            for topic_rid in {str(t) for t in item.get("topic_rids") or []}:
+                by_topic.setdefault(topic_rid, []).append(index)
         for topic_rid, indices in sorted(by_topic.items()):
             if len(indices) < min_per_topic:
                 raise ThreadSelectionPolicyInfeasible(
@@ -358,7 +378,15 @@ def select_thread_evidence(
             chosen.add(index)
     selected = sorted(chosen)  # chronological presentation
 
-    total = int(thread.get("total") or len(items))
+    total = thread.get("total", len(items))
+    if isinstance(total, bool) or not isinstance(total, int):
+        raise ValueError(
+            f"thread total must be an int, got {type(total).__name__}"
+        )
+    if total < len(items):
+        raise ValueError(
+            f"thread total {total} is smaller than its {len(items)} items"
+        )
     result = dict(thread)
     result["items"] = [items[i] for i in selected]
     result["returned"] = len(selected)

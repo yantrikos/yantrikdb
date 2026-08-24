@@ -202,7 +202,7 @@ def test_scorer_validation():
     def short_scorer(focus, texts):
         return [0.5]
 
-    with pytest.raises(ValueError, match="score count"):
+    with pytest.raises(ValueError, match="1 scores for 2 rows"):
         select_thread_evidence(thread, "f", budget=1, scorer=short_scorer)
 
 
@@ -227,3 +227,57 @@ def test_no_benchmark_imports():
         name for name in sys.modules
         if name.startswith("benchmarks") and module.__name__ in name
     ]
+
+
+def test_nonfinite_and_bool_scores_are_typed_errors():
+    thread = make_thread(3)
+    for bad in (float("nan"), float("inf"), float("-inf"), True, "0.5", None):
+        def bad_scorer(focus, texts, _bad=bad):
+            return [0.5, _bad, 0.1]
+
+        with pytest.raises(ValueError, match="row 1"):
+            select_thread_evidence(thread, "f", budget=1, scorer=bad_scorer)
+
+
+def test_cross_encoder_output_is_validated(monkeypatch):
+    # CE returning a short / non-finite vector must fail the same way as
+    # a callable scorer — the validator is shared.
+    import yantrikdb.thread as thread_mod
+
+    thread = make_thread(3)
+    monkeypatch.setattr(
+        thread_mod, "_cross_encoder_scores", lambda focus, texts: [0.5]
+    )
+    with pytest.raises(ValueError, match="1 scores for 3 rows"):
+        select_thread_evidence(thread, "f", budget=1, scorer="cross-encoder")
+    monkeypatch.setattr(
+        thread_mod,
+        "_cross_encoder_scores",
+        lambda focus, texts: [0.5, float("nan"), 0.1],
+    )
+    with pytest.raises(ValueError, match="row 1"):
+        select_thread_evidence(thread, "f", budget=1, scorer="cross-encoder")
+
+
+def test_duplicate_topic_ids_count_once_for_feasibility():
+    # One row lists topic A twice: floor=2 must be infeasible, not
+    # silently satisfied by a single unique row.
+    thread = make_thread(3, topic_map={0: ["A", "A"]})
+    with pytest.raises(ThreadSelectionPolicyInfeasible, match="fewer than"):
+        select_thread_evidence(
+            thread, "f", budget=3, scorer=scores_by_index({}),
+            min_per_topic=2,
+        )
+
+
+def test_malformed_total_is_rejected_not_coerced():
+    thread = make_thread(3)
+    thread["total"] = "10"
+    with pytest.raises(ValueError, match="total must be an int"):
+        select_thread_evidence(thread, "f", budget=2, scorer=scores_by_index({}))
+    thread["total"] = True
+    with pytest.raises(ValueError, match="total must be an int"):
+        select_thread_evidence(thread, "f", budget=2, scorer=scores_by_index({}))
+    thread["total"] = 2  # fewer than the 3 items present
+    with pytest.raises(ValueError, match="smaller than"):
+        select_thread_evidence(thread, "f", budget=2, scorer=scores_by_index({}))
