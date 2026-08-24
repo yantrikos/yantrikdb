@@ -659,21 +659,25 @@ impl crate::YantrikDB {
         let mut facets = Vec::with_capacity(total.min(limit));
         for (rid, text, created_at, first_mention_at) in merged.into_iter().take(limit) {
             let mut dep = conn.prepare(
-                "SELECT src.rid, src.metadata \
+                "SELECT src.rid, src.metadata, src.created_at \
                  FROM synthesis_dependencies d \
                  JOIN memories src ON src.rid = d.source_rid \
                  WHERE d.synthesis_rid = ?1 AND d.is_direct = 1 \
                  ORDER BY src.rid",
             )?;
-            let sources: Vec<(String, String)> = dep
+            let sources: Vec<(String, String, f64)> = dep
                 .query_map(rusqlite::params![rid], |r| {
-                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, f64>(2)?,
+                    ))
                 })?
                 .collect::<std::result::Result<_, _>>()?;
             drop(dep);
-            let source_rids = sources.iter().map(|(rid, _)| rid.clone()).collect();
+            let source_rids = sources.iter().map(|(rid, _, _)| rid.clone()).collect();
             let mut first_mention_turn = None;
-            for (_, stored_metadata) in sources {
+            for (_, stored_metadata, source_created_at) in sources {
                 let metadata = self.decrypt_text(&stored_metadata)?;
                 let Some(turn) = serde_json::from_str::<serde_json::Value>(&metadata)
                     .ok()
@@ -682,14 +686,16 @@ impl crate::YantrikDB {
                 else {
                     continue;
                 };
-                first_mention_turn =
-                    Some(first_mention_turn.map_or(turn, |first: i64| first.min(turn)));
+                match first_mention_turn {
+                    Some((earliest_at, _)) if earliest_at <= source_created_at => {}
+                    _ => first_mention_turn = Some((source_created_at, turn)),
+                }
             }
             facets.push(FacetHit {
                 rid,
                 text,
                 first_mention_at,
-                first_mention_turn,
+                first_mention_turn: first_mention_turn.map(|(_, turn)| turn),
                 created_at,
                 source_rids,
             });
@@ -723,7 +729,12 @@ mod lane_tests {
         .unwrap();
     }
 
-    fn seed_at(db: &YantrikDB, text: &str, metadata: &serde_json::Value, created_at: f64) {
+    fn seed_at(
+        db: &YantrikDB,
+        text: &str,
+        metadata: &serde_json::Value,
+        created_at: f64,
+    ) -> String {
         db.record_text_with_idempotency(
             text,
             "episodic",
@@ -739,7 +750,7 @@ mod lane_tests {
             None,
             Some(created_at),
         )
-        .unwrap();
+        .unwrap()
     }
 
     #[test]
@@ -811,6 +822,43 @@ mod lane_tests {
         let serialized = serde_json::to_value(&out).unwrap();
         assert_eq!(serialized["facets"][0]["first_mention_turn"], 20);
         assert!(serialized["facets"][2]["first_mention_turn"].is_null());
+    }
+
+    #[test]
+    fn lane_uses_turn_from_earliest_turn_bearing_repetition() {
+        let db = YantrikDB::with_default(":memory:").unwrap();
+        let earlier = seed_at(
+            &db,
+            "Always reply to me in French.",
+            &serde_json::json!({"source_turn": 50}),
+            100.0,
+        );
+        let later = seed_at(
+            &db,
+            "always  reply to me in FRENCH.",
+            &serde_json::json!({"source_turn": 3}),
+            200.0,
+        );
+        crate::cognition::consolidate::record_synthesis(
+            &db,
+            &[earlier, later],
+            "Always reply to me in French.",
+            None,
+            STANDING_INSTRUCTION_AXIS,
+            "atomic",
+            &serde_json::json!({"facet_type": STANDING_INSTRUCTION_AXIS}),
+            "test:earliest-turn-bearing-repetition",
+        )
+        .unwrap();
+
+        let out = db.recall_facets("n", 8).unwrap();
+        assert_eq!(out.facets.len(), 1);
+        assert_eq!(out.facets[0].first_mention_at, 100.0);
+        assert_eq!(
+            out.facets[0].first_mention_turn,
+            Some(50),
+            "a smaller turn from a later conversation is not the first mention"
+        );
     }
 
     #[test]
