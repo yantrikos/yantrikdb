@@ -1,9 +1,9 @@
 # AMB Event-Ordering Thread v2 Preregistration Draft
 
-Status: **draft only**. The mechanism, product artifact, hashes, commands, and
-gates are not frozen until `recall_thread_v2` and its query-only selector exist,
-the zero-call preflight passes, and this document is committed before any
-external answer or judge call.
+Status: **Stage A completed and failed on 2026-08-24**. The mechanism and gates
+below were frozen before the zero-call product run. The artifact failed the
+coverage gates, so Stage B was not authorized and no external answer or judge
+call was made.
 
 ## Decision Question
 
@@ -272,6 +272,80 @@ coverage while leaving room for the unavoidable query-only selection gap. They
 raise both clean macro and micro coverage by more than three times their frozen
 baselines. If any condition fails, the arm aborts with zero external calls. No
 threshold is relaxed and no failed row is removed.
+
+## Stage A Result
+
+The label-blind build completed on 2026-08-24 and froze the treatment before
+the membership file was opened. Provenance was:
+
+- product commit: `40abfd276967e904ce335144f1016c0fe81c299f`;
+- harness commit: `b20b47507e84c33e02e9adf635f57aa48cdb49ef`;
+- control SHA-256:
+  `43b8eb888adeb524caba70b013a8ca510c639bbf5312216e9b453d60185bcb8e`;
+- organizer manifest SHA-256:
+  `e7d039fcd81207842c17f16006c93e31ed8411fbe6be39c24170413fbbf8d9c9`;
+- wheel SHA-256:
+  `f661357411910ac5f569b577b3ff49a610dcc4337e8b0128cfbf252ece353026`;
+- treatment artifact SHA-256:
+  `2ab210b99dab0850f5dfe1cd98088d9771072fb05ba61074b6d1890bc8aa9094`;
+- freeze SHA-256:
+  `f84d15250cdee4098d5131f3b32b5341f904bfaf4779e880f74cbe3dd7aaa32e`;
+- membership SHA-256:
+  `8229c9ffe8d779295e4e161b003cd81afc45f0d4d5b53c07c82925eb54c2b86e`;
+- audit SHA-256:
+  `3d6f69b89f7537653726e99d56e3c25708beb51a4862287448574b9a66f39d33`.
+
+The build command was:
+
+```powershell
+python benchmarks/amb/build_event_ordering_thread_v2_stage_a.py build `
+  --control outputs/beam/ydb-0151/rag/100k.json `
+  --organizer-manifest benchmarks/amb/event_ordering_organizer_manifest_v1.json `
+  --organizer-root C:/Users/sync/codes/yantrikdb `
+  --work-dir .tmp-stage-a-official/store `
+  --product-commit 40abfd276967e904ce335144f1016c0fe81c299f `
+  --harness-commit b20b47507e84c33e02e9adf635f57aa48cdb49ef `
+  --wheel dist/yantrikdb-0.16.0-cp310-abi3-win_amd64.whl `
+  --output .tmp-stage-a-official/stage-a-treatment.json `
+  --freeze .tmp-stage-a-official/stage-a-freeze.json
+```
+
+The audit command, run only after the freeze hash was independently verified,
+was:
+
+```powershell
+python benchmarks/amb/build_event_ordering_thread_v2_stage_a.py audit `
+  --artifact .tmp-stage-a-official/stage-a-treatment.json `
+  --freeze .tmp-stage-a-official/stage-a-freeze.json `
+  --membership benchmarks/amb/artifacts/event40-organizer-membership-v2.json `
+  --output .tmp-stage-a-official/stage-a-audit.json
+```
+
+All structural gates passed: the artifact contained the exact `400/40` split,
+all 360 non-event contexts were byte-identical, all event threads were
+untruncated, Carla retained `6/6` source turns, and Douglas retained `5/9`.
+Coverage failed the promotion gates:
+
+- clean 37: `0.262162` macro, `56/214` (`0.261682`) micro, 19 nonzero,
+  three exact;
+- all 40: `0.292500` macro, `66/230` (`0.286957`) micro, 21 nonzero,
+  five exact;
+- bounded-focus phrase cohort: `32/124` (`0.258065`) micro;
+- broad-compound cohort: `13/75` (`0.173333`) micro.
+
+Accordingly Stage A failed and Stage B was aborted with zero external calls.
+
+After that decision was final, a gold-visible diagnostic repeated the same
+query-only semantic lookup at wider topic fan-outs. It is post-hoc evidence,
+not a rescue of this arm. Exact `top_k=3` reproduced all frozen selections.
+At `top_k=12`, clean coverage was `0.694959` macro and `140/214`
+(`0.654206`) micro, with 35 nonzero and 12 exact rows; phrase and broad micro
+coverage were `0.612903` and `0.706667`. Carla remained `6/6`, Douglas `5/9`,
+and the largest thread contained 80 items. The organizer's frozen oracle
+top-three-handle mean was `0.918472`. This localizes the failed mechanism to
+the fixed three-topic query-to-handle budget, not chronology, storage,
+source-turn persistence, or the organizer's structural ceiling. Any wider or
+adaptive selector requires new evidence and a fresh preregistration.
 
 ## Stage B: Paired Score Gate
 
