@@ -114,4 +114,6 @@ This is not residual answer noise that warrants another repeat.
 Complete and applicability-filtered facet composition remain available only as
 explicit opt-in context. They must not enter the default recall path. The next
 benchmark work is a row-level event-ordering autopsy and a fundamentally
-different coverage-first retrieval mechanism, not another composition arm.
+different coverage-first retrieval mechanism, not another composition arm. The
+completed diagnosis and query-route taxonomy are recorded in
+`EVENT_ORDERING_V5_AUTOPSY.md`.
