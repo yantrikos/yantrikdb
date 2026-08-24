@@ -19,6 +19,7 @@ import argparse
 import gzip
 import hashlib
 import json
+import os
 import random
 import statistics
 import sys
@@ -160,12 +161,20 @@ def _resolve_bootstrap_seed(run_seed: int, bootstrap_seed: int | None) -> int:
     return run_seed if bootstrap_seed is None else bootstrap_seed
 
 
+def _resolve_model_seed(model_seed: int | None) -> int:
+    """Preserve the provider's historical environment/default seed behavior."""
+    if model_seed is not None:
+        return model_seed
+    return int(os.environ.get("OMB_OLLAMA_SEED", "0"))
+
+
 def _load_resume_checkpoint(path: Path, run_fingerprint: str) -> dict[str, dict]:
     prior = json.loads(path.read_text(encoding="utf-8"))
     if prior.get("run_fingerprint") != run_fingerprint:
         raise ValueError(
             "resume checkpoint does not match the current manifest, contexts, "
-            "model, labels, split, run/bootstrap seeds, workers, and judge settings"
+            "model, labels, split, run/model/bootstrap seeds, workers, and judge "
+            "settings"
         )
     pairs = prior.get("pairs", [])
     query_ids = [pair.get("query_id") for pair in pairs]
@@ -246,6 +255,20 @@ def _write_checkpoint(path: Path, payload: dict) -> None:
     temporary.replace(path)
 
 
+def _publish_complete_output(
+    output_path: Path,
+    checkpoint_path: Path,
+    payload: dict,
+    cohort_complete: bool,
+) -> bool:
+    """Publish only complete cohorts; incomplete checkpoints stay resumable."""
+    if not cohort_complete:
+        return False
+    _write_checkpoint(output_path, payload)
+    checkpoint_path.unlink(missing_ok=True)
+    return True
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--contexts-a", type=Path, required=True)
@@ -259,6 +282,7 @@ def main() -> int:
     parser.add_argument("--answer-repeats", type=int, default=1)
     parser.add_argument("--judge-repeats", type=int, default=1)
     parser.add_argument("--seed", type=int, default=20260820)
+    parser.add_argument("--model-seed", type=int)
     parser.add_argument("--bootstrap-seed", type=int)
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--out", type=Path)
@@ -270,13 +294,21 @@ def main() -> int:
     if args.answer_repeats < 1 or args.answer_repeats % 2 == 0:
         parser.error("--answer-repeats must be a positive odd number")
     bootstrap_seed = _resolve_bootstrap_seed(args.seed, args.bootstrap_seed)
+    try:
+        model_seed = _resolve_model_seed(args.model_seed)
+    except ValueError as error:
+        parser.error(f"invalid OMB_OLLAMA_SEED: {error}")
     if args.limit is not None:
         parser.error("--limit is incompatible with a frozen manifest run")
     if not args.preflight_only and args.out is None:
         parser.error("--out is required unless --preflight-only is set")
 
-    # These imports are deliberately after argument validation. In particular,
-    # preflight never imports or constructs an LLM client.
+    # memory_bench.dataset imports the llm package, whose Ollama seed is captured
+    # at module import time. Pin the environment before any memory_bench import.
+    os.environ["OMB_OLLAMA_SEED"] = str(model_seed)
+
+    # These imports are deliberately after argument validation. Preflight never
+    # constructs an LLM client or makes an external call.
     from memory_bench.dataset import get_dataset
     from memory_bench.utils import count_tokens
 
@@ -321,16 +353,34 @@ def main() -> int:
         )
     print(
         json.dumps(
-            {key: value for key, value in preflight.items() if key != "query_ids"},
+            {
+                **{
+                    key: value for key, value in preflight.items() if key != "query_ids"
+                },
+                "execution": {
+                    "seed": args.seed,
+                    "model_seed": model_seed,
+                    "bootstrap_seed": bootstrap_seed,
+                    "workers": args.workers,
+                },
+            },
             indent=2,
         )
     )
     if args.preflight_only:
         return 0
 
-    from memory_bench.llm.ollama import OllamaLLM
+    from memory_bench.llm import ollama as ollama_module
     from memory_bench.models import QueryResult
     from memory_bench.modes.rag import RAGMode
+
+    imported_model_seed = getattr(ollama_module, "_SEED", None)
+    if imported_model_seed != model_seed:
+        parser.error(
+            "Ollama provider was imported before --model-seed was bound; refusing "
+            f"requested={model_seed} imported={imported_model_seed}"
+        )
+    OllamaLLM = ollama_module.OllamaLLM
 
     run_config = {
         "manifest_sha256": preflight["manifest_sha256"],
@@ -344,6 +394,7 @@ def main() -> int:
         "answer_repeats": args.answer_repeats,
         "judge_repeats": args.judge_repeats,
         "seed": args.seed,
+        "model_seed": model_seed,
         "bootstrap_seed": bootstrap_seed,
         "workers": args.workers,
     }
@@ -370,7 +421,7 @@ def main() -> int:
     remaining = [query_id for query_id in ids if query_id not in completed]
     print(
         f"[{args.label_a} vs {args.label_b}] pairs={len(ids)} "
-        f"resume={len(completed)} model={args.model}",
+        f"resume={len(completed)} model={args.model} model_seed={model_seed}",
         file=sys.stderr,
         flush=True,
     )
@@ -548,14 +599,20 @@ def main() -> int:
         "answer_repeats": args.answer_repeats,
         "judge_repeats": args.judge_repeats,
         "seed": args.seed,
+        "model_seed": model_seed,
         "bootstrap_seed": bootstrap_seed,
         "summary": summary,
         "pairs": pairs,
     }
-    _write_checkpoint(args.out, output)
-    checkpoint.unlink(missing_ok=True)
+    cohort_complete = len(pairs) == len(ids)
+    _publish_complete_output(args.out, checkpoint, output, cohort_complete)
+    if not cohort_complete:
+        print(
+            f"incomplete cohort: retained checkpoint at {checkpoint}",
+            file=sys.stderr,
+        )
     print(json.dumps(summary, indent=2))
-    return 0 if len(pairs) == len(ids) else 1
+    return 0 if cohort_complete else 1
 
 
 if __name__ == "__main__":

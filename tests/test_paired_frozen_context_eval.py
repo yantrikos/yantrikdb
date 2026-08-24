@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 
@@ -9,7 +10,9 @@ from benchmarks.amb.paired_frozen_context_eval import (
     _median_scored_result,
     _ordered_query_ids_sha256,
     _paired_bootstrap_interval,
+    _publish_complete_output,
     _resolve_bootstrap_seed,
+    _resolve_model_seed,
     _run_fingerprint,
     _sha256_file,
     validate_manifest,
@@ -192,6 +195,22 @@ def test_bootstrap_seed_is_independent_and_resume_bound():
     assert _resolve_bootstrap_seed(5, 8) == 8
 
 
+def test_model_seed_is_explicit_or_preserves_provider_default(monkeypatch):
+    monkeypatch.delenv("OMB_OLLAMA_SEED", raising=False)
+    assert _resolve_model_seed(None) == 0
+
+    monkeypatch.setenv("OMB_OLLAMA_SEED", "13")
+    assert _resolve_model_seed(None) == 13
+    assert _resolve_model_seed(17) == 17
+    assert os.environ["OMB_OLLAMA_SEED"] == "13"
+
+
+def test_model_seed_changes_run_fingerprint():
+    assert _run_fingerprint({"seed": 5, "model_seed": 7}) != _run_fingerprint(
+        {"seed": 5, "model_seed": 8}
+    )
+
+
 def test_resume_checkpoint_rejects_duplicate_pairs(tmp_path):
     checkpoint = tmp_path / "run.partial"
     fingerprint = _run_fingerprint({"model": "a"})
@@ -205,3 +224,40 @@ def test_resume_checkpoint_rejects_duplicate_pairs(tmp_path):
 
     with pytest.raises(ValueError, match="duplicate"):
         _load_resume_checkpoint(checkpoint, fingerprint)
+
+
+def test_incomplete_run_keeps_checkpoint_and_does_not_publish(tmp_path):
+    output = tmp_path / "result.json"
+    checkpoint = tmp_path / "result.json.partial"
+    _write_json(checkpoint, {"pairs": [{"query_id": "q1"}]})
+
+    published = _publish_complete_output(
+        output,
+        checkpoint,
+        {"pairs": [{"query_id": "q1"}]},
+        cohort_complete=False,
+    )
+
+    assert published is False
+    assert not output.exists()
+    assert json.loads(checkpoint.read_text(encoding="utf-8"))["pairs"] == [
+        {"query_id": "q1"}
+    ]
+
+
+def test_complete_run_publishes_and_removes_checkpoint(tmp_path):
+    output = tmp_path / "result.json"
+    checkpoint = tmp_path / "result.json.partial"
+    _write_json(checkpoint, {"pairs": []})
+    payload = {"pairs": [{"query_id": "q1"}]}
+
+    published = _publish_complete_output(
+        output,
+        checkpoint,
+        payload,
+        cohort_complete=True,
+    )
+
+    assert published is True
+    assert json.loads(output.read_text(encoding="utf-8")) == payload
+    assert not checkpoint.exists()

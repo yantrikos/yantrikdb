@@ -1132,6 +1132,17 @@ impl YantrikDB {
         // metadata is the stored (ciphertext-string) form; bounds are then
         // None, matching a blob that exposes no extractable event time.
         let (event_time_min, event_time_max) = crate::base::datetext::event_time_bounds(&metadata);
+        // v50: source_turn from the same value `stored_meta` is serialized
+        // from. On an encrypted store that value is ciphertext (a JSON
+        // string), the extractor sees no keys, and the column stays NULL —
+        // which is exactly why the completeness marker must NOT be restored
+        // in that case: this write may have persisted an (encrypted) turn
+        // the column does not carry, so the trigger's '0' legitimately
+        // stands and `maintain_source_turn_backfill` owes the row a
+        // decrypt-and-stamp. Only a plaintext-visible metadata object was
+        // stamped faithfully and may preserve the marker.
+        let source_turn = crate::engine::thread::extract_source_turn(&metadata);
+        let metadata_is_plaintext = metadata.is_object();
 
         let embedding_generation: i64 = state.generation as i64;
 
@@ -1141,14 +1152,20 @@ impl YantrikDB {
         // the count.
         {
             let conn = self.conn();
+            let marker_prior = if metadata_is_plaintext {
+                Some(crate::engine::thread::marker_snapshot(&conn)?)
+            } else {
+                None
+            };
             conn.execute(
                 "INSERT OR IGNORE INTO memories \
                  (rid, type, text, embedding, created_at, updated_at, importance, \
                   half_life, last_access, valence, metadata, namespace, \
                   certainty, domain, source, emotional_state, embedding_generation, \
-                  idempotency_key, origin_actor, event_time_min, event_time_max) \
+                  idempotency_key, origin_actor, event_time_min, event_time_max, \
+                  source_turn) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, \
-                         ?18, ?19, ?20, ?21)",
+                         ?18, ?19, ?20, ?21, ?22)",
                 params![
                     rid,
                     memory_type,
@@ -1172,8 +1189,13 @@ impl YantrikDB {
                     // v48 (#149) event time.
                     event_time_min,
                     event_time_max,
+                    // v50 source turn.
+                    source_turn,
                 ],
             )?;
+            if let Some(prior) = marker_prior {
+                crate::engine::thread::marker_restore(&conn, &prior)?;
+            }
         }
 
         // Chunked embeddings: the drain is a re-encode of TEXT under the
@@ -1367,10 +1389,18 @@ impl YantrikDB {
                 // Claim the mention first; Loop B's INSERT OR IGNORE below is a
                 // no-op for anything already claimed here.
                 let first_mention = conn.execute(
-                    "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) \
-                     VALUES (?1, ?2)",
-                    params![rid, entity],
+                    "INSERT OR IGNORE INTO memory_entities \
+                     (memory_rid, entity_name, entity_name_norm) VALUES (?1, ?2, ?3)",
+                    params![
+                        rid,
+                        entity,
+                        crate::engine::thread::normalize_entity_name(entity)
+                    ],
                 )? > 0;
+                // Self-heal AFTER the first-mention read: the repair is a
+                // separate UPDATE precisely so it can never count as a
+                // mention (see repair_entity_norm).
+                crate::engine::thread::repair_entity_norm(&conn, rid, entity)?;
                 let inc: i64 = if first_mention { 1 } else { 0 };
                 conn.execute(
                     "INSERT INTO entities (name, entity_type, first_seen, last_seen, mention_count) \
@@ -1401,9 +1431,15 @@ impl YantrikDB {
                 let conn = self.conn();
                 for entity in &candidates {
                     conn.execute(
-                        "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) VALUES (?1, ?2)",
-                        params![rid, entity],
+                        "INSERT OR IGNORE INTO memory_entities \
+                         (memory_rid, entity_name, entity_name_norm) VALUES (?1, ?2, ?3)",
+                        params![
+                            rid,
+                            entity,
+                            crate::engine::thread::normalize_entity_name(entity)
+                        ],
                     )?;
+                    crate::engine::thread::repair_entity_norm(&conn, rid, entity)?;
                 }
             }
             // graph_index in-memory update (idempotent — add_entity/link dedupe).
@@ -1558,9 +1594,15 @@ impl YantrikDB {
                     params![entity, entity_type, ts_secs, was_new_row],
                 )?;
                 conn.execute(
-                    "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) VALUES (?1, ?2)",
-                    params![rid, entity],
+                    "INSERT OR IGNORE INTO memory_entities \
+                     (memory_rid, entity_name, entity_name_norm) VALUES (?1, ?2, ?3)",
+                    params![
+                        rid,
+                        entity,
+                        crate::engine::thread::normalize_entity_name(entity)
+                    ],
                 )?;
+                crate::engine::thread::repair_entity_norm(&conn, rid, entity)?;
             }
         }
 

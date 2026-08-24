@@ -1124,6 +1124,8 @@ impl YantrikDB {
         // metadata must never leave the columns describing the old JSON.
         let (event_time_min, event_time_max) =
             crate::base::datetext::event_time_bounds(&new_metadata_val);
+        // v50: re-stamp source_turn from the same merged plaintext metadata.
+        let source_turn = crate::engine::thread::extract_source_turn(&new_metadata_val);
 
         let next_revision_num: i64 = tx
             .query_row(
@@ -1158,10 +1160,13 @@ impl YantrikDB {
         // UPDATE the memory in place. rid + created_at + embedding are
         // not touched (metadata/scalar-only path — the text is unchanged,
         // so the vector stays coherent). last_access is bumped.
+        // v50: preserve the marker across this stamped metadata rewrite.
+        let marker_prior = crate::engine::thread::marker_snapshot(&tx)?;
         tx.execute(
             "UPDATE memories \
              SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
-                 last_access = ?5, event_time_min = ?7, event_time_max = ?8 \
+                 last_access = ?5, event_time_min = ?7, event_time_max = ?8, \
+                 source_turn = ?9 \
              WHERE rid = ?6",
             params![
                 stored_new_text,
@@ -1173,8 +1178,11 @@ impl YantrikDB {
                 // v48 (#149) event time, from the merged plaintext metadata.
                 event_time_min,
                 event_time_max,
+                // v50 source turn, same value.
+                source_turn,
             ],
         )?;
+        crate::engine::thread::marker_restore(&tx, &marker_prior)?;
 
         // **v0.10 Item 3 (sol boundary #6):** the replication op is written
         // INSIDE this transaction. A kill between the memories mutation and
@@ -1194,6 +1202,13 @@ impl YantrikDB {
                 "new_valence": new_valence,
                 "reason": reason_trimmed,
                 "applied_at": ts,
+                // v50: the leader-derived canonical source_turn AFTER this
+                // correction's metadata merge. PRESENT-NULL is authoritative
+                // (the correction removed/invalidated the turn — the
+                // follower must CLEAR its column); only an ABSENT key
+                // (legacy pre-v50 op) makes the follower fall back to the
+                // shared extractor over its own merged metadata.
+                "source_turn": source_turn,
             }),
             None,
             None,
@@ -1794,6 +1809,8 @@ impl YantrikDB {
                     // SAME plaintext value just serialized (pre-encryption).
                     let (event_time_min, event_time_max) =
                         crate::base::datetext::event_time_bounds(&new_metadata_val);
+                    // v50: re-stamp source_turn from the same merged value.
+                    let source_turn = crate::engine::thread::extract_source_turn(&new_metadata_val);
 
                     let n: i64 = tx
                         .query_row(
@@ -1832,13 +1849,16 @@ impl YantrikDB {
                     // swap must not promote a stale staged vector for the OLD
                     // text over this correction — a NULL embedding_new makes the
                     // reembed re-encode this row from the new text instead.
+                    // v50: preserve the marker across this stamped rewrite.
+                    let marker_prior = crate::engine::thread::marker_snapshot(&tx)?;
                     tx.execute(
                         "UPDATE memories \
                      SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
                          embedding = ?5, embedding_generation = ?6, embedding_model = ?7, \
                          embedding_new = NULL, embedding_new_model = NULL, \
                          updated_at = ?8, last_access = ?8, \
-                         event_time_min = ?10, event_time_max = ?11 \
+                         event_time_min = ?10, event_time_max = ?11, \
+                         source_turn = ?12 \
                      WHERE rid = ?9",
                         params![
                             stored_new_text,
@@ -1854,8 +1874,11 @@ impl YantrikDB {
                             // plaintext metadata.
                             event_time_min,
                             event_time_max,
+                            // v50 source turn, same value.
+                            source_turn,
                         ],
                     )?;
+                    crate::engine::thread::marker_restore(&tx, &marker_prior)?;
                     // **Entity-graph coherence — safety half (nuron finding).**
                     // The vector is re-embedded above, but the memory→entity
                     // links were extracted from the OLD text; a link whose
@@ -1898,6 +1921,11 @@ impl YantrikDB {
                             "new_valence": new_valence,
                             "reason": reason_trimmed,
                             "applied_at": ts,
+                            // v50 canonical scalar — PRESENT-NULL is an
+                            // authoritative None (follower clears); an
+                            // absent key is a legacy payload (follower
+                            // falls back to the shared extractor).
+                            "source_turn": source_turn,
                             "reembedded": true,
                             // v0.10 Item 3 finding 5: the embedding's model,
                             // so a follower validates its vector space matches
@@ -2227,6 +2255,20 @@ impl YantrikDB {
             // plaintext value just serialized (pre-encryption).
             let (event_time_min, event_time_max) =
                 crate::base::datetext::event_time_bounds(&new_meta_val);
+            // v50: the leader's CANONICAL source_turn when the payload
+            // carries the key — including PRESENT-NULL, which is an
+            // authoritative None (the correction removed/invalidated the
+            // turn: this follower must CLEAR its column, not re-derive).
+            // Only an ABSENT key (a legacy pre-v50 op) falls back to the
+            // shared extractor over this follower's own merged metadata.
+            // A present non-null value that is not a valid nonnegative i64
+            // is a typed rejection (decode_canonical_source_turn) — never
+            // silently coerced to a column-clearing None.
+            let source_turn: Option<i64> =
+                match crate::engine::thread::decode_canonical_source_turn(&payload)? {
+                    Some(canonical) => canonical,
+                    None => crate::engine::thread::extract_source_turn(&new_meta_val),
+                };
 
             // Store the follower-local encrypted bytes (exact or re-embedded).
             let stored_emb: Option<Vec<u8>> = match &new_vec {
@@ -2326,13 +2368,17 @@ impl YantrikDB {
                         prior_hash,
                     ],
                 )?;
+                // v50: preserve the marker across this stamped apply
+                // (both branches rewrite metadata and re-stamp the column).
+                let marker_prior = crate::engine::thread::marker_snapshot(&tx)?;
                 if let Some(enc) = &stored_emb {
                     tx.execute(
                         "UPDATE memories \
                          SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
                              embedding = ?5, embedding_model = ?6, embedding_generation = ?7, \
                              embedding_new = NULL, embedding_new_model = NULL, last_access = ?8, \
-                             event_time_min = ?10, event_time_max = ?11 \
+                             event_time_min = ?10, event_time_max = ?11, \
+                             source_turn = ?12 \
                          WHERE rid = ?9",
                         params![
                             stored_new_text,
@@ -2348,13 +2394,16 @@ impl YantrikDB {
                             // plaintext metadata.
                             event_time_min,
                             event_time_max,
+                            // v50 source turn, same value.
+                            source_turn,
                         ],
                     )?;
                 } else {
                     tx.execute(
                         "UPDATE memories \
                          SET text = ?1, metadata = ?2, importance = ?3, valence = ?4, \
-                             last_access = ?5, event_time_min = ?7, event_time_max = ?8 \
+                             last_access = ?5, event_time_min = ?7, event_time_max = ?8, \
+                             source_turn = ?9 \
                          WHERE rid = ?6",
                         params![
                             stored_new_text,
@@ -2367,9 +2416,12 @@ impl YantrikDB {
                             // plaintext metadata.
                             event_time_min,
                             event_time_max,
+                            // v50 source turn, same value.
+                            source_turn,
                         ],
                     )?;
                 }
+                crate::engine::thread::marker_restore(&tx, &marker_prior)?;
                 // Chunked embeddings — mirror the leader: a text-changing
                 // correction replaces the window rows atomically with the
                 // text, and the old idx set escapes for surplus-key

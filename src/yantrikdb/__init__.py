@@ -6,11 +6,14 @@ from yantrikdb._yantrikdb_rust import (
     CorrectionDeferredDuringReembed,
     IdempotencyConflict,
     InvalidIdempotencyKey,
+    InvalidThreadTopicError,
     PackAlreadyMounted,
     PackEmbedderMismatch,
     PackSignatureInvalid,
+    PhraseRouteUnavailableError,
     ProvenanceInconsistent,
     RecallContended,
+    SourceTurnMaintenanceRequiredError,
     TenantManager,
     YantrikDB,
 )
@@ -33,6 +36,7 @@ from yantrikdb.organize import (
     validate_concern_items,
 )
 from yantrikdb.rerank import recall_reranked, rerank_hits
+from yantrikdb.thread import resolve_thread_topics
 from yantrikdb.triggers import check_all_triggers
 
 # Backward-compat alias
@@ -73,14 +77,18 @@ __all__ = [
     "check_all_triggers",
     "recall_reranked",
     "rerank_hits",
+    "resolve_thread_topics",
     "Backpressure",
     "BatchDeferredDuringReembed",
     "CorrectionDeferredDuringReembed",
     "IdempotencyConflict",
     "InvalidIdempotencyKey",
+    "InvalidThreadTopicError",
     "PackAlreadyMounted",
     "PackEmbedderMismatch",
     "PackSignatureInvalid",
+    "PhraseRouteUnavailableError",
     "ProvenanceInconsistent",
     "RecallContended",
+    "SourceTurnMaintenanceRequiredError",
 ]

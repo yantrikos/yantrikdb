@@ -278,4 +278,106 @@ impl PyYantrikDB {
         let val = serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         crate::py_types::json_to_py(py, &val)
     }
+
+    /// Coverage-first thread retrieval (opt-in): ALL visible rows in the
+    /// namespace matched by ANY requested anchor, in chronological order
+    /// with 1-based positions — no similarity ranking, deterministic SQL
+    /// only. Truncation keeps the earliest `limit` rows and reports it via
+    /// `total`/`omitted`. Ordinary `recall` is untouched.
+    ///
+    /// Thread v2: optional `phrases` (literal FTS phrases; typed
+    /// `PhraseRouteUnavailableError` on an encrypted store) and
+    /// `topic_rids` (already-resolved topic synthesis rids) anchors union
+    /// with the entity route. Result-shape compatibility rule (documented
+    /// choice): an ENTITY-ONLY call — `phrases`/`topic_rids` omitted or
+    /// empty — returns the EXACT legacy v1 dict shape (`items` without
+    /// route fields, `total`, `omitted`), so pre-v2 callers are unbroken;
+    /// any call passing phrases or topic_rids returns the richer v2 shape
+    /// (items carry `routes`, matched `phrases`, matched `topic_rids`;
+    /// the result adds an explicit `returned`). Only those V2-ROUTED calls
+    /// (phrases/topic_rids passed here, or any `recall_thread_v2` call)
+    /// can raise `SourceTurnMaintenanceRequiredError` on a store whose
+    /// `source_turn` columns are stale — run
+    /// `maintain_source_turn_backfill` until complete. An entity-only call
+    /// takes the legacy v1 path and NEVER raises it (v1 orders from
+    /// decrypt-derived turns, independent of the persisted columns).
+    #[pyo3(signature = (namespace, entities, limit=100, phrases=None, topic_rids=None))]
+    fn recall_thread(
+        &self,
+        py: Python<'_>,
+        namespace: &str,
+        entities: Vec<String>,
+        limit: usize,
+        phrases: Option<Vec<String>>,
+        topic_rids: Option<Vec<String>>,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let phrases = phrases.unwrap_or_default();
+        let topic_rids = topic_rids.unwrap_or_default();
+        let val = if phrases.is_empty() && topic_rids.is_empty() {
+            // Legacy shape for entity-only calls (v1 compatibility).
+            let entity_refs: Vec<&str> = entities.iter().map(String::as_str).collect();
+            let out = db
+                .recall_thread(namespace, &entity_refs, limit)
+                .map_err(map_err)?;
+            serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+        } else {
+            let query = yantrikdb_core::ThreadQuery {
+                entities,
+                phrases,
+                topic_rids,
+            };
+            let out = db
+                .recall_thread_v2(namespace, &query, limit)
+                .map_err(map_err)?;
+            serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+        };
+        crate::py_types::json_to_py(py, &val)
+    }
+
+    /// The EXPLICIT v2 entry point (final reviewer batch 11): ALWAYS takes
+    /// the v2 engine path — entity-only, phrase-only, topic-only, any mix,
+    /// or all-empty (all-empty returns an empty result with `returned=0`;
+    /// an empty query is valid, not a fault). The method name IS the
+    /// version selection: no routing rules, no strict/version kwargs.
+    /// Strict source_turn gating applies unconditionally — a stale marker
+    /// raises `SourceTurnMaintenanceRequiredError` even for entity-only
+    /// queries — and the result is always the richer v2 shape (items carry
+    /// `routes` / matched `phrases` / matched `topic_rids`; the result
+    /// carries explicit `total` / `returned` / `omitted`). `recall_thread`
+    /// above stays byte-for-byte legacy v1 for entity-only calls.
+    #[pyo3(signature = (namespace, entities=None, limit=100, phrases=None, topic_rids=None))]
+    fn recall_thread_v2(
+        &self,
+        py: Python<'_>,
+        namespace: &str,
+        entities: Option<Vec<String>>,
+        limit: usize,
+        phrases: Option<Vec<String>>,
+        topic_rids: Option<Vec<String>>,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let query = yantrikdb_core::ThreadQuery {
+            entities: entities.unwrap_or_default(),
+            phrases: phrases.unwrap_or_default(),
+            topic_rids: topic_rids.unwrap_or_default(),
+        };
+        let out = db
+            .recall_thread_v2(namespace, &query, limit)
+            .map_err(map_err)?;
+        let val = serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        crate::py_types::json_to_py(py, &val)
+    }
+
+    /// One batch of the v50 source_turn recompute/repair pass — the
+    /// maintenance operation `SourceTurnMaintenanceRequiredError` names.
+    /// Returns `{"processed", "remaining", "complete"}`; call repeatedly
+    /// until `complete` is true.
+    #[pyo3(signature = (batch=10_000))]
+    fn maintain_source_turn_backfill(&self, py: Python<'_>, batch: usize) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let out = db.maintain_source_turn_backfill(batch).map_err(map_err)?;
+        let val = serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        crate::py_types::json_to_py(py, &val)
+    }
 }

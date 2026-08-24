@@ -51,6 +51,9 @@ pub use engine::repair::{RepairError, RepairReport};
 pub use engine::split::SplitReport;
 pub use engine::tasks::Task;
 pub use engine::tenant::{TenantConfig, TenantManager};
+pub use engine::thread::{
+    MaintenanceProgress, ThreadItem, ThreadItemV2, ThreadQuery, ThreadRecall, ThreadRecallV2,
+};
 pub use engine::YantrikDB;
 pub use error::YantrikDbError;
 pub use patterns::mine_patterns;
