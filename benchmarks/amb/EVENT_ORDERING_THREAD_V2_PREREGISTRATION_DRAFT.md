@@ -81,21 +81,42 @@ supersession visibility in SQL, assigns full-thread positions by
 returned page. Every item reports route provenance. The response reports
 `total`, `returned`, and `omitted`.
 
+Eligibility, visibility, complete multi-route provenance, `total`, positions,
+and the returned stored bytes come from one consistent SQLite read snapshot.
+The engine enforces documented count and byte-size limits for entities,
+phrases, topic RIDs, and the result limit, with checked conversions into SQL
+integer types. Bounded work here means bounded query inputs and page
+decryption; exact `total` still requires evaluating the complete indexed
+union.
+
 Exact bounded ordering requires `source_turn` to be a persisted nullable
-`memories` column, stamped from plaintext metadata on every write and
-replication path. The v2 artifact must use that column; decrypting metadata for
-every eligible row before ordering would violate the bounded-work contract.
-Unencrypted migrations backfill the column before serving v2. Encrypted
-migrations set `source_turn_backfill_complete=false`; strict v2 returns a typed
-`MaintenanceRequired` error until the resumable, keyset-paged decrypt-and-stamp
-maintenance operation completes and sets the marker. Opportunistic write-time
-repair does not waive that marker.
+`memories` column, stamped from plaintext metadata on every write and carried
+canonically in replication payloads. One shared extractor preserves the
+existing rule: a valid nonnegative integer `source_turn` is preferred, then a
+valid nonnegative integer `turn_id`; other values yield `NULL`. The v2 artifact
+must use that column; decrypting metadata for every eligible row before
+ordering would violate the bounded-work contract. Plaintext and encrypted
+migrations use resumable keyset batches rather than an unbounded open-time
+table update. Strict v2 returns a typed `MaintenanceRequired` error until the
+backfill completes and sets `source_turn_backfill_complete=true`.
+Opportunistic write-time repair does not waive that marker. Unsupported raw
+SQL writes to `memories` must not be able to leave a true marker over stale
+rows; the product either rejects that write boundary or invalidates the marker
+transactionally.
 
 The caller selects no more than three organizer topics from the query and
 persisted query-independent handle representations. Gold source turns, rubric
 text, answers, and prior scores are unavailable to selection. `AI` is a domain
 phrase, not a named entity. Topic labels or metadata must not be found by a
 global decrypting scan; the caller passes resolved synthesis RIDs.
+
+An inactive, unverified, nonexistent, or cross-namespace topic RID fails the
+whole query with one typed invalid-topic error that does not reveal whether a
+RID exists in another namespace. Phrase anchors are literal FTS5 phrases, not
+operator-bearing MATCH expressions: quoting, embedded quotes, whitespace,
+empty values, duplicate normalization, and maximum lengths have deterministic
+tested behavior. If one row matches several routes or anchors, provenance
+retains every pair in deterministic request order.
 
 The treatment context renders the complete returned union chronologically with
 stable position markers. The benchmark request's exact item count and answer-
@@ -166,6 +187,20 @@ neither they nor their thresholds are inputs to the selector.
     their exported typed exception classes (each still a `RuntimeError`
     subclass), and that the pre-v2 positional and keyword `recall_thread`
     calls return unchanged entity-only behavior.
+14. A concurrency product test proves one call cannot mix eligibility,
+    supersession state, positions, totals, provenance, or returned bytes from
+    different SQLite snapshots.
+15. Boundary tests prove every public query-input maximum, checked result-limit
+    conversion, literal phrase rule, duplicate rule, and typed invalid-topic
+    behavior without cross-namespace existence disclosure.
+16. The shared turn extractor is tested for absent, null, negative, floating,
+    string, and out-of-range values, including an invalid `source_turn` with a
+    valid `turn_id` fallback. Leader and follower results agree on order,
+    scalar values, complete provenance, totals, and omissions.
+17. Both migration modes are resumable and keyset-bounded. Product tests prove
+    no supported write path or exposed raw-SQL path can leave
+    `source_turn_backfill_complete=true` while a row that should carry a turn
+    remains unstamped.
 
 The Stage A thresholds require more than half of the structurally available
 coverage while leaving room for the unavoidable query-only selection gap. They
