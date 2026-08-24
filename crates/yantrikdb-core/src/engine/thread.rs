@@ -22,10 +22,15 @@
 //!   the `INSERT ... INTO memory_entities` sites in `engine/record.rs`,
 //!   `engine/stats.rs` and `engine/graph_ops.rs`); entity↔text matching
 //!   happens through `crate::graph::tokenize`'s Unicode lowercasing
-//!   instead. This lane matches the same way: requested names are resolved
-//!   against stored `entity_name` values case-insensitively via Rust
-//!   `to_lowercase()` (NOT SQL `LOWER()`, which is ASCII-only and would
-//!   diverge from the tokenizer on non-ASCII names).
+//!   instead. This lane matches the same way, through the PERSISTED
+//!   normalized key: every writer also stamps `entity_name_norm` =
+//!   [`normalize_entity_name`] — Unicode lowercase via Rust
+//!   `to_lowercase()`, deliberately NOT full Unicode case folding, in
+//!   lockstep with `crate::graph::tokenize` (never SQL `LOWER()`, which
+//!   is ASCII-only and would diverge from the tokenizer on non-ASCII
+//!   names) — so requested names resolve with one indexed lookup on
+//!   `idx_memory_entities_norm` instead of Rust-lowercasing the whole
+//!   entity vocabulary per call (the pre-v49 O(V) DISTINCT scan).
 //! - **Visibility.** Mirrors recall's default read predicates: rows must be
 //!   `consolidation_status = 'active'` (recall's default,
 //!   `include_consolidated = false`), pass the synthesis lifecycle gate
@@ -52,6 +57,51 @@
 use std::collections::{BTreeSet, HashMap};
 
 use crate::base::error::Result;
+
+/// The single source of the persisted `memory_entities.entity_name_norm`
+/// key: Unicode lowercase via Rust `str::to_lowercase()` — deliberately
+/// NOT full Unicode case folding (no `ß` -> `ss`, no locale tailoring),
+/// in lockstep with `crate::graph::tokenize`, which lowercases the same
+/// way.
+///
+/// This MUST stay in lockstep with `crate::graph::tokenize`'s lowercasing:
+/// entity↔text matching is DEFINED by the tokenizer, and the stored key
+/// exists precisely so SQL can perform that match through an index —
+/// SQL `LOWER()` is ASCII-only and is NOT an acceptable substitute. Every
+/// `INSERT INTO memory_entities` writer must bind this value
+/// (engine/record.rs, engine/stats.rs, engine/graph_ops.rs) and then call
+/// [`repair_entity_norm`]; open()'s `entity_norm_backfill` stage uses it
+/// for pre-v49 rows; the enforcement census in `thread_tests` fails if
+/// any writer forgets.
+pub(crate) fn normalize_entity_name(name: &str) -> String {
+    name.to_lowercase()
+}
+
+/// Write-time self-heal for the persisted normalized key. `INSERT OR
+/// IGNORE` never touches a pre-existing `(memory_rid, entity_name)` row,
+/// so a row written before v49 — or carrying a stale norm value — would
+/// otherwise NEVER be repaired by later natural writes, and the
+/// normalized-key invariant would only hold for stores that started
+/// clean. Every `INSERT OR IGNORE INTO memory_entities` writer calls this
+/// right after its insert. The UPDATE's predicate makes it a no-op on
+/// already-correct rows (including the row the insert itself just
+/// wrote), and it deliberately does NOT touch `entities.mention_count` —
+/// first-mention accounting stays exactly on the insert's `changes()`
+/// result (engine/stats.rs).
+pub(crate) fn repair_entity_norm(
+    conn: &rusqlite::Connection,
+    memory_rid: &str,
+    entity_name: &str,
+) -> rusqlite::Result<()> {
+    let norm = normalize_entity_name(entity_name);
+    conn.execute(
+        "UPDATE memory_entities SET entity_name_norm = ?3 \
+         WHERE memory_rid = ?1 AND entity_name = ?2 \
+           AND (entity_name_norm IS NULL OR entity_name_norm != ?3)",
+        rusqlite::params![memory_rid, entity_name, norm],
+    )?;
+    Ok(())
+}
 
 /// One row of a coverage-first thread, in chronological order.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
@@ -109,12 +159,13 @@ impl crate::YantrikDB {
             return Ok(empty());
         }
 
-        // Requested-name index, keyed by Unicode lowercase (the tokenizer's
-        // folding). Duplicated requests ("Alpha", "alpha") collapse to the
-        // first spelling so a row never lists the same entity twice.
+        // Requested-name index, keyed by the persisted normalization (the
+        // tokenizer's Unicode lowercase — see normalize_entity_name). Duplicated
+        // requests ("Alpha", "alpha") collapse to the first spelling so a
+        // row never lists the same entity twice.
         let mut req_by_lower: HashMap<String, usize> = HashMap::new();
         for (i, e) in entities.iter().enumerate() {
-            req_by_lower.entry(e.to_lowercase()).or_insert(i);
+            req_by_lower.entry(normalize_entity_name(e)).or_insert(i);
         }
 
         struct RowAgg {
@@ -128,30 +179,16 @@ impl crate::YantrikDB {
         {
             let conn = self.read_conn();
 
-            // Resolve requested names to the VERBATIM stored entity_name
-            // values in Rust (Unicode-correct case fold; SQL LOWER() is
-            // ASCII-only). Distinct entity_name is bounded by the entity
-            // vocabulary, not the memory count.
-            let mut wanted: HashMap<String, usize> = HashMap::new();
-            {
-                let mut stmt =
-                    conn.prepare_cached("SELECT DISTINCT entity_name FROM memory_entities")?;
-                let names = stmt.query_map([], |r| r.get::<_, String>(0))?;
-                for name in names {
-                    let name = name?;
-                    if let Some(&idx) = req_by_lower.get(&name.to_lowercase()) {
-                        wanted.insert(name, idx);
-                    }
-                }
-            }
-            if wanted.is_empty() {
-                return Ok(empty());
-            }
+            // v49: requested names resolve directly against the PERSISTED
+            // normalized key (entity_name_norm — stamped by every writer,
+            // backfilled at open; see normalize_entity_name). One indexed
+            // lookup on idx_memory_entities_norm over a small fixed
+            // parameter list — the pre-v49 O(V) DISTINCT vocabulary scan
+            // (Unicode-lowercased in Rust per request) is retired.
+            let mut norm_names: Vec<&String> = req_by_lower.keys().collect();
+            norm_names.sort(); // deterministic parameter order
 
-            let mut stored_names: Vec<&String> = wanted.keys().collect();
-            stored_names.sort(); // deterministic parameter order
-
-            let placeholders: String = (0..stored_names.len())
+            let placeholders: String = (0..norm_names.len())
                 .map(|i| format!("?{}", i + 2))
                 .collect::<Vec<_>>()
                 .join(",");
@@ -159,18 +196,18 @@ impl crate::YantrikDB {
             // path (see module docs); the supersedes exclusion runs below,
             // outside the conn guard.
             let sql = format!(
-                "SELECT m.rid, m.text, m.created_at, m.metadata, me.entity_name \
+                "SELECT m.rid, m.text, m.created_at, m.metadata, me.entity_name_norm \
                  FROM memories m \
                  JOIN memory_entities me ON me.memory_rid = m.rid \
                  WHERE m.namespace = ?1 \
                    AND m.consolidation_status = 'active' \
                    AND (m.synthesis_state IS NULL OR m.synthesis_state = 'verified') \
-                   AND me.entity_name IN ({placeholders})"
+                   AND me.entity_name_norm IN ({placeholders})"
             );
             let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
-                Vec::with_capacity(stored_names.len() + 1);
+                Vec::with_capacity(norm_names.len() + 1);
             param_values.push(Box::new(namespace.to_string()));
-            for name in &stored_names {
+            for name in &norm_names {
                 param_values.push(Box::new((*name).clone()));
             }
             let params_ref: Vec<&dyn rusqlite::types::ToSql> =
@@ -187,8 +224,8 @@ impl crate::YantrikDB {
                 ))
             })?;
             for row in rows {
-                let (rid, text, created_at, metadata, entity_name) = row?;
-                let idx = wanted[&entity_name];
+                let (rid, text, created_at, metadata, entity_norm) = row?;
+                let idx = req_by_lower[&entity_norm];
                 by_rid
                     .entry(rid)
                     .or_insert_with(|| RowAgg {
@@ -685,6 +722,164 @@ mod thread_tests {
         assert_eq!(
             follower.recall_thread(NS, &["Alpha", "Beta"], 100).unwrap(),
             leader.recall_thread(NS, &["Alpha", "Beta"], 100).unwrap()
+        );
+    }
+
+    /// (g) ENFORCEMENT CENSUS — the normalized-key invariant. Rows reach
+    /// `memory_entities` through record (heuristic extraction via the
+    /// materializer), relate() (entity creation + text backfill), and
+    /// replication apply on a follower (apply_ops -> materialize +
+    /// backfill_memory_entities). After exercising all three natural
+    /// paths, EVERY row on BOTH sides must carry entity_name_norm ==
+    /// normalize_entity_name(entity_name). A writer that forgets the
+    /// binding leaves NULL (or a diverging value) and fails here.
+    #[test]
+    fn every_writer_stamps_the_normalized_entity_key() {
+        use crate::engine::thread::normalize_entity_name;
+        use crate::replication::{apply_ops, extract_ops_since};
+
+        let leader = YantrikDB::new(":memory:", 8).unwrap();
+        // Natural path 1: record with entity-bearing text (non-ASCII
+        // included — the exact case SQL LOWER() would corrupt).
+        for i in 0..4 {
+            seed_row(
+                &leader,
+                &format!("c{i}"),
+                &format!("Münster planning with Alpha and Beta round {i}"),
+                &meta_empty(),
+                BASE_MICROS + (i as i64) * 1_000_000,
+                &["Münster", "Alpha"],
+                i as f32,
+            );
+        }
+        // Natural path 2: relate() — creates entities and backfills
+        // memory_entities from row text (graph_ops.rs).
+        leader.relate("Alpha", "Beta", "related_to", 1.0).unwrap();
+        leader.relate("Münster", "Beta", "located_in", 0.7).unwrap();
+        drain(&leader);
+
+        // Natural path 3: replication apply to a follower.
+        let follower = YantrikDB::new(":memory:", 8).unwrap();
+        let ops = extract_ops_since(&leader.conn(), None, None, None, 1000).unwrap();
+        apply_ops(&follower, &ops).unwrap();
+
+        let census = |db: &YantrikDB, side: &str| {
+            let conn = db.conn();
+            let rows: Vec<(String, Option<String>)> = conn
+                .prepare("SELECT entity_name, entity_name_norm FROM memory_entities")
+                .unwrap()
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            assert!(
+                !rows.is_empty(),
+                "{side}: census precondition — the natural paths must have \
+                 produced memory_entities rows"
+            );
+            let bad = rows
+                .iter()
+                .filter(|(name, norm)| {
+                    norm.as_deref() != Some(normalize_entity_name(name).as_str())
+                })
+                .count();
+            assert_eq!(
+                bad, 0,
+                "{side}: a writer inserted memory_entities without the normalized \
+                 key; every writer must bind normalize_entity_name()"
+            );
+        };
+        census(&leader, "leader");
+        census(&follower, "follower");
+    }
+
+    /// (h) Non-ASCII case-insensitive resolution via the indexed path: the
+    /// stored spelling is 'MÜNSTER'; the request is 'münster'. Under Rust
+    /// to_lowercase both fold to 'münster'; under SQL LOWER() the stored
+    /// key would have been 'mÜnster' and the lookup would return nothing.
+    #[test]
+    fn non_ascii_entity_resolves_case_insensitively_via_indexed_path() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        seed_row(
+            &db,
+            "m_de",
+            "Planning the MÜNSTER rollout",
+            &meta_empty(),
+            BASE_MICROS,
+            &["MÜNSTER"],
+            1.0,
+        );
+        drain(&db);
+
+        let out = db.recall_thread(NS, &["münster"], 10).unwrap();
+        assert_eq!(
+            out.total, 1,
+            "Unicode fold must match, ASCII fold would miss"
+        );
+        assert_eq!(out.items[0].rid, "m_de");
+        assert_eq!(out.items[0].position, 1);
+        assert_eq!(out.items[0].entities, vec!["münster".to_string()]);
+    }
+    /// (i) SELF-HEAL ON WRITE — INSERT OR IGNORE never touches an existing
+    /// row, so a pre-v49 (or corrupted) NULL-norm row must be repaired by
+    /// the conditional UPDATE every writer runs after its insert
+    /// (repair_entity_norm). Seed the bad rows manually, then drive two
+    /// natural writer paths over the same (rid, entity) pairs.
+    #[test]
+    fn natural_writes_self_heal_a_null_normalized_key() {
+        use crate::engine::thread::normalize_entity_name;
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+
+        // Path A: the record_with_rid materializer (engine/stats.rs). The
+        // memory_entities row pre-exists with NULL norm; the recorded
+        // memory then claims the same (rid, entity) and must repair it.
+        db.conn()
+            .execute(
+                "INSERT INTO memory_entities (memory_rid, entity_name) \
+                 VALUES ('m_pre', 'Münster')",
+                [],
+            )
+            .unwrap();
+        seed_row(
+            &db,
+            "m_pre",
+            "Münster status update",
+            &meta_empty(),
+            BASE_MICROS,
+            &["Münster"],
+            1.0,
+        );
+        drain(&db);
+
+        // Path B: link_memory_entity (engine/graph_ops.rs).
+        db.conn()
+            .execute(
+                "INSERT INTO memory_entities (memory_rid, entity_name) \
+                 VALUES ('m_pre2', 'Alpha')",
+                [],
+            )
+            .unwrap();
+        db.link_memory_entity("m_pre2", "Alpha").unwrap();
+
+        let norm = |rid: &str, name: &str| -> Option<String> {
+            db.conn()
+                .query_row(
+                    "SELECT entity_name_norm FROM memory_entities \
+                     WHERE memory_rid = ?1 AND entity_name = ?2",
+                    [rid, name],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(
+            norm("m_pre", "Münster").as_deref(),
+            Some(normalize_entity_name("Münster").as_str()),
+            "the record materializer must repair a pre-existing NULL norm"
+        );
+        assert_eq!(
+            norm("m_pre2", "Alpha").as_deref(),
+            Some("alpha"),
+            "link_memory_entity must repair a pre-existing NULL norm"
         );
     }
 }

@@ -15,7 +15,9 @@
 // freezes the query/child features needed for offline membership calibration.
 // v47 adds claims.hlc so relate LWW compares causal order, not wall clocks (#148).
 // v48 makes valid time reachable at recall: event_time_min/max columns + index (#149).
-pub const SCHEMA_VERSION: i32 = 48;
+// v49 persists the Unicode-lowercased entity key (memory_entities.entity_name_norm + index)
+// so recall_thread resolves names by indexed lookup instead of an O(V) vocabulary scan.
+pub const SCHEMA_VERSION: i32 = 49;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -1080,10 +1082,22 @@ CREATE TABLE IF NOT EXISTS memory_chunks (
 CREATE TABLE IF NOT EXISTS memory_entities (
     memory_rid TEXT NOT NULL,
     entity_name TEXT NOT NULL,
+    -- v49: Unicode lowercase of entity_name (Rust str::to_lowercase() —
+    -- deliberately NOT full Unicode case folding — in lockstep with
+    -- crate::graph::tokenize; SQL LOWER() is ASCII-only and must never
+    -- produce this value). Stamped by every writer via
+    -- engine::thread::normalize_entity_name and backfilled in Rust at open
+    -- (the entity_norm_backfill stage) for migrated stores.
+    entity_name_norm TEXT,
     PRIMARY KEY (memory_rid, entity_name)
 );
 CREATE INDEX IF NOT EXISTS idx_memory_entities_entity ON memory_entities(entity_name);
 CREATE INDEX IF NOT EXISTS idx_memory_entities_rid ON memory_entities(memory_rid);
+-- Known scale caveat (deferred deliberately — see PR #190 review): this
+-- (entity_name_norm, memory_rid) index matches a name across ALL
+-- namespaces before the memories join filters namespace; a true
+-- tenant-bounded lookup would need namespace in the entity lookup index.
+CREATE INDEX IF NOT EXISTS idx_memory_entities_norm ON memory_entities(entity_name_norm, memory_rid);
 
 -- FTS5 for full-text search on memories
 CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(text, content=memories, content_rowid=rowid);
@@ -3056,4 +3070,31 @@ WHERE metadata IS NOT NULL AND json_valid(metadata);
 CREATE INDEX IF NOT EXISTS idx_memories_event_time
     ON memories(namespace, event_time_min, event_time_max)
     WHERE event_time_min IS NOT NULL;
+";
+
+/// v48 -> v49 (#188 follow-up, reviewer finding): `recall_thread` resolved
+/// requested entity names by scanning `SELECT DISTINCT entity_name FROM
+/// memory_entities` and Unicode-lowercasing EVERY name in Rust per request
+/// — O(V) over the global entity vocabulary, across namespaces, on every
+/// call. The Rust-side lowercase existed because SQL LOWER() is ASCII-only
+/// and must match `crate::graph::tokenize`'s Unicode lowercasing. v49
+/// persists that normalized key (`entity_name_norm`, stamped by every
+/// writer via `engine::thread::normalize_entity_name`) so resolution
+/// becomes one indexed lookup. Statements stay idempotent-friendly: the
+/// runner is `run_migration_idempotent` (the v0.7.3 contract).
+pub const MIGRATE_V48_TO_V49: &str = "
+ALTER TABLE memory_entities ADD COLUMN entity_name_norm TEXT;
+-- NO SQL backfill here, deliberately: SQLite LOWER() is ASCII-only, so
+-- 'MÜNSTER' would become 'mÜnster' — corrupting every non-ASCII entity
+-- name and diverging from crate::graph::tokenize's Unicode lowercasing.
+-- The ENGINE backfills post-migration in Rust (open()'s
+-- entity_norm_backfill stage) with str::to_lowercase() — Unicode
+-- lowercase, deliberately NOT full Unicode case folding, in lockstep
+-- with crate::graph::tokenize.
+-- Known scale caveat (deferred deliberately — see PR #190 review): the
+-- (entity_name_norm, memory_rid) index matches a name across ALL
+-- namespaces before the memories join filters namespace; a true
+-- tenant-bounded lookup would need namespace in the entity lookup index.
+CREATE INDEX IF NOT EXISTS idx_memory_entities_norm
+    ON memory_entities(entity_name_norm, memory_rid);
 ";

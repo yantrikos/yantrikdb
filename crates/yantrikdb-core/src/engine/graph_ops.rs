@@ -596,9 +596,15 @@ impl YantrikDB {
         {
             let conn = self.conn.lock();
             conn.execute(
-                "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) VALUES (?1, ?2)",
-                params![memory_rid, entity_name],
+                "INSERT OR IGNORE INTO memory_entities \
+                 (memory_rid, entity_name, entity_name_norm) VALUES (?1, ?2, ?3)",
+                params![
+                    memory_rid,
+                    entity_name,
+                    crate::engine::thread::normalize_entity_name(entity_name)
+                ],
             )?;
+            crate::engine::thread::repair_entity_norm(&conn, memory_rid, entity_name)?;
         } // conn dropped
 
         // Phase 2: Lock graph_index write for in-memory update
@@ -661,9 +667,15 @@ impl YantrikDB {
             let conn = self.conn.lock();
             for c in &candidates {
                 conn.execute(
-                    "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) VALUES (?1, ?2)",
-                    params![c.rid, c.entity],
+                    "INSERT OR IGNORE INTO memory_entities \
+                     (memory_rid, entity_name, entity_name_norm) VALUES (?1, ?2, ?3)",
+                    params![
+                        c.rid,
+                        c.entity,
+                        crate::engine::thread::normalize_entity_name(&c.entity)
+                    ],
                 )?;
+                crate::engine::thread::repair_entity_norm(&conn, &c.rid, &c.entity)?;
             }
         } // conn dropped
 
@@ -741,9 +753,15 @@ impl YantrikDB {
             let conn = self.conn.lock();
             for c in &candidates {
                 conn.execute(
-                    "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) VALUES (?1, ?2)",
-                    params![c.rid, c.entity],
+                    "INSERT OR IGNORE INTO memory_entities \
+                     (memory_rid, entity_name, entity_name_norm) VALUES (?1, ?2, ?3)",
+                    params![
+                        c.rid,
+                        c.entity,
+                        crate::engine::thread::normalize_entity_name(&c.entity)
+                    ],
                 )?;
+                crate::engine::thread::repair_entity_norm(&conn, &c.rid, &c.entity)?;
             }
         } // conn dropped
 

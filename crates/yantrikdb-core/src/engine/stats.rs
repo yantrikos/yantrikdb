@@ -1367,10 +1367,18 @@ impl YantrikDB {
                 // Claim the mention first; Loop B's INSERT OR IGNORE below is a
                 // no-op for anything already claimed here.
                 let first_mention = conn.execute(
-                    "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) \
-                     VALUES (?1, ?2)",
-                    params![rid, entity],
+                    "INSERT OR IGNORE INTO memory_entities \
+                     (memory_rid, entity_name, entity_name_norm) VALUES (?1, ?2, ?3)",
+                    params![
+                        rid,
+                        entity,
+                        crate::engine::thread::normalize_entity_name(entity)
+                    ],
                 )? > 0;
+                // Self-heal AFTER the first-mention read: the repair is a
+                // separate UPDATE precisely so it can never count as a
+                // mention (see repair_entity_norm).
+                crate::engine::thread::repair_entity_norm(&conn, rid, entity)?;
                 let inc: i64 = if first_mention { 1 } else { 0 };
                 conn.execute(
                     "INSERT INTO entities (name, entity_type, first_seen, last_seen, mention_count) \
@@ -1401,9 +1409,15 @@ impl YantrikDB {
                 let conn = self.conn();
                 for entity in &candidates {
                     conn.execute(
-                        "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) VALUES (?1, ?2)",
-                        params![rid, entity],
+                        "INSERT OR IGNORE INTO memory_entities \
+                         (memory_rid, entity_name, entity_name_norm) VALUES (?1, ?2, ?3)",
+                        params![
+                            rid,
+                            entity,
+                            crate::engine::thread::normalize_entity_name(entity)
+                        ],
                     )?;
+                    crate::engine::thread::repair_entity_norm(&conn, rid, entity)?;
                 }
             }
             // graph_index in-memory update (idempotent — add_entity/link dedupe).
@@ -1558,9 +1572,15 @@ impl YantrikDB {
                     params![entity, entity_type, ts_secs, was_new_row],
                 )?;
                 conn.execute(
-                    "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name) VALUES (?1, ?2)",
-                    params![rid, entity],
+                    "INSERT OR IGNORE INTO memory_entities \
+                     (memory_rid, entity_name, entity_name_norm) VALUES (?1, ?2, ?3)",
+                    params![
+                        rid,
+                        entity,
+                        crate::engine::thread::normalize_entity_name(entity)
+                    ],
                 )?;
+                crate::engine::thread::repair_entity_norm(&conn, rid, entity)?;
             }
         }
 

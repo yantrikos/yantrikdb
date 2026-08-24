@@ -113,8 +113,9 @@ use crate::schema::{
     MIGRATE_V32_TO_V33, MIGRATE_V33_TO_V34, MIGRATE_V34_TO_V35, MIGRATE_V35_TO_V36,
     MIGRATE_V36_TO_V37, MIGRATE_V37_TO_V38, MIGRATE_V3_TO_V4, MIGRATE_V40_TO_V41,
     MIGRATE_V41_TO_V42, MIGRATE_V42_TO_V43, MIGRATE_V44_TO_V45, MIGRATE_V45_TO_V46,
-    MIGRATE_V46_TO_V47, MIGRATE_V47_TO_V48, MIGRATE_V4_TO_V5, MIGRATE_V5_TO_V6, MIGRATE_V6_TO_V7,
-    MIGRATE_V7_TO_V8, MIGRATE_V8_TO_V9, MIGRATE_V9_TO_V10, SCHEMA_SQL, SCHEMA_VERSION,
+    MIGRATE_V46_TO_V47, MIGRATE_V47_TO_V48, MIGRATE_V48_TO_V49, MIGRATE_V4_TO_V5, MIGRATE_V5_TO_V6,
+    MIGRATE_V6_TO_V7, MIGRATE_V7_TO_V8, MIGRATE_V8_TO_V9, MIGRATE_V9_TO_V10, SCHEMA_SQL,
+    SCHEMA_VERSION,
 };
 use crate::types::*;
 
@@ -888,6 +889,7 @@ impl YantrikDB {
             (45, MIGRATE_V45_TO_V46),
             (46, MIGRATE_V46_TO_V47),
             (47, MIGRATE_V47_TO_V48),
+            (48, MIGRATE_V48_TO_V49),
         ];
         if let Some(v) = existing_version {
             for &(from_v, sql) in migrations {
@@ -901,6 +903,75 @@ impl YantrikDB {
         }
 
         at("schema_sql", conn.execute_batch(SCHEMA_SQL))?;
+
+        // **v49 entity_name_norm backfill — Rust, not SQL.** The reviewer
+        // finding behind v49: `recall_thread` resolved requested entity
+        // names by scanning `SELECT DISTINCT entity_name FROM
+        // memory_entities` and Unicode-lowercasing EVERY name in Rust per
+        // request — O(V) over the global entity vocabulary, across
+        // namespaces, on every call. The persisted key retires that scan,
+        // but MIGRATE_V48_TO_V49 cannot backfill it in SQL: LOWER() is
+        // ASCII-only and would diverge from crate::graph::tokenize's
+        // Unicode lowercasing on non-ASCII names. So the engine backfills
+        // here, post-migration, in KEYSET-PAGED batches: a large upgraded
+        // store must never materialize its whole entity join in RAM, so
+        // rows are fetched 10k at a time by ascending rowid and each batch
+        // commits in its own transaction. Crash-safe and idempotent:
+        // committed rows are no longer NULL and are never revisited, and
+        // on a store with nothing to do (every open after the first) the
+        // loop is a single indexed probe.
+        //
+        // Index tradeoff, documented deliberately: MIGRATE_V48_TO_V49
+        // creates idx_memory_entities_norm BEFORE this backfill runs, so
+        // the one-time backfill pays per-row index maintenance. Creating
+        // the index after the backfill would save that churn, but would
+        // split the index's existence across two owners (migration SQL vs
+        // engine code) and complicate the idempotent-replay contract —
+        // run_migration_idempotent re-runs the migration wholesale on
+        // rewound stores — so the migration keeps the CREATE INDEX.
+        {
+            const BACKFILL_BATCH: i64 = 10_000;
+            let mut last_rowid: i64 = 0;
+            loop {
+                let batch: Vec<(i64, String)> = at("entity_norm_backfill", {
+                    (|| {
+                        let mut stmt = conn.prepare(
+                            "SELECT rowid, entity_name FROM memory_entities \
+                             WHERE entity_name_norm IS NULL AND rowid > ?1 \
+                             ORDER BY rowid LIMIT ?2",
+                        )?;
+                        let rows = stmt.query_map(params![last_rowid, BACKFILL_BATCH], |r| {
+                            Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
+                        })?;
+                        rows.collect::<std::result::Result<Vec<_>, _>>()
+                    })()
+                })?;
+                let Some(&(batch_last, _)) = batch.last() else {
+                    break;
+                };
+                let tx = at("entity_norm_backfill", conn.unchecked_transaction())?;
+                {
+                    let mut update = at(
+                        "entity_norm_backfill",
+                        tx.prepare(
+                            "UPDATE memory_entities SET entity_name_norm = ?1 \
+                             WHERE rowid = ?2",
+                        ),
+                    )?;
+                    for (rowid, name) in &batch {
+                        at(
+                            "entity_norm_backfill",
+                            update.execute(params![
+                                crate::engine::thread::normalize_entity_name(name),
+                                rowid
+                            ]),
+                        )?;
+                    }
+                }
+                at("entity_norm_backfill", tx.commit())?;
+                last_rowid = batch_last;
+            }
+        }
 
         // Populate seed substitution categories (idempotent)
         rewrap(
