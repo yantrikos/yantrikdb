@@ -278,4 +278,26 @@ impl PyYantrikDB {
         let val = serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         crate::py_types::json_to_py(py, &val)
     }
+
+    /// Coverage-first thread retrieval (opt-in): ALL visible rows in the
+    /// namespace linked to ANY of `entities` via the entity join, in
+    /// chronological order with 1-based positions — no similarity ranking,
+    /// deterministic SQL only. Truncation keeps the earliest `limit` rows
+    /// and reports it via `total`/`omitted`. Ordinary `recall` is untouched.
+    #[pyo3(signature = (namespace, entities, limit=100))]
+    fn recall_thread(
+        &self,
+        py: Python<'_>,
+        namespace: &str,
+        entities: Vec<String>,
+        limit: usize,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let entity_refs: Vec<&str> = entities.iter().map(String::as_str).collect();
+        let out = db
+            .recall_thread(namespace, &entity_refs, limit)
+            .map_err(map_err)?;
+        let val = serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        crate::py_types::json_to_py(py, &val)
+    }
 }
