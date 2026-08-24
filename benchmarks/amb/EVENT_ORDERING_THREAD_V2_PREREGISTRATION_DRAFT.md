@@ -113,9 +113,10 @@ migrations use resumable keyset batches rather than an unbounded open-time
 table update. Strict v2 returns a typed `MaintenanceRequired` error until the
 backfill completes and sets `source_turn_backfill_complete=true`.
 Opportunistic write-time repair does not waive that marker. Unsupported raw
-SQL writes to `memories` must not be able to leave a true marker over stale
-rows; the product either rejects that write boundary or invalidates the marker
-transactionally.
+SQL writes to `memories` invalidate the marker transactionally. Direct SQL
+writes to the internal maintenance ledger itself are unsupported; the
+compatibility connection cannot make arbitrary operator tampering impossible,
+and this arm makes no such claim.
 
 The caller selects no more than three organizer topics from the query and
 persisted query-independent handle representations. Gold source turns, rubric
@@ -212,9 +213,10 @@ neither they nor their thresholds are inputs to the selector.
     valid `turn_id` fallback. Leader and follower results agree on order,
     scalar values, complete provenance, totals, and omissions.
 17. Both migration modes are resumable and keyset-bounded. Product tests prove
-    no supported write path or exposed raw-SQL path can leave
-    `source_turn_backfill_complete=true` while a row that should carry a turn
-    remains unstamped.
+    supported writes preserve the marker's prior state after stamping, never
+    waive an incomplete migration, and raw SQL mutations of `memories`
+    invalidate a true marker. Direct tampering with the internal maintenance
+    ledger is explicitly outside the supported API contract.
 
 The Stage A thresholds require more than half of the structurally available
 coverage while leaving room for the unavoidable query-only selection gap. They
