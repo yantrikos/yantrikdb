@@ -8,8 +8,11 @@ import json
 import math
 import re
 from collections import Counter
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
+
+# `datetime.UTC` is 3.11+; the repository's floor is 3.10 (requires-python >=3.10).
+UTC = timezone.utc
 
 
 TOKEN_RE = re.compile(r"[^\W_]+", re.UNICODE)
