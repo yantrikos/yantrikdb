@@ -24,6 +24,12 @@ jobs:
           # Linux x86_64
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          # Linux x86_64 on the OLDEST supported Python (requires-python >=3.10).
+          # 0.16.0/0.17.0 shipped a `from datetime import UTC` (3.11+) that this
+          # leg would have caught.
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            python: "3.10"
           # Linux aarch64
           - os: ubuntu-26.04-arm
             target: aarch64-unknown-linux-gnu
@@ -57,7 +63,7 @@ jobs:
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: ${{ matrix.python || '3.13' }}
 
       - name: Install maturin and dependencies
         run: |
