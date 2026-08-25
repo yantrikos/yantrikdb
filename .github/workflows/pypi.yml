@@ -175,6 +175,7 @@ jobs:
           rid = db.record_text("floor smoke: the wheel imports and writes on the oldest supported Python")
           row = db.get(rid)  # durable read-back; recall would race the async index
           assert row and "oldest supported Python" in (row.get("text") or ""), row
+          db.close()  # clean shutdown is part of the smoke; no handles left to teardown
           print("floor smoke OK:", got)
           PY
 
