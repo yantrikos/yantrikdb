@@ -10,7 +10,10 @@ from __future__ import annotations
 import math
 import re
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+
+# `datetime.UTC` is 3.11+; the package supports 3.10 (requires-python >=3.10).
+UTC = timezone.utc
 from typing import Callable, Iterable, Mapping, Sequence
 
 from yantrikdb.consolidate import record_synthesis
