@@ -31,8 +31,15 @@ import argparse
 import re
 import shutil
 import tempfile
-import tomllib
 from pathlib import Path
+
+try:  # py310-ok: tomllib is 3.11+; tomli is the backport
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ModuleNotFoundError as e:
+        raise SystemExit("packs tooling needs Python 3.11+ or `pip install tomli` on 3.10") from e
 
 from yantrikdb import YantrikDB
 

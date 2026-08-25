@@ -261,7 +261,13 @@ def grade(answer: str, expect: list[list[str]], reject: list[str] | None = None)
 def pack_setting(pack: str, key: str, fallback):
     """A retrieval parameter the pack declares for itself."""
     try:
-        import tomllib
+        try:  # py310-ok: tomllib is 3.11+; tomli is the backport
+            import tomllib
+        except ModuleNotFoundError:  # pragma: no cover - Python 3.10
+            try:
+                import tomli as tomllib  # type: ignore[no-redef]
+            except ModuleNotFoundError as e:
+                raise SystemExit("packs tooling needs Python 3.11+ or `pip install tomli` on 3.10") from e
         cfg = tomllib.loads(
             (Path(__file__).resolve().parent / pack / "pack.toml")
             .read_text(encoding="utf-8"))
