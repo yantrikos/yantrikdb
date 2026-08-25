@@ -9,7 +9,7 @@ on:
 
 jobs:
   test:
-    name: Test (${{ matrix.os }}, ${{ matrix.target }})
+    name: Test (${{ matrix.os }}, ${{ matrix.target }}, py${{ matrix.python || '3.13' }})
     runs-on: ${{ matrix.os }}
     # Hard cap so a genuine test hang fails fast instead of running until the
     # 24-hour workflow ceiling. (Note: this bounds a job once it STARTS — it
