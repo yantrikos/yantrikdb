@@ -133,10 +133,55 @@ jobs:
           name: wheels-sdist
           path: dist
 
+  # Install the BUILT wheel on the declared Python floor before anything is
+  # published. 0.16.0 and 0.17.0 both shipped a 3.11-only import that made
+  # `import yantrikdb` fail on 3.10; the build matrix never imported what it
+  # built, so nothing stopped the upload. Both registries now depend on this.
+  smoke-floor:
+    name: Import smoke on the Python floor (3.10)
+    runs-on: ubuntu-latest
+    needs: [build-wheels, build-sdist]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: wheels-*
+          merge-multiple: true
+          path: dist
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+      - name: Install runtime deps from PyPI, then ONLY the built engine from the artifacts
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python -m pip install -U pip
+          # Runtime deps come from PyPI (they are not in the artifacts); the
+          # engine itself is then installed --no-index --no-deps from this
+          # run's wheels only — proof it came from here and nowhere else.
+          pip install "uuid-utils>=0.9.0" "click>=8.0.0"
+          pip install --no-index --find-links dist --no-deps "yantrikdb==${TAG#v}"
+      - name: Import, version == tag, and a one-record round trip
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python - <<'PY'
+          import importlib.metadata as m, os, tempfile
+          import yantrikdb
+          want = os.environ["TAG"].lstrip("v")
+          got = yantrikdb.__version__
+          assert got == m.version("yantrikdb") == want, (got, m.version("yantrikdb"), want)
+          from yantrikdb import YantrikDB
+          db = YantrikDB.with_default(os.path.join(tempfile.mkdtemp(), "smoke.db"))
+          rid = db.record_text("floor smoke: the wheel imports and writes on the oldest supported Python")
+          row = db.get(rid)  # durable read-back; recall would race the async index
+          assert row and "oldest supported Python" in (row.get("text") or ""), row
+          print("floor smoke OK:", got)
+          PY
+
   publish-pypi:
     name: Publish to PyPI
     runs-on: ubuntu-latest
-    needs: [build-wheels, build-sdist]
+    needs: [build-wheels, build-sdist, smoke-floor]
     environment:
       name: pypi
       url: https://pypi.org/p/yantrikdb
@@ -179,7 +224,7 @@ jobs:
     #
     # Same prerequisites as publish-pypi now, so a wheel failure blocks
     # BOTH registries and the release can be retried as a whole.
-    needs: [build-wheels, build-sdist]
+    needs: [build-wheels, build-sdist, smoke-floor, publish-pypi]
     steps:
       - uses: actions/checkout@v4
 
