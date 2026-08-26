@@ -289,6 +289,90 @@ fn bounded_recall_excludes_mounted_pack_rows() {
     );
 }
 
+/// **A pack sealed before a column existed must still mount.** Packs published
+/// by engines at or below 0.15.x carry schema v41, which predates the v41→v42
+/// synthesis triplet; the pack file is opened read-only and can never be
+/// migrated. Before the projection became schema-aware, every one of them
+/// failed at mount with `no such column: synthesis_state`, and the host path
+/// could not surface it because a host database is always migrated first.
+///
+/// The fixture drops those columns from a sealed pack, which is exactly the
+/// shape a pre-v42 publisher wrote (and leaves the content digest — taken over
+/// rid and text — intact, so the pack still verifies).
+#[test]
+fn pack_sealed_before_the_synthesis_columns_still_mounts() {
+    let dir = tmpdir("pre-v42");
+    let pack = dir.join("physics.ydbpack");
+    build_pack(
+        &dir,
+        pack.to_str().unwrap(),
+        "E0",
+        &[("gluons bind quarks", 3), ("quarks carry color charge", 4)],
+    );
+
+    {
+        // Rebuild `memories` without any synthesis_* column — the pre-v42
+        // shape. (A plain DROP COLUMN cannot remove the CHECK-constrained
+        // ones, and v42 adds five columns, not three.)
+        let conn = rusqlite::Connection::open(&pack).unwrap();
+        let kept: Vec<String> = {
+            let mut stmt = conn.prepare("PRAGMA table_info(memories)").unwrap();
+            let rows = stmt
+                .query_map([], |r| r.get::<_, String>(1))
+                .unwrap()
+                .collect::<std::result::Result<Vec<_>, _>>()
+                .unwrap();
+            rows.into_iter()
+                .filter(|c| !c.starts_with("synthesis_"))
+                .collect()
+        };
+        assert!(kept.iter().any(|c| c == "rid"), "sanity: rid survives");
+        let cols = kept.join(", ");
+        conn.execute_batch(&format!(
+            "PRAGMA foreign_keys=OFF;
+             CREATE TABLE memories_pre_v42 AS SELECT {cols} FROM memories;
+             DROP TABLE memories;
+             ALTER TABLE memories_pre_v42 RENAME TO memories;"
+        ))
+        .unwrap();
+        let remaining: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pragma_table_info('memories') \n                 WHERE name GLOB 'synthesis_*'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(remaining, 0, "fixture must have no synthesis columns");
+    }
+
+    let db = host(&dir, "E0");
+    let id = db
+        .mount_pack(pack.to_str().unwrap())
+        .expect("a pre-v42 pack must still mount");
+    assert_eq!(db.mounted_packs()[0].rows, 2);
+
+    // And it must actually serve content, not merely mount.
+    let texts = recall_texts(&db, &vec_on(3, 0.05), 5);
+    assert!(
+        texts.iter().any(|t| t.contains("gluons")),
+        "pre-v42 pack mounted but returned nothing: {texts:?}"
+    );
+
+    // The rows behave like ordinary (non-synthesized) rows, which is what
+    // v42 migrates existing host rows to.
+    let hits = db
+        .recall_from_packs_for(
+            &[&id],
+            &vec_on(3, 0.05),
+            5,
+            None,
+            &yantrikdb::PackRecallOptions::default(),
+        )
+        .unwrap();
+    assert!(!hits.is_empty());
+    assert!(hits.iter().all(|h| h.pack.as_ref().unwrap().pack_id == id));
+}
+
 #[test]
 fn mount_then_recall_finds_pack_content() {
     let dir = tmpdir("recall");
