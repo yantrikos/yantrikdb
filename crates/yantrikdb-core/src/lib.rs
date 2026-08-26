@@ -45,7 +45,8 @@ pub use engine::importance::ImportanceRecalibrationReport;
 pub use engine::links::ChainAuditReport;
 pub use engine::maintenance::{MaintenanceCycleConfig, MaintenanceCycleReport, MaintenanceDebt};
 pub use engine::pack::{
-    MountOptions, MountedPack, PackEmbedder, PackInfo, PackManifest, PackTrust,
+    effective_pack_floor, MountOptions, MountedPack, PackEmbedder, PackInfo, PackManifest,
+    PackRecallOptions, PackTrust,
 };
 pub use engine::repair::{RepairError, RepairReport};
 pub use engine::split::SplitReport;

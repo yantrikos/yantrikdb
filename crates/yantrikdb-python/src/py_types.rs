@@ -89,6 +89,22 @@ pub fn recall_result_to_dict(
     // chunk window, or best query-term window). None = text fits one
     // window. Consumers trim by this; recall(snippets=True) applies it.
     dict.set_item("best_span", r.best_span)?;
+    // 0.18: structured pack provenance. None for host rows. Consumers key
+    // per-pack efficacy / lineage on pack_id + content_digest instead of
+    // parsing the "pack:{name}" why_retrieved stamp (name-only, so two
+    // mounted versions of one pack were indistinguishable).
+    match &r.pack {
+        Some(pp) => {
+            let pack = PyDict::new(py);
+            pack.set_item("pack_id", &pp.pack_id)?;
+            pack.set_item("name", &pp.name)?;
+            pack.set_item("version", &pp.version)?;
+            pack.set_item("trust", &pp.trust)?;
+            pack.set_item("content_digest", &pp.content_digest)?;
+            dict.set_item("pack", pack)?;
+        }
+        None => dict.set_item("pack", py.None())?,
+    }
 
     Ok(dict.into())
 }

@@ -1373,6 +1373,7 @@ impl YantrikDB {
                     disputed_with: Vec::new(),
                     aged_last_verified: None,
                     best_span: None,
+                    pack: None,
                 });
             }
         } // drop cache borrow
@@ -1490,6 +1491,7 @@ impl YantrikDB {
                         disputed_with: Vec::new(),
                         aged_last_verified: None,
                         best_span: None,
+                        pack: None,
                     });
                 }
             }
@@ -1622,6 +1624,7 @@ impl YantrikDB {
                         disputed_with: Vec::new(),
                         aged_last_verified: None,
                         best_span: None,
+                        pack: None,
                     });
                 }
             }
@@ -2262,6 +2265,7 @@ impl YantrikDB {
                                     disputed_with: Vec::new(),
                                     aged_last_verified: None,
                                     best_span: None,
+                                    pack: None,
                                 });
                             }
                         }
@@ -2435,6 +2439,7 @@ impl YantrikDB {
                         disputed_with: Vec::new(),
                         aged_last_verified: None,
                         best_span: None,
+                        pack: None,
                     });
                 }
             }
@@ -2694,6 +2699,7 @@ impl YantrikDB {
                                     disputed_with: Vec::new(),
                                     aged_last_verified: None,
                                     best_span: None,
+                                    pack: None,
                                 });
                             }
                         }
@@ -3031,6 +3037,7 @@ impl YantrikDB {
                             disputed_with: Vec::new(),
                             aged_last_verified: None,
                             best_span: None,
+                            pack: None,
                         });
                     }
                     drop(cache);
@@ -4616,6 +4623,7 @@ impl YantrikDB {
                     disputed_with: Vec::new(),
                     aged_last_verified: None,
                     best_span: None,
+                    pack: None,
                 });
             }
         }
@@ -4726,6 +4734,7 @@ impl YantrikDB {
                         disputed_with: Vec::new(),
                         aged_last_verified: None,
                         best_span: None,
+                        pack: None,
                     });
                 }
             }
@@ -5295,6 +5304,7 @@ impl YantrikDB {
                                     disputed_with: Vec::new(),
                                     aged_last_verified: None,
                                     best_span: None,
+                                    pack: None,
                                 });
                             }
                         }
@@ -5444,6 +5454,7 @@ impl YantrikDB {
                         disputed_with: Vec::new(),
                         aged_last_verified: None,
                         best_span: None,
+                        pack: None,
                     });
                 }
             }
@@ -5664,6 +5675,7 @@ impl YantrikDB {
                                     disputed_with: Vec::new(),
                                     aged_last_verified: None,
                                     best_span: None,
+                                    pack: None,
                                 });
                             }
                         }
@@ -5988,6 +6000,7 @@ impl YantrikDB {
                                 disputed_with: Vec::new(),
                                 aged_last_verified: None,
                                 best_span: None,
+                                pack: None,
                             });
                         }
                     }
@@ -6261,32 +6274,37 @@ impl YantrikDB {
         &self,
         rids: &[&str],
     ) -> Result<std::collections::HashSet<String>> {
+        let mut found = std::collections::HashSet::new();
         if rids.is_empty() {
-            return Ok(std::collections::HashSet::new());
+            return Ok(found);
         }
-        let placeholders: String = (0..rids.len())
-            .map(|i| format!("?{}", i + 1))
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!(
-            "SELECT DISTINCT target_rid FROM record_links \
-             WHERE link_type = 'supersedes' \
-             AND status = 'active' AND selection_state = 'selected' \
-             AND target_rid IN ({placeholders})"
-        );
-        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
-        for r in rids {
-            param_values.push(Box::new(r.to_string()));
-        }
-        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
-            param_values.iter().map(|p| p.as_ref()).collect();
-
         let conn = self.read_conn();
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt
-            .query_map(params_ref.as_slice(), |row| row.get::<_, String>(0))?
-            .collect::<std::result::Result<std::collections::HashSet<_>, _>>()?;
-        Ok(rows)
+        // Chunked: the pack Wall path can stage more rids than SQLite's
+        // bind limit (review of #203).
+        for chunk in rids.chunks(crate::engine::pack::SQL_IN_CHUNK) {
+            let placeholders: String = (0..chunk.len())
+                .map(|i| format!("?{}", i + 1))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql = format!(
+                "SELECT DISTINCT target_rid FROM record_links \
+                 WHERE link_type = 'supersedes' \
+                 AND status = 'active' AND selection_state = 'selected' \
+                 AND target_rid IN ({placeholders})"
+            );
+            let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
+            for r in chunk {
+                param_values.push(Box::new(r.to_string()));
+            }
+            let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+                param_values.iter().map(|p| p.as_ref()).collect();
+            let mut stmt = conn.prepare(&sql)?;
+            let rows = stmt.query_map(params_ref.as_slice(), |row| row.get::<_, String>(0))?;
+            for r in rows {
+                found.insert(r?);
+            }
+        }
+        Ok(found)
     }
 
     pub(crate) fn fetch_text_metadata_by_rids(
@@ -6594,6 +6612,7 @@ mod novelty_selection_tests {
             disputed_with: vec![],
             aged_last_verified: None,
             best_span: None,
+            pack: None,
         }
     }
 

@@ -10,7 +10,10 @@ use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList};
 type PyObject = pyo3::Py<pyo3::PyAny>;
 
-use yantrikdb_core::{MountOptions, PackEmbedder, PackManifest};
+use pyo3::exceptions::PyValueError;
+use yantrikdb_core::{MountOptions, PackEmbedder, PackManifest, PackRecallOptions};
+
+use crate::py_types::recall_result_to_dict;
 
 use super::{map_err, PyYantrikDB};
 
@@ -167,6 +170,22 @@ impl PyYantrikDB {
             d.set_item("trust", format!("{:?}", info.trust).to_lowercase())?;
             d.set_item("rows", info.rows)?;
             d.set_item("tier_multiplier", info.tier_multiplier)?;
+            // 0.18: the namespace (present on the Rust PackInfo since its
+            // doc comment described exactly this silent failure, and
+            // dropped at this boundary until now) plus the sealed, SIGNED
+            // retrieval/coverage facts — so a consumer never reads the
+            // unsigned pack.toml off disk to learn a floor the manifest
+            // already carries under its signature.
+            d.set_item("namespace", info.namespace)?;
+            d.set_item("content_digest", info.content_digest)?;
+            d.set_item("coverage", info.coverage)?;
+            d.set_item("recommended_top_k", info.recommended_top_k)?;
+            d.set_item(
+                "recommended_min_similarity",
+                info.recommended_min_similarity,
+            )?;
+            d.set_item("publisher_pubkey", info.publisher_pubkey)?;
+            d.set_item("signed", info.signed)?;
             out.append(d)?;
         }
         Ok(out.into())
@@ -377,6 +396,106 @@ impl PyYantrikDB {
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
         Ok(db.pack_context())
+    }
+
+    /// The context block for ONLY the packs in `pack_ids` (0.18), in
+    /// MOUNT order regardless of the order given, duplicates collapsed.
+    /// Every id must be mounted — an unknown id raises `PackNotMounted`
+    /// rather than being skipped. `[]` returns `None`.
+    fn pack_context_for(&self, pack_ids: Vec<String>) -> PyResult<Option<String>> {
+        let db = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+        let ids: Vec<&str> = pack_ids.iter().map(|s| s.as_str()).collect();
+        db.pack_context_for(&ids).map_err(map_err)
+    }
+
+    /// Pack-only recall over an explicit allowlist (0.18).
+    ///
+    /// Searches ONLY the packs in `pack_ids` — host rows are never
+    /// candidates and a pack outside the list cannot crowd one inside
+    /// it. The allowlist is validated first: an unknown id raises
+    /// `PackNotMounted` and nothing is searched.
+    ///
+    /// Each pack's signed `recommended_min_similarity` gates raw
+    /// similarity; `min_similarity` lets the host RAISE every pack's
+    /// floor and can never lower a pack's own. A host record that
+    /// supersedes a pack rid removes it, as in `recall`. Ties on score
+    /// break by mount order then rid, so the result is deterministic.
+    /// No MMR, graph expansion or reinforcement. Every hit carries
+    /// `hit["pack"] = {pack_id, name, version, trust, content_digest}`.
+    #[pyo3(signature = (pack_ids, query=None, query_embedding=None, top_k=10, *, min_similarity=None, namespace=None, memory_type=None, domain=None, source=None, certainty_min=None, include_consolidated=false, time_window=None))]
+    #[allow(clippy::too_many_arguments)]
+    fn recall_from_packs_for(
+        &self,
+        py: Python<'_>,
+        pack_ids: Vec<String>,
+        query: Option<&str>,
+        query_embedding: Option<Vec<f32>>,
+        top_k: usize,
+        min_similarity: Option<f64>,
+        namespace: Option<&str>,
+        memory_type: Option<&str>,
+        domain: Option<&str>,
+        source: Option<&str>,
+        certainty_min: Option<f64>,
+        include_consolidated: bool,
+        time_window: Option<(f64, f64)>,
+    ) -> PyResult<Vec<PyObject>> {
+        let db = self
+            .inner
+            .as_ref()
+            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+        let ids: Vec<&str> = pack_ids.iter().map(|s| s.as_str()).collect();
+        // Validated here, as ValueError, rather than by remapping the
+        // engine's InvalidInput globally: that variant already crosses
+        // this boundary as RuntimeError for older APIs, and changing it
+        // would change their exception type under existing handlers.
+        if let Some(m) = min_similarity {
+            if !m.is_finite() || !(0.0..=1.0).contains(&m) {
+                return Err(PyValueError::new_err(format!(
+                    "min_similarity must be within [0, 1], got {m}"
+                )));
+            }
+        }
+        // Allowlist BEFORE the embedder: an unknown id must fail before a
+        // query string is encoded (review of #203).
+        db.validate_pack_allowlist(&ids).map_err(map_err)?;
+        // Nothing asked for, nothing back, nothing embedded: an empty
+        // allowlist or top_k == 0 must not spend a (possibly remote)
+        // embedder call or reject a missing query.
+        if ids.is_empty() || top_k == 0 {
+            return Ok(Vec::new());
+        }
+        let emb = match query_embedding {
+            Some(e) => e,
+            None => match query {
+                Some(q) => self.embed_text(py, q)?,
+                None => {
+                    return Err(PyValueError::new_err(
+                        "Must provide either query or query_embedding",
+                    ))
+                }
+            },
+        };
+        let opts = PackRecallOptions {
+            include_consolidated,
+            memory_type,
+            time_window,
+            namespace,
+            domain,
+            source,
+            certainty_min,
+            min_similarity,
+        };
+        let results = db
+            .recall_from_packs_for(&ids, &emb, top_k, query, &opts)
+            .map_err(map_err)?;
+        results
+            .iter()
+            .map(|r| recall_result_to_dict(py, r))
+            .collect()
     }
 
     /// Assert that this database's existing vectors were built by the

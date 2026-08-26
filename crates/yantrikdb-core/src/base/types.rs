@@ -136,6 +136,28 @@ impl RecordStatus {
     }
 }
 
+/// Which mounted pack a recall hit came from (0.18). `None` for host rows.
+///
+/// Structured so consumers branch on fields instead of parsing the
+/// `why_retrieved` prose stamp `pack:{name}` (kept for one release) — the
+/// stamp carries the NAME, so two mounted versions of one pack were
+/// indistinguishable, and a consumer keeping per-pack efficacy or lineage
+/// had nothing to key on. `content_digest` is the manifest's digest as
+/// mounted, so a hit can be attributed to the exact corpus bytes that
+/// produced it even after the pack is rebuilt under the same id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PackProvenance {
+    /// `origin@version`, the mount id.
+    pub pack_id: String,
+    pub name: String,
+    pub version: String,
+    /// `"signed"` | `"unsigned"` | `"unverified"` — the trust tier the
+    /// mount resolved to (the same word `mounted_packs()` reports).
+    pub trust: String,
+    /// The pack's `content_digest` as sealed, if the manifest carries one.
+    pub content_digest: Option<String>,
+}
+
 /// A recall result with scoring information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RecallResult {
@@ -179,6 +201,10 @@ pub struct RecallResult {
     /// slicing is safe.
     #[serde(default)]
     pub best_span: Option<(usize, usize)>,
+    /// 0.18: set on rows that came from a mounted pack, `None` for host
+    /// rows. See [`PackProvenance`].
+    #[serde(default)]
+    pub pack: Option<PackProvenance>,
 }
 
 /// v0.13.1 explain surface — per-lane status with the never-ran /

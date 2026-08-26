@@ -54,6 +54,10 @@ fn _yantrikdb_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
         m.py().get_type::<py_errors::PackSignatureInvalid>(),
     )?;
     m.add(
+        "PackNotMounted",
+        m.py().get_type::<py_errors::PackNotMounted>(),
+    )?;
+    m.add(
         "PhraseRouteUnavailableError",
         m.py().get_type::<py_errors::PhraseRouteUnavailableError>(),
     )?;
