@@ -16,6 +16,7 @@
 //! - `pack_context_for` is a pure function of (mounted set, allowlist):
 //!   mount order, duplicates collapsed, argument order irrelevant.
 
+use yantrikdb::engine::materializer::{recommended_worker_count, spawn_all_workers};
 use yantrikdb::error::YantrikDbError;
 use yantrikdb::types::Embedder;
 use yantrikdb::{effective_pack_floor, PackEmbedder, PackManifest, PackRecallOptions, YantrikDB};
@@ -79,22 +80,39 @@ fn tmpdir(tag: &str) -> std::path::PathBuf {
     dir
 }
 
+/// Record one row, honouring the engine's backpressure the way a real
+/// writer must. `Backpressure` here is the in-memory delta tier at
+/// `delta_max` (256); it drains only while a compactor runs (the Python
+/// binding spawns one via `spawn_all_workers`; a bare `YantrikDB` has
+/// none). Fixtures that write more than 256 rows spawn the same workers
+/// and retry after `retry_after_ms`, exactly as production writers do.
 fn record(db: &YantrikDB, text: &str, emb: &[f32], ns: &str) -> String {
-    db.record(
-        text,
-        "semantic",
-        0.6,
-        0.0,
-        604800.0,
-        &serde_json::json!({}),
-        emb,
-        ns,
-        0.9,
-        "general",
-        "user",
-        None,
-    )
-    .unwrap()
+    let mut attempt = 0;
+    loop {
+        match db.record(
+            text,
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            emb,
+            ns,
+            0.9,
+            "general",
+            "user",
+            None,
+        ) {
+            Ok(rid) => return rid,
+            Err(YantrikDbError::Backpressure { retry_after_ms, .. }) if attempt < 2000 => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(
+                    retry_after_ms.clamp(1, 20),
+                ));
+            }
+            Err(e) => panic!("record failed after {attempt} retries: {e:?}"),
+        }
+    }
 }
 
 fn manifest(name: &str, digest: &str, floor: Option<f64>) -> PackManifest {
@@ -159,12 +177,22 @@ fn build_pack_all_ns(
     let dest = dir.join(format!("{name}.ydbpack"));
     let mut db = YantrikDB::new(src.to_str().unwrap(), DIM).unwrap();
     db.set_embedder(embedder(digest)).unwrap();
+    // Large fixtures need the compactor, like any real writer (see `record`).
+    let db = std::sync::Arc::new(db);
+    let workers = spawn_all_workers(&db, recommended_worker_count());
     for (text, emb, ns) in rows {
         record(&db, text, emb, ns);
     }
+    drop(workers);
     db.adopt_embedder_identity().unwrap();
-    db.seal_pack(dest.to_str().unwrap(), &manifest(name, digest, None), None)
+    let sealed = db
+        .seal_pack(dest.to_str().unwrap(), &manifest(name, digest, None), None)
         .unwrap();
+    assert_eq!(
+        sealed.corpus_rows as usize,
+        rows.len(),
+        "a rejected write must not shrink the corpus the test reasons about"
+    );
     dest.to_str().unwrap().to_string()
 }
 
