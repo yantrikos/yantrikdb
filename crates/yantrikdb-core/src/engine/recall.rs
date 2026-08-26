@@ -1373,6 +1373,7 @@ impl YantrikDB {
                     disputed_with: Vec::new(),
                     aged_last_verified: None,
                     best_span: None,
+                    pack: None,
                 });
             }
         } // drop cache borrow
@@ -1490,6 +1491,7 @@ impl YantrikDB {
                         disputed_with: Vec::new(),
                         aged_last_verified: None,
                         best_span: None,
+                        pack: None,
                     });
                 }
             }
@@ -1622,6 +1624,7 @@ impl YantrikDB {
                         disputed_with: Vec::new(),
                         aged_last_verified: None,
                         best_span: None,
+                        pack: None,
                     });
                 }
             }
@@ -2262,6 +2265,7 @@ impl YantrikDB {
                                     disputed_with: Vec::new(),
                                     aged_last_verified: None,
                                     best_span: None,
+                                    pack: None,
                                 });
                             }
                         }
@@ -2435,6 +2439,7 @@ impl YantrikDB {
                         disputed_with: Vec::new(),
                         aged_last_verified: None,
                         best_span: None,
+                        pack: None,
                     });
                 }
             }
@@ -2694,6 +2699,7 @@ impl YantrikDB {
                                     disputed_with: Vec::new(),
                                     aged_last_verified: None,
                                     best_span: None,
+                                    pack: None,
                                 });
                             }
                         }
@@ -3031,6 +3037,7 @@ impl YantrikDB {
                             disputed_with: Vec::new(),
                             aged_last_verified: None,
                             best_span: None,
+                            pack: None,
                         });
                     }
                     drop(cache);
@@ -4616,6 +4623,7 @@ impl YantrikDB {
                     disputed_with: Vec::new(),
                     aged_last_verified: None,
                     best_span: None,
+                    pack: None,
                 });
             }
         }
@@ -4726,6 +4734,7 @@ impl YantrikDB {
                         disputed_with: Vec::new(),
                         aged_last_verified: None,
                         best_span: None,
+                        pack: None,
                     });
                 }
             }
@@ -5295,6 +5304,7 @@ impl YantrikDB {
                                     disputed_with: Vec::new(),
                                     aged_last_verified: None,
                                     best_span: None,
+                                    pack: None,
                                 });
                             }
                         }
@@ -5444,6 +5454,7 @@ impl YantrikDB {
                         disputed_with: Vec::new(),
                         aged_last_verified: None,
                         best_span: None,
+                        pack: None,
                     });
                 }
             }
@@ -5664,6 +5675,7 @@ impl YantrikDB {
                                     disputed_with: Vec::new(),
                                     aged_last_verified: None,
                                     best_span: None,
+                                    pack: None,
                                 });
                             }
                         }
@@ -5988,6 +6000,7 @@ impl YantrikDB {
                                 disputed_with: Vec::new(),
                                 aged_last_verified: None,
                                 best_span: None,
+                                pack: None,
                             });
                         }
                     }
@@ -6594,6 +6607,7 @@ mod novelty_selection_tests {
             disputed_with: vec![],
             aged_last_verified: None,
             best_span: None,
+            pack: None,
         }
     }
 

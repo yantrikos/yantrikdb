@@ -334,6 +334,7 @@ impl super::YantrikDB {
                 disputed_with: Vec::new(),
                 aged_last_verified: None,
                 best_span: None,
+                pack: None,
             });
         }
         Ok(())

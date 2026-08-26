@@ -108,6 +108,15 @@ pub enum PackTrust {
 
 impl PackTrust {
     /// The score multiplier this trust level earns at merge time.
+    /// The tier's serialized name: `"signed"` | `"unsigned"` | `"unverified"`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            PackTrust::Signed => "signed",
+            PackTrust::Unsigned => "unsigned",
+            PackTrust::Unverified => "unverified",
+        }
+    }
+
     pub fn tier_multiplier(self) -> f64 {
         match self {
             PackTrust::Signed => PACK_TIER_SIGNED,
@@ -519,6 +528,57 @@ pub struct PackInfo {
     /// binding hit exactly this and had to work around it via `read_pack_manifest(path)`; a Rust
     /// embedder had no equivalent escape hatch.
     pub namespace: Option<String>,
+    /// 0.18: the sealed, signed facts a consumer needs to USE the pack without re-reading its
+    /// file — the settings travel inside the signature (see `signing_payload`), and before this
+    /// every consumer read `pack.toml` off disk instead, i.e. the unsigned copy.
+    pub content_digest: Option<String>,
+    pub coverage: Vec<String>,
+    pub recommended_top_k: Option<u32>,
+    pub recommended_min_similarity: Option<f64>,
+    pub publisher_pubkey: Option<String>,
+    /// Whether the manifest carries a signature (verified at mount; `trust` says by whom).
+    pub signed: bool,
+}
+
+/// Filters for [`YantrikDB::recall_from_packs_for`] (0.18): the recall filters a pack row can
+/// honour, plus the host's own similarity floor. `Default` = no filter and no host floor — each
+/// pack's signed floor still applies, because that one is the pack's, not the host's, to waive.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct PackRecallOptions<'a> {
+    pub include_consolidated: bool,
+    pub memory_type: Option<&'a str>,
+    pub time_window: Option<(f64, f64)>,
+    pub namespace: Option<&'a str>,
+    pub domain: Option<&'a str>,
+    pub source: Option<&'a str>,
+    pub certainty_min: Option<f64>,
+    /// The host's floor on raw similarity. Raises every pack's floor to at least this; can never
+    /// lower a pack's own. Must be finite and within `[0, 1]`.
+    pub min_similarity: Option<f64>,
+}
+
+/// The similarity floor a pack's rows must clear in `recall_from_packs_for`.
+///
+/// `declared` is the pack's signed `recommended_min_similarity`; `host_min` is the host's own
+/// floor. The result is the MAX of the two: a pack may make the host stricter about its corpus,
+/// and the host may be stricter still, but neither can lower the other — "pack rules never
+/// outrank host policy" as a number rather than a sentence. A declaration that is non-finite or
+/// outside `[0, 1]` (sloppy or hostile) is ignored, never honoured as 0.0.
+pub fn effective_pack_floor(declared: Option<f64>, host_min: Option<f64>) -> f64 {
+    let valid = |f: &f64| f.is_finite() && (0.0..=1.0).contains(f);
+    let d = declared.filter(valid).unwrap_or(0.0);
+    let h = host_min.filter(valid).unwrap_or(0.0);
+    d.max(h)
+}
+
+/// How `collect_pack_candidates_from` gates on raw similarity.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum PackFloor {
+    /// The `recall` merge seam: no similarity gate (ranking and MMR decide). Unchanged in 0.18 —
+    /// changing the default ranking is a benchmark-gated decision, not a side effect.
+    Off,
+    /// `recall_from_packs_for`: each pack's signed floor is a wall the host may raise, never lower.
+    Wall { host_min: Option<f64> },
 }
 
 /// The subset of recall's filters that applies to pack candidates.
@@ -1401,6 +1461,12 @@ impl YantrikDB {
                 rows: p.index.len(),
                 tier_multiplier: p.trust.tier_multiplier(),
                 namespace: p.manifest.namespace.clone(),
+                content_digest: p.manifest.content_digest.clone(),
+                coverage: p.manifest.coverage.clone(),
+                recommended_top_k: p.manifest.recommended_top_k,
+                recommended_min_similarity: p.manifest.recommended_min_similarity,
+                publisher_pubkey: p.manifest.publisher_pubkey.clone(),
+                signed: p.manifest.signature.is_some(),
             })
             .collect()
     }
@@ -1430,8 +1496,25 @@ impl YantrikDB {
     /// rather than five divergent reimplementations.
     pub fn pack_context(&self) -> Option<String> {
         let packs = self.pack_snapshot();
+        Self::pack_context_from(&packs)
+    }
+
+    /// The context block for ONLY the packs named in `pack_ids` (0.18), assembled in **mount
+    /// order** regardless of the order the ids were given, so the block is a pure function of
+    /// (mounted set, allowlist) and two callers asking for the same packs inject the same bytes.
+    ///
+    /// Every id must be mounted: an unknown id is `PackNotMounted`, not silently skipped — a
+    /// lease naming a pack the host no longer holds is a misconfiguration the caller has to see,
+    /// because the alternative is a turn that runs without the constitution it was promised.
+    /// Duplicates collapse. An empty allowlist yields `None`.
+    pub fn pack_context_for(&self, pack_ids: &[&str]) -> Result<Option<String>> {
+        let packs = self.resolve_pack_allowlist(pack_ids)?;
+        Ok(Self::pack_context_from(&packs))
+    }
+
+    fn pack_context_from(packs: &[Arc<MountedPack>]) -> Option<String> {
         let mut out = String::new();
-        for pack in &packs {
+        for pack in packs {
             let m = &pack.manifest;
             if m.constitution.is_empty() && m.coverage.is_empty() {
                 continue;
@@ -1502,6 +1585,28 @@ impl YantrikDB {
         self.packs.read().clone()
     }
 
+    /// Resolve an allowlist of pack ids against the mounted set: every id must be mounted (the
+    /// first unknown id is `PackNotMounted`), and the result is in MOUNT order with duplicates
+    /// collapsed — never in argument order. Validation completes before any index is searched,
+    /// so a bad allowlist costs nothing and returns nothing.
+    pub(crate) fn resolve_pack_allowlist(
+        &self,
+        pack_ids: &[&str],
+    ) -> Result<Vec<Arc<MountedPack>>> {
+        let packs = self.pack_snapshot();
+        for id in pack_ids {
+            if !packs.iter().any(|p| p.pack_id() == *id) {
+                return Err(YantrikDbError::PackNotMounted {
+                    pack_id: (*id).to_string(),
+                });
+            }
+        }
+        Ok(packs
+            .into_iter()
+            .filter(|p| pack_ids.iter().any(|id| p.pack_id() == *id))
+            .collect())
+    }
+
     /// Generate scored candidates from every mounted pack.
     ///
     /// Called from `recall_inner` after host candidate generation and
@@ -1533,6 +1638,35 @@ impl YantrikDB {
         filters: &PackFilters<'_>,
     ) -> Result<Vec<crate::types::RecallResult>> {
         let packs = self.pack_snapshot();
+        Ok(Self::collect_pack_candidates_from(
+            &packs,
+            query_embedding,
+            top_k,
+            ts,
+            learned_weights,
+            query_sentiment,
+            filters,
+            PackFloor::Off,
+        )?
+        .into_iter()
+        .map(|(_, r)| r)
+        .collect())
+    }
+
+    /// Candidate generation over an explicit set of packs (0.18). Each result is tagged with the
+    /// pack's index in `packs`, which is mount order for every caller, so a ranking can break
+    /// ties deterministically instead of by index iteration order.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn collect_pack_candidates_from(
+        packs: &[Arc<MountedPack>],
+        query_embedding: &[f32],
+        top_k: usize,
+        ts: f64,
+        learned_weights: &crate::types::LearnedWeights,
+        query_sentiment: f64,
+        filters: &PackFilters<'_>,
+        floor: PackFloor,
+    ) -> Result<Vec<(usize, crate::types::RecallResult)>> {
         if packs.is_empty() {
             return Ok(Vec::new());
         }
@@ -1543,13 +1677,27 @@ impl YantrikDB {
         // over-wide pack pool would pay text-fetch cost for rows that
         // MMR discards.
         let pack_fetch_k = (top_k * 8).min(200);
-        let mut out: Vec<crate::types::RecallResult> = Vec::new();
+        let mut out: Vec<(usize, crate::types::RecallResult)> = Vec::new();
 
-        for pack in &packs {
+        for (mount_idx, pack) in packs.iter().enumerate() {
             if pack.index.is_empty() {
                 continue;
             }
             let tier = pack.trust.tier_multiplier();
+            let wall = match floor {
+                PackFloor::Off => None,
+                PackFloor::Wall { host_min } => Some(effective_pack_floor(
+                    pack.manifest.recommended_min_similarity,
+                    host_min,
+                )),
+            };
+            let provenance = crate::types::PackProvenance {
+                pack_id: pack.pack_id(),
+                name: pack.manifest.name.clone(),
+                version: pack.manifest.version.clone(),
+                trust: pack.trust.as_str().to_string(),
+                content_digest: pack.manifest.content_digest.clone(),
+            };
             let hits = pack.index.search(query_embedding, pack_fetch_k)?;
             // Chunked embeddings: a chunk-aware pack's index holds
             // `{rid}#c{idx}` window keys. This path calls HnswIndex
@@ -1569,6 +1717,13 @@ impl YantrikDB {
                 }
 
                 let sim_score = (1.0 - distance).max(0.0);
+                // The wall gates RAW similarity, never the composite: importance and
+                // recency are near-uniform across a freshly built pack and carry no
+                // relevance signal, so a composite gate would let a confident
+                // off-topic row through — the attach-harm case the floor exists for.
+                if wall.is_some_and(|w| sim_score < w) {
+                    continue;
+                }
                 let decay = crate::scoring::ranking_decay(row.importance, row.created_at, ts);
                 let age = ts - row.created_at;
                 let recency = crate::scoring::recency_score(age);
@@ -1628,6 +1783,7 @@ impl YantrikDB {
                         disputed_with: Vec::new(),
                         aged_last_verified: None,
                         best_span: None,
+                        pack: Some(provenance.clone()),
                     },
                 ));
             }
@@ -1643,11 +1799,89 @@ impl YantrikDB {
                     result.metadata = serde_json::from_str(meta)
                         .unwrap_or(serde_json::Value::Object(Default::default()));
                 }
-                out.push(result);
+                out.push((mount_idx, result));
             }
         }
 
         Ok(out)
+    }
+
+    /// Pack-only recall over an explicit allowlist (0.18).
+    ///
+    /// Differences from `recall`, each deliberate:
+    /// - **Allowlist before search.** `pack_ids` is resolved against the mounted set first; an
+    ///   unknown id is `PackNotMounted` and NO index is searched. Only the named packs are
+    ///   searched — not "everything, then filtered" — so a pack outside the list cannot crowd
+    ///   one inside it, and host rows are never candidates at all.
+    /// - **The floor is a wall.** Each pack's signed `recommended_min_similarity` gates raw
+    ///   similarity; `opts.min_similarity` lets the host RAISE the floor for every pack and can
+    ///   never lower a pack's own (see [`effective_pack_floor`]).
+    /// - **Host corrections still win.** A host record that supersedes a pack rid removes it,
+    ///   exactly as in `recall`.
+    /// - **Deterministic order.** Ties on score break by mount order, then rid — never by index
+    ///   iteration order — so two hosts with the same mounts and the same query return the same
+    ///   bytes.
+    /// - No MMR, no graph expansion, no reinforcement: the caller asked for a source's evidence,
+    ///   not the host's policy over it, and reading a publisher's corpus must not teach the
+    ///   host's learned weights anything.
+    pub fn recall_from_packs_for(
+        &self,
+        pack_ids: &[&str],
+        query_embedding: &[f32],
+        top_k: usize,
+        query_text: Option<&str>,
+        opts: &PackRecallOptions<'_>,
+    ) -> Result<Vec<crate::types::RecallResult>> {
+        if let Some(m) = opts.min_similarity {
+            if !m.is_finite() || !(0.0..=1.0).contains(&m) {
+                return Err(YantrikDbError::InvalidInput(format!(
+                    "min_similarity must be within [0, 1], got {m}"
+                )));
+            }
+        }
+        // Validate the allowlist BEFORE anything is searched.
+        let packs = self.resolve_pack_allowlist(pack_ids)?;
+        if packs.is_empty() || top_k == 0 {
+            return Ok(Vec::new());
+        }
+        let ts = super::now();
+        let learned_weights = self.load_learned_weights()?;
+        let query_sentiment = query_text
+            .map(crate::scoring::detect_query_sentiment)
+            .unwrap_or(0.0);
+        let filters = PackFilters {
+            include_consolidated: opts.include_consolidated,
+            memory_type: opts.memory_type,
+            time_window: opts.time_window,
+            namespace: opts.namespace,
+            domain: opts.domain,
+            source: opts.source,
+            certainty_min: opts.certainty_min,
+        };
+        let mut staged = Self::collect_pack_candidates_from(
+            &packs,
+            query_embedding,
+            top_k,
+            ts,
+            &learned_weights,
+            query_sentiment,
+            &filters,
+            PackFloor::Wall {
+                host_min: opts.min_similarity,
+            },
+        )?;
+        let rids: Vec<&str> = staged.iter().map(|(_, r)| r.rid.as_str()).collect();
+        let superseded = self.superseded_rids_among(&rids)?;
+        staged.retain(|(_, r)| !superseded.contains(&r.rid));
+        staged.sort_by(|(ia, a), (ib, b)| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(ia.cmp(ib))
+                .then(a.rid.cmp(&b.rid))
+        });
+        staged.truncate(top_k);
+        Ok(staged.into_iter().map(|(_, r)| r).collect())
     }
 
     // ─────────────────────────────────────────────────────────────

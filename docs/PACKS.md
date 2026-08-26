@@ -440,9 +440,38 @@ spdx = "CC-BY-4.0"                                            # per-item provena
 harness = "elixir/qualifier@run_id"; baseline = "..."; lift = "..."
 ```
 
-Signing does not exist anywhere in the repo today (no Ed25519, no keys). v0.1 ships
-unsigned with content digests; the trust tier in §2 already distinguishes signed
-from unsigned so adding signatures later does not reshape the ranking.
+Signing exists as of 0.11 (Ed25519: `sign_pack`, `trust_publisher`, `verify_bytes`);
+the `[license]` / `[efficacy]` blocks sketched above were never built and are not in the
+manifest. What IS in the sealed manifest — and under the signature — is the retrieval
+settings block: `recommended_top_k` and `recommended_min_similarity` travel inside the
+pack, name-tagged and appended to the signing payload only when present, so a
+file-rewriter cannot lower a floor without breaking the signature and packs sealed
+before the fields existed still verify.
+
+### 5.0 — the 0.18 consumer surface
+
+Everything a consumer needs to *use* a pack is now on the engine, so no consumer reads
+the unsigned `pack.toml` off disk or parses prose:
+
+| Surface | What it gives | Why |
+|---|---|---|
+| `mounted_packs()` → `PackInfo` | `namespace`, `content_digest`, `coverage`, `recommended_top_k`, `recommended_min_similarity`, `publisher_pubkey`, `signed` | the signed facts, from the mount, not from a sidecar file |
+| every recall hit → `pack: Option<PackProvenance>` (`hit["pack"]` in Python) | `pack_id`, `name`, `version`, `trust`, `content_digest`; `None` for host rows | branch on fields; the `pack:{name}` stamp is name-only and kept for one release |
+| `pack_context_for(pack_ids)` | the §2 context block for ONLY those packs, in **mount order**, duplicates collapsed | a lease is a per-turn visibility filter, not a mount; the block must be a pure function of (mounted set, allowlist) |
+| `recall_from_packs_for(pack_ids, …)` | pack-only recall: allowlist resolved **before** any search, unknown id → `PackNotMounted`, host rows never candidates, ties by mount order then rid | a pack outside the list cannot crowd one inside it, and thirty household near-duplicates cannot crowd the pack row out — by construction, not by over-fetching |
+
+The floor in `recall_from_packs_for` is a **wall**: `effective_pack_floor(declared, host_min)
+= max(valid declared, valid host_min)`, gating *raw similarity* (§5b says why not the
+composite). A pack may make the host stricter about its own corpus; the host may be
+stricter still; neither can lower the other. A declared floor that is non-finite or
+outside `[0, 1]` is ignored, never honoured as 0.0 — "pack rules never outrank host
+policy" as a number. The ordinary `recall` merge seam (§2) is unchanged in 0.18: applying
+the signed floor there would change default ranking, which is a benchmark-gated decision.
+
+Host corrections still win in the allowlist path: a host record that `supersedes` a pack
+rid removes it, exactly as in `recall`. There is no MMR, graph expansion or reinforcement —
+the caller asked for a source's evidence, not the host's policy over it, and reading a
+publisher's corpus must not teach the host's learned weights anything.
 
 ## 5a. The thesis, measured
 

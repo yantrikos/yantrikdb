@@ -118,6 +118,17 @@ create_exception!(
 
 create_exception!(
     yantrikdb,
+    PackNotMounted,
+    PyRuntimeError,
+    "An allowlist named a pack id (origin@version) that is not mounted. \
+     Nothing was searched and nothing was returned: a lease that names a \
+     pack the host no longer holds is a misconfiguration the caller has to \
+     see, not a turn that silently runs without it. Not retryable as-is: \
+     mount the pack (or drop the id) and reissue."
+);
+
+create_exception!(
+    yantrikdb,
     PhraseRouteUnavailableError,
     PyRuntimeError,
     "recall_thread's phrase route is unavailable on this engine: the FTS \
