@@ -6,18 +6,59 @@ use crate::types::ScoringRow;
 use super::YantrikDB;
 
 impl YantrikDB {
+    /// Columns that exist on `table` right now.
+    ///
+    /// Needed because this loader runs against two very different databases:
+    /// the host's (always migrated to the current schema before use) and a
+    /// **mounted pack's** (opened read-only from a file some other engine
+    /// sealed, and never migratable — see `pack::mount_pack_opts`).
+    fn existing_columns(
+        conn: &rusqlite::Connection,
+        table: &str,
+    ) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})"))?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+        let mut out = std::collections::HashSet::new();
+        for row in rows {
+            out.insert(row?);
+        }
+        Ok(out)
+    }
+
     /// Load scoring-relevant fields for all non-tombstoned memories into a HashMap.
+    ///
+    /// **The projection is schema-aware, and has to be.** A mounted pack
+    /// carries whatever schema its publisher's engine wrote and can never be
+    /// migrated (it is opened `query_only`, and rewriting a signed publisher
+    /// artifact is not an option). Columns added after that seal are therefore
+    /// legitimately absent: the v41→v42 synthesis triplet is missing from every
+    /// pack published by an engine at or below 0.15.x. A fixed projection made
+    /// all of them fail to mount with `no such column: synthesis_state` — a
+    /// break the host path could never surface, because a host database is
+    /// always migrated before this runs. Absent columns read as NULL, which is
+    /// exactly what v42 migrates existing host rows to.
     pub(crate) fn load_scoring_cache(
         conn: &rusqlite::Connection,
     ) -> Result<HashMap<String, ScoringRow>> {
-        let mut stmt = conn.prepare(
+        let present = Self::existing_columns(conn, "memories")?;
+        let project = |name: &str| -> String {
+            if present.contains(name) {
+                name.to_string()
+            } else {
+                format!("NULL AS {name}")
+            }
+        };
+        let sql = format!(
             "SELECT rid, created_at, importance, half_life, last_access, \
              valence, consolidation_status, type, namespace, access_count, \
-             certainty, domain, source, emotional_state, synthesis_state, \
-             synthesis_axis, synthesis_granularity \
+             certainty, domain, source, emotional_state, {}, {}, {} \
              FROM memories \
              WHERE consolidation_status != 'tombstoned'",
-        )?;
+            project("synthesis_state"),
+            project("synthesis_axis"),
+            project("synthesis_granularity"),
+        );
+        let mut stmt = conn.prepare(&sql)?;
 
         let rows = stmt.query_map([], |row| {
             Ok((
