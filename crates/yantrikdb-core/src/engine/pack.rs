@@ -1886,6 +1886,12 @@ impl YantrikDB {
         // the query is even inspected, so an unknown id wins over a bad
         // vector.
         let packs = self.resolve_pack_allowlist(pack_ids)?;
+        // Nothing asked for, nothing back — and nothing spent: the query is
+        // neither validated nor (in the bindings) embedded when no result
+        // is possible.
+        if packs.is_empty() || top_k == 0 {
+            return Ok(Vec::new());
+        }
         // Then the query itself: HnswIndex::search tolerates a wrong
         // length or NaN and would rank silently on garbage; `recall`
         // validates at its entry and so does this path.
@@ -1894,9 +1900,6 @@ impl YantrikDB {
             query_embedding,
             self.embedding_dim(),
         )?;
-        if packs.is_empty() || top_k == 0 {
-            return Ok(Vec::new());
-        }
         let ts = super::now();
         let learned_weights = self.load_learned_weights()?;
         let query_sentiment = query_text

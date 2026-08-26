@@ -686,6 +686,24 @@ fn query_embedding_is_validated_after_the_allowlist() {
         "{err:?}"
     );
 
+    // No possible result → no query inspection at all.
+    assert!(db
+        .recall_from_packs_for(&[], &nan, 5, None, &opts)
+        .unwrap()
+        .is_empty());
+    assert!(db
+        .recall_from_packs_for(&[&id], &short, 0, None, &opts)
+        .unwrap()
+        .is_empty());
+    // ...but an unknown id still wins over the no-op return.
+    let err = db
+        .recall_from_packs_for(&[&id, "ghost@0"], &nan, 0, None, &opts)
+        .unwrap_err();
+    assert!(
+        matches!(err, YantrikDbError::PackNotMounted { .. }),
+        "{err:?}"
+    );
+
     // Precedence: unknown id + bad vector → PackNotMounted.
     let err = db
         .recall_from_packs_for(&[&id, "ghost@0"], &nan, 5, None, &opts)
@@ -801,6 +819,86 @@ fn pack_context_for_is_mount_ordered_and_deduplicated() {
     );
 }
 
+/// The guarantee, pinned exactly: for the SAME staged scored candidates,
+/// exact-score ties break by mount order, then rid. One source sealed twice
+/// under two identities gives identical rid/vector/created_at/importance
+/// across two mounts; two rows with an identical vector and an explicit
+/// identical created_at give an exact tie inside one pack.
+#[test]
+fn equal_scores_break_by_mount_order_then_rid() {
+    let dir = tmpdir("tie-break");
+    let src = dir.join("tie-src.db");
+    let mut sdb = YantrikDB::new(src.to_str().unwrap(), DIM).unwrap();
+    sdb.set_embedder(embedder("E0")).unwrap();
+    let t = 1_700_000_000.0;
+    for text in ["twin one", "twin two"] {
+        sdb.record_with_idempotency(
+            text,
+            "semantic",
+            0.6,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            &vec_on(3, 0.05),
+            "physics",
+            0.9,
+            "general",
+            "user",
+            None,
+            None,
+            Some(t),
+        )
+        .unwrap();
+    }
+    sdb.adopt_embedder_identity().unwrap();
+    let a = dir.join("alpha.ydbpack");
+    let b = dir.join("beta.ydbpack");
+    sdb.seal_pack(
+        a.to_str().unwrap(),
+        &manifest("alpha", "E0", None),
+        Some("physics"),
+    )
+    .unwrap();
+    sdb.seal_pack(
+        b.to_str().unwrap(),
+        &manifest("beta", "E0", None),
+        Some("physics"),
+    )
+    .unwrap();
+    drop(sdb);
+
+    let db = host(&dir, "E0");
+    let ib = db.mount_pack(b.to_str().unwrap()).unwrap(); // mounted FIRST
+    let ia = db.mount_pack(a.to_str().unwrap()).unwrap();
+    for ids in [[ia.as_str(), ib.as_str()], [ib.as_str(), ia.as_str()]] {
+        let hits = from_packs(&db, &ids, &vec_on(3, 0.05), 10);
+        assert_eq!(hits.len(), 4, "both copies of both rows");
+        assert!(
+            hits.windows(2).all(|w| w[0].score == w[1].score),
+            "the fixture must produce exact ties: {:?}",
+            hits.iter().map(|h| h.score).collect::<Vec<_>>()
+        );
+        let order: Vec<(String, String)> = hits
+            .iter()
+            .map(|h| (h.pack.as_ref().unwrap().pack_id.clone(), h.rid.clone()))
+            .collect();
+        assert_eq!(order[0].0, ib, "mount order first: {order:?}");
+        assert_eq!(order[1].0, ib, "{order:?}");
+        assert_eq!(order[2].0, ia, "{order:?}");
+        assert_eq!(order[3].0, ia, "{order:?}");
+        assert!(
+            order[0].1 < order[1].1,
+            "rid ascending within a pack: {order:?}"
+        );
+        assert!(
+            order[2].1 < order[3].1,
+            "rid ascending within a pack: {order:?}"
+        );
+    }
+}
+
+/// Smoke: repetition and allowlist argument order do not change the result
+/// on one host (the exact tie-break guarantee is pinned above).
 #[test]
 fn allowlist_recall_order_is_deterministic() {
     let dir = tmpdir("determinism");

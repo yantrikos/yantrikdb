@@ -284,6 +284,14 @@ def test_unknown_id_is_rejected_before_the_query_is_embedded(host, tmp_path):
     hits = host.recall_from_packs_for([pid], query="gluons")
     assert Counting.calls == base + 1
     assert [h["text"] for h in hits] == ["gluons bind quarks"]
+    # No possible result → nothing embedded, nothing rejected.
+    assert host.recall_from_packs_for([], query="gluons") == []
+    assert host.recall_from_packs_for([pid], query="gluons", top_k=0) == []
+    assert host.recall_from_packs_for([]) == []  # no query at all is fine here
+    assert Counting.calls == base + 1
+    with pytest.raises(yantrikdb.PackNotMounted):
+        host.recall_from_packs_for([pid, "ghost@1.0.0"], query="gluons", top_k=0)
+    assert Counting.calls == base + 1
 
 
 def test_invalid_host_floor_is_a_value_error(host, tmp_path):

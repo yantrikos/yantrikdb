@@ -462,6 +462,12 @@ impl PyYantrikDB {
         // Allowlist BEFORE the embedder: an unknown id must fail before a
         // query string is encoded (review of #203).
         db.validate_pack_allowlist(&ids).map_err(map_err)?;
+        // Nothing asked for, nothing back, nothing embedded: an empty
+        // allowlist or top_k == 0 must not spend a (possibly remote)
+        // embedder call or reject a missing query.
+        if ids.is_empty() || top_k == 0 {
+            return Ok(Vec::new());
+        }
         let emb = match query_embedding {
             Some(e) => e,
             None => match query {
