@@ -448,6 +448,47 @@ fn host_correction_supersedes_pack_row_in_allowlist_recall() {
     );
 }
 
+/// `top_k` is caller-supplied through a public API; the fetch-width
+/// arithmetic must saturate (Codex's review of #203 — the same class as
+/// the earlier search_entities clamp bug).
+#[test]
+fn absurd_top_k_neither_panics_nor_wraps() {
+    let dir = tmpdir("huge-k");
+    let pack = build_pack(
+        &dir,
+        "quarks",
+        "E0",
+        &[("gluons bind quarks", vec_on(3, 0.05))],
+        None,
+    );
+    let db = host(&dir, "E0");
+    let id = db.mount_pack(&pack).unwrap();
+    let hits = from_packs(&db, &[&id], &vec_on(3, 0.05), usize::MAX);
+    assert_eq!(texts(&hits), vec!["gluons bind quarks"]);
+    // And the merge seam, which shares the arithmetic.
+    let mixed = db
+        .recall(
+            &vec_on(3, 0.05),
+            usize::MAX,
+            None,
+            None,
+            false,
+            false,
+            None,
+            true,
+            None,
+            None,
+            None,
+            None,
+            None,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+    assert!(mixed.iter().any(|r| r.text == "gluons bind quarks"));
+}
+
 #[test]
 fn pack_context_for_is_mount_ordered_and_deduplicated() {
     let dir = tmpdir("ctx-order");

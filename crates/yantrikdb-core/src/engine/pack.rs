@@ -1676,7 +1676,9 @@ impl YantrikDB {
         // another file, and step 5 hydrates only from the host), so an
         // over-wide pack pool would pay text-fetch cost for rows that
         // MMR discards.
-        let pack_fetch_k = (top_k * 8).min(200);
+        // Saturating: `top_k` is caller-supplied through a public API, and
+        // `usize::MAX * 8` panics in debug / wraps to 0 in release.
+        let pack_fetch_k = top_k.saturating_mul(8).min(200);
         let mut out: Vec<(usize, crate::types::RecallResult)> = Vec::new();
 
         for (mount_idx, pack) in packs.iter().enumerate() {

@@ -19,6 +19,7 @@ in the test, not in an embedder.
 from __future__ import annotations
 
 import math
+import sys
 
 import pytest
 
@@ -228,6 +229,14 @@ def test_pack_floor_is_a_wall_the_host_may_raise_but_never_lower(host, tmp_path)
     # The wall gates raw similarity; the composite still ranks what clears it.
     for h in host.recall_from_packs_for([pl], query_embedding=q, top_k=10):
         assert h["scores"]["similarity"] >= 0.0
+
+
+def test_absurd_top_k_neither_panics_nor_wraps(host, tmp_path):
+    """top_k is caller-supplied; the fetch-width arithmetic must saturate."""
+    pack = _build_pack(tmp_path, name="quarks", rows=[("gluons bind quarks", _vec(3))])
+    pid = _mount(host, pack)
+    hits = host.recall_from_packs_for([pid], query_embedding=_vec(3), top_k=sys.maxsize)
+    assert [h["text"] for h in hits] == ["gluons bind quarks"]
 
 
 def test_invalid_host_floor_is_a_value_error(host, tmp_path):
