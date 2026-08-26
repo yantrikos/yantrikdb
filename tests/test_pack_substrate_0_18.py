@@ -46,16 +46,18 @@ def _build_pack(
     *,
     name: str,
     version: str = "1.0.0",
-    rows: list[tuple[str, list[float]]],
-    namespace: str = "physics",
+    rows: list[tuple],
+    namespace: str | None = "physics",
     min_similarity: float | None = None,
     coverage: list[str] | None = None,
 ) -> str:
     src = tmp_path / f"{name}-src.db"
     dest = tmp_path / f"{name}.ydbpack"
     db = YantrikDB(str(src), DIM)
-    for text, emb in rows:
-        db.record(text, embedding=emb, namespace=namespace)
+    for row in rows:
+        text, emb = row[0], row[1]
+        ns = row[2] if len(row) > 2 else (namespace or "physics")
+        db.record(text, embedding=emb, namespace=ns)
     db.seal_pack(
         str(dest),
         name=name,
@@ -236,6 +238,51 @@ def test_absurd_top_k_neither_panics_nor_wraps(host, tmp_path):
     pack = _build_pack(tmp_path, name="quarks", rows=[("gluons bind quarks", _vec(3))])
     pid = _mount(host, pack)
     hits = host.recall_from_packs_for([pid], query_embedding=_vec(3), top_k=sys.maxsize)
+    assert [h["text"] for h in hits] == ["gluons bind quarks"]
+
+
+def test_filters_cannot_hide_a_valid_row_behind_the_fetch_cap(host, tmp_path):
+    """200 closer rows in namespace a, the target at rank 201 in namespace b."""
+    rows = [(f"near {i}", _vec(3, 0.05 + i * 1e-5), "a") for i in range(200)]
+    rows.append(("target", _vec(3, 0.06), "b"))
+    pack = _build_pack(tmp_path, name="wide", rows=rows, namespace=None)
+    pid = _mount(host, pack)
+    hits = host.recall_from_packs_for([pid], query_embedding=_vec(3), top_k=1, namespace="b")
+    assert [h["text"] for h in hits] == ["target"]
+
+
+def test_query_embedding_is_validated_after_the_allowlist(host, tmp_path):
+    pack = _build_pack(tmp_path, name="quarks", rows=[("gluons bind quarks", _vec(3))])
+    pid = _mount(host, pack)
+    with pytest.raises(RuntimeError, match="dimension mismatch"):
+        host.recall_from_packs_for([pid], query_embedding=[1.0] * (DIM - 1))
+    nan = _vec(3)
+    nan[2] = float("nan")
+    with pytest.raises(RuntimeError, match="non-finite"):
+        host.recall_from_packs_for([pid], query_embedding=nan)
+    # Precedence: the unknown id wins without the vector being inspected.
+    with pytest.raises(yantrikdb.PackNotMounted):
+        host.recall_from_packs_for([pid, "ghost@0.0.1"], query_embedding=nan)
+
+
+def test_unknown_id_is_rejected_before_the_query_is_embedded(host, tmp_path):
+    pack = _build_pack(tmp_path, name="quarks", rows=[("gluons bind quarks", _vec(3))])
+    pid = _mount(host, pack)
+
+    class Counting:
+        calls = 0
+
+        def encode(self, text):
+            Counting.calls += 1
+            return _vec(3)
+
+    host.set_embedder(Counting())
+    base = Counting.calls  # set_embedder probes the embedder once
+    with pytest.raises(yantrikdb.PackNotMounted):
+        host.recall_from_packs_for([pid, "ghost@1.0.0"], query="gluons")
+    assert Counting.calls == base, "the embedder ran before the allowlist was validated"
+    hits = host.recall_from_packs_for([pid], query="gluons")
+    assert Counting.calls == base + 1
     assert [h["text"] for h in hits] == ["gluons bind quarks"]
 
 

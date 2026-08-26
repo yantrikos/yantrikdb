@@ -459,6 +459,9 @@ impl PyYantrikDB {
                 )));
             }
         }
+        // Allowlist BEFORE the embedder: an unknown id must fail before a
+        // query string is encoded (review of #203).
+        db.validate_pack_allowlist(&ids).map_err(map_err)?;
         let emb = match query_embedding {
             Some(e) => e,
             None => match query {

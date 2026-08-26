@@ -413,6 +413,13 @@ fn sanitize_pack_prose(s: &str) -> String {
 /// exists to replace.
 pub const CONSTITUTION_TOKEN_BUDGET: usize = 1500;
 
+/// Largest IN-list any pack query binds at once. SQLite's bind limit is
+/// 999 on older builds and 32766 on current ones; the Wall path's widening
+/// fetch can legitimately stage far more rids than either (packs run to
+/// 2,000,000 rows and `top_k` is caller-supplied), so every batched query
+/// chunks under this and unions the results (Codex's review of #203).
+pub(crate) const SQL_IN_CHUNK: usize = 500;
+
 /// Largest pack this engine will mount. Mounting builds an HNSW over
 /// every row, so the bound is on work the *host* is made to do by a file
 /// someone else wrote. Generous for real packs — the reference packs are
@@ -1530,8 +1537,12 @@ impl YantrikDB {
             // by asserting that it should be raised.
             out.push_str(&format!(
                 "## Third-party knowledge pack: {} ({})",
-                m.name,
-                m.pack_id()
+                // Name and id are attacker-controlled manifest strings like
+                // every other field here; transient mounts do not constrain
+                // them. Contained, so they cannot end the untrusted-data
+                // frame from inside its own header (review of #203).
+                sanitize_pack_prose(&m.name),
+                sanitize_pack_prose(&m.pack_id())
             ));
             if let Some(d) = &m.description {
                 out.push_str(&format!("\n{}", sanitize_pack_prose(d)));
@@ -1605,6 +1616,14 @@ impl YantrikDB {
             .into_iter()
             .filter(|p| pack_ids.iter().any(|id| p.pack_id() == *id))
             .collect())
+    }
+
+    /// Cheap allowlist validation — no search, no embedding. Bindings call
+    /// this BEFORE encoding a query string so an unknown id fails before
+    /// the embedder runs (the doc promise "validated first" has to hold
+    /// across the whole call, not just inside the engine).
+    pub fn validate_pack_allowlist(&self, pack_ids: &[&str]) -> Result<()> {
+        self.resolve_pack_allowlist(pack_ids).map(|_| ())
     }
 
     /// Generate scored candidates from every mounted pack.
@@ -1700,94 +1719,115 @@ impl YantrikDB {
                 trust: pack.trust.as_str().to_string(),
                 content_digest: pack.manifest.content_digest.clone(),
             };
-            let hits = pack.index.search(query_embedding, pack_fetch_k)?;
-            // Chunked embeddings: a chunk-aware pack's index holds
-            // `{rid}#c{idx}` window keys. This path calls HnswIndex
-            // directly (bypassing DeltaIndex's collapse choke point), so
-            // it folds keys to parents itself — otherwise a window key
-            // misses `pack.scoring` and is SILENTLY dropped, and two
-            // windows of one record would emit duplicate results.
-            let hits = crate::vector::chunk::collapse_to_parents(hits);
+            // A bounded fetch followed by filters hides a valid row whenever
+            // more than `fetch_k` closer rows are rejected by namespace /
+            // domain / source / type / time / status / certainty (Codex's
+            // review of #203). On the Wall path the fetch WIDENS until
+            // `top_k` rows are admitted or the index is exhausted. It does
+            // NOT stop early when a hit falls below the wall: the search is
+            // approximate and `ef` scales with `k`, so a wider search can
+            // surface an above-wall node the narrower one never visited —
+            // a below-wall boundary proves nothing about unseen nodes. Cost
+            // is bounded by the pack's index size. The recall merge seam
+            // keeps its bounded fetch (same pre-existing limit; follow-up).
+            let adaptive = matches!(floor, PackFloor::Wall { .. });
+            let index_len = pack.index.len();
+            let mut fetch_k = pack_fetch_k.min(index_len.max(1));
             let mut staged: Vec<(String, crate::types::RecallResult)> = Vec::new();
+            loop {
+                staged.clear();
+                let hits = pack.index.search(query_embedding, fetch_k)?;
+                // Chunked embeddings: a chunk-aware pack's index holds
+                // `{rid}#c{idx}` window keys. This path calls HnswIndex
+                // directly (bypassing DeltaIndex's collapse choke point), so
+                // it folds keys to parents itself — otherwise a window key
+                // misses `pack.scoring` and is SILENTLY dropped, and two
+                // windows of one record would emit duplicate results.
+                let hits = crate::vector::chunk::collapse_to_parents(hits);
 
-            for (rid, distance) in hits {
-                let Some(row) = pack.scoring.get(&rid) else {
-                    continue;
-                };
-                if !filters.admits(row) {
-                    continue;
-                }
+                for (rid, distance) in hits {
+                    let Some(row) = pack.scoring.get(&rid) else {
+                        continue;
+                    };
+                    if !filters.admits(row) {
+                        continue;
+                    }
 
-                let sim_score = (1.0 - distance).max(0.0);
-                // The wall gates RAW similarity, never the composite: importance and
-                // recency are near-uniform across a freshly built pack and carry no
-                // relevance signal, so a composite gate would let a confident
-                // off-topic row through — the attach-harm case the floor exists for.
-                if wall.is_some_and(|w| sim_score < w) {
-                    continue;
-                }
-                let decay = crate::scoring::ranking_decay(row.importance, row.created_at, ts);
-                let age = ts - row.created_at;
-                let recency = crate::scoring::recency_score(age);
-                let composite = crate::scoring::adaptive_composite_score(
-                    sim_score,
-                    decay,
-                    recency,
-                    row.importance,
-                    row.valence,
-                    query_sentiment,
-                    learned_weights,
-                );
-                let contributions = crate::scoring::adaptive_contributions(
-                    sim_score,
-                    decay,
-                    recency,
-                    row.importance,
-                    learned_weights,
-                );
-                let valence_multiplier =
-                    crate::scoring::query_valence_boost(row.valence, query_sentiment);
-                let mut why = crate::scoring::build_why(sim_score, recency, decay, row.valence);
-                why.push(format!("pack:{}", pack.manifest.name));
+                    let sim_score = (1.0 - distance).max(0.0);
+                    // The wall gates RAW similarity, never the composite: importance and
+                    // recency are near-uniform across a freshly built pack and carry no
+                    // relevance signal, so a composite gate would let a confident
+                    // off-topic row through — the attach-harm case the floor exists for.
+                    if wall.is_some_and(|w| sim_score < w) {
+                        continue;
+                    }
+                    let decay = crate::scoring::ranking_decay(row.importance, row.created_at, ts);
+                    let age = ts - row.created_at;
+                    let recency = crate::scoring::recency_score(age);
+                    let composite = crate::scoring::adaptive_composite_score(
+                        sim_score,
+                        decay,
+                        recency,
+                        row.importance,
+                        row.valence,
+                        query_sentiment,
+                        learned_weights,
+                    );
+                    let contributions = crate::scoring::adaptive_contributions(
+                        sim_score,
+                        decay,
+                        recency,
+                        row.importance,
+                        learned_weights,
+                    );
+                    let valence_multiplier =
+                        crate::scoring::query_valence_boost(row.valence, query_sentiment);
+                    let mut why = crate::scoring::build_why(sim_score, recency, decay, row.valence);
+                    why.push(format!("pack:{}", pack.manifest.name));
 
-                staged.push((
-                    rid.clone(),
-                    crate::types::RecallResult {
-                        rid,
-                        memory_type: row.memory_type.clone(),
-                        text: String::new(),
-                        created_at: row.created_at,
-                        importance: row.importance,
-                        valence: row.valence,
-                        // The trust tier is applied to the composite,
-                        // not to similarity: it expresses "how much do
-                        // we defer to this source", which is a property
-                        // of the whole ranking, not of the geometry.
-                        score: composite * tier,
-                        scores: crate::types::ScoreBreakdown {
-                            similarity: sim_score,
-                            decay,
-                            recency,
+                    staged.push((
+                        rid.clone(),
+                        crate::types::RecallResult {
+                            rid,
+                            memory_type: row.memory_type.clone(),
+                            text: String::new(),
+                            created_at: row.created_at,
                             importance: row.importance,
-                            graph_proximity: 0.0,
-                            contributions,
-                            valence_multiplier,
+                            valence: row.valence,
+                            // The trust tier is applied to the composite,
+                            // not to similarity: it expresses "how much do
+                            // we defer to this source", which is a property
+                            // of the whole ranking, not of the geometry.
+                            score: composite * tier,
+                            scores: crate::types::ScoreBreakdown {
+                                similarity: sim_score,
+                                decay,
+                                recency,
+                                importance: row.importance,
+                                graph_proximity: 0.0,
+                                contributions,
+                                valence_multiplier,
+                            },
+                            why_retrieved: why,
+                            metadata: serde_json::Value::Null,
+                            namespace: row.namespace.clone(),
+                            certainty: row.certainty,
+                            domain: row.domain.clone(),
+                            source: row.source.clone(),
+                            emotional_state: row.emotional_state.clone(),
+                            current_status: Default::default(),
+                            superseded_by: None,
+                            disputed_with: Vec::new(),
+                            aged_last_verified: None,
+                            best_span: None,
+                            pack: Some(provenance.clone()),
                         },
-                        why_retrieved: why,
-                        metadata: serde_json::Value::Null,
-                        namespace: row.namespace.clone(),
-                        certainty: row.certainty,
-                        domain: row.domain.clone(),
-                        source: row.source.clone(),
-                        emotional_state: row.emotional_state.clone(),
-                        current_status: Default::default(),
-                        superseded_by: None,
-                        disputed_with: Vec::new(),
-                        aged_last_verified: None,
-                        best_span: None,
-                        pack: Some(provenance.clone()),
-                    },
-                ));
+                    ));
+                }
+                if !adaptive || staged.len() >= top_k || fetch_k >= index_len {
+                    break;
+                }
+                fetch_k = fetch_k.saturating_mul(2).min(index_len);
             }
 
             if staged.is_empty() {
@@ -1820,9 +1860,10 @@ impl YantrikDB {
     ///   never lower a pack's own (see [`effective_pack_floor`]).
     /// - **Host corrections still win.** A host record that supersedes a pack rid removes it,
     ///   exactly as in `recall`.
-    /// - **Deterministic order.** Ties on score break by mount order, then rid — never by index
-    ///   iteration order — so two hosts with the same mounts and the same query return the same
-    ///   bytes.
+    /// - **Deterministic tie-break.** For the same staged scored candidates, exact-score ties
+    ///   break by mount order then rid — independent of allowlist argument order and of index
+    ///   iteration order. Nothing more is claimed: scores carry `now()`, the host's learned
+    ///   weights and the trust tier, so two calls (or two hosts) may rank non-ties differently.
     /// - No MMR, no graph expansion, no reinforcement: the caller asked for a source's evidence,
     ///   not the host's policy over it, and reading a publisher's corpus must not teach the
     ///   host's learned weights anything.
@@ -1841,8 +1882,18 @@ impl YantrikDB {
                 )));
             }
         }
-        // Validate the allowlist BEFORE anything is searched.
+        // Validate the allowlist BEFORE anything is searched — and before
+        // the query is even inspected, so an unknown id wins over a bad
+        // vector.
         let packs = self.resolve_pack_allowlist(pack_ids)?;
+        // Then the query itself: HnswIndex::search tolerates a wrong
+        // length or NaN and would rank silently on garbage; `recall`
+        // validates at its entry and so does this path.
+        crate::validate::validate_embedding(
+            "recall_from_packs_for",
+            query_embedding,
+            self.embedding_dim(),
+        )?;
         if packs.is_empty() || top_k == 0 {
             return Ok(Vec::new());
         }
@@ -2482,23 +2533,26 @@ impl YantrikDB {
             return Ok(out);
         }
         let conn = pack.conn.lock();
-        let placeholders: String = (0..rids.len())
-            .map(|i| format!("?{}", i + 1))
-            .collect::<Vec<_>>()
-            .join(",");
-        let sql = format!("SELECT rid, text, metadata FROM memories WHERE rid IN ({placeholders})");
-        let mut stmt = conn.prepare(&sql)?;
-        let params: Vec<&dyn rusqlite::ToSql> =
-            rids.iter().map(|r| r as &dyn rusqlite::ToSql).collect();
-        let rows = stmt.query_map(params.as_slice(), |row| {
-            let rid: String = row.get(0)?;
-            let text: String = row.get(1)?;
-            let meta: Option<String> = row.get(2)?;
-            Ok((rid, text, meta.unwrap_or_else(|| "{}".to_string())))
-        })?;
-        for row in rows {
-            let (rid, text, meta) = row?;
-            out.insert(rid, (text, meta));
+        for chunk in rids.chunks(SQL_IN_CHUNK) {
+            let placeholders: String = (0..chunk.len())
+                .map(|i| format!("?{}", i + 1))
+                .collect::<Vec<_>>()
+                .join(",");
+            let sql =
+                format!("SELECT rid, text, metadata FROM memories WHERE rid IN ({placeholders})");
+            let mut stmt = conn.prepare(&sql)?;
+            let params: Vec<&dyn rusqlite::ToSql> =
+                chunk.iter().map(|r| r as &dyn rusqlite::ToSql).collect();
+            let rows = stmt.query_map(params.as_slice(), |row| {
+                let rid: String = row.get(0)?;
+                let text: String = row.get(1)?;
+                let meta: Option<String> = row.get(2)?;
+                Ok((rid, text, meta.unwrap_or_else(|| "{}".to_string())))
+            })?;
+            for row in rows {
+                let (rid, text, meta) = row?;
+                out.insert(rid, (text, meta));
+            }
         }
         Ok(out)
     }
