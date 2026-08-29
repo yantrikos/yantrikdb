@@ -12,6 +12,7 @@ knowledge graph, in an embeddable Rust library with Python bindings.
 [![PyPI](https://img.shields.io/pypi/v/yantrikdb)](https://pypi.org/project/yantrikdb/)
 [![PyPI downloads](https://img.shields.io/pypi/dm/yantrikdb)](https://pypi.org/project/yantrikdb/)
 [![Crates.io](https://img.shields.io/crates/v/yantrikdb)](https://crates.io/crates/yantrikdb)
+[![Crates.io downloads](https://img.shields.io/crates/d/yantrikdb)](https://crates.io/crates/yantrikdb)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
 ## Get Started in 60 Seconds
@@ -566,6 +567,23 @@ This repo is the engine. The rest of the stack builds on it:
 | [langchain-yantrikdb](https://github.com/yantrikos/langchain-yantrikdb) | LangChain `VectorStore` + `ChatMessageHistory` | `pip install langchain-yantrikdb` |
 | [yantrikdb-hermes-plugin](https://github.com/yantrikos/yantrikdb-hermes-plugin) | Memory provider for NousResearch/hermes-agent | `pip install yantrikdb-hermes-plugin` |
 | [yantrik-memory](https://github.com/yantrikos/yantrik-memory) | Framework-agnostic memory layer — traits, bond evolution | `pip install yantrik-memory` |
+| [openclaw-memory-yantrikdb](https://github.com/yantrikos/openclaw-memory-yantrikdb) | OpenClaw memory-slot plugin backed by this engine | `openclaw plugins install npm:@yantrikos/openclaw-memory-yantrikdb` |
+
+## Related Projects
+
+Other MCP/agent-tooling projects from the same author, outside the yantrikdb engine stack:
+
+| Project | What |
+|---------|------|
+| [saga-mcp](https://github.com/spranab/saga-mcp) | SQLite-backed project/task tracker for agents — 31 MCP tools, no external services |
+| [brainstorm-mcp](https://github.com/spranab/brainstorm-mcp) | Multi-model debate + synthesis MCP server (GPT, Gemini, DeepSeek, Claude, Ollama) |
+| [truenas-mcp](https://github.com/spranab/truenas-mcp) | Manage TrueNAS SCALE from an agent — 278 actions behind one hierarchical MCP tool |
+| [swarmcode](https://github.com/spranab/swarmcode) | Redis-backed channel so two Claude Code instances on different machines can talk |
+| [mcpier](https://github.com/spranab/mcpier) | Self-hosted MCP control plane — deploy on your own infra, keep API keys off clients |
+| [discord-mcp](https://github.com/spranab/discord-mcp) | Run a Discord server from an agent — 30+ actions behind one hierarchical MCP tool |
+| [icantmarket-mcp](https://github.com/spranab/icantmarket-mcp) | Browse, ask, and review on icantmarket from inside an MCP client |
+| [tier](https://github.com/yantrikos/tier) | Adapts tool presentation to model size — +10pp accuracy, 97% fewer tool tokens on sub-4B models |
+| [chronicler](https://github.com/yantrikos/chronicler) | Self-hosted AI roleplay client with memory that survives long campaigns |
 
 ## Roadmap
 
