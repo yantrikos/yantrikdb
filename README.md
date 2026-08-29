@@ -6,17 +6,17 @@ and two contradictory facts come back ranked side by side with no signal that
 they disagree.
 
 YantrikDB is the engine that manages memories instead of just storing them —
-temporal decay, autonomous consolidation, contradiction detection, and a
-knowledge graph, in an embeddable Rust library with Python bindings.
+temporal decay, bounded consolidation, and a knowledge graph, in an
+embeddable Rust library with Python bindings.
 
 [![PyPI](https://img.shields.io/pypi/v/yantrikdb)](https://pypi.org/project/yantrikdb/)
 [![PyPI downloads](https://img.shields.io/pypi/dm/yantrikdb)](https://pypi.org/project/yantrikdb/)
 [![Crates.io](https://img.shields.io/crates/v/yantrikdb)](https://crates.io/crates/yantrikdb)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
-## Get Started in 60 Seconds
+## Quickstart
 
-### For AI agents (MCP — works with Claude, Cursor, Windsurf, Copilot)
+### For AI agents (MCP — works with Codex, Claude, Cursor, Windsurf, Copilot)
 
 ```bash
 pip install yantrikdb-mcp
@@ -34,7 +34,16 @@ Add to your MCP client config:
 }
 ```
 
-That's it. The agent auto-recalls context, auto-remembers decisions, and auto-detects contradictions — no prompting needed. See [yantrikdb-mcp](https://github.com/yantrikos/yantrikdb-mcp) for full docs.
+Codex users can register it directly:
+
+```bash
+codex mcp add yantrikdb -- yantrikdb-mcp
+```
+
+The MCP server exposes memory tools and usage instructions; the host client
+decides when to recall or store context. See
+[yantrikdb-mcp](https://github.com/yantrikos/yantrikdb-mcp) for client-specific
+setup and the current tool surface.
 
 ### As a Python library
 
@@ -72,9 +81,30 @@ results = db.recall("who leads the team?", top_k=3)
 db.relate("Alice", "Engineering", "leads")
 db.get_edges("Alice")
 
-db.think()  # consolidate, detect conflicts, mine patterns
+db.think()  # consolidate, scan recognized claims for conflicts, fit feedback
 
 db.close()
+```
+
+### See cognitive memory in one command
+
+A vector store can return two incompatible facts. YantrikDB can mark both as
+disputed, preserve the evidence, and wait for an explicit resolution instead
+of guessing. The runnable example uses the bundled embedder and needs no
+network:
+
+```bash
+python examples/cognitive_memory_demo.py
+```
+
+```text
+Detected 1 conflict(s)
+Claim key: Acme / headquartered_in
+Before resolution:
+  disputed=True: Acme is based in Boston.
+  disputed=True: Acme is based in Denver.
+After resolution:
+  current: Acme is based in Denver.
 ```
 
 #### Why the default is the 256-dim model
@@ -137,7 +167,7 @@ metadata.
 
 ```toml
 [dependencies]
-yantrikdb = "0.7"
+yantrikdb = "0.18"
 
 # NOTE: the crate defaults differ from the pip package on purpose.
 # `embedder-download` is OFF here, so a default cargo build has NO
@@ -146,14 +176,14 @@ yantrikdb = "0.7"
 # the 256-dim potion-base-8M default described above.
 #
 # To get that default (and set_embedder_named) in Rust, opt in:
-# yantrikdb = { version = "0.7", features = ["embedder-download"] }
+# yantrikdb = { version = "0.18", features = ["embedder-download"] }
 #
 # Why not on by default: it pulls ureq + sha2 + dirs + tar + flate2
 # into every build of an embedded database. See the measured retrieval
 # difference above and decide for your deployment.
 
 # Slim build (no bundled embedder, no network code path):
-# yantrikdb = { version = "0.7", default-features = false }
+# yantrikdb = { version = "0.18", default-features = false }
 ```
 
 ## The Problem
@@ -184,14 +214,17 @@ Real memory is hierarchical, compressed, contextual, self-updating, emotionally 
 | 1,000 | 19,988 tokens | 72 tokens | **99.6%** | 84% |
 | 5,000 | 101,739 tokens | 53 tokens | **99.9%** | 88% |
 
-At 500 memories, file-based exceeds 32K context windows. At 5,000, it doesn't fit in any context window — not even 200K. YantrikDB stays at ~70 tokens per query. Precision *improves* with more data — the opposite of context stuffing.
+At 1,000 memories, the file-based context is already about 20K tokens. At
+5,000 it is about 102K, exceeding 32K and 100K context windows. In this
+benchmark, YantrikDB stayed near 70 tokens per query while precision rose from
+66% to 88% as distractors were added.
 
 ### Evidence (reproducible)
 
 Every claim here points at a runnable harness — not a static number. Each is
 gated in CI ([`.github/workflows/benchmark.yml`](.github/workflows/benchmark.yml)) so a regression fails the build.
 
-- **Recall doesn't degrade as the corpus grows, and stays fast.**
+- **Recall stayed nearly flat as this corpus grew, and remained fast.**
   [`python -m yantrikdb.eval.benchmark`](src/yantrikdb/eval/benchmark.py) holds a fixed
   signal corpus while adding distractors and measures recall + latency at each scale.
   Sample run: recall@k `0.938 → 0.929` as memories grow 7×, with p95 recall latency
@@ -206,8 +239,8 @@ gated in CI ([`.github/workflows/benchmark.yml`](.github/workflows/benchmark.yml
   tuning. (Competitors run once their libraries are installed; results are not
   pre-tuned.)
 
-These run dependency-free on the bundled embedder, so anyone can reproduce them with
-one command.
+The first two run on the bundled embedder without a model service. The
+competitor harness additionally requires the compared libraries.
 
 ### LongMemEval-S — retrieval, scored mechanically
 
@@ -225,8 +258,8 @@ missing one scores zero).
 | 20 | 99.6% | 98.3% |
 | **40** | **99.6%** | **98.7%** |
 
-479 of 500 queries scored, 0 errors. **k=40 is the shipped default**, and it is
-load-bearing rather than generous: a paired 400-query BEAM run measured k=40 → k=20
+479 of 500 queries scored, 0 errors. **k=40 is the evaluated operating point**,
+and it is load-bearing rather than generous: a paired 400-query BEAM run measured k=40 → k=20
 costing 3.4 rubric points across 8 of 10 categories.
 
 The whole curve is published rather than the best row, because "recall@5" is not a
@@ -241,7 +274,8 @@ Reproduce: [`python lme_recall_multik.py 500 24`](https://github.com/yantrikos/a
 
 ### Design Principles
 
-- **Embedded, not client-server** — single file, no server process (like SQLite)
+- **Embedded, not client-server** — one logical SQLite database, no server process;
+  WAL mode may create transient `-wal` and `-shm` sidecars while open
 - **Local-first, sync-native** — works offline, syncs when connected
 - **Cognitive operations, not SQL** — `record()`, `recall()`, `relate()`, not `SELECT`
 - **Living system, not passive store** — does work between conversations
@@ -303,7 +337,7 @@ flowchart LR
         B2["Materializer pool<br/>N = cores / 2<br/>drains pending oplog ops"]
     end
 
-    subgraph STORE["SQLite (WAL mode, single file)"]
+    subgraph STORE["SQLite (WAL mode, one logical database)"]
         S1["memories"]
         S2["oplog"]
         S3["entity_edges, sessions, ..."]
@@ -386,7 +420,8 @@ All memories carry **importance**, **valence** (emotional tone), **domain**, **s
 
 ### Relevance-Conditioned Scoring
 
-Not just vector similarity. Every recall combines:
+Not just vector similarity. Depending on the call and available evidence,
+recall can combine:
 
 - **Semantic similarity** (HNSW) — what's topically related
 - **Temporal decay** — recent memories score higher
@@ -394,26 +429,36 @@ Not just vector similarity. Every recall combines:
 - **Graph proximity** — entity relationships boost connected memories
 - **Retrieval feedback** — learns from past recall quality
 
-Weights are tuned automatically from usage patterns.
+Explicit recall feedback can fit bounded, per-database weights during
+`think()`; defaults remain in place until enough labeled evidence exists.
 
 ### Conflict Detection & Resolution
 
-When memories contradict, YantrikDB doesn't guess — it creates a conflict segment:
+The default operator-driven flow records detected conflicts for review instead
+of guessing. Detection is conservative: it compares structured or recognized single-valued claims,
+including polarity and temporal conflicts. It is not general natural-language
+contradiction detection; arbitrary sentence pairs and multi-valued relations
+are intentionally not flagged.
 
 ```
-"works at Google" (recorded Jan 15) vs. "works at Meta" (recorded Mar 1)
-→ Conflict: identity_fact, priority: high, strategy: ask_user
+"Acme is based in Boston" (recorded Jan 15)
+"Acme is based in Denver" (recorded Mar 1)
+-> Conflict: identity_fact, relation: headquartered_in, possible succession
 ```
 
-Resolution is conversational: the AI asks naturally, not programmatically.
+Call `get_conflicts()` to inspect the evidence and `resolve_conflict()` after an
+operator confirms the current claim. The broader simple-copular free-text
+extractor is opt-in, English-only, and disabled for encrypted text. A separate
+maintenance path can be explicitly configured to auto-resolve eligible conflict
+classes; the example above does not enable it.
 
 ### Semantic Consolidation
 
-After many conversations, memories pile up. `think()` runs:
+After many conversations, memories pile up. `think()` can run:
 
-1. **Consolidation** — merge similar memories, extract patterns
-2. **Conflict scan** — find contradictions across the knowledge base
-3. **Pattern mining** — cross-domain discovery ("work stress correlates with health entries")
+1. **Consolidation** — merge similar memories (enabled by default)
+2. **Conflict scan** — compare recognized functional claims for conflicts
+3. **Pattern mining** — opt-in cross-domain discovery (off by default)
 4. **Trigger evaluation** — proactive insights worth surfacing
 
 ### Proactive Triggers
@@ -435,7 +480,7 @@ Local-first with append-only replication log:
 - **CRDT merging** — graph edges, memories, and metadata merge without conflicts
 - **Vector indexes rebuild locally** — raw memories sync, each device rebuilds HNSW
 - **Forget propagation** — tombstones ensure forgotten memories stay forgotten
-- **Conflict detection** — contradictions across devices are flagged for resolution
+- **Conflict records** — recognized single-valued claim disagreements are flagged for resolution
 
 ### Sessions & Temporal Awareness
 
@@ -547,7 +592,7 @@ namespace-scoped but remains linkable and must not be treated as anonymized.
 | **Core language** | Rust | Memory safety, no GC, ideal for embedded engines |
 | **Architecture** | Embedded (like SQLite) | No server overhead, sub-ms reads, single-tenant |
 | **Bindings** | Python (PyO3), TypeScript | Agent/AI layer integration |
-| **Storage** | Single file per user | Portable, backupable, no infrastructure |
+| **Storage** | One logical SQLite database per store | Portable and backupable; WAL mode may create transient sidecars while open |
 | **Sync** | CRDTs + append-only log | Conflict-free for most operations, deterministic |
 | **Thread safety** | Mutex/RwLock, Send+Sync | Safe concurrent access from multiple threads |
 | **Query interface** | Cognitive operations API | Not SQL — designed for how agents think |
@@ -560,7 +605,7 @@ This repo is the engine. The rest of the stack builds on it:
 |---------|------|---------|
 | [yantrikdb](https://crates.io/crates/yantrikdb) | This repo — embedded Rust engine | `cargo add yantrikdb` |
 | [yantrikdb](https://pypi.org/project/yantrikdb/) | This repo — Python bindings (PyO3) | `pip install yantrikdb` |
-| [yantrikdb-mcp](https://github.com/yantrikos/yantrikdb-mcp) | MCP server for Claude Code, Cursor, Windsurf — start here if you use an agent | `pip install yantrikdb-mcp` |
+| [yantrikdb-mcp](https://github.com/yantrikos/yantrikdb-mcp) | MCP server for Codex, Claude Code, Cursor, Windsurf — start here if you use an agent | `pip install yantrikdb-mcp` |
 | [yantrikdb-server](https://github.com/yantrikos/yantrikdb-server) | HTTP gateway and HA cluster around this engine | `docker run ghcr.io/yantrikos/yantrikdb` |
 | [yantrikdb-client](https://github.com/yantrikos/yantrikdb-client) | Typed Python client for the HTTP server | `pip install yantrikdb-client` |
 | [langchain-yantrikdb](https://github.com/yantrikos/langchain-yantrikdb) | LangChain `VectorStore` + `ChatMessageHistory` | `pip install langchain-yantrikdb` |
@@ -595,6 +640,18 @@ cargo run --example showcase_wirecard
 ```
 
 ## Research & Publications
+
+### 📄 Whose Memory, Whose Model? Isolating Retrieval Quality on BEAM (August 2026)
+
+[Read the paper →](https://yantrikdb.com/papers/beam-frozen-context/)
+
+A 25-point gap between two agent-memory systems on BEAM almost entirely disappears when both are read by the same model. An end-to-end benchmark score confounds retrieval quality, ingest-time processing, and the answerer model — so we replayed a competitor's own published context strings through our answerer and our judge, across 400 matched BEAM-100K query IDs, leaving retrieval as the only variable.
+
+Result: **their strongest configuration scored 0.592 against YantrikDB's 0.607 — statistically indistinguishable (p=0.438, conversation-clustered permutation test) — while YantrikDB used 42% fewer `cl100k_base` context tokens (13,673 vs 23,689).** In that BEAM-100K base run, YantrikDB's ingest and recall path used no LLM and no network. The common answerer and judge were LLMs; optional companion, cognition, and synthesis integrations can also use an LLM. Swapping only the answerer, holding retrieval identical, moved the score by ~9 points on its own.
+
+The token saving is a trade, not free efficiency, and the paper says so: our contexts carry a median of 5 dates against their 117, and event ordering (0.298) and temporal reasoning (0.425) are our weakest categories there. A context with fewer dates is cheaper to read and worse at time.
+
+The methodology exists because two independent adversarial reviews rejected the original comparison as confounded. Both critiques, and what they changed, are described in the paper.
 
 ### 📄 Skill as Memory, Not Document (May 2026)
 
