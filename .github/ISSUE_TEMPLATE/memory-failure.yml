@@ -1,0 +1,123 @@
+name: Memory Failure Clinic
+description: Bring a redacted, reproducible agent-memory failure for diagnosis.
+title: "[Memory failure]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Memory Failure Clinic
+
+        Give us the smallest synthetic example that still fails. We will trace the
+        memory lifecycle, identify the failing stage, and label the result as an
+        engine defect, integration defect, configuration issue, or known boundary.
+
+        **Do not paste private conversations, production memory exports, credentials,
+        access tokens, customer data, or unredacted logs.** Replace them with a tiny
+        fictional timeline that preserves the failure's shape.
+
+  - type: dropdown
+    id: failure_mode
+    attributes:
+      label: Failure mode
+      options:
+        - Relevant memory was not recalled
+        - Irrelevant memory outranked the answer
+        - Stale memory was treated as current
+        - Memory crossed a namespace or tenant boundary
+        - A true conflict was missed
+        - A false conflict was reported
+        - Consolidation merged the wrong records
+        - Decay or expiry behaved unexpectedly
+        - A skill or procedure was not selected correctly
+        - MCP or framework integration behaved differently from the engine
+        - Latency or resource use regressed
+        - Other
+    validations:
+      required: true
+
+  - type: dropdown
+    id: deployment
+    attributes:
+      label: Deployment path
+      options:
+        - Python embedded engine
+        - Rust embedded engine
+        - YantrikDB MCP
+        - YantrikDB Server (single node)
+        - YantrikDB Server (cluster)
+        - WebAssembly demo
+        - Not sure
+    validations:
+      required: true
+
+  - type: input
+    id: versions
+    attributes:
+      label: Exact versions
+      description: Engine, server, MCP, Python/Rust, and client versions that apply.
+      placeholder: "yantrikdb 0.18.0, yantrikdb-mcp 0.19.4, Python 3.12"
+    validations:
+      required: true
+
+  - type: textarea
+    id: synthetic_timeline
+    attributes:
+      label: Minimal synthetic timeline
+      description: Use fictional text, dates, namespaces, sources, and identifiers.
+      placeholder: |
+        2026-08-01 / namespace=demo / source=user: Acme is based in Boston.
+        2026-08-12 / namespace=demo / source=user: Acme moved to Denver.
+        Query: Where is Acme based now?
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Minimal reproduction
+      description: Include the smallest runnable code or API calls. Remove all secrets.
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected result
+      placeholder: State the exact records, order, conflict, or lifecycle transition expected.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual result
+      description: Include identifiers, scores, and explain output when available; no private text.
+    validations:
+      required: true
+
+  - type: textarea
+    id: controls
+    attributes:
+      label: Controls already tried
+      description: Note changes to top_k, namespace, dates, embedder, reranking, or integration path.
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: OS, architecture, storage mode, embedder, encryption mode, and relevant configuration.
+
+  - type: checkboxes
+    id: safety
+    attributes:
+      label: Privacy and reproducibility check
+      options:
+        - label: I replaced private or production memory content with synthetic data.
+          required: true
+        - label: I removed credentials, tokens, personal data, customer data, and private logs.
+          required: true
+        - label: The reproduction is small enough for a maintainer to run independently.
+          required: true
+        - label: I understand that a confirmed case may become a public regression test or engineering write-up using only the synthetic material above.
+          required: true
