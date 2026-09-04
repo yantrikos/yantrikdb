@@ -15,6 +15,8 @@ knowledge graph, in an embeddable Rust library with Python bindings.
 [![Crates.io downloads](https://img.shields.io/crates/d/yantrikdb)](https://crates.io/crates/yantrikdb)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache--2.0-blue)](LICENSE)
 
+Want a server instead of a library? [yantrikdb-server](https://github.com/yantrikos/yantrikdb-server) wraps this engine with an HTTP API, a live demo, and multi-node HA — same decay, consolidation, and contradiction detection, reachable over REST instead of an import.
+
 ## Get Started in 60 Seconds
 
 ### For AI agents (MCP — works with Claude, Cursor, Windsurf, Copilot)
