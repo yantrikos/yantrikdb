@@ -220,19 +220,34 @@ def test_headquartered_does_not_mint_a_reverse_leads_edge(db):
 # ── graph expansion ────────────────────────────────────────────────────
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Measured on 0.18.0: expand_entities boosts records similarity already "
-        "found (graph_proximity 0.25) but the one-hop record ranks 16th of 20 "
-        "behind unrelated notes; expansion does not inject linked evidence."
-    ),
-)
-def test_graph_expansion_reaches_the_second_hop(db):
+@pytest.mark.parametrize("expand", [False, True])
+def test_claim_chain_reaches_the_second_hop(db, expand):
+    """Measured on 0.18.0: expand_entities boosted records similarity had
+    already found (graph_proximity 0.25) but the one-hop record ranked 16th
+    of 20 behind unrelated notes. The claims lane now follows the chain one
+    hop and admits the provenance record with the path spelled out."""
     db.record("Alice Moreau works at Fennwick Labs as a data engineer.")
     hop = db.record("Fennwick Labs is headquartered in Berlin.")
     for i in range(15):
         db.record(f"Random note {i}: the weather in Lisbon was mild and the cafe served pastel de nata.")
     db.think({"run_consolidation": False})
-    hits = db.recall(query="Which city does Alice Moreau work in?", top_k=5, expand_entities=True, skip_reinforce=True)
+    hits = db.recall(query="Which city does Alice Moreau work in?", top_k=5, expand_entities=expand, skip_reinforce=True)
     assert hop in rids(hits), texts(hits)
+    why = next(h for h in hits if h["rid"] == hop)["why_retrieved"]
+    assert any(
+        "Alice Moreau -works_at-> Fennwick Labs ; Fennwick Labs -headquartered_in-> Berlin (path via Fennwick Labs, anchor Alice Moreau)" in w
+        for w in why
+    ), why
+    assert "keyword_reserved" in why, why
+
+
+def test_claim_chain_does_not_displace_direct_hits(db):
+    """A path is admitted at the bottom of the band, never over a direct hit."""
+    direct = db.record("Alice Moreau works at Fennwick Labs as a data engineer.")
+    hop = db.record("Fennwick Labs is headquartered in Berlin.")
+    db.record("Alice Moreau leads the data platform team at Fennwick Labs.")
+    for i in range(15):
+        db.record(f"Random note {i}: the weather in Lisbon was mild and the cafe served pastel de nata.")
+    db.think({"run_consolidation": False})
+    hits = rids(db.recall(query="What does Alice Moreau do at work?", top_k=5, skip_reinforce=True))
+    assert hits.index(direct) < hits.index(hop)

@@ -32,83 +32,114 @@ const MAX_ANCHOR_ENTITIES: usize = 4;
 /// index lookup, never a scan.
 const MAX_CLAIMS_PER_ENTITY: usize = 24;
 
+// ── Claim-chain traversal (2026-09-05) ──────────────────────────────
+//
+// The lane above answers "what does the store CLAIM about the entities
+// the query names". It could not answer "which city does Alice work
+// in" when the store held `Alice -works_at-> Fennwick Labs` and
+// `Fennwick Labs -headquartered_in-> Berlin`: Fennwick Labs is not a
+// query entity, so the Berlin record was never a candidate. Graph
+// expansion did not rescue it either — measured on 0.18.0, its
+// multiplicative boost (~+3.5% ceiling) left the Berlin record at rank
+// 16 of 20 behind unrelated notes, because a record with near-zero
+// cosine and an exact entity path can never win a cosine-scaled boost
+// (the "graph proximity is evidence, not a prior" note of 2026-08-13).
+//
+// So the lane now follows the chain ONE more hop: every far endpoint of
+// a hop-1 claim becomes a seed, and the provenance records of the
+// seed's own claims are admitted with the full path spelled out —
+// `claims_match: Alice Moreau -works_at-> Fennwick Labs ; Fennwick Labs
+// -headquartered_in-> Berlin (path via Fennwick Labs, anchor Alice
+// Moreau)`. Admission is exact evidence with a bounded blast radius:
+// at most MAX_PATH_SEEDS seeds, MAX_PATH_PER_SEED claims each,
+// MAX_PATH_CANDIDATES in total; a seed whose fetch window is full is a
+// hub and is not traversed; the keyword reserve ranks a path below a
+// direct claim (`claims_lex_strength`). Rows already admitted at hop 1
+// — including the reverse-direction reading of the hop-1 claim itself —
+// are never re-admitted.
+/// Hop-1 far endpoints consulted as hop-2 seeds.
+const MAX_PATH_SEEDS: usize = 8;
+/// Hop-2 claims admitted per seed (most recent first).
+const MAX_PATH_PER_SEED: usize = 4;
+/// Hop-2 candidates admitted in total per recall.
+const MAX_PATH_CANDIDATES: usize = 16;
+/// Keyword-reserve strength of a direct claim (exact evidence).
+const DIRECT_CLAIM_LEX: f64 = 1.0;
+/// Keyword-reserve strength of a two-hop path — exact, but derived.
+const PATH_CLAIM_LEX: f64 = 0.9;
+/// Marker inside a path why; the reserve reads it to rank paths below
+/// direct claims without a second why family.
+const PATH_MARKER: &str = "(path via ";
+
 /// A claims-lane candidate: the claim's source record plus the
 /// directional provenance that justifies its admission.
 pub(crate) struct ClaimCandidate {
     pub rid: String,
     /// e.g. `claims_match: Taylor -reports_to-> Carol (anchor Taylor)`
     pub why: String,
+    /// 1 = a claim about a query entity; 2 = reached through one
+    /// intermediate entity (see the chain-traversal note above).
+    pub hops: u8,
 }
 
-/// Resolve `query_tokens` to entities and return the source records of
-/// their claims. Best-effort by design: a missing `claims` table (old
-/// packs) or any read error yields an empty lane, never a failed
-/// recall. Duplicate rids keep their first (best-anchored) why.
-/// Claims with a phantom endpoint (an entity today's extractor would
-/// not mint) are suppressed at read time, with NO extractor exemption —
-/// the V14→V15 backfill made 'manual' untrustworthy on lane rows; see
-/// the inline comment in the row loop.
-pub(crate) fn claims_candidates(
-    conn: &Connection,
-    graph_index: &GraphIndex,
-    query_tokens: &[String],
-    namespace: Option<&str>,
-) -> Vec<ClaimCandidate> {
-    let mut anchors = graph_index.entity_matches_query(query_tokens);
-    if anchors.is_empty() {
-        return Vec::new();
-    }
-    // Strongest anchors first (mention count), bounded — with entity
-    // name as the TOTAL tiebreak. Fix (f), 2026-08-06: without it,
-    // equal-mention anchors arrive in `entity_matches_query`'s HashMap
-    // iteration order, which is seeded PER ENGINE INSTANCE — so every
-    // fresh open could consult a different anchor order (and, via the
-    // truncate below, a different anchor SET). This was the residual
-    // nondeterminism hermes's probe caught surviving fix (e): it
-    // oscillated across runs because each run opened a fresh instance,
-    // and f7c0e2d had masked it downstream with distinct boost scores.
-    anchors.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
-    anchors.truncate(MAX_ANCHOR_ENTITIES);
+/// Keyword-reserve strength of a claims-lane row, from its why: a
+/// direct claim is exact evidence at full strength, a two-hop path is
+/// exact but derived and ranks just below it. `None` when the row was
+/// not admitted by this lane.
+pub(crate) fn claims_lex_strength(why: &[String]) -> Option<f64> {
+    let w = why.iter().find(|w| w.starts_with("claims_match"))?;
+    Some(if w.contains(PATH_MARKER) {
+        PATH_CLAIM_LEX
+    } else {
+        DIRECT_CLAIM_LEX
+    })
+}
 
-    let mut out: Vec<ClaimCandidate> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for (entity, _etype, _mentions) in &anchors {
-        let sql = format!(
-            "SELECT src, rel_type, dst, source_memory_rid, polarity, extractor FROM claims \
-             WHERE (src = ?1 OR dst = ?1) AND tombstoned = 0 \
-             AND source_memory_rid IS NOT NULL {} \
-             ORDER BY created_at DESC LIMIT {}",
-            if namespace.is_some() {
-                "AND namespace = ?2"
-            } else {
-                ""
-            },
-            MAX_CLAIMS_PER_ENTITY,
-        );
-        let Ok(mut stmt) = conn.prepare_cached(&sql) else {
-            return out; // no claims table — empty lane, never an error
+/// `(src, rel_type, dst, source_memory_rid, polarity)` rows of the
+/// claims touching `entity`, most recent first, with phantom endpoints
+/// already suppressed (see the note inside). Empty on a missing table.
+fn claims_touching(
+    conn: &Connection,
+    entity: &str,
+    namespace: Option<&str>,
+) -> Vec<(String, String, String, String, i64)> {
+    let sql = format!(
+        "SELECT src, rel_type, dst, source_memory_rid, polarity, extractor FROM claims \
+         WHERE (src = ?1 OR dst = ?1) AND tombstoned = 0 \
+         AND source_memory_rid IS NOT NULL {} \
+         ORDER BY created_at DESC LIMIT {}",
+        if namespace.is_some() {
+            "AND namespace = ?2"
+        } else {
+            ""
+        },
+        MAX_CLAIMS_PER_ENTITY,
+    );
+    let Ok(mut stmt) = conn.prepare_cached(&sql) else {
+        return Vec::new(); // no claims table — empty lane, never an error
+    };
+    let mapper =
+        |row: &rusqlite::Row| -> rusqlite::Result<(String, String, String, String, i64, String)> {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
         };
-        let rows: Vec<(String, String, String, String, i64, String)> = {
-            let mapper = |row: &rusqlite::Row| -> rusqlite::Result<_> {
-                Ok((
-                    row.get(0)?,
-                    row.get(1)?,
-                    row.get(2)?,
-                    row.get(3)?,
-                    row.get(4)?,
-                    row.get(5)?,
-                ))
-            };
-            let res = if let Some(ns) = namespace {
-                stmt.query_map(params![entity, ns], mapper)
-                    .map(|r| r.filter_map(|x| x.ok()).collect())
-            } else {
-                stmt.query_map(params![entity], mapper)
-                    .map(|r| r.filter_map(|x| x.ok()).collect())
-            };
-            res.unwrap_or_default()
-        };
-        for (src, rel, dst, rid, polarity, extractor) in rows {
+    let rows: Vec<(String, String, String, String, i64, String)> = if let Some(ns) = namespace {
+        stmt.query_map(params![entity, ns], mapper)
+            .map(|r| r.filter_map(|x| x.ok()).collect())
+            .unwrap_or_default()
+    } else {
+        stmt.query_map(params![entity], mapper)
+            .map(|r| r.filter_map(|x| x.ok()).collect())
+            .unwrap_or_default()
+    };
+    rows.into_iter()
+        .filter(|(src, _, dst, _, _, _extractor)| {
             // PHANTOM SUPPRESSION — the claims-lane twin of the 0.14.1
             // GraphIndex::build_from_db heal. Claims written by pre-0.14.1
             // extractors keep stopword anchors (observed live 2026-08-16:
@@ -141,20 +172,106 @@ pub(crate) fn claims_candidates(
             // Suppressed rows do occupy slots in the per-anchor fetch
             // window above; a phantom-heavy window yields fewer candidates,
             // which is the point — those rows were noise.
-            let _ = &extractor; // fetched for observability; not a gate here
-            if crate::graph::is_rejected_entity_name(&src)
-                || crate::graph::is_rejected_entity_name(&dst)
+            !(crate::graph::is_rejected_entity_name(src)
+                || crate::graph::is_rejected_entity_name(dst))
+        })
+        .map(|(src, rel, dst, rid, polarity, _)| (src, rel, dst, rid, polarity))
+        .collect()
+}
+
+/// Resolve `query_tokens` to entities and return the source records of
+/// their claims. Best-effort by design: a missing `claims` table (old
+/// packs) or any read error yields an empty lane, never a failed
+/// recall. Duplicate rids keep their first (best-anchored) why.
+/// Claims with a phantom endpoint (an entity today's extractor would
+/// not mint) are suppressed at read time, with NO extractor exemption —
+/// the V14→V15 backfill made 'manual' untrustworthy on lane rows; see
+/// the inline comment in the row loop.
+pub(crate) fn claims_candidates(
+    conn: &Connection,
+    graph_index: &GraphIndex,
+    query_tokens: &[String],
+    namespace: Option<&str>,
+) -> Vec<ClaimCandidate> {
+    let mut anchors = graph_index.entity_matches_query(query_tokens);
+    if anchors.is_empty() {
+        return Vec::new();
+    }
+    // Strongest anchors first (mention count), bounded — with entity
+    // name as the TOTAL tiebreak. Fix (f), 2026-08-06: without it,
+    // equal-mention anchors arrive in `entity_matches_query`'s HashMap
+    // iteration order, which is seeded PER ENGINE INSTANCE — so every
+    // fresh open could consult a different anchor order (and, via the
+    // truncate below, a different anchor SET). This was the residual
+    // nondeterminism hermes's probe caught surviving fix (e): it
+    // oscillated across runs because each run opened a fresh instance,
+    // and f7c0e2d had masked it downstream with distinct boost scores.
+    anchors.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)));
+    anchors.truncate(MAX_ANCHOR_ENTITIES);
+
+    let anchor_names: std::collections::HashSet<&str> =
+        anchors.iter().map(|(name, _, _)| name.as_str()).collect();
+    let mut out: Vec<ClaimCandidate> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // (seed entity, anchor it was reached from, rendered hop-1 claim) in
+    // discovery order — deterministic because anchors and claim rows are.
+    let mut path_seeds: Vec<(String, String, String)> = Vec::new();
+    for (entity, _etype, _mentions) in &anchors {
+        for (src, rel, dst, rid, polarity) in claims_touching(conn, entity, namespace) {
+            let neg = if polarity < 0 { "NOT " } else { "" };
+            let far = if src == *entity { &dst } else { &src };
+            if !anchor_names.contains(far.as_str())
+                && path_seeds.len() < MAX_PATH_SEEDS
+                && !path_seeds.iter().any(|(seed, _, _)| seed == far)
             {
-                continue;
+                path_seeds.push((
+                    far.clone(),
+                    entity.clone(),
+                    format!("{src} -{neg}{rel}-> {dst}"),
+                ));
             }
             if !seen.insert(rid.clone()) {
                 continue;
             }
-            let neg = if polarity < 0 { "NOT " } else { "" };
             out.push(ClaimCandidate {
                 why: format!("claims_match: {src} -{neg}{rel}-> {dst} (anchor {entity})"),
                 rid,
+                hops: 1,
             });
+        }
+    }
+
+    // Hop 2: the seeds' own claims, bounded (see the traversal note).
+    let mut path_admitted = 0usize;
+    for (seed, anchor, hop1) in &path_seeds {
+        if path_admitted >= MAX_PATH_CANDIDATES {
+            break;
+        }
+        let rows = claims_touching(conn, seed, namespace);
+        if rows.len() >= MAX_CLAIMS_PER_ENTITY {
+            // A full fetch window is a hub ("Pranab", a team name): its
+            // most recent claims say nothing about THIS query. Skip it.
+            continue;
+        }
+        let mut per_seed = 0usize;
+        for (src, rel, dst, rid, polarity) in rows {
+            if per_seed >= MAX_PATH_PER_SEED || path_admitted >= MAX_PATH_CANDIDATES {
+                break;
+            }
+            if !seen.insert(rid.clone()) {
+                continue; // hop-1 provenance, or the hop-1 claim read backwards
+            }
+            let neg = if polarity < 0 { "NOT " } else { "" };
+            out.push(ClaimCandidate {
+                why: format!(
+                    "claims_match: {hop1} ; {src} -{neg}{rel}-> {dst} \
+                     {PATH_MARKER}{seed}, anchor {anchor})"
+                ),
+                rid,
+                hops: 2,
+            });
+            per_seed += 1;
+            path_admitted += 1;
         }
     }
     out
@@ -495,10 +612,157 @@ mod tests {
                 "claims_match: {} -{}{}-> {} (anchor {})",
                 "Taylor", "", "reports_to", "Carol", "Taylor"
             ),
+            hops: 1,
         };
         assert_eq!(
             c.why,
             "claims_match: Taylor -reports_to-> Carol (anchor Taylor)"
         );
+    }
+
+    // ── Claim-chain traversal ──
+
+    /// The measured 0.18.0 miss: Alice works at Fennwick Labs, Fennwick
+    /// Labs is headquartered in Berlin, and the query names only Alice.
+    fn chain_store() -> Connection {
+        let conn = seeded_store();
+        for (name, etype) in [
+            ("Alice Moreau", "person"),
+            ("Fennwick Labs", "org"),
+            ("Berlin", "place"),
+        ] {
+            conn.execute(
+                "INSERT INTO entities (name, entity_type, first_seen, last_seen, mention_count) \
+                 VALUES (?1, ?2, 0.0, 0.0, 2)",
+                params![name, etype],
+            )
+            .unwrap();
+        }
+        for (cid, src, dst, rel, ts, rid) in [
+            (
+                "cA",
+                "Alice Moreau",
+                "Fennwick Labs",
+                "works_at",
+                10.0,
+                "mA",
+            ),
+            (
+                "cB",
+                "Fennwick Labs",
+                "Berlin",
+                "headquartered_in",
+                11.0,
+                "mB",
+            ),
+            // A phantom-anchored claim on the seed: must not ride the path.
+            ("cC", "Fennwick Labs", "THE", "leads", 12.0, "mC"),
+        ] {
+            conn.execute(
+                "INSERT INTO claims (claim_id, src, dst, rel_type, created_at, \
+                 extractor, source_memory_rid) VALUES (?1, ?2, ?3, ?4, ?5, 'heuristic_v1', ?6)",
+                params![cid, src, dst, rel, ts, rid],
+            )
+            .unwrap();
+        }
+        for (rid, name) in [
+            ("mA", "Alice Moreau"),
+            ("mA", "Fennwick Labs"),
+            ("mB", "Fennwick Labs"),
+            ("mB", "Berlin"),
+        ] {
+            conn.execute(
+                "INSERT INTO memory_entities (memory_rid, entity_name) VALUES (?1, ?2)",
+                params![rid, name],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    #[test]
+    fn chain_admits_the_second_hop_with_full_path_provenance() {
+        let conn = chain_store();
+        let gi = GraphIndex::build_from_db(&conn).unwrap();
+        let tokens = crate::graph::tokenize("which city does Alice Moreau work in");
+        let cands = claims_candidates(&conn, &gi, &tokens, None);
+        let direct = cands
+            .iter()
+            .find(|c| c.rid == "mA")
+            .expect("hop-1 record admitted");
+        assert_eq!(direct.hops, 1);
+        let hop2 = cands
+            .iter()
+            .find(|c| c.rid == "mB")
+            .expect("hop-2 record admitted");
+        assert_eq!(hop2.hops, 2);
+        assert_eq!(
+            hop2.why,
+            "claims_match: Alice Moreau -works_at-> Fennwick Labs ; \
+             Fennwick Labs -headquartered_in-> Berlin (path via Fennwick Labs, anchor Alice Moreau)"
+        );
+        assert!(
+            !cands.iter().any(|c| c.rid == "mC"),
+            "phantom endpoint on the seed must be suppressed at hop 2 too"
+        );
+        // Deterministic order: hop-1 rows before hop-2 rows.
+        let hops: Vec<u8> = cands.iter().map(|c| c.hops).collect();
+        assert!(hops.windows(2).all(|w| w[0] <= w[1]), "got {hops:?}");
+    }
+
+    #[test]
+    fn chain_never_readmits_hop_one_provenance_from_the_seed_side() {
+        // From seed Fennwick Labs the lane sees `Alice -works_at-> Fennwick`
+        // again (dst side). Its record mA is already admitted at hop 1 and
+        // must appear exactly once.
+        let conn = chain_store();
+        let gi = GraphIndex::build_from_db(&conn).unwrap();
+        let tokens = crate::graph::tokenize("Alice Moreau");
+        let cands = claims_candidates(&conn, &gi, &tokens, None);
+        assert_eq!(cands.iter().filter(|c| c.rid == "mA").count(), 1);
+    }
+
+    #[test]
+    fn hub_seed_is_not_traversed() {
+        let conn = chain_store();
+        // Make Fennwick Labs a hub: fill its fetch window with claims.
+        for i in 0..MAX_CLAIMS_PER_ENTITY {
+            let (cid, dst, rid) = (format!("hub{i}"), format!("Partner{i}"), format!("mh{i}"));
+            conn.execute(
+                "INSERT INTO entities (name, entity_type, first_seen, last_seen, mention_count) \
+                 VALUES (?1, 'org', 0.0, 0.0, 1)",
+                params![dst],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO claims (claim_id, src, dst, rel_type, created_at, \
+                 extractor, source_memory_rid) VALUES (?1, 'Fennwick Labs', ?2, 'partners_with', 20.0, \
+                 'heuristic_v1', ?3)",
+                params![cid, dst, rid],
+            )
+            .unwrap();
+        }
+        let gi = GraphIndex::build_from_db(&conn).unwrap();
+        let tokens = crate::graph::tokenize("which city does Alice Moreau work in");
+        let cands = claims_candidates(&conn, &gi, &tokens, None);
+        assert!(
+            cands.iter().all(|c| c.hops == 1),
+            "hub must not be traversed: {:?}",
+            cands.iter().map(|c| &c.why).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn path_reserve_strength_ranks_below_a_direct_claim() {
+        let direct = vec!["claims_match: A -works_at-> B (anchor A)".to_string()];
+        let path = vec![
+            "recent".to_string(),
+            "claims_match: A -works_at-> B ; B -headquartered_in-> C (path via B, anchor A)"
+                .to_string(),
+        ];
+        assert_eq!(claims_lex_strength(&direct), Some(DIRECT_CLAIM_LEX));
+        assert_eq!(claims_lex_strength(&path), Some(PATH_CLAIM_LEX));
+        assert!(PATH_CLAIM_LEX < DIRECT_CLAIM_LEX);
+        assert_eq!(claims_lex_strength(&["keyword_match".to_string()]), None);
     }
 }

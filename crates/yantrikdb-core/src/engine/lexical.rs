@@ -179,16 +179,11 @@ pub(crate) fn apply_keyword_reserve(
         .map(|(i, r)| {
             // C4: a claims-lane candidate is EXACT evidence — it enters
             // the contest at full lexical strength regardless of any
-            // term statistic (its embedding may be arbitrarily far).
-            let claims = r
-                .why_retrieved
-                .iter()
-                .any(|w| w.starts_with("claims_match"));
-            let lex = if claims {
-                1.0
-            } else {
-                lex_by_rid.get(r.rid.as_str()).copied().unwrap_or(0.0)
-            };
+            // term statistic (its embedding may be arbitrarily far). A
+            // two-hop path (claim-chain traversal, 2026-09-05) is exact
+            // but derived, and ranks just below a direct claim.
+            let lex = crate::engine::claims_lane::claims_lex_strength(&r.why_retrieved)
+                .unwrap_or_else(|| lex_by_rid.get(r.rid.as_str()).copied().unwrap_or(0.0));
             (i, lex, r.scores.similarity)
         })
         .filter(|(_, lex, sim)| *lex >= KEYWORD_RESERVE_MIN_LEX || *sim >= KEYWORD_RESERVE_MIN_SIM)
