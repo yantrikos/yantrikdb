@@ -21,7 +21,9 @@
 // stamped by every metadata-persisting writer via engine::thread::extract_source_turn,
 // so recall_thread's (created_at, source_turn, rid) order is expressed in SQL
 // (SQLite may sort the full eligible set — see the idx_memories_source_turn note).
-pub const SCHEMA_VERSION: i32 = 50;
+// v51 adds the self-mined relation template tables (learned_relation_patterns +
+// support), fed by cooperative claims and applied by the materializer.
+pub const SCHEMA_VERSION: i32 = 51;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -1173,6 +1175,38 @@ CREATE TRIGGER IF NOT EXISTS memories_source_turn_marker_update
         CAST(COALESCE((SELECT CAST(value AS INTEGER) FROM meta
                        WHERE key = 'source_turn_invalidation_epoch'), 0) + 1 AS TEXT));
 END;
+
+
+-- v51: self-mined relation templates (cooperative claims, 2026-09-05).
+-- When a writer STATES a grounded claim, the phrase between subject and
+-- object in the memory text is a candidate template for that relation.
+-- A phrase becomes an ACTIVE template once >= 2 distinct (src, dst) pairs
+-- support it; the materializer then applies active templates to plain
+-- writes (claims.extractor = 'learned_v1'). Namespace-scoped: one tenant's
+-- phrasing never teaches another's extractor. Derived, local state —
+-- rebuildable from claims, never replicated, never mined on encrypted
+-- stores (a phrase is a plaintext fragment). Reversible via
+-- forget_learned_relation_patterns.
+CREATE TABLE IF NOT EXISTS learned_relation_patterns (
+    namespace TEXT NOT NULL,
+    rel_type TEXT NOT NULL,
+    phrase TEXT NOT NULL,
+    pair_count INTEGER NOT NULL DEFAULT 0,
+    active INTEGER NOT NULL DEFAULT 0,
+    first_seen REAL NOT NULL,
+    last_seen REAL NOT NULL,
+    PRIMARY KEY (namespace, rel_type, phrase)
+);
+CREATE INDEX IF NOT EXISTS idx_learned_relation_patterns_active
+    ON learned_relation_patterns(namespace, active);
+CREATE TABLE IF NOT EXISTS learned_relation_pattern_support (
+    namespace TEXT NOT NULL,
+    rel_type TEXT NOT NULL,
+    phrase TEXT NOT NULL,
+    src_norm TEXT NOT NULL,
+    dst_norm TEXT NOT NULL,
+    PRIMARY KEY (namespace, rel_type, phrase, src_norm, dst_norm)
+);
 
 -- Normalized join tables for trigger/pattern JSON arrays
 CREATE TABLE IF NOT EXISTS trigger_source_rids (
@@ -3207,4 +3241,42 @@ CREATE TRIGGER IF NOT EXISTS memories_source_turn_marker_update
         CAST(COALESCE((SELECT CAST(value AS INTEGER) FROM meta
                        WHERE key = 'source_turn_invalidation_epoch'), 0) + 1 AS TEXT));
 END;
+";
+
+/// v50 -> v51: the self-mined relation template tables. Pure additions
+/// (two tables, one index), all `IF NOT EXISTS`; identical statements
+/// live in SCHEMA_SQL so a fresh store and an upgraded store converge
+/// (the v50 belt-and-braces precedent). No backfill: templates are mined
+/// forward from writer-stated claims only.
+pub const MIGRATE_V50_TO_V51: &str = "
+-- v51: self-mined relation templates (cooperative claims, 2026-09-05).
+-- When a writer STATES a grounded claim, the phrase between subject and
+-- object in the memory text is a candidate template for that relation.
+-- A phrase becomes an ACTIVE template once >= 2 distinct (src, dst) pairs
+-- support it; the materializer then applies active templates to plain
+-- writes (claims.extractor = 'learned_v1'). Namespace-scoped: one tenant's
+-- phrasing never teaches another's extractor. Derived, local state —
+-- rebuildable from claims, never replicated, never mined on encrypted
+-- stores (a phrase is a plaintext fragment). Reversible via
+-- forget_learned_relation_patterns.
+CREATE TABLE IF NOT EXISTS learned_relation_patterns (
+    namespace TEXT NOT NULL,
+    rel_type TEXT NOT NULL,
+    phrase TEXT NOT NULL,
+    pair_count INTEGER NOT NULL DEFAULT 0,
+    active INTEGER NOT NULL DEFAULT 0,
+    first_seen REAL NOT NULL,
+    last_seen REAL NOT NULL,
+    PRIMARY KEY (namespace, rel_type, phrase)
+);
+CREATE INDEX IF NOT EXISTS idx_learned_relation_patterns_active
+    ON learned_relation_patterns(namespace, active);
+CREATE TABLE IF NOT EXISTS learned_relation_pattern_support (
+    namespace TEXT NOT NULL,
+    rel_type TEXT NOT NULL,
+    phrase TEXT NOT NULL,
+    src_norm TEXT NOT NULL,
+    dst_norm TEXT NOT NULL,
+    PRIMARY KEY (namespace, rel_type, phrase, src_norm, dst_norm)
+);
 ";

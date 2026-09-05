@@ -57,6 +57,26 @@ impl PyYantrikDB {
         json_to_py(py, &val)
     }
 
+    /// The relation templates this store has taught itself from stated
+    /// claims in `namespace` (active ones are applied to plain writes).
+    #[pyo3(signature = (namespace="default"))]
+    fn learned_relation_patterns(&self, py: Python<'_>, namespace: &str) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let rows = db.learned_relation_patterns(namespace).map_err(map_err)?;
+        let val = serde_json::to_value(&rows)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        json_to_py(py, &val)
+    }
+
+    /// Forget every learned template in `namespace`; returns how many were
+    /// removed. Claims already minted by them stay.
+    #[pyo3(signature = (namespace="default"))]
+    fn forget_learned_relation_patterns(&self, namespace: &str) -> PyResult<usize> {
+        let db = self.get_inner()?;
+        db.forget_learned_relation_patterns(namespace)
+            .map_err(map_err)
+    }
+
     #[pyo3(signature = (src, dst, rel_type="related_to", weight=1.0))]
     fn relate(&self, src: &str, dst: &str, rel_type: &str, weight: f64) -> PyResult<String> {
         let db = self.get_inner()?;

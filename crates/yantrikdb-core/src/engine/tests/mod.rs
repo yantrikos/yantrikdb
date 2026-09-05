@@ -32,6 +32,8 @@ mod event_time_recall;
 mod explain;
 mod idempotency;
 mod interactive_recall;
+#[cfg(feature = "bundled-embedder")]
+mod learned_templates;
 mod learning_categories;
 mod maintenance_debt;
 mod metamorphic;

@@ -1354,6 +1354,15 @@ impl super::YantrikDB {
             // for exactly the entities the writer cared about.
             self.link_memory_entity(memory_rid, src)?;
             self.link_memory_entity(memory_rid, dst)?;
+            // Self-mined templates: the phrase between subject and object is
+            // a candidate template for this relation (see the note above
+            // `mine_relation_template`). Best-effort: a mining failure must
+            // never fail the claim it learned from.
+            if let Err(e) =
+                self.mine_relation_template(&memory.text, src, &rel, dst, &memory.namespace)
+            {
+                tracing::warn!(error = %e, "relation template mining failed; claim kept");
+            }
             report.accepted.push(AcceptedClaim {
                 claim_id,
                 src: src.to_string(),
@@ -1382,5 +1391,248 @@ mod stated_claim_tests {
         assert_eq!(normalize_relation("__"), None);
         assert_eq!(normalize_relation("1st"), None);
         assert_eq!(normalize_relation(&"x".repeat(65)), None);
+    }
+}
+
+// ── Self-mined relation templates (2026-09-05) ─────────────────────────
+//
+// The built-in extractor knows a fixed phrase table. Every grounded claim
+// a writer states is also a labelled example of how THIS store's authors
+// phrase that relation: "Dana mentors Priya" + claim (Dana, mentors,
+// Priya) says the phrase "mentors" carries `mentors`. After two distinct
+// (src, dst) pairs agree on a phrase, the phrase is promoted to an active
+// template and the materializer applies it to plain writes — the
+// extractor grows with usage, per namespace, with no model anywhere.
+//
+// Precision rules (each one closes a measured failure class):
+// - subject must precede object within 150 chars, the extractor's window;
+// - the phrase is 1..=6 whole tokens after negation stripping;
+// - at least one token is >= 3 chars and not a function word, so "is a"
+//   can never become a template;
+// - a phrase is promoted only by DISTINCT pairs — restating one fact never
+//   promotes;
+// - never mined on encrypted stores (the phrase is plaintext).
+
+/// Claims minted by learned templates carry this extractor label.
+pub const LEARNED_CLAIM_EXTRACTOR: &str = "learned_v1";
+/// Distinct (src, dst) pairs required before a phrase becomes a template.
+pub const TEMPLATE_PROMOTION_PAIRS: i64 = 2;
+/// Active templates loaded per namespace at materialization.
+pub const MAX_ACTIVE_TEMPLATES: usize = 256;
+const MAX_TEMPLATE_TOKENS: usize = 6;
+const TEMPLATE_FUNCTION_WORDS: &[&str] = &[
+    "is", "a", "an", "the", "of", "to", "in", "on", "at", "for", "and", "or", "with", "as", "his",
+    "her", "their", "its", "was", "were", "be", "been", "has", "have", "had", "by", "from", "that",
+    "this", "it", "are", "am", "now", "also", "just", "very", "still", "not", "no", "never",
+];
+
+/// A learned template as reported by [`YantrikDB::learned_relation_patterns`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct LearnedRelationPattern {
+    pub namespace: String,
+    pub rel_type: String,
+    pub phrase: String,
+    pub pair_count: i64,
+    pub active: bool,
+    pub first_seen: f64,
+    pub last_seen: f64,
+}
+
+/// The between-window phrase a grounded claim teaches, or `None` when the
+/// text offers no admissible one. Pure; unit-tested below.
+pub(crate) fn template_phrase(text: &str, src: &str, dst: &str) -> Option<String> {
+    let lower = text.to_lowercase();
+    let src_l = src.to_lowercase();
+    let dst_l = dst.to_lowercase();
+    let pos_a = lower.find(&src_l)?;
+    let start = pos_a + src_l.len();
+    let rel = lower.get(start..)?.find(&dst_l)?;
+    let pos_b = start + rel;
+    if pos_b - pos_a > 150 {
+        return None;
+    }
+    let between = lower.get(start..pos_b)?;
+    let tokens: Vec<&str> = between
+        .split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .filter(|t| !t.is_empty())
+        .filter(|t| !crate::graph::negation_cue(t))
+        .collect();
+    if tokens.is_empty() || tokens.len() > MAX_TEMPLATE_TOKENS {
+        return None;
+    }
+    if !tokens
+        .iter()
+        .any(|t| t.chars().count() >= 3 && !TEMPLATE_FUNCTION_WORDS.contains(t))
+    {
+        return None;
+    }
+    Some(tokens.join(" "))
+}
+
+impl super::YantrikDB {
+    fn mine_relation_template(
+        &self,
+        text: &str,
+        src: &str,
+        rel_type: &str,
+        dst: &str,
+        namespace: &str,
+    ) -> Result<()> {
+        if self.is_encrypted() {
+            return Ok(());
+        }
+        let Some(phrase) = template_phrase(text, src, dst) else {
+            return Ok(());
+        };
+        let ts = now();
+        let conn = self.conn();
+        conn.execute(
+            "INSERT OR IGNORE INTO learned_relation_pattern_support \
+             (namespace, rel_type, phrase, src_norm, dst_norm) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                namespace,
+                rel_type,
+                phrase,
+                src.to_lowercase(),
+                dst.to_lowercase()
+            ],
+        )?;
+        let pairs: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM learned_relation_pattern_support \
+             WHERE namespace = ?1 AND rel_type = ?2 AND phrase = ?3",
+            params![namespace, rel_type, phrase],
+            |r| r.get(0),
+        )?;
+        let active = i64::from(pairs >= TEMPLATE_PROMOTION_PAIRS);
+        conn.execute(
+            "INSERT INTO learned_relation_patterns \
+             (namespace, rel_type, phrase, pair_count, active, first_seen, last_seen) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6) \
+             ON CONFLICT(namespace, rel_type, phrase) DO UPDATE SET \
+             pair_count = ?4, active = ?5, last_seen = ?6",
+            params![namespace, rel_type, phrase, pairs, active, ts],
+        )?;
+        Ok(())
+    }
+
+    /// Active templates for a namespace, strongest first, bounded — what
+    /// the materializer applies to a plain write.
+    pub(crate) fn active_relation_templates(
+        conn: &rusqlite::Connection,
+        namespace: &str,
+    ) -> Vec<(String, String)> {
+        let Ok(mut stmt) = conn.prepare_cached(
+            "SELECT phrase, rel_type FROM learned_relation_patterns \
+             WHERE namespace = ?1 AND active = 1 \
+             ORDER BY pair_count DESC, phrase ASC LIMIT ?2",
+        ) else {
+            return Vec::new(); // pre-v51 store mid-migration: no templates
+        };
+        stmt.query_map(params![namespace, MAX_ACTIVE_TEMPLATES as i64], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+        })
+        .map(|rows| rows.filter_map(|x| x.ok()).collect())
+        .unwrap_or_default()
+    }
+
+    /// Every learned template (active or still gathering support) in a
+    /// namespace — the audit surface for what the store has taught itself.
+    pub fn learned_relation_patterns(
+        &self,
+        namespace: &str,
+    ) -> Result<Vec<LearnedRelationPattern>> {
+        let conn = self.conn();
+        let mut stmt = conn.prepare(
+            "SELECT namespace, rel_type, phrase, pair_count, active, first_seen, last_seen \
+             FROM learned_relation_patterns WHERE namespace = ?1 \
+             ORDER BY active DESC, pair_count DESC, rel_type ASC, phrase ASC",
+        )?;
+        let rows = stmt
+            .query_map(params![namespace], |r| {
+                Ok(LearnedRelationPattern {
+                    namespace: r.get(0)?,
+                    rel_type: r.get(1)?,
+                    phrase: r.get(2)?,
+                    pair_count: r.get(3)?,
+                    active: r.get::<_, i64>(4)? != 0,
+                    first_seen: r.get(5)?,
+                    last_seen: r.get(6)?,
+                })
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        Ok(rows)
+    }
+
+    /// Forget every learned template in a namespace (and its support).
+    /// Claims already minted by those templates stay — they are ordinary
+    /// claims with `extractor = 'learned_v1'` and their own provenance.
+    /// Returns the number of templates removed.
+    pub fn forget_learned_relation_patterns(&self, namespace: &str) -> Result<usize> {
+        let conn = self.conn();
+        conn.execute(
+            "DELETE FROM learned_relation_pattern_support WHERE namespace = ?1",
+            params![namespace],
+        )?;
+        let n = conn.execute(
+            "DELETE FROM learned_relation_patterns WHERE namespace = ?1",
+            params![namespace],
+        )?;
+        Ok(n)
+    }
+}
+
+#[cfg(test)]
+mod template_phrase_tests {
+    use super::template_phrase;
+
+    #[test]
+    fn phrase_between_subject_and_object() {
+        assert_eq!(
+            template_phrase("Dana mentors Priya at Acme.", "Dana", "Priya"),
+            Some("mentors".into())
+        );
+        assert_eq!(
+            template_phrase(
+                "Alice Moreau is the lead reviewer for Fennwick Labs.",
+                "Alice Moreau",
+                "Fennwick Labs"
+            ),
+            Some("is the lead reviewer for".into())
+        );
+        // Negation cues are stripped so the phrase matches the positive form.
+        assert_eq!(
+            template_phrase("Dana does not mentor Priya.", "Dana", "Priya"),
+            Some("does mentor".into())
+        );
+    }
+
+    #[test]
+    fn function_word_windows_and_bad_shapes_are_refused() {
+        assert_eq!(
+            template_phrase("Pranab is a Vim user.", "Pranab", "Vim"),
+            None
+        );
+        assert_eq!(
+            template_phrase("Priya was mentored by Dana.", "Dana", "Priya"),
+            None,
+            "object before subject"
+        );
+        assert_eq!(
+            template_phrase("Dana Priya", "Dana", "Priya"),
+            None,
+            "empty window"
+        );
+        let long = format!("Dana {} Priya", "word ".repeat(7));
+        assert_eq!(
+            template_phrase(&long, "Dana", "Priya"),
+            None,
+            "more than six tokens"
+        );
+        let far = format!("Dana {} Priya", "x".repeat(200));
+        assert_eq!(
+            template_phrase(&far, "Dana", "Priya"),
+            None,
+            "outside the 150-char window"
+        );
     }
 }

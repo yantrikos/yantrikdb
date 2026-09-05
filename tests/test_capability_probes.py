@@ -293,3 +293,22 @@ def test_stated_preference_contradiction_surfaces(db):
     db.think()
     found = _conflict_between(db, a, b)
     assert found and found[0]["conflict_type"] == "preference", db.get_conflicts()
+
+
+# ── self-mined templates: stated claims teach the extractor ──────────────
+
+
+def test_two_stated_pairs_teach_a_template_that_extracts_from_plain_writes(db):
+    a = db.record("Dana mentors Priya on the data platform.")
+    db.attach_claims(a, [{"subject": "Dana", "relation": "mentors", "object": "Priya"}])
+    assert db.learned_relation_patterns()[0]["active"] is False
+    b = db.record("Kim mentors Alex during onboarding.")
+    db.attach_claims(b, [{"subject": "Kim", "relation": "mentors", "object": "Alex"}])
+    patterns = db.learned_relation_patterns()
+    assert patterns[0]["phrase"] == "mentors" and patterns[0]["active"] is True, patterns
+
+    db.record("Sam mentors Jordan on release engineering.")  # plain write, no claim
+    db.think()
+    assert ("Sam", "mentors", "Jordan") in {(e["src"], e["rel_type"], e["dst"]) for e in db.get_edges("Sam")}
+    assert db.forget_learned_relation_patterns() == 1
+    assert db.learned_relation_patterns() == []
