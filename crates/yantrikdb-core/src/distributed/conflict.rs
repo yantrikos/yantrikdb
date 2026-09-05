@@ -229,8 +229,38 @@ fn find_memory_for_edge(
     );
 
     match result {
-        Ok(rid) => Ok(rid),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Ok(rid @ Some(_)) => Ok(rid),
+        Ok(None) | Err(rusqlite::Error::QueryReturnedNoRows) => {
+            // The oplog scrape above only knows edges written by relate().
+            // A WRITER-STATED claim (cooperative claims, 2026-09-05) carries
+            // its provenance directly in `claims.source_memory_rid`; without
+            // this fallback two stated preferences about one subject formed
+            // a perfect identity/preference candidate and then vanished,
+            // because neither edge could be tied to a memory. Scoped to
+            // `agent_stated` on purpose: heuristic claims also carry
+            // provenance, but admitting them here would start surfacing
+            // conflicts on every store that never asked for them — that is
+            // a separate, gated decision.
+            let stated = conn.query_row(
+                "SELECT source_memory_rid FROM claims
+                 WHERE src = ?1 AND dst = ?2 AND rel_type = ?3
+                   AND tombstoned = 0 AND source_memory_rid IS NOT NULL
+                   AND extractor = ?4
+                 ORDER BY created_at DESC LIMIT 1",
+                params![
+                    src,
+                    dst,
+                    rel_type,
+                    crate::engine::graph_ops::STATED_CLAIM_EXTRACTOR
+                ],
+                |row| row.get::<_, Option<String>>(0),
+            );
+            match stated {
+                Ok(rid) => Ok(rid),
+                Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+                Err(e) => Err(e.into()),
+            }
+        }
         Err(e) => Err(e.into()),
     }
 }

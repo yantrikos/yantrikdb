@@ -41,6 +41,10 @@ pub use engine::conversation::{Turn, DEFAULT_TURN_WINDOW};
 pub use engine::demand::KnowledgeGap;
 pub use engine::digest::{ChangesSince, SessionDigest, SessionDigestConfig, StatusTransition};
 pub use engine::graph_ops::AutoRelateReport;
+pub use engine::graph_ops::{
+    AcceptedClaim, AttachClaimsReport, RejectedClaim, StatedClaim, MAX_STATED_CLAIMS,
+    STATED_CLAIM_EXTRACTOR,
+};
 pub use engine::importance::ImportanceRecalibrationReport;
 pub use engine::links::ChainAuditReport;
 pub use engine::maintenance::{MaintenanceCycleConfig, MaintenanceCycleReport, MaintenanceDebt};

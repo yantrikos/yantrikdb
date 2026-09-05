@@ -1126,3 +1126,261 @@ mod entity_search_tests {
         assert_eq!(maximum.len(), 2);
     }
 }
+
+// ── Cooperative claims (2026-09-05) ────────────────────────────────────
+//
+// The agent that writes a memory is already a language model; the engine
+// is not. The heuristic extractor mints relations for a handful of
+// sentence shapes (measured 2026-09-05: five of twenty), so most facts a
+// writer states never reach the claims table, and the contradiction and
+// succession machinery that reads that table stays blind to them.
+//
+// `attach_claims` lets the WRITER state the claims a memory makes, and
+// the engine grounds each one MECHANICALLY before storing it: subject and
+// object must occur in the memory's own text (the same whole-token match
+// the extractor uses), the relation must be a bounded snake_case token,
+// and phantom names are refused with the same predicate the read lanes
+// apply. Nothing is inferred; a claim the text does not support is
+// rejected with a reason, never silently dropped. Accepted claims carry
+// provenance (`source_memory_rid`), so the claims lane, the claim-chain
+// traversal, the conflict scanners and entity threads all see them —
+// with zero model calls inside the engine.
+
+/// The writer-stated claim extractor label (`claims.extractor`).
+pub const STATED_CLAIM_EXTRACTOR: &str = "agent_stated";
+/// Claims accepted per `attach_claims` call.
+pub const MAX_STATED_CLAIMS: usize = 32;
+const MAX_STATED_ENDPOINT_BYTES: usize = 128;
+const MAX_STATED_REL_BYTES: usize = 64;
+
+/// A claim the writer states about a memory it recorded.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StatedClaim {
+    pub src: String,
+    pub rel_type: String,
+    pub dst: String,
+    /// `1` asserted (default), `-1` denied.
+    #[serde(default = "default_polarity")]
+    pub polarity: i32,
+}
+
+fn default_polarity() -> i32 {
+    1
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct AcceptedClaim {
+    pub claim_id: String,
+    pub src: String,
+    pub rel_type: String,
+    pub dst: String,
+    pub polarity: i32,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct RejectedClaim {
+    pub src: String,
+    pub rel_type: String,
+    pub dst: String,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct AttachClaimsReport {
+    pub memory_rid: String,
+    pub accepted: Vec<AcceptedClaim>,
+    pub rejected: Vec<RejectedClaim>,
+}
+
+/// Canonical relation token: lowercase, `[a-z0-9_]`, separators folded
+/// to `_`, no leading/trailing/double underscores. `None` when nothing
+/// admissible survives.
+pub(crate) fn normalize_relation(rel: &str) -> Option<String> {
+    let mut out = String::with_capacity(rel.len());
+    let mut last_sep = true;
+    for c in rel.trim().chars() {
+        let c = c.to_ascii_lowercase();
+        if c.is_ascii_alphanumeric() {
+            out.push(c);
+            last_sep = false;
+        } else if !last_sep {
+            out.push('_');
+            last_sep = true;
+        }
+    }
+    while out.ends_with('_') {
+        out.pop();
+    }
+    if out.is_empty()
+        || out.len() > MAX_STATED_REL_BYTES
+        || !out.chars().next().is_some_and(|c| c.is_ascii_alphabetic())
+    {
+        return None;
+    }
+    Some(out)
+}
+
+impl super::YantrikDB {
+    /// Ground and store the claims a writer states about `memory_rid`.
+    /// See the module note above. Errors only on an unknown or inactive
+    /// memory or an oversized batch; per-claim problems are REPORTED in
+    /// `rejected`, never raised.
+    pub fn attach_claims(
+        &self,
+        memory_rid: &str,
+        claims: &[StatedClaim],
+    ) -> Result<AttachClaimsReport> {
+        use crate::error::YantrikDbError;
+        if claims.len() > MAX_STATED_CLAIMS {
+            return Err(YantrikDbError::InvalidInput(format!(
+                "attach_claims: {} claims exceed the cap of {MAX_STATED_CLAIMS}",
+                claims.len()
+            )));
+        }
+        let memory = self
+            .get(memory_rid)?
+            .ok_or_else(|| YantrikDbError::NotFound(format!("memory {memory_rid}")))?;
+        if memory.consolidation_status != "active" {
+            return Err(YantrikDbError::InvalidInput(format!(
+                "attach_claims: memory {memory_rid} is {}, not active",
+                memory.consolidation_status
+            )));
+        }
+        let text_tokens = crate::graph::tokenize(&memory.text);
+        let mut report = AttachClaimsReport {
+            memory_rid: memory_rid.to_string(),
+            accepted: Vec::new(),
+            rejected: Vec::new(),
+        };
+        let mut seen_in_batch: std::collections::HashSet<(String, String, String, i32)> =
+            std::collections::HashSet::new();
+
+        for claim in claims {
+            let src = claim.src.trim();
+            let dst = claim.dst.trim();
+            let reject = |reason: String, report: &mut AttachClaimsReport| {
+                report.rejected.push(RejectedClaim {
+                    src: src.to_string(),
+                    rel_type: claim.rel_type.clone(),
+                    dst: dst.to_string(),
+                    reason,
+                });
+            };
+            let Some(rel) = normalize_relation(&claim.rel_type) else {
+                reject(
+                    "relation must normalize to a snake_case token of at most 64 bytes starting with a letter".into(),
+                    &mut report,
+                );
+                continue;
+            };
+            if claim.polarity != 1 && claim.polarity != -1 {
+                reject(
+                    "polarity must be 1 (asserted) or -1 (denied)".into(),
+                    &mut report,
+                );
+                continue;
+            }
+            if src.is_empty() || dst.is_empty() {
+                reject("subject and object must be non-empty".into(), &mut report);
+                continue;
+            }
+            if src.len() > MAX_STATED_ENDPOINT_BYTES || dst.len() > MAX_STATED_ENDPOINT_BYTES {
+                reject(
+                    format!("subject and object must be at most {MAX_STATED_ENDPOINT_BYTES} bytes"),
+                    &mut report,
+                );
+                continue;
+            }
+            if crate::graph::is_rejected_entity_name(src)
+                || crate::graph::is_rejected_entity_name(dst)
+            {
+                reject("subject or object is not an admissible entity name (stopword, heading or bare number)".into(), &mut report);
+                continue;
+            }
+            if src.eq_ignore_ascii_case(dst) {
+                reject("subject and object are the same entity".into(), &mut report);
+                continue;
+            }
+            // GROUNDING — the whole point. Same predicate the extractor and
+            // the entity backfill use; whole tokens, case-insensitive.
+            let mut missing = Vec::new();
+            if !crate::graph::entity_matches_text(src, &text_tokens) {
+                missing.push(format!("subject {src:?}"));
+            }
+            if !crate::graph::entity_matches_text(dst, &text_tokens) {
+                missing.push(format!("object {dst:?}"));
+            }
+            if !missing.is_empty() {
+                reject(
+                    format!(
+                        "not grounded: {} does not occur in the memory text",
+                        missing.join(" and ")
+                    ),
+                    &mut report,
+                );
+                continue;
+            }
+            if !seen_in_batch.insert((
+                src.to_lowercase(),
+                rel.clone(),
+                dst.to_lowercase(),
+                claim.polarity,
+            )) {
+                reject(
+                    "duplicate of an earlier claim in this batch".into(),
+                    &mut report,
+                );
+                continue;
+            }
+            let claim_id = self.ingest_claim(
+                src,
+                &rel,
+                dst,
+                &memory.namespace,
+                claim.polarity,
+                "asserted",
+                None,
+                None,
+                STATED_CLAIM_EXTRACTOR,
+                Some("1.0"),
+                "high",
+                Some(memory_rid),
+                None,
+                None,
+                1.0,
+            )?;
+            // The memory now carries its endpoints as entities SYNCHRONOUSLY —
+            // a stated claim closes the materializer's read-your-writes gap
+            // for exactly the entities the writer cared about.
+            self.link_memory_entity(memory_rid, src)?;
+            self.link_memory_entity(memory_rid, dst)?;
+            report.accepted.push(AcceptedClaim {
+                claim_id,
+                src: src.to_string(),
+                rel_type: rel,
+                dst: dst.to_string(),
+                polarity: claim.polarity,
+            });
+        }
+        Ok(report)
+    }
+}
+
+#[cfg(test)]
+mod stated_claim_tests {
+    use super::normalize_relation;
+
+    #[test]
+    fn relation_normalization() {
+        assert_eq!(normalize_relation("prefers"), Some("prefers".into()));
+        assert_eq!(normalize_relation(" Works At "), Some("works_at".into()));
+        assert_eq!(normalize_relation("lives-in"), Some("lives_in".into()));
+        assert_eq!(
+            normalize_relation("is the CEO of"),
+            Some("is_the_ceo_of".into())
+        );
+        assert_eq!(normalize_relation("__"), None);
+        assert_eq!(normalize_relation("1st"), None);
+        assert_eq!(normalize_relation(&"x".repeat(65)), None);
+    }
+}

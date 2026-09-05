@@ -44,6 +44,8 @@ mod reembed_router;
 mod replication_api;
 mod ryw_visibility;
 mod source_turn_columns;
+#[cfg(feature = "bundled-embedder")]
+mod stated_claims;
 mod storage_fts;
 mod trace_entities;
 mod write_stats;

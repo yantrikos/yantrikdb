@@ -251,3 +251,45 @@ def test_claim_chain_does_not_displace_direct_hits(db):
     db.think({"run_consolidation": False})
     hits = rids(db.recall(query="What does Alice Moreau do at work?", top_k=5, skip_reinforce=True))
     assert hits.index(direct) < hits.index(hop)
+
+
+# ── cooperative claims: the writer states, the engine grounds ───────────
+
+
+def test_stated_claims_are_grounded_and_rejections_carry_reasons(db):
+    rid = db.record("Pranab prefers Vim for editing Rust.")
+    report = db.attach_claims(
+        rid,
+        [
+            {"subject": "Pranab", "relation": "prefers", "object": "Vim"},
+            {"subject": "Pranab", "relation": "prefers", "object": "Emacs"},
+        ],
+    )
+    assert [(a["src"], a["rel_type"], a["dst"]) for a in report["accepted"]] == [("Pranab", "prefers", "Vim")]
+    assert len(report["rejected"]) == 1 and "Emacs" in report["rejected"][0]["reason"]
+    # No drain needed: the stated claim links its entities synchronously.
+    assert db.recall_thread("default", ["Pranab"], 10)["total"] == 1
+
+
+def test_stated_claims_feed_the_claims_lane(db):
+    rid = db.record("Pranab prefers Vim for editing Rust.")
+    db.attach_claims(rid, [{"src": "Pranab", "rel_type": "prefers", "dst": "Vim"}])
+    for i in range(15):
+        db.record(f"Random note {i}: the weather in Lisbon was mild and the cafe served pastel de nata.")
+    hits = db.recall(query="Which editor does Pranab prefer?", top_k=3, skip_reinforce=True)
+    why = next(h for h in hits if h["rid"] == rid)["why_retrieved"]
+    assert any(w.startswith("claims_match: Pranab -prefers-> Vim") for w in why), why
+
+
+def test_stated_preference_contradiction_surfaces(db):
+    """`prefers` is on the preference whitelist but no extractor template
+    mints it (and must not: it is multi-valued across domains). A writer
+    that STATES both preferences gets the contradiction surfaced."""
+    a = db.record("Pranab prefers Vim as his editor.")
+    db.attach_claims(a, [{"subject": "Pranab", "relation": "prefers", "object": "Vim"}])
+    db.think()
+    b = db.record("Pranab prefers Emacs as his editor now.")
+    db.attach_claims(b, [{"subject": "Pranab", "relation": "prefers", "object": "Emacs"}])
+    db.think()
+    found = _conflict_between(db, a, b)
+    assert found and found[0]["conflict_type"] == "preference", db.get_conflicts()
