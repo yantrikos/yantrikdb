@@ -3,7 +3,8 @@
 ## Decision
 
 **No harm, no measurable line movement.** The branch
-`feat/extractor-word-boundaries-and-capability-probes` (head `74cd9a8`)
+`feat/extractor-word-boundaries-and-capability-probes` (head `74cd9a8`, re-parented to
+`80dda74` when the branch was rebased onto main; identical tree)
 changes the retrieved set on 24 of 400 BEAM-100K queries. On those 24, a
 same-day paired judged run scored +0.038 for the branch with a bootstrap
 interval that includes zero (6 wins, 15 ties, 3 losses). Projected onto the
@@ -77,7 +78,7 @@ under the exact `ydb-0151` recipe: the d5c8196 harness (git worktree) with
 `YDB_BENCH_RELATIONS=query`, `REL_ORDER=chrono`, `REL_TAGS=minimal`,
 `REL_SCAFFOLD=1`, `TURN_AWARE=1`, `TOPK=40`, `EMBEDDER=potion-base-8M`, and
 `deepseek-v4-flash:0731-cloud` pinned for answer and judge (`ydb-0151` used
-the rolling `:cloud` tag on 2026-08-16). Run `ydb-branch-74cd9a8`, 1 h 20 m,
+the rolling `:cloud` tag on 2026-08-16). Run `ydb-branch-74cd9a8` (the engine build now at `80dda74`), 1 h 20 m,
 result SHA-256 prefix `50976b9fb75b9bca`.
 
 | Category | branch | ydb-0151 | delta | W/T/L | identical turn sets |
