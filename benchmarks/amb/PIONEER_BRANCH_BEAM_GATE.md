@@ -13,10 +13,14 @@ release is passed on the "does not hurt" side; it makes no lift claim.
 
 ## Method — judge-free gate first, judge only where retrieval changed
 
-1. `context_diff_arm.py` (AMB fork) re-ran the frozen `ydb-0151` retrieval
-   configuration — provider `yantrikdb`, `YDB_BENCH_TURN_AWARE=1`,
-   `YDB_BENCH_TOPK=40`, `YDB_BENCH_EMBEDDER=potion-base-8M` — for all 400
-   queries, once per build, same day, same machine:
+1. `context_diff_arm.py` (AMB fork) re-ran the `ydb-0151` retrieval
+   environment — provider `yantrikdb`, `YDB_BENCH_TURN_AWARE=1`,
+   `YDB_BENCH_TOPK=40`, `YDB_BENCH_EMBEDDER=potion-base-8M` — with the fork's
+   CURRENT provider code (relevance-ordered raw chunks; `ydb-0151` itself
+   also carried the env-gated conditional timeline lane, absent here), for
+   all 400 queries, once per build, same day, same machine. Both arms share
+   the provider byte for byte, so the A/B is exact; the scores are not
+   line-comparable to `ydb-0151`'s per-category numbers:
    - A: published `yantrikdb==0.18.0` wheel;
    - B: the branch built into the same harness venv.
 2. `compare_contexts.py` diffed the 400 contexts query by query.
