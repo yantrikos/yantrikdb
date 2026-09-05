@@ -36,6 +36,10 @@ const IDENTITY_REL_TYPES: &[&str] = &[
     "phone",
     "full_name",
     "spouse",
+    // The heuristic extractor mints `married_to` ("is married to"), never
+    // `spouse`; without this entry a second spouse edge was classified
+    // Minor and never surfaced (population-of-zero whitelist entry).
+    "married_to",
     "hometown",
 ];
 
@@ -1126,6 +1130,8 @@ mod tests {
     fn test_classify_conflict() {
         assert_eq!(classify_conflict("birthday"), ConflictType::IdentityFact);
         assert_eq!(classify_conflict("works_at"), ConflictType::IdentityFact);
+        assert_eq!(classify_conflict("married_to"), ConflictType::IdentityFact);
+        assert_eq!(classify_conflict("lives_in"), ConflictType::IdentityFact);
         assert_eq!(classify_conflict("favorite"), ConflictType::Preference);
         assert_eq!(classify_conflict("prefers"), ConflictType::Preference);
         assert_eq!(classify_conflict("random_rel"), ConflictType::Minor);
