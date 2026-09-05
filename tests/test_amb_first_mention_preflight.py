@@ -112,3 +112,55 @@ def test_sessions_split_on_header_date():
     ]
     sessions = sessions_of(docs)
     assert [[t["turn"] for t in s] for s in sessions] == [[0, 1, 2], [3, 4]]
+
+
+# ── preflight 3: lexical openers / TextTiling ──────────────────────────
+
+from benchmarks.amb.lexical_opener_preflight import (  # noqa: E402
+    content_terms,
+    opener_scores,
+    tiling_depths,
+    user_turns_of,
+)
+
+
+def test_content_terms_drop_header_and_stopwords():
+    terms = content_terms("[March-15-2024 | Turn 2] User: Sure, let's build the authentication module first.")
+    assert "authentication" in terms and "module" in terms and "build" in terms
+    assert "turn" not in terms and "user" not in terms and "first" not in terms
+
+
+def _turns():
+    docs = [{
+        "id": "1_s0_0",
+        "content": (
+            "[March-15-2024 | Turn 0] User: I want authentication with sessions.\n\n"
+            "[March-15-2024 | Turn 1] Assistant: ok\n\n"
+            "[March-15-2024 | Turn 2] User: authentication sessions again please.\n\n"
+            "[March-15-2024 | Turn 3] Assistant: ok\n\n"
+            "[March-15-2024 | Turn 4] User: authentication sessions once more.\n\n"
+            "[March-15-2024 | Turn 5] Assistant: ok\n\n"
+            "[March-15-2024 | Turn 6] User: Now deployment pipelines and docker.\n\n"
+            "[March-15-2024 | Turn 7] Assistant: ok\n\n"
+            "[March-15-2024 | Turn 8] User: deployment pipelines docker again."
+        ),
+    }]
+    return user_turns_of(docs)
+
+
+def test_opener_scores_credit_the_first_turn_of_a_recurring_term():
+    turns = _turns()
+    scores = opener_scores(turns, min_recur=2)
+    # "authentication"/"sessions" recur in two later user turns → turn 0 opens two threads
+    assert scores[0] == 2.0
+    # deployment/pipelines/docker recur only once more → below min_recur=2
+    assert scores.get(6, 0.0) == 0.0
+    assert opener_scores(turns, min_recur=1)[6] == 3.0
+
+
+def test_tiling_depth_is_highest_at_the_topic_shift():
+    turns = _turns()
+    depths = tiling_depths(turns, window=1)
+    shift = depths[6]
+    assert shift > depths[2] and shift > depths[4] and shift > depths[8]
+    assert depths[0] > shift, "the first turn always opens a tile"

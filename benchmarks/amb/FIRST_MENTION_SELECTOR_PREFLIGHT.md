@@ -87,10 +87,40 @@ count in 1/40 queries.
 | top-1 of the whole session | 0.159 | 0.085 | 8.9 |
 | top-2 of the first five user turns | 0.248 | 0.095 | 13.4 |
 
+## Preflight 3 — lexical structure (no embeddings)
+
+`lexical_opener_preflight.py`, artifact
+`artifacts/event40-lexical-opener-preflight-v1.json`, SHA-256
+`7b7d3655fede31b82b10191c31c17b764462b8a067dd864524531ba45e48aef8`.
+
+Asked after the first two: could a discourse-shaped, model-free signal do
+what similarity cannot? Two classic candidates, same stores, same gold.
+
+Signal diagnostic (per user turn, all 40 queries):
+
+| Signal | Gold mean | Non-gold mean | Gold rank percentile |
+|---|---:|---:|---:|
+| thread opener (terms introduced that recur in ≥3 later turns) | 2.05 | 1.18 | 0.39 |
+| TextTiling depth (window 2) | 0.178 | 0.176 | 0.47 |
+
+Thread openers are the only signal in three preflights that is not flat:
+gold turns introduce almost twice as many recurring terms. It is still far
+too weak to select on. Best clean rows:
+
+| Selector | Recall | Precision | Rows |
+|---|---:|---:|---:|
+| thread opener ({"min_recur": 2, "floor": 0.5, "mix": true, "cap_mult": 1}) | 0.105 | 0.118 | 5.2 |
+| TextTiling ({"window": 3, "floor": 0.5, "mix": false, "cap_mult": 2}) | 0.135 | 0.079 | 10.3 |
+
+Verdict unchanged: no LLM-free selector reaches 0.25 recall or 0.12
+precision. The remaining unmeasured option is a small trained sub-topic
+opener classifier, which must be trained on non-BEAM or held-out splits.
+
 ## What this permits and forbids
 
-- Do not build an embedding-novelty or session-sampling "first mention"
-  recall mode against this benchmark; the instrument says it cannot work.
+- Do not build an embedding-novelty, session-sampling, thread-opener or
+  TextTiling "first mention" recall mode against this benchmark; the
+  instrument says none of them can work.
 - The remaining event-ordering levers are the opt-in read-time LLM selector
   (+0.058, 2026-08-19) and write-time organizer routes, both rejected as
   defaults for cross-category harm. Neither is core-engine work.
@@ -109,6 +139,8 @@ python -m benchmarks.amb.first_mention_preflight `
   --out fm-preflight.json --embed-cache nomic-cache.json --store-dir stores
 python -m benchmarks.amb.session_stratified_preflight `
   --documents ... --beam-source ... --store-dir stores --out session-preflight.json
+python -m benchmarks.amb.lexical_opener_preflight `
+  --documents ... --beam-source ... --store-dir stores --out lexical-preflight.json
 ```
 
 Run them as modules from the repository root: executed as plain scripts,
