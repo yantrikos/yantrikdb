@@ -69,6 +69,46 @@ knowledge_update and temporal unchanged. One draw per query; individual
 rows carry the ±0.13 answer-generation variance measured on 2026-08-20, so
 none of the per-category numbers is a claim.
 
+
+## Full-line run under the ydb-0151 recipe (2026-09-05, later the same day)
+
+To answer "where are the gaps NOW", the branch engine ran all 400 queries
+under the exact `ydb-0151` recipe: the d5c8196 harness (git worktree) with
+`YDB_BENCH_RELATIONS=query`, `REL_ORDER=chrono`, `REL_TAGS=minimal`,
+`REL_SCAFFOLD=1`, `TURN_AWARE=1`, `TOPK=40`, `EMBEDDER=potion-base-8M`, and
+`deepseek-v4-flash:0731-cloud` pinned for answer and judge (`ydb-0151` used
+the rolling `:cloud` tag on 2026-08-16). Run `ydb-branch-74cd9a8`, 1 h 20 m,
+result SHA-256 prefix `50976b9fb75b9bca`.
+
+| Category | branch | ydb-0151 | delta | W/T/L | identical turn sets |
+|---|---:|---:|---:|---:|---:|
+| abstention | 0.725 | 0.675 | +0.050 | 5/32/3 | 30/40 |
+| contradiction_resolution | 0.847 | 0.828 | +0.019 | 9/23/8 | 31/40 |
+| event_ordering | 0.289 | 0.291 | −0.002 | 10/21/9 | 35/40 |
+| information_extraction | 0.797 | 0.773 | +0.023 | 6/28/6 | 37/40 |
+| instruction_following | 0.800 | 0.787 | +0.013 | 2/36/2 | 39/40 |
+| knowledge_update | 0.519 | 0.631 | −0.113 | 0/35/5 | 38/40 |
+| multi_session_reasoning | 0.573 | 0.611 | −0.038 | 5/26/9 | 38/40 |
+| preference_following | 0.844 | 0.912 | −0.069 | 1/34/5 | 34/40 |
+| summarization | 0.587 | 0.593 | −0.006 | 11/19/10 | 38/40 |
+| temporal_reasoning | 0.375 | 0.412 | −0.037 | 0/37/3 | 38/40 |
+| **all** | **0.6355** | **0.6515** | **−0.016** | | **358/400** |
+
+Paired bootstrap 95% CI on the line delta: [−0.040, +0.009].
+
+**Attribution.** The retrieved turn sets are identical on 358 of 400
+queries (mean Jaccard 0.978) between engine 0.15.1 and this branch. Every
+query that lost score in knowledge_update, preference_following and
+temporal_reasoning had an identical context (Jaccard 1.00, no turns added
+or removed); the answer changed, not the evidence — e.g. `8_knowledge_update_0`
+went from "April 22" to "May 12" and `3_knowledge_update_0` from "April 5"
+to "April 1" on the same forty chunks, and `7_preference_following_0`
+flipped to an abstention. The −1.6 points is answerer/judge drift between
+the August rolling tag and today's pinned snapshot, not an engine
+regression. Consequence: the `ydb-0151` per-category gap map still
+describes the current engine; the knowledge_update losses are the reader
+choosing between a stale and a current value on identical evidence.
+
 ## Hashes
 
 - Capture A `ctx-0180-published.json` and B `ctx-patched.json`: regenerate
