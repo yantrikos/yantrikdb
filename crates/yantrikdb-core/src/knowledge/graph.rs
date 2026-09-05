@@ -601,6 +601,212 @@ const REVERSE_ROLE_PATTERNS: &[(&str, &str)] = &[
     ("head", "leads"),
 ];
 
+/// Anchored patterns: the object entity must IMMEDIATELY follow the phrase
+/// (the between-window ends with it). These mint the single-valued place
+/// facts the conflict whitelist already names (`lives_in`, `hometown`).
+/// Before this table no template produced either relation, so those
+/// whitelist entries applied to a population of zero: "Pranab lives in
+/// Berlin" then "Pranab lives in Munich" could never surface a conflict.
+///
+/// Anchoring is the precision rule that lets these exist at all: "lives in
+/// Berlin with Maria" mints Berlin only, because the window before Maria
+/// ("lives in berlin with") does not end with the phrase. "moved to" and
+/// "relocated to" map onto `lives_in` deliberately — same functional key,
+/// so the claim scanner sees a succession instead of two unrelated facts.
+/// Multi-valued preferences (`prefers`, `likes`) are NOT here: the
+/// edge-based scan flags any distinct object pair for preference relations,
+/// so "prefers Vim" + "prefers tea" would become a false conflict.
+const ANCHORED_RELATION_PATTERNS: &[(&[&str], &str)] = &[
+    (
+        &[
+            "lives in",
+            "live in",
+            "living in",
+            "now lives in",
+            "resides in",
+            "reside in",
+            "residing in",
+            "moved to",
+            "has moved to",
+            "relocated to",
+            "has relocated to",
+        ],
+        "lives_in",
+    ),
+    (
+        &["hometown is", "grew up in", "originally from"],
+        "hometown",
+    ),
+];
+
+/// True when `phrase` occurs in `hay` as whole words: the byte before the
+/// match and the byte after it are absent or non-alphanumeric.
+///
+/// Plain `str::contains` matched inside words, and the extractor is the
+/// only gate between text and the claims table: "unfounded rumors" minted
+/// `founded`, and "is headquartered in" minted a reversed `leads` edge
+/// because it contains the possessive role form "s head".
+fn contains_word_phrase(hay: &str, phrase: &str) -> bool {
+    if phrase.is_empty() {
+        return false;
+    }
+    let mut start = 0;
+    while let Some(idx) = hay[start..].find(phrase) {
+        let at = start + idx;
+        let end = at + phrase.len();
+        if boundary_before(hay, at) && boundary_after(hay, end) {
+            return true;
+        }
+        // Advance by one whole char so the next slice stays on a boundary.
+        start = at + hay[at..].chars().next().map_or(1, char::len_utf8);
+    }
+    false
+}
+
+/// True when the trimmed `hay` ENDS with `phrase` as whole words — the
+/// object entity that follows the window sits directly after the phrase.
+fn ends_with_word_phrase(hay: &str, phrase: &str) -> bool {
+    let hay = hay.trim_end();
+    if phrase.is_empty() || !hay.ends_with(phrase) {
+        return false;
+    }
+    boundary_before(hay, hay.len() - phrase.len())
+}
+
+/// Possessive role forms ("'s ceo", "s head") are glued to their owner on
+/// the left, so only the keyword's END is boundary-checked.
+fn contains_phrase_end_bounded(hay: &str, phrase: &str) -> bool {
+    if phrase.is_empty() {
+        return false;
+    }
+    let mut start = 0;
+    while let Some(idx) = hay[start..].find(phrase) {
+        let at = start + idx;
+        if boundary_after(hay, at + phrase.len()) {
+            return true;
+        }
+        start = at + hay[at..].chars().next().map_or(1, char::len_utf8);
+    }
+    false
+}
+
+fn boundary_before(hay: &str, at: usize) -> bool {
+    at == 0
+        || !hay[..at]
+            .chars()
+            .next_back()
+            .is_some_and(char::is_alphanumeric)
+}
+
+fn boundary_after(hay: &str, end: usize) -> bool {
+    end >= hay.len() || !hay[end..].chars().next().is_some_and(char::is_alphanumeric)
+}
+
+/// Apply LEARNED, anchored templates (`(phrase, rel_type)` pairs mined
+/// from writer-stated claims — see `engine::graph_ops::attach_claims`) to
+/// `text`: for every ordered entity pair whose between-window ENDS with a
+/// template phrase, mint that relation. Same window, negation and
+/// modality rules as [`extract_heuristic_relations`], deliberately kept
+/// as a separate pass so the materializer can label the claims
+/// `learned_v1` and a store can forget them independently.
+pub fn extract_learned_relations(
+    text: &str,
+    entities: &[String],
+    templates: &[(String, String)],
+) -> Vec<RelationCandidate> {
+    if templates.is_empty() {
+        return vec![];
+    }
+    let mut candidates = Vec::new();
+    for w in between_windows(text, entities) {
+        for (phrase, rel_type) in templates {
+            if ends_with_word_phrase(&w.between_stripped, phrase) {
+                candidates.push(RelationCandidate {
+                    src: w.entity_a.to_string(),
+                    rel_type: rel_type.clone(),
+                    dst: w.entity_b.to_string(),
+                    polarity: w.polarity,
+                    modality: w.modality.to_string(),
+                    confidence_band: "medium".to_string(),
+                });
+                break;
+            }
+        }
+    }
+    let mut seen = std::collections::HashSet::new();
+    candidates.retain(|c| seen.insert((c.src.clone(), c.rel_type.clone(), c.dst.clone())));
+    candidates
+}
+
+/// One ordered entity pair and the text between them, as the pattern
+/// matchers see it (lowercased, negation cues stripped, polarity and
+/// modality already read off the window).
+struct BetweenWindow<'a> {
+    entity_a: &'a str,
+    entity_b: &'a str,
+    between_stripped: String,
+    polarity: i32,
+    modality: &'static str,
+}
+
+/// Every ordered (A before B, within 150 chars) entity pair with a
+/// non-empty between-window. Shared by the built-in and learned passes so
+/// both read the same windows.
+fn between_windows<'a>(text: &str, entities: &'a [String]) -> Vec<BetweenWindow<'a>> {
+    let mut out = Vec::new();
+    if entities.len() < 2 {
+        return out;
+    }
+    let text_lower = text.to_lowercase();
+    let mut entity_positions: Vec<(usize, &str)> = Vec::new();
+    for entity in entities {
+        let entity_lower = entity.to_lowercase();
+        if let Some(pos) = text_lower.find(&entity_lower) {
+            entity_positions.push((pos, entity.as_str()));
+        }
+    }
+    entity_positions.sort_by_key(|(pos, _)| *pos);
+    for i in 0..entity_positions.len() {
+        for j in (i + 1)..entity_positions.len() {
+            let (pos_a, entity_a) = entity_positions[i];
+            let (pos_b, entity_b) = entity_positions[j];
+            if pos_b - pos_a > 150 {
+                continue;
+            }
+            let between_start = pos_a + entity_a.to_lowercase().len();
+            let between_end = pos_b;
+            if between_start >= between_end || between_end > text_lower.len() {
+                continue;
+            }
+            let between = text_lower[between_start..between_end].trim();
+            if between.is_empty() {
+                continue;
+            }
+            let has_negation = NEGATION_CUES
+                .iter()
+                .any(|cue| between.split_whitespace().any(|w| w == *cue));
+            let between_stripped: String = between
+                .split_whitespace()
+                .filter(|w| !NEGATION_CUES.contains(w))
+                .collect::<Vec<_>>()
+                .join(" ");
+            let modality = if MODALITY_CUES.iter().any(|cue| between.contains(cue)) {
+                "reported"
+            } else {
+                "asserted"
+            };
+            out.push(BetweenWindow {
+                entity_a,
+                entity_b,
+                between_stripped,
+                polarity: if has_negation { -1 } else { 1 },
+                modality,
+            });
+        }
+    }
+    out
+}
+
 /// Extract candidate relations from text using entities as anchors.
 ///
 /// For each ordered pair of entities (A before B in text), examines the
@@ -674,7 +880,7 @@ pub fn extract_heuristic_relations(text: &str, entities: &[String]) -> Vec<Relat
             // Uses between_stripped (negation removed) for matching.
             for (patterns, rel_type) in RELATION_PATTERNS {
                 for pattern in *patterns {
-                    if between_stripped.contains(pattern) {
+                    if contains_word_phrase(&between_stripped, pattern) {
                         candidates.push(RelationCandidate {
                             src: entity_a.to_string(),
                             rel_type: rel_type.to_string(),
@@ -688,11 +894,29 @@ pub fn extract_heuristic_relations(text: &str, entities: &[String]) -> Vec<Relat
                 }
             }
 
+            // Anchored patterns: entity_b must directly follow the phrase.
+            for (patterns, rel_type) in ANCHORED_RELATION_PATTERNS {
+                for pattern in *patterns {
+                    if ends_with_word_phrase(&between_stripped, pattern) {
+                        candidates.push(RelationCandidate {
+                            src: entity_a.to_string(),
+                            rel_type: rel_type.to_string(),
+                            dst: entity_b.to_string(),
+                            polarity,
+                            modality: modality.to_string(),
+                            confidence_band: "medium".to_string(),
+                        });
+                        break;
+                    }
+                }
+            }
+
             // Check possessive/appositive reverse: "Acme's CEO, Alice" → ceo_of(Alice, Acme)
             for (role_keyword, rel_type) in REVERSE_ROLE_PATTERNS {
                 let possessive = format!("'s {}", role_keyword);
                 let possessive2 = format!("s {}", role_keyword);
-                if between_stripped.contains(&possessive) || between_stripped.contains(&possessive2)
+                if contains_phrase_end_bounded(&between_stripped, &possessive)
+                    || contains_phrase_end_bounded(&between_stripped, &possessive2)
                 {
                     // Reversed: entity_a is the org, entity_b is the person
                     candidates.push(RelationCandidate {
@@ -725,6 +949,11 @@ const NEGATION_CUES: &[&str] = &[
     "not", "no", "never", "denied", "refuted", "isn't", "wasn't", "aren't", "weren't", "doesn't",
     "didn't", "disputes", "denies",
 ];
+
+/// Is `word` one of the negation cues the relation window strips?
+pub fn negation_cue(word: &str) -> bool {
+    NEGATION_CUES.contains(&word)
+}
 
 /// Cues that indicate a statement has temporal scope. Used to flag that a
 /// memory would benefit from `valid_from` / `valid_to` qualifiers.
@@ -1430,6 +1659,121 @@ mod tests {
             "should find CEO + headquartered, got: {:?}",
             rels
         );
+    }
+
+    #[test]
+    fn test_extract_relations_lives_in_is_anchored_to_the_next_entity() {
+        let entities = vec![
+            "Pranab".to_string(),
+            "Berlin".to_string(),
+            "Maria".to_string(),
+        ];
+        let rels = extract_heuristic_relations("Pranab lives in Berlin with Maria", &entities);
+        let lives: Vec<_> = rels.iter().filter(|r| r.rel_type == "lives_in").collect();
+        assert_eq!(lives.len(), 1, "got: {:?}", rels);
+        assert_eq!(lives[0].src, "Pranab");
+        assert_eq!(lives[0].dst, "Berlin");
+        assert_eq!(lives[0].polarity, 1);
+    }
+
+    #[test]
+    fn test_extract_relations_moved_to_shares_the_lives_in_key() {
+        let entities = vec!["Alice Moreau".to_string(), "Munich".to_string()];
+        let rels = extract_heuristic_relations("Alice Moreau moved to Munich last year", &entities);
+        assert_eq!(rels.len(), 1, "got: {:?}", rels);
+        assert_eq!(rels[0].rel_type, "lives_in");
+        assert_eq!(rels[0].dst, "Munich");
+    }
+
+    #[test]
+    fn test_extract_relations_lives_in_negation() {
+        let entities = vec!["Pranab".to_string(), "Berlin".to_string()];
+        let rels = extract_heuristic_relations("Pranab does not live in Berlin", &entities);
+        assert_eq!(rels.len(), 1, "got: {:?}", rels);
+        assert_eq!(rels[0].rel_type, "lives_in");
+        assert_eq!(rels[0].polarity, -1);
+    }
+
+    #[test]
+    fn test_extract_relations_hometown() {
+        let entities = vec!["Pranab".to_string(), "Kolkata".to_string()];
+        for text in ["Pranab's hometown is Kolkata", "Pranab grew up in Kolkata"] {
+            let rels = extract_heuristic_relations(text, &entities);
+            assert_eq!(rels.len(), 1, "{text}: {:?}", rels);
+            assert_eq!(rels[0].rel_type, "hometown", "{text}");
+            assert_eq!(rels[0].dst, "Kolkata", "{text}");
+        }
+    }
+
+    #[test]
+    fn test_extract_relations_headquartered_does_not_mint_reverse_leads() {
+        // "is headquartered in" contains the possessive role form "s head";
+        // substring matching minted a reversed `leads` edge from every HQ
+        // sentence (measured on 0.18.0: "Berlin leads Pranab").
+        let entities = vec!["Fennwick Labs".to_string(), "Berlin".to_string()];
+        let rels =
+            extract_heuristic_relations("Fennwick Labs is headquartered in Berlin", &entities);
+        assert!(
+            rels.iter().all(|r| r.rel_type == "headquartered_in"),
+            "got: {:?}",
+            rels
+        );
+        assert_eq!(rels.len(), 1, "got: {:?}", rels);
+    }
+
+    #[test]
+    fn test_extract_relations_patterns_match_whole_words_only() {
+        let entities = vec!["Acme".to_string(), "Globex".to_string()];
+        let rels =
+            extract_heuristic_relations("Acme dismissed unfounded rumors about Globex", &entities);
+        assert!(
+            rels.is_empty(),
+            "'unfounded' must not mint founded, got: {:?}",
+            rels
+        );
+        let rels = extract_heuristic_relations("Acme founded Globex", &entities);
+        assert_eq!(rels.len(), 1, "got: {:?}", rels);
+        assert_eq!(rels[0].rel_type, "founded");
+    }
+
+    #[test]
+    fn test_extract_relations_possessive_role_still_matches() {
+        let entities = vec!["Acme".to_string(), "Alice".to_string()];
+        let rels = extract_heuristic_relations("Acme's CEO, Alice, spoke first", &entities);
+        assert!(
+            rels.iter()
+                .any(|r| r.rel_type == "ceo_of" && r.src == "Alice" && r.dst == "Acme"),
+            "got: {:?}",
+            rels
+        );
+    }
+
+    #[test]
+    fn test_extract_learned_relations_is_anchored_and_labelled() {
+        let entities = vec!["Dana".to_string(), "Priya".to_string(), "Acme".to_string()];
+        let templates = vec![("mentors".to_string(), "mentors".to_string())];
+        let rels = extract_learned_relations(
+            "Dana mentors Priya at Acme this quarter",
+            &entities,
+            &templates,
+        );
+        assert_eq!(rels.len(), 1, "got: {:?}", rels);
+        assert_eq!(
+            (
+                rels[0].src.as_str(),
+                rels[0].rel_type.as_str(),
+                rels[0].dst.as_str()
+            ),
+            ("Dana", "mentors", "Priya")
+        );
+        let rels = extract_learned_relations(
+            "Dana does not mentor Priya",
+            &entities,
+            &[("mentor".into(), "mentors".into())],
+        );
+        assert_eq!(rels.len(), 1);
+        assert_eq!(rels[0].polarity, -1);
+        assert!(extract_learned_relations("Dana mentors Priya", &entities, &[]).is_empty());
     }
 
     #[test]

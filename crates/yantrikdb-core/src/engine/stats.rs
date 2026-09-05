@@ -1488,6 +1488,51 @@ impl YantrikDB {
             );
         }
 
+        // Loop E: self-mined templates (see engine::graph_ops, "Self-mined
+        // relation templates"). Active templates for this namespace are
+        // applied to the same entity windows; a fact any extractor already
+        // recorded is not minted twice.
+        let templates = {
+            let conn = self.conn();
+            Self::active_relation_templates(&conn, namespace)
+        };
+        if !templates.is_empty() {
+            let learned = crate::graph::extract_learned_relations(text, &heuristic_vec, &templates);
+            for rel in &learned {
+                let already_exists = {
+                    let conn = self.conn();
+                    conn.query_row(
+                        "SELECT COUNT(*) FROM edges WHERE src = ?1 AND rel_type = ?2 AND dst = ?3 \
+                         AND namespace = ?4 AND tombstoned = 0",
+                        params![rel.src, rel.rel_type, rel.dst, namespace],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0)
+                        > 0
+                };
+                if already_exists {
+                    continue;
+                }
+                let _ = self.ingest_claim(
+                    &rel.src,
+                    &rel.rel_type,
+                    &rel.dst,
+                    namespace,
+                    rel.polarity,
+                    &rel.modality,
+                    None,
+                    None,
+                    crate::engine::graph_ops::LEARNED_CLAIM_EXTRACTOR,
+                    Some("1.0"),
+                    &rel.confidence_band,
+                    Some(rid),
+                    None,
+                    None,
+                    1.0,
+                );
+            }
+        }
+
         // Audit telemetry — same shape as the foreground path emitted before.
         let features = crate::graph::analyze_text_features(text, &heuristic_vec);
         tracing::info!(

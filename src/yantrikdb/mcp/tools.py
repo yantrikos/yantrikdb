@@ -28,6 +28,7 @@ def memory_record(
     domain: str = "general",
     source: str = "user",
     emotional_state: str | None = None,
+    claims: list[dict] | None = None,
     ctx: Context = None,
 ) -> str:
     """Store a new memory in the cognitive memory engine.
@@ -43,8 +44,17 @@ def memory_record(
         domain: Topic domain (work, health, family, finance, hobby, travel, general, etc.).
         source: Who/what provided this memory (user, system, document, inference).
         emotional_state: Richer emotion label: joy, sadness, anger, fear, surprise, neutral, etc.
+        claims: The facts this memory states, as {"subject", "relation", "object"}
+            triples (optional "polarity": 1 or -1), e.g.
+            [{"subject": "Pranab", "relation": "prefers", "object": "Vim"}].
+            State a claim for any fact you want tracked for contradiction,
+            succession, entity threads and multi-hop recall. The engine
+            grounds each claim against the text: subject and object must
+            occur in it, and the relation must be a short snake_case
+            phrase. Ungrounded claims are reported back, not stored.
 
-    Returns the memory ID (rid) of the stored memory.
+    Returns the memory ID (rid), and when claims were given, how many were
+    accepted and which were rejected with reasons.
     """
     db, lock = _get_db(ctx)
     with lock:
@@ -60,7 +70,14 @@ def memory_record(
             source=source,
             emotional_state=emotional_state,
         )
-    return json.dumps({"rid": rid, "status": "recorded"})
+        report = db.attach_claims(rid, claims) if claims else None
+    out = {"rid": rid, "status": "recorded"}
+    if report is not None:
+        out["claims"] = {
+            "accepted": len(report["accepted"]),
+            "rejected": report["rejected"],
+        }
+    return json.dumps(out)
 
 
 @mcp.tool()

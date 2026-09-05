@@ -32,6 +32,8 @@ mod event_time_recall;
 mod explain;
 mod idempotency;
 mod interactive_recall;
+#[cfg(feature = "bundled-embedder")]
+mod learned_templates;
 mod learning_categories;
 mod maintenance_debt;
 mod metamorphic;
@@ -44,6 +46,8 @@ mod reembed_router;
 mod replication_api;
 mod ryw_visibility;
 mod source_turn_columns;
+#[cfg(feature = "bundled-embedder")]
+mod stated_claims;
 mod storage_fts;
 mod trace_entities;
 mod write_stats;
