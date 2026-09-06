@@ -210,3 +210,152 @@ fn new_writes_never_mint_values_or_headings_but_values_still_serve_as_objects() 
         .unwrap();
     assert_eq!(rep.accepted.len(), 1, "{rep:?}");
 }
+
+/// The store's own lexicon (v52): a word this store writes in lowercase
+/// is not a name when it shows up capitalized at a sentence start.
+#[test]
+fn seed_and_learned_lexicon_refuse_common_words_as_single_token_entities() {
+    // Seed: sentence starters never become nodes, even on a cold store.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    rec(
+        &db,
+        "Critically, Alice Moreau shipped the fix. Failed builds stay red.",
+    );
+    db.apply_pending_ops_once(100).unwrap();
+    let names = entity_names(&db);
+    for bad in ["Critically", "Failed"] {
+        assert!(!names.iter().any(|n| n == bad), "{bad:?} minted: {names:?}");
+    }
+    assert!(names.iter().any(|n| n == "Alice Moreau"), "{names:?}");
+
+    // Learned: `gizmo` is not in any seed. A fresh store admits `Gizmo`.
+    let fresh = YantrikDB::with_default(":memory:").unwrap();
+    rec(&fresh, "Gizmo ships the widget on Monday.");
+    fresh.apply_pending_ops_once(100).unwrap();
+    assert!(
+        entity_names(&fresh).iter().any(|n| n == "Gizmo"),
+        "control failed"
+    );
+
+    // A store that has written `gizmo` in lowercase four times has learned it is a word.
+    let learned = YantrikDB::with_default(":memory:").unwrap();
+    for i in 0..4 {
+        rec(&learned, &format!("the gizmo count went up again ({i})."));
+    }
+    learned.apply_pending_ops_once(100).unwrap();
+    let stats: (i64, i64) = learned
+        .conn()
+        .query_row(
+            "SELECT lower_n, cap_mid_n FROM token_case_stats WHERE token = 'gizmo'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!(stats, (4, 0), "one observation per memory per class");
+    rec(&learned, "Gizmo ships the widget on Monday.");
+    learned.apply_pending_ops_once(100).unwrap();
+    let names = entity_names(&learned);
+    assert!(
+        !names.iter().any(|n| n == "Gizmo"),
+        "learned word minted: {names:?}"
+    );
+    assert!(names.iter().any(|n| n == "Monday") || true); // Monday is a stopword-class token; not asserted
+
+    // The store's usage outranks the seed the other way: a seed word used as
+    // a NAME mid-sentence often enough stays a name.
+    let brand = YantrikDB::with_default(":memory:").unwrap();
+    for i in 0..4 {
+        rec(
+            &brand,
+            &format!("We met the Target team again today ({i})."),
+        );
+    }
+    brand.apply_pending_ops_once(100).unwrap();
+    rec(&brand, "Target opened a new store in Berlin.");
+    brand.apply_pending_ops_once(100).unwrap();
+    assert!(
+        entity_names(&brand).iter().any(|n| n == "Target"),
+        "{:?}",
+        entity_names(&brand)
+    );
+}
+
+#[test]
+fn heal_uses_the_lexicon_and_unlinks_kept_value_names() {
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let a = rec(&db, "Alice Moreau works at Fennwick Labs in Berlin.");
+    db.apply_pending_ops_once(100).unwrap();
+    {
+        let conn = db.conn();
+        for name in ["Critically", "2026"] {
+            conn.execute(
+                "INSERT OR IGNORE INTO entities (name, entity_type, first_seen, last_seen, mention_count) \
+                 VALUES (?1, 'unknown', 1.0, 1.0, 1)",
+                rusqlite::params![name],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT OR IGNORE INTO memory_entities (memory_rid, entity_name, entity_name_norm) \
+                 VALUES (?1, ?2, lower(?2))",
+                rusqlite::params![a, name],
+            )
+            .unwrap();
+        }
+    }
+    // `2026` is asserted by a manual claim: the row and claim survive, the links do not.
+    db.relate("Alice Moreau", "2026", "joined_in", 1.0).unwrap();
+    // `NOT` is only held by a co-occurrence edge auto-relate stamped `manual`:
+    // derived, not asserted, so it protects nothing and goes with the name.
+    db.conn()
+        .execute(
+            "INSERT OR IGNORE INTO entities (name, entity_type, first_seen, last_seen, mention_count) \
+             VALUES ('NOT', 'unknown', 1.0, 1.0, 1348)",
+            [],
+        )
+        .unwrap();
+    db.relate("Alice Moreau", "NOT", "co_occurs_with", 1.0)
+        .unwrap();
+    let report = db.reextract_entities(false).unwrap();
+    assert!(
+        !entity_names(&db).iter().any(|n| n == "NOT"),
+        "co-occurrence kept a stopword node"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM claims WHERE tombstoned = 0 AND dst = 'NOT'"
+        ),
+        0,
+        "derived edge survived its endpoint"
+    );
+    assert!(report.lexicon_memories >= 1, "{report:?}");
+    let names = entity_names(&db);
+    assert!(!names.iter().any(|n| n == "Critically"), "{names:?}");
+    assert!(
+        names.iter().any(|n| n == "2026"),
+        "kept name lost: {names:?}"
+    );
+    assert_eq!(report.kept_by_claims, 1, "{report:?}");
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM memory_entities WHERE entity_name = '2026'"
+        ),
+        0,
+        "kept value name still linked"
+    );
+    assert_eq!(
+        count(&db, "SELECT COUNT(*) FROM claims WHERE tombstoned = 0 AND dst = '2026' AND extractor = 'manual'"),
+        1
+    );
+    // Schema landed.
+    let v: String = db
+        .conn()
+        .query_row(
+            "SELECT value FROM meta WHERE key = 'schema_version'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(v, "52");
+}

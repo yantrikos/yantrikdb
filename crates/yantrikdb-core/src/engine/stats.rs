@@ -1355,7 +1355,15 @@ impl YantrikDB {
         let text = text_owned.as_str();
 
         let text_tokens = crate::graph::tokenize(text);
-        let heuristic_entities = crate::graph::extract_heuristic_entities(text);
+        // The store learns how it writes each token BEFORE judging this
+        // memory's candidates, so a word the store has been writing in
+        // lowercase is already a word when it shows up capitalized at a
+        // sentence start here.
+        {
+            let conn = self.conn();
+            self.record_token_case_observations(&conn, text)?;
+        }
+        let heuristic_entities = self.extract_entities_for(text);
 
         // Loop A: seed heuristic entities.
         //

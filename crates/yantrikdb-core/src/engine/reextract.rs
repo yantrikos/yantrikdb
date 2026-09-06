@@ -164,7 +164,7 @@ impl super::YantrikDB {
                     Ok(t) => t,
                     Err(_) => continue, // unreadable row: leave it claimless rather than fail the heal
                 };
-                let heuristic = crate::graph::extract_heuristic_entities(&text);
+                let heuristic = self.extract_entities_for(&text);
                 report.claims_written += self.ingest_extracted_claims(&rid, &text, &ns, &heuristic);
             }
         }
@@ -185,11 +185,16 @@ pub struct EntityAdmissionReport {
     /// Names that fail [`crate::graph::admit_entity`] today.
     pub inadmissible: usize,
     /// Inadmissible names kept because a manual or writer-stated claim
-    /// references them — an assertion outranks a heuristic.
+    /// references them — an assertion outranks a heuristic. Their
+    /// `memory_entities` links are still removed (counted in
+    /// `links_removed`), so a value a claim asserts stops being a hub.
     pub kept_by_claims: usize,
+    /// Active memories scanned to rebuild `token_case_stats` first.
+    pub lexicon_memories: usize,
     pub entities_removed: usize,
     pub links_removed: usize,
-    /// Extractor-minted claims dropped because an endpoint was removed.
+    /// Extractor-minted claims — and derived co-occurrence edges — dropped
+    /// because an endpoint was removed.
     pub claims_removed: usize,
     /// Junk-class counts before the heal (`all_caps`, `has_digit`,
     /// `no_letters`, `four_plus_words`, `long`).
@@ -247,11 +252,16 @@ impl super::YantrikDB {
     /// the heal is too. `dry_run` reports and changes nothing.
     pub fn reextract_entities(&self, dry_run: bool) -> Result<EntityAdmissionReport> {
         let before_classes = self.entity_classes()?;
+        // The store's lexicon first: admission below asks it how each
+        // single-token name is written here. Rebuilding is a read of every
+        // active text and is idempotent, so a dry run may do it too.
+        let lexicon_memories = self.rebuild_token_case_stats()?;
         let mut report = EntityAdmissionReport {
             dry_run,
             entities_scanned: 0,
             inadmissible: 0,
             kept_by_claims: 0,
+            lexicon_memories,
             entities_removed: 0,
             links_removed: 0,
             claims_removed: 0,
@@ -268,21 +278,29 @@ impl super::YantrikDB {
         };
         report.entities_scanned = names.len();
         let mut doomed: Vec<String> = Vec::new();
+        let mut kept: Vec<String> = Vec::new();
         {
             let conn = self.conn();
+            // An assertion outranks the heuristic — but a co-occurrence edge
+            // is derived, not asserted, whatever extractor label auto-relate
+            // stamped on it: on the production store 141 `co_occurs_with`
+            // rows labelled `manual` were all that kept `NOT`, `AND` and
+            // `10` in the table with a thousand mentions each.
             let mut asserted = conn.prepare(
                 "SELECT COUNT(*) FROM claims WHERE tombstoned = 0 \
                  AND extractor NOT IN ('heuristic_v1','learned_v1') \
+                 AND rel_type NOT IN ('co_occurs_with','related_to','mentions') \
                  AND (src = ?1 OR dst = ?1)",
             )?;
             for name in &names {
-                if crate::graph::admit_entity(name) {
+                if crate::graph::admit_entity_with(name, |tok| Self::token_case_stats(&conn, tok)) {
                     continue;
                 }
                 report.inadmissible += 1;
                 let refs: i64 = asserted.query_row(params![name], |r| r.get(0))?;
                 if refs > 0 {
                     report.kept_by_claims += 1;
+                    kept.push(name.clone());
                     continue;
                 }
                 doomed.push(name.clone());
@@ -290,6 +308,17 @@ impl super::YantrikDB {
         }
         if dry_run {
             return Ok(report);
+        }
+        // A kept name keeps its row and its asserted claim, but not the
+        // links that made `2026` a 49-connection hub for graph expansion.
+        for batch in kept.chunks(ENTITY_HEAL_BATCH) {
+            let conn = self.conn();
+            for name in batch {
+                report.links_removed += conn.execute(
+                    "DELETE FROM memory_entities WHERE entity_name = ?1",
+                    params![name],
+                )?;
+            }
         }
         for batch in doomed.chunks(ENTITY_HEAL_BATCH) {
             let conn = self.conn();
@@ -299,7 +328,8 @@ impl super::YantrikDB {
                     params![name],
                 )?;
                 report.claims_removed += conn.execute(
-                    "DELETE FROM claims WHERE extractor IN ('heuristic_v1','learned_v1') \
+                    "DELETE FROM claims WHERE (extractor IN ('heuristic_v1','learned_v1') \
+                     OR rel_type IN ('co_occurs_with','related_to','mentions')) \
                      AND (src = ?1 OR dst = ?1)",
                     params![name],
                 )?;

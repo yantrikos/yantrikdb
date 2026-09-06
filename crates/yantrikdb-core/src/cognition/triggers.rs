@@ -526,6 +526,11 @@ pub fn check_relationship_insight(db: &YantrikDB) -> Result<Vec<Trigger>> {
 
     for row in rows {
         let (entity, degree) = row?;
+        // A node the entity table would refuse today (a year, a heading)
+        // is not an insight, however many links an older extractor gave it.
+        if !crate::graph::admit_entity(&entity) {
+            continue;
+        }
         let urgency = (degree as f64 / 20.0).min(1.0);
 
         let mut context = HashMap::new();

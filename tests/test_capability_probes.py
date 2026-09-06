@@ -401,3 +401,24 @@ def test_claims_inherit_the_records_event_time_and_a_stated_window_wins(db):
     db.think()
     c = {(x["src"], x["rel_type"], x["dst"]): x for x in db.get_claims("Bob Lin")}[("Bob Lin", "works_at", "Globex")]
     assert c["valid_from"] is None, c
+
+
+# ── the store's own lexicon (v52) ────────────────────────────────────────
+
+
+def test_common_words_are_not_entities_by_seed_or_by_this_stores_usage(db):
+    """A sentence starter never becomes a node (seed), and a word THIS store
+    keeps writing in lowercase stops being a name once it has been seen
+    enough (learned); a fresh store admits the same token as a control."""
+    db.record("Critically, Alice Moreau shipped the fix.")
+    db.think()
+    edges = db.get_edges("Critically")
+    assert edges == [], edges
+    for i in range(4):
+        db.record(f"the gizmo count went up again ({i}).")
+    db.think()
+    db.record("Gizmo ships the widget on Monday.")
+    db.think()
+    assert db.search_entities("Gizmo") == [], db.search_entities("Gizmo")
+    report = db.reextract_entities(dry_run=True)
+    assert report["lexicon_memories"] >= 6, report

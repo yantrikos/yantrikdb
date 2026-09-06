@@ -23,7 +23,8 @@
 // (SQLite may sort the full eligible set — see the idx_memories_source_turn note).
 // v51 adds the self-mined relation template tables (learned_relation_patterns +
 // support), fed by cooperative claims and applied by the materializer.
-pub const SCHEMA_VERSION: i32 = 51;
+// v52 adds token_case_stats, the store's own lexicon for entity admission.
+pub const SCHEMA_VERSION: i32 = 52;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -1206,6 +1207,22 @@ CREATE TABLE IF NOT EXISTS learned_relation_pattern_support (
     src_norm TEXT NOT NULL,
     dst_norm TEXT NOT NULL,
     PRIMARY KEY (namespace, rel_type, phrase, src_norm, dst_norm)
+);
+
+-- v52: token case statistics — the store's own lexicon (issue #213 follow-up).
+-- Each memory contributes at most one observation per token per class:
+-- lower_n (written lowercase), cap_mid_n (capitalized NOT at a sentence
+-- start — the shape a name has), cap_start_n (capitalized by position only).
+-- A single-token entity candidate whose token this store writes in lowercase
+-- far more often than capitalized mid-sentence is a word, not a name, and is
+-- refused; a seed of sentence starters covers the cold start. Derived, local,
+-- plaintext tokens — rebuilt by reextract_entities, never replicated, never
+-- populated on encrypted stores.
+CREATE TABLE IF NOT EXISTS token_case_stats (
+    token TEXT PRIMARY KEY,
+    lower_n INTEGER NOT NULL DEFAULT 0,
+    cap_mid_n INTEGER NOT NULL DEFAULT 0,
+    cap_start_n INTEGER NOT NULL DEFAULT 0
 );
 
 -- Normalized join tables for trigger/pattern JSON arrays
@@ -3278,5 +3295,25 @@ CREATE TABLE IF NOT EXISTS learned_relation_pattern_support (
     src_norm TEXT NOT NULL,
     dst_norm TEXT NOT NULL,
     PRIMARY KEY (namespace, rel_type, phrase, src_norm, dst_norm)
+);
+";
+/// v51 -> v52: the store's own lexicon (`token_case_stats`). Pure IF NOT
+/// EXISTS addition; the same statement lives in SCHEMA_SQL so a fresh store
+/// and an upgraded one agree (the v50/v51 precedent).
+pub const MIGRATE_V51_TO_V52: &str = "
+-- v52: token case statistics — the store's own lexicon (issue #213 follow-up).
+-- Each memory contributes at most one observation per token per class:
+-- lower_n (written lowercase), cap_mid_n (capitalized NOT at a sentence
+-- start — the shape a name has), cap_start_n (capitalized by position only).
+-- A single-token entity candidate whose token this store writes in lowercase
+-- far more often than capitalized mid-sentence is a word, not a name, and is
+-- refused; a seed of sentence starters covers the cold start. Derived, local,
+-- plaintext tokens — rebuilt by reextract_entities, never replicated, never
+-- populated on encrypted stores.
+CREATE TABLE IF NOT EXISTS token_case_stats (
+    token TEXT PRIMARY KEY,
+    lower_n INTEGER NOT NULL DEFAULT 0,
+    cap_mid_n INTEGER NOT NULL DEFAULT 0,
+    cap_start_n INTEGER NOT NULL DEFAULT 0
 );
 ";
