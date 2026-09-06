@@ -82,11 +82,14 @@ def main() -> int:
     drained = 0
     stable = 0
     last = None
-    while stable < 3 and drained < 200:
-        db.think({"run_consolidation": False, "run_pattern_mining": False})
+    while stable < 3 and drained < 60:
+        # conflict scan off: it is not part of materialization and costs
+        # seconds per call on a 6k store, which made the loop crawl.
+        db.think({"run_consolidation": False, "run_pattern_mining": False,
+                  "run_conflict_scan": False})
         drained += 1
         st = db.stats()
-        now = (st.get("entities"), st.get("edges"), st.get("operations"))
+        now = (st.get("entities"), st.get("edges"))
         stable = stable + 1 if now == last else 0
         last = now
         if stable < 3:
