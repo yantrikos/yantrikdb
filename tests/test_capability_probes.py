@@ -312,3 +312,21 @@ def test_two_stated_pairs_teach_a_template_that_extracts_from_plain_writes(db):
     assert ("Sam", "mentors", "Jordan") in {(e["src"], e["rel_type"], e["dst"]) for e in db.get_edges("Sam")}
     assert db.forget_learned_relation_patterns() == 1
     assert db.learned_relation_patterns() == []
+
+
+# ── re-extraction heal ───────────────────────────────────────────────────
+
+
+def test_reextract_claims_replaces_legacy_junk_and_keeps_assertions(db):
+    a = db.record("Alice Moreau works at Fennwick Labs as a data engineer.")
+    b = db.record("Pranab confirmed the Materializer runs the loop every tick at UTC midnight.")
+    db.think()
+    db.relate("Pranab", "Acme", "works_at")
+    db.attach_claims(a, [{"subject": "Alice Moreau", "relation": "mentors", "object": "Fennwick Labs"}])
+    before = db.reextract_claims(dry_run=True)
+    assert before["claims_removed"] == 0 and before["memories_scanned"] == 2
+    report = db.reextract_claims()
+    assert report["memories_scanned"] == 2 and report["claims_written"] >= 1
+    edges = {(e["src"], e["rel_type"], e["dst"]) for e in db.get_edges("Alice Moreau")}
+    assert ("Alice Moreau", "works_at", "Fennwick Labs") in edges and ("Alice Moreau", "mentors", "Fennwick Labs") in edges
+    assert ("Pranab", "works_at", "Acme") in {(e["src"], e["rel_type"], e["dst"]) for e in db.get_edges("Pranab")}

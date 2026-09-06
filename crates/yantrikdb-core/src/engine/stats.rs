@@ -1451,8 +1451,49 @@ impl YantrikDB {
             }
         }
 
-        // Loop C+D: relation extraction + claim ingestion.
+        // Loops C+D+E live in `ingest_extracted_claims` so the one-time
+        // re-extraction heal (`reextract_claims`) runs the SAME code the
+        // materializer runs — one definition, two callers.
         let heuristic_vec: Vec<String> = heuristic_entities.iter().cloned().collect();
+        self.ingest_extracted_claims(rid, text, namespace, &heuristic_vec);
+
+        // Audit telemetry — same shape as the foreground path emitted before.
+        let features = crate::graph::analyze_text_features(text, &heuristic_vec);
+        tracing::info!(
+            target: "yantrikdb::audit::extraction",
+            namespace = %namespace,
+            memory_rid = %rid,
+            domain = %domain,
+            source = %source,
+            extractor_version = "heuristic_v1",
+            char_length = features.char_length,
+            sentence_count = features.sentence_count,
+            entity_count = features.entity_count,
+            entities_matched_in_graph = candidates.len().saturating_sub(heuristic_entities.len()),
+            negation_cue_count = features.negation_cue_count,
+            temporal_cue_count = features.temporal_cue_count,
+            modality_cue_count = features.modality_cue_count,
+            has_compound_markers = features.has_compound_markers,
+            likely_assertion = features.likely_assertion,
+            "extraction audit (materialized post-record)"
+        );
+
+        Ok(())
+    }
+
+    /// Relation extraction + claim ingestion for one memory (the
+    /// materializer's Loops C+D+E): built-in patterns as `heuristic_v1`,
+    /// active learned templates as `learned_v1`, never minting a fact any
+    /// extractor already recorded. Returns the number of claims written.
+    /// Shared by `apply_materialize_record_post` and `reextract_claims`.
+    pub(crate) fn ingest_extracted_claims(
+        &self,
+        rid: &str,
+        text: &str,
+        namespace: &str,
+        heuristic_vec: &[String],
+    ) -> usize {
+        let mut written = 0usize;
         let relations = crate::graph::extract_heuristic_relations(text, &heuristic_vec);
         for rel in &relations {
             let already_exists = {
@@ -1469,22 +1510,25 @@ impl YantrikDB {
             if already_exists {
                 continue;
             }
-            let _ = self.ingest_claim(
-                &rel.src,
-                &rel.rel_type,
-                &rel.dst,
-                namespace,
-                rel.polarity,
-                &rel.modality,
-                None,
-                None,
-                "heuristic_v1",
-                Some("1.0"),
-                &rel.confidence_band,
-                Some(rid),
-                None,
-                None,
-                1.0,
+            written += usize::from(
+                self.ingest_claim(
+                    &rel.src,
+                    &rel.rel_type,
+                    &rel.dst,
+                    namespace,
+                    rel.polarity,
+                    &rel.modality,
+                    None,
+                    None,
+                    "heuristic_v1",
+                    Some("1.0"),
+                    &rel.confidence_band,
+                    Some(rid),
+                    None,
+                    None,
+                    1.0,
+                )
+                .is_ok(),
             );
         }
 
@@ -1513,48 +1557,30 @@ impl YantrikDB {
                 if already_exists {
                     continue;
                 }
-                let _ = self.ingest_claim(
-                    &rel.src,
-                    &rel.rel_type,
-                    &rel.dst,
-                    namespace,
-                    rel.polarity,
-                    &rel.modality,
-                    None,
-                    None,
-                    crate::engine::graph_ops::LEARNED_CLAIM_EXTRACTOR,
-                    Some("1.0"),
-                    &rel.confidence_band,
-                    Some(rid),
-                    None,
-                    None,
-                    1.0,
+                written += usize::from(
+                    self.ingest_claim(
+                        &rel.src,
+                        &rel.rel_type,
+                        &rel.dst,
+                        namespace,
+                        rel.polarity,
+                        &rel.modality,
+                        None,
+                        None,
+                        crate::engine::graph_ops::LEARNED_CLAIM_EXTRACTOR,
+                        Some("1.0"),
+                        &rel.confidence_band,
+                        Some(rid),
+                        None,
+                        None,
+                        1.0,
+                    )
+                    .is_ok(),
                 );
             }
         }
 
-        // Audit telemetry — same shape as the foreground path emitted before.
-        let features = crate::graph::analyze_text_features(text, &heuristic_vec);
-        tracing::info!(
-            target: "yantrikdb::audit::extraction",
-            namespace = %namespace,
-            memory_rid = %rid,
-            domain = %domain,
-            source = %source,
-            extractor_version = "heuristic_v1",
-            char_length = features.char_length,
-            sentence_count = features.sentence_count,
-            entity_count = features.entity_count,
-            entities_matched_in_graph = candidates.len().saturating_sub(heuristic_entities.len()),
-            negation_cue_count = features.negation_cue_count,
-            temporal_cue_count = features.temporal_cue_count,
-            modality_cue_count = features.modality_cue_count,
-            has_compound_markers = features.has_compound_markers,
-            likely_assertion = features.likely_assertion,
-            "extraction audit (materialized post-record)"
-        );
-
-        Ok(())
+        written
     }
 
     /// **Phase 4.3 Commit C — apply a queued `materialize_record_with_rid_post` op.**
