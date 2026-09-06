@@ -45,6 +45,7 @@ mod recall_graph;
 mod reembed_router;
 #[cfg(feature = "bundled-embedder")]
 mod reextract_claims;
+#[cfg(feature = "bundled-embedder")]
 mod reextract_entities;
 mod replication_api;
 mod ryw_visibility;
