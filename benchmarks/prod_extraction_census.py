@@ -74,12 +74,23 @@ def main() -> int:
             created_at=float(r["created_at"]) if r.get("created_at") else None,
         )
     ingest_s = time.perf_counter() - t0
-    # Drain the materializer deterministically (think drains <= 4096 ops per call).
+    # Drain the materializer until the store stops changing. A fixed number
+    # of think() calls under-drained on a loaded host (12,727 vs 14,291
+    # entities from near-identical exports, 2026-09-06): the arms must be
+    # compared at the SAME point, which is "nothing left to apply".
     t0 = time.perf_counter()
     drained = 0
-    for _ in range(1 + len(rows) // 2000):
+    stable = 0
+    last = None
+    while stable < 3 and drained < 200:
         db.think({"run_consolidation": False, "run_pattern_mining": False})
         drained += 1
+        st = db.stats()
+        now = (st.get("entities"), st.get("edges"), st.get("operations"))
+        stable = stable + 1 if now == last else 0
+        last = now
+        if stable < 3:
+            time.sleep(0.5)
     drain_s = time.perf_counter() - t0
     db.close()
 

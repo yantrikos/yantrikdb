@@ -304,7 +304,30 @@ fn heal_uses_the_lexicon_and_unlinks_kept_value_names() {
     }
     // `2026` is asserted by a manual claim: the row and claim survive, the links do not.
     db.relate("Alice Moreau", "2026", "joined_in", 1.0).unwrap();
+    // `NOT` is only held by a co-occurrence edge auto-relate stamped `manual`:
+    // derived, not asserted, so it protects nothing and goes with the name.
+    db.conn()
+        .execute(
+            "INSERT OR IGNORE INTO entities (name, entity_type, first_seen, last_seen, mention_count) \
+             VALUES ('NOT', 'unknown', 1.0, 1.0, 1348)",
+            [],
+        )
+        .unwrap();
+    db.relate("Alice Moreau", "NOT", "co_occurs_with", 1.0)
+        .unwrap();
     let report = db.reextract_entities(false).unwrap();
+    assert!(
+        !entity_names(&db).iter().any(|n| n == "NOT"),
+        "co-occurrence kept a stopword node"
+    );
+    assert_eq!(
+        count(
+            &db,
+            "SELECT COUNT(*) FROM claims WHERE tombstoned = 0 AND dst = 'NOT'"
+        ),
+        0,
+        "derived edge survived its endpoint"
+    );
     assert!(report.lexicon_memories >= 1, "{report:?}");
     let names = entity_names(&db);
     assert!(!names.iter().any(|n| n == "Critically"), "{names:?}");

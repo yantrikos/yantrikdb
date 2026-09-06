@@ -193,7 +193,8 @@ pub struct EntityAdmissionReport {
     pub lexicon_memories: usize,
     pub entities_removed: usize,
     pub links_removed: usize,
-    /// Extractor-minted claims dropped because an endpoint was removed.
+    /// Extractor-minted claims — and derived co-occurrence edges — dropped
+    /// because an endpoint was removed.
     pub claims_removed: usize,
     /// Junk-class counts before the heal (`all_caps`, `has_digit`,
     /// `no_letters`, `four_plus_words`, `long`).
@@ -280,9 +281,15 @@ impl super::YantrikDB {
         let mut kept: Vec<String> = Vec::new();
         {
             let conn = self.conn();
+            // An assertion outranks the heuristic — but a co-occurrence edge
+            // is derived, not asserted, whatever extractor label auto-relate
+            // stamped on it: on the production store 141 `co_occurs_with`
+            // rows labelled `manual` were all that kept `NOT`, `AND` and
+            // `10` in the table with a thousand mentions each.
             let mut asserted = conn.prepare(
                 "SELECT COUNT(*) FROM claims WHERE tombstoned = 0 \
                  AND extractor NOT IN ('heuristic_v1','learned_v1') \
+                 AND rel_type NOT IN ('co_occurs_with','related_to','mentions') \
                  AND (src = ?1 OR dst = ?1)",
             )?;
             for name in &names {
@@ -321,7 +328,8 @@ impl super::YantrikDB {
                     params![name],
                 )?;
                 report.claims_removed += conn.execute(
-                    "DELETE FROM claims WHERE extractor IN ('heuristic_v1','learned_v1') \
+                    "DELETE FROM claims WHERE (extractor IN ('heuristic_v1','learned_v1') \
+                     OR rel_type IN ('co_occurs_with','related_to','mentions')) \
                      AND (src = ?1 OR dst = ?1)",
                     params![name],
                 )?;
