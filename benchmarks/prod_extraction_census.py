@@ -93,7 +93,12 @@ def main() -> int:
 
     by_rel = Counter(c[1] for c in claims)
     by_ext = Counter(c[3] for c in claims)
-    junk = [c for c in claims if is_junk_endpoint(c[0]) or is_junk_endpoint(c[2])]
+    # A value object (no letters, has a digit) is a legitimate claim OBJECT
+    # since #213 (`CT128 -runs-> 0.19.0`); only a junk SUBJECT, or a junk
+    # object that is not a value, counts against the build.
+    def _is_value(x):
+        return bool(x) and not any(ch.isalpha() for ch in x) and any(ch.isdigit() for ch in x)
+    junk = [c for c in claims if is_junk_endpoint(c[0]) or (is_junk_endpoint(c[2]) and not _is_value(c[2]))]
     clean = [c for c in claims if c not in junk]
     clean_by_rel = Counter(c[1] for c in clean)
     deny = set(x.strip() for x in args.chain_deny.split(",") if x.strip())
@@ -162,6 +167,8 @@ def main() -> int:
         "entities_top12": [{"name": e[0], "type": e[1], "mentions": e[2]} for e in ent_top],
         "sample_clean_leads": [f"{c[0]} -leads-> {c[2]}" for c in clean if c[1] == "leads"][: args.sample],
         "sample_junk": [f"{c[0]} -{c[1]}-> {c[2]}" for c in junk][: args.sample],
+        # Every extractor claim, so two runs can be diffed claim by claim.
+        "all_claims": sorted(f"{c[0]} -{c[1]}-> {c[2]}" for c in claims),
     }
     args.out.parent.mkdir(parents=True, exist_ok=True)
     json.dump(out, open(args.out, "w", encoding="utf-8"), indent=1)
