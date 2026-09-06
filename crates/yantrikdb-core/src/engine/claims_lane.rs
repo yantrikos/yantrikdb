@@ -70,6 +70,18 @@ const PATH_CLAIM_LEX: f64 = 0.9;
 /// Marker inside a path why; the reserve reads it to rank paths below
 /// direct claims without a second why family.
 const PATH_MARKER: &str = "(path via ";
+/// Relations a hop-2 traversal must NOT follow: generic co-occurrence and
+/// catch-all links carry no direction and no meaning, so a chain through
+/// them attaches confident path provenance to noise. Hop-1 still reads
+/// them (a query entity's own co-occurrences are legitimate evidence);
+/// only the traversal is gated. Measured 2026-09-05 on the production
+/// store: `co_occurs_with` was 509 of 2,576 claims.
+const CHAIN_DENY_RELS: &[&str] = &["co_occurs_with", "related_to", "mentions"];
+
+/// May a hop-2 traversal follow this relation? (Deny-list, see above.)
+pub(crate) fn chain_traversable(rel_type: &str) -> bool {
+    !CHAIN_DENY_RELS.contains(&rel_type)
+}
 
 /// A claims-lane candidate: the claim's source record plus the
 /// directional provenance that justifies its admission.
@@ -220,7 +232,8 @@ pub(crate) fn claims_candidates(
         for (src, rel, dst, rid, polarity) in claims_touching(conn, entity, namespace) {
             let neg = if polarity < 0 { "NOT " } else { "" };
             let far = if src == *entity { &dst } else { &src };
-            if !anchor_names.contains(far.as_str())
+            if chain_traversable(&rel)
+                && !anchor_names.contains(far.as_str())
                 && path_seeds.len() < MAX_PATH_SEEDS
                 && !path_seeds.iter().any(|(seed, _, _)| seed == far)
             {
@@ -257,6 +270,9 @@ pub(crate) fn claims_candidates(
         for (src, rel, dst, rid, polarity) in rows {
             if per_seed >= MAX_PATH_PER_SEED || path_admitted >= MAX_PATH_CANDIDATES {
                 break;
+            }
+            if !chain_traversable(&rel) {
+                continue; // generic link: never the second hop of a path
             }
             if !seen.insert(rid.clone()) {
                 continue; // hop-1 provenance, or the hop-1 claim read backwards
@@ -750,6 +766,39 @@ mod tests {
             "hub must not be traversed: {:?}",
             cands.iter().map(|c| &c.why).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn chain_never_follows_a_denied_relation() {
+        // Alice -works_at-> Fennwick (hop 1) ; Fennwick -co_occurs_with-> Lisbon
+        // must NOT become a path: co-occurrence carries no meaning to chain on.
+        let conn = chain_store();
+        conn.execute(
+            "INSERT INTO entities (name, entity_type, first_seen, last_seen, mention_count) \
+             VALUES ('Lisbon', 'place', 0.0, 0.0, 1)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO claims (claim_id, src, dst, rel_type, created_at, \
+             extractor, source_memory_rid) VALUES ('cX', 'Fennwick Labs', 'Lisbon', \
+             'co_occurs_with', 30.0, 'heuristic_v1', 'mX')",
+            [],
+        )
+        .unwrap();
+        let gi = GraphIndex::build_from_db(&conn).unwrap();
+        let tokens = crate::graph::tokenize("which city does Alice Moreau work in");
+        let cands = claims_candidates(&conn, &gi, &tokens, None);
+        assert!(
+            cands.iter().any(|c| c.rid == "mB"),
+            "real hop-2 still admitted"
+        );
+        assert!(
+            !cands.iter().any(|c| c.rid == "mX"),
+            "co_occurs_with hop must not be followed"
+        );
+        // And a denied hop-1 relation seeds nothing.
+        assert!(!chain_traversable("co_occurs_with") && chain_traversable("works_at"));
     }
 
     #[test]

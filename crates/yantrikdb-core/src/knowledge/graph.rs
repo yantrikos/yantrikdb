@@ -541,7 +541,16 @@ const RELATION_PATTERNS: &[(&[&str], &str)] = &[
         "founded",
     ),
     (&["founded"], "founded"),
-    (&["leads", "heads", "runs", "manages", "directs"], "leads"),
+    // "runs" is NOT leadership. Measured on the production memory store
+    // (2026-09-05, 6,408 active memories): `leads` was 1,467 of 2,576 claims
+    // and 877 of them came from "runs" — "CT128 runs 0.15.2", "the compactor
+    // runs every 100 ms". On an engineering corpus "runs" means EXECUTES /
+    // IS AT VERSION, which is exactly the functional relation the claim
+    // scanner already models as `runs` (FUNCTIONAL_REL_TYPES: runs,
+    // runs_version) for succession detection. Minting those as `leads`
+    // produced the dominant junk edge class the claim-chain would follow.
+    (&["leads", "heads", "manages", "directs"], "leads"),
+    (&["runs", "is running", "now runs"], "runs"),
     (
         &[
             "works at",
@@ -690,6 +699,15 @@ fn contains_phrase_end_bounded(hay: &str, phrase: &str) -> bool {
     false
 }
 
+/// Drop trailing articles so "works at the" still anchors on "works at".
+fn strip_trailing_articles(window: &str) -> String {
+    let mut toks: Vec<&str> = window.split_whitespace().collect();
+    while matches!(toks.last().copied(), Some("the" | "a" | "an")) {
+        toks.pop();
+    }
+    toks.join(" ")
+}
+
 fn boundary_before(hay: &str, at: usize) -> bool {
     at == 0
         || !hay[..at]
@@ -719,8 +737,11 @@ pub fn extract_learned_relations(
     }
     let mut candidates = Vec::new();
     for w in between_windows(text, entities) {
+        if w.has_inner_entity {
+            continue;
+        }
         for (phrase, rel_type) in templates {
-            if ends_with_word_phrase(&w.between_stripped, phrase) {
+            if ends_with_word_phrase(&strip_trailing_articles(&w.between_stripped), phrase) {
                 candidates.push(RelationCandidate {
                     src: w.entity_a.to_string(),
                     rel_type: rel_type.clone(),
@@ -747,6 +768,9 @@ struct BetweenWindow<'a> {
     between_stripped: String,
     polarity: i32,
     modality: &'static str,
+    /// Another entity sits strictly between the pair — the pair is not
+    /// adjacent and a template must not bridge it.
+    has_inner_entity: bool,
 }
 
 /// Every ordered (A before B, within 150 chars) entity pair with a
@@ -795,12 +819,16 @@ fn between_windows<'a>(text: &str, entities: &'a [String]) -> Vec<BetweenWindow<
             } else {
                 "asserted"
             };
+            let has_inner_entity = entity_positions[i + 1..j]
+                .iter()
+                .any(|(p, e)| *p > pos_a && *p + e.len() <= pos_b);
             out.push(BetweenWindow {
                 entity_a,
                 entity_b,
                 between_stripped,
                 polarity: if has_negation { -1 } else { 1 },
                 modality,
+                has_inner_entity,
             });
         }
     }
@@ -876,11 +904,33 @@ pub fn extract_heuristic_relations(text: &str, entities: &[String]) -> Vec<Relat
                 "asserted"
             };
 
+            // ANCHORING (2026-09-05). Forward patterns used to match ANYWHERE
+            // in the window between ANY two entities up to 150 chars apart, so
+            // a verb between two unrelated capitalized tokens minted a claim.
+            // Measured on the production store after the "runs" relabel: 478
+            // chain-visible `runs` claims, sampled "RAG runs COMPETENT",
+            // "Pranab runs UTC", "Without runs Concrete" — the relabel was
+            // right, the precision was the defect. Now a forward pattern
+            // mints only when (a) the window ENDS with the phrase (object
+            // directly follows the verb; trailing articles ignored) and (b)
+            // no other entity sits between subject and object, except an
+            // entity that is itself part of the phrase ("CEO" inside "is the
+            // CEO of"). The subject is the nearest entity before the verb.
+            let inner_entities: Vec<&str> = entity_positions[i + 1..j]
+                .iter()
+                .filter(|(p, e)| *p > pos_a && *p + e.len() <= pos_b)
+                .map(|(_, e)| *e)
+                .collect();
+            let window_anchored = strip_trailing_articles(&between_stripped);
+
             // Match forward patterns: entity_a <pattern> entity_b
             // Uses between_stripped (negation removed) for matching.
             for (patterns, rel_type) in RELATION_PATTERNS {
                 for pattern in *patterns {
-                    if contains_word_phrase(&between_stripped, pattern) {
+                    let inner_ok = inner_entities
+                        .iter()
+                        .all(|e| pattern.contains(&e.to_lowercase()));
+                    if inner_ok && ends_with_word_phrase(&window_anchored, pattern) {
                         candidates.push(RelationCandidate {
                             src: entity_a.to_string(),
                             rel_type: rel_type.to_string(),
@@ -897,7 +947,8 @@ pub fn extract_heuristic_relations(text: &str, entities: &[String]) -> Vec<Relat
             // Anchored patterns: entity_b must directly follow the phrase.
             for (patterns, rel_type) in ANCHORED_RELATION_PATTERNS {
                 for pattern in *patterns {
-                    if ends_with_word_phrase(&between_stripped, pattern) {
+                    if inner_entities.is_empty() && ends_with_word_phrase(&window_anchored, pattern)
+                    {
                         candidates.push(RelationCandidate {
                             src: entity_a.to_string(),
                             rel_type: rel_type.to_string(),
@@ -1774,6 +1825,64 @@ mod tests {
         assert_eq!(rels.len(), 1);
         assert_eq!(rels[0].polarity, -1);
         assert!(extract_learned_relations("Dana mentors Priya", &entities, &[]).is_empty());
+    }
+
+    #[test]
+    fn test_extract_relations_runs_is_a_version_relation_not_leadership() {
+        // The production defect: "CT128 runs 0.15.2" minted `leads`.
+        let entities = vec!["CT128".to_string(), "Yantrikdb".to_string()];
+        let rels = extract_heuristic_relations("CT128 runs Yantrikdb in production", &entities);
+        assert_eq!(rels.len(), 1, "got: {:?}", rels);
+        assert_eq!(rels[0].rel_type, "runs");
+        assert!(rels.iter().all(|r| r.rel_type != "leads"));
+        // Leadership language still mints leads.
+        let entities = vec!["Alice".to_string(), "Acme".to_string()];
+        let rels = extract_heuristic_relations("Alice leads Acme", &entities);
+        assert_eq!(rels[0].rel_type, "leads");
+    }
+
+    #[test]
+    fn test_forward_patterns_are_anchored_to_the_adjacent_pair() {
+        // A verb somewhere in a long window no longer bridges two unrelated
+        // entities (the production "Pranab runs UTC" shape).
+        let entities = vec![
+            "Pranab".to_string(),
+            "Materializer".to_string(),
+            "UTC".to_string(),
+        ];
+        let rels = extract_heuristic_relations(
+            "Pranab confirmed the Materializer runs the loop every tick at UTC midnight",
+            &entities,
+        );
+        assert!(
+            !rels.iter().any(|r| r.src == "Pranab" && r.dst == "UTC"),
+            "no claim may bridge Pranab and UTC across Materializer: {:?}",
+            rels
+        );
+        // Object must directly follow the verb (articles allowed).
+        let entities = vec!["Alice".to_string(), "Acme".to_string()];
+        let rels = extract_heuristic_relations("Alice works at the Acme office", &entities);
+        assert!(rels.iter().any(|r| r.rel_type == "works_at"), "{:?}", rels);
+        let rels =
+            extract_heuristic_relations("Alice works at home and later visited Acme", &entities);
+        assert!(
+            rels.is_empty(),
+            "verb not adjacent to the object: {:?}",
+            rels
+        );
+        // An inner entity that is part of the phrase itself is fine.
+        let entities = vec![
+            "Alice Chen".to_string(),
+            "CEO".to_string(),
+            "Acme Corp".to_string(),
+        ];
+        let rels = extract_heuristic_relations("Alice Chen is the CEO of Acme Corp", &entities);
+        assert!(
+            rels.iter()
+                .any(|r| r.rel_type == "ceo_of" && r.src == "Alice Chen" && r.dst == "Acme Corp"),
+            "{:?}",
+            rels
+        );
     }
 
     #[test]
