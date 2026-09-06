@@ -1494,6 +1494,9 @@ impl YantrikDB {
         heuristic_vec: &[String],
     ) -> usize {
         let mut written = 0usize;
+        // Extracted claims inherit the record's temporal tag too: a memory
+        // about 2024 yields claims valid from 2024, not from today.
+        let event_min = self.memory_event_time_min(rid);
         // Value objects (`0.19.0`, `1985`) are never entities but must stay
         // available as relation OBJECTS, or `runs`/`born_in` claims vanish
         // with the entity junk they used to ride on (issue #213).
@@ -1532,7 +1535,7 @@ impl YantrikDB {
                     namespace,
                     rel.polarity,
                     &rel.modality,
-                    None,
+                    event_min,
                     None,
                     "heuristic_v1",
                     Some("1.0"),
@@ -1582,7 +1585,7 @@ impl YantrikDB {
                         namespace,
                         rel.polarity,
                         &rel.modality,
-                        None,
+                        event_min,
                         None,
                         crate::engine::graph_ops::LEARNED_CLAIM_EXTRACTOR,
                         Some("1.0"),

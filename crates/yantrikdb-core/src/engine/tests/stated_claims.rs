@@ -28,6 +28,8 @@ fn claim(src: &str, rel: &str, dst: &str) -> StatedClaim {
         rel_type: rel.into(),
         dst: dst.into(),
         polarity: 1,
+        valid_from: None,
+        valid_to: None,
     }
 }
 
@@ -155,4 +157,99 @@ fn oversized_batch_is_refused_whole() {
         .map(|_| claim("Pranab", "prefers", "Vim"))
         .collect();
     assert!(db.attach_claims(&rid, &batch).is_err());
+}
+
+/// The temporal tag: a record's event time flows into the claims it
+/// states and the claims the extractor mints, and an explicit window on
+/// a stated claim wins over it.
+#[test]
+fn claims_inherit_the_records_event_time_unless_the_writer_gives_a_window() {
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let t_2024 = 1_704_067_200.0_f64; // 2024-01-01T00:00:00Z
+    let rid = db
+        .record_text(
+            "Alice Moreau works at Fennwick Labs, and Alice Moreau lives in Berlin.",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({"event_time_min": t_2024, "event_time_max": t_2024}),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    db.apply_pending_ops_once(100).unwrap();
+    let window = |src: &str, rel: &str, dst: &str| -> (Option<f64>, Option<f64>) {
+        db.conn()
+            .query_row(
+                "SELECT valid_from, valid_to FROM claims WHERE src = ?1 AND rel_type = ?2                  AND dst = ?3 AND tombstoned = 0",
+                rusqlite::params![src, rel, dst],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+    };
+    // Extracted claim inherits the record's event time.
+    assert_eq!(
+        window("Alice Moreau", "works_at", "Fennwick Labs"),
+        (Some(t_2024), None)
+    );
+    // Stated claim without a window inherits it too.
+    let rep = db
+        .attach_claims(
+            &rid,
+            &[StatedClaim {
+                src: "Alice Moreau".into(),
+                rel_type: "based_in".into(),
+                dst: "Berlin".into(),
+                ..StatedClaim::default()
+            }],
+        )
+        .unwrap();
+    assert_eq!(rep.accepted.len(), 1, "{rep:?}");
+    assert_eq!(
+        window("Alice Moreau", "based_in", "Berlin"),
+        (Some(t_2024), None)
+    );
+    // An explicit window wins.
+    let t_2025 = 1_735_689_600.0_f64;
+    let rep = db
+        .attach_claims(
+            &rid,
+            &[StatedClaim {
+                src: "Alice Moreau".into(),
+                rel_type: "visited".into(),
+                dst: "Berlin".into(),
+                valid_from: Some(t_2025),
+                valid_to: Some(t_2025 + 86_400.0),
+                ..StatedClaim::default()
+            }],
+        )
+        .unwrap();
+    assert_eq!(rep.accepted.len(), 1, "{rep:?}");
+    assert_eq!(
+        window("Alice Moreau", "visited", "Berlin"),
+        (Some(t_2025), Some(t_2025 + 86_400.0))
+    );
+    // A record without a tag yields claims without a window.
+    let rid2 = db
+        .record_text(
+            "Bob Lin works at Globex.",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    db.apply_pending_ops_once(100).unwrap();
+    let _ = rid2;
+    assert_eq!(window("Bob Lin", "works_at", "Globex"), (None, None));
 }

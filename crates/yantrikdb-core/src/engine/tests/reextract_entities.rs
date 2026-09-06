@@ -190,6 +190,8 @@ fn new_writes_never_mint_values_or_headings_but_values_still_serve_as_objects() 
                 rel_type: "runs".into(),
                 dst: "0.19.0".into(),
                 polarity: 1,
+                valid_from: None,
+                valid_to: None,
             }],
         )
         .unwrap();

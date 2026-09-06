@@ -44,11 +44,19 @@ impl PyYantrikDB {
                 .map(|v| v.extract::<i32>())
                 .transpose()?
                 .unwrap_or(1);
+            let window = |k: &str| -> PyResult<Option<f64>> {
+                d.get_item(k)?
+                    .filter(|v| !v.is_none())
+                    .map(|v| v.extract::<f64>())
+                    .transpose()
+            };
             stated.push(yantrikdb_core::StatedClaim {
                 src,
                 rel_type,
                 dst,
                 polarity,
+                valid_from: window("valid_from")?,
+                valid_to: window("valid_to")?,
             });
         }
         let report = db.attach_claims(memory_rid, &stated).map_err(map_err)?;
