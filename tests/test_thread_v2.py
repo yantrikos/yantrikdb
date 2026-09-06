@@ -34,6 +34,40 @@ def _seed(db, text, turn, seed):
     return rid
 
 
+def _raw_sql_in_subprocess(path, sql, params):
+    """Run one raw write against an engine store from a separate process.
+
+    NOT an in-process ``sqlite3.connect``: the engine links its own SQLite
+    and its materializer thread may be mid-write. Two SQLite libraries in
+    one process both use POSIX advisory locks, which the kernel scopes per
+    process, so their writers never serialise and a WAL commit from one
+    can land on top of the other's (sqlite.org/howtocorrupt.html, "multiple
+    copies of SQLite linked into the same application"). Measured on the
+    0.18.0 and 0.19.0 wheels under CPU contention: 2-8 % of runs left the
+    memory row holding an entities page (rid = the entity name, text = a
+    timestamp), and the py3.10 CI job hit it twice in one day. A child
+    process holds its own locks, so the kernel serialises it against the
+    engine like any other client.
+    """
+    import json
+    import subprocess
+    import sys
+
+    prog = "; ".join([
+        "import json, sqlite3, sys",
+        "path, sql, params = json.loads(sys.argv[1])",
+        "c = sqlite3.connect(path)",
+        "c.execute(sql, params)",
+        "c.commit()",
+        "c.close()",
+    ])
+    subprocess.run(
+        [sys.executable, "-c", prog, json.dumps([path, sql, params])],
+        check=True,
+        timeout=60,
+    )
+
+
 class TestThreadV2Binding:
     def test_typed_classes_are_exported(self):
         import yantrikdb as y
@@ -80,23 +114,19 @@ class TestThreadV2Binding:
         """(batch 11 test 3) On a stale-marker store: v2 raises the typed
         maintenance error even entity-only; legacy v1 still succeeds with
         decrypt-derived semantics. The two surfaces must never converge."""
-        import sqlite3
-
         import yantrikdb as y
 
         path = str(tmp_path / "stale.db")
         db = YantrikDB(path, 8)
         rid = _seed(db, "Alpha event five", 5, 1.0)
-        # Raw SQL rewrite (a second connection — exactly the raw-write
+        # Raw SQL rewrite from ANOTHER PROCESS (exactly the raw-write
         # staleness the marker triggers exist to catch): turn 5 -> 7.
-        raw = sqlite3.connect(path)
-        raw.execute(
+        _raw_sql_in_subprocess(
+            path,
             "UPDATE memories SET metadata = "
             "json_set(metadata, '$.source_turn', 7) WHERE rid = ?",
-            (rid,),
+            [rid],
         )
-        raw.commit()
-        raw.close()
 
         # (a) v2, entity-only: typed MaintenanceRequired.
         with pytest.raises(y.SourceTurnMaintenanceRequiredError):
