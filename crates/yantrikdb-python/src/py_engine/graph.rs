@@ -44,11 +44,19 @@ impl PyYantrikDB {
                 .map(|v| v.extract::<i32>())
                 .transpose()?
                 .unwrap_or(1);
+            let window = |k: &str| -> PyResult<Option<f64>> {
+                d.get_item(k)?
+                    .filter(|v| !v.is_none())
+                    .map(|v| v.extract::<f64>())
+                    .transpose()
+            };
             stated.push(yantrikdb_core::StatedClaim {
                 src,
                 rel_type,
                 dst,
                 polarity,
+                valid_from: window("valid_from")?,
+                valid_to: window("valid_to")?,
             });
         }
         let report = db.attach_claims(memory_rid, &stated).map_err(map_err)?;
@@ -87,6 +95,22 @@ impl PyYantrikDB {
         let db = self.get_inner()?;
         let edges = db.get_edges(entity).map_err(map_err)?;
         edges.iter().map(|e| edge_to_dict(py, e)).collect()
+    }
+
+    /// Every claim touching an entity with its qualifiers: polarity,
+    /// modality, `valid_from`/`valid_to` (the temporal tag), extractor,
+    /// confidence band, provenance and a derived status. `get_edges` is
+    /// the bare graph view; this is the claims-table view.
+    #[pyo3(signature = (entity, namespace=None))]
+    fn get_claims(
+        &self,
+        py: Python<'_>,
+        entity: &str,
+        namespace: Option<&str>,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let rows = db.get_claims(entity, namespace).map_err(map_err)?;
+        json_to_py(py, &serde_json::Value::Array(rows))
     }
 
     #[pyo3(signature = (pattern=None, entity_type=None, limit=20))]

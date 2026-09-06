@@ -1169,6 +1169,31 @@ pub struct StatedClaim {
     /// `1` asserted (default), `-1` denied.
     #[serde(default = "default_polarity")]
     pub polarity: i32,
+    /// World-validity start (unix seconds): when the stated fact became
+    /// true, not when it was written. Absent, the memory's own event time
+    /// (`event_time_min`, the temporal tag on the record) is used; absent
+    /// that too, the claim carries no window and only write order remains.
+    /// The conflict scanner treats non-overlapping windows as succession,
+    /// not contradiction (RFC 006), so this is what aligns a stated
+    /// relation with the time it held.
+    #[serde(default)]
+    pub valid_from: Option<f64>,
+    /// World-validity end; `None` means still true.
+    #[serde(default)]
+    pub valid_to: Option<f64>,
+}
+
+impl Default for StatedClaim {
+    fn default() -> Self {
+        Self {
+            src: String::new(),
+            rel_type: String::new(),
+            dst: String::new(),
+            polarity: 1,
+            valid_from: None,
+            valid_to: None,
+        }
+    }
 }
 
 fn default_polarity() -> i32 {
@@ -1232,6 +1257,19 @@ impl super::YantrikDB {
     /// See the module note above. Errors only on an unknown or inactive
     /// memory or an oversized batch; per-claim problems are REPORTED in
     /// `rejected`, never raised.
+    /// The record's temporal tag (`event_time_min`, set from metadata
+    /// `event_time_min`/`event_time_max` at write time), if any.
+    pub(crate) fn memory_event_time_min(&self, rid: &str) -> Option<f64> {
+        let conn = self.conn();
+        conn.query_row(
+            "SELECT event_time_min FROM memories WHERE rid = ?1",
+            params![rid],
+            |r| r.get::<_, Option<f64>>(0),
+        )
+        .ok()
+        .flatten()
+    }
+
     pub fn attach_claims(
         &self,
         memory_rid: &str,
@@ -1254,6 +1292,10 @@ impl super::YantrikDB {
             )));
         }
         let text_tokens = crate::graph::tokenize(&memory.text);
+        // The record's temporal tag: a claim stated without its own window
+        // inherits the time the memory is ABOUT, so relation and time stay
+        // aligned without the writer repeating the date per claim.
+        let event_min = self.memory_event_time_min(memory_rid);
         let mut report = AttachClaimsReport {
             memory_rid: memory_rid.to_string(),
             accepted: Vec::new(),
@@ -1351,8 +1393,8 @@ impl super::YantrikDB {
                 &memory.namespace,
                 claim.polarity,
                 "asserted",
-                None,
-                None,
+                claim.valid_from.or(event_min),
+                claim.valid_to,
                 STATED_CLAIM_EXTRACTOR,
                 Some("1.0"),
                 "high",
