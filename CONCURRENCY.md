@@ -213,6 +213,38 @@ can run a periodic deadlock check.
 
 ---
 
+## Rule 9 — One SQLite library per process: never open the store with another one while the engine is open
+
+The engine links its own SQLite (`rusqlite` `bundled`). A second SQLite
+library in the same process — Python's stdlib `sqlite3`, a system
+`libsqlite3` loaded by some other extension — opening the same store
+file is a corruption hazard, not a locking inconvenience. Both libraries
+serialise writers with POSIX advisory locks, and the kernel scopes those
+locks per *process*: library B's unlock releases library A's lock, so a
+write from B and a materializer write from A interleave their WAL
+commits (sqlite.org/howtocorrupt.html, "multiple copies of SQLite linked
+into the same application").
+
+Measured 2026-09-06 on the 0.18.0 and 0.19.0 wheels under CPU contention:
+an in-process `sqlite3.connect(...).execute("UPDATE memories SET metadata
+= ...")` while the materializer was draining left the row holding an
+`entities` page (rid = the entity name, text = a timestamp) in 2-8 % of
+runs. The py3.10 CI job saw it as `Invalid column type Real at index: 1,
+name: text` from `recall_thread`.
+
+Rules:
+
+- Raw SQL against a store the engine currently has open goes through a
+  **separate process** (`sqlite3` CLI, a `subprocess`), never an
+  in-process second library. Tests use `_raw_sql_in_subprocess` in
+  `tests/test_thread_v2.py`.
+- Alternatively `close()` the engine first; sequential use of two
+  libraries is fine.
+- Separate processes (dashboard, census scripts, backups via `.backup`)
+  are safe: the kernel serialises them.
+
+---
+
 ## Cross-stack rule — engine pressure suppresses enrichment, NEVER decay
 
 This rule lives in yantrikdb-server's tick loop (it's the consumer of
