@@ -102,6 +102,20 @@ def main() -> int:
     exposure = [c for c in clean if c[4] and c[1] not in deny]
     exposure_by_rel = Counter(c[1] for c in exposure)
     ent_junk = sum(1 for e in entities if is_junk_endpoint(e[0]))
+    # Issue #213 admission classes (counts only; names never leave the box).
+    names = [e[0] for e in entities]
+    ent_classes = {
+        "all_caps": sum(1 for n in names if len(n) >= 2 and n == n.upper() and n != n.lower()),
+        "has_digit": sum(1 for n in names if any(ch.isdigit() for ch in n)),
+        "no_letters": sum(1 for n in names if not any(ch.isalpha() for ch in n)),
+        "four_plus_words": sum(1 for n in names if len(n.split()) >= 4),
+        "long_40": sum(1 for n in names if len(n) >= 40),
+        "possessive": sum(1 for n in names if n.endswith("'s") or n.endswith("’s")),
+    }
+    claims_allcaps_endpoint = sum(
+        1 for c in claims
+        if any(len(x) >= 2 and x == x.upper() and x != x.lower() for x in (c[0], c[2]))
+    )
     ent_top = sorted(entities, key=lambda e: -(e[2] or 0))[:12]
 
     # "runs"-as-leads on this corpus: leads claims whose source text says " runs ".
@@ -143,6 +157,8 @@ def main() -> int:
         "chain_exposure_by_rel": dict(exposure_by_rel.most_common()),
         "entities_total": len(entities),
         "entities_junk": ent_junk,
+        "entities_classes": ent_classes,
+        "claims_with_allcaps_endpoint": claims_allcaps_endpoint,
         "entities_top12": [{"name": e[0], "type": e[1], "mentions": e[2]} for e in ent_top],
         "sample_clean_leads": [f"{c[0]} -leads-> {c[2]}" for c in clean if c[1] == "leads"][: args.sample],
         "sample_junk": [f"{c[0]} -{c[1]}-> {c[2]}" for c in junk][: args.sample],

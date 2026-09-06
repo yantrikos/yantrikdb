@@ -412,6 +412,126 @@ fn strip_code(text: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
+/// Longest name (in chars) the entity table admits. Beyond this a
+/// capitalized run is a title or a sentence, not a name.
+pub const ENTITY_MAX_CHARS: usize = 40;
+/// Most words a name may have. Real names are one to three words; four
+/// consecutive capitalized words is a heading or a sentence start.
+pub const ENTITY_MAX_WORDS: usize = 4;
+/// Longest single ALL-CAPS token admitted as an acronym (`FAISS`, `CT128`,
+/// `ONNX`). Longer shouted words (`MASTERING`, `STRATEGIC`) are headings.
+pub const ACRONYM_MAX_CHARS: usize = 6;
+/// Longest token inside a multi-token ALL-CAPS run (`NASA JPL`) — two or
+/// three short acronyms are a name; `STRATEGIC POINT` is a heading.
+pub const ACRONYM_RUN_TOKEN_MAX_CHARS: usize = 5;
+
+/// Entity admission — the single predicate that decides whether a
+/// capitalized run becomes a node in the entity table.
+///
+/// Every admitted entity is a node the claims lane, chain traversal,
+/// entity threads and `expand_entities` can follow, so a bad admission is
+/// not clutter: it is a hop that leads nowhere and a conflict keyed on
+/// nothing. Measured on a 6,964-row production store (2026-09-06, issue
+/// #213): 43,617 entities, 48% ALL-CAPS, 37% carrying digits, 11% bare
+/// numbers or versions, 19% four-plus words, and 55 of the 99 surviving
+/// heuristic claims had an all-caps endpoint. The relation extractor was
+/// precise by then (#210); the residual junk was all admission.
+///
+/// Rules, each answering one measured class:
+/// - no alphabetic character (`2026`, `0.19.0`, `15`): never a node. These
+///   are VALUES; see [`extract_value_candidates`] — they stay available as
+///   relation objects (`CT128 -runs-> 0.19.0`) without becoming entities.
+/// - all function words / bare months, or a prose run: rejected (as before).
+/// - more than [`ENTITY_MAX_WORDS`] words or [`ENTITY_MAX_CHARS`] chars: a
+///   heading or a sentence, not a name.
+/// - one ALL-CAPS token longer than [`ACRONYM_MAX_CHARS`]: a shouted word.
+/// - every token ALL-CAPS and any token longer than
+///   [`ACRONYM_RUN_TOKEN_MAX_CHARS`]: a shouted heading (`STRATEGIC POINT`);
+///   `NASA JPL` stays.
+/// - a trailing possessive clitic (`Pranab's`, typographic too) is a
+///   straggler from an older extractor: refused, the owner is its own node.
+pub fn admit_entity(name: &str) -> bool {
+    let name = name.trim();
+    // A possessive straggler is the grammar around a name, not a name: the
+    // chunker canonicalises `Sol's` to `Sol` for fresh text, so a stored
+    // `Pranab's` can only be an older extractor's leftover, and its owner
+    // already exists as its own node.
+    if name.ends_with("'s") || name.ends_with("\u{2019}s") || name.ends_with('\'') {
+        return false;
+    }
+    if is_rejected_entity_name(name) {
+        return false;
+    }
+    // Strip function words from both ends before judging the core: the
+    // chunker already does this for fresh text, but stored names from older
+    // extractors (`NOT 1348`, `THE Most`) arrive here whole through the
+    // heal, and a function word must not lend a number its letters.
+    let mut toks: Vec<&str> = name.split_whitespace().collect();
+    while toks.first().is_some_and(|t| is_entity_stopword(t)) {
+        toks.remove(0);
+    }
+    while toks
+        .last()
+        .is_some_and(|t| is_entity_stopword(t) && t.chars().count() > 1)
+    {
+        toks.pop();
+    }
+    if toks.is_empty() || !toks.iter().any(|t| t.chars().any(|c| c.is_alphabetic())) {
+        return false;
+    }
+    if toks.len() > ENTITY_MAX_WORDS || name.chars().count() >= ENTITY_MAX_CHARS {
+        return false;
+    }
+    let caps: Vec<bool> = toks.iter().map(|t| is_all_caps_token(t)).collect();
+    if toks.len() == 1 && caps[0] && toks[0].chars().count() > ACRONYM_MAX_CHARS {
+        return false;
+    }
+    if toks.len() > 1
+        && caps.iter().all(|&c| c)
+        && toks
+            .iter()
+            .any(|t| t.chars().count() > ACRONYM_RUN_TOKEN_MAX_CHARS)
+    {
+        return false;
+    }
+    true
+}
+
+/// Value objects: tokens that name a quantity, version or year rather than
+/// a thing — no letters, at least one digit (`0.19.0`, `2026`, `1985`,
+/// `3.6`). They are never entities (see [`admit_entity`]) but the relation
+/// extractor needs them as OBJECTS so `born_in 1985` and `runs 0.19.0` keep
+/// minting claims; those claims then feed succession detection (`runs` is
+/// functional), which is the whole reason the value is worth keeping.
+/// A value object: no letters, at least one digit (`0.19.0`, `1985`, `3.6`).
+/// Admissible as a claim OBJECT, never as a subject or an entity node.
+pub fn is_value_object(name: &str) -> bool {
+    let name = name.trim();
+    !name.is_empty()
+        && !name.chars().any(|c| c.is_alphabetic())
+        && name.chars().any(|c| c.is_ascii_digit())
+}
+
+pub fn extract_value_candidates(text: &str) -> Vec<String> {
+    let stripped = strip_code(text);
+    let mut out: Vec<String> = Vec::new();
+    for word in stripped
+        .split(|c: char| {
+            c.is_whitespace() || matches!(c, ',' | ';' | ':' | '(' | ')' | '[' | ']' | '"' | '\'')
+        })
+        .filter(|s| !s.is_empty())
+    {
+        let w = word.trim_end_matches(|c: char| c == '.' || c == '!' || c == '?');
+        if !is_value_object(w) {
+            continue;
+        }
+        if !out.iter().any(|o| o == w) {
+            out.push(w.to_string());
+        }
+    }
+    out
+}
+
 /// Extract candidate proper-noun entities from free-form text using a
 /// capitalized-chunk heuristic. Groups consecutive capitalized words into
 /// multi-word entities ("Alice Chen", "San Francisco", "Acme Corp") and
@@ -433,6 +553,26 @@ pub fn extract_heuristic_entities(text: &str) -> Vec<String> {
 
 fn extract_heuristic_entities_inner(text: &str) -> Vec<String> {
     let mut entities: Vec<String> = Vec::new();
+    // Clause punctuation ends a name. Without this a heading swallows the
+    // name after its colon (`STRATEGIC POINT: CT128 runs` minted
+    // `STRATEGIC POINT CT128`, or nothing once headings were refused) and
+    // `San Francisco, California` welds into one entity. A period is NOT a
+    // boundary: `St. Louis`, `Dr. Smith` and `Acme Inc.` must stay whole.
+    for segment in text.split(|c: char| {
+        matches!(
+            c,
+            ':' | ';' | ',' | '!' | '?' | '\n' | '(' | ')' | '[' | ']' | '"'
+        )
+    }) {
+        extract_entities_from_segment(segment, &mut entities);
+    }
+    // Deduplicate while preserving first-appearance order.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    entities.retain(|e| seen.insert(e.clone()));
+    entities
+}
+
+fn extract_entities_from_segment(text: &str, entities: &mut Vec<String>) {
     let mut chunk: Vec<String> = Vec::new();
 
     let flush = |chunk: &mut Vec<String>, out: &mut Vec<String>| {
@@ -452,7 +592,10 @@ fn extract_heuristic_entities_inner(text: &str) -> Vec<String> {
         if !chunk.is_empty() && !is_prose_run(chunk) {
             let candidate = chunk.join(" ");
             let alpha_chars = candidate.chars().filter(|c| c.is_alphanumeric()).count();
-            if alpha_chars >= 2 {
+            // Admission is the gate every writer shares: the materializer,
+            // the batch path and the heals all mint through this function,
+            // so a name the table must never hold is refused exactly here.
+            if alpha_chars >= 2 && admit_entity(&candidate) {
                 out.push(candidate);
             }
         }
@@ -474,6 +617,15 @@ fn extract_heuristic_entities_inner(text: &str) -> Vec<String> {
             .or_else(|| word.strip_suffix('\''))
             .filter(|bare| !bare.is_empty());
         let entity_word = possessive.unwrap_or(word);
+        // A token without a letter (`2026`, `0.19.0`, `15`) is a value, not
+        // a name, and it must not glue to its neighbours either: `2026
+        // Alice Moreau` was the production store's most common shape of
+        // junk. Values reach the relation extractor through
+        // `extract_value_candidates`, never through this list.
+        if !entity_word.chars().any(|c| c.is_alphabetic()) {
+            flush(&mut chunk, entities);
+            continue;
+        }
         let first = entity_word.chars().next().unwrap();
         let starts_upper = first.is_uppercase();
         let is_all_caps = entity_word.len() > 1
@@ -493,18 +645,13 @@ fn extract_heuristic_entities_inner(text: &str) -> Vec<String> {
         if joins_chunk {
             chunk.push(entity_word.to_string());
             if possessive.is_some() {
-                flush(&mut chunk, &mut entities);
+                flush(&mut chunk, entities);
             }
         } else {
-            flush(&mut chunk, &mut entities);
+            flush(&mut chunk, entities);
         }
     }
-    flush(&mut chunk, &mut entities);
-
-    // Deduplicate while preserving first-appearance order.
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    entities.retain(|e| seen.insert(e.clone()));
-    entities
+    flush(&mut chunk, entities);
 }
 
 // ── Heuristic relation extraction (RFC 006 Phase 1) ──
@@ -2553,5 +2700,91 @@ mod possessive_entity_tests {
         for bad in ["Let", "It", "What"] {
             assert!(!ents.iter().any(|e| e == bad), "{bad:?} survived: {ents:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod entity_admission_tests {
+    use super::*;
+
+    /// Issue #213: the measured junk classes, one assertion each.
+    #[test]
+    fn measured_junk_classes_are_refused() {
+        for bad in [
+            "2026",                                 // bare year
+            "0.19.0",                               // version
+            "15",                                   // count
+            "STRATEGIC POINT",                      // shouted heading
+            "MASTERING",                            // one shouted word
+            "NOT 1348",                             // function word + number
+            "Recall Return Unrelated Records Root", // five-word run
+            "A Very Long Capitalized Phrase That Is Clearly A Sentence Not A Name",
+        ] {
+            assert!(!admit_entity(bad), "{bad:?} was admitted");
+        }
+    }
+
+    #[test]
+    fn real_names_and_acronyms_are_admitted() {
+        for good in [
+            "Alice Chen",
+            "Fennwick Labs",
+            "San Francisco",
+            "NASA",
+            "HNSW",
+            "FAISS",
+            "CT128",
+            "ONNX",
+            "NASA JPL",
+            "Series A",
+            "Q2",
+            "Indian Institute",
+            "O'Brien",
+            "Yantrikdb",
+        ] {
+            assert!(admit_entity(good), "{good:?} was refused");
+        }
+    }
+
+    #[test]
+    fn possessive_stragglers_are_refused_as_nodes() {
+        assert!(!admit_entity("Pranab\u{2019}s"));
+        assert!(!admit_entity("Pranab's"));
+        assert!(admit_entity("Pranab"));
+    }
+
+    #[test]
+    fn numbers_are_values_not_entities_but_still_relation_objects() {
+        let text = "CT128 runs 0.19.0 in production since 2026.";
+        let ents = extract_heuristic_entities(text);
+        assert!(ents.iter().any(|e| e == "CT128"), "{ents:?}");
+        assert!(
+            !ents.iter().any(|e| e == "0.19.0" || e == "2026"),
+            "value minted as entity: {ents:?}"
+        );
+        let values = extract_value_candidates(text);
+        assert_eq!(values, vec!["0.19.0".to_string(), "2026".to_string()]);
+        let mut cands = ents.clone();
+        cands.extend(values);
+        let rels = extract_heuristic_relations(text, &cands);
+        assert!(
+            rels.iter()
+                .any(|r| r.src == "CT128" && r.rel_type == "runs" && r.dst == "0.19.0"),
+            "runs claim lost its value object: {rels:?}"
+        );
+    }
+
+    #[test]
+    fn shouted_headings_never_reach_the_entity_list() {
+        let ents = extract_heuristic_entities(
+            "STRATEGIC POINT: MASTERING the release. The NASA JPL team shipped it.",
+        );
+        assert!(
+            !ents
+                .iter()
+                .any(|e| e.contains("STRATEGIC") || e == "MASTERING"),
+            "{ents:?}"
+        );
+        assert!(ents.iter().any(|e| e == "NASA JPL"), "{ents:?}");
     }
 }

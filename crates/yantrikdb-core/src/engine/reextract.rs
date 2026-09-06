@@ -176,3 +176,139 @@ impl super::YantrikDB {
         Ok(report)
     }
 }
+
+/// Report of [`YantrikDB::reextract_entities`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct EntityAdmissionReport {
+    pub dry_run: bool,
+    pub entities_scanned: usize,
+    /// Names that fail [`crate::graph::admit_entity`] today.
+    pub inadmissible: usize,
+    /// Inadmissible names kept because a manual or writer-stated claim
+    /// references them — an assertion outranks a heuristic.
+    pub kept_by_claims: usize,
+    pub entities_removed: usize,
+    pub links_removed: usize,
+    /// Extractor-minted claims dropped because an endpoint was removed.
+    pub claims_removed: usize,
+    /// Junk-class counts before the heal (`all_caps`, `has_digit`,
+    /// `no_letters`, `four_plus_words`, `long`).
+    pub before_classes: BTreeMap<String, i64>,
+    /// The same counts after (equals `before` on a dry run).
+    pub after_classes: BTreeMap<String, i64>,
+}
+
+const ENTITY_HEAL_BATCH: usize = 500;
+
+impl super::YantrikDB {
+    fn entity_classes(&self) -> Result<BTreeMap<String, i64>> {
+        let conn = self.conn();
+        let mut out = BTreeMap::new();
+        let q = |sql: &str| -> Result<i64> { Ok(conn.query_row(sql, [], |r| r.get::<_, i64>(0))?) };
+        out.insert("total".into(), q("SELECT COUNT(*) FROM entities")?);
+        out.insert(
+            "all_caps".into(),
+            q("SELECT COUNT(*) FROM entities WHERE name = upper(name) AND name <> lower(name) AND length(name) >= 2")?,
+        );
+        out.insert(
+            "has_digit".into(),
+            q("SELECT COUNT(*) FROM entities WHERE name GLOB '*[0-9]*'")?,
+        );
+        out.insert(
+            "no_letters".into(),
+            q("SELECT COUNT(*) FROM entities WHERE NOT name GLOB '*[A-Za-z]*'")?,
+        );
+        out.insert(
+            "four_plus_words".into(),
+            q("SELECT COUNT(*) FROM entities WHERE (length(name) - length(replace(name,' ',''))) >= 3")?,
+        );
+        out.insert(
+            "long".into(),
+            q("SELECT COUNT(*) FROM entities WHERE length(name) >= 40")?,
+        );
+        Ok(out)
+    }
+
+    /// One-time heal for the entity table: re-apply today's admission
+    /// predicate ([`crate::graph::admit_entity`]) to every stored entity
+    /// and remove the ones it refuses — with their `memory_entities` links
+    /// and any extractor-minted claim that used them as an endpoint — then
+    /// rebuild the graph index so expansion stops seeing the dropped nodes.
+    ///
+    /// Nothing revisits admitted nodes otherwise: the extractor gate in
+    /// #213 protects new writes only, and a store written by an older
+    /// extractor keeps every heading and bare number it ever minted as a
+    /// hop the claims lane can follow. This is the entity-table twin of
+    /// [`Self::reextract_claims`], and like it is idempotent.
+    ///
+    /// An inadmissible name referenced by a `manual` or `agent_stated`
+    /// claim is KEPT: a writer asserted it, and an assertion outranks the
+    /// heuristic. The entity table is store-wide (no namespace column), so
+    /// the heal is too. `dry_run` reports and changes nothing.
+    pub fn reextract_entities(&self, dry_run: bool) -> Result<EntityAdmissionReport> {
+        let before_classes = self.entity_classes()?;
+        let mut report = EntityAdmissionReport {
+            dry_run,
+            entities_scanned: 0,
+            inadmissible: 0,
+            kept_by_claims: 0,
+            entities_removed: 0,
+            links_removed: 0,
+            claims_removed: 0,
+            after_classes: before_classes.clone(),
+            before_classes,
+        };
+        let names: Vec<String> = {
+            let conn = self.conn();
+            let mut stmt = conn.prepare("SELECT name FROM entities ORDER BY name")?;
+            let rows: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            rows
+        };
+        report.entities_scanned = names.len();
+        let mut doomed: Vec<String> = Vec::new();
+        {
+            let conn = self.conn();
+            let mut asserted = conn.prepare(
+                "SELECT COUNT(*) FROM claims WHERE tombstoned = 0 \
+                 AND extractor NOT IN ('heuristic_v1','learned_v1') \
+                 AND (src = ?1 OR dst = ?1)",
+            )?;
+            for name in &names {
+                if crate::graph::admit_entity(name) {
+                    continue;
+                }
+                report.inadmissible += 1;
+                let refs: i64 = asserted.query_row(params![name], |r| r.get(0))?;
+                if refs > 0 {
+                    report.kept_by_claims += 1;
+                    continue;
+                }
+                doomed.push(name.clone());
+            }
+        }
+        if dry_run {
+            return Ok(report);
+        }
+        for batch in doomed.chunks(ENTITY_HEAL_BATCH) {
+            let conn = self.conn();
+            for name in batch {
+                report.links_removed += conn.execute(
+                    "DELETE FROM memory_entities WHERE entity_name = ?1",
+                    params![name],
+                )?;
+                report.claims_removed += conn.execute(
+                    "DELETE FROM claims WHERE extractor IN ('heuristic_v1','learned_v1') \
+                     AND (src = ?1 OR dst = ?1)",
+                    params![name],
+                )?;
+                report.entities_removed +=
+                    conn.execute("DELETE FROM entities WHERE name = ?1", params![name])?;
+            }
+        }
+        self.rebuild_graph_index()?;
+        report.after_classes = self.entity_classes()?;
+        Ok(report)
+    }
+}

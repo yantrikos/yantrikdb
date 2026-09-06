@@ -1494,8 +1494,22 @@ impl YantrikDB {
         heuristic_vec: &[String],
     ) -> usize {
         let mut written = 0usize;
-        let relations = crate::graph::extract_heuristic_relations(text, &heuristic_vec);
+        // Value objects (`0.19.0`, `1985`) are never entities but must stay
+        // available as relation OBJECTS, or `runs`/`born_in` claims vanish
+        // with the entity junk they used to ride on (issue #213).
+        let mut candidates: Vec<String> = heuristic_vec.to_vec();
+        for v in crate::graph::extract_value_candidates(text) {
+            if !candidates.contains(&v) {
+                candidates.push(v);
+            }
+        }
+        let relations = crate::graph::extract_heuristic_relations(text, &candidates);
         for rel in &relations {
+            // A value can be an object, never a subject: `2026 -leads-> X`
+            // anchors nothing at read time and is refused there anyway.
+            if crate::graph::is_rejected_entity_name(&rel.src) {
+                continue;
+            }
             let already_exists = {
                 let conn = self.conn();
                 conn.query_row(
@@ -1541,8 +1555,11 @@ impl YantrikDB {
             Self::active_relation_templates(&conn, namespace)
         };
         if !templates.is_empty() {
-            let learned = crate::graph::extract_learned_relations(text, &heuristic_vec, &templates);
+            let learned = crate::graph::extract_learned_relations(text, &candidates, &templates);
             for rel in &learned {
+                if crate::graph::is_rejected_entity_name(&rel.src) {
+                    continue;
+                }
                 let already_exists = {
                     let conn = self.conn();
                     conn.query_row(

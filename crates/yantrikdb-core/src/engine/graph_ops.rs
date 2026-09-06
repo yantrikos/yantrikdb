@@ -633,7 +633,7 @@ impl YantrikDB {
             )?;
             for &entity in entity_names {
                 let entity_tokens = crate::graph::tokenize(entity);
-                if entity_tokens.is_empty() {
+                if entity_tokens.is_empty() || !crate::graph::admit_entity(entity) {
                     continue;
                 }
                 let rows: Vec<(String, String)> = stmt
@@ -901,8 +901,15 @@ impl YantrikDB {
                 ],
             )?;
 
-            // Ensure entities exist
+            // Ensure entities exist — for endpoints the entity table admits.
+            // A value object (`0.19.0`, `1985`) is a legitimate claim OBJECT
+            // but never a node: the claim row carries it, the read side
+            // refuses it as an anchor, and issue #213 measured what happens
+            // when every endpoint becomes a node (11% bare numbers).
             for (entity, etype) in [(&*src_resolved, src_type), (&*dst_resolved, dst_type)] {
+                if !crate::graph::admit_entity(entity) {
+                    continue;
+                }
                 conn.execute(
                     "INSERT INTO entities (name, entity_type, first_seen, last_seen) \
                      VALUES (?1, ?2, ?3, ?4) \
@@ -1291,10 +1298,15 @@ impl super::YantrikDB {
                 );
                 continue;
             }
-            if crate::graph::is_rejected_entity_name(src)
-                || crate::graph::is_rejected_entity_name(dst)
-            {
-                reject("subject or object is not an admissible entity name (stopword, heading or bare number)".into(), &mut report);
+            // The subject must be a node the table admits; the object may
+            // also be a value (`0.19.0`, `1985`): `CT128 runs 0.19.0` is the
+            // succession-bearing claim shape and its object is not a thing.
+            if !crate::graph::admit_entity(src) {
+                reject("subject is not an admissible entity name (stopword, heading, possessive or bare number)".into(), &mut report);
+                continue;
+            }
+            if !crate::graph::admit_entity(dst) && !crate::graph::is_value_object(dst) {
+                reject("object is neither an admissible entity name nor a value (a number, version or year)".into(), &mut report);
                 continue;
             }
             if src.eq_ignore_ascii_case(dst) {
