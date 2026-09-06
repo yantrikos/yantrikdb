@@ -1,0 +1,178 @@
+//! One-time claim re-extraction — the heal that makes an extractor fix
+//! reach a store that already exists.
+//!
+//! The materializer extracts claims when a memory is WRITTEN. An extractor
+//! improvement therefore touches only new writes: the production memory
+//! store measured on 2026-09-05 still carried 2,576 claims minted by the
+//! old patterns (57% junk `leads`, "Pranab runs UTC") after the anchored
+//! extractor shipped, and the claim-chain and conflict scanners kept
+//! reading them. `reextract_claims` drops every claim the extractors
+//! minted (`heuristic_v1`, `learned_v1`) and re-runs the materializer's
+//! own extraction over every active memory — one definition, two callers.
+//!
+//! Scope, deliberately: extractor-minted claims ONLY. `relate()` rows
+//! (`manual`) and writer-stated claims (`agent_stated`) are assertions,
+//! not derivations, and are never touched. Extractor claims are node-local
+//! derived state (their `hlc` is NULL, they do not replicate), so deleting
+//! and regenerating them is safe; nothing else references a heuristic
+//! claim by id. The in-memory graph index is rebuilt at the end so
+//! expansion stops seeing the deleted edges.
+
+use std::collections::BTreeMap;
+
+use rusqlite::params;
+
+use crate::error::Result;
+
+/// Extractor labels whose claims are derived from text and safe to regenerate.
+pub const REEXTRACT_EXTRACTORS: &[&str] = &["heuristic_v1", "learned_v1"];
+/// Memories processed per write-lock hold.
+const REEXTRACT_BATCH: usize = 500;
+
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ReextractReport {
+    pub namespace: Option<String>,
+    pub dry_run: bool,
+    pub memories_scanned: usize,
+    pub claims_removed: usize,
+    pub claims_written: usize,
+    /// Extractor-minted claims by relation before the heal.
+    pub before_by_rel: BTreeMap<String, i64>,
+    /// Extractor-minted claims by relation after the heal (equals `before`
+    /// on a dry run).
+    pub after_by_rel: BTreeMap<String, i64>,
+}
+
+impl super::YantrikDB {
+    fn extracted_claims_by_rel(&self, namespace: Option<&str>) -> Result<BTreeMap<String, i64>> {
+        let conn = self.conn();
+        let sql = format!(
+            "SELECT rel_type, COUNT(*) FROM claims WHERE tombstoned = 0 \
+             AND extractor IN ('heuristic_v1','learned_v1') {} GROUP BY rel_type",
+            if namespace.is_some() {
+                "AND namespace = ?1"
+            } else {
+                ""
+            }
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows: Vec<(String, i64)> = if let Some(ns) = namespace {
+            stmt.query_map(params![ns], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?
+        } else {
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        Ok(rows.into_iter().collect())
+    }
+
+    /// Drop every extractor-minted claim (optionally in one namespace) and
+    /// re-extract from every active memory with the current extractor. See
+    /// the module note for scope and safety. `dry_run` reports the current
+    /// state and touches nothing.
+    pub fn reextract_claims(
+        &self,
+        namespace: Option<&str>,
+        dry_run: bool,
+    ) -> Result<ReextractReport> {
+        let before_by_rel = self.extracted_claims_by_rel(namespace)?;
+        let mut report = ReextractReport {
+            namespace: namespace.map(str::to_string),
+            dry_run,
+            memories_scanned: 0,
+            claims_removed: 0,
+            claims_written: 0,
+            after_by_rel: before_by_rel.clone(),
+            before_by_rel,
+        };
+
+        // Count what would be scanned even on a dry run.
+        {
+            let conn = self.conn();
+            let sql = format!(
+                "SELECT COUNT(*) FROM memories WHERE consolidation_status = 'active' {}",
+                if namespace.is_some() {
+                    "AND namespace = ?1"
+                } else {
+                    ""
+                }
+            );
+            report.memories_scanned = if let Some(ns) = namespace {
+                conn.query_row(&sql, params![ns], |r| r.get::<_, i64>(0))? as usize
+            } else {
+                conn.query_row(&sql, [], |r| r.get::<_, i64>(0))? as usize
+            };
+        }
+        if dry_run {
+            return Ok(report);
+        }
+
+        // 1. Remove the derived rows.
+        {
+            let conn = self.conn();
+            let sql = format!(
+                "DELETE FROM claims WHERE extractor IN ('heuristic_v1','learned_v1') {}",
+                if namespace.is_some() {
+                    "AND namespace = ?1"
+                } else {
+                    ""
+                }
+            );
+            report.claims_removed = if let Some(ns) = namespace {
+                conn.execute(&sql, params![ns])?
+            } else {
+                conn.execute(&sql, [])?
+            };
+        }
+
+        // 2. Re-extract, keyset-paged so no single lock hold scans the store.
+        let mut last_rowid: i64 = 0;
+        let mut scanned = 0usize;
+        loop {
+            let page: Vec<(i64, String, String, String)> = {
+                let conn = self.conn();
+                let sql = format!(
+                    "SELECT rowid, rid, text, namespace FROM memories \
+                     WHERE consolidation_status = 'active' AND rowid > ?1 {} \
+                     ORDER BY rowid LIMIT ?2",
+                    if namespace.is_some() {
+                        "AND namespace = ?3"
+                    } else {
+                        ""
+                    }
+                );
+                let mut stmt = conn.prepare(&sql)?;
+                let mapper =
+                    |r: &rusqlite::Row| -> rusqlite::Result<(i64, String, String, String)> {
+                        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+                    };
+                if let Some(ns) = namespace {
+                    stmt.query_map(params![last_rowid, REEXTRACT_BATCH as i64, ns], mapper)?
+                        .collect::<std::result::Result<_, _>>()?
+                } else {
+                    stmt.query_map(params![last_rowid, REEXTRACT_BATCH as i64], mapper)?
+                        .collect::<std::result::Result<_, _>>()?
+                }
+            };
+            if page.is_empty() {
+                break;
+            }
+            for (rowid, rid, stored, ns) in page {
+                last_rowid = rowid;
+                scanned += 1;
+                let text = match self.decrypt_text(&stored) {
+                    Ok(t) => t,
+                    Err(_) => continue, // unreadable row: leave it claimless rather than fail the heal
+                };
+                let heuristic = crate::graph::extract_heuristic_entities(&text);
+                report.claims_written += self.ingest_extracted_claims(&rid, &text, &ns, &heuristic);
+            }
+        }
+        report.memories_scanned = scanned;
+
+        // 3. The in-memory graph index still holds the deleted edges.
+        self.rebuild_graph_index()?;
+        report.after_by_rel = self.extracted_claims_by_rel(namespace)?;
+        Ok(report)
+    }
+}

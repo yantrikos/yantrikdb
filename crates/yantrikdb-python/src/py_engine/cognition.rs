@@ -369,6 +369,25 @@ impl PyYantrikDB {
         crate::py_types::json_to_py(py, &val)
     }
 
+    /// Drop every extractor-minted claim (heuristic_v1 / learned_v1),
+    /// optionally in one namespace, and re-extract from every active memory
+    /// with the current extractor. relate() and writer-stated claims are
+    /// never touched. `dry_run=True` reports and changes nothing. Returns
+    /// `{memories_scanned, claims_removed, claims_written, before_by_rel,
+    /// after_by_rel, ...}`.
+    #[pyo3(signature = (namespace=None, dry_run=false))]
+    fn reextract_claims(
+        &self,
+        py: Python<'_>,
+        namespace: Option<&str>,
+        dry_run: bool,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let out = db.reextract_claims(namespace, dry_run).map_err(map_err)?;
+        let val = serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        crate::py_types::json_to_py(py, &val)
+    }
+
     /// One batch of the v50 source_turn recompute/repair pass — the
     /// maintenance operation `SourceTurnMaintenanceRequiredError` names.
     /// Returns `{"processed", "remaining", "complete"}`; call repeatedly
