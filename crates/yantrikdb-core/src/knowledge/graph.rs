@@ -795,6 +795,12 @@ pub const COMMON_WORD_SEED: &[&str] = &[
     "yet",
     "you",
     "your",
+    // literals that arrive capitalized in code-adjacent prose
+    "false",
+    "nil",
+    "none",
+    "null",
+    "undefined",
 ];
 
 /// A store writes a word in lowercase at least this many times before the
@@ -812,6 +818,8 @@ pub struct CaseStats {
     pub lower_n: i64,
     /// Occurrences capitalized NOT at a sentence start — the shape a name has.
     pub cap_mid_n: i64,
+    /// Occurrences capitalized at a sentence start — capitalized by position.
+    pub cap_start_n: i64,
 }
 
 /// How a token appears in one text; each memory contributes at most one
@@ -825,13 +833,35 @@ pub enum TokenCase {
 
 /// Case observations for the alphabetic tokens of a text, deduplicated per
 /// (token, class). Sentence starts are the first token after `.`, `!`, `?`,
-/// `:`, `;` or a newline; a capitalized token there says nothing about
-/// whether it is a name, which is the whole reason the class exists.
+/// `:`, `;`, a newline, an opening bracket or quote, a dash or a bullet —
+/// every place prose capitalizes by position; a capitalized token there
+/// says nothing about whether it is a name, which is the whole reason the
+/// class exists.
 pub fn token_case_observations(text: &str) -> Vec<(String, TokenCase)> {
     let stripped = strip_code(text);
     let mut seen: std::collections::HashSet<(String, TokenCase)> = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for segment in stripped.split(|c: char| matches!(c, '.' | '!' | '?' | ':' | ';' | '\n')) {
+    for segment in stripped.split(|c: char| {
+        matches!(
+            c,
+            '.' | '!'
+                | '?'
+                | ':'
+                | ';'
+                | '\n'
+                | '('
+                | '['
+                | '"'
+                | '\u{201c}'
+                | '\u{201d}'
+                | '\u{2014}'
+                | '\u{2013}'
+                | '*'
+                | '\u{2022}'
+                | '>'
+                | '|'
+        )
+    }) {
         let mut first = true;
         for word in segment
             .split(|c: char| !c.is_alphanumeric() && c != '\'')
@@ -871,7 +901,15 @@ pub fn token_case_observations(text: &str) -> Vec<(String, TokenCase)> {
 /// knows it.
 pub fn is_common_word(token: &str, stats: Option<CaseStats>) -> bool {
     if let Some(s) = stats {
-        if s.cap_mid_n >= COMMON_WORD_MIN_LOWER && s.cap_mid_n > s.lower_n {
+        // A name is capitalized mid-sentence at least as often as at a
+        // sentence start, and more often than it is written lowercase.
+        // `Critically` at 0 lowercase / 3 mid / 8 starts is a sentence
+        // starter that occasionally follows a dash; `Pranab` at 108 / 1474
+        // / 903 is a name.
+        if s.cap_mid_n >= COMMON_WORD_MIN_LOWER
+            && s.cap_mid_n > s.lower_n
+            && s.cap_mid_n >= s.cap_start_n
+        {
             return false;
         }
         if s.lower_n >= COMMON_WORD_MIN_LOWER && s.lower_n >= COMMON_WORD_LOWER_RATIO * s.cap_mid_n
@@ -899,10 +937,10 @@ where
         return true;
     }
     let tok = toks[0];
-    // Acronyms are never words: `API`, `PR`, `CI` stay whatever the store writes.
-    if is_all_caps_token(tok) {
-        return true;
-    }
+    // Shouted words are words too: the store writes `class` 450 times in
+    // lowercase and `CLASS` is a heading, while `API` at 366 lowercase to
+    // 650 mid-sentence capitals is a name — the statistic separates them,
+    // an acronym exemption could not.
     !is_common_word(tok, lookup(&tok.to_lowercase()))
 }
 
@@ -3401,7 +3439,8 @@ mod common_word_tests {
             "Recall",
             Some(CaseStats {
                 lower_n: 500,
-                cap_mid_n: 40
+                cap_mid_n: 40,
+                cap_start_n: 0,
             })
         ));
         // `python` 200 vs `Python` 150: within the ratio, stays a name.
@@ -3409,7 +3448,8 @@ mod common_word_tests {
             "Python",
             Some(CaseStats {
                 lower_n: 200,
-                cap_mid_n: 150
+                cap_mid_n: 150,
+                cap_start_n: 33,
             })
         ));
         // A seed word the store uses as a name mid-sentence: a name here.
@@ -3417,7 +3457,8 @@ mod common_word_tests {
             "Target",
             Some(CaseStats {
                 lower_n: 2,
-                cap_mid_n: 9
+                cap_mid_n: 9,
+                cap_start_n: 1,
             })
         ));
         // Too little evidence: the seed decides.
@@ -3425,21 +3466,24 @@ mod common_word_tests {
             "Make",
             Some(CaseStats {
                 lower_n: 1,
-                cap_mid_n: 0
+                cap_mid_n: 0,
+                cap_start_n: 0,
             })
         ));
         assert!(!is_common_word(
             "Gizmo",
             Some(CaseStats {
                 lower_n: 2,
-                cap_mid_n: 0
+                cap_mid_n: 0,
+                cap_start_n: 0,
             })
         ));
         assert!(is_common_word(
             "Gizmo",
             Some(CaseStats {
                 lower_n: 4,
-                cap_mid_n: 1
+                cap_mid_n: 1,
+                cap_start_n: 0,
             })
         ));
     }
@@ -3449,13 +3493,83 @@ mod common_word_tests {
         let none = |_: &str| None;
         assert!(!admit_entity_with("Critically", none));
         assert!(admit_entity_with("Alice Moreau", none));
-        assert!(admit_entity_with("API", none));
+        assert!(
+            admit_entity_with("API", none),
+            "cold store, not a seed word"
+        );
+        assert!(
+            !admit_entity_with("CODE", none),
+            "cold store, shouted seed word"
+        );
         assert!(admit_entity_with("Pranab", none));
+        let stats = |t: &str| match t {
+            "class" => Some(CaseStats {
+                lower_n: 450,
+                cap_mid_n: 57,
+                cap_start_n: 5,
+            }),
+            "api" => Some(CaseStats {
+                lower_n: 366,
+                cap_mid_n: 650,
+                cap_start_n: 28,
+            }),
+            _ => None,
+        };
+        assert!(!admit_entity_with("CLASS", stats));
+        assert!(admit_entity_with("API", stats));
+        // Production counts (2026-09-06): a starter that sometimes follows a
+        // dash is not a name; a shouted word is a word; an acronym is a name.
+        assert!(is_common_word(
+            "Critically",
+            Some(CaseStats {
+                lower_n: 0,
+                cap_mid_n: 3,
+                cap_start_n: 8
+            })
+        ));
+        assert!(is_common_word(
+            "FIX",
+            Some(CaseStats {
+                lower_n: 1083,
+                cap_mid_n: 232,
+                cap_start_n: 424
+            })
+        ));
+        assert!(!is_common_word(
+            "Pranab",
+            Some(CaseStats {
+                lower_n: 108,
+                cap_mid_n: 1474,
+                cap_start_n: 903
+            })
+        ));
+        assert!(!is_common_word(
+            "UTC",
+            Some(CaseStats {
+                lower_n: 4,
+                cap_mid_n: 952,
+                cap_start_n: 8
+            })
+        ));
+        assert!(
+            is_common_word("None", None),
+            "literal values are seed words"
+        );
+        let obs2 = token_case_observations("we shipped it (Critically, twice) \u{2014} Finally.");
+        assert!(
+            obs2.contains(&("critically".to_string(), TokenCase::CapStart)),
+            "{obs2:?}"
+        );
+        assert!(
+            obs2.contains(&("finally".to_string(), TokenCase::CapStart)),
+            "{obs2:?}"
+        );
         let learned = |t: &str| {
             if t == "gizmo" {
                 Some(CaseStats {
                     lower_n: 6,
                     cap_mid_n: 0,
+                    cap_start_n: 0,
                 })
             } else {
                 None

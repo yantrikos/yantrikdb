@@ -1264,12 +1264,13 @@ impl super::YantrikDB {
         token: &str,
     ) -> Option<crate::graph::CaseStats> {
         conn.query_row(
-            "SELECT lower_n, cap_mid_n FROM token_case_stats WHERE token = ?1",
+            "SELECT lower_n, cap_mid_n, cap_start_n FROM token_case_stats WHERE token = ?1",
             params![token],
             |r| {
                 Ok(crate::graph::CaseStats {
                     lower_n: r.get(0)?,
                     cap_mid_n: r.get(1)?,
+                    cap_start_n: r.get(2)?,
                 })
             },
         )
