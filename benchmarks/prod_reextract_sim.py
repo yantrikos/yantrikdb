@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import sqlite3
 import sys
 import time
@@ -57,11 +56,18 @@ def main() -> int:
 
     work = args.store
     if args.keep_copy:
+        # sqlite's online backup API folds the WAL in and never touches the
+        # -shm mapping (a plain file copy of -shm is refused on Windows).
         work = args.store.with_name("memory-healed.db")
         for suffix in ("", "-wal", "-shm"):
-            src = args.store.with_name(args.store.name + suffix)
-            if src.exists():
-                shutil.copy(src, work.with_name(work.name + suffix))
+            stale = work.with_name(work.name + suffix)
+            if stale.exists():
+                stale.unlink()
+        src_conn = sqlite3.connect(str(args.store))
+        dst_conn = sqlite3.connect(str(work))
+        src_conn.backup(dst_conn)
+        dst_conn.close()
+        src_conn.close()
     before = census(work)
 
     t0 = time.perf_counter()
