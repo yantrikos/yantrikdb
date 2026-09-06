@@ -1263,17 +1263,18 @@ impl super::YantrikDB {
         conn: &rusqlite::Connection,
         token: &str,
     ) -> Option<crate::graph::CaseStats> {
-        conn.query_row(
-            "SELECT lower_n, cap_mid_n, cap_start_n FROM token_case_stats WHERE token = ?1",
-            params![token],
-            |r| {
-                Ok(crate::graph::CaseStats {
-                    lower_n: r.get(0)?,
-                    cap_mid_n: r.get(1)?,
-                    cap_start_n: r.get(2)?,
-                })
-            },
-        )
+        let mut stmt = conn
+            .prepare_cached(
+                "SELECT lower_n, cap_mid_n, cap_start_n FROM token_case_stats WHERE token = ?1",
+            )
+            .ok()?;
+        stmt.query_row(params![token], |r| {
+            Ok(crate::graph::CaseStats {
+                lower_n: r.get(0)?,
+                cap_mid_n: r.get(1)?,
+                cap_start_n: r.get(2)?,
+            })
+        })
         .ok()
     }
 
@@ -1288,19 +1289,40 @@ impl super::YantrikDB {
         if self.is_encrypted() {
             return Ok(());
         }
-        let mut stmt = conn.prepare_cached(
-            "INSERT INTO token_case_stats (token, lower_n, cap_mid_n, cap_start_n) \
-             VALUES (?1, ?2, ?3, ?4) \
-             ON CONFLICT(token) DO UPDATE SET lower_n = lower_n + ?2, \
-             cap_mid_n = cap_mid_n + ?3, cap_start_n = cap_start_n + ?4",
-        )?;
-        for (token, class) in crate::graph::token_case_observations(text) {
-            let (l, m, st) = match class {
-                crate::graph::TokenCase::Lower => (1, 0, 0),
-                crate::graph::TokenCase::CapMid => (0, 1, 0),
-                crate::graph::TokenCase::CapStart => (0, 0, 1),
-            };
-            stmt.execute(params![token, l, m, st])?;
+        let observations = crate::graph::token_case_observations(text);
+        if observations.is_empty() {
+            return Ok(());
+        }
+        // One transaction per memory, not one per token: a 120-word memory
+        // has ~100 distinct tokens, and 100 autocommits per write made the
+        // materializer drain 70% slower on the 0.21.0 wheel (10.5 s -> 17.8 s
+        // for 300 memories). A savepoint nests safely under any outer
+        // transaction the caller may hold.
+        conn.execute_batch("SAVEPOINT token_case_stats")?;
+        let result = (|| -> Result<()> {
+            let mut stmt = conn.prepare_cached(
+                "INSERT INTO token_case_stats (token, lower_n, cap_mid_n, cap_start_n) \
+                 VALUES (?1, ?2, ?3, ?4) \
+                 ON CONFLICT(token) DO UPDATE SET lower_n = lower_n + ?2, \
+                 cap_mid_n = cap_mid_n + ?3, cap_start_n = cap_start_n + ?4",
+            )?;
+            for (token, class) in &observations {
+                let (l, m, st) = match class {
+                    crate::graph::TokenCase::Lower => (1, 0, 0),
+                    crate::graph::TokenCase::CapMid => (0, 1, 0),
+                    crate::graph::TokenCase::CapStart => (0, 0, 1),
+                };
+                stmt.execute(params![token, l, m, st])?;
+            }
+            Ok(())
+        })();
+        match result {
+            Ok(()) => conn.execute_batch("RELEASE token_case_stats")?,
+            Err(e) => {
+                let _ =
+                    conn.execute_batch("ROLLBACK TO token_case_stats; RELEASE token_case_stats");
+                return Err(e);
+            }
         }
         Ok(())
     }
@@ -1321,12 +1343,20 @@ impl super::YantrikDB {
                 .collect::<std::result::Result<_, _>>()?;
             rows
         };
+        // One transaction for the whole rebuild: 6,449 memories of
+        // per-token upserts is the heal's dominant cost otherwise.
+        conn.execute_batch("SAVEPOINT token_case_rebuild")?;
         let mut n = 0usize;
         for stored in &texts {
             let text = self.decrypt_text(stored).unwrap_or_else(|_| stored.clone());
-            self.record_token_case_observations(&conn, &text)?;
+            if let Err(e) = self.record_token_case_observations(&conn, &text) {
+                let _ = conn
+                    .execute_batch("ROLLBACK TO token_case_rebuild; RELEASE token_case_rebuild");
+                return Err(e);
+            }
             n += 1;
         }
+        conn.execute_batch("RELEASE token_case_rebuild")?;
         Ok(n)
     }
 
