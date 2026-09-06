@@ -541,7 +541,16 @@ const RELATION_PATTERNS: &[(&[&str], &str)] = &[
         "founded",
     ),
     (&["founded"], "founded"),
-    (&["leads", "heads", "runs", "manages", "directs"], "leads"),
+    // "runs" is NOT leadership. Measured on the production memory store
+    // (2026-09-05, 6,408 active memories): `leads` was 1,467 of 2,576 claims
+    // and 877 of them came from "runs" — "CT128 runs 0.15.2", "the compactor
+    // runs every 100 ms". On an engineering corpus "runs" means EXECUTES /
+    // IS AT VERSION, which is exactly the functional relation the claim
+    // scanner already models as `runs` (FUNCTIONAL_REL_TYPES: runs,
+    // runs_version) for succession detection. Minting those as `leads`
+    // produced the dominant junk edge class the claim-chain would follow.
+    (&["leads", "heads", "manages", "directs"], "leads"),
+    (&["runs", "is running", "now runs"], "runs"),
     (
         &[
             "works at",
@@ -1774,6 +1783,20 @@ mod tests {
         assert_eq!(rels.len(), 1);
         assert_eq!(rels[0].polarity, -1);
         assert!(extract_learned_relations("Dana mentors Priya", &entities, &[]).is_empty());
+    }
+
+    #[test]
+    fn test_extract_relations_runs_is_a_version_relation_not_leadership() {
+        // The production defect: "CT128 runs 0.15.2" minted `leads`.
+        let entities = vec!["CT128".to_string(), "Yantrikdb".to_string()];
+        let rels = extract_heuristic_relations("CT128 runs Yantrikdb in production", &entities);
+        assert_eq!(rels.len(), 1, "got: {:?}", rels);
+        assert_eq!(rels[0].rel_type, "runs");
+        assert!(rels.iter().all(|r| r.rel_type != "leads"));
+        // Leadership language still mints leads.
+        let entities = vec!["Alice".to_string(), "Acme".to_string()];
+        let rels = extract_heuristic_relations("Alice leads Acme", &entities);
+        assert_eq!(rels[0].rel_type, "leads");
     }
 
     #[test]
