@@ -503,13 +503,31 @@ pub fn admit_entity(name: &str) -> bool {
 /// extractor needs them as OBJECTS so `born_in 1985` and `runs 0.19.0` keep
 /// minting claims; those claims then feed succession detection (`runs` is
 /// functional), which is the whole reason the value is worth keeping.
-/// A value object: no letters, at least one digit (`0.19.0`, `1985`, `3.6`).
+/// A value object: a number, version, year or ISO date — digit groups
+/// joined by `.` or `-` only (`0.19.0`, `1985`, `3.6`, `2026-08-01`).
 /// Admissible as a claim OBJECT, never as a subject or an entity node.
+///
+/// The shape is deliberately narrow. The first cut admitted anything
+/// with a digit and no letter, and a production census then showed
+/// `Bell -founded-> 67%`, `Builder -runs-> 2+`, `Idempotent -runs-> */5`,
+/// `MTP -runs-> ~121-127` minted as claims: a symbol-bearing token is a
+/// fragment of prose or a cron line, not a value a succession can key on.
 pub fn is_value_object(name: &str) -> bool {
     let name = name.trim();
-    !name.is_empty()
-        && !name.chars().any(|c| c.is_alphabetic())
-        && name.chars().any(|c| c.is_ascii_digit())
+    if name.is_empty() || !name.chars().any(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let mut prev_sep = true;
+    for c in name.chars() {
+        if c.is_ascii_digit() {
+            prev_sep = false;
+        } else if (c == '.' || c == '-') && !prev_sep {
+            prev_sep = true;
+        } else {
+            return false;
+        }
+    }
+    !prev_sep
 }
 
 pub fn extract_value_candidates(text: &str) -> Vec<String> {
@@ -2764,6 +2782,14 @@ mod entity_admission_tests {
         );
         let values = extract_value_candidates(text);
         assert_eq!(values, vec!["0.19.0".to_string(), "2026".to_string()]);
+        for good in ["1985", "0.19.0", "3.6", "2026-08-01", "12"] {
+            assert!(is_value_object(good), "{good:?} refused");
+        }
+        for bad in [
+            "67%", "2+", "24/7", "*/5", "~12", "+4.6%", "~121-127", "1.", "-3", "v2", "",
+        ] {
+            assert!(!is_value_object(bad), "{bad:?} admitted as a value");
+        }
         let mut cands = ents.clone();
         cands.extend(values);
         let rels = extract_heuristic_relations(text, &cands);
