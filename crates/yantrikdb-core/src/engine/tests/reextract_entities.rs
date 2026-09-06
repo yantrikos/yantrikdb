@@ -181,6 +181,19 @@ fn new_writes_never_mint_values_or_headings_but_values_still_serve_as_objects() 
         edges.contains(&("Alice Moreau".into(), "born_in".into(), "1985".into())),
         "{edges:?}"
     );
+    // A value never rides a relation that cannot take one.
+    let rid3 = rec(&db, "Carol Vance leads 2 teams and Dana Ito works at 2026.");
+    db.apply_pending_ops_once(100).unwrap();
+    let junk: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM claims WHERE tombstoned = 0 AND source_memory_rid = ?1 \
+             AND rel_type IN ('leads', 'works_at')",
+            rusqlite::params![rid3],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(junk, 0, "a value object rode a generic relation");
     // A stated claim on a value object is still grounded and stored.
     let rep = db
         .attach_claims(
