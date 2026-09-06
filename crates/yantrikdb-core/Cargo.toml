@@ -24,6 +24,9 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 zstd = "0.13"
 tracing = "0.1"
 aes-gcm = "0.10"
+# Turns a vault passphrase into a key-encryption key. The cost per guess is the only thing
+# between a short passphrase and every credential, for anyone holding the database file.
+argon2 = "0.5"
 base64 = "0.22"
 parking_lot = { version = "0.12", features = ["deadlock_detection"] }
 arc-swap = "1"
