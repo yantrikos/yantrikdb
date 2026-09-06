@@ -380,22 +380,24 @@ def test_claims_inherit_the_records_event_time_and_a_stated_window_wins(db):
     """A record tagged with the time it is ABOUT (metadata event_time_min/max)
     passes that time to the claims it states and the claims the extractor
     mints, so relation and time stay aligned; an explicit valid_from on a
-    stated claim wins over it."""
+    stated claim wins over it. get_claims is the claims-table view that
+    shows the window (get_edges is the bare graph)."""
     t_2024 = 1_704_067_200.0
     rid = db.record("Alice Moreau works at Fennwick Labs, and Alice Moreau lives in Berlin.",
                     metadata={"event_time_min": t_2024, "event_time_max": t_2024})
     db.think()
-    edges = {(e["src"], e["rel_type"], e["dst"]): e for e in db.get_edges("Alice Moreau")}
-    assert edges[("Alice Moreau", "works_at", "Fennwick Labs")]["valid_from"] == t_2024, edges
+    claims = {(c["src"], c["rel_type"], c["dst"]): c for c in db.get_claims("Alice Moreau")}
+    assert claims[("Alice Moreau", "works_at", "Fennwick Labs")]["valid_from"] == t_2024, claims
     db.attach_claims(rid, [{"subject": "Alice Moreau", "relation": "based_in", "object": "Berlin"}])
     t_2025 = 1_735_689_600.0
     db.attach_claims(rid, [{"subject": "Alice Moreau", "relation": "visited", "object": "Berlin",
                             "valid_from": t_2025, "valid_to": t_2025 + 86_400}])
-    edges = {(e["src"], e["rel_type"], e["dst"]): e for e in db.get_edges("Alice Moreau")}
-    assert edges[("Alice Moreau", "based_in", "Berlin")]["valid_from"] == t_2024, edges
-    e = edges[("Alice Moreau", "visited", "Berlin")]
-    assert (e["valid_from"], e["valid_to"]) == (t_2025, t_2025 + 86_400), e
-    untagged = db.record("Bob Lin works at Globex.")
+    claims = {(c["src"], c["rel_type"], c["dst"]): c for c in db.get_claims("Alice Moreau")}
+    assert claims[("Alice Moreau", "based_in", "Berlin")]["valid_from"] == t_2024, claims
+    c = claims[("Alice Moreau", "visited", "Berlin")]
+    assert (c["valid_from"], c["valid_to"]) == (t_2025, t_2025 + 86_400), c
+    assert c["status_suggestion"] == "historical", c
+    db.record("Bob Lin works at Globex.")
     db.think()
-    e = {(x["src"], x["rel_type"], x["dst"]): x for x in db.get_edges("Bob Lin")}[("Bob Lin", "works_at", "Globex")]
-    assert e["valid_from"] is None and untagged
+    c = {(x["src"], x["rel_type"], x["dst"]): x for x in db.get_claims("Bob Lin")}[("Bob Lin", "works_at", "Globex")]
+    assert c["valid_from"] is None, c

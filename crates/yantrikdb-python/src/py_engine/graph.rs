@@ -97,6 +97,22 @@ impl PyYantrikDB {
         edges.iter().map(|e| edge_to_dict(py, e)).collect()
     }
 
+    /// Every claim touching an entity with its qualifiers: polarity,
+    /// modality, `valid_from`/`valid_to` (the temporal tag), extractor,
+    /// confidence band, provenance and a derived status. `get_edges` is
+    /// the bare graph view; this is the claims-table view.
+    #[pyo3(signature = (entity, namespace=None))]
+    fn get_claims(
+        &self,
+        py: Python<'_>,
+        entity: &str,
+        namespace: Option<&str>,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let rows = db.get_claims(entity, namespace).map_err(map_err)?;
+        json_to_py(py, &serde_json::Value::Array(rows))
+    }
+
     #[pyo3(signature = (pattern=None, entity_type=None, limit=20))]
     fn search_entities(
         &self,
