@@ -1510,7 +1510,10 @@ impl YantrikDB {
         for rel in &relations {
             // A value can be an object, never a subject: `2026 -leads-> X`
             // anchors nothing at read time and is refused there anyway.
-            if crate::graph::is_rejected_entity_name(&rel.src) {
+            // And only a few relations can take a value as an object.
+            if crate::graph::is_rejected_entity_name(&rel.src)
+                || !crate::graph::relation_admits_value_object(&rel.rel_type, &rel.dst)
+            {
                 continue;
             }
             let already_exists = {
@@ -1560,7 +1563,9 @@ impl YantrikDB {
         if !templates.is_empty() {
             let learned = crate::graph::extract_learned_relations(text, &candidates, &templates);
             for rel in &learned {
-                if crate::graph::is_rejected_entity_name(&rel.src) {
+                if crate::graph::is_rejected_entity_name(&rel.src)
+                    || !crate::graph::relation_admits_value_object(&rel.rel_type, &rel.dst)
+                {
                     continue;
                 }
                 let already_exists = {

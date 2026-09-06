@@ -503,6 +503,20 @@ pub fn admit_entity(name: &str) -> bool {
 /// extractor needs them as OBJECTS so `born_in 1985` and `runs 0.19.0` keep
 /// minting claims; those claims then feed succession detection (`runs` is
 /// functional), which is the whole reason the value is worth keeping.
+/// Relations whose OBJECT may be a value object. A version, year or count
+/// is a sensible object of `runs` (`CT128 runs 0.19.0`) or `born_in`
+/// (`Alice born_in 1985`) — the functional shapes succession keys on — and
+/// of nothing else the extractor knows: the first cut let every pattern
+/// take a value and a production re-extraction minted `Make -leads-> 2`,
+/// `Qwen -leads-> 2`, `Make -leads-> 2026-08-11`.
+pub const VALUE_OBJECT_RELS: &[&str] = &["runs", "born_in", "founded_in", "released"];
+
+/// May this extracted relation carry a value object? A value is never a
+/// subject; as an object it is admitted only for [`VALUE_OBJECT_RELS`].
+pub fn relation_admits_value_object(rel_type: &str, dst: &str) -> bool {
+    !is_value_object(dst) || VALUE_OBJECT_RELS.contains(&rel_type)
+}
+
 /// A value object: a number, version, year or ISO date — digit groups
 /// joined by `.` or `-` only (`0.19.0`, `1985`, `3.6`, `2026-08-01`).
 /// Admissible as a claim OBJECT, never as a subject or an entity node.
@@ -2798,6 +2812,16 @@ mod entity_admission_tests {
                 .any(|r| r.src == "CT128" && r.rel_type == "runs" && r.dst == "0.19.0"),
             "runs claim lost its value object: {rels:?}"
         );
+    }
+
+    #[test]
+    fn values_are_objects_only_for_relations_that_can_take_one() {
+        assert!(relation_admits_value_object("runs", "0.19.0"));
+        assert!(relation_admits_value_object("born_in", "1985"));
+        assert!(relation_admits_value_object("leads", "Acme")); // not a value: unaffected
+        assert!(!relation_admits_value_object("leads", "2"));
+        assert!(!relation_admits_value_object("works_at", "2026-08-11"));
+        assert!(!relation_admits_value_object("ceo_of", "42"));
     }
 
     #[test]
