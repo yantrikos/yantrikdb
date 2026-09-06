@@ -388,6 +388,18 @@ impl PyYantrikDB {
         crate::py_types::json_to_py(py, &val)
     }
 
+    /// Entity-table heal (issue #213): re-apply today's admission predicate to
+    /// every stored entity, drop the refused ones (plus their links and any
+    /// extractor claim on them) unless a manual/stated claim asserts them,
+    /// then rebuild the graph index. Idempotent; `dry_run=True` only reports.
+    #[pyo3(signature = (dry_run=false))]
+    fn reextract_entities(&self, py: Python<'_>, dry_run: bool) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let out = db.reextract_entities(dry_run).map_err(map_err)?;
+        let val = serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        crate::py_types::json_to_py(py, &val)
+    }
+
     /// One batch of the v50 source_turn recompute/repair pass — the
     /// maintenance operation `SourceTurnMaintenanceRequiredError` names.
     /// Returns `{"processed", "remaining", "complete"}`; call repeatedly

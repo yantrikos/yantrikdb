@@ -330,3 +330,44 @@ def test_reextract_claims_replaces_legacy_junk_and_keeps_assertions(db):
     edges = {(e["src"], e["rel_type"], e["dst"]) for e in db.get_edges("Alice Moreau")}
     assert ("Alice Moreau", "works_at", "Fennwick Labs") in edges and ("Alice Moreau", "mentors", "Fennwick Labs") in edges
     assert ("Pranab", "works_at", "Acme") in {(e["src"], e["rel_type"], e["dst"]) for e in db.get_edges("Pranab")}
+
+
+# ── entity admission (issue #213) ────────────────────────────────────────
+
+
+def test_values_and_headings_are_never_entities_but_values_still_serve_claims(db):
+    """The measured junk classes at write time: a bare version, a year and a
+    shouted heading must not become graph nodes, while `runs 0.19.0` still
+    mints its claim with the value as the object."""
+    rid = db.record("STRATEGIC POINT: CT128 runs 0.19.0 since 2026. Alice Moreau was born in 1985.")
+    db.think()
+    names = {e["name"] for e in db.list_entities(limit=100)} if hasattr(db, "list_entities") else None
+    if names is not None:
+        for bad in ("STRATEGIC POINT", "0.19.0", "2026", "1985"):
+            assert bad not in names, names
+        assert "CT128" in names, names
+    edges = {(e["src"], e["rel_type"], e["dst"]) for e in db.get_edges("CT128")}
+    assert ("CT128", "runs", "0.19.0") in edges, edges
+    edges = {(e["src"], e["rel_type"], e["dst"]) for e in db.get_edges("Alice Moreau")}
+    assert ("Alice Moreau", "born_in", "1985") in edges, edges
+    rep = db.attach_claims(rid, [{"subject": "CT128", "relation": "runs", "object": "0.19.0"}])
+    assert len(rep["accepted"]) == 1, rep
+
+
+def test_reextract_entities_drops_legacy_junk_nodes_and_keeps_asserted_ones(db):
+    """A store written by an older extractor keeps its headings and numbers as
+    nodes; the heal removes them (links and heuristic claims included) and
+    keeps any node a writer asserted a claim on."""
+    a = db.record("Alice Moreau works at Fennwick Labs in Berlin.")
+    db.think()
+    db.relate("Alice Moreau", "ACME HOLDINGS INTERNATIONAL", "works_at")
+    dry = db.reextract_entities(dry_run=True)
+    assert dry["dry_run"] is True and dry["entities_removed"] == 0
+    assert dry["kept_by_claims"] >= 1, dry
+    report = db.reextract_entities()
+    assert report["entities_removed"] == report["inadmissible"] - report["kept_by_claims"], report
+    edges = {(e["src"], e["rel_type"], e["dst"]) for e in db.get_edges("Alice Moreau")}
+    assert ("Alice Moreau", "works_at", "Fennwick Labs") in edges, edges
+    assert ("Alice Moreau", "works_at", "ACME HOLDINGS INTERNATIONAL") in edges, edges
+    again = db.reextract_entities()
+    assert again["entities_removed"] == 0 and again["claims_removed"] == 0
