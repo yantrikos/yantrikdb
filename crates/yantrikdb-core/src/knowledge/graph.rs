@@ -412,6 +412,500 @@ fn strip_code(text: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
+// ── Common-word admission: a name is not a word this store writes in lowercase ──
+
+/// Sentence starters and everyday words that arrive capitalized only by
+/// position — a cold store's seed. Measured on a production store after
+/// entity admission (#213): the remaining junk SUBJECTS were exactly these
+/// (`Critically -reports_to-> Taylor`, `Failed -runs-> ...`, `Lets -leads->
+/// Recall`, `Make -leads-> 2`). Hand-written, no external word list, so no
+/// licence rides along. The store then LEARNS the rest from its own text
+/// (see [`token_case_observations`]); this list only covers the cold start.
+pub const COMMON_WORD_SEED: &[&str] = &[
+    "about",
+    "above",
+    "actually",
+    "add",
+    "added",
+    "adding",
+    "after",
+    "again",
+    "against",
+    "ago",
+    "all",
+    "almost",
+    "already",
+    "also",
+    "although",
+    "always",
+    "another",
+    "anyway",
+    "apparently",
+    "around",
+    "ask",
+    "asked",
+    "back",
+    "basically",
+    "because",
+    "before",
+    "began",
+    "begin",
+    "behind",
+    "below",
+    "besides",
+    "better",
+    "between",
+    "big",
+    "both",
+    "bring",
+    "build",
+    "builder",
+    "built",
+    "call",
+    "called",
+    "came",
+    "can",
+    "cannot",
+    "capability",
+    "certainly",
+    "change",
+    "changed",
+    "check",
+    "checked",
+    "clearly",
+    "close",
+    "closed",
+    "code",
+    "come",
+    "coming",
+    "common",
+    "compare",
+    "consider",
+    "critically",
+    "current",
+    "currently",
+    "day",
+    "days",
+    "decide",
+    "decided",
+    "default",
+    "definitely",
+    "delete",
+    "deleted",
+    "did",
+    "different",
+    "do",
+    "does",
+    "doing",
+    "done",
+    "down",
+    "during",
+    "each",
+    "early",
+    "easy",
+    "efficient",
+    "either",
+    "else",
+    "end",
+    "enough",
+    "especially",
+    "even",
+    "eventually",
+    "ever",
+    "every",
+    "everything",
+    "exactly",
+    "example",
+    "except",
+    "expected",
+    "fail",
+    "failed",
+    "failing",
+    "fails",
+    "far",
+    "fast",
+    "few",
+    "final",
+    "finally",
+    "find",
+    "first",
+    "fix",
+    "fixed",
+    "fixing",
+    "follow",
+    "following",
+    "found",
+    "from",
+    "full",
+    "further",
+    "general",
+    "generally",
+    "get",
+    "gets",
+    "getting",
+    "give",
+    "given",
+    "go",
+    "going",
+    "good",
+    "got",
+    "great",
+    "had",
+    "happens",
+    "hard",
+    "has",
+    "have",
+    "having",
+    "hence",
+    "here",
+    "high",
+    "hopefully",
+    "how",
+    "however",
+    "idea",
+    "ideally",
+    "idempotent",
+    "if",
+    "important",
+    "instead",
+    "into",
+    "issue",
+    "just",
+    "keep",
+    "key",
+    "kind",
+    "large",
+    "last",
+    "later",
+    "least",
+    "less",
+    "let",
+    "lets",
+    "like",
+    "likely",
+    "line",
+    "link",
+    "linked",
+    "little",
+    "long",
+    "look",
+    "looked",
+    "looking",
+    "low",
+    "made",
+    "main",
+    "make",
+    "makes",
+    "making",
+    "many",
+    "may",
+    "maybe",
+    "mean",
+    "means",
+    "meanwhile",
+    "might",
+    "more",
+    "moreover",
+    "most",
+    "mostly",
+    "move",
+    "moved",
+    "much",
+    "must",
+    "near",
+    "need",
+    "needed",
+    "needs",
+    "never",
+    "new",
+    "next",
+    "nice",
+    "no",
+    "nope",
+    "normally",
+    "not",
+    "note",
+    "nothing",
+    "now",
+    "obviously",
+    "of",
+    "off",
+    "often",
+    "ok",
+    "okay",
+    "old",
+    "on",
+    "once",
+    "one",
+    "only",
+    "open",
+    "opened",
+    "option",
+    "or",
+    "other",
+    "otherwise",
+    "our",
+    "out",
+    "over",
+    "overall",
+    "own",
+    "part",
+    "pass",
+    "passed",
+    "past",
+    "per",
+    "perhaps",
+    "plan",
+    "please",
+    "point",
+    "possible",
+    "possibly",
+    "previous",
+    "previously",
+    "probably",
+    "problem",
+    "put",
+    "quick",
+    "quickly",
+    "quite",
+    "rather",
+    "ready",
+    "real",
+    "really",
+    "reason",
+    "recent",
+    "recently",
+    "remove",
+    "removed",
+    "result",
+    "results",
+    "right",
+    "run",
+    "running",
+    "runs",
+    "said",
+    "same",
+    "saw",
+    "say",
+    "says",
+    "second",
+    "see",
+    "seems",
+    "seen",
+    "set",
+    "several",
+    "should",
+    "show",
+    "shows",
+    "similar",
+    "simple",
+    "simply",
+    "since",
+    "small",
+    "so",
+    "some",
+    "something",
+    "sometimes",
+    "soon",
+    "start",
+    "started",
+    "starting",
+    "still",
+    "stop",
+    "stopped",
+    "such",
+    "sure",
+    "take",
+    "taken",
+    "target",
+    "test",
+    "tested",
+    "testing",
+    "tests",
+    "than",
+    "that",
+    "then",
+    "there",
+    "therefore",
+    "these",
+    "thing",
+    "things",
+    "think",
+    "this",
+    "those",
+    "though",
+    "three",
+    "through",
+    "thus",
+    "time",
+    "today",
+    "together",
+    "tomorrow",
+    "tonight",
+    "too",
+    "took",
+    "total",
+    "tried",
+    "true",
+    "try",
+    "trying",
+    "turn",
+    "two",
+    "under",
+    "unfortunately",
+    "unless",
+    "until",
+    "up",
+    "update",
+    "updated",
+    "upon",
+    "use",
+    "used",
+    "using",
+    "usually",
+    "very",
+    "want",
+    "wanted",
+    "way",
+    "weaker",
+    "well",
+    "went",
+    "were",
+    "what",
+    "whatever",
+    "when",
+    "whenever",
+    "where",
+    "whether",
+    "which",
+    "while",
+    "why",
+    "will",
+    "with",
+    "within",
+    "without",
+    "work",
+    "worked",
+    "working",
+    "works",
+    "would",
+    "wrong",
+    "yes",
+    "yesterday",
+    "yet",
+    "you",
+    "your",
+];
+
+/// A store writes a word in lowercase at least this many times before the
+/// statistic alone (no seed) can refuse it as a name.
+pub const COMMON_WORD_MIN_LOWER: i64 = 3;
+/// Lowercase uses must outnumber capitalized-mid-sentence uses by this
+/// factor: `python`/`Python` and `api`/`API` are both written both ways and
+/// must stay names; `recall`/`Recall` at 500:40 is a word.
+pub const COMMON_WORD_LOWER_RATIO: i64 = 2;
+
+/// How this store has written a token so far (from `token_case_stats`).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct CaseStats {
+    /// Occurrences starting lowercase.
+    pub lower_n: i64,
+    /// Occurrences capitalized NOT at a sentence start — the shape a name has.
+    pub cap_mid_n: i64,
+}
+
+/// How a token appears in one text; each memory contributes at most one
+/// observation per token per class, so a long memory cannot dominate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TokenCase {
+    Lower,
+    CapStart,
+    CapMid,
+}
+
+/// Case observations for the alphabetic tokens of a text, deduplicated per
+/// (token, class). Sentence starts are the first token after `.`, `!`, `?`,
+/// `:`, `;` or a newline; a capitalized token there says nothing about
+/// whether it is a name, which is the whole reason the class exists.
+pub fn token_case_observations(text: &str) -> Vec<(String, TokenCase)> {
+    let stripped = strip_code(text);
+    let mut seen: std::collections::HashSet<(String, TokenCase)> = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    for segment in stripped.split(|c: char| matches!(c, '.' | '!' | '?' | ':' | ';' | '\n')) {
+        let mut first = true;
+        for word in segment
+            .split(|c: char| !c.is_alphanumeric() && c != '\'')
+            .filter(|s| !s.is_empty())
+        {
+            let word = word.trim_matches('\'');
+            if word.chars().count() < 2 || !word.chars().all(|c| c.is_alphabetic() || c == '\'') {
+                if !word.is_empty() {
+                    first = false;
+                }
+                continue;
+            }
+            let class = if word.chars().next().is_some_and(|c| c.is_uppercase()) {
+                if first {
+                    TokenCase::CapStart
+                } else {
+                    TokenCase::CapMid
+                }
+            } else {
+                TokenCase::Lower
+            };
+            first = false;
+            let key = (word.to_lowercase(), class);
+            if seen.insert(key.clone()) {
+                out.push(key);
+            }
+        }
+    }
+    out
+}
+
+/// Is this single token a common word rather than a name, given how THIS
+/// store writes it? The store's own usage outranks the seed in both
+/// directions: a word the store writes capitalized mid-sentence more often
+/// than lowercase is a name here even if the seed lists it, and a word the
+/// store writes lowercase far more often is a word here even if no list
+/// knows it.
+pub fn is_common_word(token: &str, stats: Option<CaseStats>) -> bool {
+    if let Some(s) = stats {
+        if s.cap_mid_n >= COMMON_WORD_MIN_LOWER && s.cap_mid_n > s.lower_n {
+            return false;
+        }
+        if s.lower_n >= COMMON_WORD_MIN_LOWER && s.lower_n >= COMMON_WORD_LOWER_RATIO * s.cap_mid_n
+        {
+            return true;
+        }
+    }
+    let lower = token.to_lowercase();
+    COMMON_WORD_SEED.contains(&lower.as_str())
+}
+
+/// [`admit_entity`] plus the common-word rule for single-token names, with
+/// the store's case statistics supplied by `lookup` (lowercased token in,
+/// stats out). Multi-token names are unaffected: `Failed Login` is a
+/// phrase the chunker already judges by other rules.
+pub fn admit_entity_with<F>(name: &str, lookup: F) -> bool
+where
+    F: Fn(&str) -> Option<CaseStats>,
+{
+    if !admit_entity(name) {
+        return false;
+    }
+    let toks: Vec<&str> = name.split_whitespace().collect();
+    if toks.len() != 1 {
+        return true;
+    }
+    let tok = toks[0];
+    // Acronyms are never words: `API`, `PR`, `CI` stay whatever the store writes.
+    if is_all_caps_token(tok) {
+        return true;
+    }
+    !is_common_word(tok, lookup(&tok.to_lowercase()))
+}
+
 /// Longest name (in chars) the entity table admits. Beyond this a
 /// capitalized run is a title or a sentence, not a name.
 pub const ENTITY_MAX_CHARS: usize = 40;
@@ -579,11 +1073,26 @@ pub fn extract_value_candidates(text: &str) -> Vec<String> {
 /// entity. Acronyms, lowercase entities, and ambiguous mentions still need
 /// explicit `relate()` calls to enter the graph.
 pub fn extract_heuristic_entities(text: &str) -> Vec<String> {
-    let stripped = strip_code(text);
-    extract_heuristic_entities_inner(stripped.as_ref())
+    extract_heuristic_entities_with(text, |_| None)
 }
 
-fn extract_heuristic_entities_inner(text: &str) -> Vec<String> {
+/// [`extract_heuristic_entities`] with the store's case statistics: a
+/// single-token candidate this store writes in lowercase far more often
+/// than as a mid-sentence capital is a word, not a name (see
+/// [`admit_entity_with`]). Every engine writer goes through this form; the
+/// bare form is the seed-only cold path.
+pub fn extract_heuristic_entities_with<F>(text: &str, lookup: F) -> Vec<String>
+where
+    F: Fn(&str) -> Option<CaseStats>,
+{
+    let stripped = strip_code(text);
+    extract_heuristic_entities_inner(stripped.as_ref(), &lookup)
+}
+
+fn extract_heuristic_entities_inner(
+    text: &str,
+    lookup: &dyn Fn(&str) -> Option<CaseStats>,
+) -> Vec<String> {
     let mut entities: Vec<String> = Vec::new();
     // Clause punctuation ends a name. Without this a heading swallows the
     // name after its colon (`STRATEGIC POINT: CT128 runs` minted
@@ -596,7 +1105,7 @@ fn extract_heuristic_entities_inner(text: &str) -> Vec<String> {
             ':' | ';' | ',' | '!' | '?' | '\n' | '(' | ')' | '[' | ']' | '"'
         )
     }) {
-        extract_entities_from_segment(segment, &mut entities);
+        extract_entities_from_segment(segment, &mut entities, lookup);
     }
     // Deduplicate while preserving first-appearance order.
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -604,7 +1113,11 @@ fn extract_heuristic_entities_inner(text: &str) -> Vec<String> {
     entities
 }
 
-fn extract_entities_from_segment(text: &str, entities: &mut Vec<String>) {
+fn extract_entities_from_segment(
+    text: &str,
+    entities: &mut Vec<String>,
+    lookup: &dyn Fn(&str) -> Option<CaseStats>,
+) {
     let mut chunk: Vec<String> = Vec::new();
 
     let flush = |chunk: &mut Vec<String>, out: &mut Vec<String>| {
@@ -627,7 +1140,7 @@ fn extract_entities_from_segment(text: &str, entities: &mut Vec<String>) {
             // Admission is the gate every writer shares: the materializer,
             // the batch path and the heals all mint through this function,
             // so a name the table must never hold is refused exactly here.
-            if alpha_chars >= 2 && admit_entity(&candidate) {
+            if alpha_chars >= 2 && admit_entity_with(&candidate, lookup) {
                 out.push(candidate);
             }
         }
@@ -2510,7 +3023,7 @@ done";
         let plain = "Alice Chen is the CEO of Acme Corp";
         assert_eq!(
             extract_heuristic_entities(plain),
-            extract_heuristic_entities_inner(plain),
+            extract_heuristic_entities_inner(plain, &|_| None),
             "no-backtick path must be byte-identical to the pre-change behavior"
         );
         assert!(matches!(strip_code(plain), std::borrow::Cow::Borrowed(_)));
@@ -2836,5 +3349,128 @@ mod entity_admission_tests {
             "{ents:?}"
         );
         assert!(ents.iter().any(|e| e == "NASA JPL"), "{ents:?}");
+    }
+}
+
+#[cfg(test)]
+mod common_word_tests {
+    use super::*;
+
+    #[test]
+    fn observations_classify_by_position_and_case_once_per_memory() {
+        let obs = token_case_observations(
+            "Critically, the build failed. Alice Moreau fixed it; make it green. Make it so!",
+        );
+        let has = |t: &str, c: TokenCase| obs.contains(&(t.to_string(), c));
+        assert!(has("critically", TokenCase::CapStart), "{obs:?}");
+        assert!(has("alice", TokenCase::CapStart), "{obs:?}");
+        assert!(has("moreau", TokenCase::CapMid), "{obs:?}");
+        assert!(
+            has("make", TokenCase::Lower) && has("make", TokenCase::CapStart),
+            "{obs:?}"
+        );
+        assert!(!has("make", TokenCase::CapMid), "{obs:?}");
+        assert_eq!(
+            obs.iter().filter(|(t, _)| t == "it").count(),
+            1,
+            "deduplicated per class"
+        );
+    }
+
+    #[test]
+    fn seed_refuses_sentence_starters_and_stats_override_both_ways() {
+        for w in [
+            "Critically",
+            "Failed",
+            "Idempotent",
+            "Lets",
+            "Make",
+            "Trying",
+            "Target",
+        ] {
+            assert!(
+                is_common_word(w, None),
+                "{w} should be a common word by seed"
+            );
+        }
+        for w in ["Pranab", "Fennwick", "Berlin", "Yantrikdb"] {
+            assert!(!is_common_word(w, None), "{w} is a name");
+        }
+        // `recall` lowercase 500 times, `Recall` mid-sentence 40 times: a word.
+        assert!(is_common_word(
+            "Recall",
+            Some(CaseStats {
+                lower_n: 500,
+                cap_mid_n: 40
+            })
+        ));
+        // `python` 200 vs `Python` 150: within the ratio, stays a name.
+        assert!(!is_common_word(
+            "Python",
+            Some(CaseStats {
+                lower_n: 200,
+                cap_mid_n: 150
+            })
+        ));
+        // A seed word the store uses as a name mid-sentence: a name here.
+        assert!(!is_common_word(
+            "Target",
+            Some(CaseStats {
+                lower_n: 2,
+                cap_mid_n: 9
+            })
+        ));
+        // Too little evidence: the seed decides.
+        assert!(is_common_word(
+            "Make",
+            Some(CaseStats {
+                lower_n: 1,
+                cap_mid_n: 0
+            })
+        ));
+        assert!(!is_common_word(
+            "Gizmo",
+            Some(CaseStats {
+                lower_n: 2,
+                cap_mid_n: 0
+            })
+        ));
+        assert!(is_common_word(
+            "Gizmo",
+            Some(CaseStats {
+                lower_n: 4,
+                cap_mid_n: 1
+            })
+        ));
+    }
+
+    #[test]
+    fn admission_with_stats_only_touches_single_token_names_and_never_acronyms() {
+        let none = |_: &str| None;
+        assert!(!admit_entity_with("Critically", none));
+        assert!(admit_entity_with("Alice Moreau", none));
+        assert!(admit_entity_with("API", none));
+        assert!(admit_entity_with("Pranab", none));
+        let learned = |t: &str| {
+            if t == "gizmo" {
+                Some(CaseStats {
+                    lower_n: 6,
+                    cap_mid_n: 0,
+                })
+            } else {
+                None
+            }
+        };
+        assert!(!admit_entity_with("Gizmo", learned));
+        assert!(admit_entity_with("Gizmo Labs", learned));
+    }
+
+    #[test]
+    fn seed_is_lowercase_and_has_no_duplicates() {
+        let mut seen = std::collections::HashSet::new();
+        for w in COMMON_WORD_SEED {
+            assert_eq!(*w, w.to_lowercase(), "{w}");
+            assert!(seen.insert(*w), "duplicate {w}");
+        }
     }
 }

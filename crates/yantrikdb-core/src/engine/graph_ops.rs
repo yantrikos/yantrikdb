@@ -1257,6 +1257,87 @@ impl super::YantrikDB {
     /// See the module note above. Errors only on an unknown or inactive
     /// memory or an oversized batch; per-claim problems are REPORTED in
     /// `rejected`, never raised.
+    /// The store's own lexicon: how it has written `token` (lowercased) so
+    /// far. `None` on encrypted stores (never populated) and for unseen tokens.
+    pub(crate) fn token_case_stats(
+        conn: &rusqlite::Connection,
+        token: &str,
+    ) -> Option<crate::graph::CaseStats> {
+        conn.query_row(
+            "SELECT lower_n, cap_mid_n FROM token_case_stats WHERE token = ?1",
+            params![token],
+            |r| {
+                Ok(crate::graph::CaseStats {
+                    lower_n: r.get(0)?,
+                    cap_mid_n: r.get(1)?,
+                })
+            },
+        )
+        .ok()
+    }
+
+    /// Fold one memory's case observations into `token_case_stats` (at most
+    /// one count per token per class per memory). Plaintext tokens, so an
+    /// encrypted store learns nothing — same rule as relation templates.
+    pub(crate) fn record_token_case_observations(
+        &self,
+        conn: &rusqlite::Connection,
+        text: &str,
+    ) -> Result<()> {
+        if self.is_encrypted() {
+            return Ok(());
+        }
+        let mut stmt = conn.prepare_cached(
+            "INSERT INTO token_case_stats (token, lower_n, cap_mid_n, cap_start_n) \
+             VALUES (?1, ?2, ?3, ?4) \
+             ON CONFLICT(token) DO UPDATE SET lower_n = lower_n + ?2, \
+             cap_mid_n = cap_mid_n + ?3, cap_start_n = cap_start_n + ?4",
+        )?;
+        for (token, class) in crate::graph::token_case_observations(text) {
+            let (l, m, st) = match class {
+                crate::graph::TokenCase::Lower => (1, 0, 0),
+                crate::graph::TokenCase::CapMid => (0, 1, 0),
+                crate::graph::TokenCase::CapStart => (0, 0, 1),
+            };
+            stmt.execute(params![token, l, m, st])?;
+        }
+        Ok(())
+    }
+
+    /// Recompute `token_case_stats` from every active memory (the heal's
+    /// first step, and the backfill for stores that predate v52).
+    pub(crate) fn rebuild_token_case_stats(&self) -> Result<usize> {
+        let conn = self.conn();
+        conn.execute("DELETE FROM token_case_stats", [])?;
+        if self.is_encrypted() {
+            return Ok(0);
+        }
+        let texts: Vec<String> = {
+            let mut stmt =
+                conn.prepare("SELECT text FROM memories WHERE consolidation_status = 'active'")?;
+            let rows: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<std::result::Result<_, _>>()?;
+            rows
+        };
+        let mut n = 0usize;
+        for stored in &texts {
+            let text = self.decrypt_text(stored).unwrap_or_else(|_| stored.clone());
+            self.record_token_case_observations(&conn, &text)?;
+            n += 1;
+        }
+        Ok(n)
+    }
+
+    /// The extractor every engine writer uses: heuristic entities admitted
+    /// against this store's own lexicon.
+    pub(crate) fn extract_entities_for(&self, text: &str) -> Vec<String> {
+        let conn = self.conn();
+        crate::graph::extract_heuristic_entities_with(text, |tok| {
+            Self::token_case_stats(&conn, tok)
+        })
+    }
+
     /// The record's temporal tag (`event_time_min`, set from metadata
     /// `event_time_min`/`event_time_max` at write time), if any.
     pub(crate) fn memory_event_time_min(&self, rid: &str) -> Option<f64> {

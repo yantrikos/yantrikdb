@@ -1451,7 +1451,7 @@ impl YantrikDB {
                     }
                     let text = text.as_ref();
                     let text_tokens = crate::graph::tokenize(text);
-                    let heuristic = crate::graph::extract_heuristic_entities(text);
+                    let heuristic = self.extract_entities_for(text);
                     let mut candidates: std::collections::HashSet<String> =
                         heuristic.iter().cloned().collect();
                     for known in &known_entities {
