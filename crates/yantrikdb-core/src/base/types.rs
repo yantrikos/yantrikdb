@@ -677,6 +677,19 @@ pub struct Stats {
     /// Engine writes refused (pre-checks and aborted commits) since boot.
     #[serde(default)]
     pub foreign_sqlite_refused_since_boot: u64,
+    /// Commits that reached the store without going through this engine
+    /// (another process, most likely) since boot; each queues an integrity
+    /// check.
+    #[serde(default)]
+    pub foreign_commits_detected_since_boot: u64,
+    /// A queued integrity check has not run yet.
+    #[serde(default)]
+    pub integrity_check_pending: bool,
+    #[serde(default)]
+    pub integrity_checks_since_boot: u64,
+    /// The last `PRAGMA quick_check` result, empty until one has run.
+    #[serde(default)]
+    pub last_integrity_check: String,
     /// Non-tombstoned records carrying an explicit, caller-supplied
     /// `metadata.provenance_verified = true` marker. This is an audit signal,
     /// not an engine assertion: the engine cannot reconstruct authorship.

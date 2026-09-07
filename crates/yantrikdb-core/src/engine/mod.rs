@@ -1646,6 +1646,7 @@ impl YantrikDB {
                 "opened with another SQLite library already holding this store in this process"
             );
         }
+        foreign_sqlite.note_data_version(&conn);
 
         // Missing is the v42-upgrade-compatible default. A malformed or zero
         // persisted value fails open() loudly: silently disabling a write-
@@ -2147,6 +2148,41 @@ impl YantrikDB {
     #[inline]
     pub(crate) fn foreign_sqlite_precheck(&self) -> Result<()> {
         self.foreign_sqlite.check_write()
+    }
+
+    /// The cross-process half of the guard, at the user-facing write entry
+    /// points (never from a path that already holds the writer connection):
+    /// notice a commit that did not come through this engine, queue an
+    /// integrity check, and refuse if a check already failed.
+    pub(crate) fn foreign_commit_precheck(&self) -> Result<()> {
+        {
+            let conn = self.conn();
+            self.foreign_sqlite.note_data_version(&conn);
+        }
+        self.foreign_sqlite.check_write()
+    }
+
+    /// `PRAGMA quick_check` on a read connection, recorded in the guard:
+    /// anything but `ok` taints the store (writes refused until it is
+    /// repaired and the engine reopened). Runs on demand here and from the
+    /// materializer whenever a commit from outside this engine was seen.
+    pub fn integrity_check(&self) -> Result<String> {
+        let result: String = {
+            let conn = self.read_conn();
+            conn.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?
+        };
+        self.foreign_sqlite.note_integrity(&result);
+        Ok(result)
+    }
+
+    /// Run the queued integrity check, if any. Called by the materializer
+    /// between drains so the check never blocks a user write.
+    pub(crate) fn run_pending_integrity_check(&self) {
+        if self.foreign_sqlite.integrity_check_pending() {
+            if let Err(e) = self.integrity_check() {
+                tracing::warn!(error = %e, "queued integrity check failed to run");
+            }
+        }
     }
 
     /// Tick the since-boot suppression counters (one recall's worth).
@@ -2954,7 +2990,7 @@ impl YantrikDB {
         allow_queued_route: bool,
         synthesis: Option<&SynthesisAdmission>,
     ) -> Result<String> {
-        self.foreign_sqlite_precheck()?;
+        self.foreign_commit_precheck()?;
         // v0.9.3 contract gate: scalars validated BEFORE calibration mutates
         // the namespace's running distribution. (The embedding is engine-
         // generated below and validated inside the embed step.)

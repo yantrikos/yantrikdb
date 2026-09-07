@@ -831,6 +831,14 @@ impl PyYantrikDB {
         Ok(self.get_inner()?.foreign_sqlite_detected())
     }
 
+    /// `PRAGMA quick_check` on a read connection, recorded in
+    /// `stats()["last_integrity_check"]`. Anything but "ok" makes the engine
+    /// refuse writes until the store is repaired and reopened. Queued
+    /// automatically whenever a commit from outside this engine is seen.
+    fn integrity_check(&self) -> PyResult<String> {
+        self.get_inner()?.integrity_check().map_err(map_err)
+    }
+
     /// Exposed for Python consolidate.py compatibility.
     #[pyo3(signature = (op_type, target_rid, payload))]
     fn _log_op(

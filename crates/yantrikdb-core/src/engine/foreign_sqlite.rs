@@ -27,9 +27,24 @@
 //! `<store>-shm` path mapped at the same offset TWICE means two libraries
 //! have the store open in this process. That is the hazard exactly, read
 //! in a few hundred microseconds, with no way for it to fire on the
-//! engine's own connections. macOS has no `/proc`; Windows locks are per
-//! handle and does not have the problem. Elsewhere the detector reports
+//! engine's own connections. macOS has no `/proc`: the same rule is read
+//! through libproc (`proc_pidinfo(PROC_PIDREGIONPATHINFO)`, one call per
+//! region, so it is rescanned less often). Windows locks are per handle
+//! and does not have the problem; there the detector reports
 //! `supported = false` and the mode is inert.
+//!
+//! **Commits from outside this engine (all platforms).** A second engine
+//! process, the `sqlite3` CLI, a backup tool: legitimate, serialised by
+//! the kernel — and still the only way a store changes under this engine
+//! without going through it. SQLite's `PRAGMA data_version` on the writer
+//! connection changes only when ANOTHER connection commits, and every
+//! engine write goes through that one connection, so a change is exactly
+//! "someone else committed". Each is counted
+//! (`stats().foreign_commits_detected_since_boot`) and asks for one
+//! `PRAGMA quick_check`, run off the writer by the materializer (or
+//! `integrity_check()` on demand); a failed check taints the store the
+//! same way a foreign instance does, because writing onto a corrupt file
+//! only spreads the damage.
 //!
 //! **Modes**, durable in `meta.foreign_sqlite_mode`, default `refuse`:
 //! `off` never scans; `warn` scans, logs the transition and counts
@@ -52,14 +67,18 @@
 //! integrity. `stats().foreign_sqlite_tainted` says so.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, AtomicU8, Ordering};
 use std::time::{Duration, Instant};
 
 use crate::error::{Result, YantrikDbError};
 
-/// How often the commit hook re-reads `/proc/self/maps`. A commit inside
-/// this window reuses the last verdict; the first commit after it pays the
-/// scan.
+/// How often the commit hook rescans. A commit inside this window reuses
+/// the last verdict; the first commit after it pays the scan. Linux reads
+/// one file; macOS makes one libproc call per region, hence the longer
+/// window there.
+#[cfg(target_os = "macos")]
+const RESCAN_AFTER: Duration = Duration::from_millis(1000);
+#[cfg(not(target_os = "macos"))]
 const RESCAN_AFTER: Duration = Duration::from_millis(200);
 
 /// `SQLITE_CONSTRAINT_COMMITHOOK`: the extended result code SQLite returns
@@ -129,19 +148,29 @@ pub(crate) struct ForeignSqliteGuard {
     detected_since_boot: AtomicU64,
     refused_since_boot: AtomicU64,
     last_scan: parking_lot::Mutex<Option<Instant>>,
+    /// `PRAGMA data_version` of the writer connection at the last check;
+    /// -1 until the first read.
+    last_data_version: AtomicI64,
+    foreign_commits_detected_since_boot: AtomicU64,
+    /// A foreign commit was seen and no integrity check has run since.
+    integrity_check_pending: AtomicBool,
+    integrity_checks_since_boot: AtomicU64,
+    /// The last `PRAGMA quick_check` result (`ok`, or the first problem).
+    last_integrity: parking_lot::Mutex<Option<String>>,
 }
 
 impl ForeignSqliteGuard {
     pub(crate) fn new(db_path: &str, mode: ForeignSqliteMode) -> Self {
-        let shm_path = if db_path == ":memory:" || !cfg!(target_os = "linux") {
-            None
-        } else {
-            std::fs::canonicalize(db_path).ok().map(|p| {
-                let mut s = p.into_os_string();
-                s.push("-shm");
-                PathBuf::from(s)
-            })
-        };
+        let shm_path =
+            if db_path == ":memory:" || !cfg!(any(target_os = "linux", target_os = "macos")) {
+                None
+            } else {
+                std::fs::canonicalize(db_path).ok().map(|p| {
+                    let mut s = p.into_os_string();
+                    s.push("-shm");
+                    PathBuf::from(s)
+                })
+            };
         Self {
             shm_path,
             store: db_path.to_string(),
@@ -151,6 +180,68 @@ impl ForeignSqliteGuard {
             detected_since_boot: AtomicU64::new(0),
             refused_since_boot: AtomicU64::new(0),
             last_scan: parking_lot::Mutex::new(None),
+            last_data_version: AtomicI64::new(-1),
+            foreign_commits_detected_since_boot: AtomicU64::new(0),
+            integrity_check_pending: AtomicBool::new(false),
+            integrity_checks_since_boot: AtomicU64::new(0),
+            last_integrity: parking_lot::Mutex::new(None),
+        }
+    }
+
+    pub(crate) fn foreign_commits_detected_since_boot(&self) -> u64 {
+        self.foreign_commits_detected_since_boot
+            .load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn integrity_check_pending(&self) -> bool {
+        self.integrity_check_pending.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn integrity_checks_since_boot(&self) -> u64 {
+        self.integrity_checks_since_boot.load(Ordering::Relaxed)
+    }
+
+    pub(crate) fn last_integrity(&self) -> Option<String> {
+        self.last_integrity.lock().clone()
+    }
+
+    /// Read the writer connection's `PRAGMA data_version` and compare it
+    /// with the last reading. A change means a commit that did not go
+    /// through this engine. Returns whether one was seen.
+    pub(crate) fn note_data_version(&self, conn: &rusqlite::Connection) -> bool {
+        let Ok(v) = conn.query_row("PRAGMA data_version", [], |r| r.get::<_, i64>(0)) else {
+            return false;
+        };
+        let prev = self.last_data_version.swap(v, Ordering::Relaxed);
+        if prev >= 0 && prev != v {
+            self.foreign_commits_detected_since_boot
+                .fetch_add(1, Ordering::Relaxed);
+            self.integrity_check_pending.store(true, Ordering::Relaxed);
+            tracing::info!(
+                store = %self.store,
+                "a commit reached this store without going through this engine \
+                 (another process, most likely); an integrity check is queued"
+            );
+            return true;
+        }
+        false
+    }
+
+    /// Record a `PRAGMA quick_check` result. Anything but `ok` taints the
+    /// store: writing onto a corrupt file only spreads the damage.
+    pub(crate) fn note_integrity(&self, result: &str) {
+        self.integrity_check_pending.store(false, Ordering::Relaxed);
+        self.integrity_checks_since_boot
+            .fetch_add(1, Ordering::Relaxed);
+        *self.last_integrity.lock() = Some(result.to_string());
+        if result != "ok" {
+            self.tainted.store(true, Ordering::Relaxed);
+            tracing::error!(
+                store = %self.store,
+                result = %result,
+                "integrity check failed after a commit from outside this engine; \
+                 writes are refused until the store is repaired and the engine reopened"
+            );
         }
     }
 
@@ -275,9 +366,100 @@ fn foreign_shm_mapped(shm: &Path) -> bool {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+fn foreign_shm_mapped(shm: &Path) -> bool {
+    duplicate_shm_offsets_macos(shm) > 0
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn foreign_shm_mapped(_shm: &Path) -> bool {
     false
+}
+
+/// macOS: walk this process's regions with libproc and count the file
+/// offsets at which `shm_path` is mapped more than once — the same rule as
+/// the Linux reader. Layouts follow XNU's `sys/proc_info.h`
+/// (`proc_regioninfo`, `proc_regionwithpathinfo`, flavor 8). A walk that
+/// stops advancing ends the scan, so a misbehaving kernel call can only
+/// under-report, never invent a duplicate.
+#[cfg(target_os = "macos")]
+fn duplicate_shm_offsets_macos(shm_path: &Path) -> usize {
+    use std::collections::HashMap;
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct ProcRegionInfo {
+        pri_protection: u32,
+        pri_max_protection: u32,
+        pri_inheritance: u32,
+        pri_flags: u32,
+        pri_offset: u64,
+        pri_behavior: u32,
+        pri_user_wired_count: u32,
+        pri_user_tag: u32,
+        pri_pages_resident: u32,
+        pri_pages_shared_now_private: u32,
+        pri_pages_swapped_out: u32,
+        pri_pages_dirtied: u32,
+        pri_ref_count: u32,
+        pri_shadow_depth: u32,
+        pri_share_mode: u32,
+        pri_private_pages_resident: u32,
+        pri_shared_pages_resident: u32,
+        pri_obj_id: u32,
+        pri_depth: u32,
+        pri_address: u64,
+        pri_size: u64,
+    }
+    #[repr(C)]
+    struct ProcRegionWithPathInfo {
+        prp_prinfo: ProcRegionInfo,
+        prp_vip: libc::vnode_info_path,
+    }
+    const PROC_PIDREGIONPATHINFO: libc::c_int = 8;
+    const MAX_REGIONS: usize = 50_000;
+
+    let target = shm_path.to_string_lossy();
+    let pid = std::process::id() as libc::c_int;
+    let mut seen: HashMap<u64, usize> = HashMap::new();
+    let mut address: u64 = 0;
+    for _ in 0..MAX_REGIONS {
+        let mut info = std::mem::MaybeUninit::<ProcRegionWithPathInfo>::zeroed();
+        let size = std::mem::size_of::<ProcRegionWithPathInfo>() as libc::c_int;
+        // SAFETY: libproc fills at most `size` bytes of a properly sized,
+        // zeroed buffer; a non-positive return means no more regions.
+        let got = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                PROC_PIDREGIONPATHINFO,
+                address,
+                info.as_mut_ptr() as *mut libc::c_void,
+                size,
+            )
+        };
+        if got <= 0 {
+            break;
+        }
+        // SAFETY: the call succeeded and wrote the struct.
+        let info = unsafe { info.assume_init() };
+        let next = info
+            .prp_prinfo
+            .pri_address
+            .saturating_add(info.prp_prinfo.pri_size);
+        if next <= address {
+            break; // not advancing: stop rather than loop
+        }
+        address = next;
+        // SAFETY: vip_path is a NUL-terminated C string inside the struct.
+        let path = unsafe {
+            std::ffi::CStr::from_ptr(info.prp_vip.vip_path.as_ptr() as *const libc::c_char)
+        }
+        .to_string_lossy();
+        if path == target {
+            *seen.entry(info.prp_prinfo.pri_offset).or_insert(0) += 1;
+        }
+    }
+    seen.values().filter(|&&n| n > 1).count()
 }
 
 /// Count the file offsets at which `shm_path` is mapped more than once in

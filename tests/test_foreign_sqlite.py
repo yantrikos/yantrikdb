@@ -28,7 +28,10 @@ import pytest
 import yantrikdb
 from yantrikdb import YantrikDB
 
-linux_only = pytest.mark.skipif(sys.platform != "linux", reason="the detector reads /proc/self/maps")
+linux_only = pytest.mark.skipif(
+    sys.platform not in ("linux", "darwin"),
+    reason="the instance detector reads /proc/self/maps (Linux) or libproc regions (macOS)",
+)
 
 
 @pytest.fixture
@@ -44,7 +47,7 @@ def test_mode_defaults_to_refuse_and_persists(store):
     assert db.foreign_sqlite_mode() == "refuse"
     s = db.stats()
     assert s["foreign_sqlite_mode"] == "refuse"
-    assert s["foreign_sqlite_supported"] == (sys.platform == "linux")
+    assert s["foreign_sqlite_supported"] == (sys.platform in ("linux", "darwin"))
     assert s["foreign_sqlite_active"] is False
     db.set_foreign_sqlite_mode("warn")
     db.close()
@@ -145,3 +148,40 @@ def test_a_separate_process_is_not_a_foreign_instance(store):
     assert int(out.stdout.strip()) >= 1
     assert db.foreign_sqlite_detected() is False
     assert db.record("still writing")
+
+
+def test_a_commit_from_another_process_is_counted_and_checked(store):
+    """The cross-process half: a commit that did not come through this
+    engine (another engine process here) is noticed on the next write,
+    queues an integrity check, and a clean check leaves writes alone."""
+    db, path = store
+    db.record("first, from this engine")
+    db.record("second, still this engine")
+    db.think()
+    before = db.stats()
+    assert before["foreign_commits_detected_since_boot"] == 0, before
+    code = textwrap.dedent(
+        f"""
+        from yantrikdb import YantrikDB
+        other = YantrikDB.with_default({path!r})
+        other.record("from another process, through the engine")
+        other.think()
+        other.close()
+        print("done")
+        """
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
+    assert out.returncode == 0, out.stderr
+    assert db.record("third, after the other process") , "a foreign commit is not a refusal"
+    s = db.stats()
+    assert s["foreign_commits_detected_since_boot"] >= 1, s
+    assert s["foreign_sqlite_tainted"] is False
+    assert db.integrity_check() == "ok"
+    s = db.stats()
+    assert s["integrity_check_pending"] is False and s["last_integrity_check"] == "ok"
+    assert s["integrity_checks_since_boot"] >= 1
+    # The engine's own writes never count as foreign.
+    n = s["foreign_commits_detected_since_boot"]
+    db.record("fourth")
+    db.record("fifth")
+    assert db.stats()["foreign_commits_detected_since_boot"] == n

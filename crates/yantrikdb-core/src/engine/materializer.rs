@@ -103,6 +103,10 @@ fn worker_loop(weak: Weak<YantrikDB>, shutdown: Arc<AtomicBool>, worker_id: usiz
             break;
         };
 
+        // Issue #225: a commit from outside this engine queued an integrity
+        // check; run it here, off the writer, before draining.
+        db.run_pending_integrity_check();
+
         match db.apply_pending_ops_once(DRAIN_BATCH_SIZE) {
             Ok(0) => {
                 // No work — release the strong ref before sleeping so the

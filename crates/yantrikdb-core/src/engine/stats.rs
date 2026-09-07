@@ -305,6 +305,12 @@ impl YantrikDB {
             foreign_sqlite_tainted: self.foreign_sqlite.tainted(),
             foreign_sqlite_detected_since_boot: self.foreign_sqlite.detected_since_boot(),
             foreign_sqlite_refused_since_boot: self.foreign_sqlite.refused_since_boot(),
+            foreign_commits_detected_since_boot: self
+                .foreign_sqlite
+                .foreign_commits_detected_since_boot(),
+            integrity_check_pending: self.foreign_sqlite.integrity_check_pending(),
+            integrity_checks_since_boot: self.foreign_sqlite.integrity_checks_since_boot(),
+            last_integrity_check: self.foreign_sqlite.last_integrity().unwrap_or_default(),
             provenance_verified_records,
             unverified_user_source_records,
             provenance_source_counts,

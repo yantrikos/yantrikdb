@@ -59,7 +59,9 @@ pip install yantrikdb
 > separate process; sequential use after `close()` is fine. On Linux the
 > engine detects the second instance and refuses to write from then
 > until it is reopened (`ForeignSqliteInstance`,
-> `stats()["foreign_sqlite_*"]`), see CONCURRENCY.md Rule 9.
+> `stats()["foreign_sqlite_*"]`), and on every platform a commit that
+> did not come through the engine queues an integrity check; see
+> CONCURRENCY.md Rule 9.
 
 A new file-backed store opens on `potion-base-8M` (256-dim), fetched
 once (~28 MB, SHA-256 pinned, cached under your user cache dir) and

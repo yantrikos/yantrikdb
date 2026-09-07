@@ -81,6 +81,11 @@ profiling = []
 # trace tests.
 testing = []
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Issue #225: the second-SQLite-library detector walks the process's
+# memory regions through libproc on macOS.
+libc = "0.2"
+
 [dev-dependencies]
 criterion = "0.5"
 toml = "0.8"

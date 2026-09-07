@@ -257,9 +257,21 @@ unlinks the `-shm` file under the engine (its own lock table says it was
 the last user), so "resume when it closes" would be unsafe. Reads
 continue. `warn`
 counts (`stats().foreign_sqlite_detected_since_boot`) and keeps writing;
-`off` never scans. macOS has no `/proc` (detector reports
-`foreign_sqlite_supported = false`); Windows locks are per handle and is
-not affected.
+`off` never scans. macOS reads the same rule through libproc region
+enumeration (rescanned every second instead of every 200 ms); Windows
+locks are per handle and is not affected (`foreign_sqlite_supported =
+false`).
+
+The cross-process half: SQLite's `PRAGMA data_version` on the writer
+connection changes only when another connection commits, and every
+engine write goes through that one connection, so a change is exactly
+"someone else committed" (another engine process, the `sqlite3` CLI, a
+backup tool — legitimate, but the only way the store changes under the
+engine). Each is counted (`stats().foreign_commits_detected_since_boot`)
+and queues one `PRAGMA quick_check`, run off the writer by the
+materializer or by `integrity_check()` on demand; a failed check taints
+the store the same way, because writing onto a corrupt file only spreads
+the damage.
 
 ---
 

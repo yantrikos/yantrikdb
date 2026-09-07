@@ -149,7 +149,7 @@ impl YantrikDB {
     /// Create or update a relationship between entities.
     #[tracing::instrument(skip(self))]
     pub fn relate(&self, src: &str, dst: &str, rel_type: &str, weight: f64) -> Result<String> {
-        self.foreign_sqlite_precheck()?;
+        self.foreign_commit_precheck()?;
         let edge_id = crate::id::new_id();
         let ts = now();
         // #148: the edge's causal timestamp, minted once and carried VERBATIM
