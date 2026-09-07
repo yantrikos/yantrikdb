@@ -501,8 +501,15 @@ fn non_finite_bounds_are_invalid_scalars() {
 //
 // Filtering by valid time was only half the surface: a caller who
 // filtered could not see WHY a row was eligible, nor lay the hits on a
-// timeline, because `RecallResult` dropped the values. These three
-// tests pin the read side.
+// timeline, because `RecallResult` dropped the values.
+//
+// Host rows report the v48 COLUMNS — the same values the prefilter
+// range-scans — so that a row's stated bounds and its eligibility can
+// never contradict each other. The last test is the one that pins that
+// choice: it manufactures the divergence (columns NULL, JSON populated)
+// that a pre-v48 row or a ciphertext-payload follower apply leaves
+// behind, and asserts recall reports the column, because reporting the
+// JSON there would advertise an eligibility the filter denies.
 // =====================================================================
 
 /// The columns for one rid, as the census test reads them — the
@@ -612,5 +619,128 @@ fn filtered_recall_reports_the_bounds_that_made_each_row_eligible() {
         hit.event_time_max.unwrap() >= 2_000.0,
         "the reported bounds must themselves satisfy the filter that \
          admitted the row — that is what makes them an explanation"
+    );
+}
+
+/// THE PIN FOR THE SOURCING CHOICE. A row can carry event-time metadata
+/// while its columns are NULL — a pre-v48 row not yet rewritten, or a
+/// follower apply whose payload was ciphertext. The prefilter reads the
+/// COLUMNS, so such a row is excluded from every bounded recall. If
+/// hydration re-extracted the bounds from the JSON instead, an
+/// unfiltered recall would hand back bounds advertising an eligibility
+/// the filter denies — a result that contradicts the engine's own
+/// answer to "show me what happened then".
+#[test]
+fn null_columns_report_none_even_when_the_metadata_json_still_has_bounds() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let query = axis0(8);
+    let rid = put(
+        &db,
+        "legacy row written before v48",
+        &event_meta("1970-01-01", 5_000.0, 5_000.0),
+        &decoy_vec(0, 8),
+    );
+
+    // Manufacture the divergence: strip the columns, leave the JSON.
+    db.conn()
+        .execute(
+            "UPDATE memories SET event_time_min = NULL, event_time_max = NULL \
+             WHERE rid = ?1",
+            [&rid],
+        )
+        .unwrap();
+    let stored_meta: String = db
+        .conn()
+        .query_row(
+            "SELECT metadata FROM memories WHERE rid = ?1",
+            [&rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let meta: serde_json::Value = serde_json::from_str(&stored_meta).unwrap();
+    assert_eq!(
+        crate::base::datetext::event_time_bounds(&meta),
+        (Some(5_000.0), Some(5_000.0)),
+        "precondition: the JSON must still carry the bounds"
+    );
+
+    // The filter excludes it — this is the eligibility the report must
+    // not contradict.
+    let bounded = recall_window(&db, &query, 10, None, Some(4_000.0), None).unwrap();
+    assert!(
+        !rid_set(&bounded).contains(&rid),
+        "precondition: a NULL-column row is outside the eligible universe"
+    );
+
+    // So an unfiltered recall must report the column (None), not the JSON.
+    let hits = recall_window(&db, &query, 10, None, None, None).unwrap();
+    let hit = hits
+        .iter()
+        .find(|r| r.rid == rid)
+        .expect("unfiltered recall still returns the row");
+    assert_eq!(
+        (hit.event_time_min, hit.event_time_max),
+        (None, None),
+        "reported bounds must match the columns the filter reads, not the \
+         stale JSON — otherwise the result claims an eligibility it lacks"
+    );
+}
+
+/// `recall_as_of` rolls a corrected record back to its pre-correction
+/// text and metadata. The bounds must roll back WITH it: recall stamps
+/// them from the live row, and `correct()` re-derives event time, so a
+/// result left holding the current bounds would pair yesterday's
+/// metadata with today's dates — the row contradicting itself.
+#[test]
+fn as_of_rollback_moves_event_time_back_with_the_metadata() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let query = axis0(8);
+    let rid = put(
+        &db,
+        "the deadline is in March",
+        &event_meta("2024-03-15", 1_710_460_800.0, 1_710_460_800.0),
+        &decoy_vec(0, 8),
+    );
+
+    let before_correction = crate::engine::now();
+    db.correct(
+        &rid,
+        None,
+        Some(&event_meta("2024-04-20", 1_713_571_200.0, 1_713_571_200.0)),
+        None,
+        None,
+        "deadline moved",
+    )
+    .unwrap();
+
+    // Live recall sees the corrected bounds.
+    let live = recall_window(&db, &query, 5, None, None, None).unwrap();
+    let live_hit = live.iter().find(|r| r.rid == rid).expect("row is live");
+    assert_eq!(
+        live_hit.event_time_min,
+        Some(1_713_571_200.0),
+        "precondition: the correction moved the bounds"
+    );
+
+    // As-of before the correction must report the ORIGINAL bounds.
+    let rolled = db
+        .recall_as_of(&query, 5, before_correction, None, None)
+        .unwrap();
+    let hit = rolled
+        .iter()
+        .find(|r| r.rid == rid)
+        .expect("the row existed before the correction");
+    assert_eq!(
+        hit.event_time_min,
+        Some(1_710_460_800.0),
+        "as_of bounds must roll back with the metadata, not stay live"
+    );
+    assert_eq!(
+        (
+            hit.metadata.get("event_time_min").and_then(|v| v.as_f64()),
+            hit.metadata.get("event_time_max").and_then(|v| v.as_f64()),
+        ),
+        (hit.event_time_min, hit.event_time_max),
+        "the typed fields and the restored metadata must tell one story"
     );
 }

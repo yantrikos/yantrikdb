@@ -1844,6 +1844,16 @@ impl YantrikDB {
                     result.text = text.clone();
                     result.metadata = serde_json::from_str(meta)
                         .unwrap_or(serde_json::Value::Object(Default::default()));
+                    // #181: pack rows read valid time from the metadata
+                    // JSON, where host rows read the indexed columns. A
+                    // pack carries whatever schema its publisher sealed
+                    // and can never be migrated, so anything published
+                    // before v48 has no such column to select — the same
+                    // trap the v41→v42 synthesis triplet hit. Nothing is
+                    // lost: pack metadata is plaintext (so the JSON is
+                    // exactly what the columns would mirror), and pack
+                    // recall applies no event-time filter, so there is no
+                    // filter source of truth to stay consistent with.
                     let (event_time_min, event_time_max) =
                         crate::base::datetext::event_time_bounds(&result.metadata);
                     result.event_time_min = event_time_min;

@@ -206,21 +206,29 @@ pub struct RecallResult {
     #[serde(default)]
     pub pack: Option<PackProvenance>,
     /// v48 (#149) valid time: when the described events happened, as
-    /// stamped on the record — distinct from `created_at`, which is
-    /// transaction time (when the row was written). `None` when the
-    /// record carries no event time, which is also what a record
-    /// excluded by an `event_after`/`event_before` filter would have
-    /// had; a caller who filtered by time can read these to see WHY a
-    /// row was eligible, or to lay the results out on a timeline.
+    /// opposed to `created_at`, which is transaction time (when the row
+    /// was written). `None` when the record carries no event time. A
+    /// caller who filtered with `event_after`/`event_before` reads these
+    /// to see WHY a row was eligible, or to lay the results out on a
+    /// timeline.
     ///
-    /// Sourced from the record's metadata JSON during hydration rather
-    /// than the mirrored `memories.event_time_min`/`event_time_max`
-    /// columns: the two agree by construction on a plain store (every
-    /// writer stamps the columns FROM this JSON via
-    /// [`crate::base::datetext::event_time_bounds`], and the census
-    /// invariant enforces it), but on an ENCRYPTED store the columns
-    /// are NULL by design — metadata is ciphertext at rest — while the
-    /// hydrated JSON is plaintext and still carries the values.
+    /// Host rows carry the `memories.event_time_min`/`event_time_max`
+    /// columns verbatim — the same values the recall prefilter
+    /// range-scans, so a row's reported bounds and its eligibility never
+    /// disagree. That matters on rows whose columns are still NULL while
+    /// their metadata JSON is not (a pre-v48 row not yet rewritten, a
+    /// follower apply that carried a ciphertext payload): the filter
+    /// excludes those, so re-extracting bounds from their JSON would
+    /// claim an eligibility they do not have.
+    ///
+    /// Three paths have no column to read and fall back to
+    /// [`crate::base::datetext::event_time_bounds`] over the plaintext
+    /// metadata, none of them subject to that filter: mounted pack rows
+    /// (a pack sealed before v48 has no such column and can never be
+    /// migrated), link-surfaced neighbors (built from a `Memory`), and
+    /// `recall_as_of` rollback (the restored revision's own JSON is the
+    /// only record of what the bounds were at that point in time — the
+    /// columns describe the live row).
     #[serde(default)]
     pub event_time_min: Option<f64>,
     #[serde(default)]

@@ -3632,15 +3632,17 @@ impl YantrikDB {
                 result.text = tm.text.clone();
                 result.metadata = serde_json::from_str(&tm.metadata)
                     .unwrap_or(serde_json::Value::Object(Default::default()));
-                // #181: valid time, read off the metadata we just decrypted
-                // rather than the mirrored v48 columns — same values on a
-                // plain store (every writer stamps the columns FROM this
-                // JSON), but the columns are NULL on an encrypted store
-                // where this JSON still carries them. No extra query.
-                let (event_time_min, event_time_max) =
-                    crate::base::datetext::event_time_bounds(&result.metadata);
-                result.event_time_min = event_time_min;
-                result.event_time_max = event_time_max;
+                // #181: valid time, from the SAME indexed columns the
+                // event_after/event_before prefilter range-scans — so a
+                // row's reported bounds and the reason it was (or wasn't)
+                // eligible are answerable from one source. Reading the
+                // metadata JSON instead would diverge on rows whose
+                // columns are still NULL (pre-v48 rows not yet rewritten,
+                // ciphertext-payload follower applies): the filter
+                // excludes those, so reporting bounds for them would
+                // describe an eligibility they do not have.
+                result.event_time_min = tm.event_time_min;
+                result.event_time_max = tm.event_time_max;
             }
         }
 
@@ -6248,11 +6250,10 @@ impl YantrikDB {
                     result.text = tm.text.clone();
                     result.metadata = serde_json::from_str(&tm.metadata)
                         .unwrap_or(serde_json::Value::Object(Default::default()));
-                    // #181 — mirrors recall() Step 5.
-                    let (event_time_min, event_time_max) =
-                        crate::base::datetext::event_time_bounds(&result.metadata);
-                    result.event_time_min = event_time_min;
-                    result.event_time_max = event_time_max;
+                    // #181 — mirrors recall() Step 5: the filter's own
+                    // columns, not a re-extraction from the JSON.
+                    result.event_time_min = tm.event_time_min;
+                    result.event_time_max = tm.event_time_max;
                 }
             }
             // Snippet spans (mirrors recall() Step 5.5).
@@ -6358,8 +6359,10 @@ impl YantrikDB {
             .map(|i| format!("?{}", i + 1))
             .collect::<Vec<_>>()
             .join(",");
-        let sql =
-            format!("SELECT rid, type, text, metadata FROM memories WHERE rid IN ({placeholders})");
+        let sql = format!(
+            "SELECT rid, type, text, metadata, event_time_min, event_time_max \
+             FROM memories WHERE rid IN ({placeholders})"
+        );
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         for r in rids {
             param_values.push(Box::new(r.to_string()));
@@ -6375,6 +6378,8 @@ impl YantrikDB {
                     row.get::<_, String>("rid")?,
                     row.get::<_, String>("text")?,
                     row.get::<_, String>("metadata")?,
+                    row.get::<_, Option<f64>>("event_time_min")?,
+                    row.get::<_, Option<f64>>("event_time_max")?,
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -6382,7 +6387,7 @@ impl YantrikDB {
         drop(conn);
 
         let mut map = HashMap::new();
-        for (rid, stored_text, stored_meta) in rows {
+        for (rid, stored_text, stored_meta, event_time_min, event_time_max) in rows {
             let text = self.decrypt_text(&stored_text)?;
             let metadata = self.decrypt_text(&stored_meta)?;
             map.insert(
@@ -6391,6 +6396,8 @@ impl YantrikDB {
                     rid,
                     text,
                     metadata,
+                    event_time_min,
+                    event_time_max,
                 },
             );
         }

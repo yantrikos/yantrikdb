@@ -183,6 +183,17 @@ impl YantrikDB {
                 serde_json::from_str(&metadata_plain).unwrap_or(serde_json::Value::Null);
             result.importance = importance;
             result.valence = valence;
+            // #181: re-derive valid time from the metadata just restored.
+            // Recall stamped these from the memories row, which holds the
+            // CURRENT (post-correction) bounds — and correct() re-derives
+            // event time from the new text, so leaving them would pair
+            // yesterday's metadata with today's bounds. The revision's own
+            // JSON is the only record of what the bounds were as of this
+            // point in time; the indexed columns describe the live row.
+            let (event_time_min, event_time_max) =
+                crate::base::datetext::event_time_bounds(&result.metadata);
+            result.event_time_min = event_time_min;
+            result.event_time_max = event_time_max;
             result
                 .why_retrieved
                 .push("as_of: rolled back to pre-correction state".to_string());
