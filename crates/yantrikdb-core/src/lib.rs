@@ -60,6 +60,7 @@ pub use engine::tenant::{TenantConfig, TenantManager};
 pub use engine::thread::{
     MaintenanceProgress, ThreadItem, ThreadItemV2, ThreadQuery, ThreadRecall, ThreadRecallV2,
 };
+pub use engine::ChainGateMode;
 pub use engine::YantrikDB;
 pub use error::YantrikDbError;
 pub use patterns::mine_patterns;

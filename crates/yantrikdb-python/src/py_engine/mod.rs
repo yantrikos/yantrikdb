@@ -771,6 +771,27 @@ impl PyYantrikDB {
             .map_err(map_err)
     }
 
+    /// `"off"` | `"shadow"` | `"enforce"`: whether the claims lane admits
+    /// only grounded, currently-valid claims. Every database defaults to
+    /// `shadow`, which changes no result and counts what `enforce` would
+    /// refuse into `stats()["claim_chain_gate_suppressed_since_boot"]`.
+    fn claim_chain_gate_mode(&self) -> PyResult<String> {
+        Ok(self
+            .get_inner()?
+            .claim_chain_gate_mode()
+            .as_str()
+            .to_string())
+    }
+
+    /// Durably set the claim-chain gate mode. Read the suppression counters
+    /// under `shadow` first; a malformed value is a loud error.
+    fn set_claim_chain_gate_mode(&self, mode: &str) -> PyResult<()> {
+        let parsed = yantrikdb_core::ChainGateMode::parse(mode).map_err(map_err)?;
+        self.get_inner()?
+            .set_claim_chain_gate_mode(parsed)
+            .map_err(map_err)
+    }
+
     /// Exposed for Python consolidate.py compatibility.
     #[pyo3(signature = (op_type, target_rid, payload))]
     fn _log_op(

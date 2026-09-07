@@ -301,6 +301,8 @@ class TestStats:
             "synthesis_fanout_sources_over_cap",
             # v0.10 Item 4a.4: anti-laundering gate adoption surface.
             "provenance_gate_mode", "provenance_flagged_since_boot",
+            # 0.22: claim-chain gate adoption surface (shadow counters).
+            "claim_chain_gate_mode", "claim_chain_gate_suppressed_since_boot",
             # Provenance-origin census: explicitly verified records and
             # legacy/user-source rows without an explicit verification marker.
             "provenance_verified_records", "unverified_user_source_records",

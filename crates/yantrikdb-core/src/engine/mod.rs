@@ -11,6 +11,7 @@ mod capture;
 mod causal;
 mod chunking;
 mod claims_lane;
+pub use claims_lane::ChainGateMode;
 mod cognition;
 mod coherence;
 pub mod conflict;
@@ -115,8 +116,9 @@ use crate::schema::{
     MIGRATE_V36_TO_V37, MIGRATE_V37_TO_V38, MIGRATE_V3_TO_V4, MIGRATE_V40_TO_V41,
     MIGRATE_V41_TO_V42, MIGRATE_V42_TO_V43, MIGRATE_V44_TO_V45, MIGRATE_V45_TO_V46,
     MIGRATE_V46_TO_V47, MIGRATE_V47_TO_V48, MIGRATE_V48_TO_V49, MIGRATE_V49_TO_V50,
-    MIGRATE_V4_TO_V5, MIGRATE_V50_TO_V51, MIGRATE_V51_TO_V52, MIGRATE_V5_TO_V6, MIGRATE_V6_TO_V7,
-    MIGRATE_V7_TO_V8, MIGRATE_V8_TO_V9, MIGRATE_V9_TO_V10, SCHEMA_SQL, SCHEMA_VERSION,
+    MIGRATE_V4_TO_V5, MIGRATE_V50_TO_V51, MIGRATE_V51_TO_V52, MIGRATE_V52_TO_V53, MIGRATE_V5_TO_V6,
+    MIGRATE_V6_TO_V7, MIGRATE_V7_TO_V8, MIGRATE_V8_TO_V9, MIGRATE_V9_TO_V10, SCHEMA_SQL,
+    SCHEMA_VERSION,
 };
 use crate::types::*;
 
@@ -253,6 +255,18 @@ pub struct YantrikDB {
     /// (warn mode). Surfaced in `stats()` so a migrated DB's operator sees what
     /// `enforce` would reject before opting in. In-memory by design.
     pub(crate) provenance_flagged_since_boot: std::sync::atomic::AtomicU64,
+    /// **Claim-chain gate mode** (2026-09-07), cached from
+    /// `meta.claim_chain_gate_mode` (0=off, 1=shadow, 2=enforce). `shadow`
+    /// is the default everywhere: the claims lane admits exactly what it
+    /// admitted before and COUNTS what `enforce` would refuse. See
+    /// `engine::claims_lane::ChainGate`.
+    pub(crate) claim_chain_gate_mode: std::sync::atomic::AtomicU8,
+    /// Since boot: claims-lane admissions and traversals the gate would
+    /// refuse under `enforce`, keyed `hop1:<reason>` / `seed:<reason>` /
+    /// `hop2:<reason>`. The adoption nudge an operator reads in `stats()`
+    /// before turning the gate on. In-memory by design.
+    pub(crate) claim_chain_gate_suppressed_since_boot:
+        parking_lot::Mutex<std::collections::BTreeMap<String, u64>>,
     /// **v0.10 Item 3 — correction seqlock (sol r4).** A DB-wide epoch that
     /// makes a text-changing correction's (SQL commit + vector publish +
     /// scoring-cache update) atomic FROM A READER'S PERSPECTIVE, without
@@ -894,6 +908,7 @@ impl YantrikDB {
             (49, MIGRATE_V49_TO_V50),
             (50, MIGRATE_V50_TO_V51),
             (51, MIGRATE_V51_TO_V52),
+            (52, MIGRATE_V52_TO_V53),
         ];
         if let Some(v) = existing_version {
             for &(from_v, sql) in migrations {
@@ -1148,6 +1163,16 @@ impl YantrikDB {
             conn.execute(
                 "INSERT OR IGNORE INTO meta (key, value) VALUES ('provenance_gate_mode', ?1)",
                 params![default_gate_mode],
+            ),
+        )?;
+        // Claim-chain gate: `shadow` on every install, fresh or migrated —
+        // it changes no result until an operator has read the counters and
+        // opted in. INSERT OR IGNORE keeps an operator-set value.
+        at(
+            "fresh_defaults",
+            conn.execute(
+                "INSERT OR IGNORE INTO meta (key, value) VALUES ('claim_chain_gate_mode', 'shadow')",
+                [],
             ),
         )?;
 
@@ -1568,6 +1593,17 @@ impl YantrikDB {
             .unwrap_or("warn"),
         )?
         .as_u8();
+        // Same contract for the claim-chain gate: a malformed persisted mode
+        // is a typed error, never a silent `Off`.
+        let claim_chain_gate_mode = claims_lane::ChainGateMode::parse(
+            rewrap(
+                "final_meta_reads",
+                Self::get_meta(&conn, "claim_chain_gate_mode"),
+            )?
+            .as_deref()
+            .unwrap_or("shadow"),
+        )?
+        .as_u8();
 
         // Missing is the v42-upgrade-compatible default. A malformed or zero
         // persisted value fails open() loudly: silently disabling a write-
@@ -1627,6 +1663,10 @@ impl YantrikDB {
             embedder_chunked_writes: std::sync::atomic::AtomicU64::new(0),
             provenance_gate_mode: std::sync::atomic::AtomicU8::new(provenance_gate_mode),
             provenance_flagged_since_boot: std::sync::atomic::AtomicU64::new(0),
+            claim_chain_gate_mode: std::sync::atomic::AtomicU8::new(claim_chain_gate_mode),
+            claim_chain_gate_suppressed_since_boot: parking_lot::Mutex::new(
+                std::collections::BTreeMap::new(),
+            ),
             correction_epoch: std::sync::atomic::AtomicU64::new(0),
             visible_seq: dashmap::DashMap::new(),
             visible_seq_cv: parking_lot::Condvar::new(),
@@ -2005,6 +2045,43 @@ impl YantrikDB {
             .store(mode.as_u8(), std::sync::atomic::Ordering::Relaxed);
         drop(conn);
         Ok(())
+    }
+
+    /// The active claim-chain gate mode (`off` | `shadow` | `enforce`).
+    /// Every install defaults to `shadow`; see `engine::claims_lane`.
+    pub fn claim_chain_gate_mode(&self) -> claims_lane::ChainGateMode {
+        claims_lane::ChainGateMode::from_u8(
+            self.claim_chain_gate_mode
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
+    }
+
+    /// Durable opt-in to a claim-chain gate mode. The adoption path is:
+    /// run in `shadow`, read `stats().claim_chain_gate_suppressed_since_boot`,
+    /// heal or accept what would be refused, then `enforce`. Same
+    /// linearization note as `set_provenance_gate_mode`: a recall already
+    /// past the gate finishes under the old mode.
+    pub fn set_claim_chain_gate_mode(&self, mode: claims_lane::ChainGateMode) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('claim_chain_gate_mode', ?1)",
+            params![mode.as_str()],
+        )?;
+        self.claim_chain_gate_mode
+            .store(mode.as_u8(), std::sync::atomic::Ordering::Relaxed);
+        drop(conn);
+        Ok(())
+    }
+
+    /// Tick the since-boot suppression counters (one recall's worth).
+    pub(crate) fn note_chain_gate_suppressions(&self, suppressed: &[claims_lane::Suppression]) {
+        if suppressed.is_empty() {
+            return;
+        }
+        let mut counts = self.claim_chain_gate_suppressed_since_boot.lock();
+        for s in suppressed {
+            *counts.entry(s.key()).or_insert(0) += 1;
+        }
     }
 
     /// **v0.10 Item 4a.4 — the anti-laundering gate.** Parse the record's

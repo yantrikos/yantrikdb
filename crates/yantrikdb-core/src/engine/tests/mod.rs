@@ -13,6 +13,7 @@ mod backpressure_lifecycle;
 mod basics;
 mod bundled_embedder;
 mod chunking;
+mod claim_chain_gate;
 mod cognition_gates;
 mod consolidate_cluster;
 mod corrections;

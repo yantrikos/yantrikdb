@@ -644,6 +644,17 @@ pub struct Stats {
     /// consider `set_provenance_gate_mode(Enforce)` once callers are fixed.
     #[serde(default)]
     pub provenance_flagged_since_boot: u64,
+    /// Claim-chain gate mode (`off` | `shadow` | `enforce`); see
+    /// `engine::claims_lane`. Every install defaults to `shadow`.
+    #[serde(default)]
+    pub claim_chain_gate_mode: String,
+    /// Since boot: claims-lane admissions and traversals the gate would
+    /// refuse under `enforce`, keyed `hop1:<reason>` / `seed:<reason>` /
+    /// `hop2:<reason>` (reasons: ungrounded, not_yet_valid, superseded,
+    /// negated, non_asserted). Under `shadow` they were still admitted;
+    /// under `enforce` they were dropped. Empty under `off`.
+    #[serde(default)]
+    pub claim_chain_gate_suppressed_since_boot: HashMap<String, u64>,
     /// Non-tombstoned records carrying an explicit, caller-supplied
     /// `metadata.provenance_verified = true` marker. This is an audit signal,
     /// not an engine assertion: the engine cannot reconstruct authorship.

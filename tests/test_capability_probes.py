@@ -422,3 +422,41 @@ def test_common_words_are_not_entities_by_seed_or_by_this_stores_usage(db):
     assert db.search_entities("Gizmo") == [], db.search_entities("Gizmo")
     report = db.reextract_entities(dry_run=True)
     assert report["lexicon_memories"] >= 6, report
+
+
+# ── the claim-chain gate (v53) ───────────────────────────────────────────
+
+
+def test_claim_chain_gate_shadows_by_default_and_enforce_keeps_only_grounded_claims(db):
+    """Every store opens in `shadow`: the claims lane admits what it always
+    did and counts what `enforce` would refuse. A heuristic claim is
+    ungrounded (its binding was never validated); a cooperative claim the
+    engine grounded in the text is not, and survives `enforce`."""
+    assert db.claim_chain_gate_mode() == "shadow"
+    assert db.stats()["claim_chain_gate_mode"] == "shadow"
+    rid = db.record("Alice Moreau works at Fennwick Labs. Fennwick Labs is headquartered in Berlin.")
+    db.think()
+    claims = {(c["src"], c["rel_type"], c["dst"]): c for c in db.get_claims("Alice Moreau")}
+    assert claims[("Alice Moreau", "works_at", "Fennwick Labs")]["grounding"] == 0, claims
+
+    query = "Which city does Alice Moreau work in?"
+    hits = db.recall(query=query, top_k=5, skip_reinforce=True)
+    assert any(w.startswith("claims_match") for h in hits for w in h["why_retrieved"]), hits
+    counted = db.stats()["claim_chain_gate_suppressed_since_boot"]
+    assert counted.get("hop1:ungrounded", 0) > 0, counted
+
+    db.set_claim_chain_gate_mode("enforce")
+    assert db.stats()["claim_chain_gate_mode"] == "enforce"
+    hits = db.recall(query=query, top_k=5, skip_reinforce=True)
+    assert not any(w.startswith("claims_match") for h in hits for w in h["why_retrieved"]), hits
+
+    db.attach_claims(rid, [{"subject": "Alice Moreau", "relation": "works_at", "object": "Fennwick Labs"}])
+    claims = db.get_claims("Alice Moreau")
+    assert any(c["extractor"] == "agent_stated" and c["grounding"] == 1 for c in claims), claims
+    hits = db.recall(query=query, top_k=5, skip_reinforce=True)
+    assert any("Alice Moreau -works_at-> Fennwick Labs" in w for h in hits for w in h["why_retrieved"]), hits
+
+    with pytest.raises(Exception):
+        db.set_claim_chain_gate_mode("warn")
+    db.set_claim_chain_gate_mode("shadow")
+    assert db.claim_chain_gate_mode() == "shadow"

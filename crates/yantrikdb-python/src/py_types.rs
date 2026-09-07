@@ -296,6 +296,13 @@ pub fn stats_to_dict(py: Python<'_>, s: &yantrikdb_core::Stats) -> PyResult<PyOb
         "provenance_flagged_since_boot",
         s.provenance_flagged_since_boot,
     )?;
+    // Claim-chain gate adoption surface: `mode` is off|shadow|enforce;
+    // the map counts what `enforce` would refuse, by hop and reason.
+    dict.set_item("claim_chain_gate_mode", &s.claim_chain_gate_mode)?;
+    dict.set_item(
+        "claim_chain_gate_suppressed_since_boot",
+        &s.claim_chain_gate_suppressed_since_boot,
+    )?;
     dict.set_item("provenance_verified_records", s.provenance_verified_records)?;
     dict.set_item(
         "unverified_user_source_records",

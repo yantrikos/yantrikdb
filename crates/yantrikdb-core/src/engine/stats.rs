@@ -277,6 +277,13 @@ impl YantrikDB {
             provenance_flagged_since_boot: self
                 .provenance_flagged_since_boot
                 .load(std::sync::atomic::Ordering::Relaxed),
+            claim_chain_gate_mode: self.claim_chain_gate_mode().as_str().to_string(),
+            claim_chain_gate_suppressed_since_boot: self
+                .claim_chain_gate_suppressed_since_boot
+                .lock()
+                .iter()
+                .map(|(k, v)| (k.clone(), *v))
+                .collect(),
             provenance_verified_records,
             unverified_user_source_records,
             provenance_source_counts,
