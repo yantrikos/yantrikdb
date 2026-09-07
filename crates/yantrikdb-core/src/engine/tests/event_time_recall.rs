@@ -496,3 +496,121 @@ fn non_finite_bounds_are_invalid_scalars() {
         );
     }
 }
+
+// ── #181: the values ride out on the result ──────────────────────────
+//
+// Filtering by valid time was only half the surface: a caller who
+// filtered could not see WHY a row was eligible, nor lay the hits on a
+// timeline, because `RecallResult` dropped the values. These three
+// tests pin the read side.
+// =====================================================================
+
+/// The columns for one rid, as the census test reads them — the
+/// `event_time_columns.rs` shape, reused here to prove the hydrated
+/// values agree with the v48 columns rather than merely existing.
+fn columns_for(db: &YantrikDB, rid: &str) -> (Option<f64>, Option<f64>) {
+    db.conn()
+        .query_row(
+            "SELECT event_time_min, event_time_max FROM memories WHERE rid = ?1",
+            [rid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+}
+
+/// A date-bearing record carries the stamped values out through recall.
+#[test]
+fn recall_result_carries_the_stamped_event_time() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let query = axis0(8);
+    let rid = put(
+        &db,
+        "the migration ran that week",
+        &event_meta("2024-03-15", 1_710_460_800.0, 1_710_547_200.0),
+        &decoy_vec(0, 8),
+    );
+
+    let hits = recall_window(&db, &query, 5, None, None, None).unwrap();
+    let hit = hits
+        .iter()
+        .find(|r| r.rid == rid)
+        .expect("the date-bearing record must be recalled");
+
+    assert_eq!(
+        hit.event_time_min,
+        Some(1_710_460_800.0),
+        "event_time_min must reach the caller"
+    );
+    assert_eq!(
+        hit.event_time_max,
+        Some(1_710_547_200.0),
+        "event_time_max must reach the caller"
+    );
+
+    // The load-bearing half: hydrated values are sourced from the
+    // metadata JSON, so this asserts they agree with the mirrored v48
+    // columns — the invariant that makes that sourcing choice safe.
+    assert_eq!(
+        (hit.event_time_min, hit.event_time_max),
+        columns_for(&db, &rid),
+        "hydrated values must equal the v48 columns for the same row"
+    );
+}
+
+/// An undated record carries `None` — absence stays absence, never a
+/// zero or a `created_at` stand-in.
+#[test]
+fn recall_result_event_time_is_none_for_an_undated_record() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let query = axis0(8);
+    let rid = put(&db, "no date in this one", &empty_meta(), &decoy_vec(0, 8));
+
+    let hits = recall_window(&db, &query, 5, None, None, None).unwrap();
+    let hit = hits
+        .iter()
+        .find(|r| r.rid == rid)
+        .expect("the undated record must be recalled");
+
+    assert_eq!(hit.event_time_min, None, "undated ⇒ None, not 0.0");
+    assert_eq!(hit.event_time_max, None, "undated ⇒ None, not created_at");
+    assert_eq!(
+        (hit.event_time_min, hit.event_time_max),
+        columns_for(&db, &rid),
+        "both must be NULL in the columns too"
+    );
+}
+
+/// The point of the issue: a caller who FILTERED by valid time can read
+/// back the values that made each row eligible, for every row returned.
+#[test]
+fn filtered_recall_reports_the_bounds_that_made_each_row_eligible() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let query = axis0(8);
+    put(
+        &db,
+        "early event",
+        &event_meta("1970-01-01", 1_000.0, 1_000.0),
+        &decoy_vec(0, 8),
+    );
+    let late = put(
+        &db,
+        "late event",
+        &event_meta("1970-01-01", 3_000.0, 3_000.0),
+        &decoy_vec(1, 8),
+    );
+
+    let hits = recall_window(&db, &query, 10, None, Some(2_000.0), None).unwrap();
+    assert_eq!(
+        rid_set(&hits),
+        std::collections::HashSet::from([late]),
+        "only the late record overlaps [2000, ∞)"
+    );
+    let hit = &hits[0];
+    assert_eq!(hit.event_time_min, Some(3_000.0));
+    assert_eq!(hit.event_time_max, Some(3_000.0));
+    assert!(
+        hit.event_time_max.unwrap() >= 2_000.0,
+        "the reported bounds must themselves satisfy the filter that \
+         admitted the row — that is what makes them an explanation"
+    );
+}

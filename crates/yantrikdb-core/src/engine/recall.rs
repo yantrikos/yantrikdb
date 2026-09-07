@@ -1374,6 +1374,8 @@ impl YantrikDB {
                     aged_last_verified: None,
                     best_span: None,
                     pack: None,
+                    event_time_min: None,
+                    event_time_max: None,
                 });
             }
         } // drop cache borrow
@@ -1492,6 +1494,8 @@ impl YantrikDB {
                         aged_last_verified: None,
                         best_span: None,
                         pack: None,
+                        event_time_min: None,
+                        event_time_max: None,
                     });
                 }
             }
@@ -1625,6 +1629,8 @@ impl YantrikDB {
                         aged_last_verified: None,
                         best_span: None,
                         pack: None,
+                        event_time_min: None,
+                        event_time_max: None,
                     });
                 }
             }
@@ -2266,6 +2272,8 @@ impl YantrikDB {
                                     aged_last_verified: None,
                                     best_span: None,
                                     pack: None,
+                                    event_time_min: None,
+                                    event_time_max: None,
                                 });
                             }
                         }
@@ -2440,6 +2448,8 @@ impl YantrikDB {
                         aged_last_verified: None,
                         best_span: None,
                         pack: None,
+                        event_time_min: None,
+                        event_time_max: None,
                     });
                 }
             }
@@ -2700,6 +2710,8 @@ impl YantrikDB {
                                     aged_last_verified: None,
                                     best_span: None,
                                     pack: None,
+                                    event_time_min: None,
+                                    event_time_max: None,
                                 });
                             }
                         }
@@ -3038,6 +3050,8 @@ impl YantrikDB {
                             aged_last_verified: None,
                             best_span: None,
                             pack: None,
+                            event_time_min: None,
+                            event_time_max: None,
                         });
                     }
                     drop(cache);
@@ -3618,6 +3632,15 @@ impl YantrikDB {
                 result.text = tm.text.clone();
                 result.metadata = serde_json::from_str(&tm.metadata)
                     .unwrap_or(serde_json::Value::Object(Default::default()));
+                // #181: valid time, read off the metadata we just decrypted
+                // rather than the mirrored v48 columns — same values on a
+                // plain store (every writer stamps the columns FROM this
+                // JSON), but the columns are NULL on an encrypted store
+                // where this JSON still carries them. No extra query.
+                let (event_time_min, event_time_max) =
+                    crate::base::datetext::event_time_bounds(&result.metadata);
+                result.event_time_min = event_time_min;
+                result.event_time_max = event_time_max;
             }
         }
 
@@ -4624,6 +4647,8 @@ impl YantrikDB {
                     aged_last_verified: None,
                     best_span: None,
                     pack: None,
+                    event_time_min: None,
+                    event_time_max: None,
                 });
             }
         }
@@ -4735,6 +4760,8 @@ impl YantrikDB {
                         aged_last_verified: None,
                         best_span: None,
                         pack: None,
+                        event_time_min: None,
+                        event_time_max: None,
                     });
                 }
             }
@@ -5305,6 +5332,8 @@ impl YantrikDB {
                                     aged_last_verified: None,
                                     best_span: None,
                                     pack: None,
+                                    event_time_min: None,
+                                    event_time_max: None,
                                 });
                             }
                         }
@@ -5455,6 +5484,8 @@ impl YantrikDB {
                         aged_last_verified: None,
                         best_span: None,
                         pack: None,
+                        event_time_min: None,
+                        event_time_max: None,
                     });
                 }
             }
@@ -5676,6 +5707,8 @@ impl YantrikDB {
                                     aged_last_verified: None,
                                     best_span: None,
                                     pack: None,
+                                    event_time_min: None,
+                                    event_time_max: None,
                                 });
                             }
                         }
@@ -6001,6 +6034,8 @@ impl YantrikDB {
                                 aged_last_verified: None,
                                 best_span: None,
                                 pack: None,
+                                event_time_min: None,
+                                event_time_max: None,
                             });
                         }
                     }
@@ -6213,6 +6248,11 @@ impl YantrikDB {
                     result.text = tm.text.clone();
                     result.metadata = serde_json::from_str(&tm.metadata)
                         .unwrap_or(serde_json::Value::Object(Default::default()));
+                    // #181 — mirrors recall() Step 5.
+                    let (event_time_min, event_time_max) =
+                        crate::base::datetext::event_time_bounds(&result.metadata);
+                    result.event_time_min = event_time_min;
+                    result.event_time_max = event_time_max;
                 }
             }
             // Snippet spans (mirrors recall() Step 5.5).
@@ -6613,6 +6653,8 @@ mod novelty_selection_tests {
             aged_last_verified: None,
             best_span: None,
             pack: None,
+            event_time_min: None,
+            event_time_max: None,
         }
     }
 

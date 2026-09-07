@@ -205,6 +205,26 @@ pub struct RecallResult {
     /// rows. See [`PackProvenance`].
     #[serde(default)]
     pub pack: Option<PackProvenance>,
+    /// v48 (#149) valid time: when the described events happened, as
+    /// stamped on the record — distinct from `created_at`, which is
+    /// transaction time (when the row was written). `None` when the
+    /// record carries no event time, which is also what a record
+    /// excluded by an `event_after`/`event_before` filter would have
+    /// had; a caller who filtered by time can read these to see WHY a
+    /// row was eligible, or to lay the results out on a timeline.
+    ///
+    /// Sourced from the record's metadata JSON during hydration rather
+    /// than the mirrored `memories.event_time_min`/`event_time_max`
+    /// columns: the two agree by construction on a plain store (every
+    /// writer stamps the columns FROM this JSON via
+    /// [`crate::base::datetext::event_time_bounds`], and the census
+    /// invariant enforces it), but on an ENCRYPTED store the columns
+    /// are NULL by design — metadata is ciphertext at rest — while the
+    /// hydrated JSON is plaintext and still carries the values.
+    #[serde(default)]
+    pub event_time_min: Option<f64>,
+    #[serde(default)]
+    pub event_time_max: Option<f64>,
 }
 
 /// v0.13.1 explain surface — per-lane status with the never-ran /

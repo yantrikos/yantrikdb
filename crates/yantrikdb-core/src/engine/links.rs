@@ -982,6 +982,11 @@ impl YantrikDB {
                 let nscore = seed_score * pol.neighbor_factor / 4.0;
                 present.insert(l.rid.clone());
                 budget -= 1;
+                // Surfaced neighbors are built whole from `mem` and never
+                // reach recall's Step 5 hydration, so the valid-time pair
+                // is read here, before the literal moves `mem.metadata`.
+                let (event_time_min, event_time_max) =
+                    crate::base::datetext::event_time_bounds(&mem.metadata);
                 added.push(RecallResult {
                     rid: mem.rid,
                     memory_type: mem.memory_type,
@@ -1018,6 +1023,8 @@ impl YantrikDB {
                     aged_last_verified: None,
                     best_span: None,
                     pack: None,
+                    event_time_min,
+                    event_time_max,
                 });
             }
         }
