@@ -52,7 +52,9 @@ pub use engine::pack::{
     effective_pack_floor, MountOptions, MountedPack, PackEmbedder, PackInfo, PackManifest,
     PackRecallOptions, PackTrust,
 };
-pub use engine::reextract::{ReextractReport, REEXTRACT_EXTRACTORS};
+pub use engine::reextract::{
+    ExtractionRefusalRow, ReextractReport, SilverRecallReport, REEXTRACT_EXTRACTORS,
+};
 pub use engine::repair::{RepairError, RepairReport};
 pub use engine::split::SplitReport;
 pub use engine::tasks::Task;

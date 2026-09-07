@@ -24,7 +24,7 @@
 // v51 adds the self-mined relation template tables (learned_relation_patterns +
 // support), fed by cooperative claims and applied by the materializer.
 // v52 adds token_case_stats, the store's own lexicon for entity admission.
-pub const SCHEMA_VERSION: i32 = 53;
+pub const SCHEMA_VERSION: i32 = 54;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -1231,6 +1231,25 @@ CREATE TABLE IF NOT EXISTS token_case_stats (
     cap_mid_n INTEGER NOT NULL DEFAULT 0,
     cap_start_n INTEGER NOT NULL DEFAULT 0
 );
+-- v54: the extraction refusal ledger. Every relation trigger the extractor
+-- saw and could not bind safely, with the reason (engine::graph binding
+-- rules). Rewritten per memory on every extraction, capped per memory,
+-- derived and local (never replicated). This is the recall instrument: the
+-- next binding rule is chosen from the reason histogram, not an example.
+CREATE TABLE IF NOT EXISTS extraction_refusals (
+    memory_rid TEXT NOT NULL,
+    namespace TEXT NOT NULL DEFAULT 'default',
+    rel_type TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    left_token TEXT NOT NULL DEFAULT '',
+    right_token TEXT NOT NULL DEFAULT '',
+    at INTEGER NOT NULL DEFAULT 0,
+    extractor_version TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    PRIMARY KEY (memory_rid, rel_type, at)
+);
+CREATE INDEX IF NOT EXISTS idx_extraction_refusals_reason ON extraction_refusals(reason, rel_type);
 
 -- Normalized join tables for trigger/pattern JSON arrays
 CREATE TABLE IF NOT EXISTS trigger_source_rids (
@@ -3323,6 +3342,25 @@ CREATE TABLE IF NOT EXISTS token_case_stats (
     cap_mid_n INTEGER NOT NULL DEFAULT 0,
     cap_start_n INTEGER NOT NULL DEFAULT 0
 );
+-- v54: the extraction refusal ledger. Every relation trigger the extractor
+-- saw and could not bind safely, with the reason (engine::graph binding
+-- rules). Rewritten per memory on every extraction, capped per memory,
+-- derived and local (never replicated). This is the recall instrument: the
+-- next binding rule is chosen from the reason histogram, not an example.
+CREATE TABLE IF NOT EXISTS extraction_refusals (
+    memory_rid TEXT NOT NULL,
+    namespace TEXT NOT NULL DEFAULT 'default',
+    rel_type TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    left_token TEXT NOT NULL DEFAULT '',
+    right_token TEXT NOT NULL DEFAULT '',
+    at INTEGER NOT NULL DEFAULT 0,
+    extractor_version TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    PRIMARY KEY (memory_rid, rel_type, at)
+);
+CREATE INDEX IF NOT EXISTS idx_extraction_refusals_reason ON extraction_refusals(reason, rel_type);
 ";
 
 pub const MIGRATE_V52_TO_V53: &str = "
@@ -3336,4 +3374,26 @@ pub const MIGRATE_V52_TO_V53: &str = "
 -- ('claim_chain_gate_mode', seeded 'shadow' on open).
 ALTER TABLE claims ADD COLUMN grounding INTEGER NOT NULL DEFAULT 0;
 UPDATE claims SET grounding = 1 WHERE extractor = 'agent_stated';
+";
+
+pub const MIGRATE_V53_TO_V54: &str = "
+-- v54: the extraction refusal ledger. Every relation trigger the extractor
+-- saw and could not bind safely, with the reason (engine::graph binding
+-- rules). Rewritten per memory on every extraction, capped per memory,
+-- derived and local (never replicated). This is the recall instrument: the
+-- next binding rule is chosen from the reason histogram, not an example.
+CREATE TABLE IF NOT EXISTS extraction_refusals (
+    memory_rid TEXT NOT NULL,
+    namespace TEXT NOT NULL DEFAULT 'default',
+    rel_type TEXT NOT NULL,
+    trigger TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    left_token TEXT NOT NULL DEFAULT '',
+    right_token TEXT NOT NULL DEFAULT '',
+    at INTEGER NOT NULL DEFAULT 0,
+    extractor_version TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    PRIMARY KEY (memory_rid, rel_type, at)
+);
+CREATE INDEX IF NOT EXISTS idx_extraction_refusals_reason ON extraction_refusals(reason, rel_type);
 ";

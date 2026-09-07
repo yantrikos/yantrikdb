@@ -11,6 +11,8 @@ use self::helpers::*;
 mod alias_migration;
 mod backpressure_lifecycle;
 mod basics;
+#[cfg(feature = "bundled-embedder")]
+mod bound_extraction;
 mod bundled_embedder;
 mod chunking;
 #[cfg(feature = "bundled-embedder")]

@@ -31,6 +31,21 @@ const THINK_DRAIN_BATCH: usize = 64;
 /// boundary and why a bounded drain beats an unbounded one.
 const THINK_DRAIN_BUDGET: usize = 4096;
 
+/// `extractor_version` written by the bound extractor (occurrence-local
+/// binding with evidence spans; `graph::extract_relations_bound`).
+pub(crate) const BOUND_EXTRACTOR_VERSION: &str = "2.0";
+/// Refusal rows kept per memory.
+const REFUSAL_LEDGER_CAP_PER_MEMORY: usize = 8;
+
+/// The claims table stores spans as `INTEGER`; a span past `i32::MAX`
+/// (never on a memory this engine accepts) is stored as none.
+fn span_columns(span: Option<(usize, usize)>) -> (Option<i32>, Option<i32>) {
+    match span {
+        Some((s, e)) => (i32::try_from(s).ok(), i32::try_from(e).ok()),
+        None => (None, None),
+    }
+}
+
 impl YantrikDB {
     /// Get engine statistics. Optionally filter memory counts by namespace.
     pub fn stats(&self, namespace: Option<&str>) -> Result<Stats> {
@@ -1496,6 +1511,48 @@ impl YantrikDB {
         Ok(())
     }
 
+    /// Rewrite the refusal ledger rows for one memory: what the bound
+    /// extractor saw and would not bind, capped so a log-shaped memory
+    /// cannot flood the table. Best-effort: a ledger failure never fails
+    /// extraction.
+    pub(crate) fn record_extraction_refusals(
+        &self,
+        rid: &str,
+        namespace: &str,
+        refusals: &[crate::graph::ExtractionRefusal],
+    ) {
+        let conn = self.conn();
+        if conn
+            .execute(
+                "DELETE FROM extraction_refusals WHERE memory_rid = ?1",
+                params![rid],
+            )
+            .is_err()
+        {
+            return; // pre-v54 store (an old pack): no ledger
+        }
+        let ts = now();
+        for r in refusals.iter().take(REFUSAL_LEDGER_CAP_PER_MEMORY) {
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO extraction_refusals (memory_rid, namespace, rel_type, \
+                 trigger, reason, left_token, right_token, at, extractor_version, created_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                params![
+                    rid,
+                    namespace,
+                    r.rel_type,
+                    r.trigger,
+                    r.reason,
+                    r.left,
+                    r.right,
+                    r.at as i64,
+                    BOUND_EXTRACTOR_VERSION,
+                    ts
+                ],
+            );
+        }
+    }
+
     /// Relation extraction + claim ingestion for one memory (the
     /// materializer's Loops C+D+E): built-in patterns as `heuristic_v1`,
     /// active learned templates as `learned_v1`, never minting a fact any
@@ -1521,8 +1578,9 @@ impl YantrikDB {
                 candidates.push(v);
             }
         }
-        let relations = crate::graph::extract_heuristic_relations(text, &candidates);
-        for rel in &relations {
+        let extraction = crate::graph::extract_relations_bound(text, &candidates);
+        self.record_extraction_refusals(rid, namespace, &extraction.refusals);
+        for rel in &extraction.relations {
             // A value can be an object, never a subject: `2026 -leads-> X`
             // anchors nothing at read time and is refused there anyway.
             // And only a few relations can take a value as an object.
@@ -1545,8 +1603,9 @@ impl YantrikDB {
             if already_exists {
                 continue;
             }
+            let (span_start, span_end) = span_columns(rel.span);
             written += usize::from(
-                self.ingest_claim(
+                self.ingest_claim_grounded(
                     &rel.src,
                     &rel.rel_type,
                     &rel.dst,
@@ -1556,12 +1615,13 @@ impl YantrikDB {
                     event_min,
                     None,
                     "heuristic_v1",
-                    Some("1.0"),
+                    Some(BOUND_EXTRACTOR_VERSION),
                     &rel.confidence_band,
                     Some(rid),
-                    None,
-                    None,
+                    span_start,
+                    span_end,
                     1.0,
+                    crate::engine::claims_lane::GROUNDING_EXTRACTOR_BOUND,
                 )
                 .is_ok(),
             );
@@ -1597,8 +1657,9 @@ impl YantrikDB {
                 if already_exists {
                     continue;
                 }
+                let (span_start, span_end) = span_columns(rel.span);
                 written += usize::from(
-                    self.ingest_claim(
+                    self.ingest_claim_grounded(
                         &rel.src,
                         &rel.rel_type,
                         &rel.dst,
@@ -1608,12 +1669,13 @@ impl YantrikDB {
                         event_min,
                         None,
                         crate::engine::graph_ops::LEARNED_CLAIM_EXTRACTOR,
-                        Some("1.0"),
+                        Some(BOUND_EXTRACTOR_VERSION),
                         &rel.confidence_band,
                         Some(rid),
-                        None,
-                        None,
+                        span_start,
+                        span_end,
                         1.0,
+                        crate::engine::claims_lane::GROUNDING_EXTRACTOR_BOUND,
                     )
                     .is_ok(),
                 );
