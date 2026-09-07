@@ -838,7 +838,7 @@ pub enum TokenCase {
 /// says nothing about whether it is a name, which is the whole reason the
 /// class exists.
 pub fn token_case_observations(text: &str) -> Vec<(String, TokenCase)> {
-    let stripped = strip_code(text);
+    let stripped: String = mark_sentence_ends(strip_code(text).as_ref());
     let mut seen: std::collections::HashSet<(String, TokenCase)> = std::collections::HashSet::new();
     let mut out = Vec::new();
     for segment in stripped.split(|c: char| {
@@ -1127,10 +1127,62 @@ where
     extract_heuristic_entities_inner(stripped.as_ref(), &lookup)
 }
 
+/// Titles after which a period is an abbreviation, not a sentence end:
+/// `St. Louis`, `Dr. Smith`, `Gen. Patton` must not split inside the name.
+/// Company suffixes (`Inc.`, `Ltd.`) are deliberately NOT here: they end
+/// sentences far more often than they precede a capitalized continuation,
+/// and `Acme Inc. Then Bob left` welded into `Acme Inc Then Bob`.
+const ABBREVIATIONS_BEFORE_PERIOD: &[&str] = &[
+    "mr", "mrs", "ms", "dr", "prof", "st", "mt", "ft", "gen", "sen", "rep", "gov", "capt", "lt",
+    "sgt", "col",
+];
+
+/// Mark sentence ends so a name at the end of one sentence is never welded
+/// to the capitalized word that opens the next. Measured 2026-09-06: the
+/// chunker read `moved to Munich. Assistant: ok` as the entity `Munich
+/// Assistant`, so no `lives_in` claim could fire; every BEAM turn ends
+/// that way (`... . User:` / `... . Assistant:`) and ordinary prose does
+/// too (`works at Fennwick Labs. Alice Moreau lives in Berlin`). A period
+/// followed by whitespace becomes a hard boundary unless the token before
+/// it is a single letter (an initial: `J. K. Rowling`) or a known
+/// abbreviation; decimals (`0.19.0`) have no whitespace after the period
+/// and are untouched.
+fn mark_sentence_ends(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 8);
+    let chars: Vec<char> = text.chars().collect();
+    let mut word = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '.' {
+            let next_ws = i + 1 >= chars.len() || chars[i + 1].is_whitespace();
+            let prev = word.to_lowercase();
+            let is_abbrev = prev.chars().count() == 1 && prev.chars().all(|ch| ch.is_alphabetic())
+                || ABBREVIATIONS_BEFORE_PERIOD.contains(&prev.as_str());
+            out.push('.');
+            if next_ws && !prev.is_empty() && !is_abbrev {
+                out.push('\n');
+            }
+            word.clear();
+        } else {
+            if c.is_alphanumeric() || c == '\'' {
+                word.push(c);
+            } else {
+                word.clear();
+            }
+            out.push(c);
+        }
+        i += 1;
+    }
+    out
+}
+
 fn extract_heuristic_entities_inner(
     text: &str,
     lookup: &dyn Fn(&str) -> Option<CaseStats>,
 ) -> Vec<String> {
+    let text_owned = mark_sentence_ends(text);
+    let text = text_owned.as_str();
     let mut entities: Vec<String> = Vec::new();
     // Clause punctuation ends a name. Without this a heading swallows the
     // name after its colon (`STRATEGIC POINT: CT128 runs` minted
@@ -3586,5 +3638,72 @@ mod common_word_tests {
             assert_eq!(*w, w.to_lowercase(), "{w}");
             assert!(seen.insert(*w), "duplicate {w}");
         }
+    }
+}
+
+#[cfg(test)]
+mod sentence_boundary_tests {
+    use super::*;
+
+    #[test]
+    fn a_name_at_a_sentence_end_is_not_welded_to_the_next_sentence() {
+        for (text, must_have, must_not) in [
+            (
+                "[June-02-2024 | Turn 0] User: Alice Moreau moved to Munich. Assistant: ok.",
+                vec!["Alice Moreau", "Munich"],
+                vec!["Munich Assistant"],
+            ),
+            (
+                "Alice Moreau works at Fennwick Labs. Alice Moreau lives in Berlin.",
+                vec!["Fennwick Labs", "Berlin"],
+                vec!["Fennwick Labs Alice Moreau"],
+            ),
+            (
+                "We met in St. Louis with Dr. Smith of Acme Inc. Then Bob left.",
+                vec!["St Louis", "Dr Smith", "Acme Inc"],
+                vec!["Acme Inc Then", "Louis"],
+            ),
+            (
+                "J. K. Rowling signed. Carol Vance read it.",
+                vec!["J K Rowling", "Carol Vance"],
+                vec!["Rowling Carol Vance"],
+            ),
+        ] {
+            let ents = extract_heuristic_entities(text);
+            for e in &must_have {
+                assert!(
+                    ents.iter().any(|x| x == e),
+                    "{e:?} missing from {ents:?} for {text:?}"
+                );
+            }
+            for e in &must_not {
+                assert!(
+                    !ents.iter().any(|x| x == e),
+                    "{e:?} welded in {ents:?} for {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn beam_turn_format_now_mints_the_relation() {
+        let t = "[June-02-2024 | Turn 0] User: Alice Moreau moved to Munich. Assistant: ok.";
+        let ents = extract_heuristic_entities(t);
+        let rels = extract_heuristic_relations(t, &ents);
+        assert!(
+            rels.iter()
+                .any(|r| r.src == "Alice Moreau" && r.rel_type == "lives_in" && r.dst == "Munich"),
+            "{rels:?}"
+        );
+    }
+
+    #[test]
+    fn decimals_and_initials_keep_their_periods() {
+        let ents = extract_heuristic_entities("CT128 runs 0.19.0 now. Mt. Fuji is tall.");
+        assert!(ents.iter().any(|e| e == "Mt Fuji"), "{ents:?}");
+        assert_eq!(
+            extract_value_candidates("CT128 runs 0.19.0 now."),
+            vec!["0.19.0".to_string()]
+        );
     }
 }
