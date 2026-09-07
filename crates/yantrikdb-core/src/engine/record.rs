@@ -1958,9 +1958,10 @@ impl YantrikDB {
             let (Some(rid), Some((heuristic, _))) = (rid, linkage) else {
                 continue;
             };
-            let relations =
-                crate::graph::extract_heuristic_relations(sanitized_texts[idx].as_ref(), heuristic);
-            for rel in &relations {
+            let extraction =
+                crate::graph::extract_relations_bound(sanitized_texts[idx].as_ref(), heuristic);
+            self.record_extraction_refusals(rid, namespaces[idx], &extraction.refusals);
+            for rel in &extraction.relations {
                 // Same existence check as the async path (stats.rs Loop
                 // C+D): re-ingesting a known heuristic relation churns
                 // claims without adding information.
@@ -1977,7 +1978,11 @@ impl YantrikDB {
                 if already_exists {
                     continue;
                 }
-                if let Err(e) = self.ingest_claim(
+                let (span_start, span_end) = match rel.span {
+                    Some((s, e)) => (i32::try_from(s).ok(), i32::try_from(e).ok()),
+                    None => (None, None),
+                };
+                if let Err(e) = self.ingest_claim_grounded(
                     &rel.src,
                     &rel.rel_type,
                     &rel.dst,
@@ -1987,12 +1992,13 @@ impl YantrikDB {
                     None,
                     None,
                     "heuristic_v1",
-                    Some("1.0"),
+                    Some(crate::engine::stats::BOUND_EXTRACTOR_VERSION),
                     &rel.confidence_band,
                     Some(rid),
-                    None,
-                    None,
+                    span_start,
+                    span_end,
                     1.0,
+                    crate::engine::claims_lane::GROUNDING_EXTRACTOR_BOUND,
                 ) {
                     tracing::warn!(
                         rid = %rid,

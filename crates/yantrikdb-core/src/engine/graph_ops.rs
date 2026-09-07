@@ -832,6 +832,7 @@ impl YantrikDB {
     /// entity + graph indexes, and logs to the oplog. `relate()` still works
     /// but will be deprecated in v0.7 (Phase 5) in favor of this method.
     #[tracing::instrument(skip(self))]
+    #[allow(clippy::too_many_arguments)]
     pub fn ingest_claim(
         &self,
         src: &str,
@@ -850,17 +851,59 @@ impl YantrikDB {
         span_end: Option<i32>,
         weight: f64,
     ) -> Result<String> {
-        let claim_id = crate::id::new_id();
-        let ts = now();
         // v53 grounding status: only a cooperative claim has had its
         // endpoints grounded in the source text by the engine
-        // (attach_claims). Every other writer, the heuristic extractor
-        // included, gets 0 until it validates its own bindings.
+        // (attach_claims). Every other writer through this surface gets 0;
+        // the bound extractor passes its own level explicitly.
         let grounding: i64 = if extractor == STATED_CLAIM_EXTRACTOR {
-            1
+            crate::engine::claims_lane::GROUNDING_COOPERATIVE
         } else {
-            0
+            crate::engine::claims_lane::GROUNDING_NONE
         };
+        self.ingest_claim_grounded(
+            src,
+            rel_type,
+            dst,
+            namespace,
+            polarity,
+            modality,
+            valid_from,
+            valid_to,
+            extractor,
+            extractor_version,
+            confidence_band,
+            source_memory_rid,
+            span_start,
+            span_end,
+            weight,
+            grounding,
+        )
+    }
+
+    /// [`Self::ingest_claim`] with an explicit `grounding` status — the
+    /// bound extractor's path (`GROUNDING_EXTRACTOR_BOUND`).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn ingest_claim_grounded(
+        &self,
+        src: &str,
+        rel_type: &str,
+        dst: &str,
+        namespace: &str,
+        polarity: i32,
+        modality: &str,
+        valid_from: Option<f64>,
+        valid_to: Option<f64>,
+        extractor: &str,
+        extractor_version: Option<&str>,
+        confidence_band: &str,
+        source_memory_rid: Option<&str>,
+        span_start: Option<i32>,
+        span_end: Option<i32>,
+        weight: f64,
+        grounding: i64,
+    ) -> Result<String> {
+        let claim_id = crate::id::new_id();
+        let ts = now();
 
         // Resolve aliases before storage
         let src_resolved = self.resolve_alias(src, namespace);

@@ -140,6 +140,10 @@ pub(crate) const GROUNDING_NONE: i64 = 0;
 /// `claims.grounding`: cooperative — the writer stated it, the engine
 /// grounded both endpoints in the source text (`attach_claims`).
 pub(crate) const GROUNDING_COOPERATIVE: i64 = 1;
+/// `claims.grounding`: the extractor bound both arguments occurrence-
+/// locally inside one segment and recorded the evidence span
+/// (`graph::extract_relations_bound`, extractor version 2.0).
+pub(crate) const GROUNDING_EXTRACTOR_BOUND: i64 = 2;
 
 /// The claim-chain gate mode. See the module note above.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -392,8 +396,14 @@ fn claims_touching(conn: &Connection, entity: &str, namespace: Option<&str>) -> 
             // Suppressed rows do occupy slots in the per-anchor fetch
             // window above; a phantom-heavy window yields fewer candidates,
             // which is the point — those rows were noise.
+            //
+            // A value OBJECT (`CT128 -runs-> 0.21.2`) is not a phantom: the
+            // relation admits it and it is exactly the temporal fact a
+            // reader asks for. The subject side stays strict.
             !(crate::graph::is_rejected_entity_name(&row.src)
-                || crate::graph::is_rejected_entity_name(&row.dst))
+                || (crate::graph::is_rejected_entity_name(&row.dst)
+                    && !(crate::graph::is_value_object(&row.dst)
+                        && crate::graph::relation_admits_value_object(&row.rel, &row.dst))))
         })
         .collect()
 }

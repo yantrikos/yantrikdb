@@ -429,34 +429,64 @@ def test_common_words_are_not_entities_by_seed_or_by_this_stores_usage(db):
 
 def test_claim_chain_gate_shadows_by_default_and_enforce_keeps_only_grounded_claims(db):
     """Every store opens in `shadow`: the claims lane admits what it always
-    did and counts what `enforce` would refuse. A heuristic claim is
-    ungrounded (its binding was never validated); a cooperative claim the
-    engine grounded in the text is not, and survives `enforce`."""
+    did and counts what `enforce` would refuse. A claim the bound extractor
+    minted carries grounding 2 (both arguments bound inside one segment,
+    evidence span recorded) and a cooperative claim carries 1; both survive
+    `enforce`. Legacy rows (grounding 0) are what the counters are for."""
     assert db.claim_chain_gate_mode() == "shadow"
     assert db.stats()["claim_chain_gate_mode"] == "shadow"
-    rid = db.record("Alice Moreau works at Fennwick Labs. Fennwick Labs is headquartered in Berlin.")
+    rid = db.record("Alice Moreau works at Fennwick Labs.")
+    db.record("Fennwick Labs is headquartered in Berlin, near the river.")
     db.think()
     claims = {(c["src"], c["rel_type"], c["dst"]): c for c in db.get_claims("Alice Moreau")}
-    assert claims[("Alice Moreau", "works_at", "Fennwick Labs")]["grounding"] == 0, claims
+    assert claims[("Alice Moreau", "works_at", "Fennwick Labs")]["grounding"] == 2, claims
 
     query = "Which city does Alice Moreau work in?"
     hits = db.recall(query=query, top_k=5, skip_reinforce=True)
-    assert any(w.startswith("claims_match") for h in hits for w in h["why_retrieved"]), hits
-    counted = db.stats()["claim_chain_gate_suppressed_since_boot"]
-    assert counted.get("hop1:ungrounded", 0) > 0, counted
+    assert any("(path via Fennwick Labs" in w for h in hits for w in h["why_retrieved"]), hits
+    assert isinstance(db.stats()["claim_chain_gate_suppressed_since_boot"], dict)
 
     db.set_claim_chain_gate_mode("enforce")
     assert db.stats()["claim_chain_gate_mode"] == "enforce"
     hits = db.recall(query=query, top_k=5, skip_reinforce=True)
-    assert not any(w.startswith("claims_match") for h in hits for w in h["why_retrieved"]), hits
+    assert any("(path via Fennwick Labs" in w for h in hits for w in h["why_retrieved"]), hits
 
-    db.attach_claims(rid, [{"subject": "Alice Moreau", "relation": "works_at", "object": "Fennwick Labs"}])
+    db.attach_claims(rid, [{"subject": "Alice Moreau", "relation": "mentors", "object": "Fennwick Labs"}])
     claims = db.get_claims("Alice Moreau")
     assert any(c["extractor"] == "agent_stated" and c["grounding"] == 1 for c in claims), claims
-    hits = db.recall(query=query, top_k=5, skip_reinforce=True)
-    assert any("Alice Moreau -works_at-> Fennwick Labs" in w for h in hits for w in h["why_retrieved"]), hits
+    hits = db.recall(query="Who does Alice Moreau mentor?", top_k=5, skip_reinforce=True)
+    assert any("Alice Moreau -mentors-> Fennwick Labs" in w for h in hits for w in h["why_retrieved"]), hits
 
     with pytest.raises(Exception):
         db.set_claim_chain_gate_mode("warn")
     db.set_claim_chain_gate_mode("shadow")
     assert db.claim_chain_gate_mode() == "shadow"
+
+
+# ── occurrence-local binding, the refusal ledger, silver recall (v54) ────
+
+
+def test_bound_extractor_abstains_with_a_reason_and_silver_recall_reads_it(db):
+    """The extractor binds each relation trigger inside its own segment: the
+    subject is the mention right before the trigger, never a capitalized
+    name found by walking back. What it cannot bind it refuses with a
+    reason into a ledger; every cooperative claim is a labelled example
+    the extractor is scored against (silver recall), judge-free."""
+    db.record("PyPI (trusted publishing) → swarm ping core+server → core runs CT128 dogfood")
+    db.record("PyPI and latest release both 0.15.6. RE-VERIFIED: 'Sarah works at Google'.")
+    db.think()
+    pypi = {(c["src"], c["rel_type"], c["dst"]) for c in db.get_claims("PyPI")}
+    assert ("PyPI", "runs", "CT128") not in pypi and ("PyPI", "works_at", "Google") not in pypi, pypi
+    sarah = {(c["src"], c["rel_type"], c["dst"]): c for c in db.get_claims("Sarah")}
+    assert sarah[("Sarah", "works_at", "Google")]["grounding"] == 2, sarah
+    counts = db.extraction_refusal_counts()
+    assert counts.get("runs:lowercase_subject") == 1, counts
+    row = next(r for r in db.extraction_refusals() if r["rel_type"] == "runs")
+    assert (row["left_token"], row["right_token"]) == ("core", "CT128"), row
+
+    rid = db.record("Bob Lin, an old friend from Lisbon, works at Globex and prefers tea.")
+    db.attach_claims(rid, [{"subject": "Bob Lin", "relation": "works_at", "object": "Globex"},
+                           {"subject": "Bob Lin", "relation": "prefers", "object": "tea"}])
+    report = db.extraction_silver_recall()
+    assert report["stated_claims"] == 2 and report["unsupported_relation"] == 1, report
+    assert report["missed_by_reason"] == {"subject_not_adjacent": 1}, report

@@ -53,7 +53,7 @@ fn claim_whys(whys: &[String]) -> Vec<&str> {
 }
 
 #[test]
-fn grounding_marks_cooperative_claims_and_nothing_else() {
+fn grounding_marks_cooperative_and_bound_claims() {
     let db = YantrikDB::with_default(":memory:").unwrap();
     let rid = rec(&db, "Sarah works at Google. Sarah lives in Berlin.");
     db.attach_claims(
@@ -90,8 +90,8 @@ fn grounding_marks_cooperative_claims_and_nothing_else() {
         by_extractor
             .iter()
             .filter(|(e, _, _)| e == "heuristic_v1")
-            .all(|(_, _, g)| *g == 0),
-        "heuristic rows are ungrounded until an extractor validates its bindings: {by_extractor:?}"
+            .all(|(_, _, g)| *g == 2),
+        "the bound extractor validates its bindings (grounding 2): {by_extractor:?}"
     );
     assert!(
         by_extractor.iter().any(|(e, _, _)| e == "heuristic_v1"),
@@ -130,10 +130,11 @@ fn enforce_stops_the_pypi_chain_and_keeps_cooperative_evidence() {
         &db,
         "PyPI and latest release both 0.15.6. Re-verified: 'Sarah works at Google'.",
     );
-    // A named object on purpose: the lane's phantom filter still refuses a
-    // value object (`0.21.2`) as an endpoint at read time — a pre-existing
-    // limit, noted for the next step, not this gate's concern.
-    let coop_rid = rec(&db, "CT128 runs Hermes now, verified by content.");
+    // A value object on purpose: the lane's phantom filter used to refuse
+    // `0.21.2` as an endpoint at read time, so the one temporal fact a
+    // reader asks for never surfaced; a value the relation admits is not
+    // a phantom.
+    let coop_rid = rec(&db, "CT128 runs 0.21.2 now, verified by content.");
     {
         let conn = db.conn.lock();
         for (name, etype, mc) in [
@@ -205,7 +206,7 @@ fn enforce_stops_the_pypi_chain_and_keeps_cooperative_evidence() {
             &[StatedClaim {
                 src: "CT128".into(),
                 rel_type: "runs".into(),
-                dst: "Hermes".into(),
+                dst: "0.21.2".into(),
                 polarity: 1,
                 valid_from: None,
                 valid_to: None,
@@ -217,7 +218,7 @@ fn enforce_stops_the_pypi_chain_and_keeps_cooperative_evidence() {
     assert!(
         claim_whys(&coop_whys)
             .iter()
-            .any(|w| w.contains("CT128 -runs-> Hermes")),
+            .any(|w| w.contains("CT128 -runs-> 0.21.2")),
         "grounded claim survives enforce: {coop_whys:?}"
     );
 }

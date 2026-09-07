@@ -1260,6 +1260,16 @@ fn extract_entities_from_segment(
         .split(|c: char| !c.is_alphanumeric() && c != '\'')
         .filter(|s| !s.is_empty())
     {
+        // A leading quote mark is not part of a name: `'Sarah works at
+        // Google'` (a quoted assertion inside a note) must admit Sarah.
+        // Measured 2026-09-07 on the production store: with Sarah refused
+        // the subject search fell back to the previous capitalized entity
+        // and minted `PyPI -works_at-> Google`.
+        let word = word.trim_start_matches('\'');
+        if word.is_empty() {
+            flush(&mut chunk, entities);
+            continue;
+        }
         // A possessive clitic belongs to the grammar around a name, not to
         // the entity's identity. End the current chunk at the owner so
         // "Sol's Q2 plan" yields "Sol" and "Q2", rather than minting the
@@ -1327,6 +1337,9 @@ pub struct RelationCandidate {
     pub polarity: i32,           // 1=positive, -1=negative
     pub modality: String,        // asserted, reported, hypothetical, denied
     pub confidence_band: String, // low, medium, high
+    /// Byte span in the source text from the subject mention to the object
+    /// mention — where the binding was found, not proof the text asserts it.
+    pub span: Option<(usize, usize)>,
 }
 
 /// Relation patterns: keyword phrases that appear BETWEEN two entities
@@ -1544,104 +1557,7 @@ pub fn extract_learned_relations(
     if templates.is_empty() {
         return vec![];
     }
-    let mut candidates = Vec::new();
-    for w in between_windows(text, entities) {
-        if w.has_inner_entity {
-            continue;
-        }
-        for (phrase, rel_type) in templates {
-            if ends_with_word_phrase(&strip_trailing_articles(&w.between_stripped), phrase) {
-                candidates.push(RelationCandidate {
-                    src: w.entity_a.to_string(),
-                    rel_type: rel_type.clone(),
-                    dst: w.entity_b.to_string(),
-                    polarity: w.polarity,
-                    modality: w.modality.to_string(),
-                    confidence_band: "medium".to_string(),
-                });
-                break;
-            }
-        }
-    }
-    let mut seen = std::collections::HashSet::new();
-    candidates.retain(|c| seen.insert((c.src.clone(), c.rel_type.clone(), c.dst.clone())));
-    candidates
-}
-
-/// One ordered entity pair and the text between them, as the pattern
-/// matchers see it (lowercased, negation cues stripped, polarity and
-/// modality already read off the window).
-struct BetweenWindow<'a> {
-    entity_a: &'a str,
-    entity_b: &'a str,
-    between_stripped: String,
-    polarity: i32,
-    modality: &'static str,
-    /// Another entity sits strictly between the pair — the pair is not
-    /// adjacent and a template must not bridge it.
-    has_inner_entity: bool,
-}
-
-/// Every ordered (A before B, within 150 chars) entity pair with a
-/// non-empty between-window. Shared by the built-in and learned passes so
-/// both read the same windows.
-fn between_windows<'a>(text: &str, entities: &'a [String]) -> Vec<BetweenWindow<'a>> {
-    let mut out = Vec::new();
-    if entities.len() < 2 {
-        return out;
-    }
-    let text_lower = text.to_lowercase();
-    let mut entity_positions: Vec<(usize, &str)> = Vec::new();
-    for entity in entities {
-        let entity_lower = entity.to_lowercase();
-        if let Some(pos) = text_lower.find(&entity_lower) {
-            entity_positions.push((pos, entity.as_str()));
-        }
-    }
-    entity_positions.sort_by_key(|(pos, _)| *pos);
-    for i in 0..entity_positions.len() {
-        for j in (i + 1)..entity_positions.len() {
-            let (pos_a, entity_a) = entity_positions[i];
-            let (pos_b, entity_b) = entity_positions[j];
-            if pos_b - pos_a > 150 {
-                continue;
-            }
-            let between_start = pos_a + entity_a.to_lowercase().len();
-            let between_end = pos_b;
-            if between_start >= between_end || between_end > text_lower.len() {
-                continue;
-            }
-            let between = text_lower[between_start..between_end].trim();
-            if between.is_empty() {
-                continue;
-            }
-            let has_negation = NEGATION_CUES
-                .iter()
-                .any(|cue| between.split_whitespace().any(|w| w == *cue));
-            let between_stripped: String = between
-                .split_whitespace()
-                .filter(|w| !NEGATION_CUES.contains(w))
-                .collect::<Vec<_>>()
-                .join(" ");
-            let modality = if MODALITY_CUES.iter().any(|cue| between.contains(cue)) {
-                "reported"
-            } else {
-                "asserted"
-            };
-            let has_inner_entity = entity_positions[i + 1..j]
-                .iter()
-                .any(|(p, e)| *p > pos_a && *p + e.len() <= pos_b);
-            out.push(BetweenWindow {
-                entity_a,
-                entity_b,
-                between_stripped,
-                polarity: if has_negation { -1 } else { 1 },
-                modality,
-                has_inner_entity,
-            });
-        }
-    }
-    out
+    bind_relations(text, entities, templates).relations
 }
 
 /// Extract candidate relations from text using entities as anchors.
@@ -1654,150 +1570,569 @@ fn between_windows<'a>(text: &str, entities: &'a [String]) -> Vec<BetweenWindow<
 /// Returns high-precision, low-recall candidates — only emits when a
 /// clear keyword pattern matches. Designed for the RFC 006 Phase 1
 /// relation whitelist.
+/// Built-in relation extraction: every pattern in [`RELATION_PATTERNS`]
+/// and [`ANCHORED_RELATION_PATTERNS`], bound occurrence-locally (see
+/// [`extract_relations_bound`]). Relations only; callers that want the
+/// refusals use the bound form.
 pub fn extract_heuristic_relations(text: &str, entities: &[String]) -> Vec<RelationCandidate> {
-    if entities.len() < 2 {
-        return vec![];
+    extract_relations_bound(text, entities).relations
+}
+
+// ── Occurrence-local relation binding (2026-09-07) ──────────────────
+//
+// The pairwise pass this replaces took a flat list of entity NAMES,
+// re-found each name's FIRST occurrence in the whole text and paired any
+// two within 150 bytes whose between-window ended with a pattern. Two
+// defects followed, both measured on the production store after the
+// 0.21.2 deploy:
+//
+// * the subject was "the nearest entity before the verb", unbounded —
+//   `PyPI and latest release both 0.15.6. RE-VERIFIED: 'Sarah works at
+//   Google'` minted `PyPI -works_at-> Google` (the quoted 'Sarah was not
+//   admitted, and the search walked back past a sentence boundary and a
+//   colon), and `PyPI (trusted publishing) → swarm ping core+server →
+//   core runs CT128 dogfood` minted `PyPI -runs-> CT128` (the true
+//   subject, lowercase `core`, was skipped);
+// * only the first occurrence of a name was ever a candidate, so an
+//   entity introduced in a heading was invisible to the assertion about
+//   it further down — recall silently capped by chunk layout.
+//
+// Now the text is cut into SEGMENTS (sentence ends, newlines, semicolons,
+// arrows, label colons), every occurrence of every entity becomes a
+// MENTION with a byte span, and each relation TRIGGER binds its arguments
+// inside its own segment: the object is the first mention right after the
+// trigger (articles allowed between), the subject is the last mention
+// right before it, with only closed-class wrappers allowed between
+// (`which`, `who`, an auxiliary, an adverb like `now`; negation and
+// modality cues are read off and removed first). Anything else is a
+// REFUSAL with a reason — the extractor abstains and says why, it never
+// walks further back for a convenient capitalized name. Refusals are the
+// recall instrument: the materializer writes them to a ledger so the next
+// rule is chosen from a histogram, not from an example.
+
+/// Why a trigger did not bind. The ledger keys on these.
+pub const REFUSAL_NO_SUBJECT: &str = "no_subject";
+pub const REFUSAL_LOWERCASE_SUBJECT: &str = "lowercase_subject";
+pub const REFUSAL_SUBJECT_NOT_ADMITTED: &str = "subject_not_admitted";
+pub const REFUSAL_SUBJECT_NOT_ADJACENT: &str = "subject_not_adjacent";
+pub const REFUSAL_NO_OBJECT: &str = "no_object";
+
+/// A relation trigger the extractor saw and could not bind safely.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExtractionRefusal {
+    pub rel_type: String,
+    /// The pattern phrase that fired.
+    pub trigger: String,
+    /// One of the `REFUSAL_*` reasons.
+    pub reason: &'static str,
+    /// The raw token immediately left of the trigger, or the first token
+    /// that broke subject adjacency.
+    pub left: String,
+    /// The raw token immediately right of the trigger, or the first token
+    /// that broke object adjacency.
+    pub right: String,
+    /// Byte offset of the trigger in the source text.
+    pub at: usize,
+}
+
+/// What one pass over a text produced: the bindings that held and the
+/// triggers that were refused.
+#[derive(Debug, Clone, Default)]
+pub struct RelationExtraction {
+    pub relations: Vec<RelationCandidate>,
+    pub refusals: Vec<ExtractionRefusal>,
+}
+
+/// Arrow markers agent notes use as step separators: a hard boundary.
+const ARROW_MARKERS: &[&str] = &["→", "->", "=>", "⇒"];
+/// Closed-class words allowed between a subject mention and its trigger.
+/// Anything else breaks adjacency (`subject_not_adjacent`).
+const LEAD_WRAPPERS: &[&str] = &[
+    "who",
+    "which",
+    "that",
+    "whom",
+    "does",
+    "did",
+    "do",
+    "has",
+    "have",
+    "had",
+    "also",
+    "now",
+    "still",
+    "currently",
+    "already",
+    "just",
+    "officially",
+    "then",
+];
+/// Words allowed between a trigger and its object mention.
+const OBJECT_ARTICLES: &[&str] = &["the", "a", "an"];
+
+/// Segment byte ranges of `text` for relation binding: sentence ends
+/// (the same period rule as [`mark_sentence_ends`]), newlines,
+/// semicolons, `!`/`?`, arrows, and a colon followed by whitespace or the
+/// end (a label — `NOTE:`, `PyPI:` — never supplies a subject; a colon
+/// inside a token such as `12:30` or `ns::x` is not a boundary).
+fn relation_segments(text: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    let mut seg_start = 0usize;
+    let mut word = String::new();
+    let mut i = 0usize;
+    while i < text.len() {
+        if let Some(arrow) = ARROW_MARKERS.iter().find(|a| text[i..].starts_with(*a)) {
+            out.push((seg_start, i));
+            i += arrow.len();
+            seg_start = i;
+            word.clear();
+            continue;
+        }
+        let c = text[i..].chars().next().unwrap_or(' ');
+        let clen = c.len_utf8();
+        let next_ws_or_end = i + clen >= text.len()
+            || text[i + clen..]
+                .chars()
+                .next()
+                .is_some_and(char::is_whitespace);
+        let boundary = match c {
+            '\n' | ';' | '!' | '?' => true,
+            ':' => next_ws_or_end,
+            '.' => {
+                let prev = word.to_lowercase();
+                let is_abbrev = (prev.chars().count() == 1
+                    && prev.chars().all(|ch| ch.is_alphabetic()))
+                    || ABBREVIATIONS_BEFORE_PERIOD.contains(&prev.as_str());
+                next_ws_or_end && !prev.is_empty() && !is_abbrev
+            }
+            _ => false,
+        };
+        if boundary {
+            out.push((seg_start, i));
+            seg_start = i + clen;
+            word.clear();
+        } else if c.is_alphanumeric() || c == '\'' {
+            word.push(c);
+        } else {
+            word.clear();
+        }
+        i += clen;
     }
+    out.push((seg_start, text.len()));
+    out.into_iter().filter(|(a, b)| b > a).collect()
+}
 
-    let text_lower = text.to_lowercase();
-    let mut candidates: Vec<RelationCandidate> = Vec::new();
+/// One token of a segment: the raw text (quote marks trimmed), a
+/// lowercase key with any possessive clitic removed, and its byte span
+/// relative to the segment.
+struct Tok<'a> {
+    raw: &'a str,
+    key: String,
+    start: usize,
+    end: usize,
+}
 
-    // Find position of each entity in the text (case-insensitive)
-    let mut entity_positions: Vec<(usize, &str)> = Vec::new();
-    for entity in entities {
-        let entity_lower = entity.to_lowercase();
-        if let Some(pos) = text_lower.find(&entity_lower) {
-            entity_positions.push((pos, entity.as_str()));
+fn possessive_stripped(lower: &str) -> &str {
+    lower
+        .strip_suffix("'s")
+        .or_else(|| lower.strip_suffix('\''))
+        .filter(|bare| !bare.is_empty())
+        .unwrap_or(lower)
+}
+
+fn segment_tokens(seg: &str) -> Vec<Tok<'_>> {
+    let mut toks = Vec::new();
+    let mut open: Option<usize> = None;
+    let mut push = |s: usize, e: usize| {
+        let raw = &seg[s..e];
+        let trimmed = raw.trim_matches('\'');
+        if trimmed.is_empty() {
+            return;
+        }
+        let lead = raw.len() - raw.trim_start_matches('\'').len();
+        let start = s + lead;
+        let lower = trimmed.to_lowercase();
+        toks.push(Tok {
+            raw: trimmed,
+            key: possessive_stripped(&lower).to_string(),
+            start,
+            end: start + trimmed.len(),
+        });
+    };
+    for (i, c) in seg.char_indices() {
+        if c.is_alphanumeric() || c == '\'' {
+            if open.is_none() {
+                open = Some(i);
+            }
+        } else if let Some(s) = open.take() {
+            push(s, i);
         }
     }
-    entity_positions.sort_by_key(|(pos, _)| *pos);
+    if let Some(s) = open {
+        push(s, seg.len());
+    }
+    toks
+}
 
-    // For each adjacent pair, check the text between them
-    for i in 0..entity_positions.len() {
-        for j in (i + 1)..entity_positions.len() {
-            let (pos_a, entity_a) = entity_positions[i];
-            let (pos_b, entity_b) = entity_positions[j];
+fn key_sequence(phrase: &str) -> Vec<String> {
+    segment_tokens(phrase).into_iter().map(|t| t.key).collect()
+}
 
-            // Skip pairs too far apart (likely different sentences)
-            if pos_b - pos_a > 150 {
+/// Start indices at which `needle` occurs in `keys` as a contiguous run.
+fn find_runs(keys: &[&str], needle: &[String]) -> Vec<usize> {
+    if needle.is_empty() || needle.len() > keys.len() {
+        return Vec::new();
+    }
+    (0..=keys.len() - needle.len())
+        .filter(|&i| needle.iter().enumerate().all(|(j, n)| keys[i + j] == n))
+        .collect()
+}
+
+/// A pattern occurrence in normalized-token space.
+struct TriggerHit {
+    rel_type: String,
+    phrase: String,
+    s: usize,
+    e: usize,
+}
+
+/// An entity occurrence in normalized-token space.
+struct MentionHit {
+    name: String,
+    s: usize,
+    e: usize,
+}
+
+/// Keep the longest of overlapping runs; ties keep the earlier pattern.
+fn dedupe_runs<T>(mut hits: Vec<T>, span: impl Fn(&T) -> (usize, usize)) -> Vec<T> {
+    hits.sort_by(|a, b| {
+        let (sa, ea) = span(a);
+        let (sb, eb) = span(b);
+        sa.cmp(&sb).then_with(|| (eb - sb).cmp(&(ea - sa)))
+    });
+    let mut kept: Vec<T> = Vec::new();
+    for h in hits {
+        let (s, e) = span(&h);
+        if kept.iter().any(|k| {
+            let (ks, ke) = span(k);
+            s < ke && ks < e
+        }) {
+            continue;
+        }
+        kept.push(h);
+    }
+    kept
+}
+
+fn is_negation_key(key: &str) -> bool {
+    NEGATION_CUES.contains(&key)
+}
+
+fn is_modality_key(key: &str) -> bool {
+    MODALITY_CUES.contains(&key)
+}
+
+/// Bind `patterns` (`(phrase, rel_type)`) occurrence-locally over `text`
+/// with `entities` as the admitted mentions. The engine's built-in tables
+/// and the store's learned templates both go through here, so one rule
+/// governs every extractor. See the module note above for the rules.
+fn bind_relations(
+    text: &str,
+    entities: &[String],
+    patterns: &[(String, String)],
+) -> RelationExtraction {
+    let mut out = RelationExtraction::default();
+    if entities.is_empty() || patterns.is_empty() {
+        return out;
+    }
+    let entity_keys: Vec<(String, Vec<String>)> = entities
+        .iter()
+        .map(|e| (e.clone(), key_sequence(e)))
+        .filter(|(_, k)| !k.is_empty())
+        .collect();
+    let pattern_keys: Vec<(String, String, Vec<String>)> = patterns
+        .iter()
+        .map(|(phrase, rel)| (phrase.clone(), rel.clone(), key_sequence(phrase)))
+        .filter(|(_, _, k)| !k.is_empty())
+        .collect();
+
+    for (seg_start, seg_end) in relation_segments(text) {
+        let seg = &text[seg_start..seg_end];
+        let toks = segment_tokens(seg);
+        if toks.len() < 2 {
+            continue;
+        }
+        // Normalized stream: cue tokens removed, positions remembered.
+        let norm: Vec<usize> = (0..toks.len())
+            .filter(|&i| !is_negation_key(&toks[i].key) && !is_modality_key(&toks[i].key))
+            .collect();
+        let nkeys: Vec<&str> = norm.iter().map(|&i| toks[i].key.as_str()).collect();
+
+        let mut mentions: Vec<MentionHit> = Vec::new();
+        for (name, keys) in &entity_keys {
+            for s in find_runs(&nkeys, keys) {
+                mentions.push(MentionHit {
+                    name: name.clone(),
+                    s,
+                    e: s + keys.len(),
+                });
+            }
+        }
+        let mentions = dedupe_runs(mentions, |m| (m.s, m.e));
+        if mentions.is_empty() {
+            continue;
+        }
+        let mut triggers: Vec<TriggerHit> = Vec::new();
+        for (phrase, rel, keys) in &pattern_keys {
+            for s in find_runs(&nkeys, keys) {
+                triggers.push(TriggerHit {
+                    rel_type: rel.clone(),
+                    phrase: phrase.clone(),
+                    s,
+                    e: s + keys.len(),
+                });
+            }
+        }
+        let triggers = dedupe_runs(triggers, |t| (t.s, t.e));
+
+        let raw_at = |n: usize| toks[norm[n]].raw.to_string();
+        // The last binding that held in this segment: (subject, object) in
+        // normalized-token space, for the coordination rule below.
+        let mut last_bound: Option<(usize, usize, usize)> = None; // (subj_s, subj_e, obj_e)
+        for t in &triggers {
+            let at = seg_start + toks[norm[t.s]].start;
+            // Object: the first mention after the trigger, articles between.
+            let mut object: Option<&MentionHit> = None;
+            let mut object_break: Option<String> = None;
+            for m in mentions.iter().filter(|m| m.s >= t.e) {
+                let gap = &nkeys[t.e..m.s];
+                match gap.iter().find(|g| !OBJECT_ARTICLES.contains(g)) {
+                    None => object = Some(m),
+                    Some(_) => {
+                        object_break = gap
+                            .iter()
+                            .position(|g| !OBJECT_ARTICLES.contains(g))
+                            .map(|i| raw_at(t.e + i));
+                    }
+                }
+                break;
+            }
+            let Some(object) = object else {
+                out.refusals.push(ExtractionRefusal {
+                    rel_type: t.rel_type.clone(),
+                    trigger: t.phrase.clone(),
+                    reason: REFUSAL_NO_OBJECT,
+                    left: if t.s > 0 {
+                        raw_at(t.s - 1)
+                    } else {
+                        String::new()
+                    },
+                    right: object_break.unwrap_or_else(|| {
+                        (t.e..nkeys.len())
+                            .find(|&i| !OBJECT_ARTICLES.contains(&nkeys[i]))
+                            .map(raw_at)
+                            .unwrap_or_default()
+                    }),
+                    at,
+                });
+                continue;
+            };
+            // Subject: the last mention before the trigger, wrappers between.
+            let subject = mentions.iter().filter(|m| m.e <= t.s).last();
+            let mut coordinated: Option<(usize, usize)> = None;
+            let (reason, left) = match subject {
+                None => {
+                    if t.s == 0 {
+                        (Some(REFUSAL_NO_SUBJECT), String::new())
+                    } else {
+                        let tok = &toks[norm[t.s - 1]];
+                        let lower = tok
+                            .raw
+                            .chars()
+                            .next()
+                            .is_some_and(|c| c.is_alphabetic() && c.is_lowercase());
+                        (
+                            Some(if lower {
+                                REFUSAL_LOWERCASE_SUBJECT
+                            } else {
+                                REFUSAL_SUBJECT_NOT_ADMITTED
+                            }),
+                            tok.raw.to_string(),
+                        )
+                    }
+                }
+                Some(m) => {
+                    let gap = &nkeys[m.e..t.s];
+                    // Coordination: `Alice works at Acme and lives in Berlin`.
+                    // The mention right before `lives in` is Acme, the
+                    // OBJECT of the binding that just held; the shared
+                    // subject is that binding's subject. Only `and`, only
+                    // when the previous binding's object is exactly this
+                    // mention — anything looser is the walk-back this
+                    // extractor exists to refuse.
+                    if gap == ["and"] {
+                        if let Some((ss, se, oe)) = last_bound {
+                            if oe == m.e {
+                                coordinated = Some((ss, se));
+                            }
+                        }
+                    }
+                    if coordinated.is_some() {
+                        (None, String::new())
+                    } else if gap.is_empty() {
+                        // `..., an engineer from Berlin, works at ...`: the
+                        // comma closes an appositive, so the mention right
+                        // before the trigger is NOT its subject. Only a
+                        // wrapper (`, which`, `, who`) may cross a comma.
+                        let sep = &seg[toks[norm[m.e - 1]].end..toks[norm[t.s]].start];
+                        if sep.contains(',') {
+                            (Some(REFUSAL_SUBJECT_NOT_ADJACENT), ",".to_string())
+                        } else {
+                            (None, String::new())
+                        }
+                    } else {
+                        match gap.iter().position(|g| !LEAD_WRAPPERS.contains(g)) {
+                            None => (None, String::new()),
+                            Some(i) => (Some(REFUSAL_SUBJECT_NOT_ADJACENT), raw_at(m.e + i)),
+                        }
+                    }
+                }
+            };
+            if let Some(reason) = reason {
+                out.refusals.push(ExtractionRefusal {
+                    rel_type: t.rel_type.clone(),
+                    trigger: t.phrase.clone(),
+                    reason,
+                    left,
+                    right: object.name.clone(),
+                    at,
+                });
                 continue;
             }
-
-            let between_start = pos_a + entity_a.to_lowercase().len();
-            let between_end = pos_b;
-            if between_start >= between_end || between_end > text_lower.len() {
+            let subject = subject.expect("checked above");
+            let (subj_name, subj_s, subj_e) = match coordinated {
+                Some((ss, se)) => {
+                    let name = mentions
+                        .iter()
+                        .find(|m| m.s == ss && m.e == se)
+                        .map(|m| m.name.clone())
+                        .unwrap_or_else(|| subject.name.clone());
+                    (name, ss, se)
+                }
+                None => (subject.name.clone(), subject.s, subject.e),
+            };
+            if subj_name == object.name {
                 continue;
             }
-
-            let between = text_lower[between_start..between_end].trim();
-            if between.is_empty() {
-                continue;
-            }
-
-            // Check negation in the between-window, then strip negation
-            // words so pattern matching still works on "is NOT the CEO of"
-            let has_negation = NEGATION_CUES
-                .iter()
-                .any(|cue| between.split_whitespace().any(|w| w == *cue));
-            let polarity = if has_negation { -1 } else { 1 };
-            let between_stripped: String = between
-                .split_whitespace()
-                .filter(|w| !NEGATION_CUES.contains(w))
-                .collect::<Vec<_>>()
-                .join(" ");
-
-            // Check modality cues
-            let modality = if MODALITY_CUES.iter().any(|cue| between.contains(cue)) {
+            last_bound = Some((subj_s, subj_e, object.e));
+            // Polarity and modality: cues that sat between subject and
+            // object in the ORIGINAL token stream (the coordinated clause
+            // reads its own cues: from the `and`, not from the first clause).
+            let lo = if coordinated.is_some() {
+                norm[t.s].saturating_sub(1)
+            } else {
+                norm[subj_e - 1]
+            };
+            let hi = norm[object.s];
+            let cues = &toks[lo..hi];
+            let polarity = if cues.iter().any(|c| is_negation_key(&c.key)) {
+                -1
+            } else {
+                1
+            };
+            let modality = if cues.iter().any(|c| is_modality_key(&c.key)) {
                 "reported"
             } else {
                 "asserted"
             };
+            out.relations.push(RelationCandidate {
+                src: subj_name,
+                rel_type: t.rel_type.clone(),
+                dst: object.name.clone(),
+                polarity,
+                modality: modality.to_string(),
+                confidence_band: "medium".to_string(),
+                span: Some((
+                    seg_start + toks[norm[subj_s]].start,
+                    seg_start + toks[norm[object.e - 1]].end,
+                )),
+            });
+        }
 
-            // ANCHORING (2026-09-05). Forward patterns used to match ANYWHERE
-            // in the window between ANY two entities up to 150 chars apart, so
-            // a verb between two unrelated capitalized tokens minted a claim.
-            // Measured on the production store after the "runs" relabel: 478
-            // chain-visible `runs` claims, sampled "RAG runs COMPETENT",
-            // "Pranab runs UTC", "Without runs Concrete" — the relabel was
-            // right, the precision was the defect. Now a forward pattern
-            // mints only when (a) the window ENDS with the phrase (object
-            // directly follows the verb; trailing articles ignored) and (b)
-            // no other entity sits between subject and object, except an
-            // entity that is itself part of the phrase ("CEO" inside "is the
-            // CEO of"). The subject is the nearest entity before the verb.
-            let inner_entities: Vec<&str> = entity_positions[i + 1..j]
+        // Possessive/appositive reverse role: `Acme's CEO, Alice` →
+        // ceo_of(Alice, Acme). Adjacent mentions, exactly the role word
+        // between them, the owner written as a possessive.
+        for pair in mentions.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            let between = &nkeys[a.e..b.s];
+            if between.len() != 1 {
+                continue;
+            }
+            let owner_raw = toks[norm[a.e - 1]].raw;
+            let possessive =
+                owner_raw.ends_with("'s") || owner_raw.ends_with("'S") || owner_raw.ends_with("s'");
+            if !possessive {
+                continue;
+            }
+            if let Some((_, rel)) = REVERSE_ROLE_PATTERNS
                 .iter()
-                .filter(|(p, e)| *p > pos_a && *p + e.len() <= pos_b)
-                .map(|(_, e)| *e)
-                .collect();
-            let window_anchored = strip_trailing_articles(&between_stripped);
-
-            // Match forward patterns: entity_a <pattern> entity_b
-            // Uses between_stripped (negation removed) for matching.
-            for (patterns, rel_type) in RELATION_PATTERNS {
-                for pattern in *patterns {
-                    let inner_ok = inner_entities
-                        .iter()
-                        .all(|e| pattern.contains(&e.to_lowercase()));
-                    if inner_ok && ends_with_word_phrase(&window_anchored, pattern) {
-                        candidates.push(RelationCandidate {
-                            src: entity_a.to_string(),
-                            rel_type: rel_type.to_string(),
-                            dst: entity_b.to_string(),
-                            polarity,
-                            modality: modality.to_string(),
-                            confidence_band: "medium".to_string(),
-                        });
-                        break; // one match per pattern group per pair
-                    }
-                }
-            }
-
-            // Anchored patterns: entity_b must directly follow the phrase.
-            for (patterns, rel_type) in ANCHORED_RELATION_PATTERNS {
-                for pattern in *patterns {
-                    if inner_entities.is_empty() && ends_with_word_phrase(&window_anchored, pattern)
-                    {
-                        candidates.push(RelationCandidate {
-                            src: entity_a.to_string(),
-                            rel_type: rel_type.to_string(),
-                            dst: entity_b.to_string(),
-                            polarity,
-                            modality: modality.to_string(),
-                            confidence_band: "medium".to_string(),
-                        });
-                        break;
-                    }
-                }
-            }
-
-            // Check possessive/appositive reverse: "Acme's CEO, Alice" → ceo_of(Alice, Acme)
-            for (role_keyword, rel_type) in REVERSE_ROLE_PATTERNS {
-                let possessive = format!("'s {}", role_keyword);
-                let possessive2 = format!("s {}", role_keyword);
-                if contains_phrase_end_bounded(&between_stripped, &possessive)
-                    || contains_phrase_end_bounded(&between_stripped, &possessive2)
-                {
-                    // Reversed: entity_a is the org, entity_b is the person
-                    candidates.push(RelationCandidate {
-                        src: entity_b.to_string(), // person
-                        rel_type: rel_type.to_string(),
-                        dst: entity_a.to_string(), // org
-                        polarity,
-                        modality: modality.to_string(),
-                        confidence_band: "medium".to_string(),
-                    });
-                    break;
-                }
+                .find(|(role, _)| *role == between[0])
+            {
+                out.relations.push(RelationCandidate {
+                    src: b.name.clone(),
+                    rel_type: rel.to_string(),
+                    dst: a.name.clone(),
+                    polarity: 1,
+                    modality: "asserted".to_string(),
+                    confidence_band: "medium".to_string(),
+                    span: Some((
+                        seg_start + toks[norm[a.s]].start,
+                        seg_start + toks[norm[b.e - 1]].end,
+                    )),
+                });
             }
         }
     }
-
-    // Deduplicate: same (src, rel_type, dst) keeps highest confidence
     let mut seen = std::collections::HashSet::new();
-    candidates.retain(|c| seen.insert((c.src.clone(), c.rel_type.clone(), c.dst.clone())));
+    out.relations
+        .retain(|c| seen.insert((c.src.clone(), c.rel_type.clone(), c.dst.clone())));
+    let mut seen_r = std::collections::HashSet::new();
+    out.refusals
+        .retain(|r| seen_r.insert((r.rel_type.clone(), r.at)));
+    out
+}
 
-    candidates
+fn builtin_patterns() -> Vec<(String, String)> {
+    let mut v: Vec<(String, String)> = Vec::new();
+    for (patterns, rel) in RELATION_PATTERNS
+        .iter()
+        .chain(ANCHORED_RELATION_PATTERNS.iter())
+    {
+        for p in patterns.iter() {
+            v.push((p.to_string(), rel.to_string()));
+        }
+    }
+    v
+}
+
+/// The built-in patterns, bound occurrence-locally, WITH the refusals.
+/// This is what the materializer and the heal call.
+pub fn extract_relations_bound(text: &str, entities: &[String]) -> RelationExtraction {
+    bind_relations(text, entities, &builtin_patterns())
+}
+
+/// Every relation type a built-in pattern can mint. A stated claim with any
+/// other relation is outside the extractor's vocabulary by construction.
+pub fn builtin_relation_types() -> Vec<String> {
+    let mut v: Vec<String> = RELATION_PATTERNS
+        .iter()
+        .chain(ANCHORED_RELATION_PATTERNS.iter())
+        .map(|(_, rel)| rel.to_string())
+        .chain(REVERSE_ROLE_PATTERNS.iter().map(|(_, rel)| rel.to_string()))
+        .collect();
+    v.sort();
+    v.dedup();
+    v
 }
 
 // ── Text feature analysis (Phase 0 audit data for RFC 006) ──
@@ -3763,5 +4098,267 @@ mod contraction_tests {
             "{ents:?}"
         );
         assert!(!admit_entity("I'm Alice"), "a contraction inside a name");
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+
+    fn triples(text: &str, entities: &[&str]) -> Vec<(String, String, String, i32)> {
+        let ents: Vec<String> = entities.iter().map(|e| e.to_string()).collect();
+        extract_heuristic_relations(text, &ents)
+            .into_iter()
+            .map(|r| (r.src, r.rel_type, r.dst, r.polarity))
+            .collect()
+    }
+
+    fn refusals(text: &str, entities: &[&str]) -> Vec<(String, &'static str, String, String)> {
+        let ents: Vec<String> = entities.iter().map(|e| e.to_string()).collect();
+        extract_relations_bound(text, &ents)
+            .refusals
+            .into_iter()
+            .map(|r| (r.rel_type, r.reason, r.left, r.right))
+            .collect()
+    }
+
+    /// The two production incidents of 2026-09-07, verbatim.
+    #[test]
+    fn the_subject_search_never_walks_back_past_a_boundary() {
+        let text = "PyPI and latest release both 0.15.6. RE-VERIFIED: 'Sarah works at Google'.";
+        let ents = extract_heuristic_entities(text);
+        assert!(
+            ents.iter().any(|e| e == "Sarah"),
+            "a quoted name is admitted: {ents:?}"
+        );
+        let got = triples(text, &ents.iter().map(String::as_str).collect::<Vec<_>>());
+        assert_eq!(
+            got,
+            vec![("Sarah".into(), "works_at".into(), "Google".into(), 1)],
+            "the quoted subject binds, PyPI never does"
+        );
+
+        let text = "PyPI (trusted publishing) → swarm ping core+server → core runs CT128 dogfood";
+        let ents = extract_heuristic_entities(text);
+        let names: Vec<&str> = ents.iter().map(String::as_str).collect();
+        assert!(
+            triples(text, &names).is_empty(),
+            "no claim, not a wrong one"
+        );
+        let r = refusals(text, &names);
+        assert!(
+            r.iter().any(|(rel, reason, left, right)| rel == "runs"
+                && *reason == REFUSAL_LOWERCASE_SUBJECT
+                && left == "core"
+                && right == "CT128"),
+            "the abstention names its reason: {r:?}"
+        );
+    }
+
+    #[test]
+    fn prepending_unrelated_text_never_changes_the_triple() {
+        let base = [
+            (
+                "Alice Moreau works at Fennwick Labs.",
+                &["Alice Moreau", "Fennwick Labs"][..],
+                ("Alice Moreau", "works_at", "Fennwick Labs"),
+            ),
+            (
+                "Acme is headquartered in Berlin.",
+                &["Acme", "Berlin"][..],
+                ("Acme", "headquartered_in", "Berlin"),
+            ),
+            (
+                "Pranab lives in Berlin.",
+                &["Pranab", "Berlin"][..],
+                ("Pranab", "lives_in", "Berlin"),
+            ),
+        ];
+        let prefixes = [
+            "",
+            "PyPI is a package index. ",
+            "NOTE: ",
+            "Deploy → verify → ",
+            "Fennwick Labs; Berlin; Acme. ",
+            "Ünïcode prélude. ",
+        ];
+        for (text, ents, want) in base {
+            for prefix in prefixes {
+                let full = format!("{prefix}{text}");
+                let mut all: Vec<&str> = ents.to_vec();
+                all.push("PyPI");
+                let got = triples(&full, &all);
+                assert_eq!(
+                    got,
+                    vec![(want.0.into(), want.1.into(), want.2.into(), 1)],
+                    "prefix {prefix:?} on {text:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_later_mention_binds_even_when_the_name_appeared_earlier() {
+        // The first-occurrence bug: CT128 opens the note as a heading, the
+        // assertion about it comes two sentences later.
+        let text = "CT128 is the memory host. Backups live on node4. Tonight CT128 runs 0.19.0.";
+        let got = triples(text, &["CT128", "node4", "0.19.0"]);
+        assert_eq!(
+            got,
+            vec![("CT128".into(), "runs".into(), "0.19.0".into(), 1)]
+        );
+        let ents: Vec<String> = ["CT128", "0.19.0"].iter().map(|s| s.to_string()).collect();
+        let rels = extract_relations_bound(text, &ents).relations;
+        assert_eq!(
+            rels[0].span,
+            Some((text.find("Tonight CT128").unwrap() + 8, text.len() - 1))
+        );
+    }
+
+    #[test]
+    fn segment_boundaries_are_hard() {
+        let names = ["Sarah", "Google", "PyPI", "CT128"];
+        assert_eq!(
+            triples("Sarah joined Google; PyPI runs CT128.", &names),
+            vec![
+                ("Sarah".into(), "works_at".into(), "Google".into(), 1),
+                ("PyPI".into(), "runs".into(), "CT128".into(), 1)
+            ]
+        );
+        // A label colon never supplies a subject.
+        assert!(triples("PyPI: runs CT128", &names).is_empty());
+        assert!(refusals("PyPI: runs CT128", &names)
+            .iter()
+            .any(|(_, reason, _, _)| *reason == REFUSAL_NO_SUBJECT));
+        // A colon inside a token is not a boundary; a quoted assertion binds.
+        assert_eq!(
+            triples("At 12:30 Sarah said \"CT128 runs Google\"", &names),
+            vec![("CT128".into(), "runs".into(), "Google".into(), 1)]
+        );
+    }
+
+    #[test]
+    fn subject_adjacency_admits_wrappers_and_refuses_phrases() {
+        let names = ["Alice Moreau", "Fennwick Labs", "Acme", "Berlin"];
+        assert_eq!(
+            triples(
+                "Acme, which is headquartered in Berlin, hired Alice Moreau.",
+                &names
+            ),
+            vec![("Acme".into(), "headquartered_in".into(), "Berlin".into(), 1)]
+        );
+        assert_eq!(
+            triples("Alice Moreau now works at Fennwick Labs.", &names),
+            vec![(
+                "Alice Moreau".into(),
+                "works_at".into(),
+                "Fennwick Labs".into(),
+                1
+            )]
+        );
+        let text = "Alice Moreau, an engineer from Berlin, works at Fennwick Labs.";
+        assert!(
+            triples(text, &names).is_empty(),
+            "an appositive phrase is not adjacency"
+        );
+        let r = refusals(text, &names);
+        assert!(
+            r.iter().any(|(rel, reason, left, _)| rel == "works_at"
+                && *reason == REFUSAL_SUBJECT_NOT_ADJACENT
+                && left == ","),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn negation_and_modality_are_read_off_the_original_stream() {
+        let names = ["Alice", "Acme", "Pranab", "Berlin"];
+        assert_eq!(
+            triples("Alice is not the CEO of Acme.", &names),
+            vec![("Alice".into(), "ceo_of".into(), "Acme".into(), -1)]
+        );
+        assert_eq!(
+            triples("Pranab does not live in Berlin.", &names),
+            vec![("Pranab".into(), "lives_in".into(), "Berlin".into(), -1)]
+        );
+        let ents: Vec<String> = names.iter().map(|s| s.to_string()).collect();
+        let rels = extract_relations_bound("Alice reportedly works at Acme.", &ents).relations;
+        assert_eq!(rels.len(), 1);
+        assert_eq!(rels[0].modality, "reported");
+    }
+
+    #[test]
+    fn coordination_shares_the_subject_only_through_the_previous_object() {
+        let names = ["Alice Moreau", "Fennwick Labs", "Berlin", "Bob Lin"];
+        assert_eq!(
+            triples(
+                "Alice Moreau works at Fennwick Labs and lives in Berlin.",
+                &names
+            ),
+            vec![
+                (
+                    "Alice Moreau".into(),
+                    "works_at".into(),
+                    "Fennwick Labs".into(),
+                    1
+                ),
+                ("Alice Moreau".into(), "lives_in".into(), "Berlin".into(), 1)
+            ]
+        );
+        // `and` after a mention that was NOT the previous object: refused.
+        let text = "Alice Moreau met Bob Lin and lives in Berlin.";
+        assert!(
+            triples(text, &names).is_empty(),
+            "{:?}",
+            triples(text, &names)
+        );
+        assert!(refusals(text, &names)
+            .iter()
+            .any(|(_, reason, left, _)| *reason == REFUSAL_SUBJECT_NOT_ADJACENT && left == "and"));
+    }
+
+    #[test]
+    fn missing_object_is_a_refusal_not_a_guess() {
+        let r = refusals(
+            "Alice Moreau works at the new office downtown.",
+            &["Alice Moreau"],
+        );
+        assert!(
+            r.iter().any(|(rel, reason, left, right)| rel == "works_at"
+                && *reason == REFUSAL_NO_OBJECT
+                && left == "Moreau"
+                && right == "new"),
+            "{r:?}"
+        );
+    }
+
+    #[test]
+    fn possessive_role_binds_in_reverse_inside_a_segment() {
+        assert_eq!(
+            triples(
+                "Acme's CEO, Alice Chen, spoke first.",
+                &["Acme", "Alice Chen"]
+            ),
+            vec![("Alice Chen".into(), "ceo_of".into(), "Acme".into(), 1)]
+        );
+    }
+
+    #[test]
+    fn learned_templates_bind_with_the_same_rules() {
+        let templates = vec![("mentors".to_string(), "mentors".to_string())];
+        let ents: Vec<String> = ["Carol", "Taylor", "Pat"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let rels = extract_learned_relations(
+            "Carol mentors Taylor. Pat, a friend of Carol, mentors nobody.",
+            &ents,
+            &templates,
+        );
+        assert_eq!(rels.len(), 1, "{rels:?}");
+        assert_eq!(
+            (rels[0].src.as_str(), rels[0].dst.as_str()),
+            ("Carol", "Taylor")
+        );
     }
 }

@@ -342,3 +342,241 @@ impl super::YantrikDB {
         Ok(report)
     }
 }
+
+// ── The refusal ledger and silver recall (2026-09-07) ───────────────────
+//
+// Precision work on the extractor was blind: every change looked free
+// because nothing measured recall without a judge. Two instruments, both
+// judge-free and both computed from what the store already holds:
+//
+// * the REFUSAL LEDGER (`extraction_refusals`, written by the bound
+//   extractor on every extraction): a histogram of why triggers did not
+//   bind. If most misses are `lowercase_subject`, alias policy is the
+//   lever; if `subject_not_adjacent`, the wrapper list; if the relation
+//   never appears, the pattern table.
+// * SILVER RECALL: every cooperative claim (`agent_stated`) is a labelled
+//   example — the writer stated a triple and the engine grounded it in a
+//   memory's text. Hide the label, re-run the extractor over that memory,
+//   and ask whether it recovers the same triple. Not ground truth (the
+//   writer's vocabulary is wider than the pattern table, and a grounded
+//   claim need not be a sentence the patterns cover), but it MOVES when a
+//   precision change costs recall, which is what was missing.
+
+/// One row of the refusal ledger.
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct ExtractionRefusalRow {
+    pub memory_rid: String,
+    pub namespace: String,
+    pub rel_type: String,
+    pub trigger: String,
+    pub reason: String,
+    pub left_token: String,
+    pub right_token: String,
+    pub at: i64,
+    pub extractor_version: String,
+}
+
+/// Report of [`YantrikDB::extraction_silver_recall`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+pub struct SilverRecallReport {
+    pub namespace: Option<String>,
+    /// Cooperative claims with a readable source memory.
+    pub stated_claims: usize,
+    /// Stated triples the bound extractor re-derived from the same text.
+    pub recovered: usize,
+    /// Stated triples whose relation no built-in pattern can mint at all —
+    /// outside the extractor's vocabulary, counted apart from misses.
+    pub unsupported_relation: usize,
+    /// Missed triples by cause: a refusal reason recorded for the same
+    /// relation on that memory, `bound_elsewhere` (the relation fired on
+    /// different endpoints), or `no_trigger` (no pattern fired).
+    pub missed_by_reason: BTreeMap<String, usize>,
+    /// Recovered / (recovered + missed), on the supported relations only.
+    pub recall: f64,
+}
+
+impl super::YantrikDB {
+    /// Refusal counts keyed `rel_type:reason`, the histogram the next
+    /// binding rule is chosen from. Empty on a pre-v54 store.
+    pub fn extraction_refusal_counts(
+        &self,
+        namespace: Option<&str>,
+    ) -> Result<BTreeMap<String, i64>> {
+        let conn = self.conn();
+        let sql = format!(
+            "SELECT rel_type, reason, COUNT(*) FROM extraction_refusals {} \
+             GROUP BY rel_type, reason",
+            if namespace.is_some() {
+                "WHERE namespace = ?1"
+            } else {
+                ""
+            }
+        );
+        let Ok(mut stmt) = conn.prepare(&sql) else {
+            return Ok(BTreeMap::new());
+        };
+        let mapper = |r: &rusqlite::Row| -> rusqlite::Result<(String, String, i64)> {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        };
+        let rows: Vec<(String, String, i64)> = if let Some(ns) = namespace {
+            stmt.query_map(params![ns], mapper)?
+                .collect::<std::result::Result<_, _>>()?
+        } else {
+            stmt.query_map([], mapper)?
+                .collect::<std::result::Result<_, _>>()?
+        };
+        Ok(rows
+            .into_iter()
+            .map(|(rel, reason, n)| (format!("{rel}:{reason}"), n))
+            .collect())
+    }
+
+    /// The ledger rows themselves, newest first, for inspection.
+    pub fn extraction_refusals(
+        &self,
+        namespace: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ExtractionRefusalRow>> {
+        let conn = self.conn();
+        let sql = format!(
+            "SELECT memory_rid, namespace, rel_type, trigger, reason, left_token, right_token, \
+             at, extractor_version FROM extraction_refusals {} \
+             ORDER BY created_at DESC, memory_rid, at LIMIT ?{}",
+            if namespace.is_some() {
+                "WHERE namespace = ?1"
+            } else {
+                ""
+            },
+            if namespace.is_some() { 2 } else { 1 }
+        );
+        let Ok(mut stmt) = conn.prepare(&sql) else {
+            return Ok(Vec::new());
+        };
+        let mapper = |r: &rusqlite::Row| -> rusqlite::Result<ExtractionRefusalRow> {
+            Ok(ExtractionRefusalRow {
+                memory_rid: r.get(0)?,
+                namespace: r.get(1)?,
+                rel_type: r.get(2)?,
+                trigger: r.get(3)?,
+                reason: r.get(4)?,
+                left_token: r.get(5)?,
+                right_token: r.get(6)?,
+                at: r.get(7)?,
+                extractor_version: r.get(8)?,
+            })
+        };
+        let limit = limit as i64;
+        let rows = if let Some(ns) = namespace {
+            stmt.query_map(params![ns, limit], mapper)?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        } else {
+            stmt.query_map(params![limit], mapper)?
+                .collect::<std::result::Result<Vec<_>, _>>()?
+        };
+        Ok(rows)
+    }
+
+    /// Silver recall: re-derive every cooperative claim from its source
+    /// memory with the bound extractor and count what came back. See the
+    /// module note. Read-only.
+    pub fn extraction_silver_recall(&self, namespace: Option<&str>) -> Result<SilverRecallReport> {
+        let stated: Vec<(String, String, String, String)> = {
+            let conn = self.conn();
+            let sql = format!(
+                "SELECT src, rel_type, dst, source_memory_rid FROM claims \
+                 WHERE extractor = ?1 AND tombstoned = 0 AND source_memory_rid IS NOT NULL {} \
+                 ORDER BY created_at",
+                if namespace.is_some() {
+                    "AND namespace = ?2"
+                } else {
+                    ""
+                }
+            );
+            let mut stmt = conn.prepare(&sql)?;
+            let mapper = |r: &rusqlite::Row| -> rusqlite::Result<(String, String, String, String)> {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            };
+            if let Some(ns) = namespace {
+                stmt.query_map(
+                    params![crate::engine::graph_ops::STATED_CLAIM_EXTRACTOR, ns],
+                    mapper,
+                )?
+                .collect::<std::result::Result<_, _>>()?
+            } else {
+                stmt.query_map(
+                    params![crate::engine::graph_ops::STATED_CLAIM_EXTRACTOR],
+                    mapper,
+                )?
+                .collect::<std::result::Result<_, _>>()?
+            }
+        };
+        let supported: std::collections::HashSet<String> =
+            crate::graph::builtin_relation_types().into_iter().collect();
+        let mut report = SilverRecallReport {
+            namespace: namespace.map(str::to_string),
+            stated_claims: 0,
+            recovered: 0,
+            unsupported_relation: 0,
+            missed_by_reason: BTreeMap::new(),
+            recall: 0.0,
+        };
+        // One extraction per memory, shared by its claims.
+        let mut cache: std::collections::HashMap<String, Option<crate::graph::RelationExtraction>> =
+            std::collections::HashMap::new();
+        for (src, rel, dst, rid) in stated {
+            let extraction = cache.entry(rid.clone()).or_insert_with(|| {
+                let stored: Option<String> = {
+                    let conn = self.conn();
+                    conn.query_row(
+                        "SELECT text FROM memories WHERE rid = ?1",
+                        params![rid],
+                        |r| r.get(0),
+                    )
+                    .ok()
+                };
+                let text = stored.and_then(|t| self.decrypt_text(&t).ok())?;
+                let mut candidates = self.extract_entities_for(&text);
+                for v in crate::graph::extract_value_candidates(&text) {
+                    if !candidates.contains(&v) {
+                        candidates.push(v);
+                    }
+                }
+                Some(crate::graph::extract_relations_bound(&text, &candidates))
+            });
+            let Some(extraction) = extraction else {
+                continue; // unreadable source: not a labelled example
+            };
+            report.stated_claims += 1;
+            if !supported.contains(&rel) {
+                report.unsupported_relation += 1;
+                continue;
+            }
+            let same = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
+            if extraction
+                .relations
+                .iter()
+                .any(|r| r.rel_type == rel && same(&r.src, &src) && same(&r.dst, &dst))
+            {
+                report.recovered += 1;
+                continue;
+            }
+            let reason =
+                if let Some(refusal) = extraction.refusals.iter().find(|r| r.rel_type == rel) {
+                    refusal.reason.to_string()
+                } else if extraction.relations.iter().any(|r| r.rel_type == rel) {
+                    "bound_elsewhere".to_string()
+                } else {
+                    "no_trigger".to_string()
+                };
+            *report.missed_by_reason.entry(reason).or_insert(0) += 1;
+        }
+        let missed: usize = report.missed_by_reason.values().sum();
+        let denom = report.recovered + missed;
+        report.recall = if denom == 0 {
+            0.0
+        } else {
+            report.recovered as f64 / denom as f64
+        };
+        Ok(report)
+    }
+}

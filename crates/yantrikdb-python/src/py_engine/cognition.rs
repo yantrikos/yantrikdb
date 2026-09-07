@@ -400,6 +400,52 @@ impl PyYantrikDB {
         crate::py_types::json_to_py(py, &val)
     }
 
+    /// The extraction refusal ledger as a histogram keyed `rel_type:reason`
+    /// — why the bound extractor saw a relation trigger and would not bind
+    /// it. The instrument the next binding rule is chosen from.
+    #[pyo3(signature = (namespace=None))]
+    fn extraction_refusal_counts(
+        &self,
+        py: Python<'_>,
+        namespace: Option<&str>,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let out = db.extraction_refusal_counts(namespace).map_err(map_err)?;
+        let val = serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        crate::py_types::json_to_py(py, &val)
+    }
+
+    /// The ledger rows, newest first: memory_rid, rel_type, trigger, reason,
+    /// left_token, right_token, at (byte offset), extractor_version.
+    #[pyo3(signature = (namespace=None, limit=200))]
+    fn extraction_refusals(
+        &self,
+        py: Python<'_>,
+        namespace: Option<&str>,
+        limit: usize,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let out = db.extraction_refusals(namespace, limit).map_err(map_err)?;
+        let val = serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        crate::py_types::json_to_py(py, &val)
+    }
+
+    /// Silver recall: re-derive every cooperative (`agent_stated`) claim
+    /// from its source memory with the bound extractor. Returns
+    /// stated_claims, recovered, unsupported_relation, missed_by_reason and
+    /// recall (recovered over supported relations). Read-only; judge-free.
+    #[pyo3(signature = (namespace=None))]
+    fn extraction_silver_recall(
+        &self,
+        py: Python<'_>,
+        namespace: Option<&str>,
+    ) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let out = db.extraction_silver_recall(namespace).map_err(map_err)?;
+        let val = serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        crate::py_types::json_to_py(py, &val)
+    }
+
     /// One batch of the v50 source_turn recompute/repair pass — the
     /// maintenance operation `SourceTurnMaintenanceRequiredError` names.
     /// Returns `{"processed", "remaining", "complete"}`; call repeatedly
