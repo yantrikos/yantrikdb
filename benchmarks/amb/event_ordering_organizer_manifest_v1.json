@@ -1,0 +1,26 @@
+{
+  "protocol": "event-ordering-query-independent-organizers-v1",
+  "gold_fields_present": false,
+  "units": {
+    "1": {"path": "benchmarks/amb/artifacts/summarization-unit1-topic-cards-deepseek-v1.json", "sha256": "4701324835416dfe0c76c3d2d6658846a890bed8257463aad65f15a5a51b3db1", "input_sha256": "d5416b14415307b0d1ec0a7800fc727b8edb6ec916b32be52898e00ab4df1d4f"},
+    "2": {"path": "benchmarks/amb/artifacts/summarization-unit2-topic-cards-deepseek-v1.json", "sha256": "0890d7b3461a00f85d10b879af4306a621be6a9e8dc182865a508767f3f77fa1", "input_sha256": "10fd81ea8a426a8cee8c1283fd3ec5d7fcd989094de55e9079774052fb208824"},
+    "3": {"path": "benchmarks/amb/artifacts/summarization-unit3-topic-cards-deepseek-v1.json", "sha256": "7420ba06678e82f571fe5a197ebd5db131f456f92ec4efff17540a45dca3147c", "input_sha256": "e14d43745e8c02e3cc66c016e2bfdf5d836527d990db6756bfa823f6a823c71d"},
+    "4": {"path": "benchmarks/amb/artifacts/summarization-unit4-topic-cards-deepseek-v2.json", "sha256": "4a8facacf03ae4d233bf7c30420bd1aef1c843dfb5d28b71e57cd1f82474455b", "input_sha256": "02d617bbad41bada64d17bc618ed4c2258ba23935ae31bbfeac340d44bca61cd"},
+    "5": {"path": "benchmarks/amb/artifacts/summarization-unit5-topic-cards-deepseek-v4.json", "sha256": "8bb836e3815b4e4b50eed10126f30feb684ab6dd1d9f4dc5f22d06971278b5b4", "input_sha256": "a17001241c24e85ef5c428a49541e9561d9cfebcaca311fedf424699d4327bd9"},
+    "6": {"path": "benchmarks/amb/artifacts/summarization-unit6-topic-cards-deepseek-v2.json", "sha256": "91ae0eae9054d7a9c2236ad1b5eabc2eb335c08db9bc45d0208bcf3a6739934b", "input_sha256": "d89ff53cc27913403fc89e92adeaa2e2e00c0fc3397d89b47238d949584ecf86"},
+    "7": {"path": "benchmarks/amb/artifacts/summarization-unit7-topic-cards-deepseek-v1.json", "sha256": "389ef72a2e9657d16d42a10e14deb09892121cf2bd857ee57721b3c36175a77c", "input_sha256": "bdcdc32d4ef91bffb4b347261d7dfce932296f0a35df5bb2217acb14dc40f43a"},
+    "8": {"path": "benchmarks/amb/artifacts/summarization-unit8-topic-cards-deepseek-v1.json", "sha256": "12ced4b2fcb6cff9772b565ec0cc537a98d0ac331b993866074ab3d4f180d192", "input_sha256": "7ad1d15139002ae809e6614fb7a29575b80ee9334430c5c30fd3b35dd4642c78"},
+    "9": {"path": "benchmarks/amb/artifacts/summarization-unit9-topic-cards-deepseek-v1.json", "sha256": "5ed4aebd7e5d66770d40301e80f8632e85d5559169ecc81c0de4c25812882c68", "input_sha256": "8c3a4d2e8af098756192e5fd68194c44a459aab3cdd01ba3bc1d0a38279199d0"},
+    "10": {"path": "benchmarks/amb/artifacts/summarization-unit10-topic-cards-deepseek-v1.json", "sha256": "cd63e0835ae74c289909f6a375743a531bacea36cf1451b219d164b1bff6d4ae", "input_sha256": "a8dac8003dded5e86b7e6f47323e125ac70c7ed7bbaf4d08c20f9078ba32066b"},
+    "11": {"path": "benchmarks/amb/artifacts/summarization-unit11-topic-cards-deepseek-v3.json", "sha256": "fd18d6e76d41cb6c7d2901b6499c007e9ce72467aac8efb19fa155a03a38d60c", "input_sha256": "4bc1147e516a9acf26d751f1ec1f69f4a891458b64dd0faacbab0d5e0d664a96"},
+    "12": {"path": "benchmarks/amb/artifacts/summarization-unit12-topic-cards-deepseek-v2.json", "sha256": "16e63fb30eac05ae28d7d5a52b049ceda321aa65d77925b5d07dc5c3c99d7e62", "input_sha256": "e94015832ae06e053423c6ae993b9bed4d4356213c531aa29448ae7dc3fc90f7"},
+    "13": {"path": "benchmarks/amb/artifacts/summarization-unit13-topic-cards-deepseek-v1.json", "sha256": "b79c00d5fb884576baf76a495adf2088257243b90931bbb916cee50c77200532", "input_sha256": "55de9c467bc0ca7ddfaee1dd1babcf2026263ff80f532351c7c61c9de0433d9f"},
+    "14": {"path": "benchmarks/amb/artifacts/summarization-unit14-topic-cards-deepseek-v1.json", "sha256": "14c00581951415662d51a50b4a6819cc9c3bf539bcc0d869110da195bffdaa25", "input_sha256": "f1d02028e53256fa9cd592834b304464e5b790c0a50de6ba9c53c9ed6743d0bf"},
+    "15": {"path": "benchmarks/amb/artifacts/summarization-unit15-topic-cards-deepseek-v1.json", "sha256": "76d51e5e47e4ecec55df9f5fbeb803a301f7c4e2ad06e41a11a8c99823fdbc58", "input_sha256": "7cc28ca590ff3148f60d2f35c5e1bc6cdee242e32b372b21a39c4fbb00a9312e"},
+    "16": {"path": "benchmarks/amb/artifacts/summarization-unit16-topic-cards-deepseek-v2.json", "sha256": "b9e946b4c539137f007629e8eafdaeb45cf9179d782c57854f4848288b1ed184", "input_sha256": "89c7ad8cd130a72dd05a7226c70061fc458e2a961779897026d2420f53152220"},
+    "17": {"path": "benchmarks/amb/artifacts/summarization-unit17-topic-cards-deepseek-v1.json", "sha256": "0e076faad7ad8e501ac7e815360bd5bda0027526b01270e8209cac78f9888609", "input_sha256": "392828b2e1f31dc16f095885d72a06322ca3d6da16ca0e2b20c1ed8e991c9318"},
+    "18": {"path": "benchmarks/amb/artifacts/summarization-unit18-topic-cards-deepseek-v1.json", "sha256": "f910c71c0157a10c509e7216a2236e78c5921a67c803a953dd23986142f47ef9", "input_sha256": "050a3a9396022f957529bb7c9e246b867402b00f397e8317a21a05760e5da4a3"},
+    "19": {"path": "benchmarks/amb/artifacts/summarization-unit19-topic-cards-deepseek-v2.json", "sha256": "34e9a3cd0324108fd94f2168fe9c5571c1bc01b3028396f66a92393f431d37a8", "input_sha256": "fdbabf24b8ee27be38fa87df65e5cc0307a8c420ca0a34d934f6d0a7762bfdda"},
+    "20": {"path": "benchmarks/amb/artifacts/summarization-unit20-topic-cards-deepseek-v2.json", "sha256": "43f2ec9f1cd5fcd22194c13f894d5619d2dd5e39768820297f75768d4102b975", "input_sha256": "0fa4e060076755b6efb806db460ecce9d9bdf22db3dbebe9303f25a97682f707"}
+  }
+}
