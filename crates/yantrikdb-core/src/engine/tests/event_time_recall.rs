@@ -499,22 +499,15 @@ fn non_finite_bounds_are_invalid_scalars() {
 
 // ── #181: the values ride out on the result ──────────────────────────
 //
-// Filtering by valid time was only half the surface: a caller who
-// filtered could not see WHY a row was eligible, nor lay the hits on a
-// timeline, because `RecallResult` dropped the values.
-//
-// Host rows report the v48 COLUMNS — the same values the prefilter
-// range-scans — so that a row's stated bounds and its eligibility can
-// never contradict each other. The last test is the one that pins that
-// choice: it manufactures the divergence (columns NULL, JSON populated)
-// that a pre-v48 row or a ciphertext-payload follower apply leaves
-// behind, and asserts recall reports the column, because reporting the
-// JSON there would advertise an eligibility the filter denies.
+// Filtering was only half the surface — a caller who filtered could not
+// see WHY a row was eligible. Host rows report the v48 COLUMNS, the same
+// values the prefilter range-scans, so stated bounds and eligibility can
+// never contradict each other. `null_columns_report_none_*` is the test
+// that pins that choice.
 // =====================================================================
 
-/// The columns for one rid, as the census test reads them — the
-/// `event_time_columns.rs` shape, reused here to prove the hydrated
-/// values agree with the v48 columns rather than merely existing.
+/// The `event_time_columns.rs` census shape, reused to prove the
+/// hydrated values match the columns rather than merely existing.
 fn columns_for(db: &YantrikDB, rid: &str) -> (Option<f64>, Option<f64>) {
     db.conn()
         .query_row(
@@ -554,9 +547,6 @@ fn recall_result_carries_the_stamped_event_time() {
         "event_time_max must reach the caller"
     );
 
-    // The load-bearing half: hydrated values are sourced from the
-    // metadata JSON, so this asserts they agree with the mirrored v48
-    // columns — the invariant that makes that sourcing choice safe.
     assert_eq!(
         (hit.event_time_min, hit.event_time_max),
         columns_for(&db, &rid),
@@ -622,14 +612,11 @@ fn filtered_recall_reports_the_bounds_that_made_each_row_eligible() {
     );
 }
 
-/// THE PIN FOR THE SOURCING CHOICE. A row can carry event-time metadata
-/// while its columns are NULL — a pre-v48 row not yet rewritten, or a
-/// follower apply whose payload was ciphertext. The prefilter reads the
-/// COLUMNS, so such a row is excluded from every bounded recall. If
-/// hydration re-extracted the bounds from the JSON instead, an
-/// unfiltered recall would hand back bounds advertising an eligibility
-/// the filter denies — a result that contradicts the engine's own
-/// answer to "show me what happened then".
+/// THE PIN FOR THE SOURCING CHOICE. A pre-v48 row, or a follower apply
+/// with a ciphertext payload, leaves NULL columns beside populated JSON.
+/// The prefilter reads the COLUMNS, so the row is excluded from every
+/// bounded recall — reporting its JSON bounds would advertise an
+/// eligibility the filter denies.
 #[test]
 fn null_columns_report_none_even_when_the_metadata_json_still_has_bounds() {
     let db = YantrikDB::new(":memory:", 8).unwrap();
@@ -686,11 +673,9 @@ fn null_columns_report_none_even_when_the_metadata_json_still_has_bounds() {
     );
 }
 
-/// `recall_as_of` rolls a corrected record back to its pre-correction
-/// text and metadata. The bounds must roll back WITH it: recall stamps
-/// them from the live row, and `correct()` re-derives event time, so a
-/// result left holding the current bounds would pair yesterday's
-/// metadata with today's dates — the row contradicting itself.
+/// The bounds must roll back with the metadata: recall stamps them from
+/// the live row and `correct()` re-derives event time, so leaving them
+/// pairs yesterday's metadata with today's dates.
 #[test]
 fn as_of_rollback_moves_event_time_back_with_the_metadata() {
     let db = YantrikDB::new(":memory:", 8).unwrap();

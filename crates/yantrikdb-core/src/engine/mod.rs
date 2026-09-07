@@ -433,14 +433,11 @@ pub(crate) struct TextMetadataRow {
     pub rid: String,
     pub text: String,
     pub metadata: String,
-    /// v48 (#149) valid time, read from the indexed columns rather than
-    /// re-extracted from `metadata`. The columns are what the
-    /// `event_after`/`event_before` prefilter range-scans, so reporting
-    /// them keeps a result's stated bounds and its filter eligibility
-    /// answerable from one source. Safe to select unconditionally: this
-    /// query only ever runs against the host database, which is always
-    /// migrated before recall (mounted packs, which can predate a column
-    /// and can never be migrated, go through `fetch_pack_text_metadata`).
+    /// v48 (#149) valid time, from the columns the recall prefilter
+    /// range-scans rather than re-extracted from `metadata`. Selected
+    /// unconditionally because this query only runs against the host
+    /// database, which is always migrated; packs, which can predate the
+    /// column, go through `fetch_pack_text_metadata`.
     pub event_time_min: Option<f64>,
     pub event_time_max: Option<f64>,
 }

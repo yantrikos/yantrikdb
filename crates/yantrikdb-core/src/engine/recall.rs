@@ -3632,15 +3632,11 @@ impl YantrikDB {
                 result.text = tm.text.clone();
                 result.metadata = serde_json::from_str(&tm.metadata)
                     .unwrap_or(serde_json::Value::Object(Default::default()));
-                // #181: valid time, from the SAME indexed columns the
-                // event_after/event_before prefilter range-scans — so a
-                // row's reported bounds and the reason it was (or wasn't)
-                // eligible are answerable from one source. Reading the
-                // metadata JSON instead would diverge on rows whose
-                // columns are still NULL (pre-v48 rows not yet rewritten,
-                // ciphertext-payload follower applies): the filter
-                // excludes those, so reporting bounds for them would
-                // describe an eligibility they do not have.
+                // #181: the columns, not a re-extraction from the JSON.
+                // They diverge on rows the prefilter excludes (columns
+                // still NULL, JSON populated — pre-v48 rows, ciphertext
+                // follower applies), where the JSON would report an
+                // eligibility the filter denies.
                 result.event_time_min = tm.event_time_min;
                 result.event_time_max = tm.event_time_max;
             }
@@ -6250,8 +6246,7 @@ impl YantrikDB {
                     result.text = tm.text.clone();
                     result.metadata = serde_json::from_str(&tm.metadata)
                         .unwrap_or(serde_json::Value::Object(Default::default()));
-                    // #181 — mirrors recall() Step 5: the filter's own
-                    // columns, not a re-extraction from the JSON.
+                    // #181 — mirrors recall() Step 5.
                     result.event_time_min = tm.event_time_min;
                     result.event_time_max = tm.event_time_max;
                 }

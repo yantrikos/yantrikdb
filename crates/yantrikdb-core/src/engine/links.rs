@@ -982,13 +982,9 @@ impl YantrikDB {
                 let nscore = seed_score * pol.neighbor_factor / 4.0;
                 present.insert(l.rid.clone());
                 budget -= 1;
-                // #181: surfaced neighbors are built whole from `mem` and
-                // never reach recall's Step 5 hydration, so the valid-time
-                // pair is read here, before the literal moves
-                // `mem.metadata`. `Memory` carries the decrypted JSON but
-                // not the indexed columns, and link expansion exists to
-                // cross the relevance filters rather than answer to them,
-                // so there is no filter eligibility to stay aligned with.
+                // #181: neighbors never reach Step 5 hydration, and `Memory`
+                // carries the JSON but not the columns — so read the pair
+                // here, before the literal moves `mem.metadata`.
                 let (event_time_min, event_time_max) =
                     crate::base::datetext::event_time_bounds(&mem.metadata);
                 added.push(RecallResult {

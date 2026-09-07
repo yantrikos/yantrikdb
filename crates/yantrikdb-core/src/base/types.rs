@@ -205,30 +205,16 @@ pub struct RecallResult {
     /// rows. See [`PackProvenance`].
     #[serde(default)]
     pub pack: Option<PackProvenance>,
-    /// v48 (#149) valid time: when the described events happened, as
-    /// opposed to `created_at`, which is transaction time (when the row
-    /// was written). `None` when the record carries no event time. A
-    /// caller who filtered with `event_after`/`event_before` reads these
-    /// to see WHY a row was eligible, or to lay the results out on a
-    /// timeline.
+    /// v48 (#149) valid time — when the described events happened, as
+    /// opposed to `created_at` (when the row was written). `None` when
+    /// the record carries no event time.
     ///
-    /// Host rows carry the `memories.event_time_min`/`event_time_max`
-    /// columns verbatim — the same values the recall prefilter
-    /// range-scans, so a row's reported bounds and its eligibility never
-    /// disagree. That matters on rows whose columns are still NULL while
-    /// their metadata JSON is not (a pre-v48 row not yet rewritten, a
-    /// follower apply that carried a ciphertext payload): the filter
-    /// excludes those, so re-extracting bounds from their JSON would
-    /// claim an eligibility they do not have.
-    ///
-    /// Three paths have no column to read and fall back to
-    /// [`crate::base::datetext::event_time_bounds`] over the plaintext
-    /// metadata, none of them subject to that filter: mounted pack rows
-    /// (a pack sealed before v48 has no such column and can never be
-    /// migrated), link-surfaced neighbors (built from a `Memory`), and
-    /// `recall_as_of` rollback (the restored revision's own JSON is the
-    /// only record of what the bounds were at that point in time — the
-    /// columns describe the live row).
+    /// Host rows carry the `memories` columns verbatim: those are what
+    /// `event_after`/`event_before` range-scans, so a row's reported
+    /// bounds can never claim an eligibility the filter denies. Pack
+    /// rows, link-surfaced neighbors and `recall_as_of` rollback have no
+    /// column to read and derive from metadata instead; none are subject
+    /// to that filter.
     #[serde(default)]
     pub event_time_min: Option<f64>,
     #[serde(default)]
