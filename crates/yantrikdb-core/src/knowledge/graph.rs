@@ -271,6 +271,22 @@ const MAX_ENTITY_TOKENS: usize = 6;
 /// Genuine all-caps names are short: `NASA`, `IBM`, `HNSW`, `IBM WATSON`.
 const MAX_ALLCAPS_TOKENS: usize = 2;
 
+/// `I'm`, `I'd`, `I'll`, `I've`, `We're`, `Don't`, `Can't`: an apostrophe
+/// followed by a clitic. `O'Brien` and `D'Arcy` have a capital after the
+/// apostrophe and a longer tail, and stay names.
+fn is_contraction(tok: &str) -> bool {
+    let lower = tok.to_lowercase();
+    if let Some(pos) = lower.find('\'') {
+        let tail = &lower[pos + 1..];
+        let next_upper = tok[pos + 1..]
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_uppercase());
+        return matches!(tail, "m" | "d" | "ll" | "ve" | "re" | "s" | "t") && !next_upper;
+    }
+    false
+}
+
 fn is_all_caps_token(tok: &str) -> bool {
     tok.chars().any(|c| c.is_alphabetic())
         && tok.chars().all(|c| !c.is_alphabetic() || c.is_uppercase())
@@ -991,6 +1007,9 @@ pub fn admit_entity(name: &str) -> bool {
     if name.ends_with("'s") || name.ends_with("\u{2019}s") || name.ends_with('\'') {
         return false;
     }
+    if name.split_whitespace().any(is_contraction) {
+        return false;
+    }
     if is_rejected_entity_name(name) {
         return false;
     }
@@ -1252,6 +1271,14 @@ fn extract_entities_from_segment(
             .or_else(|| word.strip_suffix('\''))
             .filter(|bare| !bare.is_empty());
         let entity_word = possessive.unwrap_or(word);
+        // A contraction (`I'm`, `I'd`, `We'll`, `Don't`) is grammar, not a
+        // name, and it must not open or extend a chunk: on BEAM every
+        // facts block the first cut rendered was `I'm -headquartered_in->
+        // East Janethaven`, the subject being the pronoun's contraction.
+        if is_contraction(entity_word) {
+            flush(&mut chunk, entities);
+            continue;
+        }
         // A token without a letter (`2026`, `0.19.0`, `15`) is a value, not
         // a name, and it must not glue to its neighbours either: `2026
         // Alice Moreau` was the production store's most common shape of
@@ -3705,5 +3732,36 @@ mod sentence_boundary_tests {
             extract_value_candidates("CT128 runs 0.19.0 now."),
             vec!["0.19.0".to_string()]
         );
+    }
+}
+
+#[cfg(test)]
+mod contraction_tests {
+    use super::*;
+
+    #[test]
+    fn contractions_are_never_names_but_irish_names_are() {
+        for bad in ["I'm", "I'd", "I'll", "We're", "Don't", "It's"] {
+            assert!(is_contraction(bad), "{bad}");
+            assert!(!admit_entity(bad), "{bad} admitted");
+        }
+        for good in ["O'Brien", "D'Arcy", "Alice", "Fennwick Labs"] {
+            assert!(!is_contraction(good), "{good}");
+            assert!(admit_entity(good), "{good} refused");
+        }
+        let ents = extract_heuristic_entities(
+            "I'm headquartered in East Janethaven. We'll meet Alice Moreau there.",
+        );
+        assert!(
+            !ents
+                .iter()
+                .any(|e| e.starts_with("I'm") || e.starts_with("We'll")),
+            "{ents:?}"
+        );
+        assert!(
+            ents.iter().any(|e| e == "East Janethaven") && ents.iter().any(|e| e == "Alice Moreau"),
+            "{ents:?}"
+        );
+        assert!(!admit_entity("I'm Alice"), "a contraction inside a name");
     }
 }
