@@ -299,6 +299,18 @@ impl YantrikDB {
                 .iter()
                 .map(|(k, v)| (k.clone(), *v))
                 .collect(),
+            foreign_sqlite_mode: self.foreign_sqlite.mode().as_str().to_string(),
+            foreign_sqlite_supported: self.foreign_sqlite.supported(),
+            foreign_sqlite_active: self.foreign_sqlite.active(),
+            foreign_sqlite_tainted: self.foreign_sqlite.tainted(),
+            foreign_sqlite_detected_since_boot: self.foreign_sqlite.detected_since_boot(),
+            foreign_sqlite_refused_since_boot: self.foreign_sqlite.refused_since_boot(),
+            foreign_commits_detected_since_boot: self
+                .foreign_sqlite
+                .foreign_commits_detected_since_boot(),
+            integrity_check_pending: self.foreign_sqlite.integrity_check_pending(),
+            integrity_checks_since_boot: self.foreign_sqlite.integrity_checks_since_boot(),
+            last_integrity_check: self.foreign_sqlite.last_integrity().unwrap_or_default(),
             provenance_verified_records,
             unverified_user_source_records,
             provenance_source_counts,

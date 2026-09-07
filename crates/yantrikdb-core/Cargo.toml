@@ -10,7 +10,7 @@ keywords = ["ai", "memory", "cognitive", "database", "embeddings"]
 categories = ["database", "science"]
 
 [dependencies]
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled", "hooks"] }
 uuid7 = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -81,6 +81,11 @@ profiling = []
 # trace tests.
 testing = []
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Issue #225: the second-SQLite-library detector walks the process's
+# memory regions through libproc on macOS.
+libc = "0.2"
+
 [dev-dependencies]
 criterion = "0.5"
 toml = "0.8"
@@ -88,7 +93,7 @@ tempfile = "3"
 # Pack tests hash the host file to prove unmount mutates nothing, and
 # tamper with a sealed pack to prove the content digest catches it.
 blake3 = "1"
-rusqlite = { version = "0.37", features = ["bundled"] }
+rusqlite = { version = "0.37", features = ["bundled", "hooks"] }
 
 [[bench]]
 name = "engine_bench"

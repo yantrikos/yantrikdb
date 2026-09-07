@@ -655,6 +655,41 @@ pub struct Stats {
     /// under `enforce` they were dropped. Empty under `off`.
     #[serde(default)]
     pub claim_chain_gate_suppressed_since_boot: HashMap<String, u64>,
+    /// **Issue #225** — second-SQLite-library guard mode (`off` | `warn` |
+    /// `refuse`); every install defaults to `refuse`.
+    #[serde(default)]
+    pub foreign_sqlite_mode: String,
+    /// Whether this platform/store can be scanned (Linux, file-backed).
+    #[serde(default)]
+    pub foreign_sqlite_supported: bool,
+    /// The last scan found another SQLite library holding the store open in
+    /// this process. Under `refuse`, writes are failing right now.
+    #[serde(default)]
+    pub foreign_sqlite_active: bool,
+    /// A foreign instance was seen at some point since this engine opened.
+    /// Latched: its close may have unlinked the shm/WAL under the engine,
+    /// so writes stay refused (under `refuse`) until the engine is reopened.
+    #[serde(default)]
+    pub foreign_sqlite_tainted: bool,
+    /// Scans since boot that found a foreign instance.
+    #[serde(default)]
+    pub foreign_sqlite_detected_since_boot: u64,
+    /// Engine writes refused (pre-checks and aborted commits) since boot.
+    #[serde(default)]
+    pub foreign_sqlite_refused_since_boot: u64,
+    /// Commits that reached the store without going through this engine
+    /// (another process, most likely) since boot; each queues an integrity
+    /// check.
+    #[serde(default)]
+    pub foreign_commits_detected_since_boot: u64,
+    /// A queued integrity check has not run yet.
+    #[serde(default)]
+    pub integrity_check_pending: bool,
+    #[serde(default)]
+    pub integrity_checks_since_boot: u64,
+    /// The last `PRAGMA quick_check` result, empty until one has run.
+    #[serde(default)]
+    pub last_integrity_check: String,
     /// Non-tombstoned records carrying an explicit, caller-supplied
     /// `metadata.provenance_verified = true` marker. This is an audit signal,
     /// not an engine assertion: the engine cannot reconstruct authorship.

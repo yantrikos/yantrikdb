@@ -243,6 +243,36 @@ Rules:
 - Separate processes (dashboard, census scripts, backups via `.backup`)
   are safe: the kernel serialises them.
 
+**The engine now guards this itself (issue #225, 0.22).** On Linux every
+SQLite instance maps the store's `-shm` file region by region; the same
+`<store>-shm` path mapped at the same offset twice in `/proc/self/maps`
+means a second library has the store open in this process. The engine
+scans at open and from the writer connection's commit hook (cached 200
+ms). `foreign_sqlite_mode`, durable in `meta`, defaults to `refuse` on
+every install: engine writes fail with `ForeignSqliteInstance` — and the
+commit hook aborts anything that slipped past the pre-check, the
+materializer's commits included — from the first detection until the
+engine is reopened: measured 2026-09-07, the foreign library's close
+unlinks the `-shm` file under the engine (its own lock table says it was
+the last user), so "resume when it closes" would be unsafe. Reads
+continue. `warn`
+counts (`stats().foreign_sqlite_detected_since_boot`) and keeps writing;
+`off` never scans. macOS reads the same rule through libproc region
+enumeration (rescanned every second instead of every 200 ms); Windows
+locks are per handle and is not affected (`foreign_sqlite_supported =
+false`).
+
+The cross-process half: SQLite's `PRAGMA data_version` on the writer
+connection changes only when another connection commits, and every
+engine write goes through that one connection, so a change is exactly
+"someone else committed" (another engine process, the `sqlite3` CLI, a
+backup tool — legitimate, but the only way the store changes under the
+engine). Each is counted (`stats().foreign_commits_detected_since_boot`)
+and queues one `PRAGMA quick_check`, run off the writer by the
+materializer or by `integrity_check()` on demand; a failed check taints
+the store the same way, because writing onto a corrupt file only spreads
+the damage.
+
 ---
 
 ## Cross-stack rule — engine pressure suppresses enrichment, NEVER decay

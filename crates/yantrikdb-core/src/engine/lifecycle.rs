@@ -816,6 +816,7 @@ impl YantrikDB {
     /// behavioral difference vs the cluster primitive.
     #[tracing::instrument(skip(self))]
     pub fn forget(&self, rid: &str) -> Result<bool> {
+        self.foreign_commit_precheck()?;
         let ts_micros = (now() * 1_000_000.0) as i64;
         self.tombstone_inner(rid, None, None, ts_micros, None)
     }
@@ -874,6 +875,7 @@ impl YantrikDB {
         new_valence: Option<f64>,
         reason: &str,
     ) -> Result<CorrectionResult> {
+        self.foreign_commit_precheck()?;
         self.correct_impl(
             rid,
             new_text,

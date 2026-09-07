@@ -14,6 +14,7 @@ from yantrikdb._yantrikdb_rust import (
     PhraseRouteUnavailableError,
     ProvenanceInconsistent,
     RecallContended,
+    ForeignSqliteInstance,
     SourceTurnMaintenanceRequiredError,
     TenantManager,
     YantrikDB,
@@ -98,5 +99,6 @@ __all__ = [
     "PhraseRouteUnavailableError",
     "ProvenanceInconsistent",
     "RecallContended",
+    "ForeignSqliteInstance",
     "SourceTurnMaintenanceRequiredError",
 ]
