@@ -437,6 +437,58 @@ fn strip_code(text: &str) -> std::borrow::Cow<'_, str> {
 /// Recall`, `Make -leads-> 2`). Hand-written, no external word list, so no
 /// licence rides along. The store then LEARNS the rest from its own text
 /// (see [`token_case_observations`]); this list only covers the cold start.
+/// Words that open a sentence capitalized by position and are never part
+/// of the name that follows: `Tonight CT128 runs 0.19.0` is CT128's
+/// sentence, not `Tonight CT128`'s. The lexicon handles a token the store
+/// has seen lowercase; this covers the cold start and the words a store
+/// mostly writes at sentence starts (so the lexicon never learns them).
+pub const SENTENCE_OPENERS: &[&str] = &[
+    "today",
+    "tonight",
+    "tomorrow",
+    "yesterday",
+    "meanwhile",
+    "however",
+    "later",
+    "earlier",
+    "then",
+    "now",
+    "also",
+    "finally",
+    "recently",
+    "currently",
+    "previously",
+    "next",
+    "first",
+    "second",
+    "last",
+    "after",
+    "before",
+    "during",
+    "since",
+    "until",
+    "when",
+    "while",
+    "once",
+    "still",
+    "already",
+    "soon",
+    "again",
+    "here",
+    "there",
+    "overall",
+    "otherwise",
+    "instead",
+    "besides",
+    "anyway",
+    "note",
+    "update",
+    "reminder",
+    "result",
+    "status",
+    "conclusion",
+];
+
 pub const COMMON_WORD_SEED: &[&str] = &[
     "about",
     "above",
@@ -1228,8 +1280,22 @@ fn extract_entities_from_segment(
     lookup: &dyn Fn(&str) -> Option<CaseStats>,
 ) {
     let mut chunk: Vec<String> = Vec::new();
+    // Does the current chunk start with the segment's first word — a word
+    // capitalized by position, not by being a name?
+    let mut chunk_opens_segment = false;
 
-    let flush = |chunk: &mut Vec<String>, out: &mut Vec<String>| {
+    let flush = |chunk: &mut Vec<String>, out: &mut Vec<String>, opens_segment: bool| {
+        // SENTENCE-INITIAL WELDING (issue #224 follow-up, 2026-09-07): a
+        // multi-token chunk that opens the segment with a word the store
+        // writes lowercase elsewhere, or a known sentence opener, is that
+        // word welded onto the name after it (`Tonight CT128`). Drop the
+        // opener; the single-token case is already the lexicon's job.
+        if opens_segment && chunk.len() >= 2 {
+            let first = &chunk[0];
+            if is_sentence_opener_with(first, lookup) {
+                chunk.remove(0);
+            }
+        }
         while !chunk.is_empty() && is_entity_stopword(&chunk[0]) {
             chunk.remove(0);
         }
@@ -1256,10 +1322,13 @@ fn extract_entities_from_segment(
         chunk.clear();
     };
 
+    let mut first_word = true;
     for word in text
         .split(|c: char| !c.is_alphanumeric() && c != '\'')
         .filter(|s| !s.is_empty())
     {
+        let at_segment_start = first_word;
+        first_word = false;
         // A leading quote mark is not part of a name: `'Sarah works at
         // Google'` (a quoted assertion inside a note) must admit Sarah.
         // Measured 2026-09-07 on the production store: with Sarah refused
@@ -1267,7 +1336,7 @@ fn extract_entities_from_segment(
         // and minted `PyPI -works_at-> Google`.
         let word = word.trim_start_matches('\'');
         if word.is_empty() {
-            flush(&mut chunk, entities);
+            flush(&mut chunk, entities, chunk_opens_segment);
             continue;
         }
         // A possessive clitic belongs to the grammar around a name, not to
@@ -1286,7 +1355,7 @@ fn extract_entities_from_segment(
         // facts block the first cut rendered was `I'm -headquartered_in->
         // East Janethaven`, the subject being the pronoun's contraction.
         if is_contraction(entity_word) {
-            flush(&mut chunk, entities);
+            flush(&mut chunk, entities, chunk_opens_segment);
             continue;
         }
         // A token without a letter (`2026`, `0.19.0`, `15`) is a value, not
@@ -1295,7 +1364,7 @@ fn extract_entities_from_segment(
         // junk. Values reach the relation extractor through
         // `extract_value_candidates`, never through this list.
         if !entity_word.chars().any(|c| c.is_alphabetic()) {
-            flush(&mut chunk, entities);
+            flush(&mut chunk, entities, chunk_opens_segment);
             continue;
         }
         let first = entity_word.chars().next().unwrap();
@@ -1315,15 +1384,36 @@ fn extract_entities_from_segment(
         };
 
         if joins_chunk {
+            if chunk.is_empty() {
+                chunk_opens_segment = at_segment_start;
+            }
             chunk.push(entity_word.to_string());
             if possessive.is_some() {
-                flush(&mut chunk, entities);
+                flush(&mut chunk, entities, chunk_opens_segment);
             }
         } else {
-            flush(&mut chunk, entities);
+            flush(&mut chunk, entities, chunk_opens_segment);
         }
     }
-    flush(&mut chunk, entities);
+    flush(&mut chunk, entities, chunk_opens_segment);
+}
+
+/// A word that opens a sentence by position: in the opener list, or one this
+/// store writes lowercase far more often than as a mid-sentence capital
+/// (the lexicon's own common-word rule, without the seed).
+fn is_sentence_opener_with(token: &str, lookup: &dyn Fn(&str) -> Option<CaseStats>) -> bool {
+    let lower = token.to_lowercase();
+    if SENTENCE_OPENERS.contains(&lower.as_str()) {
+        return true;
+    }
+    match lookup(&lower) {
+        Some(s) => {
+            s.lower_n >= COMMON_WORD_MIN_LOWER
+                && s.lower_n >= COMMON_WORD_LOWER_RATIO * s.cap_mid_n
+                && !(s.cap_mid_n >= COMMON_WORD_MIN_LOWER && s.cap_mid_n > s.lower_n)
+        }
+        None => false,
+    }
 }
 
 // ── Heuristic relation extraction (RFC 006 Phase 1) ──
@@ -4359,6 +4449,86 @@ mod binding_tests {
         assert_eq!(
             (rels[0].src.as_str(), rels[0].dst.as_str()),
             ("Carol", "Taylor")
+        );
+    }
+}
+
+#[cfg(test)]
+mod sentence_opener_tests {
+    use super::*;
+
+    #[test]
+    fn a_sentence_opener_is_never_welded_onto_the_name_after_it() {
+        for (text, want, never) in [
+            (
+                "Tonight CT128 runs 0.19.0 after the deploy.",
+                "CT128",
+                "Tonight CT128",
+            ),
+            (
+                "Meanwhile Alice Moreau moved to Munich.",
+                "Alice Moreau",
+                "Meanwhile Alice Moreau",
+            ),
+            (
+                "Yesterday Fennwick Labs shipped.",
+                "Fennwick Labs",
+                "Yesterday Fennwick Labs",
+            ),
+            (
+                "Note: CT128 is the host. Later CT128 rebooted.",
+                "CT128",
+                "Later CT128",
+            ),
+        ] {
+            let ents = extract_heuristic_entities(text);
+            assert!(ents.iter().any(|e| e == want), "{text:?} → {ents:?}");
+            assert!(
+                !ents.iter().any(|e| e == never),
+                "{text:?} welded: {ents:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_first_name_at_a_sentence_start_stays_whole() {
+        // Not an opener, unknown to a fresh lexicon: the name keeps its head.
+        let ents = extract_heuristic_entities("Alice Moreau works at Fennwick Labs.");
+        assert!(ents.iter().any(|e| e == "Alice Moreau"), "{ents:?}");
+        // A store that writes `Result` lowercase constantly says so; one
+        // that writes `Alice` as a mid-sentence capital keeps the name.
+        let lookup = |tok: &str| match tok {
+            "result" => Some(CaseStats {
+                lower_n: 40,
+                cap_mid_n: 1,
+                cap_start_n: 9,
+            }),
+            "alice" => Some(CaseStats {
+                lower_n: 0,
+                cap_mid_n: 30,
+                cap_start_n: 12,
+            }),
+            _ => None,
+        };
+        let ents =
+            extract_heuristic_entities_with("Result CT128 passed. Alice Moreau agreed.", lookup);
+        assert!(
+            ents.iter().any(|e| e == "CT128") && !ents.iter().any(|e| e == "Result CT128"),
+            "{ents:?}"
+        );
+        assert!(ents.iter().any(|e| e == "Alice Moreau"), "{ents:?}");
+    }
+
+    #[test]
+    fn the_bound_extractor_now_sees_the_later_mention_in_prose() {
+        let text = "CT128 is the memory host. Tonight CT128 runs 0.19.0 after the deploy.";
+        let mut ents = extract_heuristic_entities(text);
+        ents.extend(extract_value_candidates(text));
+        let rels = extract_relations_bound(text, &ents).relations;
+        assert!(
+            rels.iter()
+                .any(|r| r.src == "CT128" && r.rel_type == "runs" && r.dst == "0.19.0"),
+            "{rels:?}"
         );
     }
 }
