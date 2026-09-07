@@ -497,15 +497,6 @@ fn non_finite_bounds_are_invalid_scalars() {
     }
 }
 
-// ── #181: the values ride out on the result ──────────────────────────
-//
-// Filtering was only half the surface — a caller who filtered could not
-// see WHY a row was eligible. Host rows report the v48 COLUMNS, the same
-// values the prefilter range-scans, so stated bounds and eligibility can
-// never contradict each other. `null_columns_report_none_*` is the test
-// that pins that choice.
-// =====================================================================
-
 /// The `event_time_columns.rs` census shape, reused to prove the
 /// hydrated values match the columns rather than merely existing.
 fn columns_for(db: &YantrikDB, rid: &str) -> (Option<f64>, Option<f64>) {
