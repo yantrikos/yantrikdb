@@ -380,6 +380,19 @@ pub(crate) fn map_err(e: yantrikdb_core::YantrikDbError) -> PyErr {
             py_errors::ProvenanceInconsistent::new_err(e.to_string())
         }
         E::RecallContended { .. } => py_errors::RecallContended::new_err(e.to_string()),
+        E::ForeignSqliteInstance { .. } => py_errors::ForeignSqliteInstance::new_err(e.to_string()),
+        // The commit hook's abort surfaces from SQLite as
+        // SQLITE_CONSTRAINT_COMMITHOOK; it means the same thing.
+        E::Database(rusqlite::Error::SqliteFailure(ref err, _))
+            if err.extended_code == yantrikdb_core::engine::SQLITE_CONSTRAINT_COMMITHOOK =>
+        {
+            py_errors::ForeignSqliteInstance::new_err(
+                "refusing to write: another SQLite library has this store open in this \
+                 process (issue #225); the commit was aborted. Close that connection, check \
+                 integrity and reopen the engine (its close may have unlinked the \
+                 shared-memory file); use the engine API / a separate process for raw SQL.",
+            )
+        }
         E::PackEmbedderMismatch { .. } => py_errors::PackEmbedderMismatch::new_err(e.to_string()),
         E::PackAlreadyMounted { .. } => py_errors::PackAlreadyMounted::new_err(e.to_string()),
         E::PackSignatureInvalid { .. } => py_errors::PackSignatureInvalid::new_err(e.to_string()),
@@ -790,6 +803,32 @@ impl PyYantrikDB {
         self.get_inner()?
             .set_claim_chain_gate_mode(parsed)
             .map_err(map_err)
+    }
+
+    /// `"off"` | `"warn"` | `"refuse"`: what the engine does when another
+    /// SQLite library (the stdlib `sqlite3` module, a system libsqlite3)
+    /// has this store open in this process — the silent-corruption hazard
+    /// of issue #225. Every database defaults to `refuse`: writes fail with
+    /// `ForeignSqliteInstance` from the first detection until the engine is
+    /// reopened (the foreign library's close may unlink the shm/WAL under it). Detection needs Linux and a
+    /// file-backed store (`stats()["foreign_sqlite_supported"]`).
+    fn foreign_sqlite_mode(&self) -> PyResult<String> {
+        Ok(self.get_inner()?.foreign_sqlite_mode().as_str().to_string())
+    }
+
+    /// Durably set the guard mode. `warn` keeps writing and counts; `off`
+    /// never scans. Both opt out of a corruption guard.
+    fn set_foreign_sqlite_mode(&self, mode: &str) -> PyResult<()> {
+        let parsed = yantrikdb_core::ForeignSqliteMode::parse(mode).map_err(map_err)?;
+        self.get_inner()?
+            .set_foreign_sqlite_mode(parsed)
+            .map_err(map_err)
+    }
+
+    /// Scan now: is a second SQLite library holding this store open in this
+    /// process? Always False where detection is unsupported.
+    fn foreign_sqlite_detected(&self) -> PyResult<bool> {
+        Ok(self.get_inner()?.foreign_sqlite_detected())
     }
 
     /// Exposed for Python consolidate.py compatibility.

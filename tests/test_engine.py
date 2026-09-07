@@ -303,6 +303,10 @@ class TestStats:
             "provenance_gate_mode", "provenance_flagged_since_boot",
             # 0.22: claim-chain gate adoption surface (shadow counters).
             "claim_chain_gate_mode", "claim_chain_gate_suppressed_since_boot",
+            # Issue #225: the second-SQLite-library guard.
+            "foreign_sqlite_mode", "foreign_sqlite_supported", "foreign_sqlite_active",
+            "foreign_sqlite_tainted",
+            "foreign_sqlite_detected_since_boot", "foreign_sqlite_refused_since_boot",
             # Provenance-origin census: explicitly verified records and
             # legacy/user-source rows without an explicit verification marker.
             "provenance_verified_records", "unverified_user_source_records",

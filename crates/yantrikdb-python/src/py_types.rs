@@ -303,6 +303,19 @@ pub fn stats_to_dict(py: Python<'_>, s: &yantrikdb_core::Stats) -> PyResult<PyOb
         "claim_chain_gate_suppressed_since_boot",
         &s.claim_chain_gate_suppressed_since_boot,
     )?;
+    // Issue #225: the second-SQLite-library guard.
+    dict.set_item("foreign_sqlite_mode", &s.foreign_sqlite_mode)?;
+    dict.set_item("foreign_sqlite_supported", s.foreign_sqlite_supported)?;
+    dict.set_item("foreign_sqlite_active", s.foreign_sqlite_active)?;
+    dict.set_item("foreign_sqlite_tainted", s.foreign_sqlite_tainted)?;
+    dict.set_item(
+        "foreign_sqlite_detected_since_boot",
+        s.foreign_sqlite_detected_since_boot,
+    )?;
+    dict.set_item(
+        "foreign_sqlite_refused_since_boot",
+        s.foreign_sqlite_refused_since_boot,
+    )?;
     dict.set_item("provenance_verified_records", s.provenance_verified_records)?;
     dict.set_item(
         "unverified_user_source_records",

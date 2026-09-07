@@ -69,6 +69,20 @@ create_exception!(
 
 create_exception!(
     yantrikdb,
+    ForeignSqliteInstance,
+    PyRuntimeError,
+    "Another SQLite library (the stdlib `sqlite3` module, a system libsqlite3) \
+     has this store open in this process, and the engine refused to write: \
+     POSIX locks are per process, so that connection's unlock releases the \
+     engine's and the two writers would interleave WAL commits (silent page \
+     aliasing; issue #225). Close that connection, check integrity and reopen \
+     the engine — its close may have unlinked the shared-memory file under the \
+     engine, so writes stay refused until then — and use the engine API or a \
+     separate process for raw SQL."
+);
+
+create_exception!(
+    yantrikdb,
     RecallContended,
     PyRuntimeError,
     "A recall lost a bounded read-contention race (writer-priority lock \

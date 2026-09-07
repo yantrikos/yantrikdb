@@ -100,6 +100,7 @@ impl YantrikDB {
         source: &str,
         emotional_state: Option<&str>,
     ) -> Result<String> {
+        self.foreign_sqlite_precheck()?;
         self.record_with_idempotency(
             text,
             memory_type,
@@ -170,6 +171,7 @@ impl YantrikDB {
         idempotency_key: Option<&str>,
         created_at: Option<f64>,
     ) -> Result<String> {
+        self.foreign_sqlite_precheck()?;
         self.record_with_idempotency_routed(
             text,
             memory_type,
@@ -1138,6 +1140,7 @@ impl YantrikDB {
     /// Uses SAVEPOINT for atomicity while keeping `&self` (no `&mut self`).
     #[tracing::instrument(skip(self, inputs), fields(batch_size = inputs.len()))]
     pub fn record_batch(&self, inputs: &[RecordInput]) -> Result<Vec<String>> {
+        self.foreign_sqlite_precheck()?;
         if inputs.is_empty() {
             return Ok(vec![]);
         }
@@ -2096,6 +2099,7 @@ impl YantrikDB {
         seq: Option<u64>,
         admission: crate::provenance::WriteAdmission,
     ) -> Result<()> {
+        self.foreign_sqlite_precheck()?;
         // 4a.6b (sol r2 finding 2): the anti-laundering gate. ORIGIN callers are
         // gated exactly like record(); ADMITTED callers (the materializer drain,
         // replication apply) are NOT re-gated — the op was gated at the leader's

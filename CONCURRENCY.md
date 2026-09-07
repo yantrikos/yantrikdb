@@ -243,6 +243,24 @@ Rules:
 - Separate processes (dashboard, census scripts, backups via `.backup`)
   are safe: the kernel serialises them.
 
+**The engine now guards this itself (issue #225, 0.22).** On Linux every
+SQLite instance maps the store's `-shm` file region by region; the same
+`<store>-shm` path mapped at the same offset twice in `/proc/self/maps`
+means a second library has the store open in this process. The engine
+scans at open and from the writer connection's commit hook (cached 200
+ms). `foreign_sqlite_mode`, durable in `meta`, defaults to `refuse` on
+every install: engine writes fail with `ForeignSqliteInstance` — and the
+commit hook aborts anything that slipped past the pre-check, the
+materializer's commits included — from the first detection until the
+engine is reopened: measured 2026-09-07, the foreign library's close
+unlinks the `-shm` file under the engine (its own lock table says it was
+the last user), so "resume when it closes" would be unsafe. Reads
+continue. `warn`
+counts (`stats().foreign_sqlite_detected_since_boot`) and keeps writing;
+`off` never scans. macOS has no `/proc` (detector reports
+`foreign_sqlite_supported = false`); Windows locks are per handle and is
+not affected.
+
 ---
 
 ## Cross-stack rule — engine pressure suppresses enrichment, NEVER decay

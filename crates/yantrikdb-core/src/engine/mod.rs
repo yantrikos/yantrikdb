@@ -12,6 +12,8 @@ mod causal;
 mod chunking;
 mod claims_lane;
 pub use claims_lane::ChainGateMode;
+pub(crate) mod foreign_sqlite;
+pub use foreign_sqlite::{ForeignSqliteMode, SQLITE_CONSTRAINT_COMMITHOOK};
 mod cognition;
 mod coherence;
 pub mod conflict;
@@ -267,6 +269,9 @@ pub struct YantrikDB {
     /// before turning the gate on. In-memory by design.
     pub(crate) claim_chain_gate_suppressed_since_boot:
         parking_lot::Mutex<std::collections::BTreeMap<String, u64>>,
+    /// **Issue #225** — the second-SQLite-library guard, shared with the
+    /// writer connection's commit hook. See `engine::foreign_sqlite`.
+    pub(crate) foreign_sqlite: std::sync::Arc<foreign_sqlite::ForeignSqliteGuard>,
     /// **v0.10 Item 3 — correction seqlock (sol r4).** A DB-wide epoch that
     /// makes a text-changing correction's (SQL commit + vector publish +
     /// scoring-cache update) atomic FROM A READER'S PERSPECTIVE, without
@@ -1176,6 +1181,16 @@ impl YantrikDB {
                 [],
             ),
         )?;
+        // Issue #225: refuse to write while a second SQLite library has the
+        // store open in this process — on every install, because the
+        // alternative is silent corruption. `set_foreign_sqlite_mode` opts out.
+        at(
+            "fresh_defaults",
+            conn.execute(
+                "INSERT OR IGNORE INTO meta (key, value) VALUES ('foreign_sqlite_mode', 'refuse')",
+                [],
+            ),
+        )?;
 
         // **v28 (issue #41 brainstorm-4 §6).** Seed meta.active_generation
         // on first install. INSERT OR IGNORE preserves the durable
@@ -1605,6 +1620,32 @@ impl YantrikDB {
             .unwrap_or("shadow"),
         )?
         .as_u8();
+        let foreign_sqlite_mode = foreign_sqlite::ForeignSqliteMode::parse(
+            rewrap(
+                "final_meta_reads",
+                Self::get_meta(&conn, "foreign_sqlite_mode"),
+            )?
+            .as_deref()
+            .unwrap_or("refuse"),
+        )?;
+        // Issue #225: the guard, and the commit hook that makes it a hard
+        // guarantee on the writer connection — every engine commit, the
+        // materializer's included, goes through this one connection.
+        let foreign_sqlite = std::sync::Arc::new(foreign_sqlite::ForeignSqliteGuard::new(
+            db_path,
+            foreign_sqlite_mode,
+        ));
+        {
+            let hook_guard = std::sync::Arc::clone(&foreign_sqlite);
+            conn.commit_hook(Some(move || hook_guard.commit_should_abort()));
+        }
+        if foreign_sqlite.scan() {
+            tracing::warn!(
+                db_path = %db_path,
+                mode = foreign_sqlite_mode.as_str(),
+                "opened with another SQLite library already holding this store in this process"
+            );
+        }
 
         // Missing is the v42-upgrade-compatible default. A malformed or zero
         // persisted value fails open() loudly: silently disabling a write-
@@ -1668,6 +1709,7 @@ impl YantrikDB {
             claim_chain_gate_suppressed_since_boot: parking_lot::Mutex::new(
                 std::collections::BTreeMap::new(),
             ),
+            foreign_sqlite,
             correction_epoch: std::sync::atomic::AtomicU64::new(0),
             visible_seq: dashmap::DashMap::new(),
             visible_seq_cv: parking_lot::Condvar::new(),
@@ -2072,6 +2114,39 @@ impl YantrikDB {
             .store(mode.as_u8(), std::sync::atomic::Ordering::Relaxed);
         drop(conn);
         Ok(())
+    }
+
+    /// **Issue #225.** The second-SQLite-library guard mode
+    /// (`off` | `warn` | `refuse`); every install defaults to `refuse`.
+    pub fn foreign_sqlite_mode(&self) -> foreign_sqlite::ForeignSqliteMode {
+        self.foreign_sqlite.mode()
+    }
+
+    /// Durably set the guard mode. `warn` keeps writing and counts
+    /// detections; `off` never scans. Both are opt-outs from a corruption
+    /// guard — say why in the operator log.
+    pub fn set_foreign_sqlite_mode(&self, mode: foreign_sqlite::ForeignSqliteMode) -> Result<()> {
+        let conn = self.conn();
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('foreign_sqlite_mode', ?1)",
+            params![mode.as_str()],
+        )?;
+        self.foreign_sqlite.set_mode(mode);
+        drop(conn);
+        Ok(())
+    }
+
+    /// Scan now (not the cached verdict): is a second SQLite library holding
+    /// this store open in this process? Always `false` where the detector is
+    /// unsupported (`stats().foreign_sqlite_supported`).
+    pub fn foreign_sqlite_detected(&self) -> bool {
+        self.foreign_sqlite.scan()
+    }
+
+    /// The typed pre-check every public write entry point runs first.
+    #[inline]
+    pub(crate) fn foreign_sqlite_precheck(&self) -> Result<()> {
+        self.foreign_sqlite.check_write()
     }
 
     /// Tick the since-boot suppression counters (one recall's worth).
@@ -2879,6 +2954,7 @@ impl YantrikDB {
         allow_queued_route: bool,
         synthesis: Option<&SynthesisAdmission>,
     ) -> Result<String> {
+        self.foreign_sqlite_precheck()?;
         // v0.9.3 contract gate: scalars validated BEFORE calibration mutates
         // the namespace's running distribution. (The embedding is engine-
         // generated below and validated inside the embed step.)

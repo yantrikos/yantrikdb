@@ -455,6 +455,22 @@ pub enum YantrikDbError {
     #[error("provenance rejected at {path}: {reason}")]
     ProvenanceInconsistent { path: &'static str, reason: String },
 
+    /// **Issue #225.** Another SQLite library has this store open in this
+    /// process (Python's stdlib `sqlite3`, a system `libsqlite3`). POSIX
+    /// advisory locks are per process, so its unlock releases the engine's
+    /// and two writers would interleave WAL commits — silent page aliasing.
+    /// The engine refuses to write while the condition holds; writes resume
+    /// once the foreign connection closes. Use the engine API or a separate
+    /// process for raw SQL. See CONCURRENCY.md Rule 9.
+    #[error(
+        "refusing to write: another SQLite library has {path} open in this process \
+         (issue #225 — POSIX locks are per process, so its unlock releases the engine's \
+         and the two writers would interleave WAL commits). Close that connection, check \
+         integrity and reopen the engine (its close may have unlinked the shared-memory \
+         file); use the engine API / a separate process for raw SQL."
+    )]
+    ForeignSqliteInstance { path: String },
+
     /// **v0.10 Item 4a.6c — durable idempotency (T07).** The caller reused an
     /// idempotency key whose committed claim does not match this write —
     /// normally a DIFFERENT payload digest under the same key ("repetition is

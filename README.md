@@ -49,6 +49,18 @@ pip install yantrikdb
 `sentence-transformers` install, no ONNX runtime.** Just one
 `pip install`.
 
+> **Never open the store with a second SQLite library in the same
+> process.** The engine bundles its own SQLite; `sqlite3.connect()` on
+> the same file from the same process (for a helper `UPDATE`, a raw
+> `INSERT` into `claims`, your own scan) corrupts the store silently:
+> POSIX locks are per process, so that connection's unlock releases the
+> engine's and the two writers interleave WAL commits. Use the engine API
+> (`correct()`, `ingest_claim()`, `attach_claims()`, `think()`) or a
+> separate process; sequential use after `close()` is fine. On Linux the
+> engine detects the second instance and refuses to write from then
+> until it is reopened (`ForeignSqliteInstance`,
+> `stats()["foreign_sqlite_*"]`), see CONCURRENCY.md Rule 9.
+
 A new file-backed store opens on `potion-base-8M` (256-dim), fetched
 once (~28 MB, SHA-256 pinned, cached under your user cache dir) and
 self-hosted from `yantrikos/yantrikdb-models` — no HuggingFace
