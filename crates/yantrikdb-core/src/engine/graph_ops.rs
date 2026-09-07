@@ -852,6 +852,15 @@ impl YantrikDB {
     ) -> Result<String> {
         let claim_id = crate::id::new_id();
         let ts = now();
+        // v53 grounding status: only a cooperative claim has had its
+        // endpoints grounded in the source text by the engine
+        // (attach_claims). Every other writer, the heuristic extractor
+        // included, gets 0 until it validates its own bindings.
+        let grounding: i64 = if extractor == STATED_CLAIM_EXTRACTOR {
+            1
+        } else {
+            0
+        };
 
         // Resolve aliases before storage
         let src_resolved = self.resolve_alias(src, namespace);
@@ -886,18 +895,18 @@ impl YantrikDB {
                 "INSERT INTO claims (claim_id, src, dst, rel_type, weight, created_at, \
                  polarity, modality, valid_from, valid_to, extractor, extractor_version, \
                  confidence_band, source_memory_rid, span_start, span_end, namespace, \
-                 proposition_id, regime_tag) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19) \
+                 proposition_id, regime_tag, grounding) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20) \
                  ON CONFLICT(src, dst, rel_type, extractor, polarity, namespace) DO UPDATE SET \
                  weight = ?5, created_at = ?6, modality = ?8, \
                  valid_from = ?9, valid_to = ?10, extractor_version = ?12, \
                  confidence_band = ?13, source_memory_rid = ?14, span_start = ?15, span_end = ?16, \
-                 proposition_id = ?18, regime_tag = ?19",
+                 proposition_id = ?18, regime_tag = ?19, grounding = ?20",
                 params![
                     claim_id, src_resolved, dst_resolved, rel_type, weight, ts,
                     polarity, modality, valid_from, valid_to, extractor, extractor_version,
                     confidence_band, source_memory_rid, span_start, span_end, namespace,
-                    proposition_id, regime_tag
+                    proposition_id, regime_tag, grounding
                 ],
             )?;
 
@@ -1016,18 +1025,18 @@ impl YantrikDB {
         let conn = self.conn.lock();
         let sql = if let Some(ns) = namespace {
             format!(
-                "SELECT edge_id, src, dst, rel_type, weight, created_at, \
+                "SELECT claim_id, src, dst, rel_type, weight, created_at, \
                  polarity, modality, valid_from, valid_to, extractor, confidence_band, \
-                 source_memory_rid, namespace \
-                 FROM edges WHERE (src = ?1 OR dst = ?1) AND namespace = '{}' AND tombstoned = 0 \
+                 source_memory_rid, namespace, grounding \
+                 FROM claims WHERE (src = ?1 OR dst = ?1) AND namespace = '{}' AND tombstoned = 0 \
                  ORDER BY created_at DESC",
                 ns.replace('\'', "''")
             )
         } else {
-            "SELECT edge_id, src, dst, rel_type, weight, created_at, \
+            "SELECT claim_id, src, dst, rel_type, weight, created_at, \
              polarity, modality, valid_from, valid_to, extractor, confidence_band, \
-             source_memory_rid, namespace \
-             FROM edges WHERE (src = ?1 OR dst = ?1) AND tombstoned = 0 \
+             source_memory_rid, namespace, grounding \
+             FROM claims WHERE (src = ?1 OR dst = ?1) AND tombstoned = 0 \
              ORDER BY created_at DESC"
                 .to_string()
         };
@@ -1088,6 +1097,7 @@ impl YantrikDB {
                     "confidence_band": row.get::<_, String>(11)?,
                     "source_memory_rid": source_rid,
                     "namespace": row.get::<_, String>(13)?,
+                    "grounding": row.get::<_, i64>(14)?,
                     "status_suggestion": status,
                 }))
             })?

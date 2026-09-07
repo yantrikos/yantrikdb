@@ -24,7 +24,7 @@
 // v51 adds the self-mined relation template tables (learned_relation_patterns +
 // support), fed by cooperative claims and applied by the materializer.
 // v52 adds token_case_stats, the store's own lexicon for entity admission.
-pub const SCHEMA_VERSION: i32 = 52;
+pub const SCHEMA_VERSION: i32 = 53;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -734,6 +734,13 @@ CREATE TABLE IF NOT EXISTS claims (
     extractor TEXT NOT NULL DEFAULT 'manual',       -- manual|structured_ingest|heuristic_v1|agent_llm
     extractor_version TEXT,
     confidence_band TEXT NOT NULL DEFAULT 'medium', -- low|medium|high
+    -- v53: versioned grounding status. 0 = the argument binding was never
+    -- validated (every extractor row so far); 1 = cooperative: a writer
+    -- stated the claim and the engine grounded both endpoints in the source
+    -- text (attach_claims). The claim-chain gate reads this column; see
+    -- engine::claims_lane. Higher values are reserved for validated
+    -- extractor bindings.
+    grounding INTEGER NOT NULL DEFAULT 0,
     source_memory_rid TEXT,                         -- provenance: which memory spawned this claim
     span_start INTEGER,                             -- byte offset in source memory text
     span_end INTEGER,
@@ -3316,4 +3323,17 @@ CREATE TABLE IF NOT EXISTS token_case_stats (
     cap_mid_n INTEGER NOT NULL DEFAULT 0,
     cap_start_n INTEGER NOT NULL DEFAULT 0
 );
+";
+
+pub const MIGRATE_V52_TO_V53: &str = "
+-- v53: claims.grounding — a versioned grounding status the claim-chain gate
+-- reads (engine::claims_lane). 0 = binding never validated: every extractor
+-- row written before the gate existed, and every heuristic row since, until
+-- an extractor that validates its bindings sets a higher value. 1 =
+-- cooperative: the writer stated it and the engine grounded both endpoints
+-- in the text (attach_claims, extractor 'agent_stated'), so the backfill
+-- marks exactly those rows. The gate mode itself lives in meta
+-- ('claim_chain_gate_mode', seeded 'shadow' on open).
+ALTER TABLE claims ADD COLUMN grounding INTEGER NOT NULL DEFAULT 0;
+UPDATE claims SET grounding = 1 WHERE extractor = 'agent_stated';
 ";

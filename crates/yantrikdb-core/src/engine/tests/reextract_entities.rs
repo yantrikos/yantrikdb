@@ -357,5 +357,5 @@ fn heal_uses_the_lexicon_and_unlinks_kept_value_names() {
             |r| r.get(0),
         )
         .unwrap();
-    assert_eq!(v, "52");
+    assert_eq!(v, crate::base::schema::SCHEMA_VERSION.to_string());
 }

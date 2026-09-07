@@ -107,41 +107,249 @@ pub(crate) fn claims_lex_strength(why: &[String]) -> Option<f64> {
     })
 }
 
-/// `(src, rel_type, dst, source_memory_rid, polarity)` rows of the
-/// claims touching `entity`, most recent first, with phantom endpoints
-/// already suppressed (see the note inside). Empty on a missing table.
-fn claims_touching(
-    conn: &Connection,
-    entity: &str,
-    namespace: Option<&str>,
-) -> Vec<(String, String, String, String, i64)> {
-    let sql = format!(
-        "SELECT src, rel_type, dst, source_memory_rid, polarity, extractor FROM claims \
-         WHERE (src = ?1 OR dst = ?1) AND tombstoned = 0 \
-         AND source_memory_rid IS NOT NULL {} \
-         ORDER BY created_at DESC LIMIT {}",
-        if namespace.is_some() {
-            "AND namespace = ?2"
-        } else {
-            ""
-        },
-        MAX_CLAIMS_PER_ENTITY,
-    );
-    let Ok(mut stmt) = conn.prepare_cached(&sql) else {
-        return Vec::new(); // no claims table — empty lane, never an error
+// ── Claim-chain eligibility gate (2026-09-07) ───────────────────────
+//
+// Measured on the production store after the 0.21.2 deploy: the heal
+// wrote `PyPI -works_at-> Google` (the subject search walked back past a
+// sentence boundary and a colon to the previous capitalized entity) and
+// `PyPI -runs-> CT128` (the true subject, lowercase `core`, was skipped),
+// and this lane then surfaced both with confident path provenance on a
+// query about CT128. Extraction will be fixed; the gate is what stops a
+// wrong claim from PROPAGATING in the meantime, and what keeps future
+// wrong claims from doing so.
+//
+// A claim is eligible for the lane when its `grounding` status says its
+// argument binding was validated (today: only cooperative claims, whose
+// endpoints the engine grounded in the text) AND it is valid as of the
+// query's time. A claim may additionally be TRAVERSED (used as a seed or
+// admitted as the second hop of a path) only when it is a positive,
+// asserted proposition — a denial or a reported rumour is exact evidence
+// about its anchor, never a link to chain through.
+//
+// Three modes, durable in `meta.claim_chain_gate_mode`, default `shadow`
+// on every install: `off` evaluates nothing; `shadow` admits exactly what
+// the lane admitted before and COUNTS what `enforce` would refuse
+// (`stats().claim_chain_gate_suppressed_since_boot`, keyed
+// `hop1:<reason>` / `seed:<reason>` / `hop2:<reason>`); `enforce` refuses
+// it. Under `enforce`, every edge of a path must be eligible — a path is
+// never built through a claim that could not stand on its own.
+
+/// `claims.grounding`: the binding was never validated (every extractor
+/// row so far).
+pub(crate) const GROUNDING_NONE: i64 = 0;
+/// `claims.grounding`: cooperative — the writer stated it, the engine
+/// grounded both endpoints in the source text (`attach_claims`).
+pub(crate) const GROUNDING_COOPERATIVE: i64 = 1;
+
+/// The claim-chain gate mode. See the module note above.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChainGateMode {
+    Off,
+    Shadow,
+    Enforce,
+}
+
+impl ChainGateMode {
+    /// Parse a persisted or caller-supplied mode. A malformed value is a
+    /// typed error, never a silent `Off`.
+    pub fn parse(s: &str) -> crate::error::Result<Self> {
+        match s {
+            "off" => Ok(Self::Off),
+            "shadow" => Ok(Self::Shadow),
+            "enforce" => Ok(Self::Enforce),
+            other => Err(crate::error::YantrikDbError::InvalidInput(format!(
+                "claim_chain_gate_mode: expected off|shadow|enforce, got {other:?}"
+            ))),
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Shadow => "shadow",
+            Self::Enforce => "enforce",
+        }
+    }
+
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Off => 0,
+            Self::Shadow => 1,
+            Self::Enforce => 2,
+        }
+    }
+
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            2 => Self::Enforce,
+            1 => Self::Shadow,
+            _ => Self::Off,
+        }
+    }
+}
+
+/// Why a claim was (or under `enforce`, would be) refused by the gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Ineligible {
+    /// `grounding` says the binding was never validated.
+    Ungrounded,
+    /// `valid_from` is after the query's as-of time.
+    NotYetValid,
+    /// `valid_to` is before the query's as-of time.
+    Superseded,
+    /// Polarity is not positive — a denial is evidence, not a link.
+    Negated,
+    /// Modality is not `asserted` — reported, hypothetical, quoted.
+    NonAsserted,
+}
+
+impl Ineligible {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            Self::Ungrounded => "ungrounded",
+            Self::NotYetValid => "not_yet_valid",
+            Self::Superseded => "superseded",
+            Self::Negated => "negated",
+            Self::NonAsserted => "non_asserted",
+        }
+    }
+}
+
+/// One refusal (real under `enforce`, hypothetical under `shadow`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Suppression {
+    /// `hop1` (a direct admission), `seed` (a hop-1 claim the path would
+    /// have continued from), `hop2` (a second-hop admission).
+    pub hop: &'static str,
+    pub reason: Ineligible,
+}
+
+impl Suppression {
+    /// The stats counter key, `hop1:ungrounded` and the like.
+    pub(crate) fn key(&self) -> String {
+        format!("{}:{}", self.hop, self.reason.as_str())
+    }
+}
+
+/// The gate as one recall sees it: the mode and the instant claims must
+/// be valid at (the end of the caller's time window, else now).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct ChainGate {
+    pub mode: ChainGateMode,
+    pub as_of: f64,
+}
+
+impl ChainGate {
+    pub(crate) fn new(mode: ChainGateMode, as_of: f64) -> Self {
+        Self { mode, as_of }
+    }
+
+    /// No gate at all — the pre-gate lane, for tests of the lane itself.
+    #[cfg(test)]
+    pub(crate) fn off() -> Self {
+        Self {
+            mode: ChainGateMode::Off,
+            as_of: f64::MAX,
+        }
+    }
+}
+
+/// One claim row as the lane reads it.
+#[derive(Debug, Clone)]
+pub(crate) struct ClaimRow {
+    pub src: String,
+    pub rel: String,
+    pub dst: String,
+    /// The claim's source record — what the lane admits.
+    pub rid: String,
+    pub polarity: i64,
+    pub modality: String,
+    pub valid_from: Option<f64>,
+    pub valid_to: Option<f64>,
+    pub grounding: i64,
+}
+
+fn valid_as_of(row: &ClaimRow, as_of: f64) -> Option<Ineligible> {
+    if row.valid_from.is_some_and(|from| from > as_of) {
+        return Some(Ineligible::NotYetValid);
+    }
+    if row.valid_to.is_some_and(|to| to < as_of) {
+        return Some(Ineligible::Superseded);
+    }
+    None
+}
+
+/// May this claim be admitted as direct evidence about a query entity?
+pub(crate) fn direct_ineligibility(row: &ClaimRow, as_of: f64) -> Option<Ineligible> {
+    if row.grounding < GROUNDING_COOPERATIVE {
+        return Some(Ineligible::Ungrounded);
+    }
+    valid_as_of(row, as_of)
+}
+
+/// May this claim be chained through — used as a seed, or admitted as the
+/// second hop of a path? Stricter than direct admission: only a positive,
+/// asserted proposition links two entities.
+pub(crate) fn traversal_ineligibility(row: &ClaimRow, as_of: f64) -> Option<Ineligible> {
+    if let Some(reason) = direct_ineligibility(row, as_of) {
+        return Some(reason);
+    }
+    if row.polarity < 1 {
+        return Some(Ineligible::Negated);
+    }
+    if row.modality != "asserted" {
+        return Some(Ineligible::NonAsserted);
+    }
+    None
+}
+
+/// The claims touching `entity`, most recent first, with phantom
+/// endpoints already suppressed (see the note inside). Empty on a
+/// missing table. A `claims` table that predates v53 (a pack sealed
+/// before the column existed) is read through the legacy column set:
+/// its rows carry no grounding and no windows, which the gate reads as
+/// ungrounded — counted under `shadow`, refused under `enforce`.
+fn claims_touching(conn: &Connection, entity: &str, namespace: Option<&str>) -> Vec<ClaimRow> {
+    let ns_clause = if namespace.is_some() {
+        "AND namespace = ?2"
+    } else {
+        ""
     };
-    let mapper =
-        |row: &rusqlite::Row| -> rusqlite::Result<(String, String, String, String, i64, String)> {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-            ))
-        };
-    let rows: Vec<(String, String, String, String, i64, String)> = if let Some(ns) = namespace {
+    let sql = format!(
+        "SELECT src, rel_type, dst, source_memory_rid, polarity, modality, valid_from, \
+         valid_to, grounding FROM claims \
+         WHERE (src = ?1 OR dst = ?1) AND tombstoned = 0 \
+         AND source_memory_rid IS NOT NULL {ns_clause} \
+         ORDER BY created_at DESC LIMIT {MAX_CLAIMS_PER_ENTITY}",
+    );
+    let legacy_sql = format!(
+        "SELECT src, rel_type, dst, source_memory_rid, polarity, 'asserted', NULL, NULL, \
+         {GROUNDING_NONE} FROM claims \
+         WHERE (src = ?1 OR dst = ?1) AND tombstoned = 0 \
+         AND source_memory_rid IS NOT NULL {ns_clause} \
+         ORDER BY created_at DESC LIMIT {MAX_CLAIMS_PER_ENTITY}",
+    );
+    let mut stmt = match conn.prepare_cached(&sql) {
+        Ok(stmt) => stmt,
+        Err(_) => match conn.prepare_cached(&legacy_sql) {
+            Ok(stmt) => stmt,
+            Err(_) => return Vec::new(), // no claims table — empty lane, never an error
+        },
+    };
+    let mapper = |row: &rusqlite::Row| -> rusqlite::Result<ClaimRow> {
+        Ok(ClaimRow {
+            src: row.get(0)?,
+            rel: row.get(1)?,
+            dst: row.get(2)?,
+            rid: row.get(3)?,
+            polarity: row.get(4)?,
+            modality: row.get(5)?,
+            valid_from: row.get(6)?,
+            valid_to: row.get(7)?,
+            grounding: row.get(8)?,
+        })
+    };
+    let rows: Vec<ClaimRow> = if let Some(ns) = namespace {
         stmt.query_map(params![entity, ns], mapper)
             .map(|r| r.filter_map(|x| x.ok()).collect())
             .unwrap_or_default()
@@ -151,7 +359,7 @@ fn claims_touching(
             .unwrap_or_default()
     };
     rows.into_iter()
-        .filter(|(src, _, dst, _, _, _extractor)| {
+        .filter(|row| {
             // PHANTOM SUPPRESSION — the claims-lane twin of the 0.14.1
             // GraphIndex::build_from_db heal. Claims written by pre-0.14.1
             // extractors keep stopword anchors (observed live 2026-08-16:
@@ -184,30 +392,35 @@ fn claims_touching(
             // Suppressed rows do occupy slots in the per-anchor fetch
             // window above; a phantom-heavy window yields fewer candidates,
             // which is the point — those rows were noise.
-            !(crate::graph::is_rejected_entity_name(src)
-                || crate::graph::is_rejected_entity_name(dst))
+            !(crate::graph::is_rejected_entity_name(&row.src)
+                || crate::graph::is_rejected_entity_name(&row.dst))
         })
-        .map(|(src, rel, dst, rid, polarity, _)| (src, rel, dst, rid, polarity))
         .collect()
 }
 
 /// Resolve `query_tokens` to entities and return the source records of
-/// their claims. Best-effort by design: a missing `claims` table (old
-/// packs) or any read error yields an empty lane, never a failed
-/// recall. Duplicate rids keep their first (best-anchored) why.
-/// Claims with a phantom endpoint (an entity today's extractor would
-/// not mint) are suppressed at read time, with NO extractor exemption —
-/// the V14→V15 backfill made 'manual' untrustworthy on lane rows; see
-/// the inline comment in the row loop.
+/// their claims, plus what the gate refused (or, under `shadow`, would
+/// have). Best-effort by design: a missing `claims` table (old packs) or
+/// any read error yields an empty lane, never a failed recall. Duplicate
+/// rids keep their first (best-anchored) why. Claims with a phantom
+/// endpoint (an entity today's extractor would not mint) are suppressed
+/// at read time, with NO extractor exemption — the V14→V15 backfill made
+/// 'manual' untrustworthy on lane rows; see the inline comment in
+/// `claims_touching`.
 pub(crate) fn claims_candidates(
     conn: &Connection,
     graph_index: &GraphIndex,
     query_tokens: &[String],
     namespace: Option<&str>,
-) -> Vec<ClaimCandidate> {
+    gate: &ChainGate,
+) -> (Vec<ClaimCandidate>, Vec<Suppression>) {
+    let mut suppressed: Vec<Suppression> = Vec::new();
+    let audit = gate.mode != ChainGateMode::Off;
+    let enforce = gate.mode == ChainGateMode::Enforce;
+
     let mut anchors = graph_index.entity_matches_query(query_tokens);
     if anchors.is_empty() {
-        return Vec::new();
+        return (Vec::new(), suppressed);
     }
     // Strongest anchors first (mention count), bounded — with entity
     // name as the TOTAL tiebreak. Fix (f), 2026-08-06: without it,
@@ -229,26 +442,57 @@ pub(crate) fn claims_candidates(
     // discovery order — deterministic because anchors and claim rows are.
     let mut path_seeds: Vec<(String, String, String)> = Vec::new();
     for (entity, _etype, _mentions) in &anchors {
-        for (src, rel, dst, rid, polarity) in claims_touching(conn, entity, namespace) {
-            let neg = if polarity < 0 { "NOT " } else { "" };
-            let far = if src == *entity { &dst } else { &src };
-            if chain_traversable(&rel)
+        for row in claims_touching(conn, entity, namespace) {
+            if audit {
+                if let Some(reason) = direct_ineligibility(&row, gate.as_of) {
+                    suppressed.push(Suppression {
+                        hop: "hop1",
+                        reason,
+                    });
+                    if enforce {
+                        continue; // neither admitted nor a seed
+                    }
+                }
+            }
+            let neg = if row.polarity < 0 { "NOT " } else { "" };
+            let far = if row.src == *entity {
+                &row.dst
+            } else {
+                &row.src
+            };
+            if chain_traversable(&row.rel)
                 && !anchor_names.contains(far.as_str())
                 && path_seeds.len() < MAX_PATH_SEEDS
                 && !path_seeds.iter().any(|(seed, _, _)| seed == far)
             {
-                path_seeds.push((
-                    far.clone(),
-                    entity.clone(),
-                    format!("{src} -{neg}{rel}-> {dst}"),
-                ));
+                let refused = if audit {
+                    traversal_ineligibility(&row, gate.as_of)
+                } else {
+                    None
+                };
+                if let Some(reason) = refused {
+                    suppressed.push(Suppression {
+                        hop: "seed",
+                        reason,
+                    });
+                }
+                if refused.is_none() || !enforce {
+                    path_seeds.push((
+                        far.clone(),
+                        entity.clone(),
+                        format!("{} -{neg}{}-> {}", row.src, row.rel, row.dst),
+                    ));
+                }
             }
-            if !seen.insert(rid.clone()) {
+            if !seen.insert(row.rid.clone()) {
                 continue;
             }
             out.push(ClaimCandidate {
-                why: format!("claims_match: {src} -{neg}{rel}-> {dst} (anchor {entity})"),
-                rid,
+                why: format!(
+                    "claims_match: {} -{neg}{}-> {} (anchor {entity})",
+                    row.src, row.rel, row.dst
+                ),
+                rid: row.rid,
                 hops: 1,
             });
         }
@@ -267,30 +511,43 @@ pub(crate) fn claims_candidates(
             continue;
         }
         let mut per_seed = 0usize;
-        for (src, rel, dst, rid, polarity) in rows {
+        for row in rows {
             if per_seed >= MAX_PATH_PER_SEED || path_admitted >= MAX_PATH_CANDIDATES {
                 break;
             }
-            if !chain_traversable(&rel) {
+            if !chain_traversable(&row.rel) {
                 continue; // generic link: never the second hop of a path
             }
-            if !seen.insert(rid.clone()) {
+            if seen.contains(&row.rid) {
                 continue; // hop-1 provenance, or the hop-1 claim read backwards
             }
-            let neg = if polarity < 0 { "NOT " } else { "" };
+            if audit {
+                if let Some(reason) = traversal_ineligibility(&row, gate.as_of) {
+                    suppressed.push(Suppression {
+                        hop: "hop2",
+                        reason,
+                    });
+                    if enforce {
+                        continue; // not marked seen: another claim may still admit the rid
+                    }
+                }
+            }
+            seen.insert(row.rid.clone());
+            let neg = if row.polarity < 0 { "NOT " } else { "" };
             out.push(ClaimCandidate {
                 why: format!(
-                    "claims_match: {hop1} ; {src} -{neg}{rel}-> {dst} \
-                     {PATH_MARKER}{seed}, anchor {anchor})"
+                    "claims_match: {hop1} ; {} -{neg}{}-> {} \
+                     {PATH_MARKER}{seed}, anchor {anchor})",
+                    row.src, row.rel, row.dst
                 ),
-                rid,
+                rid: row.rid,
                 hops: 2,
             });
             per_seed += 1;
             path_admitted += 1;
         }
     }
-    out
+    (out, suppressed)
 }
 
 impl super::YantrikDB {
@@ -337,12 +594,20 @@ impl super::YantrikDB {
         let Some(qt) = query_text else {
             return Ok(());
         };
-        let cands = {
+        // The gate evaluates claims as of the end of the caller's window,
+        // else now: a superseded claim is still the right answer to a
+        // question about the time it held.
+        let gate = ChainGate::new(
+            self.claim_chain_gate_mode(),
+            time_window.map_or(ts, |(_, hi)| hi),
+        );
+        let (cands, suppressed) = {
             let gi = self.graph_index.read();
             let tokens = crate::graph::tokenize(qt);
             let conn = self.read_conn();
-            claims_candidates(&conn, &gi, &tokens, namespace)
+            claims_candidates(&conn, &gi, &tokens, namespace, &gate)
         };
+        self.note_chain_gate_suppressions(&suppressed);
         if cands.is_empty() {
             return Ok(());
         }
@@ -494,8 +759,10 @@ mod tests {
                  dst TEXT NOT NULL, rel_type TEXT NOT NULL, weight REAL DEFAULT 1.0, \
                  created_at REAL NOT NULL, tombstoned INTEGER NOT NULL DEFAULT 0, \
                  polarity INTEGER NOT NULL DEFAULT 1, \
+                 modality TEXT NOT NULL DEFAULT 'asserted', valid_from REAL, valid_to REAL, \
                  extractor TEXT NOT NULL DEFAULT 'manual', source_memory_rid TEXT, \
-                 namespace TEXT NOT NULL DEFAULT 'default');
+                 namespace TEXT NOT NULL DEFAULT 'default', \
+                 grounding INTEGER NOT NULL DEFAULT 0);
              CREATE VIEW edges AS SELECT src, dst, weight, tombstoned FROM claims;",
         )
         .unwrap();
@@ -540,7 +807,7 @@ mod tests {
         let conn = seeded_store();
         let gi = GraphIndex::build_from_db(&conn).unwrap();
         let tokens = crate::graph::tokenize("what does DB use");
-        let cands = claims_candidates(&conn, &gi, &tokens, None);
+        let cands = claims_candidates(&conn, &gi, &tokens, None, &ChainGate::off()).0;
         let rids: Vec<&str> = cands.iter().map(|c| c.rid.as_str()).collect();
         assert!(
             !rids.contains(&"m1"),
@@ -583,7 +850,7 @@ mod tests {
         .unwrap();
         let gi = GraphIndex::build_from_db(&conn).unwrap();
         let tokens = crate::graph::tokenize("release 15 log architecture");
-        let cands = claims_candidates(&conn, &gi, &tokens, None);
+        let cands = claims_candidates(&conn, &gi, &tokens, None, &ChainGate::off()).0;
         let rids: Vec<&str> = cands.iter().map(|c| c.rid.as_str()).collect();
         assert!(
             !rids.contains(&"m9"),
@@ -606,7 +873,7 @@ mod tests {
             "fixture must reproduce the protected-anchor precondition"
         );
         let tokens = crate::graph::tokenize("the database leads");
-        let cands = claims_candidates(&conn, &gi, &tokens, None);
+        let cands = claims_candidates(&conn, &gi, &tokens, None, &ChainGate::off()).0;
         assert!(
             !cands.iter().any(|c| c.why.contains("DB -leads-> THE")),
             "the exact live phantom why must never be emitted, got {:?}",
@@ -701,7 +968,7 @@ mod tests {
         let conn = chain_store();
         let gi = GraphIndex::build_from_db(&conn).unwrap();
         let tokens = crate::graph::tokenize("which city does Alice Moreau work in");
-        let cands = claims_candidates(&conn, &gi, &tokens, None);
+        let cands = claims_candidates(&conn, &gi, &tokens, None, &ChainGate::off()).0;
         let direct = cands
             .iter()
             .find(|c| c.rid == "mA")
@@ -734,7 +1001,7 @@ mod tests {
         let conn = chain_store();
         let gi = GraphIndex::build_from_db(&conn).unwrap();
         let tokens = crate::graph::tokenize("Alice Moreau");
-        let cands = claims_candidates(&conn, &gi, &tokens, None);
+        let cands = claims_candidates(&conn, &gi, &tokens, None, &ChainGate::off()).0;
         assert_eq!(cands.iter().filter(|c| c.rid == "mA").count(), 1);
     }
 
@@ -760,7 +1027,7 @@ mod tests {
         }
         let gi = GraphIndex::build_from_db(&conn).unwrap();
         let tokens = crate::graph::tokenize("which city does Alice Moreau work in");
-        let cands = claims_candidates(&conn, &gi, &tokens, None);
+        let cands = claims_candidates(&conn, &gi, &tokens, None, &ChainGate::off()).0;
         assert!(
             cands.iter().all(|c| c.hops == 1),
             "hub must not be traversed: {:?}",
@@ -788,7 +1055,7 @@ mod tests {
         .unwrap();
         let gi = GraphIndex::build_from_db(&conn).unwrap();
         let tokens = crate::graph::tokenize("which city does Alice Moreau work in");
-        let cands = claims_candidates(&conn, &gi, &tokens, None);
+        let cands = claims_candidates(&conn, &gi, &tokens, None, &ChainGate::off()).0;
         assert!(
             cands.iter().any(|c| c.rid == "mB"),
             "real hop-2 still admitted"
@@ -813,5 +1080,216 @@ mod tests {
         assert_eq!(claims_lex_strength(&path), Some(PATH_CLAIM_LEX));
         assert!(PATH_CLAIM_LEX < DIRECT_CLAIM_LEX);
         assert_eq!(claims_lex_strength(&["keyword_match".to_string()]), None);
+    }
+
+    // ── Claim-chain eligibility gate ──
+
+    /// The production repro of 2026-09-07, verbatim: the heal minted
+    /// `PyPI -runs-> CT128` (true subject: lowercase `core`) and
+    /// `PyPI -works_at-> Google` (true subject: a quoted 'Sarah), and a
+    /// query about CT128 surfaced both with path provenance.
+    fn pypi_store() -> Connection {
+        let conn = seeded_store();
+        for (name, etype, mc) in [
+            ("CT128", "tech", 9),
+            ("PyPI", "org", 4),
+            ("Google", "org", 2),
+        ] {
+            conn.execute(
+                "INSERT INTO entities (name, entity_type, first_seen, last_seen, mention_count) \
+                 VALUES (?1, ?2, 0.0, 0.0, ?3)",
+                params![name, etype, mc],
+            )
+            .unwrap();
+        }
+        for (cid, src, dst, rel, ts, rid) in [
+            ("cRun", "PyPI", "CT128", "runs", 40.0, "mRun"),
+            ("cWork", "PyPI", "Google", "works_at", 41.0, "mWork"),
+        ] {
+            conn.execute(
+                "INSERT INTO claims (claim_id, src, dst, rel_type, created_at, \
+                 extractor, source_memory_rid) VALUES (?1, ?2, ?3, ?4, ?5, 'heuristic_v1', ?6)",
+                params![cid, src, dst, rel, ts, rid],
+            )
+            .unwrap();
+        }
+        for (rid, name) in [
+            ("mRun", "CT128"),
+            ("mRun", "PyPI"),
+            ("mWork", "PyPI"),
+            ("mWork", "Google"),
+        ] {
+            conn.execute(
+                "INSERT INTO memory_entities (memory_rid, entity_name) VALUES (?1, ?2)",
+                params![rid, name],
+            )
+            .unwrap();
+        }
+        conn
+    }
+
+    fn run(conn: &Connection, query: &str, gate: ChainGate) -> (Vec<String>, Vec<String>) {
+        let gi = GraphIndex::build_from_db(conn).unwrap();
+        let tokens = crate::graph::tokenize(query);
+        let (cands, sups) = claims_candidates(conn, &gi, &tokens, None, &gate);
+        (
+            cands.iter().map(|c| c.rid.clone()).collect(),
+            sups.iter().map(|s| s.key()).collect(),
+        )
+    }
+
+    #[test]
+    fn shadow_counts_what_enforce_refuses_and_admits_everything() {
+        let conn = pypi_store();
+        let q = "what does CT128 run";
+        let (off_rids, off_sups) = run(&conn, q, ChainGate::off());
+        assert_eq!(
+            off_rids,
+            vec!["mRun", "mWork"],
+            "the pre-gate lane chains the junk"
+        );
+        assert!(off_sups.is_empty(), "off evaluates nothing");
+
+        let (rids, sups) = run(&conn, q, ChainGate::new(ChainGateMode::Shadow, 1000.0));
+        assert_eq!(rids, off_rids, "shadow changes no admission");
+        assert_eq!(
+            sups,
+            vec!["hop1:ungrounded", "seed:ungrounded", "hop2:ungrounded"],
+            "every stage enforce would refuse is counted, in lane order"
+        );
+    }
+
+    #[test]
+    fn enforce_never_builds_a_path_through_an_ungrounded_claim() {
+        let conn = pypi_store();
+        let (rids, sups) = run(
+            &conn,
+            "what does CT128 run",
+            ChainGate::new(ChainGateMode::Enforce, 1000.0),
+        );
+        assert!(rids.is_empty(), "both PyPI edges refused, got {rids:?}");
+        assert_eq!(
+            sups,
+            vec!["hop1:ungrounded"],
+            "a refused hop-1 row is never a seed"
+        );
+    }
+
+    #[test]
+    fn cooperative_claims_pass_and_a_denial_is_evidence_but_never_a_link() {
+        let conn = chain_store();
+        conn.execute(
+            "UPDATE claims SET grounding = 1 WHERE claim_id IN ('cA', 'cB')",
+            [],
+        )
+        .unwrap();
+        let q = "which city does Alice Moreau work in";
+        let (rids, sups) = run(&conn, q, ChainGate::new(ChainGateMode::Enforce, 1000.0));
+        assert_eq!(rids, vec!["mA", "mB"], "grounded chain survives enforce");
+        assert!(
+            sups.is_empty(),
+            "nothing to refuse on a grounded chain: {sups:?}"
+        );
+
+        // Alice does NOT work at Fennwick Labs: still exact evidence about
+        // Alice (admitted, rendered NOT) but no path may run through it.
+        conn.execute("UPDATE claims SET polarity = -1 WHERE claim_id = 'cA'", [])
+            .unwrap();
+        let (rids, sups) = run(&conn, q, ChainGate::new(ChainGateMode::Enforce, 1000.0));
+        assert_eq!(
+            rids,
+            vec!["mA"],
+            "the denial is admitted at hop 1, the path is not built"
+        );
+        assert!(sups.contains(&"seed:negated".to_string()), "{sups:?}");
+
+        // A reported claim is not asserted: same rule.
+        conn.execute(
+            "UPDATE claims SET polarity = 1, modality = 'reported' WHERE claim_id = 'cA'",
+            [],
+        )
+        .unwrap();
+        let (rids, sups) = run(&conn, q, ChainGate::new(ChainGateMode::Enforce, 1000.0));
+        assert_eq!(rids, vec!["mA"]);
+        assert!(sups.contains(&"seed:non_asserted".to_string()), "{sups:?}");
+    }
+
+    #[test]
+    fn validity_is_judged_as_of_the_query_time() {
+        let conn = chain_store();
+        conn.execute(
+            "UPDATE claims SET grounding = 1, valid_from = 100.0, valid_to = 200.0 \
+             WHERE claim_id = 'cA'",
+            [],
+        )
+        .unwrap();
+        conn.execute("UPDATE claims SET grounding = 1 WHERE claim_id = 'cB'", [])
+            .unwrap();
+        let q = "Alice Moreau";
+        for (as_of, expect_rid, expect_sup) in [
+            (150.0, true, None),
+            (300.0, false, Some("hop1:superseded")),
+            (50.0, false, Some("hop1:not_yet_valid")),
+        ] {
+            let (rids, sups) = run(&conn, q, ChainGate::new(ChainGateMode::Enforce, as_of));
+            assert_eq!(
+                rids.contains(&"mA".to_string()),
+                expect_rid,
+                "as_of {as_of}: {rids:?}"
+            );
+            match expect_sup {
+                Some(key) => assert!(sups.contains(&key.to_string()), "as_of {as_of}: {sups:?}"),
+                None => assert!(sups.is_empty(), "as_of {as_of}: {sups:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_pre_v53_claims_table_reads_as_ungrounded_not_as_an_error() {
+        // A pack sealed before the column existed: the legacy column set.
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE entities (name TEXT PRIMARY KEY, entity_type TEXT, \
+                 first_seen REAL, last_seen REAL, mention_count INTEGER);
+             CREATE TABLE memory_entities (memory_rid TEXT, entity_name TEXT);
+             CREATE TABLE claims (claim_id TEXT PRIMARY KEY, src TEXT NOT NULL, \
+                 dst TEXT NOT NULL, rel_type TEXT NOT NULL, weight REAL DEFAULT 1.0, \
+                 created_at REAL NOT NULL, tombstoned INTEGER NOT NULL DEFAULT 0, \
+                 polarity INTEGER NOT NULL DEFAULT 1, \
+                 extractor TEXT NOT NULL DEFAULT 'manual', source_memory_rid TEXT, \
+                 namespace TEXT NOT NULL DEFAULT 'default');
+             CREATE VIEW edges AS SELECT src, dst, weight, tombstoned FROM claims;
+             INSERT INTO entities VALUES ('Taylor', 'person', 0.0, 0.0, 3);
+             INSERT INTO claims (claim_id, src, dst, rel_type, created_at, source_memory_rid) \
+                 VALUES ('c', 'Taylor', 'Carol', 'reports_to', 1.0, 'm');
+             INSERT INTO memory_entities VALUES ('m', 'Taylor');",
+        )
+        .unwrap();
+        let (rids, sups) = run(&conn, "Taylor", ChainGate::new(ChainGateMode::Shadow, 10.0));
+        assert_eq!(
+            rids,
+            vec!["m"],
+            "legacy rows still reach the lane under shadow"
+        );
+        assert_eq!(
+            sups,
+            vec!["hop1:ungrounded", "seed:ungrounded"],
+            "read as ungrounded at both stages, never as an error"
+        );
+    }
+
+    #[test]
+    fn gate_mode_round_trips_and_refuses_garbage() {
+        for (text, mode) in [
+            ("off", ChainGateMode::Off),
+            ("shadow", ChainGateMode::Shadow),
+            ("enforce", ChainGateMode::Enforce),
+        ] {
+            let parsed = ChainGateMode::parse(text).unwrap();
+            assert_eq!(parsed, mode);
+            assert_eq!(parsed.as_str(), text);
+            assert_eq!(ChainGateMode::from_u8(parsed.as_u8()), mode);
+        }
+        assert!(ChainGateMode::parse("warn").is_err());
     }
 }
