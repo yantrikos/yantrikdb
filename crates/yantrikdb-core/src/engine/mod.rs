@@ -433,6 +433,13 @@ pub(crate) struct TextMetadataRow {
     pub rid: String,
     pub text: String,
     pub metadata: String,
+    /// v48 (#149) valid time, from the columns the recall prefilter
+    /// range-scans rather than re-extracted from `metadata`. Selected
+    /// unconditionally because this query only runs against the host
+    /// database, which is always migrated; packs, which can predate the
+    /// column, go through `fetch_pack_text_metadata`.
+    pub event_time_min: Option<f64>,
+    pub event_time_max: Option<f64>,
 }
 
 /// Embedder a NEW store created via [`YantrikDB::with_default`] uses.

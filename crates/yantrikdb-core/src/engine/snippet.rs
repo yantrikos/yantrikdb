@@ -157,6 +157,8 @@ mod tests {
             aged_last_verified: None,
             best_span: None,
             pack: None,
+            event_time_min: None,
+            event_time_max: None,
         }
     }
 

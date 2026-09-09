@@ -205,6 +205,20 @@ pub struct RecallResult {
     /// rows. See [`PackProvenance`].
     #[serde(default)]
     pub pack: Option<PackProvenance>,
+    /// v48 (#149) valid time — when the described events happened, as
+    /// opposed to `created_at` (when the row was written). `None` when
+    /// the record carries no event time.
+    ///
+    /// Host rows carry the `memories` columns verbatim: those are what
+    /// `event_after`/`event_before` range-scans, so a row's reported
+    /// bounds can never claim an eligibility the filter denies. Pack
+    /// rows, link-surfaced neighbors and `recall_as_of` rollback have no
+    /// column to read and derive from metadata instead; none are subject
+    /// to that filter.
+    #[serde(default)]
+    pub event_time_min: Option<f64>,
+    #[serde(default)]
+    pub event_time_max: Option<f64>,
 }
 
 /// v0.13.1 explain surface — per-lane status with the never-ran /

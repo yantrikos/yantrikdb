@@ -496,3 +496,227 @@ fn non_finite_bounds_are_invalid_scalars() {
         );
     }
 }
+
+/// The `event_time_columns.rs` census shape, reused to prove the
+/// hydrated values match the columns rather than merely existing.
+fn columns_for(db: &YantrikDB, rid: &str) -> (Option<f64>, Option<f64>) {
+    db.conn()
+        .query_row(
+            "SELECT event_time_min, event_time_max FROM memories WHERE rid = ?1",
+            [rid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+}
+
+/// A date-bearing record carries the stamped values out through recall.
+#[test]
+fn recall_result_carries_the_stamped_event_time() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let query = axis0(8);
+    let rid = put(
+        &db,
+        "the migration ran that week",
+        &event_meta("2024-03-15", 1_710_460_800.0, 1_710_547_200.0),
+        &decoy_vec(0, 8),
+    );
+
+    let hits = recall_window(&db, &query, 5, None, None, None).unwrap();
+    let hit = hits
+        .iter()
+        .find(|r| r.rid == rid)
+        .expect("the date-bearing record must be recalled");
+
+    assert_eq!(
+        hit.event_time_min,
+        Some(1_710_460_800.0),
+        "event_time_min must reach the caller"
+    );
+    assert_eq!(
+        hit.event_time_max,
+        Some(1_710_547_200.0),
+        "event_time_max must reach the caller"
+    );
+
+    assert_eq!(
+        (hit.event_time_min, hit.event_time_max),
+        columns_for(&db, &rid),
+        "hydrated values must equal the v48 columns for the same row"
+    );
+}
+
+/// An undated record carries `None` — absence stays absence, never a
+/// zero or a `created_at` stand-in.
+#[test]
+fn recall_result_event_time_is_none_for_an_undated_record() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let query = axis0(8);
+    let rid = put(&db, "no date in this one", &empty_meta(), &decoy_vec(0, 8));
+
+    let hits = recall_window(&db, &query, 5, None, None, None).unwrap();
+    let hit = hits
+        .iter()
+        .find(|r| r.rid == rid)
+        .expect("the undated record must be recalled");
+
+    assert_eq!(hit.event_time_min, None, "undated ⇒ None, not 0.0");
+    assert_eq!(hit.event_time_max, None, "undated ⇒ None, not created_at");
+    assert_eq!(
+        (hit.event_time_min, hit.event_time_max),
+        columns_for(&db, &rid),
+        "both must be NULL in the columns too"
+    );
+}
+
+/// The point of the issue: a caller who FILTERED by valid time can read
+/// back the values that made each row eligible, for every row returned.
+#[test]
+fn filtered_recall_reports_the_bounds_that_made_each_row_eligible() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let query = axis0(8);
+    put(
+        &db,
+        "early event",
+        &event_meta("1970-01-01", 1_000.0, 1_000.0),
+        &decoy_vec(0, 8),
+    );
+    let late = put(
+        &db,
+        "late event",
+        &event_meta("1970-01-01", 3_000.0, 3_000.0),
+        &decoy_vec(1, 8),
+    );
+
+    let hits = recall_window(&db, &query, 10, None, Some(2_000.0), None).unwrap();
+    assert_eq!(
+        rid_set(&hits),
+        std::collections::HashSet::from([late]),
+        "only the late record overlaps [2000, ∞)"
+    );
+    let hit = &hits[0];
+    assert_eq!(hit.event_time_min, Some(3_000.0));
+    assert_eq!(hit.event_time_max, Some(3_000.0));
+    assert!(
+        hit.event_time_max.unwrap() >= 2_000.0,
+        "the reported bounds must themselves satisfy the filter that \
+         admitted the row — that is what makes them an explanation"
+    );
+}
+
+/// THE PIN FOR THE SOURCING CHOICE. A pre-v48 row, or a follower apply
+/// with a ciphertext payload, leaves NULL columns beside populated JSON.
+/// The prefilter reads the COLUMNS, so the row is excluded from every
+/// bounded recall — reporting its JSON bounds would advertise an
+/// eligibility the filter denies.
+#[test]
+fn null_columns_report_none_even_when_the_metadata_json_still_has_bounds() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let query = axis0(8);
+    let rid = put(
+        &db,
+        "legacy row written before v48",
+        &event_meta("1970-01-01", 5_000.0, 5_000.0),
+        &decoy_vec(0, 8),
+    );
+
+    // Manufacture the divergence: strip the columns, leave the JSON.
+    db.conn()
+        .execute(
+            "UPDATE memories SET event_time_min = NULL, event_time_max = NULL \
+             WHERE rid = ?1",
+            [&rid],
+        )
+        .unwrap();
+    let stored_meta: String = db
+        .conn()
+        .query_row(
+            "SELECT metadata FROM memories WHERE rid = ?1",
+            [&rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let meta: serde_json::Value = serde_json::from_str(&stored_meta).unwrap();
+    assert_eq!(
+        crate::base::datetext::event_time_bounds(&meta),
+        (Some(5_000.0), Some(5_000.0)),
+        "precondition: the JSON must still carry the bounds"
+    );
+
+    // The filter excludes it — this is the eligibility the report must
+    // not contradict.
+    let bounded = recall_window(&db, &query, 10, None, Some(4_000.0), None).unwrap();
+    assert!(
+        !rid_set(&bounded).contains(&rid),
+        "precondition: a NULL-column row is outside the eligible universe"
+    );
+
+    // So an unfiltered recall must report the column (None), not the JSON.
+    let hits = recall_window(&db, &query, 10, None, None, None).unwrap();
+    let hit = hits
+        .iter()
+        .find(|r| r.rid == rid)
+        .expect("unfiltered recall still returns the row");
+    assert_eq!(
+        (hit.event_time_min, hit.event_time_max),
+        (None, None),
+        "reported bounds must match the columns the filter reads, not the \
+         stale JSON — otherwise the result claims an eligibility it lacks"
+    );
+}
+
+/// The bounds must roll back with the metadata: recall stamps them from
+/// the live row and `correct()` re-derives event time, so leaving them
+/// pairs yesterday's metadata with today's dates.
+#[test]
+fn as_of_rollback_moves_event_time_back_with_the_metadata() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let query = axis0(8);
+    let rid = put(
+        &db,
+        "the deadline is in March",
+        &event_meta("2024-03-15", 1_710_460_800.0, 1_710_460_800.0),
+        &decoy_vec(0, 8),
+    );
+
+    let before_correction = crate::engine::now();
+    db.correct(
+        &rid,
+        None,
+        Some(&event_meta("2024-04-20", 1_713_571_200.0, 1_713_571_200.0)),
+        None,
+        None,
+        "deadline moved",
+    )
+    .unwrap();
+
+    // Live recall sees the corrected bounds.
+    let live = recall_window(&db, &query, 5, None, None, None).unwrap();
+    let live_hit = live.iter().find(|r| r.rid == rid).expect("row is live");
+    assert_eq!(
+        live_hit.event_time_min,
+        Some(1_713_571_200.0),
+        "precondition: the correction moved the bounds"
+    );
+
+    // As-of before the correction must report the ORIGINAL bounds.
+    let rolled = db
+        .recall_as_of(&query, 5, before_correction, None, None)
+        .unwrap();
+    let hit = rolled
+        .iter()
+        .find(|r| r.rid == rid)
+        .expect("the row existed before the correction");
+    assert_eq!(
+        hit.event_time_min,
+        Some(1_710_460_800.0),
+        "as_of bounds must roll back with the metadata, not stay live"
+    );
+    assert_eq!(
+        (
+            hit.metadata.get("event_time_min").and_then(|v| v.as_f64()),
+            hit.metadata.get("event_time_max").and_then(|v| v.as_f64()),
+        ),
+        (hit.event_time_min, hit.event_time_max),
+        "the typed fields and the restored metadata must tell one story"
+    );
+}

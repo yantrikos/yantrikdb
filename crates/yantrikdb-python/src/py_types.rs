@@ -105,6 +105,13 @@ pub fn recall_result_to_dict(
         }
         None => dict.set_item("pack", py.None())?,
     }
+    // #181: v48 valid time — when the described events happened, as opposed
+    // to `created_at` (when the row was written). None when the record
+    // carries no event time. Lets a caller who filtered with
+    // event_after/event_before see WHY a row was eligible, or lay the hits
+    // out on a timeline.
+    dict.set_item("event_time_min", r.event_time_min)?;
+    dict.set_item("event_time_max", r.event_time_max)?;
 
     Ok(dict.into())
 }

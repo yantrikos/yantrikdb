@@ -1821,6 +1821,9 @@ impl YantrikDB {
                             aged_last_verified: None,
                             best_span: None,
                             pack: Some(provenance.clone()),
+                            // Stamped in the hydration loop below.
+                            event_time_min: None,
+                            event_time_max: None,
                         },
                     ));
                 }
@@ -1840,6 +1843,15 @@ impl YantrikDB {
                     result.text = text.clone();
                     result.metadata = serde_json::from_str(meta)
                         .unwrap_or(serde_json::Value::Object(Default::default()));
+                    // #181: JSON here, columns on the host path. A pack
+                    // sealed before v48 has no such column and can never be
+                    // migrated (the v41→v42 synthesis trap). Nothing is
+                    // lost — pack metadata is plaintext, and pack recall
+                    // applies no event-time filter to stay aligned with.
+                    let (event_time_min, event_time_max) =
+                        crate::base::datetext::event_time_bounds(&result.metadata);
+                    result.event_time_min = event_time_min;
+                    result.event_time_max = event_time_max;
                 }
                 out.push((mount_idx, result));
             }

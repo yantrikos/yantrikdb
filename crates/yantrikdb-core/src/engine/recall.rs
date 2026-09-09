@@ -1374,6 +1374,8 @@ impl YantrikDB {
                     aged_last_verified: None,
                     best_span: None,
                     pack: None,
+                    event_time_min: None,
+                    event_time_max: None,
                 });
             }
         } // drop cache borrow
@@ -1492,6 +1494,8 @@ impl YantrikDB {
                         aged_last_verified: None,
                         best_span: None,
                         pack: None,
+                        event_time_min: None,
+                        event_time_max: None,
                     });
                 }
             }
@@ -1625,6 +1629,8 @@ impl YantrikDB {
                         aged_last_verified: None,
                         best_span: None,
                         pack: None,
+                        event_time_min: None,
+                        event_time_max: None,
                     });
                 }
             }
@@ -2266,6 +2272,8 @@ impl YantrikDB {
                                     aged_last_verified: None,
                                     best_span: None,
                                     pack: None,
+                                    event_time_min: None,
+                                    event_time_max: None,
                                 });
                             }
                         }
@@ -2440,6 +2448,8 @@ impl YantrikDB {
                         aged_last_verified: None,
                         best_span: None,
                         pack: None,
+                        event_time_min: None,
+                        event_time_max: None,
                     });
                 }
             }
@@ -2700,6 +2710,8 @@ impl YantrikDB {
                                     aged_last_verified: None,
                                     best_span: None,
                                     pack: None,
+                                    event_time_min: None,
+                                    event_time_max: None,
                                 });
                             }
                         }
@@ -3038,6 +3050,8 @@ impl YantrikDB {
                             aged_last_verified: None,
                             best_span: None,
                             pack: None,
+                            event_time_min: None,
+                            event_time_max: None,
                         });
                     }
                     drop(cache);
@@ -3618,6 +3632,13 @@ impl YantrikDB {
                 result.text = tm.text.clone();
                 result.metadata = serde_json::from_str(&tm.metadata)
                     .unwrap_or(serde_json::Value::Object(Default::default()));
+                // #181: the columns, not a re-extraction from the JSON.
+                // They diverge on rows the prefilter excludes (columns
+                // still NULL, JSON populated — pre-v48 rows, ciphertext
+                // follower applies), where the JSON would report an
+                // eligibility the filter denies.
+                result.event_time_min = tm.event_time_min;
+                result.event_time_max = tm.event_time_max;
             }
         }
 
@@ -4624,6 +4645,8 @@ impl YantrikDB {
                     aged_last_verified: None,
                     best_span: None,
                     pack: None,
+                    event_time_min: None,
+                    event_time_max: None,
                 });
             }
         }
@@ -4735,6 +4758,8 @@ impl YantrikDB {
                         aged_last_verified: None,
                         best_span: None,
                         pack: None,
+                        event_time_min: None,
+                        event_time_max: None,
                     });
                 }
             }
@@ -5305,6 +5330,8 @@ impl YantrikDB {
                                     aged_last_verified: None,
                                     best_span: None,
                                     pack: None,
+                                    event_time_min: None,
+                                    event_time_max: None,
                                 });
                             }
                         }
@@ -5455,6 +5482,8 @@ impl YantrikDB {
                         aged_last_verified: None,
                         best_span: None,
                         pack: None,
+                        event_time_min: None,
+                        event_time_max: None,
                     });
                 }
             }
@@ -5676,6 +5705,8 @@ impl YantrikDB {
                                     aged_last_verified: None,
                                     best_span: None,
                                     pack: None,
+                                    event_time_min: None,
+                                    event_time_max: None,
                                 });
                             }
                         }
@@ -6001,6 +6032,8 @@ impl YantrikDB {
                                 aged_last_verified: None,
                                 best_span: None,
                                 pack: None,
+                                event_time_min: None,
+                                event_time_max: None,
                             });
                         }
                     }
@@ -6213,6 +6246,9 @@ impl YantrikDB {
                     result.text = tm.text.clone();
                     result.metadata = serde_json::from_str(&tm.metadata)
                         .unwrap_or(serde_json::Value::Object(Default::default()));
+                    // #181 — mirrors recall() Step 5.
+                    result.event_time_min = tm.event_time_min;
+                    result.event_time_max = tm.event_time_max;
                 }
             }
             // Snippet spans (mirrors recall() Step 5.5).
@@ -6318,8 +6354,10 @@ impl YantrikDB {
             .map(|i| format!("?{}", i + 1))
             .collect::<Vec<_>>()
             .join(",");
-        let sql =
-            format!("SELECT rid, type, text, metadata FROM memories WHERE rid IN ({placeholders})");
+        let sql = format!(
+            "SELECT rid, type, text, metadata, event_time_min, event_time_max \
+             FROM memories WHERE rid IN ({placeholders})"
+        );
         let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> = Vec::new();
         for r in rids {
             param_values.push(Box::new(r.to_string()));
@@ -6335,6 +6373,8 @@ impl YantrikDB {
                     row.get::<_, String>("rid")?,
                     row.get::<_, String>("text")?,
                     row.get::<_, String>("metadata")?,
+                    row.get::<_, Option<f64>>("event_time_min")?,
+                    row.get::<_, Option<f64>>("event_time_max")?,
                 ))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -6342,7 +6382,7 @@ impl YantrikDB {
         drop(conn);
 
         let mut map = HashMap::new();
-        for (rid, stored_text, stored_meta) in rows {
+        for (rid, stored_text, stored_meta, event_time_min, event_time_max) in rows {
             let text = self.decrypt_text(&stored_text)?;
             let metadata = self.decrypt_text(&stored_meta)?;
             map.insert(
@@ -6351,6 +6391,8 @@ impl YantrikDB {
                     rid,
                     text,
                     metadata,
+                    event_time_min,
+                    event_time_max,
                 },
             );
         }
@@ -6613,6 +6655,8 @@ mod novelty_selection_tests {
             aged_last_verified: None,
             best_span: None,
             pack: None,
+            event_time_min: None,
+            event_time_max: None,
         }
     }
 
