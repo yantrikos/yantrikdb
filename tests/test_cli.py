@@ -172,11 +172,54 @@ class TestThink:
         assert "Consolidations:" in result.output
 
 
+@pytest.fixture
+def conflict_db_path(tmp_path):
+    """A DB holding one identity_fact conflict (born 1985 vs born 1990)."""
+    p = str(tmp_path / "conflict.db")
+    db = YantrikDB(db_path=p, embedding_dim=DIM)
+    db.record("Pranab was born in 1985.", embedding=_vec(3.0))
+    db.think()
+    db.record("Pranab was born in 1990.", embedding=_vec(4.0))
+    db.think()
+    assert db.get_conflicts(), "fixture must hold a conflict"
+    db.close()
+    return p
+
+
 class TestConflicts:
     def test_conflicts_empty(self, runner, db_path):
         result = runner.invoke(cli, ["conflicts", "--db", db_path, "--dim", str(DIM)])
         assert result.exit_code == 0
         assert "No conflicts." in result.output
+
+    def test_conflicts_lists_label_priority(self, runner, conflict_db_path):
+        """The engine stores priority as a label (low/medium/high/critical),
+        so a non-empty listing must print it as-is, not as a float (#243)."""
+        db = YantrikDB(db_path=conflict_db_path, embedding_dim=DIM)
+        conflict = db.get_conflicts()[0]
+        db.close()
+
+        result = runner.invoke(
+            cli, ["conflicts", "--db", conflict_db_path, "--dim", str(DIM)]
+        )
+        assert result.exit_code == 0, result.output
+        assert f"[{conflict['priority']}] {conflict['conflict_id'][:12]}" in result.output
+        assert "type=identity_fact" in result.output
+
+    def test_conflicts_lists_resolved(self, runner, conflict_db_path):
+        db = YantrikDB(db_path=conflict_db_path, embedding_dim=DIM)
+        conflict = db.get_conflicts()[0]
+        db.resolve_conflict(conflict["conflict_id"], "keep_both")
+        db.close()
+
+        result = runner.invoke(
+            cli,
+            ["conflicts", "--db", conflict_db_path, "--dim", str(DIM),
+             "--status", "resolved"],
+        )
+        assert result.exit_code == 0, result.output
+        assert f"[{conflict['priority']}]" in result.output
+        assert "status=resolved" in result.output
 
 
 class TestTriggers:
