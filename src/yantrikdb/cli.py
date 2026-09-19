@@ -422,7 +422,8 @@ def conflicts(db_path, embedding_dim, status):
             click.echo("No conflicts.")
             return
         for c in items:
-            click.echo(f"\n[{c['priority']:.2f}] {c['conflict_id'][:12]}...  "
+            # priority is a label (low/medium/high/critical), never a number.
+            click.echo(f"\n[{c['priority']}] {c['conflict_id'][:12]}...  "
                         f"status={c['status']}  type={c['conflict_type']}")
             click.echo(f"    entity={c.get('entity', '?')}")
             click.echo(f"    {c['detection_reason']}")
