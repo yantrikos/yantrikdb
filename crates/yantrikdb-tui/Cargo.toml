@@ -1,6 +1,6 @@
 [package]
 name = "yantrikdb-tui"
-version = "0.23.0"
+version = "0.23.1"
 edition = "2021"
 license = "Apache-2.0"
 description = "Terminal explorer for a YantrikDB store: namespaces, memories, search, claims, revision history, entities, tasks"
@@ -17,7 +17,7 @@ path = "src/main.rs"
 # `embedder-download` so a store built with a named model (potion-base-8M,
 # 256-d, the default for new stores) can be searched with the SAME model:
 # the TUI reads the store's recorded embedder identity and attaches it.
-yantrikdb = { path = "../yantrikdb-core", version = "0.23.0", features = ["embedder-download"] }
+yantrikdb = { path = "../yantrikdb-core", version = "0.23.1", features = ["embedder-download"] }
 # Same version and features as the engine so exactly ONE SQLite is linked
 # (CONCURRENCY.md rule 9 is about a second library; this is the same one,
 # reached through `YantrikDB::conn()`).
