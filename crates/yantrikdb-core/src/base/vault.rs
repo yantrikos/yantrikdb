@@ -111,9 +111,8 @@ pub fn unlock(conn: &Connection, passphrase: &str) -> Result<EncryptionProvider>
             "this vault has no passphrase; call set_passphrase to protect it".into(),
         )
     })?;
-    let wrapped_b64 = read_row(conn, "dek_wrapped").ok_or_else(|| {
-        YantrikDbError::Encryption("this vault has no wrapped key".into())
-    })?;
+    let wrapped_b64 = read_row(conn, "dek_wrapped")
+        .ok_or_else(|| YantrikDbError::Encryption("this vault has no wrapped key".into()))?;
 
     let salt = B64
         .decode(&salt_b64)
@@ -150,7 +149,9 @@ pub fn lock() {
 /// rather than replaced. What goes away is the copy of it stored in the clear.
 pub fn set_passphrase(conn: &Connection, passphrase: &str) -> Result<()> {
     if passphrase.trim().is_empty() {
-        return Err(YantrikDbError::Encryption("a passphrase cannot be empty".into()));
+        return Err(YantrikDbError::Encryption(
+            "a passphrase cannot be empty".into(),
+        ));
     }
 
     // The key to keep: whatever is currently in use, so nothing already stored becomes unreadable.
@@ -532,9 +533,7 @@ pub fn remove_pin(conn: &Connection) -> Result<()> {
     }
 
     let dek = current_dek(conn).ok_or_else(|| {
-        YantrikDbError::Encryption(
-            "unlock the vault before removing its protection".into(),
-        )
+        YantrikDbError::Encryption("unlock the vault before removing its protection".into())
     })?;
 
     write_row(conn, "vault_dek", &B64.encode(dek))?;
@@ -597,7 +596,6 @@ mod tests {
         (conn, enc)
     }
 
-
     // ── What the wrapping is for ────────────────────────────────────
     //
     // These tests are written as attacks, because that is the only way to know whether a
@@ -614,14 +612,28 @@ mod tests {
 
         set_passphrase(&conn, "correct horse battery staple").unwrap();
         let enc = vault_encryption(&conn).unwrap();
-        store(&conn, &enc, "reddit.com", "someone", "hunter2", None, None, None).unwrap();
+        store(
+            &conn,
+            &enc,
+            "reddit.com",
+            "someone",
+            "hunter2",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         // An attacker with the file does the thing that used to work.
-        conn.execute("DELETE FROM vault_security WHERE key = 'pin_hash'", []).unwrap();
+        conn.execute("DELETE FROM vault_security WHERE key = 'pin_hash'", [])
+            .unwrap();
         lock(); // and comes to it fresh, as a new process would
 
         let denied = vault_encryption(&conn);
-        assert!(denied.is_err(), "deleting a row must not open a wrapped vault");
+        assert!(
+            denied.is_err(),
+            "deleting a row must not open a wrapped vault"
+        );
     }
 
     /// The file used to be enough on its own. It must not be.
@@ -641,7 +653,10 @@ mod tests {
                 |r| r.get(0),
             )
             .ok();
-        assert!(plaintext_key.is_none(), "the unwrapped key must not be in the file");
+        assert!(
+            plaintext_key.is_none(),
+            "the unwrapped key must not be in the file"
+        );
 
         // And what is left cannot be turned back into it without the passphrase.
         lock();
@@ -662,7 +677,17 @@ mod tests {
 
         set_passphrase(&conn, "a real passphrase").unwrap();
         let enc = vault_encryption(&conn).unwrap();
-        store(&conn, &enc, "bank.example", "me", "the-secret", None, None, None).unwrap();
+        store(
+            &conn,
+            &enc,
+            "bank.example",
+            "me",
+            "the-secret",
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         lock();
 
         let mut stmt = conn.prepare("SELECT value FROM vault_security").unwrap();
@@ -671,10 +696,15 @@ mod tests {
             .unwrap()
             .filter_map(|v| v.ok())
             .collect();
-        assert!(!values.is_empty(), "the table should still hold the salt and the wrapped key");
+        assert!(
+            !values.is_empty(),
+            "the table should still hold the salt and the wrapped key"
+        );
 
         for value in &values {
-            let Ok(bytes) = B64.decode(value) else { continue };
+            let Ok(bytes) = B64.decode(value) else {
+                continue;
+            };
             if bytes.len() != 32 {
                 continue;
             }
@@ -725,7 +755,10 @@ mod tests {
         let enc = unlock(&conn, "now protected").unwrap();
         let entries = get(&conn, &enc, "x.com").unwrap();
         assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].password, "s3cret", "the entry must survive being protected");
+        assert_eq!(
+            entries[0].password, "s3cret",
+            "the entry must survive being protected"
+        );
     }
 
     #[test]
@@ -740,7 +773,10 @@ mod tests {
 
         lock();
         assert!(!is_unlocked());
-        assert!(vault_encryption(&conn).is_err(), "a locked vault must stay shut");
+        assert!(
+            vault_encryption(&conn).is_err(),
+            "a locked vault must stay shut"
+        );
     }
 
     /// A vault made before any of this still opens, because refusing would lock people out of
@@ -754,7 +790,10 @@ mod tests {
         let enc = vault_encryption(&conn).unwrap();
         store(&conn, &enc, "old.example", "user", "pw", None, None, None).unwrap();
 
-        assert!(!is_protected(&conn), "an unwrapped key is not protection and must not read as it");
+        assert!(
+            !is_protected(&conn),
+            "an unwrapped key is not protection and must not read as it"
+        );
         let again = vault_encryption(&conn).unwrap();
         assert_eq!(get(&conn, &again, "old.example").unwrap()[0].password, "pw");
     }
