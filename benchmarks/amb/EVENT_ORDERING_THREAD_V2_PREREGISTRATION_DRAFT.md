@@ -1,0 +1,409 @@
+# AMB Event-Ordering Thread v2 Preregistration Draft
+
+Status: **Stage A completed and failed on 2026-08-24**. The mechanism and gates
+below were frozen before the zero-call product run. The artifact failed the
+coverage gates, so Stage B was not authorized and no external answer or judge
+call was made.
+
+## Decision Question
+
+Can a query-only, multi-anchor chronological thread retrieve the cross-session
+evidence needed for BEAM event ordering and convert that evidence into a
+material score lift without optimizing toward known benchmark defects?
+
+This is a fundamentally different retrieval mechanism from the terminal
+standing-facet composition line. The control is the frozen ordinary
+`ydb-0151` context. The treatment changes evidence selection and hydration; it
+does not add standing instructions or use gold source IDs, rubrics, answers, or
+scores during retrieval.
+
+## Evidence Base
+
+The frozen v5 autopsy supplies the design and stopping evidence:
+
+- 40 event-ordering queries; 37 clean primary rows and three quarantined rows.
+- Clean-row control source coverage: `19.09%` macro and `36/214` (`16.82%`)
+  micro, with one exact query and 21 nonzero queries.
+- Clean-row oracle top-three-topic ceiling: `91.64%` macro and `192/214`
+  (`89.72%`) micro, with 25 exact queries and all 37 nonzero.
+- All 17 negative v5 deltas are source-incomplete.
+- The sole source-complete row scored `0.7333`, so full coverage is not a
+  perfect-answer assumption.
+- Frozen control score: `0.279247` on the clean 37 and `0.277192` on all 40.
+
+A planning ceiling multiplies clean-row oracle macro coverage (`0.9164`) by
+the observed full-source reader result (`0.7333`), yielding `0.6720`. Holding
+the three quarantined rows at their observed `0.3000` treatment mean yields an
+all-40 ceiling of about `0.6441`, or roughly `+0.367` over the frozen control.
+This is an optimistic mechanism ceiling, not the expected effect or a gate:
+the reader residual is `n=1`, from one query, and query-only topic selection
+will not attain oracle handle selection. Neither `0.6720` nor `0.6441` is a
+measured score ceiling.
+
+## Cohort And Estimands
+
+The scorer runs all 40 event-ordering rows from the frozen BEAM 100k cohort.
+No query is removed from execution or reporting.
+
+The product artifact still contains all 400 frozen rows. The treatment's
+deterministic chronology-query predicate may change only the 40 event-ordering
+rows; all 360 non-event rows must remain byte-identical to control. Event-only
+scoring is acceptable because cross-category safety is proved by construction,
+not because the other categories go unmeasured. The same predicate and code
+path used to build the artifact are the only behavior eligible for promotion.
+
+The primary estimand is the paired treatment-minus-control delta over the 37
+rows not known before this arm to have defective or underidentified labels.
+The three quarantined rows remain a separately reported diagnostic stratum:
+
+- `9_event_ordering_0`: correction conflict; the gold requires stale Bryan
+  history.
+- `18_event_ordering_0`: unstated Patrick merge/split granularity.
+- `19_event_ordering_0`: unstated later Douglas partition.
+
+Secondary estimands are the all-40 event-ordering delta and the clean bounded-
+phrase and broad-compound route deltas. Exact-entity and entity-plus-focus
+strata contain one query each and are descriptive only.
+
+## Treatment
+
+The deterministic chronology-query predicate is a conjunction over query text
+only, matched case-insensitively:
+
+- `\bbrought\s+up\b`;
+- either `\bin\s+order\b` or `\border\s+in\s+which\b`; and
+- `\b(?:conversations?|chats?)\b`.
+
+On the frozen 400 queries this selects exactly the 40 event-ordering rows. The
+existing generic `ordered_list` query shape selects 55 rows, including 15 from
+other categories, and is therefore prohibited for this arm. Category labels
+are used only after predicate output is frozen to audit the 40/360 split; they
+are not inputs to the predicate.
+
+For an accepted query, `focus_text` is derived from query text only by this
+fixed chain:
+
+1. split once after `\bbrought\s+up\b`;
+2. cut once before
+   `\b(?:throughout|across|during|in)\s+(?:our\s+)?(?:conversations?|chats?)\b`;
+3. trim surrounding whitespace and `,.;:?!`; and
+4. remove one leading
+   `^(?:different\s+)?(?:aspects?\s+of\s+|ways\s+)?`, then trim again.
+
+An empty focus is a Stage A construction error. The nonempty value is the
+query-only semantic input to phrase routing and organizer-handle lookup. On
+the frozen 40 it yields 40 nonempty focuses; no source turn, answer, category,
+or prior score is read to produce them.
+
+`recall_thread_v2` receives a query-only `ThreadQuery`:
+
+- `entities`: exact names resolved through the persisted normalized entity
+  key.
+- `phrases`: bounded phrases matched through `memories_fts`.
+- `topic_rids`: already-resolved organizer synthesis RIDs. Direct members come
+  from `synthesis_dependencies` with `is_direct=1` and the requested namespace.
+
+The engine unions and deduplicates all route RIDs, applies active/synthesis/
+supersession visibility in SQL, assigns full-thread positions by
+`(created_at, source_turn, rid)`, applies the SQL limit, and decrypts only the
+returned page. Every item reports route provenance. The response reports
+`total`, `returned`, and `omitted`.
+
+Eligibility, visibility, complete multi-route provenance, `total`, positions,
+and the returned stored bytes come from one consistent SQLite read snapshot.
+The engine enforces documented count and byte-size limits for entities,
+phrases, topic RIDs, and the result limit, with checked conversions into SQL
+integer types. Bounded work here means bounded query inputs and page
+decryption; exact `total` still requires evaluating the complete indexed
+union.
+
+Exact bounded ordering requires `source_turn` to be a persisted nullable
+`memories` column, stamped from plaintext metadata on every write and carried
+canonically in replication payloads. One shared extractor preserves the
+existing rule: a valid nonnegative integer `source_turn` is preferred, then a
+valid nonnegative integer `turn_id`; other values yield `NULL`. The v2 artifact
+must use that column; decrypting metadata for every eligible row before
+ordering would violate the bounded-work contract. Plaintext and encrypted
+migrations use resumable keyset batches rather than an unbounded open-time
+table update. Strict v2 returns a typed `MaintenanceRequired` error until the
+backfill completes and sets `source_turn_backfill_complete=true`.
+Opportunistic write-time repair does not waive that marker. Unsupported raw
+SQL writes to `memories` invalidate the marker transactionally. Direct SQL
+writes to the internal maintenance ledger itself are unsupported; the
+compatibility connection cannot make arbitrary operator tampering impossible,
+and this arm makes no such claim.
+
+The frozen caller constructs all three routes from `focus_text`:
+
+1. `entities` is the first-occurrence-deduplicated set of title-case tokens
+   matching `\b[A-Z][a-z]{2,}\b`, excluding the fixed generic set `Across`,
+   `Can`, `Chats`, `Conversations`, `Different`, `During`, `Mention`, `Only`,
+   `Order`, `Throughout`, and `Walk`. All-uppercase tokens are excluded, so
+   `AI` is a domain phrase, not a named entity.
+2. `phrases` is the one-element list containing the exact nonempty
+   `focus_text`.
+3. `topic_rids` is at most three persisted organizer syntheses selected by
+   `recall(query=focus_text, top_k=3, namespace="default",
+   source="inference", include_consolidated=True, skip_reinforce=True)`,
+   retaining only records whose persisted `organizer_kind` is
+   `query_independent_topic`, in returned order.
+
+The Stage A store contains source-turn atomics with `source="user"` and
+organizer handles with `source="inference"`, so topic lookup is a bounded
+semantic search over handle records rather than a global decrypting metadata
+scan. Existing query-independent artifacts are normalized to the product's
+12-evidence-items-per-handle and three-handle-memberships-per-evidence caps
+before persistence. Source evidence order determines the first 12 retained
+items; where an item has more owners, the three smallest source handles win,
+with source order as the tie break. This transformation has no query input.
+
+Gold source turns, rubric text, answers, prior scores, and frozen route labels
+are unavailable to every step above. The selected routes are unioned in one
+and only one public call:
+
+`recall_thread_v2("default", entities=entities, limit=100,
+phrases=phrases, topic_rids=topic_rids)`.
+
+An inactive, unverified, nonexistent, or cross-namespace topic RID fails the
+whole query with one typed invalid-topic error that does not reveal whether a
+RID exists in another namespace. Phrase anchors are literal FTS5 phrases, not
+operator-bearing MATCH expressions: quoting, embedded quotes, whitespace,
+empty values, duplicate normalization, and maximum lengths have deterministic
+tested behavior. If one row matches several routes or anchors, provenance
+retains every pair in deterministic request order.
+
+The treatment context renders the complete returned union chronologically with
+stable position markers. The benchmark request's exact item count and answer-
+only form remain ordinary query instructions; no gold count is introduced.
+
+The fixed benchmark limit is `100`. This is not a product claim that all user
+threads fit in 100 rows. Any query with `omitted > 0` aborts this arm before
+external calls.
+
+The FTS phrase route is plaintext-store-only. An encrypted engine receiving a
+nonempty phrase route must return a typed capability error naming that route,
+never an empty result that looks like no evidence. Entity and resolved-topic
+routes remain available under encryption. The benchmark artifact must record
+its actual encryption mode and route capabilities; this arm is expected to use
+the same plaintext mode as its frozen control and makes no searchable-
+encryption claim.
+
+Both actionable errors remain typed across the public Python boundary: the
+phrase-capability and source-turn maintenance exceptions subclass
+`RuntimeError` for compatibility but do not collapse to a generic exception
+that callers must identify by matching message text. The existing Python call
+shape `recall_thread(namespace, entities, limit=100)` remains valid in both
+positional and keyword form; `phrases` and `topic_rids` are additive optional
+arguments. This benchmark arm nevertheless uses only the explicit
+`recall_thread_v2` entry point, including entity-bearing queries, so the
+strict marker and rich response shape cannot depend on implicit routing.
+
+## Stage A: Zero-Call Product Gate
+
+The complete 400-row artifact is built through the public product path. The
+preflight makes no answer, judge, or other external model call. All conditions
+must pass:
+
+The treatment and its hash are finalized before authoritative source turns are
+joined for membership scoring. Frozen route labels are evaluator strata only;
+neither they nor their thresholds are inputs to the selector.
+
+The build subcommand has no membership or gold argument. It writes the
+treatment artifact and a separate freeze file containing the artifact SHA-256.
+The audit subcommand is the first process allowed to accept authoritative
+membership; it refuses the join if the artifact bytes no longer match the
+freeze.
+
+1. The exact 400 frozen query IDs are present once in control and treatment.
+2. Control contexts are byte-identical to frozen `ydb-0151`; all 360 non-event
+   treatment contexts are byte-identical to their controls, and exactly the 40
+   event-ordering rows enter the exact three-clause query-text predicate above.
+   The artifact records predicate results before category labels are joined.
+3. Every event-ordering treatment row records its selected entities, phrases,
+   topic RIDs, topic labels and scores, route provenance, `total`, `returned`,
+   and `omitted`.
+4. Every treatment row has `omitted=0`, `returned=total`, continuous unique
+   positions, and chronological `(created_at, source_turn, rid)` order.
+5. Namespace and visibility behavior matches default host recall; correction
+   and supersession semantics are unchanged.
+6. Selection uses only the query and persisted product records. No evaluation
+   source ID, rubric, gold answer, v5 score, or frozen route label enters the
+   selector.
+7. At most three topic RIDs are selected per query; every selected topic RID
+   resolves to an active, verified organizer synthesis in the same namespace.
+8. On the 37 clean rows, authoritative source-turn recall is at least `0.55`
+   macro and `0.55` micro, at least `30/37` rows have nonzero coverage, and at
+   least `8/37` have exact source coverage.
+9. Bounded-focus-phrase micro recall is at least `0.55` over its frozen 22
+   rows; broad-compound-topic micro recall is at least `0.55` over its frozen
+   13 rows.
+10. The exact-entity Carla row contains `6/6` source turns. The Douglas
+    entity-plus-focus row contains at least `4/9` source turns.
+11. The artifact records plaintext mode with phrase capability available. A
+    separate product test proves that encrypted phrase queries return the typed
+    capability error while encrypted entity-only and topic-only queries remain
+    functional.
+12. The artifact records `source_turn_backfill_complete=true`. Product tests
+    prove an encrypted migrated store returns `MaintenanceRequired` before the
+    named maintenance operation and exact positions after it; an unencrypted
+    migration completes the marker before v2 can be queried.
+13. Python product tests prove both actionable failures cross the binding as
+    their exported typed exception classes (each still a `RuntimeError`
+    subclass), and that the pre-v2 positional and keyword `recall_thread`
+    calls return unchanged entity-only behavior.
+14. A concurrency product test proves one call cannot mix eligibility,
+    supersession state, positions, totals, provenance, or returned bytes from
+    different SQLite snapshots.
+15. Boundary tests prove every public query-input maximum, checked result-limit
+    conversion, literal phrase rule, duplicate rule, and typed invalid-topic
+    behavior without cross-namespace existence disclosure.
+16. The shared turn extractor is tested for absent, null, negative, floating,
+    string, and out-of-range values, including an invalid `source_turn` with a
+    valid `turn_id` fallback. Leader and follower results agree on order,
+    scalar values, complete provenance, totals, and omissions.
+17. Both migration modes are resumable and keyset-bounded. Product tests prove
+    supported writes preserve the marker's prior state after stamping, never
+    waive an incomplete migration, and raw SQL mutations of `memories`
+    invalidate a true marker. Direct tampering with the internal maintenance
+    ledger is explicitly outside the supported API contract.
+
+The Stage A thresholds require more than half of the structurally available
+coverage while leaving room for the unavoidable query-only selection gap. They
+raise both clean macro and micro coverage by more than three times their frozen
+baselines. If any condition fails, the arm aborts with zero external calls. No
+threshold is relaxed and no failed row is removed.
+
+## Stage A Result
+
+The label-blind build completed on 2026-08-24 and froze the treatment before
+the membership file was opened. Provenance was:
+
+- product commit: `40abfd276967e904ce335144f1016c0fe81c299f`;
+- harness commit: `b20b47507e84c33e02e9adf635f57aa48cdb49ef`;
+- control SHA-256:
+  `43b8eb888adeb524caba70b013a8ca510c639bbf5312216e9b453d60185bcb8e`;
+- organizer manifest SHA-256:
+  `e7d039fcd81207842c17f16006c93e31ed8411fbe6be39c24170413fbbf8d9c9`;
+- wheel SHA-256:
+  `f661357411910ac5f569b577b3ff49a610dcc4337e8b0128cfbf252ece353026`;
+- treatment artifact SHA-256:
+  `2ab210b99dab0850f5dfe1cd98088d9771072fb05ba61074b6d1890bc8aa9094`;
+- freeze SHA-256:
+  `f84d15250cdee4098d5131f3b32b5341f904bfaf4779e880f74cbe3dd7aaa32e`;
+- membership SHA-256:
+  `8229c9ffe8d779295e4e161b003cd81afc45f0d4d5b53c07c82925eb54c2b86e`;
+- audit SHA-256:
+  `3d6f69b89f7537653726e99d56e3c25708beb51a4862287448574b9a66f39d33`.
+
+The build command was:
+
+```powershell
+python benchmarks/amb/build_event_ordering_thread_v2_stage_a.py build `
+  --control outputs/beam/ydb-0151/rag/100k.json `
+  --organizer-manifest benchmarks/amb/event_ordering_organizer_manifest_v1.json `
+  --organizer-root C:/Users/sync/codes/yantrikdb `
+  --work-dir .tmp-stage-a-official/store `
+  --product-commit 40abfd276967e904ce335144f1016c0fe81c299f `
+  --harness-commit b20b47507e84c33e02e9adf635f57aa48cdb49ef `
+  --wheel dist/yantrikdb-0.16.0-cp310-abi3-win_amd64.whl `
+  --output .tmp-stage-a-official/stage-a-treatment.json `
+  --freeze .tmp-stage-a-official/stage-a-freeze.json
+```
+
+The audit command, run only after the freeze hash was independently verified,
+was:
+
+```powershell
+python benchmarks/amb/build_event_ordering_thread_v2_stage_a.py audit `
+  --artifact .tmp-stage-a-official/stage-a-treatment.json `
+  --freeze .tmp-stage-a-official/stage-a-freeze.json `
+  --membership benchmarks/amb/artifacts/event40-organizer-membership-v2.json `
+  --output .tmp-stage-a-official/stage-a-audit.json
+```
+
+All structural gates passed: the artifact contained the exact `400/40` split,
+all 360 non-event contexts were byte-identical, all event threads were
+untruncated, Carla retained `6/6` source turns, and Douglas retained `5/9`.
+Coverage failed the promotion gates:
+
+- clean 37: `0.262162` macro, `56/214` (`0.261682`) micro, 19 nonzero,
+  three exact;
+- all 40: `0.292500` macro, `66/230` (`0.286957`) micro, 21 nonzero,
+  five exact;
+- bounded-focus phrase cohort: `32/124` (`0.258065`) micro;
+- broad-compound cohort: `13/75` (`0.173333`) micro.
+
+Accordingly Stage A failed and Stage B was aborted with zero external calls.
+
+After that decision was final, a gold-visible diagnostic repeated the same
+query-only semantic lookup at wider topic fan-outs. It is post-hoc evidence,
+not a rescue of this arm. Exact `top_k=3` reproduced all frozen selections.
+At `top_k=12`, clean coverage was `0.694959` macro and `140/214`
+(`0.654206`) micro, with 35 nonzero and 12 exact rows; phrase and broad micro
+coverage were `0.612903` and `0.706667`. Carla remained `6/6`, Douglas `5/9`,
+and the largest thread contained 80 items. The organizer's frozen oracle
+top-three-handle mean was `0.918472`. This localizes the failed mechanism to
+the fixed three-topic query-to-handle budget, not chronology, storage,
+source-turn persistence, or the organizer's structural ceiling. Any wider or
+adaptive selector requires new evidence and a fresh preregistration.
+
+## Stage B: Paired Score Gate
+
+Stage B is filled and frozen only after Stage A passes and the following are
+recorded in this document:
+
+- control, treatment, manifest, ordered-query-ID, membership-report, and source
+  dataset SHA-256 values;
+- exact product and benchmark commits;
+- exact commands, answer model, judge model, worker count, seeds, output paths,
+  call budget, resume policy, and analyzer version;
+- a no-client preflight proving those bindings without an external call.
+
+The intended estimator is three independent paired replicates with one answer
+and one judge result per arm and query in each replicate. Per-query arm scores
+are arithmetic means across replicates. A separate frozen seed drives 20,000
+paired query-level bootstrap resamples. The existing median-answer selection
+path is prohibited.
+
+Provisional run/model seeds are `20260901`, `20260902`, and `20260903`; the
+provisional bootstrap seed is `20260904`. They remain placeholders until the
+artifact hashes and commands are frozen.
+
+The projected event-only budget is 240 answer invocations and 240
+`score_result` invocations: `40 queries * 2 arms * 3 replicates` for each. This
+is not an exact provider HTTP-request count because BEAM may issue one judge
+request per rubric item inside a `score_result` invocation.
+
+All promotion gates must pass:
+
+1. The clean 37-row mean delta is at least `+0.08`, its paired 95% interval
+   lower bound is non-negative, and wins exceed losses.
+2. The all-40 event-ordering mean delta is at least `+0.05`.
+3. The 22-row bounded-focus-phrase mean delta is non-negative.
+4. The 13-row broad-compound-topic mean delta is non-negative.
+5. The three quarantined rows are reported but do not enter gates 1, 3, or 4.
+   Their answers and contexts are inspected only for correction or stale-fact
+   regressions, never to tune selector thresholds.
+6. The score-bearing treatment artifact has the same `omitted=0`, provenance,
+   ordering, visibility, and hash properties as the Stage A artifact.
+
+The `+0.08` clean-row floor is below the planning ceiling by a wide margin but
+large enough to justify a new default event-ordering route. At the Stage A
+minimum coverage of `0.55`, applying the observed `0.7333` reader discount
+implies about `0.403`, approximately `+0.124` above the frozen clean control;
+the score gate retains roughly two thirds of that conservative planning lift.
+
+## Decision And Finality
+
+Pass Stage A and all Stage B gates: enable the multi-anchor chronological route
+by default only for queries accepted by the exact deterministic chronology-
+query predicate used in the frozen artifact, with the same selector, bounded-
+work, visibility, and omission behavior. No broader recall path is promoted.
+
+Fail Stage A: no external run; revise query-only topic selection only with new
+row-level evidence. Fail Stage B: keep the route opt-in and stop power
+escalation. No post-hoc route allowlist, query removal, threshold change,
+replicate exclusion, seed replacement, or score-driven topic mapping is
+allowed. A Stage B failure is terminal for this exact mechanism: no identical
+rerun or power escalation is allowed. A future attempt requires a materially
+changed mechanism, new evidence, and a fresh preregistration.
