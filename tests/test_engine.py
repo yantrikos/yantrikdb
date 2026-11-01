@@ -940,6 +940,45 @@ class TestSetEmbedderNamedWorkers:
             db.close()
 
 
+class TestReembedNamed:
+    """Issue #260 — expose reembed(name) on the Python binding so a populated
+    store can be moved to another named embedder without dropping to Rust."""
+
+    def _skip_if_no_download(self, db):
+        """Skip on slim wheels (built --no-default-features) where the
+        named-download path compiles out to a feature-absent stub."""
+        try:
+            db.set_embedder_named("issue-260-no-such-model")
+        except Exception as exc:  # noqa: BLE001 - inspecting the message
+            msg = str(exc).lower()
+            if "embedder-download" in msg and "feature" in msg:
+                pytest.skip("wheel built --no-default-features; named-download path absent")
+            return msg
+        return ""
+
+    def test_reembed_named_rebuilds_vectors(self, tmp_path):
+        db = YantrikDB.with_default(str(tmp_path / "reembed.db"))
+        try:
+            self._skip_if_no_download(db)
+            rid = db.record("the quick brown fox jumps over the lazy dog")
+
+            try:
+                report = db.reembed("potion-multilingual-128M")
+            except Exception as exc:  # noqa: BLE001 - model may be unavailable
+                msg = str(exc).lower()
+                if any(k in msg for k in ("resolve", "download", "fetch", "network")):
+                    pytest.skip(f"potion-multilingual-128M unavailable: {exc}")
+                raise
+
+            # The store now reports the new embedder identity.
+            assert report["new_embedder"] == "potion-multilingual-128M"
+            # The record survived the rebuild and is still recallable.
+            hits = db.recall(query="quick brown fox", top_k=3, skip_reinforce=True)
+            assert any(h["rid"] == rid for h in hits)
+        finally:
+            db.close()
+
+
 # ── Encryption tests ──
 
 
