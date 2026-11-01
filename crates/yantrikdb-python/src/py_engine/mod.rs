@@ -724,8 +724,8 @@ impl PyYantrikDB {
                 yantrikdb_core::engine::reembed::ReembedOptions::default(),
             )
             .map_err(map_err)?;
-        let value = serde_json::to_value(&report)
-            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        let value =
+            serde_json::to_value(&report).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         json_to_py(py, &value)
     }
 
