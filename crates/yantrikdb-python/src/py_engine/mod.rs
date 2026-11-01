@@ -709,6 +709,35 @@ impl PyYantrikDB {
         ))
     }
 
+    /// Re-embed every stored memory with a new named embedder, resolving the
+    /// model through the embedder-download registry (downloading it on first
+    /// use) and returning the reembed report as a dict. Raises if the wheel
+    /// was built `--no-default-features`, if the engine refuses the call (a
+    /// `Pause` write policy, namespace scoping or `resume_from_checkpoint`),
+    /// or if the model cannot be resolved.
+    #[cfg(feature = "embedder-download")]
+    fn reembed(&self, py: Python<'_>, new_embedder_name: &str) -> PyResult<PyObject> {
+        let db = self.get_inner()?;
+        let report = db
+            .reembed(
+                new_embedder_name,
+                yantrikdb_core::engine::reembed::ReembedOptions::default(),
+            )
+            .map_err(map_err)?;
+        let value = serde_json::to_value(&report)
+            .map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+        json_to_py(py, &value)
+    }
+
+    /// Slim-build stub, mirroring set_embedder_named.
+    #[cfg(not(feature = "embedder-download"))]
+    fn reembed(&self, _py: Python<'_>, _new_embedder_name: &str) -> PyResult<PyObject> {
+        Err(PyRuntimeError::new_err(
+            "reembed requires the 'embedder-download' Cargo feature, \
+             which is on by default. This wheel was built --no-default-features.",
+        ))
+    }
+
     /// The _conn property — returns a ConnectionProxy for test compatibility.
     #[getter]
     fn _conn(&self) -> PyResult<ConnectionProxy> {

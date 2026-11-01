@@ -605,10 +605,10 @@ impl YantrikDB {
     /// - Verifying phase (sanity check + staging cleanup)
     /// - Crash recovery on open()
     ///
-    /// Currently returns `Err` at the Encoding phase boundary if the
-    /// call would proceed past Probing for a non-no-op reembed. The
-    /// boundary is clean — meta.reembed_state is cleared on the way
-    /// out so the DB is not left mid-reembed.
+    /// Runs the full Encoding → Rebuilding → Swapping → Verifying flow to
+    /// completion (delegating to `reembed_with_embedder` after resolving the
+    /// named embedder). Invalid options — a `Pause` write policy, namespace
+    /// scoping, or `resume_from_checkpoint` — are rejected up front.
     pub fn reembed(
         &self,
         new_embedder_name: &str,
