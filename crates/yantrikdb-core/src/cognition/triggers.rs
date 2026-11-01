@@ -2007,15 +2007,33 @@ mod tests {
             0.0,
         ];
         db.record(
-            "alpha record", "semantic", 0.5, 0.0, 604800.0,
+            "alpha record",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
             &serde_json::json!({}),
-            &emb_a, "default", 0.8, "general", "user", None,
+            &emb_a,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
         )
         .unwrap();
         db.record(
-            "beta record", "semantic", 0.5, 0.0, 604800.0,
+            "beta record",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
             &serde_json::json!({}),
-            &emb_b, "default", 0.8, "general", "user", None,
+            &emb_b,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
         )
         .unwrap();
 
