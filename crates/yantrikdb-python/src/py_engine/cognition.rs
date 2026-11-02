@@ -49,6 +49,9 @@ impl PyYantrikDB {
             if let Ok(Some(v)) = d.get_item("consolidation_sim_threshold") {
                 c.consolidation_sim_threshold = v.extract()?;
             }
+            if let Ok(Some(v)) = d.get_item("redundancy_sim_threshold") {
+                c.redundancy_sim_threshold = v.extract()?;
+            }
             if let Ok(Some(v)) = d.get_item("extract_attribute_claims") {
                 c.extract_attribute_claims = v.extract()?;
             }
@@ -64,7 +67,7 @@ impl PyYantrikDB {
             // (the pair added above) were unreachable from Python for months
             // and nothing ever said so. A typo must be an error, not a
             // silently-default run.
-            const KNOWN: [&str; 14] = [
+            const KNOWN: [&str; 15] = [
                 "importance_threshold",
                 "decay_threshold",
                 "max_triggers",
@@ -76,6 +79,7 @@ impl PyYantrikDB {
                 "consolidation_limit",
                 "consolidation_time_window_days",
                 "consolidation_sim_threshold",
+                "redundancy_sim_threshold",
                 "extract_attribute_claims",
                 "consolidation_min_cluster",
                 "consolidation_require_entity_overlap",

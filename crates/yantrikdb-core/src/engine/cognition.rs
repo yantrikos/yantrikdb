@@ -151,7 +151,7 @@ impl YantrikDB {
         all_triggers.extend(crate::triggers::check_temporal_drift(self)?);
         all_triggers.extend(crate::triggers::check_redundancy(
             self,
-            config.consolidation_sim_threshold,
+            config.redundancy_sim_threshold,
         )?);
         all_triggers.extend(crate::triggers::check_relationship_insight(self)?);
         all_triggers.extend(crate::triggers::check_valence_trend(self)?);
