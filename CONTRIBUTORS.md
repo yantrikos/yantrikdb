@@ -21,10 +21,22 @@ YantrikDB is primarily developed by [Pranab Sarkar](https://github.com/spranab) 
 - **[PR #254](https://github.com/yantrikos/yantrikdb/pull/254): a compression gist is never a cluster seed** (2026-10-23, released in v0.23.3). Scoped the fix for [#253](https://github.com/yantrikos/yantrikdb/issues/253) to seed selection only: a gist stays eligible as a member but can no longer seed a cluster. Applied it at both the consolidation and topic-mining call sites, with tests for each side of that rule.
 - **[PR #252](https://github.com/yantrikos/yantrikdb/pull/252): bundled embedder cache location** (released in v0.23.3). The bundled model is cached under the platform cache dir, falling back to the temp dir when that can't be written.
 
+### [@TianHengZhuang](https://github.com/TianHengZhuang)
+
+Picked up all three good-first issues within hours of their being filed (2026-11-01):
+
+- **[PR #263](https://github.com/yantrikos/yantrikdb/pull/263): `check_redundancy` honors its threshold** (fixes [#259](https://github.com/yantrikos/yantrikdb/issues/259)). The check ignored its argument and hardcoded 0.85, while `think()` passed the consolidation threshold. Adds `ThinkConfig.redundancy_sim_threshold`, defaulting to 0.85 so behavior is unchanged, with a test at the similarity boundary.
+- **[PR #264](https://github.com/yantrikos/yantrikdb/pull/264): `reembed(name)` on the Python binding** (fixes [#260](https://github.com/yantrikos/yantrikdb/issues/260)). A populated store can now move to another named embedder from Python, for example `potion-multilingual-128M` for a non-English corpus, instead of starting fresh. Includes the build stub for builds without the `embedder-download` feature, and fixes the stale doc comment on `reembed()`.
+- **[yantrikdb-hermes-plugin#103](https://github.com/yantrikos/yantrikdb-hermes-plugin/pull/103): `YANTRIKDB_COMPRESSION_GIST` switch** (fixes [plugin#102](https://github.com/yantrikos/yantrikdb-hermes-plugin/issues/102)). Lets users turn off the pre-compression gist write.
+
 ### Reporters
 
 - **[antonius888](https://github.com/antonius888)**: filed [#253](https://github.com/yantrikos/yantrikdb/issues/253) (consolidation merging unrelated records on a Hermes store). The live repro, cluster-size histogram, trigger dump and SQL for inspecting `consolidated_into` pointed to both the gist seed problem fixed in v0.23.3 and the default embedder's behaviour on non-English text.
 - **[alienos](https://github.com/alienos)** — filed [yantrikdb-hermes-plugin#1](https://github.com/yantrikos/yantrikdb-hermes-plugin/issues/1) (multilingual embedding support → engine v0.7.9 `potion-multilingual-128M` bundling) and [yantrikdb-hermes-plugin#4](https://github.com/yantrikos/yantrikdb-hermes-plugin/issues/4) (`has_embedder()` false-negative bug → engine v0.7.10 fix). Clear repros + evidence sections made diagnosis straightforward in both cases.
+
+### Reviewers
+
+- **[hakarrr](https://github.com/hakarrr)**: reviewed [PR #263](https://github.com/yantrikos/yantrikdb/pull/263) and caught two real problems before merge: a `cargo fmt` failure, and a new `ThinkConfig` field without a serde default, which would have broken deserializing older configs. Included a minimal serde reproduction.
 
 ## How attribution works going forward
 
