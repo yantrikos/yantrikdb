@@ -3,8 +3,9 @@ name: Wasm build
 # crates/yantrikdb-wasm is excluded from the workspace, so `cargo test --workspace`
 # never compiles it. Nothing else built it either. The browser build has broken
 # silently twice because of that: it rotted from March to August 2026, and by
-# November a fresh dependency resolve had pulled in getrandom 0.4, which does not
-# compile for wasm32-unknown-unknown until its `wasm_js` feature is enabled.
+# November it failed on current toolchains two ways. A fresh dependency resolve had
+# pulled in getrandom 0.4, which needs its `wasm_js` feature, and Rust 1.96 had
+# stopped linking wasm with --allow-undefined (see the crate's .cargo/config.toml).
 #
 # The crate tracks no Cargo.lock, so this resolves dependencies fresh on every run.
 # A new semver-compatible release can turn it red with no commit here. That is
