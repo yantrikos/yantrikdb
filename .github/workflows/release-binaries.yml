@@ -43,11 +43,11 @@ jobs:
             target: x86_64-pc-windows-msvc
             ext: ".exe"
             os_label: windows-amd64
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
             ext: ""
             os_label: macos-arm64
-          - os: macos-14
+          - os: macos-15
             target: x86_64-apple-darwin
             ext: ""
             os_label: macos-amd64
