@@ -37,7 +37,7 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-msvc
           # macOS Apple Silicon — sole macOS runtime coverage.
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
           # macOS Intel (x86_64-apple-darwin) is intentionally NOT tested here:
           # GitHub's hosted macos-13 Intel runners are deprecated and routinely
