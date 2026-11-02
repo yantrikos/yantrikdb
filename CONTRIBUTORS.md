@@ -29,6 +29,14 @@ Picked up all three good-first issues within hours of their being filed (2026-11
 - **[PR #264](https://github.com/yantrikos/yantrikdb/pull/264): `reembed(name)` on the Python binding** (fixes [#260](https://github.com/yantrikos/yantrikdb/issues/260)). A populated store can now move to another named embedder from Python, for example `potion-multilingual-128M` for a non-English corpus, instead of starting fresh. Includes the build stub for builds without the `embedder-download` feature, and fixes the stale doc comment on `reembed()`.
 - **[yantrikdb-hermes-plugin#103](https://github.com/yantrikos/yantrikdb-hermes-plugin/pull/103): `YANTRIKDB_COMPRESSION_GIST` switch** (fixes [plugin#102](https://github.com/yantrikos/yantrikdb-hermes-plugin/issues/102)). Lets users turn off the pre-compression gist write.
 
+### Tby Zhang ([@nsknojj](https://github.com/nsknojj))
+
+- **[PR #268](https://github.com/yantrikos/yantrikdb/pull/268): valid-time bounds on wasm recall** (fixes [#182](https://github.com/yantrikos/yantrikdb/issues/182), 2026-11-02). `recall` in the wasm binding gains optional `event_after` / `event_before`, with existing two-argument callers unchanged. Added the wasm crate's first tests, and gated the SQLite VFS shim on `wasm32` so they can run natively. Also reported that the wasm32 build was failing on unmodified code, which led to [#269](https://github.com/yantrikos/yantrikdb/pull/269).
+
+### Skender Haxhimolla ([@skenderh](https://github.com/skenderh))
+
+- **[yantrikdb-mcp#48](https://github.com/yantrikos/yantrikdb-mcp/pull/48): `YANTRIKDB_EMBEDDER=named:<model>`** (2026-11-02). Lets the MCP server select any model in the engine's downloadable registry, such as the 512-dim `potion-base-32M`, without patching the installed package.
+
 ### Reporters
 
 - **[antonius888](https://github.com/antonius888)**: filed [#253](https://github.com/yantrikos/yantrikdb/issues/253) (consolidation merging unrelated records on a Hermes store). The live repro, cluster-size histogram, trigger dump and SQL for inspecting `consolidated_into` pointed to both the gist seed problem fixed in v0.23.3 and the default embedder's behaviour on non-English text.
