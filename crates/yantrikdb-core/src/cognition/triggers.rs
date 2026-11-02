@@ -293,7 +293,7 @@ pub fn check_redundancy(db: &YantrikDB, sim_threshold: f64) -> Result<Vec<Trigge
 fn check_redundancy_in_namespace(
     db: &YantrikDB,
     namespace: &str,
-    _sim_threshold: f64,
+    sim_threshold: f64,
 ) -> Result<Vec<Trigger>> {
     // Phase 1: Collect memory data while holding the conn lock.
     let rows: Vec<(String, String, Vec<u8>)> = {
@@ -330,7 +330,7 @@ fn check_redundancy_in_namespace(
     }; // conn lock released here
 
     let mut triggers = Vec::new();
-    let threshold = 0.85;
+    let threshold = sim_threshold;
 
     for i in 0..rows.len() {
         for j in (i + 1)..rows.len() {
@@ -1989,5 +1989,75 @@ mod tests {
                 triggers.iter().map(|t| &t.reason).collect::<Vec<_>>()
             );
         }
+    }
+
+    #[test]
+    fn test_check_redundancy_honors_sim_threshold() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        // Two unit vectors with cosine similarity 0.9 (a == e0, b == 0.9*e0 + sqrt(0.19)*e1).
+        let emb_a: Vec<f32> = vec![1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let emb_b: Vec<f32> = vec![
+            0.9,
+            (1.0 - 0.9 * 0.9f32).sqrt(),
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+            0.0,
+        ];
+        db.record(
+            "alpha record",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            &emb_a,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+        db.record(
+            "beta record",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            &emb_b,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+
+        // 0.9 > 0.85: the pair is flagged.
+        assert!(
+            !check_redundancy(&db, 0.85).unwrap().is_empty(),
+            "a 0.9-similarity pair must be flagged at threshold 0.85"
+        );
+        // 0.9 < 0.95: nothing is flagged.
+        assert!(
+            check_redundancy(&db, 0.95).unwrap().is_empty(),
+            "a 0.9-similarity pair must not be flagged at threshold 0.95"
+        );
+    }
+
+    /// A `ThinkConfig` serialized before `redundancy_sim_threshold` existed
+    /// must still deserialize, taking the same 0.85 that `Default` uses.
+    #[test]
+    fn test_think_config_without_redundancy_threshold_deserializes() {
+        let mut old = serde_json::to_value(crate::types::ThinkConfig::default()).unwrap();
+        old.as_object_mut()
+            .unwrap()
+            .remove("redundancy_sim_threshold");
+        let cfg: crate::types::ThinkConfig = serde_json::from_value(old).unwrap();
+        assert_eq!(cfg.redundancy_sim_threshold, 0.85);
     }
 }

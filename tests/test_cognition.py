@@ -80,6 +80,29 @@ class TestThink:
         result = db.think()
         assert result["duration_ms"] >= 0
 
+    def test_think_redundancy_sim_threshold_reaches_check(self, db):
+        """#259: the redundancy threshold is settable from Python and honoured.
+
+        Two records at cosine 0.9 are redundant at 0.85 and not at 0.95. Each
+        threshold runs on its own store so trigger cooldowns can't mask it.
+        """
+        a = [1.0] + [0.0] * (DIM - 1)
+        b = [0.9, math.sqrt(1 - 0.81)] + [0.0] * (DIM - 2)
+        quiet = {"run_consolidation": False, "run_conflict_scan": False, "max_triggers": 50}
+
+        def redundancy_count(threshold):
+            engine = YantrikDB(db_path=":memory:", embedding_dim=DIM)
+            try:
+                engine.record("alpha record", embedding=a)
+                engine.record("beta record", embedding=b)
+                result = engine.think({**quiet, "redundancy_sim_threshold": threshold})
+                return sum(1 for t in result["triggers"] if t["trigger_type"] == "redundancy")
+            finally:
+                engine.close()
+
+        assert redundancy_count(0.85) >= 1
+        assert redundancy_count(0.95) == 0
+
 
 class TestTriggerLifecycle:
     def _create_trigger(self, db):
