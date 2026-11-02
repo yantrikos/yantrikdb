@@ -1335,7 +1335,9 @@ pub struct ThinkConfig {
     /// Cosine similarity above which two active memories are flagged as
     /// redundant by `check_redundancy`. Kept separate from the consolidation
     /// threshold so `think()` doesn't reuse a consolidation knob for a
-    /// different purpose.
+    /// different purpose. Defaults on deserialize, so a `ThinkConfig`
+    /// serialized before this field existed still loads.
+    #[serde(default = "default_redundancy_sim_threshold")]
     pub redundancy_sim_threshold: f64,
     pub consolidation_time_window_days: f64,
     pub consolidation_min_cluster: usize,
@@ -1357,6 +1359,10 @@ pub struct ThinkConfig {
     pub extract_attribute_claims: bool,
 }
 
+fn default_redundancy_sim_threshold() -> f64 {
+    0.85
+}
+
 impl Default for ThinkConfig {
     fn default() -> Self {
         Self {
@@ -1367,7 +1373,7 @@ impl Default for ThinkConfig {
             run_conflict_scan: true,
             run_pattern_mining: false,
             consolidation_sim_threshold: 0.6,
-            redundancy_sim_threshold: 0.85,
+            redundancy_sim_threshold: default_redundancy_sim_threshold(),
             consolidation_time_window_days: 7.0,
             consolidation_min_cluster: 2,
             consolidation_limit: 5,

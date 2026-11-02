@@ -2048,4 +2048,16 @@ mod tests {
             "a 0.9-similarity pair must not be flagged at threshold 0.95"
         );
     }
+
+    /// A `ThinkConfig` serialized before `redundancy_sim_threshold` existed
+    /// must still deserialize, taking the same 0.85 that `Default` uses.
+    #[test]
+    fn test_think_config_without_redundancy_threshold_deserializes() {
+        let mut old = serde_json::to_value(crate::types::ThinkConfig::default()).unwrap();
+        old.as_object_mut()
+            .unwrap()
+            .remove("redundancy_sim_threshold");
+        let cfg: crate::types::ThinkConfig = serde_json::from_value(old).unwrap();
+        assert_eq!(cfg.redundancy_sim_threshold, 0.85);
+    }
 }
