@@ -22,6 +22,7 @@ js-sys = "0.3"
 web-sys = { version = "0.3", features = ["console"] }
 getrandom_02 = { package = "getrandom", version = "0.2", features = ["js"] }
 getrandom = { version = "0.3", features = ["wasm_js"] }
+getrandom_04 = { package = "getrandom", version = "0.4", features = ["wasm_js"] }
 
 [profile.release]
 opt-level = "s"
