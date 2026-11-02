@@ -1,0 +1,11 @@
+# SQLite is C, built against the wasi sysroot, and leaves libc symbols (strcmp,
+# malloc, ...) unresolved on purpose: they become imports from `env`, supplied in
+# the browser by yantrikdb-web's public/wasm/wasm-shims.js. Rust 1.96 stopped
+# passing --allow-undefined to wasm-ld by default, which turns those into link
+# errors, so this crate has to ask for it.
+#
+# The cost is that a symbol nothing provides now fails when the module is loaded,
+# not when it is linked. yantrikdb-web's verify-wasm-demo.mjs loads the module, so
+# it catches that.
+[target.wasm32-unknown-unknown]
+rustflags = ["-Clink-arg=--allow-undefined"]

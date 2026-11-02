@@ -1,0 +1,64 @@
+name: Wasm build
+
+# crates/yantrikdb-wasm is excluded from the workspace, so `cargo test --workspace`
+# never compiles it. Nothing else built it either. The browser build has broken
+# silently twice because of that: it rotted from March to August 2026, and by
+# November it failed on current toolchains two ways. A fresh dependency resolve had
+# pulled in getrandom 0.4, which needs its `wasm_js` feature, and Rust 1.96 had
+# stopped linking wasm with --allow-undefined (see the crate's .cargo/config.toml).
+#
+# The crate tracks no Cargo.lock, so this resolves dependencies fresh on every run.
+# A new semver-compatible release can turn it red with no commit here. That is
+# intended: it is the failure a release would otherwise discover.
+#
+# The compiler settings match yantrikdb-web/scripts/build-wasm.sh, which builds the
+# bundle the site serves. This job proves the crate compiles and links. It does not
+# prove the demo works; yantrikdb-web's verify-wasm-demo.mjs does that.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  wasm:
+    name: Wasm crate (native tests + wasm32 build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      WASI_SDK_VERSION: "25"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Rust Cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/yantrikdb-wasm
+
+      - name: Run the crate's native tests
+        working-directory: crates/yantrikdb-wasm
+        run: cargo test
+
+      - name: Install wasi-sdk
+        run: |
+          curl -fsSL -o wasi-sdk.tar.gz \
+            "https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-${WASI_SDK_VERSION}/wasi-sdk-${WASI_SDK_VERSION}.0-x86_64-linux.tar.gz"
+          mkdir -p "$RUNNER_TEMP/wasi-sdk"
+          tar -xzf wasi-sdk.tar.gz -C "$RUNNER_TEMP/wasi-sdk" --strip-components=1
+          rm wasi-sdk.tar.gz
+
+      - name: Build for wasm32-unknown-unknown
+        working-directory: crates/yantrikdb-wasm
+        run: |
+          WASI="$RUNNER_TEMP/wasi-sdk"
+          export CC_wasm32_unknown_unknown="$WASI/bin/clang"
+          export AR_wasm32_unknown_unknown="$WASI/bin/llvm-ar"
+          export CFLAGS_wasm32_unknown_unknown="--sysroot=$WASI/share/wasi-sysroot --target=wasm32-wasi -DSQLITE_THREADSAFE=0 -DLONGDOUBLE_TYPE=double -DSQLITE_OS_OTHER -DSQLITE_OMIT_WAL -DSQLITE_OMIT_LOAD_EXTENSION -DSQLITE_DEFAULT_MEMSTATUS=0 -DSQLITE_TEMP_STORE=3 -fvisibility=default -O2"
+          cargo build --release --target wasm32-unknown-unknown
+          test -f target/wasm32-unknown-unknown/release/yantrikdb_wasm.wasm
