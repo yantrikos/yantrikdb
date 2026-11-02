@@ -108,6 +108,13 @@ jobs:
       - name: Run Rust Tests (testing feature — failpoints + kill proofs)
         run: cargo test --workspace --exclude yantrikdb-python --features testing --verbose
 
+      # Linux only: there the default torch wheel pulls ~4 GB of nvidia-*
+      # CUDA packages (see benchmark.yml); macOS and Windows wheels are
+      # already CPU builds, so those legs are left untouched.
+      - name: Install CPU-only torch (Linux)
+        if: runner.os == 'Linux'
+        run: pip install torch --index-url https://download.pytorch.org/whl/cpu
+
       - name: Install Python package
         run: pip install -e ".[all,dev]"
 
