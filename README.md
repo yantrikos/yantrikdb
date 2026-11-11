@@ -156,7 +156,7 @@ metadata.
 
 ```toml
 [dependencies]
-yantrikdb = "0.7"
+yantrikdb = "0.23"
 
 # NOTE: the crate defaults differ from the pip package on purpose.
 # `embedder-download` is OFF here, so a default cargo build has NO
@@ -165,14 +165,14 @@ yantrikdb = "0.7"
 # the 256-dim potion-base-8M default described above.
 #
 # To get that default (and set_embedder_named) in Rust, opt in:
-# yantrikdb = { version = "0.7", features = ["embedder-download"] }
+# yantrikdb = { version = "0.23", features = ["embedder-download"] }
 #
 # Why not on by default: it pulls ureq + sha2 + dirs + tar + flate2
 # into every build of an embedded database. See the measured retrieval
 # difference above and decide for your deployment.
 
 # Slim build (no bundled embedder, no network code path):
-# yantrikdb = { version = "0.7", default-features = false }
+# yantrikdb = { version = "0.23", default-features = false }
 ```
 
 ## The Problem
