@@ -959,6 +959,26 @@ fn commit_consolidation(
     additive: bool,
     synthesis: Option<&SynthesisWrite<'_>>,
 ) -> Result<serde_json::Value> {
+    // Namespaces are tenant boundaries, and this is the single place a
+    // consolidation is written — every path that commits one funnels
+    // through here. The candidate scan groups by namespace and
+    // `load_cluster_members` refuses a mixed rid list, but the invariant
+    // belongs at the chokepoint too (issue #242): a caller that builds
+    // its cluster any other way must not be able to store one tenant's
+    // synthesis in another tenant's namespace, retiring records it never
+    // named. Without this check the consolidated record silently takes
+    // the FIRST member's namespace.
+    if let Some(first) = cluster.first() {
+        if let Some(other) = cluster.iter().find(|m| m.namespace != first.namespace) {
+            return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                "commit_consolidation: members span namespaces \
+                 ('{}' vs '{}' at {}) — a cluster must be \
+                 consolidated within one namespace",
+                first.namespace, other.namespace, other.rid
+            )));
+        }
+    }
+
     let ts = crate::time::now_secs();
     {
         let source_rids: Vec<String> = cluster.iter().map(|m| m.rid.clone()).collect();
@@ -1698,6 +1718,134 @@ mod tests {
             )
             .unwrap();
         assert_eq!(wrapped, "0", "the cursor wraps after reaching the tail");
+    }
+
+    fn seed_in_namespace(db: &YantrikDB, text: &str, namespace: &str, emb: &[f32]) -> String {
+        db.record(
+            text,
+            "semantic",
+            0.7,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            emb,
+            namespace,
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap()
+    }
+
+    /// Issue #242: the namespace invariant must hold at the chokepoint
+    /// itself, not only in the callers that happen to guard it. The
+    /// candidate scan groups by namespace and `load_cluster_members`
+    /// refuses a mixed rid list, but `commit_consolidation` — the single
+    /// place a consolidation is written — took the FIRST member's
+    /// namespace and committed. Any caller reaching it with a mixed
+    /// cluster (a future path, or one that builds its members without
+    /// `load_cluster_members`) stored one tenant's synthesis in another
+    /// tenant's namespace and retired the other tenant's records.
+    ///
+    /// The seeded rows are real, so the unguarded path would fully
+    /// succeed: this test fails without the chokepoint check.
+    #[test]
+    fn test_commit_consolidation_rejects_cross_namespace_cluster() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let emb = vec![1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let rid_a = seed_in_namespace(&db, "alice mail server runs postfix", "alice", &emb);
+        let rid_b = seed_in_namespace(&db, "bob mail server runs postfix", "bob", &emb);
+
+        let members = vec![
+            MemoryWithEmbedding {
+                namespace: "alice".to_string(),
+                ..make_mem(
+                    &rid_a,
+                    "alice mail server runs postfix",
+                    emb.clone(),
+                    100.0,
+                    0.7,
+                )
+            },
+            MemoryWithEmbedding {
+                namespace: "bob".to_string(),
+                ..make_mem(
+                    &rid_b,
+                    "bob mail server runs postfix",
+                    emb.clone(),
+                    101.0,
+                    0.7,
+                )
+            },
+        ];
+
+        let err = commit_consolidation(
+            &db,
+            &members,
+            "merged summary",
+            Some(emb.clone()),
+            false,
+            None,
+        )
+        .expect_err("a cross-namespace cluster must be refused at commit time");
+        assert!(
+            err.to_string().contains("namespace"),
+            "the refusal must name the boundary it protects: {err}"
+        );
+
+        // The refusal happens before any write: both sources stay active
+        // and no consolidated record exists.
+        for rid in [&rid_a, &rid_b] {
+            let m = db.get_memory(rid).unwrap().unwrap();
+            assert_eq!(m.consolidation_status, "active");
+        }
+        let conn = db.conn();
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 2, "no consolidated record may be written");
+    }
+
+    /// The control: the chokepoint check must not be "achieved" by
+    /// refusing consolidation outright — a single-namespace cluster
+    /// committed directly still goes through, into that namespace.
+    #[test]
+    fn test_commit_consolidation_same_namespace_still_commits() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let emb = vec![1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let rid_a = seed_in_namespace(&db, "alice mail server runs postfix", "alice", &emb);
+        let rid_b = seed_in_namespace(&db, "alice backup runs nightly", "alice", &emb);
+
+        let members = vec![
+            MemoryWithEmbedding {
+                namespace: "alice".to_string(),
+                ..make_mem(
+                    &rid_a,
+                    "alice mail server runs postfix",
+                    emb.clone(),
+                    100.0,
+                    0.7,
+                )
+            },
+            MemoryWithEmbedding {
+                namespace: "alice".to_string(),
+                ..make_mem(&rid_b, "alice backup runs nightly", emb.clone(), 101.0, 0.7)
+            },
+        ];
+
+        let out = commit_consolidation(
+            &db,
+            &members,
+            "alice mail summary",
+            Some(emb.clone()),
+            false,
+            None,
+        )
+        .unwrap();
+        let new_rid = out["consolidated_rid"].as_str().expect("consolidated rid");
+        let m = db.get_memory(new_rid).unwrap().unwrap();
+        assert_eq!(m.namespace, "alice");
     }
 }
 
