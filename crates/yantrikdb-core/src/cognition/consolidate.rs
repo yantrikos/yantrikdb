@@ -1853,7 +1853,7 @@ mod tests {
         .unwrap();
         let new_rid = out["consolidated_rid"].as_str().expect("consolidated rid");
         let m = db.get_memory(new_rid).unwrap().unwrap();
-                assert_eq!(m.namespace, "alice");
+        assert_eq!(m.namespace, "alice");
     }
 
     /// Issue #242, the composition the ticket actually worries about:
