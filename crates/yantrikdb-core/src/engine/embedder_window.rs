@@ -62,12 +62,24 @@ impl YantrikDB {
     /// Two texts sharing a filler prefix of length `n` and differing
     /// only after it. Near-identical vectors mean the suffix was never
     /// seen.
-    fn suffix_is_seen(&self, n: usize) -> Result<bool> {
+    ///
+    /// The embedding is supplied by the caller so the same probe works
+    /// for an embedder the engine cannot reach itself — a Python
+    /// callable attached through `set_embedder(obj)` lives in the pyo3
+    /// wrapper, not in this struct (issue #273).
+    fn suffix_is_seen_with<F>(&self, n: usize, embed: &F) -> Result<bool>
+    where
+        F: Fn(&str) -> Result<Vec<f32>>,
+    {
         let filler = "the quick brown fox jumps over the lazy dog ".repeat(n / 44 + 1);
         let head = &filler[..n.min(filler.len())];
-        let a = self.embed(&format!("{head} alpha zulu quasar"))?;
-        let b = self.embed(&format!("{head} omega tundra basalt"))?;
+        let a = embed(&format!("{head} alpha zulu quasar"))?;
+        let b = embed(&format!("{head} omega tundra basalt"))?;
         Ok(!same_vector(&a, &b))
+    }
+
+    fn suffix_is_seen(&self, n: usize) -> Result<bool> {
+        self.suffix_is_seen_with(n, &|text| self.embed(text))
     }
 
     /// Empirically detect the embedder's usable input window, in
@@ -80,9 +92,30 @@ impl YantrikDB {
     /// budget is the honest unit for the warning it powers. Expect it
     /// to land near `window_tokens * ~4`.
     pub fn detect_embedder_window(&self) -> Result<Option<usize>> {
+        self.detect_embedder_window_with(|text| self.embed(text))
+    }
+
+    /// Same probe, with the embedding supplied by the caller.
+    ///
+    /// Exists because the pyo3 wrapper can hold an embedder this struct
+    /// cannot see: `set_embedder(obj)` stores a Python `PyObject` on the
+    /// wrapper side, and `embed_text()` already prefers it over the
+    /// engine's own. Without this entry point the probe looked at the
+    /// wrong embedder — or reported "no embedder configured" while
+    /// `has_embedder()` returned true (issue #273).
+    ///
+    /// The detected window is stored in this instance, so `stats()` and
+    /// `rechunk_long_records()` see it for the rest of the process. It
+    /// is **not** persisted: persistence is keyed to the engine's
+    /// embedder digest, and a Python callable has none. Callers that
+    /// need it across restarts re-probe, or attach an engine embedder.
+    pub fn detect_embedder_window_with<F>(&self, embed: F) -> Result<Option<usize>>
+    where
+        F: Fn(&str) -> Result<Vec<f32>>,
+    {
         // Cheap exit: if content at the far end is still seen, nothing
         // is being dropped anywhere below it.
-        if self.suffix_is_seen(PROBE_MAX)? {
+        if self.suffix_is_seen_with(PROBE_MAX, &embed)? {
             self.embedder_window_chars
                 .store(NO_TRUNCATION, Ordering::Relaxed);
             self.persist_embedder_window(NO_TRUNCATION);
@@ -91,7 +124,7 @@ impl YantrikDB {
         // A truncating embedder: binary search the boundary between
         // "suffix still seen" and "suffix ignored".
         let (mut lo, mut hi) = (PROBE_MIN, PROBE_MAX);
-        if !self.suffix_is_seen(lo)? {
+        if !self.suffix_is_seen_with(lo, &embed)? {
             // Truncates below even the smallest probe — report the
             // floor rather than pretending to more precision.
             self.embedder_window_chars.store(lo, Ordering::Relaxed);
@@ -100,7 +133,7 @@ impl YantrikDB {
         }
         while hi - lo > 64 {
             let mid = lo + (hi - lo) / 2;
-            if self.suffix_is_seen(mid)? {
+            if self.suffix_is_seen_with(mid, &embed)? {
                 lo = mid;
             } else {
                 hi = mid;
@@ -109,7 +142,8 @@ impl YantrikDB {
         self.embedder_window_chars.store(lo, Ordering::Relaxed);
         // The probe is ~24 embed calls — persist the answer (keyed to
         // the embedder digest) so a restart neither repays that cost
-        // nor silently deactivates chunking.
+        // nor silently deactivates chunking. A best-effort no-op when
+        // the embedder has no digest (Python-side embedder).
         self.persist_embedder_window(lo);
         Ok(Some(lo))
     }

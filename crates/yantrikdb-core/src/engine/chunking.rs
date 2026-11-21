@@ -207,9 +207,8 @@ impl YantrikDB {
     /// an interrupted run continues where it stopped. Returns
     /// `(records_chunked, chunk_vectors_written)`.
     pub fn rechunk_long_records(&self) -> Result<(usize, usize)> {
-        let window = match self.embedder_window_chars.load(Ordering::Relaxed) {
-            0 | NO_TRUNCATION => return Ok((0, 0)),
-            n => n,
+        let Some(window) = self.known_window() else {
+            return Ok((0, 0));
         };
         let state = self.search_state.load_full();
         let embedder = state
@@ -220,7 +219,50 @@ impl YantrikDB {
         let generation = state.generation;
         let dim = state.dim();
         drop(state);
+        self.rechunk_with(window, dim, generation, |text| {
+            embedder
+                .embed(text)
+                .map_err(|e| crate::error::YantrikDbError::Inference(e.to_string()))
+        })
+    }
 
+    /// Same backfill, with the embedding supplied by the caller.
+    ///
+    /// Exists for the Python-side embedder: the pyo3 wrapper holds it, not
+    /// this struct, so `rechunk_long_records()` could never use it and raised
+    /// `NoEmbedder` even after the window was known (issue #273).
+    pub fn rechunk_long_records_with<F>(&self, embed: F) -> Result<(usize, usize)>
+    where
+        F: Fn(&str) -> Result<Vec<f32>>,
+    {
+        let Some(window) = self.known_window() else {
+            return Ok((0, 0));
+        };
+        let state = self.search_state.load_full();
+        let generation = state.generation;
+        let dim = state.dim();
+        drop(state);
+        self.rechunk_with(window, dim, generation, embed)
+    }
+
+    /// The probed window, when chunking applies at all.
+    fn known_window(&self) -> Option<usize> {
+        match self.embedder_window_chars.load(Ordering::Relaxed) {
+            0 | NO_TRUNCATION => None,
+            n => Some(n),
+        }
+    }
+
+    fn rechunk_with<F>(
+        &self,
+        window: usize,
+        dim: usize,
+        generation: u64,
+        embed: F,
+    ) -> Result<(usize, usize)>
+    where
+        F: Fn(&str) -> Result<Vec<f32>>,
+    {
         // Candidates: active + hot + vectored, no chunk rows yet. Text
         // length cannot be filtered in SQL (it may be encrypted), so
         // every candidate is read and measured client-side.
@@ -257,8 +299,7 @@ impl YantrikDB {
             }
             let mut chunk_vecs: ChunkVectors = Vec::with_capacity(ranges.len());
             for (i, (a, b)) in ranges.iter().enumerate() {
-                let v = embedder
-                    .embed(&text[*a..*b])
+                let v = embed(&text[*a..*b])
                     .map_err(|e| crate::error::YantrikDbError::Inference(e.to_string()))?;
                 crate::validate::validate_embedding("rechunk", &v, dim)?;
                 chunk_vecs.push((i + 1, v));

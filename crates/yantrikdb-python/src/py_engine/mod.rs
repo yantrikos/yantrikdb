@@ -920,6 +920,19 @@ impl PyYantrikDB {
     }
 }
 
+/// Convert a Python embedder's `encode()` output to a vector, accepting
+/// `list[float]` and numpy arrays (via `.tolist()`).
+///
+/// Shared by `embed_text()` and the window probe so both interpret an
+/// embedder's return value identically.
+pub(crate) fn py_vector(py: Python<'_>, result: &PyObject) -> PyResult<Vec<f32>> {
+    if let Ok(list) = result.extract::<Vec<f32>>(py) {
+        return Ok(list);
+    }
+    let list = result.call_method0(py, "tolist")?;
+    list.extract::<Vec<f32>>(py)
+}
+
 impl PyYantrikDB {
     /// Get a reference to the inner YantrikDB engine (for use by consolidation/trigger wrappers).
     pub fn get_inner(&self) -> PyResult<&YantrikDB> {
@@ -949,13 +962,7 @@ impl PyYantrikDB {
         // one to a store with a recorded identity is refused as before.
         if let Some(emb) = &self.embedder {
             let result = emb.call_method1(py, "encode", (text,))?;
-            // Handle both list and numpy array returns
-            if let Ok(list) = result.extract::<Vec<f32>>(py) {
-                return Ok(list);
-            }
-            // Try calling .tolist() for numpy arrays
-            let list = result.call_method0(py, "tolist")?;
-            return list.extract::<Vec<f32>>(py);
+            return py_vector(py, &result);
         }
 
         if let Some(db) = &self.inner {
