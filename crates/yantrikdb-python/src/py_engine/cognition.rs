@@ -96,7 +96,28 @@ impl PyYantrikDB {
         } else {
             yantrikdb_core::ThinkConfig::default()
         };
-        let result = db.think(&cfg).map_err(map_err)?;
+        let result = {
+            // Release the GIL for the engine call (#271). `think()` is CPU-bound
+            // and, without this, holds the GIL for its whole duration: a 10 ms
+            // Python ticker measured 99 increments/s before the call and 0 after
+            // it started, for over 110 s on a 23k-record store. Everything else
+            // in the host — the async gateway's event loop included — starves
+            // while it runs.
+            //
+            // `detach` is what older PyO3 docs call `allow_threads`; the rename
+            // landed in 0.26 and this crate is on 0.28.3, where `allow_threads`
+            // no longer exists.
+            //
+            // Nothing in the closure touches Python: the config dict was already
+            // converted to `ThinkConfig` above, and the result dict is built
+            // after reattaching. `Arc<YantrikDB>` is owned and `Send + Sync`,
+            // which is what `Ungil` requires.
+            let db = self
+                .inner
+                .clone()
+                .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+            py.detach(move || db.think(&cfg)).map_err(map_err)?
+        };
         think_result_to_dict(py, &result)
     }
 
