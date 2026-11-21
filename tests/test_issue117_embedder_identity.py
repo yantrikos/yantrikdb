@@ -18,13 +18,46 @@ been burned by one-directional checks before.
 """
 
 import hashlib
-import sqlite3
+import json
+import subprocess
+import sys
 
 import pytest
 
 from yantrikdb import YantrikDB
 
 DIM = 64  # BUNDLED_EMBEDDER_DIM — same dim on both sides, so no dim check can catch it
+
+
+def _raw_sql(path, statements):
+    """Run raw SQL against a store from a CHILD process; return the last result.
+
+    Not an in-process ``sqlite3.connect``, even after ``db.close()``. The
+    engine links its own SQLite, and ``close()`` does not guarantee that
+    library has let go of the WAL ``-shm`` mapping. Python's stdlib
+    ``sqlite3`` is a second SQLite in the same process; POSIX advisory locks
+    are per process, so on close it believes it is the last connection and
+    truncates/unlinks the ``-shm`` the engine still has mapped. macOS arm64
+    CI took that as SIGBUS twice on 2026-11-21, once in each fixture below.
+    A child process holds its own locks, so the kernel serialises it.
+
+    ``statements`` is a list of ``[sql, params]``; writes are committed.
+    """
+    prog = "; ".join([
+        "import json, sqlite3, sys",
+        "path, stmts = json.loads(sys.argv[1])",
+        "c = sqlite3.connect(path)",
+        "rows = [c.execute(q, p).fetchall() for q, p in stmts]",
+        "c.commit()",
+        "c.close()",
+        "print(json.dumps(rows[-1]))",
+    ])
+    out = subprocess.run(
+        [sys.executable, "-c", prog, json.dumps([path, statements])],
+        capture_output=True, text=True, timeout=60,
+    )
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
 
 
 class _Hostile:
@@ -55,13 +88,9 @@ def built(tmp_path):
     db.record("the cluster runs on port 7438", namespace="n")
     db.close()
 
-    conn = sqlite3.connect(db_path)
-    try:
-        digest = conn.execute(
-            "SELECT value FROM meta WHERE key='embedder_digest'"
-        ).fetchone()[0]
-    finally:
-        conn.close()
+    digest = _raw_sql(
+        db_path, [["SELECT value FROM meta WHERE key='embedder_digest'", []]]
+    )[0][0]
     return db_path, digest
 
 
@@ -160,16 +189,11 @@ def false_identity(tmp_path):
     db.record("the deploy key for node4 is id_deploy", namespace="n")
     db.close()
 
-    conn = sqlite3.connect(db_path)
-    try:
-        # The vectors stay DIM-wide; only the claim about them changes.
-        conn.execute("UPDATE meta SET value='384' WHERE key='embedder_dim'")
-        conn.commit()
-        width = conn.execute(
-            "SELECT length(embedding) FROM memories WHERE embedding IS NOT NULL LIMIT 1"
-        ).fetchone()[0]
-    finally:
-        conn.close()
+    # The vectors stay DIM-wide; only the claim about them changes.
+    width = _raw_sql(db_path, [
+        ["UPDATE meta SET value='384' WHERE key='embedder_dim'", []],
+        ["SELECT length(embedding) FROM memories WHERE embedding IS NOT NULL LIMIT 1", []],
+    ])[0][0]
     assert width == DIM * 4, "fixture must leave the vectors untouched"
     return db_path
 

@@ -756,9 +756,23 @@ impl PyYantrikDB {
     }
 
     #[pyo3(signature = (namespace=None))]
-    fn stats(&self, py: Python<'_>, namespace: Option<&str>) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let s = db.stats(namespace).map_err(map_err)?;
+    fn stats(slf: &Bound<'_, Self>, namespace: Option<&str>) -> PyResult<PyObject> {
+        let py = slf.py();
+        // No borrow of `slf` is held across the detached call; see
+        // `engine_handle` for why that matters.
+        let db = Self::engine_handle(slf)?;
+        let namespace = namespace.map(str::to_owned);
+        // Release the GIL for the engine call (#271). `stats()` aggregates
+        // over the store and, without this, holds the GIL for its whole
+        // duration, stalling every other thread in the host while it runs.
+        // `detach` is PyO3 0.28's name for what older docs call
+        // `allow_threads`. Nothing in the closure touches Python: the
+        // namespace was converted to an owned string above, and the result
+        // dict is built after reattaching. `Arc<YantrikDB>` is owned and
+        // `Send + Sync`, which is what `Ungil` requires.
+        let s = py
+            .detach(move || db.stats(namespace.as_deref()))
+            .map_err(map_err)?;
         stats_to_dict(py, &s)
     }
 

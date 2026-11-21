@@ -1,7 +1,8 @@
 """Engine calls that release the GIL must not lock other threads out of the wrapper.
 
 `recall()` and `think()` run the engine inside `py.detach` (#271, #279, #280), so
-other Python threads keep running while they work. The first version kept the
+other Python threads keep running while they work. `stats()` releases the GIL the
+same way, and the third test below covers it. The first version kept the
 wrapper's `PyRef` borrow for the whole call. While a recall loop ran in one
 thread, every `set_embedder()` from another thread failed with
 `RuntimeError: Already borrowed` (3.5M of 3.5M calls in 5 s), and `close()`
@@ -90,6 +91,51 @@ def test_set_embedder_while_recall_runs_in_another_thread(db):
     unexpected = [e for e in recall_errors if "Already mutably borrowed" not in e]
     assert not unexpected, unexpected[:2]
     assert not any("PanicException" in e for e in recall_errors)
+
+
+def test_set_embedder_while_stats_runs_in_another_thread(db):
+    stop = threading.Event()
+    stats_calls = []
+    stats_errors = []
+
+    def worker():
+        while not stop.is_set():
+            stats_calls.append(1)
+            try:
+                db.stats()
+            except Exception as e:  # noqa: BLE001 - every failure is the finding
+                stats_errors.append(repr(e))
+
+    t = threading.Thread(target=worker)
+    t.start()
+    errors = []
+    calls = 0
+    deadline = time.time() + 2.0
+    try:
+        while time.time() < deadline:
+            try:
+                db.set_embedder(Emb(), allow_unverified_embedder=True)
+            except Exception as e:  # noqa: BLE001
+                errors.append(repr(e))
+            calls += 1
+    finally:
+        stop.set()
+        t.join()
+
+    # The test only means something if both threads really ran concurrently.
+    assert len(stats_calls) > 5, "the stats worker barely ran; nothing was contended"
+    assert calls > 5
+    assert not _borrow_errors(errors), (
+        f"{len(errors)}/{calls} set_embedder() calls failed while stats() was "
+        f"detached: {errors[:1]}"
+    )
+    # Same pre-existing contract as recall(): set_embedder() keeps its
+    # mutable borrow while it calls the Python embedder's encode(), so a
+    # stats() arriving mid-call is refused with "Already mutably borrowed".
+    # That must stay an ordinary RuntimeError, never a panic.
+    unexpected = [e for e in stats_errors if "Already mutably borrowed" not in e]
+    assert not unexpected, unexpected[:2]
+    assert not any("PanicException" in e for e in stats_errors)
 
 
 def test_close_while_think_runs_in_another_thread(db):
