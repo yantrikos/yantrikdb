@@ -406,3 +406,95 @@ fn an_embedder_with_no_window_reports_no_truncation() {
     );
     assert_eq!(db.stats(None).unwrap().embedder_window_chars, None);
 }
+
+// ── #273: an embedder the engine cannot reach (a Python callable) ─────
+
+/// The shape of a store whose only embedder lives in the pyo3 wrapper: the
+/// engine has none, so `detect_embedder_window()` cannot answer, and the
+/// caller supplies the embedding instead. Before the fix this raised
+/// "No embedder configured" while `has_embedder()` reported true.
+#[test]
+fn probe_accepts_an_embedder_the_engine_cannot_reach() {
+    let db = YantrikDB::new(":memory:", 32).unwrap();
+    let probe = TruncatingEmbedder {
+        window: 1000,
+        dim: 32,
+    };
+    assert!(!db.has_embedder(), "nothing attached on the engine side");
+
+    let found = db
+        .detect_embedder_window_with(|text| {
+            probe
+                .embed(text)
+                .map_err(|e| crate::YantrikDbError::Inference(e.to_string()))
+        })
+        .unwrap()
+        .expect("truncation must be detectable through the supplied embedder");
+
+    assert!(
+        (900..=1064).contains(&found),
+        "detected window {found} should be near the real 1000"
+    );
+    assert_eq!(db.embedder_window(), Some(found));
+    assert_eq!(
+        db.stats(None).unwrap().embedder_window_chars,
+        Some(found),
+        "stats() must report the window the probe found"
+    );
+}
+
+/// The backfill must embed the windows with the caller's embedder. Without
+/// it the engine raised NoEmbedder on a store whose only embedder is
+/// Python-side — a known window still produced no chunks.
+#[test]
+fn rechunk_embeds_windows_with_the_callers_embedder() {
+    let db = YantrikDB::new(":memory:", 32).unwrap();
+    let probe = TruncatingEmbedder {
+        window: 400,
+        dim: 32,
+    };
+    let embed = |text: &str| {
+        probe
+            .embed(text)
+            .map_err(|e| crate::YantrikDbError::Inference(e.to_string()))
+    };
+
+    // Written the way the wrapper writes it: the vector is computed outside
+    // the engine and passed in.
+    let text = long_text_with_tail(TAIL);
+    let vector = probe.embed(&text).unwrap();
+    let rid = db
+        .record(
+            &text,
+            "episodic",
+            0.5,
+            0.0,
+            604_800.0,
+            &serde_json::json!({}),
+            &vector,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    assert!(!rid.is_empty());
+    assert_eq!(db.stats(None).unwrap().chunk_vectors, 0);
+
+    db.detect_embedder_window_with(embed)
+        .unwrap()
+        .expect("truncation");
+
+    let (records, vectors) = db.rechunk_long_records_with(embed).unwrap();
+    assert_eq!(records, 1, "the one overflowing record backfills");
+    assert!(vectors >= 1);
+    assert_eq!(
+        db.stats(None).unwrap().chunk_vectors as usize,
+        vectors,
+        "every written chunk vector must be visible in stats"
+    );
+
+    // Idempotent: nothing left to do.
+    assert_eq!(db.rechunk_long_records_with(embed).unwrap(), (0, 0));
+}

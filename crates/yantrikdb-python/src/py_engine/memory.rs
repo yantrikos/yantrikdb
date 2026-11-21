@@ -5,7 +5,25 @@ type PyObject = pyo3::Py<pyo3::PyAny>;
 
 use crate::py_types::*;
 
-use super::{map_err, PyYantrikDB};
+use super::{map_err, py_vector, PyYantrikDB};
+
+/// Adapter from a Python-side embedder to the engine's embedding closure
+/// signature.
+///
+/// The engine can only reach its own embedder; a callable attached through
+/// `set_embedder(obj)` lives here. Both the window probe and the chunk
+/// backfill need exactly this bridge (issue #273).
+fn py_embed(
+    py: Python<'_>,
+    emb: PyObject,
+) -> impl Fn(&str) -> std::result::Result<Vec<f32>, yantrikdb_core::YantrikDbError> + '_ {
+    move |text: &str| {
+        let out = emb
+            .call_method1(py, "encode", (text,))
+            .map_err(|e| yantrikdb_core::YantrikDbError::Inference(e.to_string()))?;
+        py_vector(py, &out).map_err(|e| yantrikdb_core::YantrikDbError::Inference(e.to_string()))
+    }
+}
 
 #[pymethods]
 impl PyYantrikDB {
@@ -273,11 +291,22 @@ impl PyYantrikDB {
     /// its head, so its tail cannot be retrieved. Run once after
     /// attaching an embedder; `stats()` then reports the window and a
     /// count of writes that exceeded it.
-    fn detect_embedder_window(&self) -> PyResult<Option<usize>> {
+    fn detect_embedder_window(&self, py: Python<'_>) -> PyResult<Option<usize>> {
         let db = self
             .inner
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+        // A caller-attached Python embedder outranks the engine's own — the
+        // same precedence `embed_text()` applies. The core probe can only
+        // reach the engine's embedder, so supply the embedding from here
+        // (issue #273). Without this, a store with a Python embedder either
+        // raised "No embedder configured" while `has_embedder()` was true, or
+        // silently reported the *native* embedder's window.
+        if let Some(emb) = &self.embedder {
+            return db
+                .detect_embedder_window_with(py_embed(py, emb.clone_ref(py)))
+                .map_err(map_err);
+        }
         db.detect_embedder_window().map_err(map_err)
     }
 
@@ -290,11 +319,19 @@ impl PyYantrikDB {
     /// committed per record, live after one index rebuild at the end).
     /// Idempotent — an interrupted run continues where it stopped.
     /// Returns `(records_chunked, chunk_vectors_written)`.
-    fn rechunk_long_records(&self) -> PyResult<(usize, usize)> {
+    fn rechunk_long_records(&self, py: Python<'_>) -> PyResult<(usize, usize)> {
         let db = self
             .inner
             .as_ref()
             .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+        // Same precedence as the probe: the caller's embedder embeds the
+        // windows, not the engine's (issue #273). Without this the backfill
+        // raised NoEmbedder on a store whose only embedder is Python-side.
+        if let Some(emb) = &self.embedder {
+            return db
+                .rechunk_long_records_with(py_embed(py, emb.clone_ref(py)))
+                .map_err(map_err);
+        }
         db.rechunk_long_records().map_err(map_err)
     }
 
