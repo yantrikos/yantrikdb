@@ -183,14 +183,24 @@ impl PyYantrikDB {
         event_after: Option<f64>,
         event_before: Option<f64>,
     ) -> PyResult<Vec<PyObject>> {
+        // Owned handle and owned strings: everything below moves into the
+        // detached closure, which may not borrow `self` or any Python-bound
+        // argument. `Arc<YantrikDB>` is Send + Sync, the strings are owned, and
+        // the numeric arguments are Copy — that is what `Ungil` requires.
         let db = self
             .inner
-            .as_ref()
+            .clone()
             .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+        let query = query.map(str::to_owned);
+        let memory_type = memory_type.map(str::to_owned);
+        let namespace = namespace.map(str::to_owned);
+        let domain = domain.map(str::to_owned);
+        let source = source.map(str::to_owned);
+        let order = order.map(str::to_owned);
 
         let emb = match query_embedding {
             Some(e) => e,
-            None => match query {
+            None => match query.as_deref() {
                 Some(q) => self.embed_text(py, q)?,
                 None => {
                     return Err(PyValueError::new_err(
@@ -200,25 +210,33 @@ impl PyYantrikDB {
             },
         };
 
-        let mut results = db
-            .recall(
-                &emb,
-                top_k,
-                time_window,
-                memory_type,
-                include_consolidated,
-                expand_entities,
-                query,
-                skip_reinforce,
-                namespace,
-                domain,
-                source,
-                certainty_min,
-                order,
-                include_superseded,
-                event_after,
-                event_before,
-            )
+        // Release the GIL for the engine call (#271). Measured on a 23k-record
+        // store: recall() took 274 ms wall and held the GIL for 267 ms of it —
+        // the vector search is CPU-bound Rust, and nothing else in the host
+        // runs while it does. `detach` is PyO3 0.28's name for what older docs
+        // call `allow_threads`. The query embedding above stays outside: it is
+        // a Python call and would be illegal inside the closure.
+        let mut results = py
+            .detach(move || {
+                db.recall(
+                    &emb,
+                    top_k,
+                    time_window,
+                    memory_type.as_deref(),
+                    include_consolidated,
+                    expand_entities,
+                    query.as_deref(),
+                    skip_reinforce,
+                    namespace.as_deref(),
+                    domain.as_deref(),
+                    source.as_deref(),
+                    certainty_min,
+                    order.as_deref(),
+                    include_superseded,
+                    event_after,
+                    event_before,
+                )
+            })
             .map_err(map_err)?;
 
         if let Some(ratio) = min_score_ratio {
