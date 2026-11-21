@@ -1853,7 +1853,84 @@ mod tests {
         .unwrap();
         let new_rid = out["consolidated_rid"].as_str().expect("consolidated rid");
         let m = db.get_memory(new_rid).unwrap().unwrap();
-        assert_eq!(m.namespace, "alice");
+                assert_eq!(m.namespace, "alice");
+    }
+
+    /// Issue #242, the composition the ticket actually worries about:
+    /// `find_clusters` never looks at `namespace`, so the `think()`-driven
+    /// path is one caller-side grouping away from handing the commit a
+    /// mixed cluster. The test above builds that cluster by hand; this
+    /// one produces it the way the production path would — a
+    /// mixed-namespace slice straight into `find_clusters` — and asserts
+    /// the refusal still happens at commit time, with nothing written.
+    #[test]
+    fn test_find_clusters_mixed_namespace_slice_is_refused_at_commit() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let emb = vec![1.0f32, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let rid_a = seed_in_namespace(&db, "alice mail server runs postfix", "alice", &emb);
+        let rid_b = seed_in_namespace(&db, "bob mail server runs postfix", "bob", &emb);
+
+        let mems = vec![
+            MemoryWithEmbedding {
+                namespace: "alice".to_string(),
+                ..make_mem(
+                    &rid_a,
+                    "alice mail server runs postfix",
+                    emb.clone(),
+                    100.0,
+                    0.7,
+                )
+            },
+            MemoryWithEmbedding {
+                namespace: "bob".to_string(),
+                ..make_mem(
+                    &rid_b,
+                    "bob mail server runs postfix",
+                    emb.clone(),
+                    101.0,
+                    0.7,
+                )
+            },
+        ];
+
+        // find_clusters is namespace-blind by design (see its doc):
+        // identical embeddings inside the time window cluster together
+        // across the tenant boundary. If a future change gives
+        // find_clusters its own namespace guard, this assertion is the
+        // one to revisit — the commit refusal below must hold either way.
+        let clusters = find_clusters(&mems, None, 0.9, 7.0, 2, 10, None);
+        assert_eq!(clusters.len(), 1, "the mixed slice must cluster as one");
+        let members: Vec<MemoryWithEmbedding> =
+            clusters[0].iter().map(|&idx| mems[idx].clone()).collect();
+        assert_eq!(members.len(), 2);
+
+        let err = commit_consolidation(
+            &db,
+            &members,
+            "merged summary",
+            Some(emb.clone()),
+            false,
+            None,
+        )
+        .expect_err(
+            "a cluster produced from a mixed-namespace slice must be refused at commit time",
+        );
+        assert!(
+            err.to_string().contains("namespace"),
+            "the refusal must name the boundary it protects: {err}"
+        );
+
+        // The refusal happens before any write: both sources stay active
+        // and no consolidated record exists.
+        for rid in [&rid_a, &rid_b] {
+            let m = db.get_memory(rid).unwrap().unwrap();
+            assert_eq!(m.consolidation_status, "active");
+        }
+        let conn = db.conn();
+        let total: i64 = conn
+            .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(total, 2, "no consolidated record may be written");
     }
 }
 
