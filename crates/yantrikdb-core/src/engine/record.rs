@@ -187,6 +187,59 @@ impl YantrikDB {
             emotional_state,
             idempotency_key,
             created_at,
+            &[],
+            true,
+            None,
+        )
+    }
+
+    /// `record_with_idempotency` for a caller that embeds **outside** the engine
+    /// but knows the window geometry — the write-path counterpart to
+    /// `rechunk_long_records`.
+    ///
+    /// `chunks` is `(chunk_idx, window_vector)` with an index starting at 1
+    /// (chunk 0 is `embedding`, the head vector); the geometry comes from
+    /// [`crate::vector::chunk::chunk_ranges`]. The engine cannot derive these
+    /// itself: a Python-side embedder has no engine identity to probe, so the
+    /// caller that owns it must hand them over. Without them a record longer
+    /// than the window is stored with its tail in no vector at all until a
+    /// backfill runs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_with_idempotency_and_chunks(
+        &self,
+        text: &str,
+        memory_type: &str,
+        importance: f64,
+        valence: f64,
+        half_life: f64,
+        metadata: &serde_json::Value,
+        embedding: &[f32],
+        namespace: &str,
+        certainty: f64,
+        domain: &str,
+        source: &str,
+        emotional_state: Option<&str>,
+        idempotency_key: Option<&str>,
+        created_at: Option<f64>,
+        chunks: &[(usize, Vec<f32>)],
+    ) -> Result<String> {
+        self.foreign_commit_precheck()?;
+        self.record_with_idempotency_routed(
+            text,
+            memory_type,
+            importance,
+            valence,
+            half_life,
+            metadata,
+            embedding,
+            namespace,
+            certainty,
+            domain,
+            source,
+            emotional_state,
+            idempotency_key,
+            created_at,
+            chunks,
             true,
             None,
         )
@@ -229,6 +282,7 @@ impl YantrikDB {
             emotional_state,
             idempotency_key,
             created_at,
+            &[],
             false,
             synthesis,
         )
@@ -251,6 +305,7 @@ impl YantrikDB {
         emotional_state: Option<&str>,
         idempotency_key: Option<&str>,
         created_at: Option<f64>,
+        chunks: &[(usize, Vec<f32>)],
         allow_queued_route: bool,
         synthesis: Option<&SynthesisAdmission>,
     ) -> Result<String> {
@@ -440,8 +495,10 @@ impl YantrikDB {
             embedding,
             // Caller-supplied vector: the engine cannot know the
             // text/vector relationship, so it never chunks here —
-            // `record_text()` is the chunking entry.
-            &[],
+            // `record_text()` is the chunking entry, and
+            // `record_with_idempotency_and_chunks` is the entry for a caller
+            // that embeds outside the engine but knows the window geometry.
+            chunks,
             namespace,
             certainty,
             domain,
