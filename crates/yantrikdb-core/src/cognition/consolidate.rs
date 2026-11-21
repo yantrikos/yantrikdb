@@ -82,6 +82,14 @@ pub(crate) fn compression_gist_cannot_seed(m: &MemoryWithEmbedding) -> bool {
 ///     only when a record is about to seed; it is never applied to the
 ///     candidate scan. See [`compression_gist_cannot_seed`] for the case that
 ///     motivates the distinction.
+///   - Namespace is NOT one of the clustering criteria: this function will
+///     cluster a mixed-namespace slice. Namespaces are tenant boundaries,
+///     and the boundary is enforced where a consolidation is written —
+///     `commit_consolidation` refuses a cluster whose members disagree on
+///     namespace (issue #242). Callers must therefore group by namespace
+///     before calling, as `find_consolidation_candidates_page` does; the
+///     commit-time refusal is the backstop, not a licence to skip the
+///     grouping.
 pub fn find_clusters(
     memories: &[MemoryWithEmbedding],
     entities_by_rid: Option<&HashMap<String, HashSet<String>>>,
