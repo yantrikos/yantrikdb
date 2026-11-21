@@ -111,6 +111,17 @@ pub fn collapse_to_parents_indexed(results: Vec<(String, f64)>) -> Vec<(String, 
 /// Ranges are BYTE offsets aligned down to `char` boundaries, so
 /// slicing `&text[a..b]` is always valid UTF-8. Alignment can shift a
 /// boundary by at most 3 bytes, which the 20% overlap absorbs.
+///
+/// When the text needs more than [`MAX_CHUNKS`] windows, full coverage
+/// is arithmetically impossible (16 × window < text). The first
+/// implementation kept the first 16 consecutive windows, which left
+/// everything past them in NO vector: a 272,000-char record under a
+/// 7,473-char window covered 97,158 chars (36%) and a query matching
+/// only its tail returned nothing, while the module promise above says
+/// the record is findable from any part of its text. Under the cap the
+/// windows are therefore SPREAD over the whole text instead — first
+/// window still overlapping chunk 0, last window ending exactly at
+/// `len` — so every region is sampled and the tail is always embedded.
 pub fn chunk_ranges(text: &str, window: usize) -> Vec<(usize, usize)> {
     let len = text.len();
     if window == 0 || len <= window {
@@ -138,6 +149,23 @@ pub fn chunk_ranges(text: &str, window: usize) -> Vec<(usize, usize)> {
             break;
         }
         start += stride;
+    }
+
+    // Hit the cap with text still uncovered: re-space the windows so the
+    // sample spans the whole record instead of clustering at its head.
+    if out.len() == MAX_CHUNKS && covered_to < len {
+        out.clear();
+        let last_start = len - window; // ends exactly at len
+        let span = last_start.saturating_sub(stride);
+        for i in 0..MAX_CHUNKS {
+            let s = stride + span * i / (MAX_CHUNKS - 1);
+            let e = (s + window).min(len);
+            let a = floor_char_boundary(text, s);
+            let b = floor_char_boundary(text, e).max(a);
+            if b > a {
+                out.push((a, b));
+            }
+        }
     }
     out
 }
@@ -267,6 +295,58 @@ mod tests {
     fn chunk_count_is_capped() {
         let text = "w".repeat(1_000_000);
         assert!(chunk_ranges(&text, 300).len() <= MAX_CHUNKS);
+    }
+
+    #[test]
+    fn capped_record_embeds_its_tail_not_just_its_head() {
+        // 272k chars under a 7.4k window needs 46 windows; 16 are allowed.
+        // Keeping the FIRST 16 left everything past char ~97k in no vector,
+        // so a query matching only the tail could not reach the record at
+        // all — while the module promises any-part findability. Under the
+        // cap the windows must span the whole text, tail included.
+        let window = 7_473;
+        let len = 272_000;
+        let text = "a".repeat(len);
+        let ranges = chunk_ranges(&text, window);
+        assert_eq!(ranges.len(), MAX_CHUNKS);
+        assert_eq!(
+            ranges.last().unwrap().1,
+            len,
+            "the last window must end at the end of the text"
+        );
+        assert!(
+            ranges.last().unwrap().0 > len / 2,
+            "the sample must reach the second half (last window starts at {})",
+            ranges.last().unwrap().0
+        );
+        // Spread, not a head cluster: consecutive starts are more than one
+        // window apart, which is the whole point of sampling a capped text.
+        for pair in ranges.windows(2) {
+            assert!(
+                pair[1].0 > pair[0].1,
+                "capped windows are a sample, not a contiguous run"
+            );
+        }
+        // Every window stays within bounds and is at most one window wide.
+        for (a, b) in &ranges {
+            assert!(b > a && b - a <= window && *b <= len);
+        }
+    }
+
+    #[test]
+    fn under_the_cap_every_char_is_still_covered() {
+        // The cap must not change the geometry of records that fit within
+        // it: contiguous, overlapping windows that reach the end.
+        let window = 300;
+        let text = "q".repeat(window * 10); // 10 windows needed, cap is 16
+        let ranges = chunk_ranges(&text, window);
+        assert!(ranges.len() < MAX_CHUNKS);
+        let mut covered = window;
+        for (a, b) in &ranges {
+            assert!(*a <= covered, "gap before {a} (covered to {covered})");
+            covered = covered.max(*b);
+        }
+        assert_eq!(covered, text.len());
     }
 
     #[test]
