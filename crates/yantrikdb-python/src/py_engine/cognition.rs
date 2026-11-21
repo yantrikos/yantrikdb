@@ -12,8 +12,10 @@ impl PyYantrikDB {
     // ── Cognition loop (V3) ──
 
     #[pyo3(signature = (config=None))]
-    fn think(&self, py: Python<'_>, config: Option<&Bound<'_, PyDict>>) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
+    fn think(slf: &Bound<'_, Self>, config: Option<&Bound<'_, PyDict>>) -> PyResult<PyObject> {
+        let py = slf.py();
+        // No borrow of `slf` is held past this line; see `engine_handle`.
+        let db = Self::engine_handle(slf)?;
         let cfg = if let Some(d) = config {
             let mut c = yantrikdb_core::ThinkConfig::default();
             if let Ok(Some(v)) = d.get_item("importance_threshold") {
@@ -112,10 +114,6 @@ impl PyYantrikDB {
             // converted to `ThinkConfig` above, and the result dict is built
             // after reattaching. `Arc<YantrikDB>` is owned and `Send + Sync`,
             // which is what `Ungil` requires.
-            let db = self
-                .inner
-                .clone()
-                .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
             py.detach(move || db.think(&cfg)).map_err(map_err)?
         };
         think_result_to_dict(py, &result)
