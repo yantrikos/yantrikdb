@@ -258,9 +258,25 @@ impl PyYantrikDB {
         db.dismiss_conflict(conflict_id, note).map_err(map_err)
     }
 
-    fn scan_conflicts(&self, py: Python<'_>) -> PyResult<Vec<PyObject>> {
-        let db = self.get_inner()?;
-        let conflicts = yantrikdb_core::scan_conflicts(db).map_err(map_err)?;
+    fn scan_conflicts(slf: &Bound<'_, Self>) -> PyResult<Vec<PyObject>> {
+        let py = slf.py();
+        // No borrow of `slf` is held across the detached call; see
+        // `engine_handle` for why that matters.
+        let db = Self::engine_handle(slf)?;
+        // Release the GIL for the engine call (#271). `scan_conflicts()`
+        // walks every contradicting edge group on the identity/preference
+        // whitelist plus the concurrent-consolidation pairs, and on a
+        // loaded store a single call runs well over half a second;
+        // without this it holds the GIL for the whole walk, stalling
+        // every other thread in the host. `detach` is PyO3 0.28's name
+        // for what older docs call `allow_threads`. Nothing in the
+        // closure touches Python: it takes an owned `Arc<YantrikDB>` and
+        // returns owned `Conflict` values, and the result dicts are
+        // built after reattaching. `Arc<YantrikDB>` is owned and
+        // `Send + Sync`, which is what `Ungil` requires.
+        let conflicts = py
+            .detach(move || yantrikdb_core::scan_conflicts(&db))
+            .map_err(map_err)?;
         conflicts.iter().map(|c| conflict_to_dict(py, c)).collect()
     }
 }
