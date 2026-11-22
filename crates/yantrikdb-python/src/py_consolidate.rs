@@ -148,6 +148,7 @@ pub fn py_consolidate(
 
         results.iter().map(|v| json_to_py(py, v)).collect()
 }
+
 fn dict_to_mem_with_embedding(d: &Bound<'_, PyDict>) -> PyResult<MemoryWithEmbedding> {
     let rid: String = d
         .get_item("rid")?
