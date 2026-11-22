@@ -108,29 +108,46 @@ pub fn find_consolidation_candidates(
 #[pyfunction]
 #[pyo3(name = "consolidate", signature = (db, sim_threshold=0.6, time_window_days=7.0, min_cluster_size=2, limit=100, dry_run=false))]
 pub fn py_consolidate(
-    py: Python<'_>,
-    db: &PyYantrikDB,
-    sim_threshold: f64,
-    time_window_days: f64,
-    min_cluster_size: usize,
-    limit: usize,
-    dry_run: bool,
-) -> PyResult<Vec<PyObject>> {
-    let inner = db.get_inner()?;
-    let results = yantrikdb_core::consolidate::consolidate(
-        inner,
-        sim_threshold,
-        time_window_days,
-        min_cluster_size,
-        limit,
-        true, // require_entity_overlap — default behavior since v0.6.0
-        dry_run,
-    )
-    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+        db: Bound<'_, PyYantrikDB>,
+        sim_threshold: f64,
+        time_window_days: f64,
+        min_cluster_size: usize,
+        limit: usize,
+        dry_run: bool,
+    ) -> PyResult<Vec<PyObject>> {
+        let py = db.py();
+        // No borrow of `db` is held across the detached call; see
+        // `engine_handle` in py_engine for why that matters.
+        let inner = PyYantrikDB::engine_handle(&db)?;
+        // Release the GIL for the engine call (#271). One consolidate() pass
+        // loads a page of eligible memories, decrypts their embeddings, runs
+        // pairwise cosine clustering over the page, builds the extractive
+        // summaries, and commits the consolidations; on a loaded store a
+        // single call runs for seconds, and without this it holds the GIL
+        // for the whole pass, stalling every other thread in the host.
+        // `detach` is PyO3 0.28's name for what older docs call
+        // `allow_threads`. Nothing in the closure touches Python: it takes
+        // an owned `Arc<YantrikDB>` plus plain values, the default path
+        // carries each cluster's mean embedding so the engine embedder is
+        // never invoked, and the result JSON is converted after
+        // reattaching. `Arc<YantrikDB>` is owned and `Send + Sync`, which
+        // is what `Ungil` requires.
+        let results = py
+                    .detach(move || {
+                                    yantrikdb_core::consolidate::consolidate(
+                                                        &inner,
+                                                        sim_threshold,
+                                                        time_window_days,
+                                                        min_cluster_size,
+                                                        limit,
+                                                        true, // require_entity_overlap — default behavior since v0.6.0
+                                                        dry_run,
+                                                    )
+                    })
+                    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
-    results.iter().map(|v| json_to_py(py, v)).collect()
+        results.iter().map(|v| json_to_py(py, v)).collect()
 }
-
 fn dict_to_mem_with_embedding(d: &Bound<'_, PyDict>) -> PyResult<MemoryWithEmbedding> {
     let rid: String = d
         .get_item("rid")?
