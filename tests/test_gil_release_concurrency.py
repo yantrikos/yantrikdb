@@ -222,21 +222,21 @@ def test_set_embedder_while_scan_conflicts_runs_in_another_thread(db):
 
 
 def test_set_embedder_while_consolidate_runs_in_another_thread(db):
-        # consolidate() is a module-level function taking the engine, not a
-        # method; the borrow hazard is the same. Before the fix it held the
-        # wrapper's shared borrow (and the GIL) for the whole pass, so every
-        # set_embedder() from another thread failed "Already borrowed" while
-        # a consolidation pass was running.
-        stop = threading.Event()
-        consol_calls = []
-        consol_errors = []
+    # consolidate() is a module-level function taking the engine, not a
+    # method; the borrow hazard is the same. Before the fix it held the
+    # wrapper's shared borrow (and the GIL) for the whole pass, so every
+    # set_embedder() from another thread failed "Already borrowed" while
+    # a consolidation pass was running.
+    stop = threading.Event()
+    consol_calls = []
+    consol_errors = []
 
     def worker():
-                while not stop.is_set():
-                                consol_calls.append(1)
-                                try:
-                                                    consolidate(db)
-except Exception as e:  # noqa: BLE001 - every failure is the finding
+        while not stop.is_set():
+            consol_calls.append(1)
+            try:
+                consolidate(db)
+            except Exception as e:  # noqa: BLE001 - every failure is the finding
                 consol_errors.append(repr(e))
 
     t = threading.Thread(target=worker)
@@ -245,22 +245,22 @@ except Exception as e:  # noqa: BLE001 - every failure is the finding
     calls = 0
     deadline = time.time() + 2.0
     try:
-                while time.time() < deadline:
-                                try:
-                                                    db.set_embedder(Emb(), allow_unverified_embedder=True)
-    except Exception as e:  # noqa: BLE001
-                        errors.append(repr(e))
-                    calls += 1
-finally:
+        while time.time() < deadline:
+            try:
+                db.set_embedder(Emb(), allow_unverified_embedder=True)
+            except Exception as e:  # noqa: BLE001
+                errors.append(repr(e))
+            calls += 1
+    finally:
         stop.set()
-            t.join()
+        t.join()
 
     # The test only means something if both threads really ran concurrently.
     assert len(consol_calls) > 5, "the consolidate worker barely ran; nothing was contended"
     assert calls > 5
     assert not _borrow_errors(errors), (
-                f"{len(errors)}/{calls} set_embedder() calls failed while "
-                f"consolidate() was detached: {errors[:1]}"
+        f"{len(errors)}/{calls} set_embedder() calls failed while "
+        f"consolidate() was detached: {errors[:1]}"
     )
     # Same pre-existing contract as recall(): set_embedder() keeps its
     # mutable borrow while it calls the Python embedder's encode(), so a
