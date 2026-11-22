@@ -756,9 +756,23 @@ impl PyYantrikDB {
     }
 
     #[pyo3(signature = (namespace=None))]
-    fn stats(&self, py: Python<'_>, namespace: Option<&str>) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let s = db.stats(namespace).map_err(map_err)?;
+    fn stats(slf: &Bound<'_, Self>, namespace: Option<&str>) -> PyResult<PyObject> {
+        let py = slf.py();
+        // No borrow of `slf` is held across the detached call; see
+        // `engine_handle` for why that matters.
+        let db = Self::engine_handle(slf)?;
+        let namespace = namespace.map(str::to_owned);
+        // Release the GIL for the engine call (#271). `stats()` aggregates
+        // over the store and, without this, holds the GIL for its whole
+        // duration, stalling every other thread in the host while it runs.
+        // `detach` is PyO3 0.28's name for what older docs call
+        // `allow_threads`. Nothing in the closure touches Python: the
+        // namespace was converted to an owned string above, and the result
+        // dict is built after reattaching. `Arc<YantrikDB>` is owned and
+        // `Send + Sync`, which is what `Ungil` requires.
+        let s = py
+            .detach(move || db.stats(namespace.as_deref()))
+            .map_err(map_err)?;
         stats_to_dict(py, &s)
     }
 
@@ -935,6 +949,28 @@ pub(crate) fn py_vector(py: Python<'_>, result: &PyObject) -> PyResult<Vec<f32>>
 
 impl PyYantrikDB {
     /// Get a reference to the inner YantrikDB engine (for use by consolidation/trigger wrappers).
+    /// An owned engine handle for a call that releases the GIL (#271).
+    ///
+    /// A `&self` pymethod keeps its `PyRef` borrow for the whole call. Once
+    /// the engine call runs inside `py.detach`, other Python threads run
+    /// too, and any `&mut self` method they call (`close`, `set_embedder`,
+    /// `set_embedder_named`) fails with `RuntimeError: Already borrowed`
+    /// for as long as the detached call lasts. Methods that detach therefore
+    /// take `slf: &Bound<Self>`, borrow only long enough to clone the `Arc`,
+    /// and run the engine with no borrow held. A concurrent `close()` then
+    /// behaves as it always has with live references: it drops the
+    /// wrapper's handle and returns `False`; the engine closes when the
+    /// detached call releases the last reference.
+    pub(crate) fn engine_handle(slf: &Bound<'_, Self>) -> PyResult<Arc<YantrikDB>> {
+        // try_borrow, not borrow: `set_embedder` holds a mutable borrow while
+        // it calls the Python embedder, and another thread can arrive here
+        // mid-call. That must surface as RuntimeError, never as a panic.
+        slf.try_borrow()?
+            .inner
+            .clone()
+            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))
+    }
+
     pub fn get_inner(&self) -> PyResult<&YantrikDB> {
         self.inner
             .as_deref()

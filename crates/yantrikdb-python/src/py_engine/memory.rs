@@ -176,8 +176,7 @@ impl PyYantrikDB {
     #[pyo3(signature = (query=None, query_embedding=None, top_k=10, time_window=None, memory_type=None, include_consolidated=false, expand_entities=false, skip_reinforce=false, namespace=None, domain=None, source=None, certainty_min=None, order=None, include_superseded=false, snippets=false, min_score_ratio=None, event_after=None, event_before=None))]
     #[allow(clippy::too_many_arguments)]
     fn recall(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         query: Option<&str>,
         query_embedding: Option<Vec<f32>>,
         top_k: usize,
@@ -220,10 +219,10 @@ impl PyYantrikDB {
         // detached closure, which may not borrow `self` or any Python-bound
         // argument. `Arc<YantrikDB>` is Send + Sync, the strings are owned, and
         // the numeric arguments are Copy — that is what `Ungil` requires.
-        let db = self
-            .inner
-            .clone()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+        let py = slf.py();
+        // No borrow of `slf` is held across the detached call; see
+        // `engine_handle` for why that matters.
+        let db = Self::engine_handle(slf)?;
         let query = query.map(str::to_owned);
         let memory_type = memory_type.map(str::to_owned);
         let namespace = namespace.map(str::to_owned);
@@ -234,7 +233,7 @@ impl PyYantrikDB {
         let emb = match query_embedding {
             Some(e) => e,
             None => match query.as_deref() {
-                Some(q) => self.embed_text(py, q)?,
+                Some(q) => slf.try_borrow()?.embed_text(py, q)?,
                 None => {
                     return Err(PyValueError::new_err(
                         "Must provide either query or query_embedding",
