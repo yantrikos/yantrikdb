@@ -8,6 +8,8 @@ from yantrikdb._yantrikdb_rust import (
     consolidate_cluster,
     find_consolidation_candidates,
     record_synthesis,
+    restore_from_consolidation,
+    summarize_cluster,
 )
 
 __all__ = [
@@ -15,6 +17,8 @@ __all__ = [
     "consolidate_cluster",
     "find_consolidation_candidates",
     "record_synthesis",
+    "restore_from_consolidation",
+    "summarize_cluster",
     "_cosine_similarity",
     "_extractive_summary",
     "_find_clusters",

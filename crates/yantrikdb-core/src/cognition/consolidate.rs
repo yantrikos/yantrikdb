@@ -261,6 +261,7 @@ pub fn consolidate_cluster(
         embedding.map(|v| v.to_vec()),
         false,
         None,
+        None,
     )
 }
 
@@ -295,6 +296,16 @@ pub fn summarize_cluster(
     text: &str,
     embedding: Option<&[f32]>,
 ) -> Result<serde_json::Value> {
+    summarize_cluster_impl(db, source_rids, text, embedding, None)
+}
+
+fn summarize_cluster_impl(
+    db: &YantrikDB,
+    source_rids: &[String],
+    text: &str,
+    embedding: Option<&[f32]>,
+    idempotency_key: Option<&str>,
+) -> Result<serde_json::Value> {
     if source_rids.is_empty() {
         return Err(crate::error::YantrikDbError::InvalidInput(
             "summarize_cluster: source_rids is empty".into(),
@@ -316,6 +327,7 @@ pub fn summarize_cluster(
         embedding.map(|v| v.to_vec()),
         true,
         None,
+        idempotency_key,
     )
 }
 
@@ -517,7 +529,204 @@ pub fn record_synthesis(
         embedding.map(|v| v.to_vec()),
         true,
         Some(&write),
+        None,
     )
+}
+
+/// The factor a REPLACING consolidation multiplies each source's importance
+/// by. The demotion SQL in `commit_consolidation` and the replica's
+/// `materialize_consolidate` apply it as a literal; this constant is what an
+/// INFERRED restore divides by, and a test pins the two together.
+pub const CONSOLIDATED_SOURCE_IMPORTANCE_FACTOR: f64 = 0.3;
+
+/// [`summarize_cluster`] with a caller-supplied idempotency key (#291).
+///
+/// Without a key, two identical calls store two summaries. With one, a retry
+/// returns the first summary's rid with `idempotent_replay: true`, and a call
+/// that reuses the key with different text or a different source set is
+/// rejected instead of silently writing a second record. The source list is
+/// canonicalised (sorted, de-duplicated), so a retry may name the sources in
+/// any order.
+pub fn summarize_cluster_with_key(
+    db: &YantrikDB,
+    source_rids: &[String],
+    text: &str,
+    embedding: Option<&[f32]>,
+    idempotency_key: &str,
+) -> Result<serde_json::Value> {
+    if idempotency_key.trim().is_empty() {
+        return Err(crate::error::YantrikDbError::InvalidInput(
+            "summarize_cluster: idempotency_key is empty".into(),
+        ));
+    }
+    let mut canonical = source_rids.to_vec();
+    canonical.sort();
+    canonical.dedup();
+    summarize_cluster_impl(db, &canonical, text, embedding, Some(idempotency_key))
+}
+
+/// Undo a REPLACING consolidation: return its sources to recall (#291).
+///
+/// Every source that `summary_rid` retired (`consolidation_status =
+/// 'consolidated'` and `consolidated_into = summary_rid`) goes back to
+/// `active` with the importance it had before the demotion. The summary
+/// itself is left in place, so the end state is exactly what
+/// [`summarize_cluster`] would have written: the synthesis BESIDE its
+/// sources. `forget()` the summary as well if it should go too.
+/// Membership rows stay, because they are provenance and a set-union CRDT.
+///
+/// The importance comes from `consolidation_members.prior_importance`,
+/// captured at demotion since schema v55. A member consolidated before v55
+/// has no stored value. Restoring it would mean dividing its current
+/// importance by [`CONSOLIDATED_SOURCE_IMPORTANCE_FACTOR`], which is wrong
+/// whenever anything adjusted the importance in between. So the call refuses,
+/// writing nothing, unless `allow_inferred` is set. Each restored source
+/// reports `basis: "stored"` or `basis: "inferred"`.
+///
+/// Never touched: members that were forgotten (tombstoned: a restore must not
+/// resurrect deleted content), members that are already active (an additive
+/// summary, or a second restore call), members since consolidated into a
+/// different summary, and members not present on this node. Each is reported
+/// under `skipped` with its reason. A second call is therefore a no-op.
+pub fn restore_from_consolidation(
+    db: &YantrikDB,
+    summary_rid: &str,
+    allow_inferred: bool,
+) -> Result<serde_json::Value> {
+    use rusqlite::OptionalExtension;
+
+    struct Member {
+        rid: String,
+        prior: Option<f64>,
+        status: Option<String>,
+        into: Option<String>,
+        importance: Option<f64>,
+    }
+
+    let members: Vec<Member> = {
+        let conn = db.conn();
+        let exists: Option<String> = conn
+            .query_row(
+                "SELECT rid FROM memories WHERE rid = ?1",
+                rusqlite::params![summary_rid],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if exists.is_none() {
+            return Err(crate::error::YantrikDbError::NotFound(format!(
+                "restore_from_consolidation: no memory {summary_rid}"
+            )));
+        }
+        let mut stmt = conn.prepare(
+            "SELECT cm.source_rid, cm.prior_importance, m.consolidation_status, \
+                    m.consolidated_into, m.importance \
+             FROM consolidation_members cm \
+             LEFT JOIN memories m ON m.rid = cm.source_rid \
+             WHERE cm.consolidation_rid = ?1 \
+             ORDER BY cm.source_rid",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![summary_rid], |row| {
+            Ok(Member {
+                rid: row.get(0)?,
+                prior: row.get(1)?,
+                status: row.get(2)?,
+                into: row.get(3)?,
+                importance: row.get(4)?,
+            })
+        })?;
+        rows.collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    if members.is_empty() {
+        return Err(crate::error::YantrikDbError::InvalidInput(format!(
+            "restore_from_consolidation: {summary_rid} is not a consolidation \
+             summary (it has no members)"
+        )));
+    }
+
+    let mut plan: Vec<(String, f64, &'static str)> = Vec::new();
+    let mut skipped: Vec<serde_json::Value> = Vec::new();
+    let mut unknown: Vec<String> = Vec::new();
+    for m in &members {
+        let reason = match m.status.as_deref() {
+            None => Some("not_present"),
+            Some("tombstoned") => Some("forgotten"),
+            Some("active") => Some("already_active"),
+            Some("consolidated") if m.into.as_deref() != Some(summary_rid) => {
+                Some("consolidated_elsewhere")
+            }
+            Some("consolidated") => None,
+            Some(_) => Some("unexpected_status"),
+        };
+        if let Some(reason) = reason {
+            skipped.push(serde_json::json!({"rid": m.rid, "reason": reason}));
+            continue;
+        }
+        match (m.prior, m.importance) {
+            (Some(prior), _) => plan.push((m.rid.clone(), prior, "stored")),
+            (None, Some(current)) if allow_inferred => plan.push((
+                m.rid.clone(),
+                (current / CONSOLIDATED_SOURCE_IMPORTANCE_FACTOR).min(1.0),
+                "inferred",
+            )),
+            _ => unknown.push(m.rid.clone()),
+        }
+    }
+    if !unknown.is_empty() {
+        return Err(crate::error::YantrikDbError::InvalidInput(format!(
+            "restore_from_consolidation: {} of {} sources of {summary_rid} were \
+             consolidated before their importance was recorded (schema < v55), \
+             so their original value is unknown (first: {}). Nothing was \
+             restored. Pass allow_inferred=true to restore them at current \
+             importance / {} instead.",
+            unknown.len(),
+            members.len(),
+            unknown[0],
+            CONSOLIDATED_SOURCE_IMPORTANCE_FACTOR
+        )));
+    }
+
+    if !plan.is_empty() {
+        let ts = crate::time::now_secs();
+        let conn = db.conn();
+        let tx = conn.unchecked_transaction()?;
+        for (rid, importance, _) in &plan {
+            tx.execute(
+                "UPDATE memories \
+                 SET consolidation_status = 'active', consolidated_into = NULL, \
+                     importance = ?1, updated_at = ?2 \
+                 WHERE rid = ?3 AND consolidation_status = 'consolidated' \
+                   AND consolidated_into = ?4",
+                rusqlite::params![importance, ts, rid, summary_rid],
+            )?;
+        }
+        tx.commit()?;
+        for (rid, importance, _) in &plan {
+            db.cache_mark_restored(rid, *importance);
+        }
+    } // conn lock released before log_op
+
+    let restored: Vec<serde_json::Value> = plan
+        .iter()
+        .map(|(rid, importance, basis)| {
+            serde_json::json!({"rid": rid, "importance": importance, "basis": basis})
+        })
+        .collect();
+    if !restored.is_empty() {
+        // Replicas apply the SAME values (see `materialize_consolidation_restore`):
+        // each node's own prior is not consulted on apply, so the restored
+        // state converges even where a replica never captured a prior.
+        db.log_op(
+            "consolidation_restore",
+            Some(summary_rid),
+            &serde_json::json!({"summary_rid": summary_rid, "restored": restored}),
+            None,
+        )?;
+    }
+    Ok(serde_json::json!({
+        "summary_rid": summary_rid,
+        "restored": restored,
+        "skipped": skipped,
+    }))
 }
 
 /// Load the named memories, refusing anything that would make the
@@ -929,6 +1138,7 @@ pub fn consolidate(
             Some(mean_emb),
             false,
             None,
+            None,
         )?);
     }
 
@@ -966,6 +1176,9 @@ fn commit_consolidation(
     // beside them rather than over them. See `summarize_cluster`.
     additive: bool,
     synthesis: Option<&SynthesisWrite<'_>>,
+    // #291: a caller-supplied key for `summarize_cluster_with_key`. A typed
+    // synthesis derives its own key from its admission and never passes one.
+    caller_key: Option<&str>,
 ) -> Result<serde_json::Value> {
     // Namespaces are tenant boundaries, and this is the single place a
     // consolidation is written — every path that commits one funnels
@@ -1011,12 +1224,15 @@ fn commit_consolidation(
         let admission = synthesis
             .map(|write| build_synthesis_admission(db, cluster, write))
             .transpose()?;
-        let effective_idempotency_key = admission.as_ref().map(|admission| {
-            format!(
-                "{}:evidence-v1:{}",
-                admission.logical_key, admission.evidence_version
-            )
-        });
+        let effective_idempotency_key = admission
+            .as_ref()
+            .map(|admission| {
+                format!(
+                    "{}:evidence-v1:{}",
+                    admission.logical_key, admission.evidence_version
+                )
+            })
+            .or_else(|| caller_key.map(|key| format!("summarize-v1:{key}")));
 
         // Availability time is the newest evidence member. The synthesis
         // must not appear in recall_as_of before all evidence it depends on
@@ -1123,7 +1339,10 @@ fn commit_consolidation(
             // Legacy unkeyed consolidation keeps its maintenance timestamp.
             // Keyed synthesis omits wall time because metadata participates in
             // the idempotency digest and must be byte-stable across retries.
-            meta_obj.insert("consolidation_time".into(), serde_json::json!(ts));
+            // A caller-keyed summary omits it for the same reason.
+            if caller_key.is_none() {
+                meta_obj.insert("consolidation_time".into(), serde_json::json!(ts));
+            }
         }
 
         let idempotency_key = effective_idempotency_key.as_deref();
@@ -1249,6 +1468,20 @@ fn commit_consolidation(
                 if additive {
                     continue;
                 }
+                // #291: record the value the demotion below replaces, on the
+                // membership row, BEFORE the update. Without it a restore
+                // could only divide by 0.3 and hope nothing else had touched
+                // the importance since. `IS NULL` keeps a re-applied
+                // consolidation from overwriting the first capture with an
+                // already-demoted value.
+                conn.execute(
+                    "UPDATE consolidation_members \
+                     SET prior_importance = \
+                         (SELECT importance FROM memories WHERE rid = ?2) \
+                     WHERE consolidation_rid = ?1 AND source_rid = ?2 \
+                       AND prior_importance IS NULL",
+                    rusqlite::params![consolidated_rid, source_rid],
+                )?;
                 conn.execute(
                     "UPDATE memories \
                      SET consolidation_status = 'consolidated', \
@@ -1795,6 +2028,7 @@ mod tests {
             Some(emb.clone()),
             false,
             None,
+            None,
         )
         .expect_err("a cross-namespace cluster must be refused at commit time");
         assert!(
@@ -1848,6 +2082,7 @@ mod tests {
             "alice mail summary",
             Some(emb.clone()),
             false,
+            None,
             None,
         )
         .unwrap();
@@ -1910,6 +2145,7 @@ mod tests {
             "merged summary",
             Some(emb.clone()),
             false,
+            None,
             None,
         )
         .expect_err(
@@ -2049,5 +2285,242 @@ mod additive_summary_tests {
         let m = db.get_memory(new_rid).unwrap().unwrap();
         assert_eq!(m.text, "Initial project setup");
         assert_eq!(m.consolidation_status, "active");
+    }
+}
+
+#[cfg(test)]
+mod restore_tests {
+    //! #291: a replacing consolidation must be reversible from stored data,
+    //! and the additive entry point must be safe to retry.
+    use super::CONSOLIDATED_SOURCE_IMPORTANCE_FACTOR as FACTOR;
+    use crate::YantrikDB;
+
+    fn seed(db: &YantrikDB, items: &[(&str, f64)]) -> Vec<String> {
+        items
+            .iter()
+            .enumerate()
+            .map(|(i, (t, imp))| {
+                let mut v = vec![0.0f32; 8];
+                v[i % 8] = 1.0;
+                db.record_with_idempotency(
+                    t,
+                    "episodic",
+                    *imp,
+                    0.0,
+                    604800.0,
+                    &serde_json::json!({}),
+                    &v,
+                    "default",
+                    0.8,
+                    "work",
+                    "user",
+                    None,
+                    None,
+                    None,
+                )
+                .unwrap()
+            })
+            .collect()
+    }
+
+    fn prior(db: &YantrikDB, summary: &str, source: &str) -> Option<f64> {
+        db.conn()
+            .query_row(
+                "SELECT prior_importance FROM consolidation_members \
+                 WHERE consolidation_rid = ?1 AND source_rid = ?2",
+                rusqlite::params![summary, source],
+                |row| row.get(0),
+            )
+            .unwrap()
+    }
+
+    /// The rids a DEFAULT recall (consolidated excluded) returns for `emb`.
+    fn recalled(db: &YantrikDB, emb: &[f32]) -> Vec<String> {
+        db.recall(
+            emb, 20, None, None, false, false, None, true, None, None, None, None, None, false,
+            None, None,
+        )
+        .unwrap()
+        .into_iter()
+        .map(|r| r.rid)
+        .collect()
+    }
+
+    fn consolidated(db: &YantrikDB, rids: &[String]) -> String {
+        let out = super::consolidate_cluster(db, rids, "merged synthesis", Some(&vec![0.5f32; 8]))
+            .unwrap();
+        out["consolidated_rid"].as_str().unwrap().to_string()
+    }
+
+    #[test]
+    fn replacing_consolidation_records_the_value_it_demotes() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let rids = seed(&db, &[("alpha fact", 0.65), ("beta fact", 0.5)]);
+        let summary = consolidated(&db, &rids);
+        for (rid, original) in rids.iter().zip([0.65, 0.5]) {
+            assert_eq!(prior(&db, &summary, rid), Some(original));
+            let m = db.get_memory(rid).unwrap().unwrap();
+            assert_eq!(m.consolidation_status, "consolidated");
+            // Pins the SQL literal to the constant an inferred restore uses.
+            assert!((m.importance - original * FACTOR).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn restore_returns_sources_to_recall_at_their_stored_importance() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let rids = seed(&db, &[("alpha fact", 0.65), ("beta fact", 0.5)]);
+        let mut probe = vec![0.0f32; 8];
+        probe[0] = 1.0;
+        let summary = consolidated(&db, &rids);
+        assert!(
+            !recalled(&db, &probe).contains(&rids[0]),
+            "precondition: a consolidated source is not a default recall candidate"
+        );
+
+        let out = super::restore_from_consolidation(&db, &summary, false).unwrap();
+        assert_eq!(out["restored"].as_array().unwrap().len(), 2);
+        for (rid, original) in rids.iter().zip([0.65, 0.5]) {
+            let m = db.get_memory(rid).unwrap().unwrap();
+            assert_eq!(m.consolidation_status, "active");
+            assert_eq!(m.consolidated_into, None);
+            assert!(
+                (m.importance - original).abs() < 1e-12,
+                "{rid}: {}",
+                m.importance
+            );
+        }
+        // The use, not just the rows: the source is a recall candidate again,
+        // and the summary is still there beside it.
+        let hits = recalled(&db, &probe);
+        assert!(
+            hits.contains(&rids[0]),
+            "restored source missing from recall: {hits:?}"
+        );
+        assert_eq!(
+            db.get_memory(&summary)
+                .unwrap()
+                .unwrap()
+                .consolidation_status,
+            "active"
+        );
+
+        // A second call restores nothing and changes nothing.
+        let again = super::restore_from_consolidation(&db, &summary, false).unwrap();
+        assert!(again["restored"].as_array().unwrap().is_empty());
+        assert!(again["skipped"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|s| s["reason"] == "already_active"));
+    }
+
+    #[test]
+    fn restore_refuses_an_unknown_base_unless_inference_is_allowed() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let rids = seed(&db, &[("alpha fact", 0.6), ("beta fact", 0.5)]);
+        let summary = consolidated(&db, &rids);
+        // A pre-v55 consolidation: the membership rows carry no prior.
+        db.conn()
+            .execute(
+                "UPDATE consolidation_members SET prior_importance = NULL",
+                [],
+            )
+            .unwrap();
+
+        let err = super::restore_from_consolidation(&db, &summary, false).unwrap_err();
+        assert!(err.to_string().contains("allow_inferred"), "{err}");
+        for rid in &rids {
+            assert_eq!(
+                db.get_memory(rid).unwrap().unwrap().consolidation_status,
+                "consolidated",
+                "a refused restore must write nothing"
+            );
+        }
+
+        let out = super::restore_from_consolidation(&db, &summary, true).unwrap();
+        for entry in out["restored"].as_array().unwrap() {
+            assert_eq!(entry["basis"], "inferred");
+        }
+        let m = db.get_memory(&rids[0]).unwrap().unwrap();
+        assert!((m.importance - 0.6).abs() < 1e-9, "{}", m.importance);
+    }
+
+    #[test]
+    fn restore_never_resurrects_a_forgotten_source() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let rids = seed(&db, &[("alpha fact", 0.6), ("beta fact", 0.5)]);
+        let summary = consolidated(&db, &rids);
+        assert!(db.forget(&rids[1]).unwrap());
+
+        let out = super::restore_from_consolidation(&db, &summary, false).unwrap();
+        let restored: Vec<&str> = out["restored"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["rid"].as_str().unwrap())
+            .collect();
+        assert_eq!(restored, vec![rids[0].as_str()]);
+        assert_eq!(out["skipped"][0]["reason"], "forgotten");
+        assert_eq!(
+            db.get_memory(&rids[1])
+                .unwrap()
+                .unwrap()
+                .consolidation_status,
+            "tombstoned"
+        );
+    }
+
+    #[test]
+    fn additive_members_record_no_prior_and_restore_is_a_no_op() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let rids = seed(&db, &[("alpha fact", 0.6), ("beta fact", 0.5)]);
+        let out = super::summarize_cluster(&db, &rids, "topic", Some(&vec![0.5f32; 8])).unwrap();
+        let summary = out["consolidated_rid"].as_str().unwrap();
+        for rid in &rids {
+            assert_eq!(prior(&db, summary, rid), None);
+        }
+        let out = super::restore_from_consolidation(&db, summary, false).unwrap();
+        assert!(out["restored"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn restore_rejects_a_record_that_is_not_a_summary() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let rids = seed(&db, &[("alpha fact", 0.6)]);
+        assert!(super::restore_from_consolidation(&db, &rids[0], false).is_err());
+        assert!(super::restore_from_consolidation(&db, "no-such-rid", false).is_err());
+    }
+
+    #[test]
+    fn keyed_summary_replays_instead_of_duplicating() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let rids = seed(&db, &[("alpha fact", 0.6), ("beta fact", 0.5)]);
+        let emb = vec![0.5f32; 8];
+        let first =
+            super::summarize_cluster_with_key(&db, &rids, "topic", Some(&emb), "k1").unwrap();
+        assert_eq!(first["idempotent_replay"], false);
+        // Same key, sources named in the other order: the same record.
+        let reversed: Vec<String> = rids.iter().rev().cloned().collect();
+        let second =
+            super::summarize_cluster_with_key(&db, &reversed, "topic", Some(&emb), "k1").unwrap();
+        assert_eq!(second["idempotent_replay"], true);
+        assert_eq!(second["consolidated_rid"], first["consolidated_rid"]);
+        let summaries: i64 = db
+            .conn()
+            .query_row(
+                "SELECT COUNT(DISTINCT consolidation_rid) FROM consolidation_members",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(summaries, 1);
+        // Same key, different text: refused, not a second record.
+        assert!(
+            super::summarize_cluster_with_key(&db, &rids, "other topic", Some(&emb), "k1").is_err()
+        );
+        // The unkeyed form keeps its documented behaviour.
+        let unkeyed = super::summarize_cluster(&db, &rids, "topic", Some(&emb)).unwrap();
+        assert_ne!(unkeyed["consolidated_rid"], first["consolidated_rid"]);
     }
 }

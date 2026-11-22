@@ -34,7 +34,8 @@ pub use conflict::{
     scan_conflicts_limited,
 };
 pub use consolidate::{
-    consolidate, find_consolidation_candidates, record_synthesis, summarize_cluster,
+    consolidate, find_consolidation_candidates, record_synthesis, restore_from_consolidation,
+    summarize_cluster, summarize_cluster_with_key, CONSOLIDATED_SOURCE_IMPORTANCE_FACTOR,
 };
 pub use engine::conflict::ConflictBurndownReport;
 pub use engine::conversation::{Turn, DEFAULT_TURN_WINDOW};

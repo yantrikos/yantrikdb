@@ -20,7 +20,12 @@ from yantrikdb._yantrikdb_rust import (
     TenantManager,
     YantrikDB,
 )
-from yantrikdb.consolidate import consolidate, record_synthesis
+from yantrikdb.consolidate import (
+    consolidate,
+    record_synthesis,
+    restore_from_consolidation,
+    summarize_cluster,
+)
 from yantrikdb.organize import (
     ConcernItem,
     ConcernPlan,
@@ -66,6 +71,8 @@ __all__ = [
     "TenantManager",
     "consolidate",
     "record_synthesis",
+    "restore_from_consolidation",
+    "summarize_cluster",
     "ConcernItem",
     "ConcernPlan",
     "TopicHandle",
