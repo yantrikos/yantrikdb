@@ -96,6 +96,10 @@ fn _yantrikdb_rust(m: &Bound<'_, PyModule>) -> PyResult<()> {
     )?)?;
     m.add_function(wrap_pyfunction!(py_consolidate::py_consolidate_cluster, m)?)?;
     m.add_function(wrap_pyfunction!(py_consolidate::py_summarize_cluster, m)?)?;
+    m.add_function(wrap_pyfunction!(
+        py_consolidate::py_restore_from_consolidation,
+        m
+    )?)?;
     m.add_function(wrap_pyfunction!(py_consolidate::py_record_synthesis, m)?)?;
     m.add_function(wrap_pyfunction!(py_consolidate::py_cosine_similarity, m)?)?;
     m.add_function(wrap_pyfunction!(tuning_fingerprint, m)?)?;

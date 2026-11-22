@@ -590,6 +590,15 @@ fn materialize_op(db: &YantrikDB, op: &OplogEntry) -> Result<()> {
                 }
             }
         }
+        "consolidation_restore" => {
+            // #291. Apply the values the origin restored, not this node's own
+            // prior: a replica that never held a source when the consolidate
+            // op arrived has no prior, and convergence must not depend on it.
+            let restored = materialize_consolidation_restore(&*db.conn(), &op.payload)?;
+            for (rid, importance) in &restored {
+                db.cache_mark_restored(rid, *importance);
+            }
+        }
         "conflict_detect" => {
             materialize_conflict_detect(&*db.conn(), &op.payload, &op.hlc, &op.origin_actor)?
         }
@@ -1294,6 +1303,19 @@ fn materialize_consolidate(
 
         // Mark source memories as consolidated (if they exist locally)
         if !additive {
+            // #291: capture this node's own pre-demotion value first, under
+            // the same `active` guard the demotion uses. A source that is
+            // absent here or no longer active is not demoted, and its
+            // membership row keeps prior_importance NULL (unknown).
+            conn.execute(
+                "UPDATE consolidation_members \
+                 SET prior_importance = \
+                     (SELECT importance FROM memories \
+                      WHERE rid = ?2 AND consolidation_status = 'active') \
+                 WHERE consolidation_rid = ?1 AND source_rid = ?2 \
+                   AND prior_importance IS NULL",
+                params![consolidated_rid, source_rid],
+            )?;
             conn.execute(
                 "UPDATE memories \
                  SET consolidation_status = 'consolidated', \
@@ -1306,6 +1328,41 @@ fn materialize_consolidate(
     }
 
     Ok(())
+}
+
+/// Materialize a "consolidation_restore" op (#291): return the named sources
+/// to `active` at the importance the origin wrote. Guarded exactly like the
+/// origin's update, so a source this node has since forgotten, or that a
+/// later consolidation took over, is left alone. Replay is a no-op because
+/// a restored source is no longer `consolidated`.
+fn materialize_consolidation_restore(
+    conn: &Connection,
+    payload: &serde_json::Value,
+) -> Result<Vec<(String, f64)>> {
+    let summary_rid = payload["summary_rid"].as_str().unwrap_or_default();
+    let mut applied = Vec::new();
+    if summary_rid.is_empty() {
+        return Ok(applied);
+    }
+    let ts = crate::time::now_secs();
+    for entry in payload["restored"].as_array().into_iter().flatten() {
+        let (Some(rid), Some(importance)) = (entry["rid"].as_str(), entry["importance"].as_f64())
+        else {
+            continue;
+        };
+        let changed = conn.execute(
+            "UPDATE memories \
+             SET consolidation_status = 'active', consolidated_into = NULL, \
+                 importance = ?1, updated_at = ?2 \
+             WHERE rid = ?3 AND consolidation_status = 'consolidated' \
+               AND consolidated_into = ?4",
+            params![importance, ts, rid, summary_rid],
+        )?;
+        if changed > 0 {
+            applied.push((rid.to_string(), importance));
+        }
+    }
+    Ok(applied)
 }
 
 // ── V2: Conflict materializers ──
@@ -2937,6 +2994,78 @@ mod tests {
         // Extracting without exclusion should return the op
         let ops = extract_ops_since(&*db.conn(), None, None, None, 100).unwrap();
         assert!(!ops.is_empty());
+    }
+
+    /// #291: a replica captures its own pre-demotion value when it applies a
+    /// replacing consolidation, and a restore made at the origin converges
+    /// on the replica at the origin's values.
+    #[test]
+    fn test_consolidation_restore_replicates() {
+        let a = YantrikDB::new_with_actor(":memory:", 8, "A").unwrap();
+        let mut rids = Vec::new();
+        for (text, importance, seed) in [("mem1", 0.65, 1.0), ("mem2", 0.5, 1.1)] {
+            rids.push(
+                a.record(
+                    text,
+                    "episodic",
+                    importance,
+                    0.0,
+                    604800.0,
+                    &empty_meta(),
+                    &vec_seed(seed, 8),
+                    "default",
+                    0.8,
+                    "general",
+                    "user",
+                    None,
+                )
+                .unwrap(),
+            );
+        }
+        let out =
+            crate::consolidate::consolidate_cluster(&a, &rids, "merged", Some(&vec_seed(1.05, 8)))
+                .unwrap();
+        let summary = out["consolidated_rid"].as_str().unwrap().to_string();
+
+        let b = YantrikDB::new_with_actor(":memory:", 8, "B").unwrap();
+        let ops = extract_ops_since(&*a.conn(), None, None, None, 1000).unwrap();
+        apply_ops(&b, &ops).unwrap();
+        let prior_on_b: Option<f64> = b
+            .conn()
+            .query_row(
+                "SELECT prior_importance FROM consolidation_members \
+                 WHERE consolidation_rid = ?1 AND source_rid = ?2",
+                params![summary, rids[0]],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(prior_on_b, Some(0.65));
+        assert_eq!(
+            b.get_memory(&rids[0])
+                .unwrap()
+                .unwrap()
+                .consolidation_status,
+            "consolidated"
+        );
+
+        crate::consolidate::restore_from_consolidation(&a, &summary, false).unwrap();
+        let last = ops.last().map(|op| op.op_id.clone());
+        let more = extract_ops_since(&*a.conn(), None, last.as_deref(), None, 1000).unwrap();
+        assert!(more.iter().any(|op| op.op_type == "consolidation_restore"));
+        apply_ops(&b, &more).unwrap();
+        for (rid, original) in rids.iter().zip([0.65, 0.5]) {
+            let m = b.get_memory(rid).unwrap().unwrap();
+            assert_eq!(m.consolidation_status, "active", "{rid} not restored on B");
+            assert!(
+                (m.importance - original).abs() < 1e-12,
+                "{rid}: {}",
+                m.importance
+            );
+        }
+        // Recall is not asserted here: ops carry an embedding hash, not the
+        // vector, so this harness's replica indexes nothing and recalls
+        // nothing for ANY record. The origin-side recall test in
+        // consolidate.rs covers admission.
     }
 
     #[test]

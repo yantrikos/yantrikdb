@@ -129,6 +129,16 @@ impl YantrikDB {
         }
     }
 
+    /// Return a memory retired by a consolidation to `active` in the cache,
+    /// at the importance `restore_from_consolidation` wrote (#291).
+    pub fn cache_mark_restored(&self, rid: &str, importance: f64) {
+        let mut cache = self.scoring_cache.write();
+        if let Some(row) = cache.get_mut(rid) {
+            row.consolidation_status = "active".to_string();
+            row.importance = importance;
+        }
+    }
+
     /// Mark a memory as consolidated in the cache and reduce its importance.
     pub fn cache_mark_consolidated(&self, rid: &str, importance_factor: f64) {
         let mut cache = self.scoring_cache.write();

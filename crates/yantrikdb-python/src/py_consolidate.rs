@@ -243,23 +243,72 @@ fn mem_with_emb_to_dict(py: Python<'_>, m: &MemoryWithEmbedding) -> PyResult<PyO
 /// surface a phrase nobody wrote — it has to be synthesised and stored. The
 /// replacing form was tried and cost -21.6pp on summarization and -17.5pp on
 /// preference_following by hiding the detail those categories need.
+///
+/// `idempotency_key` (#291): without one, two identical calls store two
+/// summaries. With one, a retry returns the first summary with
+/// `idempotent_replay: True`, and reusing the key with different text or a
+/// different source set raises instead of writing a second record. Sources
+/// may be named in any order.
 #[pyfunction]
-#[pyo3(name = "summarize_cluster", signature = (db, source_rids, text, embedding=None))]
+#[pyo3(
+    name = "summarize_cluster",
+    signature = (db, source_rids, text, embedding=None, idempotency_key=None)
+)]
 pub fn py_summarize_cluster(
     py: Python<'_>,
     db: &PyYantrikDB,
     source_rids: Vec<String>,
     text: &str,
     embedding: Option<Vec<f32>>,
+    idempotency_key: Option<&str>,
 ) -> PyResult<PyObject> {
     let inner = db.get_inner()?;
-    let out = yantrikdb_core::consolidate::summarize_cluster(
-        inner,
-        &source_rids,
-        text,
-        embedding.as_deref(),
-    )
+    let out = match idempotency_key {
+        Some(key) => yantrikdb_core::consolidate::summarize_cluster_with_key(
+            inner,
+            &source_rids,
+            text,
+            embedding.as_deref(),
+            key,
+        ),
+        None => yantrikdb_core::consolidate::summarize_cluster(
+            inner,
+            &source_rids,
+            text,
+            embedding.as_deref(),
+        ),
+    }
     .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    json_to_py(py, &out)
+}
+
+/// Undo a replacing consolidation: return the sources `summary_rid` retired
+/// to `active`, at the importance they had before it (#291).
+///
+/// The summary stays, so the result is what `summarize_cluster` would have
+/// written: the synthesis beside its sources. `forget()` it as well if it
+/// should go too. Sources consolidated before schema v55 have no stored
+/// value; the call then raises and writes nothing, unless
+/// `allow_inferred=True`, which restores them at current importance / 0.3.
+/// Forgotten sources are never brought back.
+///
+/// Returns `{"summary_rid", "restored": [{"rid", "importance", "basis"}],
+/// "skipped": [{"rid", "reason"}]}`. A second call restores nothing.
+#[pyfunction]
+#[pyo3(
+    name = "restore_from_consolidation",
+    signature = (db, summary_rid, allow_inferred=false)
+)]
+pub fn py_restore_from_consolidation(
+    py: Python<'_>,
+    db: &PyYantrikDB,
+    summary_rid: &str,
+    allow_inferred: bool,
+) -> PyResult<PyObject> {
+    let inner = db.get_inner()?;
+    let out =
+        yantrikdb_core::consolidate::restore_from_consolidation(inner, summary_rid, allow_inferred)
+            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     json_to_py(py, &out)
 }
 
