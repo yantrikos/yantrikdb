@@ -42,8 +42,7 @@ impl PyYantrikDB {
     #[pyo3(signature = (text, memory_type="episodic", importance=0.5, valence=0.0, half_life=604800.0, metadata=None, embedding=None, namespace="default", certainty=0.8, domain="general", source="user", emotional_state=None, idempotency_key=None, created_at=None))]
     #[allow(clippy::too_many_arguments)]
     fn record(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         text: &str,
         memory_type: &str,
         importance: f64,
@@ -59,10 +58,19 @@ impl PyYantrikDB {
         idempotency_key: Option<&str>,
         created_at: Option<f64>,
     ) -> PyResult<String> {
-        let db = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+        // Owned handle and owned strings: everything below moves into
+        // the detached closure, which may not borrow `self` or any
+        // Python-bound argument. No borrow of `slf` is held across the
+        // detached call; see `engine_handle` for why that matters.
+        let py = slf.py();
+        let db = Self::engine_handle(slf)?;
+        let text = text.to_owned();
+        let memory_type = memory_type.to_owned();
+        let namespace = namespace.to_owned();
+        let domain = domain.to_owned();
+        let source = source.to_owned();
+        let emotional_state = emotional_state.map(str::to_owned);
+        let idempotency_key = idempotency_key.map(str::to_owned);
 
         let meta = match metadata {
             Some(d) => py_to_json(&d.as_any())?,
@@ -78,78 +86,91 @@ impl PyYantrikDB {
         // refusal: a key with a PYTHON-object fallback embedder (wrapper-side
         // vector generation the engine cannot reproduce — same drift hazard the
         // guard existed for, still real on that path only).
-        match embedding {
-            Some(emb) => db
-                .record_with_idempotency(
-                    text,
-                    memory_type,
-                    importance,
-                    valence,
-                    half_life,
-                    &meta,
-                    &emb,
-                    namespace,
-                    certainty,
-                    domain,
-                    source,
-                    emotional_state,
-                    idempotency_key,
-                    created_at,
-                )
-                .map_err(map_err),
-            // Only let the engine embed when the caller attached nothing of
-            // their own — an explicit Python embedder outranks a default the
-            // engine resolved for this dimension (#84).
-            None if db.has_embedder() && self.embedder.is_none() => db
-                .record_text_with_idempotency(
-                    text,
-                    memory_type,
-                    importance,
-                    valence,
-                    half_life,
-                    &meta,
-                    namespace,
-                    certainty,
-                    domain,
-                    source,
-                    emotional_state,
-                    idempotency_key,
-                    created_at,
-                )
-                .map_err(map_err),
-            None => {
-                if idempotency_key.is_some() {
-                    return Err(PyValueError::new_err(
-                        "idempotency_key with a Python-side fallback embedder is \
-                         not supported: the wrapper generates the vector outside \
-                         the engine, so a drift across retries would fake a \
-                         conflict. Pass an explicit `embedding`, or attach an \
-                         engine embedder (bundled/named).",
-                    ));
-                }
-                let emb = self.embed_text(py, text)?;
-                // Unkeyed, so the idempotency variant is byte-for-byte
-                // record() — used here only because it is the surface that
-                // carries `created_at`.
-                db.record_with_idempotency(
-                    text,
-                    memory_type,
-                    importance,
-                    valence,
-                    half_life,
-                    &meta,
-                    &emb,
-                    namespace,
-                    certainty,
-                    domain,
-                    source,
-                    emotional_state,
-                    None,
-                    created_at,
-                )
-                .map_err(map_err)
-            }
+        //
+        // The routing decision and any Python-side embedding run here,
+        // under a brief borrow, BEFORE the detach: `embed_text` calls
+        // back into Python and would be illegal inside the detached
+        // closure. What moves into the closure is only the prepared
+        // engine call.
+        enum Prepared {
+            With { emb: Vec<f32>, key: Option<String> },
+            Text { key: Option<String> },
         }
+        let prepared = match embedding {
+            Some(emb) => Prepared::With {
+                emb,
+                key: idempotency_key,
+            },
+            None => {
+                // Only let the engine embed when the caller attached nothing of
+                // their own — an explicit Python embedder outranks a default the
+                // engine resolved for this dimension (#84).
+                let caller_attached = slf.try_borrow()?.embedder.is_some();
+                if db.has_embedder() && !caller_attached {
+                    Prepared::Text {
+                        key: idempotency_key,
+                    }
+                } else {
+                    if idempotency_key.is_some() {
+                        return Err(PyValueError::new_err(
+                            "idempotency_key with a Python-side fallback embedder is \
+                             not supported: the wrapper generates the vector outside \
+                             the engine, so a drift across retries would fake a \
+                             conflict. Pass an explicit `embedding`, or attach an \
+                             engine embedder (bundled/named).",
+                        ));
+                    }
+                    let emb = slf.try_borrow()?.embed_text(py, &text)?;
+                    // Unkeyed, so the idempotency variant is byte-for-byte
+                    // record() — used here only because it is the surface that
+                    // carries `created_at`.
+                    Prepared::With { emb, key: None }
+                }
+            }
+        };
+
+        // Release the GIL for the engine call (#271). A record writes
+        // the row, its embedding, and the index entries under SQLite
+        // locks; the common path (an explicit embedding, or the engine's
+        // own embedder as with_default() sets up) makes no Python call
+        // at all, so the whole call detaches. On the Python-embedder
+        // path the embedding itself happened above, before the detach —
+        // only the engine write detaches there. `detach` is PyO3 0.28's
+        // name for what older docs call `allow_threads`.
+        py.detach(move || match prepared {
+            Prepared::With { emb, key } => db.record_with_idempotency(
+                &text,
+                &memory_type,
+                importance,
+                valence,
+                half_life,
+                &meta,
+                &emb,
+                &namespace,
+                certainty,
+                &domain,
+                &source,
+                emotional_state.as_deref(),
+                key.as_deref(),
+                created_at,
+            ),
+            Prepared::Text { key } => db.record_text_with_idempotency(
+                &text,
+                &memory_type,
+                importance,
+                valence,
+                half_life,
+                &meta,
+                &namespace,
+                certainty,
+                &domain,
+                &source,
+                emotional_state.as_deref(),
+                key.as_deref(),
+                created_at,
+            ),
+        })
+        .map_err(map_err)
     }
 
     // expand_entities defaults to FALSE as of 2026-08-05: measured on a

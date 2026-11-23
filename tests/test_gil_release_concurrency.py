@@ -3,7 +3,8 @@
 `recall()` and `think()` run the engine inside `py.detach` (#271, #279, #280), so
 other Python threads keep running while they work. `stats()` releases the GIL the
 same way, and the third test below covers it. `scan_conflicts()` does the same,
-and the fourth test below covers it. The first version kept the
+and the fourth test below covers it. `record()` does the same,
+and the fifth test below covers it. The first version kept the
 wrapper's `PyRef` borrow for the whole call. While a recall loop ran in one
 thread, every `set_embedder()` from another thread failed with
 `RuntimeError: Already borrowed` (3.5M of 3.5M calls in 5 s), and `close()`
@@ -217,3 +218,56 @@ def test_set_embedder_while_scan_conflicts_runs_in_another_thread(db):
     unexpected = [e for e in scan_errors if "Already mutably borrowed" not in e]
     assert not unexpected, unexpected[:2]
     assert not any("PanicException" in e for e in scan_errors)
+
+
+def test_set_embedder_while_record_runs_in_another_thread(db):
+    stop = threading.Event()
+    record_calls = []
+    record_errors = []
+
+    def worker():
+        n = 0
+        while not stop.is_set():
+            n += 1
+            try:
+                # Explicit embedding: the pure engine-write path. Retry
+                # on ingest backpressure, as a real caller must — it is
+                # queue flow control, not a borrow failure.
+                db.record(f"record under load {n}", embedding=Emb().encode(f"load {n}"))
+                record_calls.append(1)
+            except Exception as e:  # noqa: BLE001 - every failure is the finding
+                if "Backpressure" in type(e).__name__ or "queue full" in repr(e):
+                    time.sleep(0.05)
+                    continue
+                record_errors.append(repr(e))
+
+    t = threading.Thread(target=worker)
+    t.start()
+    errors = []
+    calls = 0
+    deadline = time.time() + 2.0
+    try:
+        while time.time() < deadline:
+            try:
+                db.set_embedder(Emb(), allow_unverified_embedder=True)
+            except Exception as e:  # noqa: BLE001
+                errors.append(repr(e))
+            calls += 1
+    finally:
+        stop.set()
+        t.join()
+
+    # The test only means something if both threads really ran concurrently.
+    assert len(record_calls) > 5, "the record worker barely ran; nothing was contended"
+    assert calls > 5
+    assert not _borrow_errors(errors), (
+        f"{len(errors)}/{calls} set_embedder() calls failed while "
+        f"record() was detached: {errors[:1]}"
+    )
+    # Same pre-existing contract as recall(): set_embedder() keeps its
+    # mutable borrow while it calls the Python embedder's encode(), so a
+    # record() arriving mid-call is refused with "Already mutably
+    # borrowed". That must stay an ordinary RuntimeError, never a panic.
+    unexpected = [e for e in record_errors if "Already mutably borrowed" not in e]
+    assert not unexpected, unexpected[:2]
+    assert not any("PanicException" in e for e in record_errors)
