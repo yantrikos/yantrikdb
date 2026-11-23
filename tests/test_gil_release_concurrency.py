@@ -84,11 +84,12 @@ def test_set_embedder_while_recall_runs_in_another_thread(db):
         f"{len(errors)}/{calls} set_embedder() calls failed while recall() was "
         f"detached: {errors[:1]}"
     )
-    # Pre-existing, unchanged by the GIL release and identical on 0.23.4:
-    # set_embedder() keeps its mutable borrow while it calls the Python
-    # embedder's encode(), so a recall() arriving mid-call is refused with
-    # "Already mutably borrowed". That must stay an ordinary RuntimeError —
-    # the first cut of this fix turned it into a Rust panic.
+    # #282 contract: set_embedder() no longer holds a mutable borrow
+    # across its probe, so a recall() arriving mid-call is NOT refused
+    # either. Neither direction may refuse the other with a borrow error;
+    # any other worker error is still a finding, and a panic always is.
+    refusals = [e for e in recall_errors if "borrowed" in e]
+    assert not refusals, refusals[:2]
     unexpected = [e for e in recall_errors if "Already mutably borrowed" not in e]
     assert not unexpected, unexpected[:2]
     assert not any("PanicException" in e for e in recall_errors)
@@ -130,10 +131,10 @@ def test_set_embedder_while_stats_runs_in_another_thread(db):
         f"{len(errors)}/{calls} set_embedder() calls failed while stats() was "
         f"detached: {errors[:1]}"
     )
-    # Same pre-existing contract as recall(): set_embedder() keeps its
-    # mutable borrow while it calls the Python embedder's encode(), so a
-    # stats() arriving mid-call is refused with "Already mutably borrowed".
-    # That must stay an ordinary RuntimeError, never a panic.
+    # Same #282 contract as recall(): neither direction may refuse the
+    # other with a borrow error, and a panic never may happen.
+    refusals = [e for e in stats_errors if "borrowed" in e]
+    assert not refusals, refusals[:2]
     unexpected = [e for e in stats_errors if "Already mutably borrowed" not in e]
     assert not unexpected, unexpected[:2]
     assert not any("PanicException" in e for e in stats_errors)
@@ -210,10 +211,87 @@ def test_set_embedder_while_scan_conflicts_runs_in_another_thread(db):
         f"{len(errors)}/{calls} set_embedder() calls failed while "
         f"scan_conflicts() was detached: {errors[:1]}"
     )
-    # Same pre-existing contract as recall(): set_embedder() keeps its
-    # mutable borrow while it calls the Python embedder's encode(), so a
-    # scan arriving mid-call is refused with "Already mutably borrowed".
-    # That must stay an ordinary RuntimeError, never a panic.
+    # Same #282 contract as recall(): neither direction may refuse the
+    # other with a borrow error, and a panic never may happen.
+    refusals = [e for e in scan_errors if "borrowed" in e]
+    assert not refusals, refusals[:2]
     unexpected = [e for e in scan_errors if "Already mutably borrowed" not in e]
     assert not unexpected, unexpected[:2]
     assert not any("PanicException" in e for e in scan_errors)
+
+
+class _DeclaringEmb:
+    """An embedder that declares the fingerprint it is given (#117)."""
+
+    def __init__(self, fingerprint, dim=64):
+        self.fingerprint = fingerprint
+        self.dim = dim
+
+    def encode(self, text):
+        r = random.Random(hash(text) & 0xFFFFFFFF)
+        v = [r.random() for _ in range(self.dim)]
+        n = sum(x * x for x in v) ** 0.5
+        return [x / n for x in v]
+
+
+def test_set_embedder_identity_check_under_recall_load(tmp_path):
+    # The other tests pass allow_unverified_embedder=True, so the #117
+    # identity check early-returns and only the probe path is exercised.
+    # This arm runs the identity check for real — a store whose vectors
+    # were built by the bundled engine embedder (recorded identity), and
+    # an embedder declaring the matching fingerprint — under the same
+    # concurrent recall load, asserting the #282 contract holds on the
+    # phase that runs under a shared borrow too.
+    import re
+
+    path = os.path.join(str(tmp_path), "gil-identity.db")
+    store = YantrikDB(path, 64)  # 64 dims: the bundled engine embedder
+    for i in range(50):
+        store.record(f"identity record {i} about topic {i % 7}")
+
+    # Harvest the recorded digest from the refusal message itself: a
+    # wrong declared fingerprint is refused and the error names the
+    # recorded digest. Public API only; no second SQLite in-process.
+    with pytest.raises(RuntimeError) as excinfo:
+        store.set_embedder(_DeclaringEmb("sha256:wrong"))
+    m = re.search(r"digest ([^,]+),", str(excinfo.value))
+    assert m, str(excinfo.value)
+    digest = m.group(1)
+
+    q = _DeclaringEmb(digest).encode("topic 3")
+    stop = threading.Event()
+    recall_calls = []
+    recall_errors = []
+
+    def worker():
+        while not stop.is_set():
+            recall_calls.append(1)
+            try:
+                store.recall(query_embedding=q, top_k=5)
+            except Exception as e:  # noqa: BLE001 - every failure is the finding
+                recall_errors.append(repr(e))
+
+    t = threading.Thread(target=worker)
+    t.start()
+    errors = []
+    calls = 0
+    deadline = time.time() + 2.0
+    try:
+        while time.time() < deadline:
+            try:
+                # No allow_unverified: the identity check runs in full.
+                store.set_embedder(_DeclaringEmb(digest))
+            except Exception as e:  # noqa: BLE001
+                errors.append(repr(e))
+            calls += 1
+    finally:
+        stop.set()
+        t.join()
+        store.close()
+
+    assert len(recall_calls) > 5, "the recall worker barely ran; nothing was contended"
+    assert calls > 5
+    assert not errors, f"identity-checked set_embedder() failed under load: {errors[:1]}"
+    refusals = [e for e in recall_errors if "borrowed" in e]
+    assert not refusals, refusals[:2]
+    assert not any("PanicException" in e for e in recall_errors)

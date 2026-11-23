@@ -585,13 +585,24 @@ impl PyYantrikDB {
     /// localized error.
     #[pyo3(signature = (embedder, allow_unverified_embedder = false))]
     fn set_embedder(
-        &mut self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         embedder: PyObject,
         allow_unverified_embedder: bool,
     ) -> PyResult<()> {
-        // Probe with a sentinel — if encode() doesn't produce a numeric
-        // vector, the embedder is bogus and we raise immediately.
+        let py = slf.py();
+        // #282: this method used to take `&mut self`, so pyo3 held the
+        // wrapper's mutable borrow for the whole call — including the
+        // probe below, which calls back into Python. Any other thread
+        // touching the wrapper during the probe was refused with
+        // `RuntimeError: Already mutably borrowed` (measured at 99.998%
+        // of concurrent recall() calls). The borrow is only needed for
+        // the final field store, so the call now runs in three phases:
+        // validate with no borrow held, identity-check under a brief
+        // shared borrow, then borrow mutably for the store alone.
+
+        // Phase 1, no borrow held: probe with a sentinel — if encode()
+        // doesn't produce a numeric vector, the embedder is bogus and we
+        // raise immediately.
         let probe = embedder
             .call_method1(py, "encode", ("__yantrikdb_probe__",))
             .map_err(|e| {
@@ -619,11 +630,23 @@ impl PyYantrikDB {
             ));
         }
 
-        // #117: the probe above proves it is AN embedder. This proves it is
-        // THE embedder — the one whose space the stored vectors live in.
-        self.check_embedder_identity(py, &embedder, allow_unverified_embedder)?;
+        // Phase 2, shared borrow only: #117 — the probe above proves it
+        // is AN embedder. This proves it is THE embedder — the one whose
+        // space the stored vectors live in. The helper takes `&self`; a
+        // shared borrow cannot refuse the `&self` crowd #282 is about.
+        slf.try_borrow()?
+            .check_embedder_identity(py, &embedder, allow_unverified_embedder)?;
 
-        self.embedder = Some(embedder);
+        // Phase 3, mutable borrow for the store alone — one field
+        // assignment, no Python call inside it. A close() can now land
+        // between validation and the store, so re-check the engine is
+        // still there: storing onto a closed wrapper would leave
+        // has_embedder() reporting true on a closed database.
+        let mut borrowed = slf.try_borrow_mut()?;
+        if borrowed.inner.is_none() {
+            return Err(PyRuntimeError::new_err("YantrikDB is closed"));
+        }
+        borrowed.embedder = Some(embedder);
         Ok(())
     }
 
@@ -962,9 +985,10 @@ impl PyYantrikDB {
     /// wrapper's handle and returns `False`; the engine closes when the
     /// detached call releases the last reference.
     pub(crate) fn engine_handle(slf: &Bound<'_, Self>) -> PyResult<Arc<YantrikDB>> {
-        // try_borrow, not borrow: `set_embedder` holds a mutable borrow while
-        // it calls the Python embedder, and another thread can arrive here
-        // mid-call. That must surface as RuntimeError, never as a panic.
+        // try_borrow, not borrow: a `&mut self` method (`close`,
+        // `set_embedder_named`) can hold the mutable borrow while another
+        // thread arrives here mid-call. That must surface as
+        // RuntimeError, never as a panic.
         slf.try_borrow()?
             .inner
             .clone()
