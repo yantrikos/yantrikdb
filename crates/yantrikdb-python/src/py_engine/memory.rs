@@ -913,8 +913,7 @@ impl PyYantrikDB {
     #[pyo3(signature = (rid, reason, new_text=None, metadata_merge=None, new_importance=None, new_valence=None))]
     #[allow(clippy::too_many_arguments)]
     fn correct(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         rid: &str,
         reason: &str,
         new_text: Option<&str>,
@@ -922,7 +921,15 @@ impl PyYantrikDB {
         new_importance: Option<f64>,
         new_valence: Option<f64>,
     ) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
+        // Owned handle and owned strings: everything below moves into
+        // the detached closure, which may not borrow `self` or any
+        // Python-bound argument. No borrow of `slf` is held across the
+        // detached call; see `engine_handle` for why that matters.
+        let py = slf.py();
+        let db = Self::engine_handle(slf)?;
+        let rid = rid.to_owned();
+        let reason = reason.to_owned();
+        let new_text = new_text.map(str::to_owned);
         let metadata_json = match metadata_merge {
             Some(d) => Some(py_to_json(&d.as_any())?),
             None => None,
@@ -936,36 +943,57 @@ impl PyYantrikDB {
         // embedder) and hand the vector to `correct_with_embedding`. When a
         // native embedder exists we let the engine embed (it also handles the
         // reembed-cutover revalidation loop natively).
-        let use_caller_embed = new_text.is_some() && self.embedder.is_some();
-        let result = if use_caller_embed {
-            // sol r8: snapshot the search generation BEFORE embedding so the
-            // vector is pinned to the space it is computed in. If a reembed
-            // cutover advances the generation before the correction commits,
-            // the engine rejects it retryably rather than committing a
-            // wrong-space vector.
-            let gen = db.search_generation();
-            let emb = self.embed_text(py, new_text.expect("checked is_some"))?;
-            db.correct_with_embedding(
-                rid,
-                new_text,
-                &emb,
-                gen,
-                metadata_json.as_ref(),
-                new_importance,
-                new_valence,
-                reason,
-            )
-            .map_err(map_err)?
-        } else {
-            db.correct(
-                rid,
-                new_text,
-                metadata_json.as_ref(),
-                new_importance,
-                new_valence,
-                reason,
-            )
-            .map_err(map_err)?
+        // The caller-embedder check and the pre-embed run under a brief
+        // shared borrow, before the detach: `embed_text` is a Python call
+        // and would be illegal inside the detached closure.
+        let caller_embed = {
+            let borrowed = slf.try_borrow()?;
+            if new_text.is_some() && borrowed.embedder.is_some() {
+                // sol r8: snapshot the search generation BEFORE embedding so
+                // the vector is pinned to the space it is computed in. If a
+                // reembed cutover advances the generation before the
+                // correction commits, the engine rejects it retryably rather
+                // than committing a wrong-space vector.
+                let gen = db.search_generation();
+                let emb = borrowed.embed_text(py, new_text.as_deref().expect("checked is_some"))?;
+                Some((emb, gen))
+            } else {
+                None
+            }
+        };
+        // Release the GIL for the engine call (#271). A correction writes
+        // the revision, re-embeds inside the engine on the native path,
+        // and updates the indexes under SQLite locks; on a loaded store
+        // that is long enough to wedge a host event loop when the GIL is
+        // held for the whole call. `detach` is PyO3 0.28's name for what
+        // older docs call `allow_threads`.
+        let result = match caller_embed {
+            Some((emb, gen)) => py
+                .detach(move || {
+                    db.correct_with_embedding(
+                        &rid,
+                        new_text.as_deref(),
+                        &emb,
+                        gen,
+                        metadata_json.as_ref(),
+                        new_importance,
+                        new_valence,
+                        &reason,
+                    )
+                })
+                .map_err(map_err)?,
+            None => py
+                .detach(move || {
+                    db.correct(
+                        &rid,
+                        new_text.as_deref(),
+                        metadata_json.as_ref(),
+                        new_importance,
+                        new_valence,
+                        &reason,
+                    )
+                })
+                .map_err(map_err)?,
         };
         let dict = PyDict::new(py);
         dict.set_item("original_rid", &result.original_rid)?;
