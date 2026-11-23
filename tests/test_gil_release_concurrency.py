@@ -243,8 +243,17 @@ def test_set_embedder_while_consolidate_runs_in_another_thread(db):
     t.start()
     errors = []
     calls = 0
-    deadline = time.time() + 2.0
     try:
+        # Open the contention window only once the worker has provably
+        # run: on a slow runner a fixed window can elapse before the
+        # worker gets through even a few passes, and the count below
+        # then fails with nothing actually wrong. Wait for a floor of
+        # passes first, bounded so a wedged worker still fails the
+        # assert instead of hanging the suite.
+        warm_deadline = time.time() + 30.0
+        while len(consol_calls) < 10 and time.time() < warm_deadline:
+            time.sleep(0.005)
+        deadline = time.time() + 2.0
         while time.time() < deadline:
             try:
                 db.set_embedder(Emb(), allow_unverified_embedder=True)
