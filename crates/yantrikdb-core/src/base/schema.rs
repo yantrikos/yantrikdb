@@ -24,7 +24,7 @@
 // v51 adds the self-mined relation template tables (learned_relation_patterns +
 // support), fed by cooperative claims and applied by the materializer.
 // v52 adds token_case_stats, the store's own lexicon for entity admission.
-pub const SCHEMA_VERSION: i32 = 54;
+pub const SCHEMA_VERSION: i32 = 55;
 
 pub const SCHEMA_SQL: &str = "
 -- Memory records: the source of truth
@@ -960,6 +960,11 @@ CREATE TABLE IF NOT EXISTS consolidation_members (
     source_rid TEXT NOT NULL,            -- original memory
     hlc BLOB NOT NULL,                  -- when this consolidation happened
     actor_id TEXT NOT NULL,             -- which device did it
+    -- v55 (#291): the source's importance at the moment a REPLACING
+    -- consolidation demoted it. NULL for additive members (never demoted)
+    -- and for rows written before v55 (unknown). Local to each node: a
+    -- replica captures its own pre-demotion value when it applies the op.
+    prior_importance REAL,
     PRIMARY KEY (consolidation_rid, source_rid)
 );
 
@@ -3396,4 +3401,14 @@ CREATE TABLE IF NOT EXISTS extraction_refusals (
     PRIMARY KEY (memory_rid, rel_type, at)
 );
 CREATE INDEX IF NOT EXISTS idx_extraction_refusals_reason ON extraction_refusals(reason, rel_type);
+";
+
+pub const MIGRATE_V54_TO_V55: &str = "
+-- v55 (#291): a replacing consolidation multiplies each source's importance
+-- by 0.3 and stored no record of the value it replaced, so a restore could
+-- only be computed, never verified. The pre-demotion value is now captured
+-- per membership row. Existing rows stay NULL: their base is unknown, and
+-- restore_from_consolidation refuses them unless the caller opts into the
+-- inferred value.
+ALTER TABLE consolidation_members ADD COLUMN prior_importance REAL;
 ";
