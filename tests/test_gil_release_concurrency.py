@@ -3,7 +3,8 @@
 `recall()` and `think()` run the engine inside `py.detach` (#271, #279, #280), so
 other Python threads keep running while they work. `stats()` releases the GIL the
 same way, and the third test below covers it. `scan_conflicts()` does the same,
-and the fourth test below covers it. The first version kept the
+and the fourth test below covers it. `consolidate()` does the same, and the
+fifth test below covers it. The first version kept the
 wrapper's `PyRef` borrow for the whole call. While a recall loop ran in one
 thread, every `set_embedder()` from another thread failed with
 `RuntimeError: Already borrowed` (3.5M of 3.5M calls in 5 s), and `close()`
@@ -22,6 +23,7 @@ import time
 import pytest
 
 from yantrikdb import YantrikDB
+from yantrikdb.consolidate import consolidate
 
 DIM = 32  # not 64/256: those dims auto-attach a bundled engine-native embedder
 
@@ -217,3 +219,62 @@ def test_set_embedder_while_scan_conflicts_runs_in_another_thread(db):
     unexpected = [e for e in scan_errors if "Already mutably borrowed" not in e]
     assert not unexpected, unexpected[:2]
     assert not any("PanicException" in e for e in scan_errors)
+
+
+def test_set_embedder_while_consolidate_runs_in_another_thread(db):
+    # consolidate() is a module-level function taking the engine, not a
+    # method; the borrow hazard is the same. Before the fix it held the
+    # wrapper's shared borrow (and the GIL) for the whole pass, so every
+    # set_embedder() from another thread failed "Already borrowed" while
+    # a consolidation pass was running.
+    stop = threading.Event()
+    consol_calls = []
+    consol_errors = []
+
+    def worker():
+        while not stop.is_set():
+            consol_calls.append(1)
+            try:
+                consolidate(db)
+            except Exception as e:  # noqa: BLE001 - every failure is the finding
+                consol_errors.append(repr(e))
+
+    t = threading.Thread(target=worker)
+    t.start()
+    errors = []
+    calls = 0
+    try:
+        # Open the contention window only once the worker has provably
+        # run: on a slow runner a fixed window can elapse before the
+        # worker gets through even a few passes, and the count below
+        # then fails with nothing actually wrong. Wait for a floor of
+        # passes first, bounded so a wedged worker still fails the
+        # assert instead of hanging the suite.
+        warm_deadline = time.time() + 30.0
+        while len(consol_calls) < 10 and time.time() < warm_deadline:
+            time.sleep(0.005)
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            try:
+                db.set_embedder(Emb(), allow_unverified_embedder=True)
+            except Exception as e:  # noqa: BLE001
+                errors.append(repr(e))
+            calls += 1
+    finally:
+        stop.set()
+        t.join()
+
+    # The test only means something if both threads really ran concurrently.
+    assert len(consol_calls) > 5, "the consolidate worker barely ran; nothing was contended"
+    assert calls > 5
+    assert not _borrow_errors(errors), (
+        f"{len(errors)}/{calls} set_embedder() calls failed while "
+        f"consolidate() was detached: {errors[:1]}"
+    )
+    # Same pre-existing contract as recall(): set_embedder() keeps its
+    # mutable borrow while it calls the Python embedder's encode(), so a
+    # consolidate arriving mid-call is refused with "Already mutably
+    # borrowed". That must stay an ordinary RuntimeError, never a panic.
+    unexpected = [e for e in consol_errors if "Already mutably borrowed" not in e]
+    assert not unexpected, unexpected[:2]
+    assert not any("PanicException" in e for e in consol_errors)
