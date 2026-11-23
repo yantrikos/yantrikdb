@@ -217,3 +217,50 @@ def test_set_embedder_while_scan_conflicts_runs_in_another_thread(db):
     unexpected = [e for e in scan_errors if "Already mutably borrowed" not in e]
     assert not unexpected, unexpected[:2]
     assert not any("PanicException" in e for e in scan_errors)
+
+
+def test_set_embedder_while_record_runs_in_another_thread(db):
+    """The write path releases the GIL too (#271 follow-up).
+
+    `record()` used to take `&self` and run the whole write - including the
+    SQLite transaction, which can wait on a lock - with the wrapper's shared
+    borrow held and the GIL held. A concurrent `set_embedder()` therefore
+    failed with "Already borrowed" for as long as any write was in flight.
+    """
+    stop = threading.Event()
+    record_calls = []
+    record_errors = []
+
+    def worker():
+        i = 0
+        while not stop.is_set():
+            record_calls.append(1)
+            i += 1
+            try:
+                db.record(f"gil record {i} about topic {i % 97}")
+            except Exception as e:  # noqa: BLE001 - every failure is the finding
+                record_errors.append(repr(e))
+
+    t = threading.Thread(target=worker)
+    t.start()
+    errors = []
+    calls = 0
+    deadline = time.time() + 2.0
+    try:
+        while time.time() < deadline:
+            try:
+                db.set_embedder(Emb(), allow_unverified_embedder=True)
+            except Exception as e:  # noqa: BLE001
+                errors.append(repr(e))
+            calls += 1
+    finally:
+        stop.set()
+        t.join()
+
+    assert len(record_calls) > 5, "the record worker barely ran; nothing was contended"
+    assert calls > 5
+    assert not _borrow_errors(errors), (
+        f"{len(errors)}/{calls} set_embedder() calls failed while record() was "
+        f"detached: {errors[:1]}"
+    )
+    assert not any("PanicException" in e for e in record_errors), record_errors[:2]

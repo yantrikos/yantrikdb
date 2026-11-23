@@ -42,7 +42,7 @@ impl PyYantrikDB {
     #[pyo3(signature = (text, memory_type="episodic", importance=0.5, valence=0.0, half_life=604800.0, metadata=None, embedding=None, namespace="default", certainty=0.8, domain="general", source="user", emotional_state=None, idempotency_key=None, created_at=None))]
     #[allow(clippy::too_many_arguments)]
     fn record(
-        &self,
+        slf: &Bound<'_, Self>,
         py: Python<'_>,
         text: &str,
         memory_type: &str,
@@ -59,10 +59,12 @@ impl PyYantrikDB {
         idempotency_key: Option<&str>,
         created_at: Option<f64>,
     ) -> PyResult<String> {
-        let db = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+        // #271: the SQLite write must not hold the GIL. Owned handle and owned
+        // strings, because everything below moves into the detached closure —
+        // the same shape `recall` already uses. The routing decision is taken
+        // BEFORE the detach: one branch needs `self.embedder`, the other is a
+        // Python call that would be illegal inside the closure.
+        let db = Self::engine_handle(slf)?;
 
         let meta = match metadata {
             Some(d) => py_to_json(&d.as_any())?,
@@ -78,45 +80,16 @@ impl PyYantrikDB {
         // refusal: a key with a PYTHON-object fallback embedder (wrapper-side
         // vector generation the engine cannot reproduce — same drift hazard the
         // guard existed for, still real on that path only).
-        match embedding {
-            Some(emb) => db
-                .record_with_idempotency(
-                    text,
-                    memory_type,
-                    importance,
-                    valence,
-                    half_life,
-                    &meta,
-                    &emb,
-                    namespace,
-                    certainty,
-                    domain,
-                    source,
-                    emotional_state,
-                    idempotency_key,
-                    created_at,
-                )
-                .map_err(map_err),
-            // Only let the engine embed when the caller attached nothing of
-            // their own — an explicit Python embedder outranks a default the
-            // engine resolved for this dimension (#84).
-            None if db.has_embedder() && self.embedder.is_none() => db
-                .record_text_with_idempotency(
-                    text,
-                    memory_type,
-                    importance,
-                    valence,
-                    half_life,
-                    &meta,
-                    namespace,
-                    certainty,
-                    domain,
-                    source,
-                    emotional_state,
-                    idempotency_key,
-                    created_at,
-                )
-                .map_err(map_err),
+        //
+        // Only let the engine embed when the caller attached nothing of their
+        // own — an explicit Python embedder outranks a default the engine
+        // resolved for this dimension (#84).
+        let engine_embeds =
+            embedding.is_none() && db.has_embedder() && slf.try_borrow()?.embedder.is_none();
+
+        let emb = match embedding {
+            Some(emb) => Some(emb),
+            None if engine_embeds => None,
             None => {
                 if idempotency_key.is_some() {
                     return Err(PyValueError::new_err(
@@ -127,29 +100,55 @@ impl PyYantrikDB {
                          engine embedder (bundled/named).",
                     ));
                 }
-                let emb = self.embed_text(py, text)?;
-                // Unkeyed, so the idempotency variant is byte-for-byte
-                // record() — used here only because it is the surface that
-                // carries `created_at`.
-                db.record_with_idempotency(
-                    text,
-                    memory_type,
-                    importance,
-                    valence,
-                    half_life,
-                    &meta,
-                    &emb,
-                    namespace,
-                    certainty,
-                    domain,
-                    source,
-                    emotional_state,
-                    None,
-                    created_at,
-                )
-                .map_err(map_err)
+                Some(slf.try_borrow()?.embed_text(py, text)?)
             }
-        }
+        };
+
+        // Everything the closure touches must be owned: `&str` arguments and
+        // `&Bound<PyDict>` metadata would keep a borrow or a Python reference
+        // alive across the GIL boundary.
+        let text = text.to_owned();
+        let memory_type = memory_type.to_owned();
+        let namespace = namespace.to_owned();
+        let domain = domain.to_owned();
+        let source = source.to_owned();
+        let emotional_state = emotional_state.map(str::to_owned);
+        let idempotency_key = idempotency_key.map(str::to_owned);
+
+        py.detach(move || match emb {
+            Some(emb) => db.record_with_idempotency(
+                &text,
+                &memory_type,
+                importance,
+                valence,
+                half_life,
+                &meta,
+                &emb,
+                &namespace,
+                certainty,
+                &domain,
+                &source,
+                emotional_state.as_deref(),
+                idempotency_key.as_deref(),
+                created_at,
+            ),
+            None => db.record_text_with_idempotency(
+                &text,
+                &memory_type,
+                importance,
+                valence,
+                half_life,
+                &meta,
+                &namespace,
+                certainty,
+                &domain,
+                &source,
+                emotional_state.as_deref(),
+                idempotency_key.as_deref(),
+                created_at,
+            ),
+        })
+        .map_err(map_err)
     }
 
     // expand_entities defaults to FALSE as of 2026-08-05: measured on a
