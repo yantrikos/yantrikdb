@@ -1613,3 +1613,36 @@ fn reinstall_racing_a_mount_keeps_the_installed_copy() {
         assert_eq!(db.mounted_packs().len(), 1, "trial {trial}");
     }
 }
+
+/// An install sweeps temp copies that dead installs left behind, but only
+/// ones untouched for an hour: a fresh one may be another install's work in
+/// progress.
+#[test]
+fn install_sweeps_stale_temp_copies_only() {
+    let dir = tmpdir("install-sweep");
+    let pack = dir.join("physics.ydbpack");
+    build_pack(
+        &dir,
+        pack.to_str().unwrap(),
+        "E0",
+        &[("gluons bind quarks", 3)],
+    );
+    let db = host(&dir, "E0");
+    let pack_dir = db.pack_dir().unwrap();
+    std::fs::create_dir_all(&pack_dir).unwrap();
+    let stale = pack_dir.join(".physics-1.0.0.ydbpack.tmp.4242.7");
+    let fresh = pack_dir.join(".physics-1.0.0.ydbpack.tmp.4242.8");
+    std::fs::write(&stale, b"half a pack").unwrap();
+    std::fs::write(&fresh, b"half a pack").unwrap();
+    let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+    std::fs::File::options()
+        .write(true)
+        .open(&stale)
+        .unwrap()
+        .set_modified(two_hours_ago)
+        .unwrap();
+
+    db.install_pack(pack.to_str().unwrap()).unwrap();
+    assert!(!stale.exists(), "the stale temp copy must be swept");
+    assert!(fresh.exists(), "a fresh temp copy may be a live install's");
+}

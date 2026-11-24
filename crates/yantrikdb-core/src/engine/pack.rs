@@ -2103,6 +2103,10 @@ impl YantrikDB {
             .zip(dest.canonicalize().ok())
             .map(|(a, b)| a == b)
             .unwrap_or(false);
+        // Stale temp copies from installs that died mid-write. Under the
+        // install lock no install of this engine is writing one, and an
+        // age bound keeps any other process's live copy safe.
+        sweep_stale_install_temps(&dir);
 
         // 1. Write the new copy (or converted copy) beside the destination
         //    BEFORE touching the current mount: that is the slow step, and
@@ -2321,6 +2325,7 @@ impl YantrikDB {
         // Not while an install or uninstall is replacing a file (#271
         // review): the install lock orders them.
         let _serial = self.pack_install_lock.lock();
+        sweep_stale_install_temps(&dir);
         let installed = match self.installed_packs() {
             Ok(v) => v,
             Err(e) => {
@@ -2696,6 +2701,34 @@ impl YantrikDB {
 /// A per-process counter for install temp files, so two installs never
 /// write the same temp path (installs are also serialised; this keeps the
 /// name unique even if that ever changes).
+/// Remove install temp copies (`.<file>.tmp.<pid>.<n>`) left by installs
+/// that died mid-write. Only copies untouched for an hour go: a live
+/// install keeps writing its copy (and any install of this engine is
+/// excluded by the install lock the callers hold), so an hour-old copy is
+/// no install's work in progress. Best-effort; errors are ignored.
+fn sweep_stale_install_temps(dir: &std::path::Path) {
+    const STALE: std::time::Duration = std::time::Duration::from_secs(3600);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with('.') && name.contains(".ydbpack.tmp.")) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= STALE);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
 fn next_install_tmp() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
