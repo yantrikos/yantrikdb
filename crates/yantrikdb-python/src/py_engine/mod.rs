@@ -941,24 +941,62 @@ impl PyYantrikDB {
     /// reference drops. The old signature returned bare Ok(()) in both
     /// cases, so "db.close() succeeded" could mean "still open and
     /// writable through the proxy" (2026-08-15 binding audit).
-    fn close(&mut self) -> PyResult<bool> {
-        if let Some(arc) = self.inner.take() {
-            match Arc::try_unwrap(arc) {
-                Ok(db) => {
-                    db.close().map_err(map_err)?;
-                    return Ok(true);
+    ///
+    /// The background workers are stopped first. They hold only `Weak`
+    /// refs, but each one upgrades to a strong ref while it works, and the
+    /// compactor used to hold one across its whole idle wait, so this
+    /// returned False almost every time with nothing else holding the
+    /// engine (#271 review).
+    fn close(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        // Take the handle and the workers under a brief borrow, then stop
+        // the workers (joining a materializer mid-drain) and close SQLite (a
+        // WAL checkpoint) with the GIL released: held through both, a thread
+        // beside the close froze for its whole length, up to 1.8 s under
+        // write load (#271 review).
+        let (arc, workers) = {
+            let mut this = Self::borrow_mut_briefly(slf)?;
+            match this.inner.take() {
+                Some(arc) => (arc, this._workers.take()),
+                // Already closed: idempotent, and truthfully "no exclusive
+                // close performed by this call".
+                None => return Ok(false),
+            }
+        };
+        enum Outcome {
+            Closed,
+            StillShared(AllWorkerGuards),
+        }
+        let outcome = slf
+            .py()
+            .detach(move || -> Result<Outcome, yantrikdb_core::YantrikDbError> {
+                drop(workers);
+                match Arc::try_unwrap(arc) {
+                    Ok(db) => {
+                        db.close()?;
+                        Ok(Outcome::Closed)
+                    }
+                    // Other references still exist (another thread's call in
+                    // flight, or a `_conn` proxy); ours drops here and the DB
+                    // closes on the last drop, but NOT yet, and the caller
+                    // deserves to know. Until then the engine still takes
+                    // writes through those references, so it keeps its
+                    // workers: without the compactor, writes wedge at
+                    // delta_max. They hold only Weak refs and exit when the
+                    // engine is finally dropped.
+                    Err(arc) => Ok(Outcome::StillShared(spawn_all_workers(
+                        &arc,
+                        recommended_worker_count(),
+                    ))),
                 }
-                Err(_arc) => {
-                    // Other references still exist; ours is dropped, the
-                    // DB closes on last drop — but NOT yet, and the caller
-                    // deserves to know.
-                    return Ok(false);
-                }
+            })
+            .map_err(map_err)?;
+        match outcome {
+            Outcome::Closed => Ok(true),
+            Outcome::StillShared(workers) => {
+                Self::borrow_mut_briefly(slf)?._workers = Some(workers);
+                Ok(false)
             }
         }
-        // Already closed: idempotent, and truthfully "no exclusive close
-        // performed by this call".
-        Ok(false)
     }
 }
 
@@ -975,8 +1013,78 @@ pub(crate) fn py_vector(py: Python<'_>, result: &PyObject) -> PyResult<Vec<f32>>
     list.extract::<Vec<f32>>(py)
 }
 
+/// Where a binding's vector comes from, decided once, from the snapshot
+/// [`PyYantrikDB::engine_and_embedder`] took (#271).
+pub(crate) enum EmbedPlan<'a> {
+    /// A vector already in hand: passed by the caller, or produced by the
+    /// caller-attached Python embedder (with the GIL held, as any Python
+    /// call must be, but with no borrow of the wrapper).
+    Ready(Vec<f32>),
+    /// The engine's own embedder, run inside the detached closure with the
+    /// engine call it feeds: native inference needs no GIL, and one detach
+    /// per call keeps the cost to one GIL handoff. Borrows the caller's
+    /// text: a `&str` argument outlives the call, detach included.
+    Native(&'a str),
+}
+
+impl EmbedPlan<'_> {
+    /// The vector, inside `py.detach`.
+    pub(crate) fn into_vector(
+        self,
+        db: &YantrikDB,
+    ) -> Result<Vec<f32>, yantrikdb_core::YantrikDbError> {
+        match self {
+            EmbedPlan::Ready(v) => Ok(v),
+            EmbedPlan::Native(text) => db.embed(text),
+        }
+    }
+}
+
+/// `embed_text`'s precedence, without a borrow held across `encode()`:
+/// an embedder the caller ATTACHED wins over one the engine resolved for
+/// this store's dimension (yantrikdb-hermes-plugin #84), then the engine's
+/// own, else the same error `embed_text` raises.
+pub(crate) fn plan_embed<'a>(
+    py: Python<'_>,
+    db: &YantrikDB,
+    embedder: Option<&PyObject>,
+    text: &'a str,
+) -> PyResult<EmbedPlan<'a>> {
+    if let Some(emb) = embedder {
+        let result = emb.call_method1(py, "encode", (text,))?;
+        return Ok(EmbedPlan::Ready(py_vector(py, &result)?));
+    }
+    if db.has_embedder() {
+        return Ok(EmbedPlan::Native(text));
+    }
+    Err(PyRuntimeError::new_err(
+        "No embedder configured. Pass an embedder to YantrikDB() or call set_embedder().",
+    ))
+}
+
 impl PyYantrikDB {
-    /// Get a reference to the inner YantrikDB engine (for use by consolidation/trigger wrappers).
+    /// The wrapper's mutable borrow, retried for up to a second instead of
+    /// failing at once. Since the bindings release the GIL, another thread
+    /// can hold a shared borrow for a moment (taking its engine snapshot,
+    /// or around a Python embedder's encode()), and a close() or swap that
+    /// arrives then was refused with "Already borrowed" (#271 review). The
+    /// GIL is released between tries, so the holder can finish.
+    pub(crate) fn borrow_mut_briefly<'py>(slf: &Bound<'py, Self>) -> PyResult<PyRefMut<'py, Self>> {
+        const TRIES: u32 = 1000;
+        let mut tries = 0;
+        loop {
+            match slf.try_borrow_mut() {
+                Ok(this) => return Ok(this),
+                Err(e) if tries >= TRIES => return Err(e.into()),
+                Err(_) => {
+                    tries += 1;
+                    slf.py()
+                        .detach(|| std::thread::sleep(std::time::Duration::from_millis(1)));
+                }
+            }
+        }
+    }
+
     /// An owned engine handle for a call that releases the GIL (#271).
     ///
     /// A `&self` pymethod keeps its `PyRef` borrow for the whole call. Once
@@ -1000,10 +1108,35 @@ impl PyYantrikDB {
             .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))
     }
 
+    /// Get a reference to the inner YantrikDB engine (for use by consolidation/trigger wrappers).
     pub fn get_inner(&self) -> PyResult<&YantrikDB> {
         self.inner
             .as_deref()
             .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))
+    }
+
+    /// The engine handle and the caller-attached Python embedder, taken
+    /// under ONE short borrow (#271).
+    ///
+    /// `embed_text(&self)` runs the Python embedder's `encode()` while the
+    /// wrapper is borrowed, so a `set_embedder()` or `close()` from another
+    /// thread fails with `RuntimeError: Already borrowed` for as long as
+    /// `encode()` takes. A binding that embeds takes this snapshot instead,
+    /// drops the borrow, and embeds with [`plan_embed`]. Taking both from one
+    /// borrow matters: the same snapshot must decide how the call is routed
+    /// and which embedder produces the vector, or a `set_embedder()` landing
+    /// between two borrows could split them. A swap that lands after the
+    /// snapshot is ordered after this call, as if the call had finished first.
+    pub(crate) fn engine_and_embedder(
+        slf: &Bound<'_, Self>,
+    ) -> PyResult<(Arc<YantrikDB>, Option<PyObject>)> {
+        let this = slf.try_borrow()?;
+        let db = this
+            .inner
+            .clone()
+            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+        let embedder = this.embedder.as_ref().map(|e| e.clone_ref(slf.py()));
+        Ok((db, embedder))
     }
 
     pub(crate) fn embed_text(&self, py: Python<'_>, text: &str) -> PyResult<Vec<f32>> {

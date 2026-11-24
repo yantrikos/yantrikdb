@@ -5,7 +5,7 @@ type PyObject = pyo3::Py<pyo3::PyAny>;
 
 use crate::py_types::*;
 
-use super::{map_err, py_vector, PyYantrikDB};
+use super::{map_err, plan_embed, py_vector, EmbedPlan, PyYantrikDB};
 
 /// Adapter from a Python-side embedder to the engine's embedding closure
 /// signature.
@@ -200,25 +200,20 @@ impl PyYantrikDB {
         event_after: Option<f64>,
         event_before: Option<f64>,
     ) -> PyResult<Vec<PyObject>> {
-        // Owned handle and owned strings: everything below moves into the
-        // detached closure, which may not borrow `self` or any Python-bound
-        // argument. `Arc<YantrikDB>` is Send + Sync, the strings are owned, and
-        // the numeric arguments are Copy — that is what `Ungil` requires.
+        // An owned engine handle, so the detached closure borrows nothing of
+        // `self`. `Arc<YantrikDB>` is Send + Sync; the `&str` arguments are
+        // Rust strings PyO3 has already extracted, valid for the whole call;
+        // the numeric arguments are Copy. That is what `Ungil` requires.
         let py = slf.py();
-        // No borrow of `slf` is held across the detached call; see
-        // `engine_handle` for why that matters.
-        let db = Self::engine_handle(slf)?;
-        let query = query.map(str::to_owned);
-        let memory_type = memory_type.map(str::to_owned);
-        let namespace = namespace.map(str::to_owned);
-        let domain = domain.map(str::to_owned);
-        let source = source.map(str::to_owned);
-        let order = order.map(str::to_owned);
+        // No borrow of `slf` is held across the Python embedder's `encode()`
+        // or the detached call; see `engine_and_embedder` for why that
+        // matters.
+        let (db, embedder) = Self::engine_and_embedder(slf)?;
 
-        let emb = match query_embedding {
-            Some(e) => e,
-            None => match query.as_deref() {
-                Some(q) => slf.try_borrow()?.embed_text(py, q)?,
+        let plan = match query_embedding {
+            Some(e) => EmbedPlan::Ready(e),
+            None => match query {
+                Some(q) => plan_embed(py, &db, embedder.as_ref(), q)?,
                 None => {
                     return Err(PyValueError::new_err(
                         "Must provide either query or query_embedding",
@@ -231,24 +226,26 @@ impl PyYantrikDB {
         // store: recall() took 274 ms wall and held the GIL for 267 ms of it —
         // the vector search is CPU-bound Rust, and nothing else in the host
         // runs while it does. `detach` is PyO3 0.28's name for what older docs
-        // call `allow_threads`. The query embedding above stays outside: it is
-        // a Python call and would be illegal inside the closure.
+        // call `allow_threads`. A Python embedder ran above (a Python call is
+        // illegal inside the closure); the engine's own embedder runs inside
+        // it, with the search it feeds.
         let mut results = py
             .detach(move || {
+                let emb = plan.into_vector(&db)?;
                 db.recall(
                     &emb,
                     top_k,
                     time_window,
-                    memory_type.as_deref(),
+                    memory_type,
                     include_consolidated,
                     expand_entities,
-                    query.as_deref(),
+                    query,
                     skip_reinforce,
-                    namespace.as_deref(),
-                    domain.as_deref(),
-                    source.as_deref(),
+                    namespace,
+                    domain,
+                    source,
                     certainty_min,
-                    order.as_deref(),
+                    order,
                     include_superseded,
                     event_after,
                     event_before,

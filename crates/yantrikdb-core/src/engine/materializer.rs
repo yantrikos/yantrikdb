@@ -37,18 +37,29 @@ const ERROR_BACKOFF_INTERVAL: Duration = Duration::from_millis(100);
 /// - sets shutdown=true so the worker exits its next loop iteration
 /// - joins the JoinHandle so the thread fully terminates before this guard goes out of scope
 ///
-/// Joining can take up to `IDLE_POLL_INTERVAL` (100ms) in the worst case
-/// since the worker only checks shutdown between drain passes. If you need
-/// faster shutdown, drop the engine's `Arc<YantrikDB>` first (Weak::upgrade
-/// will fail next iteration).
+/// The worker's idle and back-off waits are `park_timeout`, and the guard
+/// unparks the thread after setting the flag, so a worker between drain
+/// passes stops at once; one mid-pass finishes that pass (at most
+/// `DRAIN_BATCH_SIZE` ops) first.
 pub struct MaterializerGuard {
     shutdown: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 
+impl MaterializerGuard {
+    /// Ask the worker to stop and wake it, without waiting for it. Lets a
+    /// pool signal every worker before joining any (see `AllWorkerGuards`).
+    fn signal(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.handle.as_ref() {
+            handle.thread().unpark();
+        }
+    }
+}
+
 impl Drop for MaterializerGuard {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Relaxed);
+        self.signal();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -97,7 +108,7 @@ pub fn spawn_materializers(db: &Arc<YantrikDB>, count: usize) -> Vec<Materialize
 fn worker_loop(weak: Weak<YantrikDB>, shutdown: Arc<AtomicBool>, worker_id: usize) {
     tracing::debug!(worker_id, "materializer worker started");
 
-    while !shutdown.load(Ordering::Relaxed) {
+    while !shutdown.load(Ordering::SeqCst) {
         let Some(db) = weak.upgrade() else {
             tracing::debug!(worker_id, "engine dropped — materializer exiting");
             break;
@@ -117,7 +128,7 @@ fn worker_loop(weak: Weak<YantrikDB>, shutdown: Arc<AtomicBool>, worker_id: usiz
         if db.foreign_sqlite_refusing() {
             db.note_outside_commits();
             drop(db);
-            std::thread::sleep(IDLE_POLL_INTERVAL);
+            std::thread::park_timeout(IDLE_POLL_INTERVAL);
             continue;
         }
 
@@ -126,7 +137,7 @@ fn worker_loop(weak: Weak<YantrikDB>, shutdown: Arc<AtomicBool>, worker_id: usiz
                 // No work — release the strong ref before sleeping so the
                 // engine can be dropped during our sleep without blocking.
                 drop(db);
-                std::thread::sleep(IDLE_POLL_INTERVAL);
+                std::thread::park_timeout(IDLE_POLL_INTERVAL);
             }
             Ok(n) => {
                 tracing::trace!(worker_id, applied = n, "drained batch");
@@ -136,7 +147,7 @@ fn worker_loop(weak: Weak<YantrikDB>, shutdown: Arc<AtomicBool>, worker_id: usiz
             Err(e) => {
                 tracing::warn!(worker_id, error = %e, "drain failed; backing off");
                 drop(db);
-                std::thread::sleep(ERROR_BACKOFF_INTERVAL);
+                std::thread::park_timeout(ERROR_BACKOFF_INTERVAL);
             }
         }
     }
@@ -177,12 +188,28 @@ pub fn recommended_worker_count() -> usize {
 
 pub struct CompactorGuard {
     shutdown: Arc<AtomicBool>,
+    /// The delta index the compactor is (about to be) waiting on, so a
+    /// shutdown can wake it instead of waiting out `COMPACTOR_INTERVAL`.
+    /// It is the compactor's own Arc, not the engine's current one: a
+    /// reembed swap can publish a new index while the compactor still waits
+    /// on the old.
+    waiting_on: Arc<parking_lot::Mutex<Option<Arc<crate::vector::delta_index::DeltaIndex>>>>,
     handle: Option<JoinHandle<()>>,
+}
+
+impl CompactorGuard {
+    /// Ask the compactor to stop and wake it, without waiting for it.
+    fn signal(&self) {
+        self.shutdown.store(true, Ordering::SeqCst);
+        if let Some(index) = self.waiting_on.lock().as_ref() {
+            index.wake_compactor();
+        }
+    }
 }
 
 impl Drop for CompactorGuard {
     fn drop(&mut self) {
-        self.shutdown.store(true, Ordering::Relaxed);
+        self.signal();
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
         }
@@ -215,15 +242,18 @@ const COMPACTOR_INTERVAL: Duration = Duration::from_millis(250);
 pub fn spawn_compactor(db: &Arc<YantrikDB>) -> CompactorGuard {
     let shutdown = Arc::new(AtomicBool::new(false));
     let shutdown_clone = Arc::clone(&shutdown);
+    let waiting_on = Arc::new(parking_lot::Mutex::new(None));
+    let waiting_on_clone = Arc::clone(&waiting_on);
     let weak = Arc::downgrade(db);
 
     let handle = std::thread::Builder::new()
         .name("yantrikdb-compactor".to_string())
-        .spawn(move || compactor_loop(weak, shutdown_clone))
+        .spawn(move || compactor_loop(weak, shutdown_clone, waiting_on_clone))
         .expect("spawn compactor thread");
 
     CompactorGuard {
         shutdown,
+        waiting_on,
         handle: Some(handle),
     }
 }
@@ -260,6 +290,18 @@ pub struct AllWorkerGuards {
     /// engine's hot delta tier fills past `delta_max` and every
     /// subsequent write returns `Backpressure`.
     pub compactor: CompactorGuard,
+}
+
+impl Drop for AllWorkerGuards {
+    /// Signal every worker before joining any. The fields' own drops then
+    /// join threads that are already on their way out, so stopping the pool
+    /// costs about one drain pass, not one poll interval per worker.
+    fn drop(&mut self) {
+        for m in &self.materializers {
+            m.signal();
+        }
+        self.compactor.signal();
+    }
 }
 
 /// **Recommended entry point** for spawning the engine's background
@@ -303,10 +345,14 @@ pub fn spawn_all_workers(db: &Arc<YantrikDB>, materializer_count: usize) -> AllW
     }
 }
 
-fn compactor_loop(weak: Weak<YantrikDB>, shutdown: Arc<AtomicBool>) {
+fn compactor_loop(
+    weak: Weak<YantrikDB>,
+    shutdown: Arc<AtomicBool>,
+    waiting_on: Arc<parking_lot::Mutex<Option<Arc<crate::vector::delta_index::DeltaIndex>>>>,
+) {
     tracing::debug!("compactor started");
 
-    while !shutdown.load(Ordering::Relaxed) {
+    while !shutdown.load(Ordering::SeqCst) {
         let Some(db) = weak.upgrade() else {
             tracing::debug!("engine dropped — compactor exiting");
             break;
@@ -352,9 +398,17 @@ fn compactor_loop(weak: Weak<YantrikDB>, shutdown: Arc<AtomicBool>) {
         // shutdown. yantrikdb-server bench (msg b9c98a4d) showed
         // the unconditional sleep racing the delta refill at
         // 1000 wps; this closes that race.
-        let _ = vec_index.wait_for_compaction_signal(COMPACTOR_INTERVAL);
-        drop(vec_index);
+        //
+        // The strong engine ref is dropped BEFORE the wait: held across it,
+        // the idle compactor kept the strong count at 2 almost all the
+        // time, so close()'s Arc::try_unwrap nearly always failed. The wait
+        // needs only the delta index, which the guard can reach through
+        // `waiting_on` to wake it on shutdown.
         drop(db);
+        *waiting_on.lock() = Some(Arc::clone(&vec_index));
+        let _ = vec_index.wait_for_compaction_signal_unless(COMPACTOR_INTERVAL, &shutdown);
+        *waiting_on.lock() = None;
+        drop(vec_index);
     }
 
     tracing::debug!("compactor exited");
@@ -742,6 +796,51 @@ mod tests {
         assert!(
             start.elapsed() < Duration::from_secs(2),
             "compactor guard drop must join within 2s"
+        );
+    }
+
+    /// Stopping the pool must not cost a poll interval per worker. The
+    /// guards used to be dropped one after another, and each worker learned
+    /// of the shutdown only when its own guard dropped, then slept out its
+    /// 100 ms (materializer) or 250 ms (compactor) tick: 1.2-1.5 s for a
+    /// 16-core host's pool, all of it inside set_embedder_named() and
+    /// close(), with the GIL held.
+    #[test]
+    fn dropping_the_pool_stops_every_worker_promptly() {
+        let db = open_test_db();
+        let workers = spawn_all_workers(&db, 16);
+        // Let every worker reach its idle wait.
+        std::thread::sleep(Duration::from_millis(300));
+        let start = std::time::Instant::now();
+        drop(workers);
+        let took = start.elapsed();
+        eprintln!("stopping the pool took {took:?}");
+        assert!(
+            took < Duration::from_millis(100),
+            "stopping 16 materializers and the compactor took {took:?}"
+        );
+    }
+
+    /// The idle compactor holds only a Weak ref, so close() (Arc::try_unwrap)
+    /// can succeed while it waits for its next tick.
+    #[test]
+    fn idle_compactor_holds_no_strong_ref() {
+        let db = open_test_db();
+        let _compactor = spawn_compactor(&db);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let mut sole = 0;
+        let mut samples = 0;
+        while std::time::Instant::now() < deadline {
+            samples += 1;
+            if Arc::strong_count(&db) == 1 {
+                sole += 1;
+            }
+            std::thread::sleep(Duration::from_millis(7));
+        }
+        assert!(
+            sole * 10 >= samples * 9,
+            "the idle compactor held a strong ref in {} of {samples} samples",
+            samples - sole
         );
     }
 }
