@@ -16,6 +16,7 @@ the engine, and the main thread calling the wrapper's `&mut self` methods
 (`close()` among them; `set_embedder()` was one too, before #282).
 """
 
+import concurrent.futures
 import os
 import random
 import threading
@@ -895,5 +896,150 @@ def test_a_swap_kept_out_by_a_held_borrow_says_so(tmp_path):
         msg = out.get("error", "")
         assert "held a borrow" in msg and "ConnectionProxy" not in msg, msg
         assert "  " not in msg, f"broken line continuations: {msg!r}"
+    finally:
+        db.close()
+
+
+def _vec(text, dim, salt=0):
+    r = random.Random((hash(text) + salt) & 0xFFFFFFFF)
+    v = [r.random() for _ in range(dim)]
+    n = sum(x * x for x in v) ** 0.5
+    return [x / n for x in v]
+
+
+@_needs_potion
+@pytest.mark.parametrize("relay", [False, True], ids=["same-thread", "cross-thread"])
+def test_a_call_back_from_encode_during_a_swap_completes_and_the_swap_succeeds(tmp_path, relay):
+    # recall(query=...) and the other embedding bindings took the engine
+    # before running the Python embedder's encode(). A call encode() made
+    # back into the store (on its own thread, or handed to a helper thread
+    # it waits on) then waited at the swap gate while the swap waited for
+    # the encode() caller, until the swap failed at its 10 s deadline
+    # (#302 review 4: same-thread 3 of 4, cross-thread 4 of 4). The
+    # binding now holds nothing of the store across encode().
+    db = YantrikDB(os.path.join(str(tmp_path), f"reenter-{relay}.db"), 256)
+    helper = concurrent.futures.ThreadPoolExecutor(1)
+    try:
+        seed = db.record("seed", embedding=[0.05] * 256)
+        nested = []
+
+        class CallsBack:
+            def encode(self, text):
+                if text != "__yantrikdb_probe__":
+                    time.sleep(0.05)
+                    started = time.perf_counter()
+                    if relay:
+                        helper.submit(db.get, seed).result()
+                    else:
+                        db.get(seed)
+                    nested.append(time.perf_counter() - started)
+                return _vec(text, 256)
+
+        db.set_embedder(CallsBack(), allow_unverified_embedder=True)
+        stop = threading.Event()
+        errors = []
+
+        def recaller():
+            while not stop.is_set():
+                try:
+                    db.recall(query="topic", top_k=3)
+                except Exception as e:  # noqa: BLE001
+                    errors.append(repr(e))
+
+        t = threading.Thread(target=recaller)
+        t.start()
+        took = []
+        try:
+            time.sleep(0.3)
+            for _ in range(2):
+                started = time.perf_counter()
+                db.set_embedder_named("potion-base-8M")
+                took.append(time.perf_counter() - started)
+        finally:
+            stop.set()
+            t.join(30)
+        assert not errors, errors[:3]
+        assert max(took) < 5, took
+        assert nested and max(nested) < 5, max(nested or [0])
+    finally:
+        helper.shutdown()
+        db.close()
+
+
+class _SwitchesEmb:
+    """Once armed, its next encode() replaces the store's Python embedder."""
+
+    def __init__(self, db, replacement):
+        self.db, self.replacement, self.armed = db, replacement, False
+
+    def encode(self, text):
+        if self.armed:
+            self.armed = False
+            self.db.set_embedder(self.replacement, allow_unverified_embedder=True)
+        return _vec(text, DIM, salt=1)
+
+
+class _OtherEmb:
+    def encode(self, text):
+        return _vec(text, DIM, salt=2)
+
+
+def test_an_embedder_replaced_during_encode_makes_the_vector(tmp_path):
+    # The binding runs encode() before it takes the engine. If set_embedder()
+    # replaces the Python embedder in between, the vector came from the old
+    # one; the binding notices (the wrapper's embedder epoch moved) and plans
+    # again with the new one, so no vector from the old space is used.
+    db = YantrikDB(os.path.join(str(tmp_path), "replan.db"), DIM)
+    try:
+        other = _OtherEmb()
+        first = _SwitchesEmb(db, other)
+        db.set_embedder(first, allow_unverified_embedder=True)
+        first.armed = True
+        # Vectors come back as f32: compare to that precision.
+        assert db.embed("the harbour plan") == pytest.approx(other.encode("the harbour plan"), abs=1e-6)
+
+        db.set_embedder(first, allow_unverified_embedder=True)
+        first.armed = True
+        rid = db.record_text("the harbour plan, written")
+        hit = db.recall(query_embedding=other.encode("the harbour plan, written"), top_k=1)[0]
+        assert hit["rid"] == rid
+        assert hit["scores"]["similarity"] > 0.999, hit["scores"]
+    finally:
+        db.close()
+
+
+@_needs_potion
+def test_a_named_swap_during_encode_leaves_the_python_vector_valid(tmp_path):
+    # set_embedder_named replaces the engine's own embedder. A caller-attached
+    # Python embedder outranks it, so a vector the Python embedder made just
+    # before the swap is still the one to use: the call goes on with it, and
+    # the swap does not wait for the call.
+    db = YantrikDB(os.path.join(str(tmp_path), "named-mid.db"), 256)
+    try:
+        out = {}
+
+        class SwapsMidEncode:
+            armed = False
+
+            def encode(self, text):
+                if self.armed:
+                    self.armed = False
+                    sw = threading.Thread(
+                        target=lambda: out.update(swap=db.set_embedder_named("potion-base-8M"))
+                    )
+                    sw.start()
+                    sw.join(30)
+                    out["alive"] = sw.is_alive()
+                return _vec(text, 256, salt=3)
+
+        emb = SwapsMidEncode()
+        db.set_embedder(emb, allow_unverified_embedder=True)
+        emb.armed = True
+        started = time.perf_counter()
+        vector = db.embed("the harbour plan")
+        took = time.perf_counter() - started
+        assert out == {"swap": None, "alive": False}, out
+        assert vector == pytest.approx(_vec("the harbour plan", 256, salt=3), abs=1e-6)
+        assert took < 5, took
     finally:
         db.close()

@@ -205,19 +205,18 @@ impl PyYantrikDB {
         // Rust strings PyO3 has already extracted, valid for the whole call;
         // the numeric arguments are Copy. That is what `Ungil` requires.
         let py = slf.py();
-        // No borrow of `slf` is held across the Python embedder's `encode()`
-        // or the detached call; see `engine_and_embedder` for why that
-        // matters.
-        let (db, embedder) = Self::engine_and_embedder(slf)?;
-
-        let plan = query_plan(
-            py,
-            &db,
-            embedder.as_ref(),
-            query_embedding,
-            query,
-            "Must provide either query or query_embedding",
-        )?;
+        // Neither a borrow of `slf` nor the engine is held across the Python
+        // embedder's `encode()`, nor a borrow across the detached call; see
+        // `planned` for why that matters.
+        let (db, plan) = Self::planned(slf, |e| {
+            query_plan(
+                py,
+                e,
+                query_embedding.clone(),
+                query,
+                "Must provide either query or query_embedding",
+            )
+        })?;
 
         // Release the GIL for the engine call (#271). Measured on a 23k-record
         // store: recall() took 274 ms wall and held the GIL for 267 ms of it —
@@ -362,15 +361,15 @@ impl PyYantrikDB {
         memory_type: Option<&str>,
     ) -> PyResult<Vec<PyObject>> {
         let py = slf.py();
-        let (db, embedder) = Self::engine_and_embedder(slf)?;
-        let plan = query_plan(
-            py,
-            &db,
-            embedder.as_ref(),
-            query_embedding,
-            query,
-            "Must provide either query or query_embedding",
-        )?;
+        let (db, plan) = Self::planned(slf, |e| {
+            query_plan(
+                py,
+                e,
+                query_embedding.clone(),
+                query,
+                "Must provide either query or query_embedding",
+            )
+        })?;
         let results = run_detached(py, db, move |db| {
             let emb = plan.into_vector(db)?;
             db.recall_as_of(&emb, top_k, as_of, namespace, memory_type)
@@ -413,8 +412,7 @@ impl PyYantrikDB {
         created_at: Option<f64>,
     ) -> PyResult<String> {
         let py = slf.py();
-        let (db, embedder) = Self::engine_and_embedder(slf)?;
-        let plan = plan_embed(py, &db, embedder.as_ref(), text)?;
+        let (db, plan) = Self::planned(slf, |e| plan_embed(py, e, text))?;
 
         let meta = match metadata {
             Some(d) => py_to_json(&d.as_any())?,
@@ -529,8 +527,7 @@ impl PyYantrikDB {
         explain: bool,
     ) -> PyResult<PyObject> {
         let py = slf.py();
-        let (db, embedder) = Self::engine_and_embedder(slf)?;
-        let plan = plan_embed(py, &db, embedder.as_ref(), query)?;
+        let (db, plan) = Self::planned(slf, |e| plan_embed(py, e, query))?;
 
         // Dispatch via recall() directly so we can pass all three filter
         // args in one call. Engine's recall_text_filtered only takes
@@ -629,15 +626,15 @@ impl PyYantrikDB {
         source: Option<&str>,
     ) -> PyResult<PyObject> {
         let py = slf.py();
-        let (db, embedder) = Self::engine_and_embedder(slf)?;
-        let plan = query_plan(
-            py,
-            &db,
-            embedder.as_ref(),
-            query_embedding,
-            query,
-            "Must provide either query or query_embedding",
-        )?;
+        let (db, plan) = Self::planned(slf, |e| {
+            query_plan(
+                py,
+                e,
+                query_embedding.clone(),
+                query,
+                "Must provide either query or query_embedding",
+            )
+        })?;
         let response = run_detached(py, db, move |db| {
             let emb = plan.into_vector(db)?;
             db.recall_with_response(
@@ -672,15 +669,15 @@ impl PyYantrikDB {
         source: Option<&str>,
     ) -> PyResult<PyObject> {
         let py = slf.py();
-        let (db, embedder) = Self::engine_and_embedder(slf)?;
-        let plan = query_plan(
-            py,
-            &db,
-            embedder.as_ref(),
-            refinement_embedding,
-            refinement_text,
-            "Must provide either refinement_text or refinement_embedding",
-        )?;
+        let (db, plan) = Self::planned(slf, |e| {
+            query_plan(
+                py,
+                e,
+                refinement_embedding.clone(),
+                refinement_text,
+                "Must provide either refinement_text or refinement_embedding",
+            )
+        })?;
         let response = run_detached(py, db, move |db| {
             let ref_emb = plan.into_vector(db)?;
             db.recall_refine(
@@ -727,15 +724,15 @@ impl PyYantrikDB {
         source: Option<&str>,
     ) -> PyResult<Vec<PyObject>> {
         let py = slf.py();
-        let (db, embedder) = Self::engine_and_embedder(slf)?;
-        let plan = query_plan(
-            py,
-            &db,
-            embedder.as_ref(),
-            embedding,
-            query,
-            "Must provide either query or embedding",
-        )?;
+        let (db, plan) = Self::planned(slf, |e| {
+            query_plan(
+                py,
+                e,
+                embedding.clone(),
+                query,
+                "Must provide either query or embedding",
+            )
+        })?;
         let results = run_detached(py, db, move |db| {
             let emb = plan.into_vector(db)?;
             let mut q = yantrikdb_core::RecallQuery::new(emb).top_k(top_k);
@@ -1322,150 +1319,153 @@ impl PyYantrikDB {
         inputs: Vec<Bound<'_, PyDict>>,
     ) -> PyResult<Vec<String>> {
         let py = slf.py();
-        let (db, embedder) = Self::engine_and_embedder(slf)?;
+        // The items are read and planned while the call holds nothing of the
+        // store (`planned`), and read again if the plan must be made again.
+        let (db, (record_inputs, native)) = Self::planned(slf, |e| {
+            let mut record_inputs = Vec::with_capacity(inputs.len());
+            // Items the engine's own embedder will embed, inside the detached
+            // call below (indexes into record_inputs, whose text it embeds).
+            let mut native: Vec<usize> = Vec::new();
+            for d in &inputs {
+                let text: String = d
+                    .get_item("text")?
+                    .ok_or_else(|| PyValueError::new_err("Each input must have a 'text' key"))?
+                    .extract()?;
 
-        let mut record_inputs = Vec::with_capacity(inputs.len());
-        // Items the engine's own embedder will embed, inside the detached
-        // call below (indexes into record_inputs, whose text it embeds).
-        let mut native: Vec<usize> = Vec::new();
-        for d in &inputs {
-            let text: String = d
-                .get_item("text")?
-                .ok_or_else(|| PyValueError::new_err("Each input must have a 'text' key"))?
-                .extract()?;
+                let memory_type: String = d
+                    .get_item("memory_type")?
+                    .map(|v| v.extract::<String>())
+                    .transpose()?
+                    .unwrap_or_else(|| "episodic".to_string());
 
-            let memory_type: String = d
-                .get_item("memory_type")?
-                .map(|v| v.extract::<String>())
-                .transpose()?
-                .unwrap_or_else(|| "episodic".to_string());
+                let importance: f64 = d
+                    .get_item("importance")?
+                    .map(|v| v.extract::<f64>())
+                    .transpose()?
+                    .unwrap_or(0.5);
 
-            let importance: f64 = d
-                .get_item("importance")?
-                .map(|v| v.extract::<f64>())
-                .transpose()?
-                .unwrap_or(0.5);
+                let valence: f64 = d
+                    .get_item("valence")?
+                    .map(|v| v.extract::<f64>())
+                    .transpose()?
+                    .unwrap_or(0.0);
 
-            let valence: f64 = d
-                .get_item("valence")?
-                .map(|v| v.extract::<f64>())
-                .transpose()?
-                .unwrap_or(0.0);
+                let half_life: f64 = d
+                    .get_item("half_life")?
+                    .map(|v| v.extract::<f64>())
+                    .transpose()?
+                    .unwrap_or(604800.0);
 
-            let half_life: f64 = d
-                .get_item("half_life")?
-                .map(|v| v.extract::<f64>())
-                .transpose()?
-                .unwrap_or(604800.0);
+                let metadata = d
+                    .get_item("metadata")?
+                    .map(|v| py_to_json(&v))
+                    .transpose()?
+                    .unwrap_or(serde_json::json!({}));
 
-            let metadata = d
-                .get_item("metadata")?
-                .map(|v| py_to_json(&v))
-                .transpose()?
-                .unwrap_or(serde_json::json!({}));
-
-            // 4a.6d-2b (sol r1 finding 1): a key on a batch item requires an
-            // EXPLICIT embedding. Rust record_batch digests PayloadVariant::
-            // Record — API-byte identity, the caller-supplied vector included —
-            // so a wrapper-synthesized vector would make an honest retry a
-            // false conflict the moment the embedder drifts, and would make
-            // `record(text, key)` (which routes to record_text's
-            // embedding-EXCLUDED digest) and `record_batch([{text, key}])`
-            // resolve the same user-level write differently. No engine-side
-            // text-batch idempotency surface exists yet, so fail loud rather
-            // than subtly mis-dedup — same interim stance 4a.6c took on
-            // record() before 4a.6d-1 shipped the RecordText variant.
-            let has_key = d
-                .get_item("idempotency_key")?
-                .map(|v| !v.is_none())
-                .unwrap_or(false);
-            let embedding: Vec<f32> = match d.get_item("embedding")? {
-                Some(v) if !v.is_none() => v.extract()?,
-                _ if has_key => {
-                    return Err(PyValueError::new_err(
-                        "idempotency_key on a record_batch item requires an \
+                // 4a.6d-2b (sol r1 finding 1): a key on a batch item requires an
+                // EXPLICIT embedding. Rust record_batch digests PayloadVariant::
+                // Record — API-byte identity, the caller-supplied vector included —
+                // so a wrapper-synthesized vector would make an honest retry a
+                // false conflict the moment the embedder drifts, and would make
+                // `record(text, key)` (which routes to record_text's
+                // embedding-EXCLUDED digest) and `record_batch([{text, key}])`
+                // resolve the same user-level write differently. No engine-side
+                // text-batch idempotency surface exists yet, so fail loud rather
+                // than subtly mis-dedup — same interim stance 4a.6c took on
+                // record() before 4a.6d-1 shipped the RecordText variant.
+                let has_key = d
+                    .get_item("idempotency_key")?
+                    .map(|v| !v.is_none())
+                    .unwrap_or(false);
+                let embedding: Vec<f32> = match d.get_item("embedding")? {
+                    Some(v) if !v.is_none() => v.extract()?,
+                    _ if has_key => {
+                        return Err(PyValueError::new_err(
+                            "idempotency_key on a record_batch item requires an \
                          explicit 'embedding': the batch digest includes the \
                          caller's vector (API-byte identity), and a \
                          wrapper-generated vector would make an honest retry \
                          a false conflict. Pass the embedding, or use \
                          record(text, idempotency_key=...) for an \
                          engine-embedded keyed write.",
-                    ));
-                }
-                _ => match plan_embed(py, &db, embedder.as_ref(), &text)? {
-                    EmbedPlan::Ready(v) => v,
-                    EmbedPlan::Native(_) => {
-                        native.push(record_inputs.len());
-                        Vec::new()
+                        ));
                     }
-                },
-            };
+                    _ => match plan_embed(py, e, &text)? {
+                        EmbedPlan::Ready(v) => v,
+                        EmbedPlan::Native(_) => {
+                            native.push(record_inputs.len());
+                            Vec::new()
+                        }
+                    },
+                };
 
-            let namespace: String = d
-                .get_item("namespace")?
-                .map(|v| v.extract::<String>())
-                .transpose()?
-                .unwrap_or_else(|| "default".to_string());
+                let namespace: String = d
+                    .get_item("namespace")?
+                    .map(|v| v.extract::<String>())
+                    .transpose()?
+                    .unwrap_or_else(|| "default".to_string());
 
-            let certainty: f64 = d
-                .get_item("certainty")?
-                .map(|v| v.extract::<f64>())
-                .transpose()?
-                .unwrap_or(0.8);
+                let certainty: f64 = d
+                    .get_item("certainty")?
+                    .map(|v| v.extract::<f64>())
+                    .transpose()?
+                    .unwrap_or(0.8);
 
-            let domain: String = d
-                .get_item("domain")?
-                .map(|v| v.extract::<String>())
-                .transpose()?
-                .unwrap_or_else(|| "general".to_string());
+                let domain: String = d
+                    .get_item("domain")?
+                    .map(|v| v.extract::<String>())
+                    .transpose()?
+                    .unwrap_or_else(|| "general".to_string());
 
-            let source: String = d
-                .get_item("source")?
-                .map(|v| v.extract::<String>())
-                .transpose()?
-                .unwrap_or_else(|| "user".to_string());
+                let source: String = d
+                    .get_item("source")?
+                    .map(|v| v.extract::<String>())
+                    .transpose()?
+                    .unwrap_or_else(|| "user".to_string());
 
-            let emotional_state: Option<String> = d
-                .get_item("emotional_state")?
-                .map(|v| v.extract::<Option<String>>())
-                .transpose()?
-                .flatten();
+                let emotional_state: Option<String> = d
+                    .get_item("emotional_state")?
+                    .map(|v| v.extract::<Option<String>>())
+                    .transpose()?
+                    .flatten();
 
-            // 4a.6d-2b: optional per-item idempotency key, same contract as
-            // record(idempotency_key=...). Batch items carry explicit
-            // caller-supplied embeddings, so the Record digest variant
-            // applies and no embedder-drift guard is needed here.
-            let idempotency_key: Option<String> = d
-                .get_item("idempotency_key")?
-                .map(|v| v.extract::<Option<String>>())
-                .transpose()?
-                .flatten();
+                // 4a.6d-2b: optional per-item idempotency key, same contract as
+                // record(idempotency_key=...). Batch items carry explicit
+                // caller-supplied embeddings, so the Record digest variant
+                // applies and no embedder-drift guard is needed here.
+                let idempotency_key: Option<String> = d
+                    .get_item("idempotency_key")?
+                    .map(|v| v.extract::<Option<String>>())
+                    .transpose()?
+                    .flatten();
 
-            // Optional per-item event time, same contract as
-            // record(created_at=...) — the historical-import surface.
-            let created_at: Option<f64> = d
-                .get_item("created_at")?
-                .map(|v| v.extract::<Option<f64>>())
-                .transpose()?
-                .flatten();
+                // Optional per-item event time, same contract as
+                // record(created_at=...) — the historical-import surface.
+                let created_at: Option<f64> = d
+                    .get_item("created_at")?
+                    .map(|v| v.extract::<Option<f64>>())
+                    .transpose()?
+                    .flatten();
 
-            record_inputs.push(yantrikdb_core::RecordInput {
-                text,
-                memory_type,
-                importance,
-                valence,
-                half_life,
-                metadata,
-                embedding,
-                namespace,
-                certainty,
-                domain,
-                source,
-                emotional_state,
-                idempotency_key,
-                created_at,
-            });
-        }
+                record_inputs.push(yantrikdb_core::RecordInput {
+                    text,
+                    memory_type,
+                    importance,
+                    valence,
+                    half_life,
+                    metadata,
+                    embedding,
+                    namespace,
+                    certainty,
+                    domain,
+                    source,
+                    emotional_state,
+                    idempotency_key,
+                    created_at,
+                });
+            }
+            Ok((record_inputs, native))
+        })?;
 
         run_detached(py, db, move |db| {
             let mut record_inputs = record_inputs;
@@ -1751,8 +1751,8 @@ impl PyYantrikDB {
     /// ```
     fn embed(slf: &Bound<'_, Self>, text: &str) -> PyResult<Vec<f32>> {
         let py = slf.py();
-        let (db, embedder) = Self::engine_and_embedder(slf)?;
-        match plan_embed(py, &db, embedder.as_ref(), text)? {
+        let (db, plan) = Self::planned(slf, |e| plan_embed(py, e, text))?;
+        match plan {
             EmbedPlan::Ready(v) => Ok(v),
             plan @ EmbedPlan::Native(_) => run_detached(py, db, move |db| plan.into_vector(db)),
         }

@@ -270,18 +270,19 @@ def test_close_with_nothing_in_flight_closes(db):
 
 
 def test_close_while_recall_is_inside_encode(db):
-    # close() mid-call drops the wrapper's handle and reports False, because
-    # the in-flight recall() still holds the engine; it finishes on that
-    # reference, and the engine closes when it goes.
+    # recall() runs the Python embedder's encode() before it takes the
+    # engine (#302 review 4), so a close() landing then is the exclusive
+    # close (True), and the recall reports the store closed, as if close()
+    # had come first. Before, the recall held the engine through encode():
+    # close() returned False and the recall finished on that reference.
     emb, t, out = _recall_in_a_thread_blocked_in_encode(db)
     try:
-        assert db.close() is False
+        assert db.close() is True
     finally:
         emb.release.set()
         t.join(30)
     assert not t.is_alive()
-    assert "error" not in out, out.get("error")
-    assert out["results"]
+    assert "closed" in out.get("error", ""), out
 
 
 def test_close_under_write_load_keeps_other_threads_running(tmp_path):

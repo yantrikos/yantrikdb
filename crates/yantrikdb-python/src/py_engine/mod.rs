@@ -25,6 +25,10 @@ use crate::py_types::*;
 pub struct PyYantrikDB {
     pub(crate) inner: Option<Arc<YantrikDB>>,
     pub(crate) embedder: Option<PyObject>,
+    /// Bumped whenever `embedder` is replaced (`set_embedder`). A binding
+    /// that planned its vector with one Python embedder checks it before it
+    /// uses the vector (`planned`).
+    embedder_epoch: u64,
     /// Background worker pool (materializers + compactor). MUST be held for the
     /// engine's lifetime: without the compactor the in-memory delta tier fills
     /// to `delta_max` (256) and every subsequent write returns Backpressure
@@ -113,6 +117,7 @@ impl PyYantrikDB {
         Self {
             inner: Some(inner),
             embedder,
+            embedder_epoch: 0,
             workers,
             swap_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             swap_turn: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -711,6 +716,7 @@ impl PyYantrikDB {
             return Err(PyRuntimeError::new_err("YantrikDB is closed"));
         }
         borrowed.embedder = Some(embedder);
+        borrowed.embedder_epoch += 1;
         Ok(())
     }
 
@@ -1280,8 +1286,18 @@ pub(crate) fn py_vector(py: Python<'_>, result: &PyObject) -> PyResult<Vec<f32>>
     list.extract::<Vec<f32>>(py)
 }
 
-/// Where a binding's vector comes from, decided once, from the snapshot
-/// [`PyYantrikDB::engine_and_embedder`] took (#271).
+/// What a binding plans its vector with, taken under one brief borrow and
+/// holding no reference to the engine (see [`PyYantrikDB::planned`]).
+pub(crate) struct EmbedderSnapshot {
+    /// The caller-attached Python embedder, which outranks the engine's.
+    pub(crate) embedder: Option<PyObject>,
+    /// Whether the engine has an embedder of its own.
+    pub(crate) native: bool,
+    epoch: u64,
+}
+
+/// Where a binding's vector comes from, decided once, from the embedder
+/// snapshot [`PyYantrikDB::planned`] took (#271).
 pub(crate) enum EmbedPlan<'a> {
     /// A vector already in hand: passed by the caller, or produced by the
     /// caller-attached Python embedder (with the GIL held, as any Python
@@ -1310,7 +1326,7 @@ impl EmbedPlan<'_> {
 /// Run one engine call with the GIL released (#271).
 ///
 /// `db` is an owned handle ([`PyYantrikDB::engine_handle`] or
-/// [`PyYantrikDB::engine_and_embedder`]), so no borrow of the wrapper is held
+/// [`PyYantrikDB::planned`]), so no borrow of the wrapper is held
 /// while `f` runs. Every binding that reaches SQLite goes through here, not
 /// only the slow ones: the engine serialises on one connection mutex, so even
 /// a point read can wait out another thread's write (up to `busy_timeout`),
@@ -1330,21 +1346,21 @@ where
     py.detach(move || f(&db)).map_err(map_err)
 }
 
-/// `embed_text`'s precedence, without a borrow held across `encode()`:
-/// an embedder the caller ATTACHED wins over one the engine resolved for
-/// this store's dimension (yantrikdb-hermes-plugin #84), then the engine's
-/// own, else the same error `embed_text` raises.
+/// `embed_text`'s precedence, with nothing of the store held across
+/// `encode()` (see [`PyYantrikDB::planned`]): an embedder the caller
+/// ATTACHED wins over one the engine resolved for this store's dimension
+/// (yantrikdb-hermes-plugin #84), then the engine's own, else the same
+/// error `embed_text` raises.
 pub(crate) fn plan_embed<'a>(
     py: Python<'_>,
-    db: &YantrikDB,
-    embedder: Option<&PyObject>,
+    snapshot: &EmbedderSnapshot,
     text: &'a str,
 ) -> PyResult<EmbedPlan<'a>> {
-    if let Some(emb) = embedder {
+    if let Some(emb) = snapshot.embedder.as_ref() {
         let result = emb.call_method1(py, "encode", (text,))?;
         return Ok(EmbedPlan::Ready(py_vector(py, &result)?));
     }
-    if db.has_embedder() {
+    if snapshot.native {
         return Ok(EmbedPlan::Native(text));
     }
     Err(PyRuntimeError::new_err(
@@ -1356,15 +1372,14 @@ pub(crate) fn plan_embed<'a>(
 /// embedded with [`plan_embed`], else `ValueError(missing)`.
 pub(crate) fn query_plan<'a>(
     py: Python<'_>,
-    db: &YantrikDB,
-    embedder: Option<&PyObject>,
+    snapshot: &EmbedderSnapshot,
     given: Option<Vec<f32>>,
     text: Option<&'a str>,
     missing: &'static str,
 ) -> PyResult<EmbedPlan<'a>> {
     match (given, text) {
         (Some(v), _) => Ok(EmbedPlan::Ready(v)),
-        (None, Some(t)) => plan_embed(py, db, embedder, t),
+        (None, Some(t)) => plan_embed(py, snapshot, t),
         (None, None) => Err(PyValueError::new_err(missing)),
     }
 }
@@ -1431,9 +1446,19 @@ impl PyYantrikDB {
     /// reference the gate keeps out, so a time limit of its own (this was
     /// 2 s) let steady traffic starve the swap again once it passed (#302
     /// review 3). The wait is still bounded: the swap gives up at its own
-    /// deadline (10 s) and the gate drops on every way out of it. No call
-    /// in flight waits for one parked here: no detached call calls back
-    /// into Python, so none can re-enter the store mid-call.
+    /// deadline (10 s) and the gate drops on every way out of it.
+    ///
+    /// No call the swap waits for is itself waiting here. A binding runs a
+    /// Python embedder's `encode()` before it takes the engine
+    /// ([`planned`](Self::planned)), so a call that `encode()` makes back
+    /// into the store, on its own thread or by handing it to another one,
+    /// holds up nothing the swap waits for: it waits here, then runs on the
+    /// swapped engine (#302 review 4). No detached call calls back into
+    /// Python on this branch. `record()` and the other methods that embed
+    /// through `embed_text` still hold the wrapper's borrow (but no engine
+    /// reference) across `encode()`; a swap then waits on that borrow, and
+    /// a call `encode()` makes back into the store waits here until the
+    /// swap gives up (#297 moves them).
     ///
     /// try_borrow, not borrow: a method holding the mutable borrow
     /// (`close()`, the swap, `set_embedder()` storing its embedder) can be
@@ -1442,12 +1467,20 @@ impl PyYantrikDB {
     /// first, which covers those brief mutable borrows; a longer one still
     /// gets the error.
     pub(crate) fn snapshot_borrow<'py>(slf: &Bound<'py, Self>) -> PyResult<PyRef<'py, Self>> {
+        Self::shared_borrow(slf, true)
+    }
+
+    /// [`snapshot_borrow`](Self::snapshot_borrow), or with `gated` false
+    /// the same borrow without waiting at the swap gate: for a look that
+    /// takes no engine reference.
+    fn shared_borrow<'py>(slf: &Bound<'py, Self>, gated: bool) -> PyResult<PyRef<'py, Self>> {
         const BORROW_RETRY: std::time::Duration = std::time::Duration::from_millis(10);
         let mut refused_since: Option<std::time::Instant> = None;
         loop {
             match slf.try_borrow() {
                 Ok(this) => {
-                    let pending = this.swap_pending.load(std::sync::atomic::Ordering::Acquire);
+                    let pending =
+                        gated && this.swap_pending.load(std::sync::atomic::Ordering::Acquire);
                     if !pending || this.inner.is_none() {
                         return Ok(this);
                     }
@@ -1481,28 +1514,62 @@ impl PyYantrikDB {
         run_detached(slf.py(), Self::engine_handle(slf)?, f)
     }
 
-    /// The engine handle and the caller-attached Python embedder, taken
-    /// under ONE short borrow (#271).
+    /// The engine handle and a binding's embedding plan, the plan made while
+    /// the call holds nothing of the store (#302 review 4).
     ///
-    /// `embed_text(&self)` runs the Python embedder's `encode()` while the
-    /// wrapper is borrowed, so a `set_embedder()` or `close()` from another
-    /// thread fails with `RuntimeError: Already borrowed` for as long as
-    /// `encode()` takes. A binding that embeds takes this snapshot instead,
-    /// drops the borrow, and embeds with [`plan_embed`]. Taking both from one
-    /// borrow matters: the same snapshot must decide how the call is routed
-    /// and which embedder produces the vector, or a `set_embedder()` landing
-    /// between two borrows could split them. A swap that lands after the
-    /// snapshot is ordered after this call, as if the call had finished first.
-    pub(crate) fn engine_and_embedder(
+    /// A Python embedder's `encode()` can call back into the store, on its
+    /// own thread or by handing the call to another thread and waiting for
+    /// it. While it runs, this call holds no borrow of the wrapper and no
+    /// reference to the engine: the embedder is taken under a brief borrow
+    /// (not at the swap gate: it takes no engine reference), `plan` runs,
+    /// and only then is the engine handle taken, at the gate. Holding the
+    /// engine across `encode()` made a pending `set_embedder_named` wait for
+    /// this call while the call's own callback waited at the gate for the
+    /// swap, until the swap's 10 s deadline failed it.
+    ///
+    /// The plan must still fit the engine it is used on:
+    /// - A Python vector depends only on the Python embedder that made it.
+    ///   `set_embedder_named` replaces the engine's own embedder, which a
+    ///   caller-attached Python one outranks, so a swap landing in between
+    ///   leaves that vector valid.
+    /// - A native plan embeds inside the detached call, on the engine taken
+    ///   here.
+    /// - What can make a plan stale is `set_embedder()` replacing (or first
+    ///   attaching) the Python embedder in between. It bumps
+    ///   `embedder_epoch`; the plan is then made again with the new one, at
+    ///   most three times.
+    pub(crate) fn planned<T>(
         slf: &Bound<'_, Self>,
-    ) -> PyResult<(Arc<YantrikDB>, Option<PyObject>)> {
-        let this = Self::snapshot_borrow(slf)?;
-        let db = this
-            .inner
-            .clone()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
-        let embedder = this.embedder.as_ref().map(|e| e.clone_ref(slf.py()));
-        Ok((db, embedder))
+        mut plan: impl FnMut(&EmbedderSnapshot) -> PyResult<T>,
+    ) -> PyResult<(Arc<YantrikDB>, T)> {
+        const TRIES: usize = 3;
+        let py = slf.py();
+        for _ in 0..TRIES {
+            let snapshot = {
+                let this = Self::shared_borrow(slf, false)?;
+                let Some(db) = this.inner.as_deref() else {
+                    return Err(PyRuntimeError::new_err("YantrikDB is closed"));
+                };
+                EmbedderSnapshot {
+                    embedder: this.embedder.as_ref().map(|e| e.clone_ref(py)),
+                    native: db.has_embedder(),
+                    epoch: this.embedder_epoch,
+                }
+            };
+            let made = plan(&snapshot)?;
+            let this = Self::snapshot_borrow(slf)?;
+            let db = this
+                .inner
+                .clone()
+                .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+            if this.embedder_epoch == snapshot.epoch {
+                return Ok((db, made));
+            }
+        }
+        Err(PyRuntimeError::new_err(
+            "this store's Python embedder was replaced three times while this call was \
+             embedding with it; retry the call",
+        ))
     }
 
     pub(crate) fn embed_text(&self, py: Python<'_>, text: &str) -> PyResult<Vec<f32>> {
