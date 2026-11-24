@@ -499,7 +499,9 @@ RELEASES = {
     "set_claim_chain_gate_mode": lambda db, c: db.set_claim_chain_gate_mode("shadow"),
     "set_foreign_sqlite_mode": lambda db, c: db.set_foreign_sqlite_mode("refuse"),
     # sessions, temporal, procedural, categories
-    "session_start": lambda db, c: db.session_start("default", "witness"),
+    # A second start for the same client raises "active session already
+    # exists" from inside the detached call; the first one starts it.
+    "session_start": lambda db, c: _swallow(db.session_start, "default", "witness"),
     "session_end": lambda db, c: _swallow(db.session_end, c["session"]),
     "active_session": lambda db, c: db.active_session(),
     "session_history": lambda db, c: db.session_history(),
