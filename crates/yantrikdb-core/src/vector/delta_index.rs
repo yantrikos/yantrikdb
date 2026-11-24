@@ -14,19 +14,23 @@
 //!   acquire the delta write lock briefly to append. Reader latency adds
 //!   `O(delta.len() * dim)` distance computations — bounded by `delta_max`.
 //!
-//! - **Compaction** (Phase 5): periodically clones cold + applies delta
-//!   entries to build a new cold, then atomically swaps via ArcSwap. The
-//!   delta is sealed during compaction and a new mutable delta is allocated
-//!   so writers don't block.
+//! - **Compaction** (Phase 5): periodically clones cold + applies a
+//!   snapshot of the published delta entries to build a new cold, installs
+//!   it with a compare-and-swap, then retires exactly the merged entries.
+//!   The entries stay in the delta (visible) for the whole build, and
+//!   writers keep appending. Compaction and an index rebuild from SQL
+//!   exclude each other through the compaction gate (CONCURRENCY.md
+//!   Rule 3).
 //!
 //! ## Lock-acquisition contract
 //!
 //! - Reads: `cold.load()` (no lock) + `delta.read()` (parking_lot RwLock
-//!   read; only contends with the brief append lock and the
-//!   sealing-for-compaction swap).
+//!   read; only contends with the brief append lock and compaction's
+//!   brief snapshot and retire).
 //! - Writes: `delta.write()` for one append + drop. Never touches cold.
-//! - Compaction (Phase 5): clones cold off-thread, swaps cold via ArcSwap,
-//!   swaps delta atomically. Brief writer lock, no impact on readers.
+//! - Compaction (Phase 5): holds the compaction gate, clones cold, swaps
+//!   the merge in by CAS, retires the merged entries. Brief delta locks,
+//!   no impact on readers.
 //!
 //! ## Visibility / read-your-writes
 //!
@@ -138,8 +142,8 @@ pub struct DeltaIndex {
     delta_max: usize,
     dim: usize,
     /// Wall-clock instant when the delta most recently transitioned from
-    /// empty to non-empty. Cleared (set to `None`) at every successful
-    /// `seal_delta_for_compaction`. The compactor reads this to decide
+    /// empty to non-empty. Reset whenever entries are retired
+    /// (`retire_compacted`), from what remains. The compactor reads this to decide
     /// whether the age-based trigger fires.
     ///
     /// Lives on `DeltaIndex` rather than per-`DeltaEntry` so a busy
@@ -692,7 +696,8 @@ impl DeltaIndex {
     ///
     /// Also clears the dirty-age clock — once entries are sealed, the
     /// next append against the now-empty delta restarts the age window.
-    pub fn seal_delta_for_compaction(&self) -> Vec<DeltaEntry> {
+    #[cfg(test)]
+    pub(crate) fn seal_delta_for_compaction(&self) -> Vec<DeltaEntry> {
         let mut delta = self.delta.write();
         // **v0.10 Item 3.** RESERVED (unpublished) entries are corrections
         // whose SQL has not yet committed — they must NOT be sealed into
@@ -728,7 +733,8 @@ impl DeltaIndex {
     /// Atomically install a new cold tier (post-compaction).
     /// Old readers continue against the prior Arc; new readers see the
     /// new tier on their next `cold.load()`.
-    pub fn install_cold(&self, new_cold: HnswIndex) {
+    #[cfg(test)]
+    pub(crate) fn install_cold(&self, new_cold: HnswIndex) {
         self.cold.store(Arc::new(new_cold));
     }
 
@@ -793,7 +799,8 @@ impl DeltaIndex {
     ///        - live with rid not in cold: HnswIndex::insert
     ///        - live with rid in cold (update): remove + re-insert
     ///   4. ensure_all_reachable() on the merged clone.
-    ///   5. ArcSwap.store(Arc::new(new_cold)), THEN retire_compacted()
+    ///   5. compare-and-swap the merged cold in (abandoned if cold was
+    ///      replaced meanwhile), THEN retire_compacted()
     ///      removes exactly the merged (rid, seq) pairs from the delta.
     ///      At no instant is a sealed entry in neither tier.
     ///
@@ -815,6 +822,38 @@ impl DeltaIndex {
     /// published after the read is still in the delta at the install.
     pub(crate) fn pause_compaction(&self) -> parking_lot::MutexGuard<'_, ()> {
         self.compaction_gate.lock()
+    }
+
+    /// The `(rid, seq)` keys of every published delta entry, for a rebuild
+    /// to retire once its tier, read from SQL after these were published,
+    /// is installed. Only published entries: a reserved one belongs to a
+    /// write that has not committed, so SQL does not show it yet.
+    pub(crate) fn published_keys(&self) -> std::collections::HashSet<(String, u64)> {
+        self.delta
+            .read()
+            .iter()
+            .filter(|e| e.published)
+            .map(|e| (e.rid.clone(), e.seq))
+            .collect()
+    }
+
+    /// Install a cold tier rebuilt from SQL and retire the delta entries it
+    /// subsumes (`published_keys` taken while the rebuild read SQL). A
+    /// subsumed entry left in the delta would shadow the rebuilt vector for
+    /// its rid — a stale vector serving until the next compaction merged it
+    /// back over the rebuilt one. Call with the compaction gate held.
+    pub(crate) fn install_rebuilt(
+        &self,
+        new_cold: HnswIndex,
+        subsumed: &std::collections::HashSet<(String, u64)>,
+    ) {
+        self.cold.store(Arc::new(new_cold));
+        self.retire_compacted(subsumed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compaction_gate_is_held(&self) -> bool {
+        self.compaction_gate.is_locked()
     }
 
     /// The build half of [`Self::compact`]: snapshot the published delta and
@@ -928,8 +967,11 @@ impl DeltaIndex {
                 .store(0, std::sync::atomic::Ordering::Release);
             tracing::debug!(
                 sealed = sealed.len(),
-                "cold tier replaced during compaction; merge abandoned, retried next tick"
+                "cold tier replaced during compaction; merge abandoned, retried now"
             );
+            // Retry without waiting out the compactor's tick: the entries
+            // still occupy the delta and may be holding writers off.
+            self.compactor_wake_cv.notify_one();
             return 0;
         }
         let merged: std::collections::HashSet<(String, u64)> =
@@ -1034,6 +1076,11 @@ mod tests {
             idx.install_compaction(prepared),
             0,
             "a merge built on a replaced tier must be abandoned"
+        );
+        assert_eq!(
+            idx.compacting.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "an abandoned merge must close the admission window it opened"
         );
         let found = |rid: &str, seed: f32| {
             idx.search(&vec_seed(seed, 8), 10)

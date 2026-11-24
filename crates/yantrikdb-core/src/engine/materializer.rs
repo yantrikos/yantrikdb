@@ -321,7 +321,7 @@ fn compactor_loop(weak: Weak<YantrikDB>, shutdown: Arc<AtomicBool>) {
         //
         // If a Phase-2 swap publishes a NEW SearchState mid-iteration,
         // this iteration's `vec_index` Arc is the OLD DeltaIndex. The
-        // install_cold call (inside compact) writes to the OLD
+        // cold install inside compact() writes to the OLD
         // DeltaIndex's internal cold slot — harmless waste, not
         // corruption, because the OLD DeltaIndex is no longer the
         // published vec_index. The next loop iteration loads the NEW
