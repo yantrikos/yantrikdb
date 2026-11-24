@@ -1521,9 +1521,17 @@ impl PyYantrikDB {
     /// own (this was 2 s) let steady traffic starve the swap again once it
     /// passed (#302 review 3). The wait is still bounded: the swap gives up
     /// at its own deadline (10 s) and the gate drops on every way out of it.
-    /// That bound also ends the one wait no marker can tell apart: two
-    /// stores swapping at once, each with a call in flight whose callback
-    /// calls into the other.
+    ///
+    /// Two waits the marker cannot tell apart from a new call, and that
+    /// only that deadline ends. The swap then fails ("did not get it within
+    /// 10s") and the parked call goes ahead:
+    /// - a relayed callback: an `encode()` that hands its call into the
+    ///   store to another thread and waits for it. The other thread holds
+    ///   no mark, so its call waits at the gate while the swap waits for the
+    ///   `encode()` caller. (With the gate's old 2 s limit this was a 2 s
+    ///   stall and the swap went through.)
+    /// - two stores swapping at once, each with a call in flight whose
+    ///   callback calls into the other.
     ///
     /// A binding that embeds before it detaches runs the Python embedder's
     /// `encode()` before it takes the engine ([`planned`](Self::planned)),
