@@ -122,9 +122,10 @@ or retires anything until the rebuild has installed. SQL is
 authoritative: the rebuilt tier is what SQL holds as of the read, so the
 rebuild retires the delta entries published before the read, and a stale
 one cannot shadow the rebuilt vector. Every engine write path commits SQL
-before it publishes, so this loses nothing SQL has; a vector published
-without SQL (`insert_vector` before the caller writes the column) is
-dropped by a rebuild, as by a reopen. The compare-and-swap in step 3 is
+before it publishes, so this loses nothing SQL has; a vector that
+reaches the index without SQL agreeing (`record_with_rid` onto an
+existing row whose SQL holds another vector or is cold, `insert_vector`
+for a rid with no row) is dropped by a rebuild, as by a reopen. The compare-and-swap in step 3 is
 a second line against a cold tier replaced mid-merge; it does not stop
 an installer that skips the gate from losing writes, which is why the
 only installer besides compaction is the rebuild (`install_rebuilt`),
