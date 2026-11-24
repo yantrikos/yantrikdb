@@ -301,21 +301,13 @@ def test_set_embedder_identity_check_with_recall_traffic(tmp_path):
     # nothing inside the check yields the GIL, and recall() takes only
     # shared borrows, which a shared borrow cannot refuse (maintainer
     # note on #295; the test is named for exactly what it proves).
-    import re
-
     path = os.path.join(str(tmp_path), "gil-identity.db")
     store = YantrikDB(path, 64)  # 64 dims: the bundled engine embedder
     for i in range(50):
         store.record(f"identity record {i} about topic {i % 7}")
 
-    # Harvest the recorded digest from the refusal message itself: a
-    # wrong declared fingerprint is refused and the error names the
-    # recorded digest. Public API only; no second SQLite in-process.
-    with pytest.raises(RuntimeError) as excinfo:
-        store.set_embedder(_DeclaringEmb("sha256:wrong"))
-    m = re.search(r"digest ([^,]+),", str(excinfo.value))
-    assert m, str(excinfo.value)
-    digest = m.group(1)
+    # The digest the store recorded for its vectors, through the public API.
+    digest = store.embedder_identity()["digest"]
 
     q = _DeclaringEmb(digest).encode("topic 3")
     stop = threading.Event()
