@@ -686,3 +686,27 @@ def test_set_embedder_named_beside_a_held_borrow_leaves_the_workers_running(tmp_
             db.record(f"after the swap {i}", embedding=[0.05] * 256)
     finally:
         db.close()
+
+
+def test_a_refused_close_gives_up_after_about_a_second(tmp_path):
+    # The mutable borrow is retried for a second, by the clock. It was 1000
+    # one-millisecond sleeps, which ran 1.3-2.4 s on Windows. The refused
+    # close() leaves the store as it was. The borrow is held by a record()
+    # inside its Python embedder's encode().
+    db = YantrikDB(os.path.join(str(tmp_path), "refused.db"), DIM)
+    emb = _SlowEncodeEmb(3.0)
+    db.set_embedder(emb, allow_unverified_embedder=True)
+    emb.armed = True
+    t = threading.Thread(target=lambda: db.record("a write held across encode()"))
+    t.start()
+    try:
+        assert emb.entered.wait(10)
+        started = time.perf_counter()
+        with pytest.raises(RuntimeError, match="Already borrowed"):
+            db.close()
+        took = time.perf_counter() - started
+    finally:
+        t.join(30)
+    assert 0.9 <= took < 1.25, f"the refused close() took {took:.2f} s"
+    db.record("still open", embedding=[0.1] * DIM)
+    assert db.close() is True

@@ -1141,6 +1141,24 @@ impl PyYantrikDB {
     }
 }
 
+/// Call `attempt` until it succeeds or `within` has passed, sleeping a
+/// millisecond with the GIL released between tries. The last refusal is
+/// the error.
+fn retry_until<T, E: Into<PyErr>>(
+    py: Python<'_>,
+    within: std::time::Duration,
+    mut attempt: impl FnMut() -> Result<T, E>,
+) -> PyResult<T> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        match attempt() {
+            Ok(value) => return Ok(value),
+            Err(e) if std::time::Instant::now() >= deadline => return Err(e.into()),
+            Err(_) => py.detach(|| std::thread::sleep(std::time::Duration::from_millis(1))),
+        }
+    }
+}
+
 /// Convert a Python embedder's `encode()` output to a vector, accepting
 /// `list[float]` and numpy arrays (via `.tolist()`).
 ///
@@ -1249,21 +1267,19 @@ impl PyYantrikDB {
     /// can hold a shared borrow for a moment (taking its engine snapshot,
     /// or around a Python embedder's encode()), and a close() or swap that
     /// arrives then was refused with "Already borrowed" (#271 review). The
-    /// GIL is released between tries, so the holder can finish.
+    /// GIL is released between tries, so the holder can finish. The second
+    /// is a deadline, not a count of tries: 1000 one-millisecond sleeps ran
+    /// 1.3-2.4 s (#302 review 3).
     pub(crate) fn borrow_mut_briefly<'py>(slf: &Bound<'py, Self>) -> PyResult<PyRefMut<'py, Self>> {
-        const TRIES: u32 = 1000;
-        let mut tries = 0;
-        loop {
-            match slf.try_borrow_mut() {
-                Ok(this) => return Ok(this),
-                Err(e) if tries >= TRIES => return Err(e.into()),
-                Err(_) => {
-                    tries += 1;
-                    slf.py()
-                        .detach(|| std::thread::sleep(std::time::Duration::from_millis(1)));
-                }
-            }
-        }
+        Self::borrow_mut_within(slf, std::time::Duration::from_secs(1))
+    }
+
+    /// [`borrow_mut_briefly`](Self::borrow_mut_briefly), retried for `within`.
+    fn borrow_mut_within<'py>(
+        slf: &Bound<'py, Self>,
+        within: std::time::Duration,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        retry_until(slf.py(), within, || slf.try_borrow_mut())
     }
 
     /// An owned engine handle for a call that releases the GIL (#271).
