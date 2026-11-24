@@ -3171,7 +3171,10 @@ impl YantrikDB {
         // after acquiring and revalidating the sync guard: a queue-mode
         // deferral must not mutate durable metadata while claiming that no
         // durable state changed.
-        if allow_queued_route {
+        // A vector the caller's embedder made is not the engine embedder's:
+        // stamping the engine's identity would label the store with a model
+        // that did not build its vectors (#304 review 3).
+        if allow_queued_route && text_embedder.is_none() {
             self.stamp_embedder_identity_once();
         }
         // Task 29 (Ingest Integrity): strip any leaked tool-call
@@ -3386,7 +3389,7 @@ impl YantrikDB {
                 continue;
             }
 
-            if !allow_queued_route {
+            if !allow_queued_route && text_embedder.is_none() {
                 self.stamp_embedder_identity_once();
             }
 

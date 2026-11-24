@@ -57,3 +57,44 @@ def test_a_python_embedder_follower_repairs_replicated_rows(tmp_path):
     finally:
         leader.close()
         follower.close()
+
+
+class NamedEmb64(Emb):
+    name = "caller-model-64"
+
+    def encode(self, text):
+        self.calls += 1
+        r = random.Random(hash(text) & 0xFFFFFFFF)
+        v = [r.random() for _ in range(64)]
+        n = sum(x * x for x in v) ** 0.5
+        return [x / n for x in v]
+
+
+def test_rows_refreshed_by_a_python_embedder_carry_its_name_not_the_engines(tmp_path):
+    # A 64-dim follower has the bundled engine embedder and a Python one. The
+    # rows the Python embedder refreshes record its declared name as their
+    # embedding_model, not the bundled model's.
+    leader = YantrikDB(os.path.join(str(tmp_path), "leader64.db"), 64)
+    follower = YantrikDB(os.path.join(str(tmp_path), "follower64.db"), 64)
+    try:
+        if not follower.has_embedder():
+            import pytest
+
+            pytest.skip("this build has no bundled engine embedder")
+        leader.set_embedder(NamedEmb64(), allow_unverified_embedder=True)
+        for i in range(5):
+            leader.record(f"the harbour plan, note {i}")
+        follower.set_embedder(NamedEmb64(), allow_unverified_embedder=True)
+        follower.apply_ops(leader.extract_ops_since(limit=1000))
+        done = follower.refresh_embeddings(dry_run=False)
+        assert done["refreshed"] >= 5, done
+        models = {
+            r["m"]
+            for r in follower._conn.execute(
+                "SELECT DISTINCT embedding_model AS m FROM memories"
+            ).fetchall()
+        }
+        assert models == {"caller-model-64"}, models
+    finally:
+        leader.close()
+        follower.close()

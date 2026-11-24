@@ -370,7 +370,7 @@ impl YantrikDB {
         if !dry_run && !self.has_embedder() {
             return Err(YantrikDbError::NoEmbedder);
         }
-        self.refresh_embeddings_inner(namespace, dry_run, &|texts: &[&str]| {
+        self.refresh_embeddings_inner(namespace, dry_run, None, &|texts: &[&str]| {
             texts.iter().map(|t| self.embed(t)).collect()
         })
     }
@@ -383,22 +383,31 @@ impl YantrikDB {
     /// caller can reach its embedder once per batch. The scan, the
     /// usability check, the per-tier encoding, the per-row error reporting
     /// and the guarded apply are the same code as the engine path's.
+    ///
+    /// `model_name` is recorded as the refreshed rows' `embedding_model`:
+    /// the caller's embedder's declared name, or `None` (NULL) when it
+    /// declares none. Never the engine's runtime embedder, which did not
+    /// make these vectors.
     pub fn refresh_embeddings_with_batch<F>(
         &self,
         namespace: Option<&str>,
         dry_run: bool,
+        model_name: Option<&str>,
         embed: F,
     ) -> Result<RefreshReport>
     where
         F: Fn(&[&str]) -> Vec<Result<Vec<f32>>>,
     {
-        self.refresh_embeddings_inner(namespace, dry_run, &embed)
+        self.refresh_embeddings_inner(namespace, dry_run, Some(model_name), &embed)
     }
 
     fn refresh_embeddings_inner(
         &self,
         namespace: Option<&str>,
         dry_run: bool,
+        // Some(name) when the caller's embedder made the vectors (name may
+        // be None); None for the engine's own embedder.
+        caller_model: Option<Option<&str>>,
         embed: &BatchEmbed<'_>,
     ) -> Result<RefreshReport> {
         let mut report = RefreshReport {
@@ -561,7 +570,7 @@ impl YantrikDB {
             return Ok(report);
         }
 
-        self.apply_refreshes(&pending, &mut report)?;
+        self.apply_refreshes_with_model(&pending, &mut report, caller_model)?;
 
         tracing::info!(
             target: "yantrikdb::audit::repair",
@@ -586,6 +595,19 @@ impl YantrikDB {
         pending: &[PendingRefresh],
         report: &mut RefreshReport,
     ) -> Result<()> {
+        self.apply_refreshes_with_model(pending, report, None)
+    }
+
+    /// [`Self::apply_refreshes`], recording `caller_model` as the rows'
+    /// `embedding_model` when the caller's embedder made the vectors
+    /// (`Some(name)`, the name possibly `None`), or the engine's runtime
+    /// embedder when it did (`None`).
+    fn apply_refreshes_with_model(
+        &self,
+        pending: &[PendingRefresh],
+        report: &mut RefreshReport,
+        caller_model: Option<Option<&str>>,
+    ) -> Result<()> {
         // ── Phase 3: apply in one transaction. The generation is READ, never
         // bumped: this is the same space the store was already in, and
         // advancing the store-wide watermark for a repair would make every
@@ -593,7 +615,10 @@ impl YantrikDB {
         let state = self.search_state.load_full();
         let generation = state.generation as i64;
         let mut refreshed_hot = 0usize;
-        let model = state.runtime_embedder_name.clone();
+        let model = match caller_model {
+            Some(name) => name.map(str::to_string),
+            None => state.runtime_embedder_name.clone(),
+        };
         let updated_at = now();
         {
             let conn = self.conn();

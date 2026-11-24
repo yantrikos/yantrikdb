@@ -120,3 +120,25 @@ def test_a_keyed_retry_with_a_noisy_embedder_returns_the_same_rid(tmp_path, name
             KEYED[name](db, rids[:2], "the launch moved to april")
     finally:
         db.close()
+
+
+# ── whose identity a caller-embedded vector carries ──────────────────────
+
+
+def test_a_caller_embedded_summary_does_not_stamp_the_engine_identity(tmp_path):
+    # On a 64-dim store the engine attaches its bundled embedder, and the
+    # caller attaches a Python one. A summary the Python embedder made must
+    # not stamp the bundled model as the store's embedder identity: reopening
+    # with the Python embedder was then refused, and seal_pack declared the
+    # wrong model.
+    db = YantrikDB(os.path.join(str(tmp_path), "identity.db"), 64)
+    try:
+        if not db.has_embedder():
+            pytest.skip("this build has no bundled engine embedder")
+        db.set_embedder(NoisyEmb(64), allow_unverified_embedder=True)
+        rids = [db.record(f"alice moved the launch to march, note {i}") for i in range(3)]
+        assert db.embedder_identity() is None
+        ext.summarize_cluster(db, rids[:2], "the launch moved to march", idempotency_key="id-1")
+        assert db.embedder_identity() is None, db.embedder_identity()
+    finally:
+        db.close()

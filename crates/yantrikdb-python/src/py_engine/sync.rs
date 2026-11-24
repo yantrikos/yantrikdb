@@ -257,9 +257,19 @@ impl PyYantrikDB {
         // inside the detached call, re-taking the GIL once per batch of up
         // to 256 texts.
         let (db, embedder) = Self::engine_and_embedder(slf)?;
+        // The rows record the embedder's declared name, if it has one; never
+        // the engine's, which did not make these vectors (#304 review 3).
+        let model_name: Option<String> = embedder.as_ref().and_then(|emb| {
+            emb.getattr(py, "name")
+                .ok()
+                .and_then(|v| v.extract::<String>(py).ok())
+        });
         let report = run_detached(py, db, |db| match embedder.as_ref() {
-            Some(emb) => {
-                db.refresh_embeddings_with_batch(namespace, dry_run, |texts: &[&str]| {
+            Some(emb) => db.refresh_embeddings_with_batch(
+                namespace,
+                dry_run,
+                model_name.as_deref(),
+                |texts: &[&str]| {
                     Python::attach(|py| {
                         texts
                             .iter()
@@ -272,8 +282,8 @@ impl PyYantrikDB {
                             })
                             .collect()
                     })
-                })
-            }
+                },
+            ),
             None => db.refresh_embeddings(namespace, dry_run),
         })?;
 
