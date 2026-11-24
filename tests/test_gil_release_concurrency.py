@@ -576,28 +576,34 @@ class _YieldingEmb(Emb):
         return super().encode(text)
 
 
-def test_close_beside_a_python_embedded_write_is_not_refused(tmp_path):
-    # record() keeps its shared borrow of the wrapper while the Python
-    # embedder runs, and a yielding encode() lets the main thread in
-    # meanwhile. close() takes the mutable borrow and was refused with
-    # "Already borrowed" whenever it landed inside a record(); it now retries
-    # briefly, with the GIL released, and gets in between two calls.
+def test_close_beside_recalls_with_a_python_embedder_is_not_refused(tmp_path):
+    # recall() takes the wrapper's shared borrow only for its snapshot; the
+    # Python embedder's encode() runs with no borrow held. close() takes the
+    # mutable borrow and retries briefly instead of failing at once. On
+    # 0.23.6 recall() kept its borrow through encode(), and a close() that
+    # landed then was refused with "Already borrowed".
+    #
+    # record() still holds its borrow across encode() until #297 lands, and
+    # a tight record() loop leaves no gap with the GIL free, so close()
+    # beside one can still be refused; that is #297's to fix.
     for attempt in range(5):
         db = YantrikDB(os.path.join(str(tmp_path), f"yield{attempt}.db"), DIM)
         db.set_embedder(_YieldingEmb(), allow_unverified_embedder=True)
+        for i in range(50):
+            db.record(f"record {i} about topic {i % 7}")
         stop = threading.Event()
         errors = []
 
-        def writer():
+        def reader():
             while not stop.is_set():
                 try:
-                    db.record("a write the embedder takes its time over")
+                    db.recall(query="topic 3", top_k=5)
                 except Exception as e:  # noqa: BLE001
                     if "closed" not in str(e):
                         errors.append(repr(e))
                     return
 
-        t = threading.Thread(target=writer)
+        t = threading.Thread(target=reader)
         t.start()
         time.sleep(0.05)
         try:

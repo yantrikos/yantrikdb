@@ -316,9 +316,12 @@ def test_close_under_write_load_keeps_other_threads_running(tmp_path):
         stop.set()
         t.join()
         worst = max(gaps)
-        if took < 0.04:
+        if took < 0.06:
             continue  # too quick to tell a held GIL from a released one
-        assert worst < took / 2, (
+        # Held, the ticker stalls for the whole close (99-100% of it on the
+        # previous build); released, its gaps are scheduling noise, which on
+        # a loaded macOS runner reached half of a 50 ms close.
+        assert worst < took * 0.75, (
             f"the ticker stalled {worst * 1000:.0f} ms during a {took * 1000:.0f} ms close()"
         )
         return

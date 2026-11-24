@@ -1241,16 +1241,17 @@ impl PyYantrikDB {
     /// that calls back into this store), which the swap is itself waiting
     /// for, proceeds rather than waiting on its own swap.
     ///
-    /// try_borrow, not borrow: `set_embedder` holds a mutable borrow while
-    /// it calls the Python embedder, and another thread can arrive here
-    /// mid-call; that surfaces as RuntimeError, never as a panic. A refusal
-    /// is retried for up to 50 ms first, which covers the swap's own brief
-    /// mutable borrow.
+    /// try_borrow, not borrow: a method holding the mutable borrow
+    /// (`close()`, the swap, `set_embedder()` storing its embedder) can be
+    /// mid-call when another thread arrives here; that surfaces as
+    /// RuntimeError, never as a panic. A refusal is retried for up to 10 ms
+    /// first, which covers those brief mutable borrows; a longer one still
+    /// gets the error.
     pub(crate) fn snapshot_borrow<'py>(slf: &Bound<'py, Self>) -> PyResult<PyRef<'py, Self>> {
         const GATE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
-        const BORROW_TRIES: u32 = 50;
+        const BORROW_RETRY: std::time::Duration = std::time::Duration::from_millis(10);
         let started = std::time::Instant::now();
-        let mut refused = 0;
+        let mut refused_since: Option<std::time::Instant> = None;
         loop {
             match slf.try_borrow() {
                 Ok(this) => {
@@ -1259,8 +1260,12 @@ impl PyYantrikDB {
                         return Ok(this);
                     }
                 }
-                Err(e) if refused >= BORROW_TRIES => return Err(e.into()),
-                Err(_) => refused += 1,
+                Err(e) => {
+                    let since = *refused_since.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed() >= BORROW_RETRY {
+                        return Err(e.into());
+                    }
+                }
             }
             slf.py()
                 .detach(|| std::thread::sleep(std::time::Duration::from_millis(1)));
