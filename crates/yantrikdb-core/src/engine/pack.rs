@@ -2166,9 +2166,33 @@ impl YantrikDB {
                 }
             }
         };
+        // Keep the installed file aside until the new copy has mounted: a
+        // copy that turns out unmountable (say, modified after sealing) must
+        // not cost the working install. Not named like a temp copy, so the
+        // stale-temp sweep never takes it.
+        let mut aside: Option<std::path::PathBuf> = None;
         if let Some(tmp) = tmp.as_ref() {
+            if dest.exists() {
+                let kept = dir.join(format!(
+                    ".{file_name}.prev.{}.{}",
+                    std::process::id(),
+                    next_install_tmp()
+                ));
+                if let Err(e) = std::fs::rename(&dest, &kept) {
+                    let _ = std::fs::remove_file(tmp);
+                    restore_previous();
+                    return Err(YantrikDbError::PackUnreadable {
+                        path: dest.display().to_string(),
+                        reason: format!("could not move the installed copy aside: {e}"),
+                    });
+                }
+                aside = Some(kept);
+            }
             if let Err(e) = std::fs::rename(tmp, &dest) {
                 let _ = std::fs::remove_file(tmp);
+                if let Some(kept) = aside.as_ref() {
+                    let _ = std::fs::rename(kept, &dest);
+                }
                 restore_previous();
                 return Err(YantrikDbError::PackUnreadable {
                     path: dest.display().to_string(),
@@ -2176,6 +2200,11 @@ impl YantrikDB {
                 });
             }
         }
+        let drop_aside = |aside: &Option<std::path::PathBuf>| {
+            if let Some(kept) = aside {
+                let _ = std::fs::remove_file(kept);
+            }
+        };
 
         // 3. Mount, then record. A pack that cannot be mounted must not be
         //    left in the table for open() to trip over every time.
@@ -2199,6 +2228,7 @@ impl YantrikDB {
         };
         match self.mount_pack(&dest_str) {
             Ok(id) => {
+                drop_aside(&aside);
                 record(&id)?;
                 Ok(id)
             }
@@ -2209,15 +2239,27 @@ impl YantrikDB {
             // as a sequential re-install would. Deleting the copy here lost
             // the pack at the next open while its row stayed.
             Err(YantrikDbError::PackAlreadyMounted { .. }) => {
+                drop_aside(&aside);
                 record(&pack_id)?;
                 Ok(pack_id)
             }
             Err(e) => {
-                // Remove the file only if no install of this pack is on
-                // record: a recorded install's copy is what the next open
-                // remounts.
-                if !same && !self.pack_is_installed(&pack_id)? {
-                    let _ = std::fs::remove_file(&dest);
+                // The new copy cannot be mounted. Put the working install's
+                // file back and remount it; with no earlier copy, remove the
+                // new one unless an install of this pack is on record (a
+                // recorded install's copy is what the next open remounts).
+                if !same {
+                    match aside.as_ref() {
+                        Some(kept) => {
+                            let _ = std::fs::remove_file(&dest);
+                            let _ = std::fs::rename(kept, &dest);
+                        }
+                        None => {
+                            if !self.pack_is_installed(&pack_id)? {
+                                let _ = std::fs::remove_file(&dest);
+                            }
+                        }
+                    }
                 }
                 restore_previous();
                 Err(e)

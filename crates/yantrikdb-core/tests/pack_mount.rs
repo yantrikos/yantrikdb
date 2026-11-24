@@ -1679,3 +1679,60 @@ fn concurrent_seals_to_one_destination_refuse_the_loser_cleanly() {
         assert_eq!((ok, exists), (1, 1), "trial {trial}: {results:?}");
     }
 }
+
+/// A re-install whose new copy cannot be mounted (here: modified after
+/// sealing, so its content digest fails) leaves the working install as it
+/// was. The install replaced the installed file and then tried to put the
+/// old mount back from that same, now bad, file: the pack ended up
+/// unmounted, with the modified copy at the installed path.
+#[test]
+fn reinstall_of_an_unmountable_copy_keeps_the_working_install() {
+    let dir = tmpdir("reinstall-bad");
+    let pack = dir.join("physics.ydbpack");
+    build_pack(
+        &dir,
+        pack.to_str().unwrap(),
+        "E0",
+        &[("gluons bind quarks", 3)],
+    );
+    let bad = dir.join("physics-edited.ydbpack");
+    std::fs::copy(&pack, &bad).unwrap();
+    {
+        let c = rusqlite::Connection::open(&bad).unwrap();
+        c.execute(
+            "UPDATE memories SET text = text || ' (edited)' \
+             WHERE rowid = (SELECT min(rowid) FROM memories)",
+            [],
+        )
+        .unwrap();
+    }
+    let db = host(&dir, "E0");
+    db.install_pack(pack.to_str().unwrap()).unwrap();
+    let installed = db.pack_dir().unwrap().join("physics-1.0.0.ydbpack");
+
+    assert!(db.install_pack(bad.to_str().unwrap()).is_err());
+    assert_eq!(
+        db.mounted_packs().len(),
+        1,
+        "the working install stays mounted"
+    );
+    let texts = recall_texts(&db, &vec_on(3, 0.05), 5);
+    assert!(texts.iter().any(|t| t == "gluons bind quarks"), "{texts:?}");
+    let edited: i64 = rusqlite::Connection::open(&installed)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE text LIKE '%(edited)'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        edited, 0,
+        "the installed path still holds the original copy"
+    );
+    db.unmount_all_packs();
+    assert!(
+        db.remount_installed().iter().all(|o| o.mounted),
+        "the next open remounts it"
+    );
+}
