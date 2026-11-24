@@ -298,10 +298,21 @@ pub struct RefreshReport {
     /// Rows whose text changed between scan and apply — skipped, never
     /// clobbered.
     pub skipped_concurrent_modification: usize,
+    /// Rows refreshed in SQL but not re-indexed because a reembed cutover
+    /// began first. The reembed re-encodes them in the new space.
+    pub reindex_deferred: usize,
     /// Up to `SAMPLE_CAP` rids that were found unusable.
     pub sample_rids: Vec<String>,
     /// Per-row failures. One bad row never aborts the sweep.
     pub errors: Vec<RepairError>,
+}
+
+/// Rows a refresh committed in the hot tier, awaiting re-indexing at the
+/// index seqs reserved for them inside the commit.
+pub(crate) struct RefreshedHot<'a> {
+    generation: i64,
+    first_seq: u64,
+    rows: Vec<(&'a str, &'a [f32])>,
 }
 
 pub(crate) struct PendingRefresh {
@@ -505,15 +516,25 @@ impl YantrikDB {
         Ok(report)
     }
 
-    /// Phases 3–4 of [`Self::refresh_embeddings`]: write the re-encoded
-    /// vectors in one transaction, each guarded on the text and tier it was
-    /// scanned with, then make the hot ones searchable. Split out so the
-    /// guards can be tested without racing a real refresh.
+    /// Phases 3–4 of [`Self::refresh_embeddings`]: commit, then re-index.
     pub(crate) fn apply_refreshes(
         &self,
         pending: &[PendingRefresh],
         report: &mut RefreshReport,
     ) -> Result<()> {
+        let hot = self.commit_refreshes(pending, report)?;
+        self.reindex_refreshed(hot, report)
+    }
+
+    /// Phase 3: write the re-encoded vectors in one transaction, each
+    /// guarded on the text and tier it was scanned with. Returns the rows
+    /// refreshed in the hot tier, with the index seqs reserved for them.
+    /// Split from the re-index so tests can interleave other writers.
+    pub(crate) fn commit_refreshes<'a>(
+        &self,
+        pending: &'a [PendingRefresh],
+        report: &mut RefreshReport,
+    ) -> Result<RefreshedHot<'a>> {
         // ── Phase 3: apply in one transaction. The generation is READ, never
         // bumped: this is the same space the store was already in, and
         // advancing the store-wide watermark for a repair would make every
@@ -521,6 +542,7 @@ impl YantrikDB {
         let state = self.search_state.load_full();
         let generation = state.generation as i64;
         let mut refreshed_hot: Vec<(&str, &[f32])> = Vec::new();
+        let mut first_seq = 0u64;
         let model = state.runtime_embedder_name.clone();
         let updated_at = now();
         {
@@ -555,25 +577,81 @@ impl YantrikDB {
                 }
             }
             sp.release()?;
+            // Reserve one index seq per refreshed hot row while the conn is
+            // still held. An archive() that lands after this commit takes
+            // the conn after us, so its tombstone gets a later seq and
+            // outranks our append (the row stays archived); a tombstone an
+            // archive left BEFORE the commit (a row archived, then hydrated
+            // with no vector) gets an earlier one and loses.
+            if !refreshed_hot.is_empty() {
+                first_seq = self.vec_seq.fetch_add(
+                    refreshed_hot.len() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                ) + 1;
+            }
         }
 
-        // ── Phase 4: make the newly-filled hot vectors searchable. Cold rows
-        // stay out of the index by design (archive tombstones them), so a
-        // refresh that only touched cold rows rebuilds nothing.
-        //
-        // The rebuild alone is not enough: it installs a new cold tier but
-        // leaves the delta alone, and a row archived and then hydrated
-        // while it had no vector still has archive()'s tombstone there,
-        // which outranks the rebuilt entry. Appending each refreshed vector
-        // at a fresh seq, as insert_vector does, supersedes it. The rebuild
-        // refuses to install across a reembed cutover, and the appends are
-        // skipped if one landed after it: those vectors belong to the old
-        // space.
-        if !refreshed_hot.is_empty() {
-            self.rebuild_vec_index()?;
-            if self.search_state.load().generation as i64 == generation {
-                for (rid, embedding) in &refreshed_hot {
-                    self.insert_vector(rid, embedding)?;
+        Ok(RefreshedHot {
+            generation,
+            first_seq,
+            rows: refreshed_hot,
+        })
+    }
+
+    /// Phase 4: make the newly-filled hot vectors searchable. Cold rows
+    /// stay out of the index by design (archive tombstones them).
+    ///
+    /// Appended through the delta, not by rebuilding the cold tier: a
+    /// rebuild leaves the delta alone (where a tombstone from an earlier
+    /// archive still hides the row), can be overwritten by a compaction
+    /// already in flight, and costs a full index build. Appends wait out
+    /// Backpressure instead of failing the whole repair after its SQL has
+    /// committed, and each one checks under the sync-writer guard that no
+    /// reembed cutover has moved the store to another space; rows skipped
+    /// that way are counted, and the reembed re-encodes them anyway.
+    pub(crate) fn reindex_refreshed(
+        &self,
+        hot: RefreshedHot<'_>,
+        report: &mut RefreshReport,
+    ) -> Result<()> {
+        const APPEND_PATIENCE: std::time::Duration = std::time::Duration::from_secs(60);
+        let RefreshedHot {
+            generation,
+            first_seq,
+            rows: refreshed_hot,
+        } = hot;
+        for (i, (rid, embedding)) in refreshed_hot.iter().enumerate() {
+            crate::validate::validate_embedding(
+                "refresh_embeddings",
+                embedding,
+                self.embedding_dim,
+            )?;
+            let seq = first_seq + i as u64;
+            let mut waited = std::time::Duration::ZERO;
+            loop {
+                let Some(_sync_guard) = self.write_router.try_enter_sync_writer() else {
+                    report.reindex_deferred += refreshed_hot.len() - i;
+                    return Ok(());
+                };
+                let state = self.search_state.load_full();
+                if state.generation as i64 != generation {
+                    report.reindex_deferred += refreshed_hot.len() - i;
+                    return Ok(());
+                }
+                match state
+                    .vec_index
+                    .append(rid.to_string(), embedding.to_vec(), seq)
+                {
+                    Ok(()) => break,
+                    Err(YantrikDbError::Backpressure { retry_after_ms, .. })
+                        if waited < APPEND_PATIENCE =>
+                    {
+                        let pause = std::time::Duration::from_millis(retry_after_ms.max(1));
+                        drop(_sync_guard);
+                        std::thread::sleep(pause);
+                        waited += pause;
+                    }
+                    Err(e) => return Err(e),
                 }
             }
         }

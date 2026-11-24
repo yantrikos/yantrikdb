@@ -334,6 +334,126 @@ mod with_engine_embedder {
         assert!(db.hydrate(&first).unwrap());
     }
 
+    fn recalls(db: &YantrikDB, rid: &str) -> bool {
+        let text = db.get(rid).unwrap().unwrap().text;
+        let query = db.embed(&text).unwrap();
+        db.recall(
+            &query, 10, None, None, false, false, None, true, None, None, None, None, None, false,
+            None, None,
+        )
+        .unwrap()
+        .iter()
+        .any(|h| h.rid == rid)
+    }
+
+    fn pending_for(db: &YantrikDB, rid: &str) -> crate::engine::repair::PendingRefresh {
+        let (ciphertext, tier): (String, String) = db
+            .conn()
+            .query_row(
+                "SELECT text, storage_tier FROM memories WHERE rid = ?1",
+                params![rid],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let vector = db.embed(&db.get(rid).unwrap().unwrap().text).unwrap();
+        let blob = if tier == "cold" {
+            crate::compression::compress_embedding(&vector)
+        } else {
+            crate::serde_helpers::serialize_f32(&vector)
+        };
+        crate::engine::repair::PendingRefresh {
+            rid: rid.to_string(),
+            scanned_ciphertext: ciphertext,
+            scanned_tier: tier,
+            new_embedding_blob: blob,
+            embedding: vector,
+        }
+    }
+
+    /// A follower with more rows than the delta tier holds (256 by
+    /// default): re-indexing them all at once used to fail the repair with
+    /// Backpressure after its SQL had committed, leaving rows out of recall
+    /// and nothing for a retry to do.
+    #[test]
+    fn refresh_at_scale_waits_out_backpressure() {
+        let db = std::sync::Arc::new(YantrikDB::with_default(":memory:").unwrap());
+        let _workers = crate::engine::materializer::spawn_all_workers(&db, 2);
+        // The setup's own writes outrun the compactor too; a caller is
+        // expected to retry Backpressure, so the setup does.
+        let rids: Vec<String> = (0..700)
+            .map(|i| loop {
+                match db.record_text(
+                    &format!("replicated note {i} about topic {} and the ferry", i % 17),
+                    "episodic",
+                    0.5,
+                    0.0,
+                    604800.0,
+                    &empty_meta(),
+                    "default",
+                    0.8,
+                    "general",
+                    "user",
+                    None,
+                ) {
+                    Ok(rid) => break rid,
+                    Err(crate::error::YantrikDbError::Backpressure { retry_after_ms, .. }) => {
+                        std::thread::sleep(std::time::Duration::from_millis(retry_after_ms));
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            })
+            .collect();
+        strip_vectors(&db, &rids);
+
+        let report = db.refresh_embeddings(None, false).unwrap();
+        assert_eq!(report.refreshed, rids.len(), "{report:?}");
+        assert_eq!(report.reindex_deferred, 0, "{report:?}");
+        for rid in rids.iter().step_by(97) {
+            assert!(recalls(&db, rid), "{rid} must be back in vector recall");
+        }
+    }
+
+    /// An archive that lands between the refresh's commit and its
+    /// re-index wins: the row stays archived and out of vector recall.
+    #[test]
+    fn archive_between_commit_and_reindex_keeps_the_row_archived() {
+        let (db, rids) = store();
+        let rid = &rids[4];
+        strip_vectors(&db, std::slice::from_ref(rid));
+        let pending = vec![pending_for(&db, rid)];
+
+        let mut report = crate::engine::repair::RefreshReport::default();
+        let hot = db.commit_refreshes(&pending, &mut report).unwrap();
+        assert_eq!(report.refreshed, 1);
+        assert!(db.archive(rid).unwrap());
+        db.reindex_refreshed(hot, &mut report).unwrap();
+
+        assert_eq!(tier(&db, rid), "cold");
+        assert!(!recalls(&db, rid), "an archived row must not be re-indexed");
+    }
+
+    /// The tier guard, cold to hot: a compressed vector encoded for a cold
+    /// row is not written once a hydrate has made the row hot.
+    #[test]
+    fn refresh_skips_a_row_hydrated_after_the_scan() {
+        let (db, rids) = store();
+        let rid = &rids[5];
+        assert!(db.archive(rid).unwrap());
+        let pending = vec![pending_for(&db, rid)];
+        assert_eq!(pending[0].scanned_tier, "cold");
+        assert!(db.hydrate(rid).unwrap());
+        let before = embedding_blob(&db, rid).unwrap();
+
+        let mut report = crate::engine::repair::RefreshReport::default();
+        db.apply_refreshes(&pending, &mut report).unwrap();
+        assert_eq!(report.skipped_concurrent_modification, 1, "{report:?}");
+        assert_eq!(
+            embedding_blob(&db, rid).unwrap(),
+            before,
+            "a compressed vector must not land in a hot row"
+        );
+    }
+
     /// The tier guard: a vector re-encoded for the tier it was scanned in
     /// is not written if an archive moved the row meanwhile.
     #[test]

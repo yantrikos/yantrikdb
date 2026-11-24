@@ -118,3 +118,40 @@ def test_evict_then_refresh_while_cold_then_hydrate(tmp_path):
         "SELECT count(*) AS n FROM memories WHERE embedding IS NULL"
     ).fetchall()[0]["n"] == 0
     db.close()
+
+
+def test_refresh_at_follower_scale(tmp_path):
+    # More replicated rows than the in-memory delta tier holds (256): the
+    # repair used to fail with Backpressure after committing its SQL,
+    # leaving rows out of vector recall with nothing left to retry.
+    src = YantrikDB.with_default(str(tmp_path / "leader.db"))
+    texts = [f"replicated record {i} about topic {i % 23} and the ferry" for i in range(1000)]
+    for t in texts:
+        src.record(t)
+    ops = src.extract_ops_since(limit=5000)
+    src.close()
+    db = YantrikDB.with_default(str(tmp_path / "follower.db"))
+    db.apply_ops(ops)
+
+    db.evict(len(texts) - 20)
+    cold = [
+        r["rid"]
+        for r in db._conn.execute(
+            "SELECT rid FROM memories WHERE storage_tier = 'cold' LIMIT 10"
+        ).fetchall()
+    ]
+    assert cold, "precondition: eviction moved rows to cold"
+    for rid in cold:
+        assert db.hydrate(rid) is True
+
+    report = db.refresh_embeddings(dry_run=False)
+    assert report["errors"] == []
+    assert report["reindex_deferred"] == 0
+    assert db._conn.execute(
+        "SELECT count(*) AS n FROM memories WHERE embedding IS NULL"
+    ).fetchall()[0]["n"] == 0
+    for rid in cold:
+        text = db.get(rid)["text"]
+        hits = db.recall(query=text, top_k=10)
+        assert any(h["rid"] == rid for h in hits), rid
+    db.close()

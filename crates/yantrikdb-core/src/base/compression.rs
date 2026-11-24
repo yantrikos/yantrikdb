@@ -22,9 +22,23 @@ pub fn decompress_embedding(blob: &[u8]) -> Vec<f32> {
 /// do not know the tier (a text `correct()`, the reembed swap, an external
 /// backfill) can leave a raw blob in a cold row. Every reader that is not
 /// restricted to one tier must decode by content, not by tier.
+///
+/// Never panics: a blob that carries the zstd magic but does not decode
+/// (corruption, truncation) yields an empty vector, which callers already
+/// treat as unusable (a dimension mismatch), with a warning logged.
 pub fn decode_embedding_blob(blob: &[u8]) -> Vec<f32> {
     if is_compressed(blob) {
-        decompress_embedding(blob)
+        match zstd::decode_all(blob) {
+            Ok(raw) => deserialize_f32(&raw),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    bytes = blob.len(),
+                    "stored embedding has the zstd magic but does not decode; treating it as missing"
+                );
+                Vec::new()
+            }
+        }
     } else {
         deserialize_f32(blob)
     }
@@ -55,6 +69,8 @@ mod tests {
             embedding
         );
         assert_eq!(decode_embedding_blob(&serialize_f32(&embedding)), embedding);
+        // A corrupt blob behind the zstd magic must not panic.
+        assert!(decode_embedding_blob(&[0x28, 0xB5, 0x2F, 0xFD, 1, 2, 3]).is_empty());
     }
 
     #[test]

@@ -258,6 +258,7 @@ impl PyYantrikDB {
             "skipped_concurrent_modification",
             report.skipped_concurrent_modification,
         )?;
+        dict.set_item("reindex_deferred", report.reindex_deferred)?;
         dict.set_item("sample_rids", report.sample_rids.clone())?;
 
         let errors = pyo3::types::PyList::empty(py);
