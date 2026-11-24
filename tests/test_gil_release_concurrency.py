@@ -359,10 +359,11 @@ def test_set_embedder_raises_closed_when_probe_closes_the_store(tmp_path):
     # embedder's encode() closes the store during the phase-1 probe.
     # The identity check passes trivially with
     # allow_unverified_embedder=True, so the phase-3 re-check is what
-    # must refuse the store, raising the closed error. On main this
-    # call returned None: the identity check returns Ok when the
-    # engine is already gone, and the embedder landed on a closed
-    # wrapper as if the call had succeeded.
+    # must refuse the store, raising the closed error. Before #295,
+    # set_embedder() held the mutable borrow across the probe, so the
+    # close() inside encode() was refused ("Already mutably borrowed")
+    # and the probe failed with TypeError. A close() before the call is
+    # test_set_embedder_on_a_closed_store_raises, below.
     path = os.path.join(str(tmp_path), "gil-close-probe.db")
     store = YantrikDB(path, DIM)
 
@@ -1067,3 +1068,14 @@ def test_the_replaced_embedder_is_dropped_outside_the_borrow(tmp_path):
         assert seen == [True], seen
     finally:
         db.close()
+
+
+def test_set_embedder_on_a_closed_store_raises(tmp_path):
+    # #295 changed this: on 0.23.6, set_embedder() on a closed store returned
+    # None (the identity check returns Ok when the engine is gone), and the
+    # embedder landed on a closed wrapper as if the call had succeeded. It
+    # now raises. It still runs the embedder's probe (one encode()) first.
+    db = YantrikDB(os.path.join(str(tmp_path), "closed-set.db"), DIM)
+    db.close()
+    with pytest.raises(RuntimeError, match="YantrikDB is closed"):
+        db.set_embedder(Emb(), allow_unverified_embedder=True)
