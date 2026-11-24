@@ -370,13 +370,11 @@ impl PyYantrikDB {
     }
 
     /// Publisher keys this host trusts, as `[{"pubkey", "label"}]`.
-    fn trusted_publishers(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let db = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+    fn trusted_publishers(slf: &Bound<'_, Self>) -> PyResult<PyObject> {
+        let py = slf.py();
+        let publishers = Self::detached(slf, |db| db.trusted_publishers())?;
         let out = PyList::empty(py);
-        for (pubkey, label) in db.trusted_publishers().map_err(map_err)? {
+        for (pubkey, label) in publishers {
             let d = PyDict::new(py);
             d.set_item("pubkey", pubkey)?;
             d.set_item("label", label)?;
@@ -523,12 +521,9 @@ impl PyYantrikDB {
     ///
     /// A database with no recorded identity cannot prove pack
     /// compatibility, which is why `mount_pack` refuses it by default.
-    fn embedder_identity(&self, py: Python<'_>) -> PyResult<Option<PyObject>> {
-        let db = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
-        let Some((name, digest, dim)) = db.embedder_identity().map_err(map_err)? else {
+    fn embedder_identity(slf: &Bound<'_, Self>) -> PyResult<Option<PyObject>> {
+        let py = slf.py();
+        let Some((name, digest, dim)) = Self::detached(slf, |db| db.embedder_identity())? else {
             return Ok(None);
         };
         let d = PyDict::new(py);

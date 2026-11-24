@@ -653,9 +653,22 @@ impl YantrikDB {
     /// error — `set_embedder_named` is atomic.
     #[cfg(feature = "embedder-download")]
     pub fn set_embedder_named(&mut self, name: &str) -> Result<()> {
-        use crate::embedder::DownloadedEmbedder;
-        let downloaded = DownloadedEmbedder::fetch(name)?;
+        let downloaded = crate::embedder::DownloadedEmbedder::fetch(name)?;
+        self.set_downloaded_embedder(downloaded)
+    }
+
+    /// The second half of [`Self::set_embedder_named`]: install a model
+    /// already fetched with `DownloadedEmbedder::fetch(name)`, under the same
+    /// dimension contract. A host that cannot block while it holds exclusive
+    /// access (the Python binding, #271) fetches first (network, SHA-256
+    /// verification, load) and takes `&mut self` only for this swap.
+    #[cfg(feature = "embedder-download")]
+    pub fn set_downloaded_embedder(
+        &mut self,
+        downloaded: crate::embedder::DownloadedEmbedder,
+    ) -> Result<()> {
         if downloaded.dim() != self.embedding_dim() {
+            let name = crate::Embedder::name(&downloaded).unwrap_or_default();
             return Err(crate::error::YantrikDbError::InvalidInput(format!(
                 "embedder {name:?} dim={} but engine was opened with dim={}; \
                  either reopen with `YantrikDB::new(path, {})` or pick a \

@@ -119,30 +119,26 @@ impl PyYantrikDB {
         think_result_to_dict(py, &result)
     }
 
-    fn deliver_trigger(&self, trigger_id: &str) -> PyResult<bool> {
-        let db = self.get_inner()?;
-        db.deliver_trigger(trigger_id).map_err(map_err)
+    fn deliver_trigger(slf: &Bound<'_, Self>, trigger_id: &str) -> PyResult<bool> {
+        Self::detached(slf, |db| db.deliver_trigger(trigger_id))
     }
 
-    fn acknowledge_trigger(&self, trigger_id: &str) -> PyResult<bool> {
-        let db = self.get_inner()?;
-        db.acknowledge_trigger(trigger_id).map_err(map_err)
+    fn acknowledge_trigger(slf: &Bound<'_, Self>, trigger_id: &str) -> PyResult<bool> {
+        Self::detached(slf, |db| db.acknowledge_trigger(trigger_id))
     }
 
-    fn act_on_trigger(&self, trigger_id: &str) -> PyResult<bool> {
-        let db = self.get_inner()?;
-        db.act_on_trigger(trigger_id).map_err(map_err)
+    fn act_on_trigger(slf: &Bound<'_, Self>, trigger_id: &str) -> PyResult<bool> {
+        Self::detached(slf, |db| db.act_on_trigger(trigger_id))
     }
 
-    fn dismiss_trigger(&self, trigger_id: &str) -> PyResult<bool> {
-        let db = self.get_inner()?;
-        db.dismiss_trigger(trigger_id).map_err(map_err)
+    fn dismiss_trigger(slf: &Bound<'_, Self>, trigger_id: &str) -> PyResult<bool> {
+        Self::detached(slf, |db| db.dismiss_trigger(trigger_id))
     }
 
     #[pyo3(signature = (limit=10))]
-    fn get_pending_triggers(&self, py: Python<'_>, limit: usize) -> PyResult<Vec<PyObject>> {
-        let db = self.get_inner()?;
-        let triggers = db.get_pending_triggers(limit).map_err(map_err)?;
+    fn get_pending_triggers(slf: &Bound<'_, Self>, limit: usize) -> PyResult<Vec<PyObject>> {
+        let py = slf.py();
+        let triggers = Self::detached(slf, |db| db.get_pending_triggers(limit))?;
         triggers
             .iter()
             .map(|t| persisted_trigger_to_dict(py, t))
@@ -205,8 +201,7 @@ impl PyYantrikDB {
 
     #[pyo3(signature = (status=None, conflict_type=None, entity=None, priority=None, namespace=None, limit=50))]
     fn get_conflicts(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         status: Option<&str>,
         conflict_type: Option<&str>,
         entity: Option<&str>,
@@ -214,10 +209,10 @@ impl PyYantrikDB {
         namespace: Option<&str>,
         limit: usize,
     ) -> PyResult<Vec<PyObject>> {
-        let db = self.get_inner()?;
-        let conflicts = db
-            .get_conflicts(status, conflict_type, entity, priority, namespace, limit)
-            .map_err(map_err)?;
+        let py = slf.py();
+        let conflicts = Self::detached(slf, |db| {
+            db.get_conflicts(status, conflict_type, entity, priority, namespace, limit)
+        })?;
         conflicts.iter().map(|c| conflict_to_dict(py, c)).collect()
     }
 
@@ -231,18 +226,17 @@ impl PyYantrikDB {
 
     #[pyo3(signature = (conflict_id, strategy, winner_rid=None, new_text=None, resolution_note=None))]
     fn resolve_conflict(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         conflict_id: &str,
         strategy: &str,
         winner_rid: Option<&str>,
         new_text: Option<&str>,
         resolution_note: Option<&str>,
     ) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let result = db
-            .resolve_conflict(conflict_id, strategy, winner_rid, new_text, resolution_note)
-            .map_err(map_err)?;
+        let py = slf.py();
+        let result = Self::detached(slf, |db| {
+            db.resolve_conflict(conflict_id, strategy, winner_rid, new_text, resolution_note)
+        })?;
         let dict = PyDict::new(py);
         dict.set_item("conflict_id", &result.conflict_id)?;
         dict.set_item("strategy", &result.strategy)?;

@@ -433,9 +433,9 @@ impl PyYantrikDB {
     /// `pending_triggers`. Read-only and cheap; a reactive host (the MCP
     /// server) surfaces this to the calling LLM, which acts as the scheduler
     /// the passive engine deliberately does not own.
-    fn maintenance_debt(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let debt = db.maintenance_debt();
+    fn maintenance_debt(slf: &Bound<'_, Self>) -> PyResult<PyObject> {
+        let py = slf.py();
+        let debt = Self::detached(slf, |db| Ok(db.maintenance_debt()))?;
         let dict = PyDict::new(py);
         dict.set_item("writes_since_think", debt.writes_since_think)?;
         dict.set_item("last_think_at", debt.last_think_at)?;
@@ -458,7 +458,7 @@ impl PyYantrikDB {
     ))]
     #[allow(clippy::too_many_arguments)]
     fn session_digest(
-        &self,
+        slf: &Bound<'_, Self>,
         narrative_namespace: Option<String>,
         max_decisions: usize,
         max_conflicts: usize,
@@ -467,7 +467,6 @@ impl PyYantrikDB {
         namespace: Option<String>,
         include_superseded: bool,
     ) -> PyResult<String> {
-        let db = self.get_inner()?;
         let cfg = yantrikdb_core::SessionDigestConfig {
             narrative_namespace,
             // v0.9.3: optional content scope — decisions + conflicts filtered
@@ -481,7 +480,7 @@ impl PyYantrikDB {
             // stamped with current_status + superseded_by.
             include_superseded,
         };
-        let digest = db.session_digest(&cfg).map_err(map_err)?;
+        let digest = Self::detached(slf, |db| db.session_digest(&cfg))?;
         serde_json::to_string(&digest).map_err(|e| {
             // Never report "{}" for an operation that ran — the caller
             // cannot tell "ran, report lost" from "did nothing".
@@ -495,15 +494,14 @@ impl PyYantrikDB {
     /// Returns a JSON string with `new_records` and `status_transitions`.
     #[pyo3(signature = (since, namespace = None, snippet_chars = 240))]
     fn what_changed_since(
-        &self,
+        slf: &Bound<'_, Self>,
         since: f64,
         namespace: Option<&str>,
         snippet_chars: usize,
     ) -> PyResult<String> {
-        let db = self.get_inner()?;
-        let changes = db
-            .what_changed_since(since, namespace, snippet_chars)
-            .map_err(map_err)?;
+        let changes = Self::detached(slf, |db| {
+            db.what_changed_since(since, namespace, snippet_chars)
+        })?;
         serde_json::to_string(&changes).map_err(|e| {
             // Never report "{}" for an operation that ran — the caller
             // cannot tell "ran, report lost" from "did nothing".
@@ -515,14 +513,14 @@ impl PyYantrikDB {
     /// session summary into provisional candidate memories. Returns new rids.
     #[pyo3(signature = (summary, namespace = "default", domain = "general"))]
     fn draft_memories_from_summary(
-        &self,
+        slf: &Bound<'_, Self>,
         summary: &str,
         namespace: &str,
         domain: &str,
     ) -> PyResult<Vec<String>> {
-        let db = self.get_inner()?;
-        db.draft_memories_from_summary(summary, namespace, domain)
-            .map_err(map_err)
+        Self::detached(slf, |db| {
+            db.draft_memories_from_summary(summary, namespace, domain)
+        })
     }
 
     /// Auto-relate co-occurring entities to raise graph density (task 44).
@@ -543,28 +541,27 @@ impl PyYantrikDB {
     /// Returns the turn id.
     #[pyo3(signature = (namespace, role, content, max_turns = 10))]
     fn record_turn(
-        &self,
+        slf: &Bound<'_, Self>,
         namespace: &str,
         role: &str,
         content: &str,
         max_turns: usize,
     ) -> PyResult<i64> {
-        let db = self.get_inner()?;
-        db.record_turn(namespace, role, content, max_turns)
-            .map_err(map_err)
+        Self::detached(slf, |db| {
+            db.record_turn(namespace, role, content, max_turns)
+        })
     }
 
     /// The last `limit` turns for a namespace, oldest-first (ready to prepend
     /// to a prompt as recent context).
     #[pyo3(signature = (namespace, limit = 10))]
     fn recent_turns(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         namespace: &str,
         limit: usize,
     ) -> PyResult<Vec<PyObject>> {
-        let db = self.get_inner()?;
-        let turns = db.recent_turns(namespace, limit).map_err(map_err)?;
+        let py = slf.py();
+        let turns = Self::detached(slf, |db| db.recent_turns(namespace, limit))?;
         turns
             .iter()
             .map(|t| {
@@ -578,9 +575,8 @@ impl PyYantrikDB {
     }
 
     /// Clear a namespace's conversation buffer. Returns rows removed.
-    fn clear_turns(&self, namespace: &str) -> PyResult<usize> {
-        let db = self.get_inner()?;
-        db.clear_turns(namespace).map_err(map_err)
+    fn clear_turns(slf: &Bound<'_, Self>, namespace: &str) -> PyResult<usize> {
+        Self::detached(slf, |db| db.clear_turns(namespace))
     }
 
     /// Surface knowledge gaps — frequently-asked, poorly-answered queries the
@@ -593,17 +589,16 @@ impl PyYantrikDB {
     /// encrypted databases (demand capture is disabled there).
     #[pyo3(signature = (min_count = 3, max_avg_top_score = 0.4, limit = 20, namespace = None))]
     fn knowledge_gaps(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         min_count: u64,
         max_avg_top_score: f64,
         limit: usize,
         namespace: Option<&str>,
     ) -> PyResult<Vec<PyObject>> {
-        let db = self.get_inner()?;
-        let gaps = db
-            .knowledge_gaps(namespace, min_count, max_avg_top_score, limit)
-            .map_err(map_err)?;
+        let py = slf.py();
+        let gaps = Self::detached(slf, |db| {
+            db.knowledge_gaps(namespace, min_count, max_avg_top_score, limit)
+        })?;
         gaps.iter()
             .map(|g| {
                 let d = PyDict::new(py);
@@ -620,54 +615,49 @@ impl PyYantrikDB {
     /// Create a task/chore in a namespace. Returns the new task id. (v0.9.0)
     #[pyo3(signature = (namespace, title, priority = "medium", parent_id = None))]
     fn task_add(
-        &self,
+        slf: &Bound<'_, Self>,
         namespace: &str,
         title: &str,
         priority: &str,
         parent_id: Option<&str>,
     ) -> PyResult<String> {
-        let db = self.get_inner()?;
-        db.task_add(namespace, title, priority, parent_id)
-            .map_err(map_err)
+        Self::detached(slf, |db| db.task_add(namespace, title, priority, parent_id))
     }
 
     /// Update a task's status and/or priority. Returns whether it existed.
     #[pyo3(signature = (id, status = None, priority = None))]
     fn task_update(
-        &self,
+        slf: &Bound<'_, Self>,
         id: &str,
         status: Option<&str>,
         priority: Option<&str>,
     ) -> PyResult<bool> {
-        let db = self.get_inner()?;
-        db.task_update(id, status, priority).map_err(map_err)
+        Self::detached(slf, |db| db.task_update(id, status, priority))
     }
 
     /// List tasks in a namespace, optionally filtered by status, priority-ordered.
     #[pyo3(signature = (namespace, status = None))]
     fn task_list(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         namespace: &str,
         status: Option<&str>,
     ) -> PyResult<Vec<PyObject>> {
-        let db = self.get_inner()?;
-        let tasks = db.task_list(namespace, status).map_err(map_err)?;
+        let py = slf.py();
+        let tasks = Self::detached(slf, |db| db.task_list(namespace, status))?;
         tasks.iter().map(|t| task_to_dict(py, t)).collect()
     }
 
     /// Get one task by id, or None.
-    fn task_get(&self, py: Python<'_>, id: &str) -> PyResult<Option<PyObject>> {
-        let db = self.get_inner()?;
-        match db.task_get(id).map_err(map_err)? {
+    fn task_get(slf: &Bound<'_, Self>, id: &str) -> PyResult<Option<PyObject>> {
+        let py = slf.py();
+        match Self::detached(slf, |db| db.task_get(id))? {
             Some(t) => Ok(Some(task_to_dict(py, &t)?)),
             None => Ok(None),
         }
     }
 
     /// Delete a task. Returns whether a row was removed.
-    fn task_delete(&self, id: &str) -> PyResult<bool> {
-        let db = self.get_inner()?;
-        db.task_delete(id).map_err(map_err)
+    fn task_delete(slf: &Bound<'_, Self>, id: &str) -> PyResult<bool> {
+        Self::detached(slf, |db| db.task_delete(id))
     }
 }

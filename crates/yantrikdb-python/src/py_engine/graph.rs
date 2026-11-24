@@ -5,7 +5,7 @@ type PyObject = pyo3::Py<pyo3::PyAny>;
 
 use crate::py_types::*;
 
-use super::{map_err, PyYantrikDB};
+use super::{map_err, run_detached, PyYantrikDB};
 
 #[pymethods]
 impl PyYantrikDB {
@@ -17,12 +17,14 @@ impl PyYantrikDB {
     /// inferred. Raises on an unknown/inactive memory or a batch over the
     /// cap; per-claim problems are reported, never raised.
     fn attach_claims(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         memory_rid: &str,
         claims: Vec<Bound<'_, PyDict>>,
     ) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
+        let py = slf.py();
+        // Closed before anything else, as when the whole call ran under one
+        // borrow: a closed store reports that, not a malformed claim.
+        let db = Self::engine_handle(slf)?;
         let mut stated = Vec::with_capacity(claims.len());
         for d in &claims {
             let pick = |keys: &[&str]| -> PyResult<Option<String>> {
@@ -59,7 +61,7 @@ impl PyYantrikDB {
                 valid_to: window("valid_to")?,
             });
         }
-        let report = db.attach_claims(memory_rid, &stated).map_err(map_err)?;
+        let report = run_detached(py, db, |db| db.attach_claims(memory_rid, &stated))?;
         let val = serde_json::to_value(&report)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         json_to_py(py, &val)
@@ -86,9 +88,14 @@ impl PyYantrikDB {
     }
 
     #[pyo3(signature = (src, dst, rel_type="related_to", weight=1.0))]
-    fn relate(&self, src: &str, dst: &str, rel_type: &str, weight: f64) -> PyResult<String> {
-        let db = self.get_inner()?;
-        db.relate(src, dst, rel_type, weight).map_err(map_err)
+    fn relate(
+        slf: &Bound<'_, Self>,
+        src: &str,
+        dst: &str,
+        rel_type: &str,
+        weight: f64,
+    ) -> PyResult<String> {
+        Self::detached(slf, |db| db.relate(src, dst, rel_type, weight))
     }
 
     fn get_edges(&self, py: Python<'_>, entity: &str) -> PyResult<Vec<PyObject>> {
@@ -115,16 +122,13 @@ impl PyYantrikDB {
 
     #[pyo3(signature = (pattern=None, entity_type=None, limit=20))]
     fn search_entities(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         pattern: Option<&str>,
         entity_type: Option<&str>,
         limit: usize,
     ) -> PyResult<Vec<PyObject>> {
-        let db = self.get_inner()?;
-        let entities = db
-            .search_entities(pattern, entity_type, limit)
-            .map_err(map_err)?;
+        let py = slf.py();
+        let entities = Self::detached(slf, |db| db.search_entities(pattern, entity_type, limit))?;
         entities.iter().map(|e| entity_to_dict(py, e)).collect()
     }
 

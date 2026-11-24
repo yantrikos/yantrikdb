@@ -170,11 +170,10 @@ def test_witness_sees_a_call_that_releases_the_gil():
 
 
 def test_witness_sees_nothing_through_a_binding_that_holds_the_gil(db):
-    # A binding that still runs under the GIL, so the witness is checked on the
-    # real extension too, not only on pure Python. If this binding is ever
-    # detached, pick another that is not.
-    rid = db.record("a record to read back")
-    assert _seen_during(lambda: db.get(rid)) == 0
+    # A binding that runs under the GIL, so the witness is checked on the real
+    # extension too, not only on pure Python. has_embedder() reads two fields
+    # and touches no store, so it has no reason ever to be detached.
+    assert _seen_during(lambda: db.has_embedder()) == 0
 
 
 # ── the bindings #271 has detached so far ───────────────────────────────
@@ -271,18 +270,19 @@ def test_close_with_nothing_in_flight_closes(db):
 
 
 def test_close_while_recall_is_inside_encode(db):
-    # close() mid-call drops the wrapper's handle and reports False, because
-    # the in-flight recall() still holds the engine; it finishes on that
-    # reference, and the engine closes when it goes.
+    # recall() runs the Python embedder's encode() before it takes the
+    # engine (#302 review 4), so a close() landing then is the exclusive
+    # close (True), and the recall reports the store closed, as if close()
+    # had come first. Before, the recall held the engine through encode():
+    # close() returned False and the recall finished on that reference.
     emb, t, out = _recall_in_a_thread_blocked_in_encode(db)
     try:
-        assert db.close() is False
+        assert db.close() is True
     finally:
         emb.release.set()
         t.join(30)
     assert not t.is_alive()
-    assert "error" not in out, out.get("error")
-    assert out["results"]
+    assert "closed" in out.get("error", ""), out
 
 
 def test_close_under_write_load_keeps_other_threads_running(tmp_path):
@@ -317,10 +317,296 @@ def test_close_under_write_load_keeps_other_threads_running(tmp_path):
         stop.set()
         t.join()
         worst = max(gaps)
-        if took < 0.04:
+        if took < 0.06:
             continue  # too quick to tell a held GIL from a released one
-        assert worst < took / 2, (
+        # Held, the ticker stalls for the whole close (99-100% of it on the
+        # previous build); released, its gaps are scheduling noise, which on
+        # a loaded macOS runner reached half of a 50 ms close.
+        assert worst < took * 0.75, (
             f"the ticker stalled {worst * 1000:.0f} ms during a {took * 1000:.0f} ms close()"
         )
         return
     pytest.skip("close() never took long enough to measure on this machine")
+
+
+# ── coverage: every public method is witnessed or listed as holding ─────
+#
+# A method that reaches SQLite and holds the GIL can stop every Python thread
+# in the host for up to busy_timeout (5 s) while another thread, or another
+# process, holds the write lock: duration is not the criterion, touching the
+# store is. So every public method is either in RELEASES, with a witness test,
+# or in HOLDS, with the reason it still holds. A new method fails
+# test_every_public_method_is_classified until someone decides which.
+
+
+def _swallow(fn, *args, **kwargs):
+    # For calls that fail on purpose (an unknown id): the failure comes back
+    # from inside the detached call, so the GIL was still given up.
+    try:
+        fn(*args, **kwargs)
+    except Exception:  # noqa: BLE001
+        pass
+
+
+RELEASES = {
+    # detached before this sweep (their own tests are above)
+    "recall": None,
+    "think": None,
+    "stats": None,
+    "scan_conflicts": None,
+    # stops the workers and closes SQLite detached; its witness is
+    # test_close_under_write_load_keeps_other_threads_running above (one
+    # call per store, so it cannot run in the loop below)
+    "close": None,
+    # memory
+    "recall_as_of": lambda db, c: db.recall_as_of(time.time() + 60, query="topic 3"),
+    "record_text": lambda db, c: db.record_text("witness record_text"),
+    "recall_text": lambda db, c: db.recall_text("topic 3", 5),
+    "recall_with_response": lambda db, c: db.recall_with_response(query="topic 3"),
+    "recall_refine": lambda db, c: db.recall_refine(c["q"], refinement_text="thing 2"),
+    "query": lambda db, c: db.query(query="topic 3"),
+    "get": lambda db, c: db.get(c["rid"]),
+    "get_memory": lambda db, c: db.get_memory(c["rid"]),
+    "forget": lambda db, c: db.forget("no-such-rid"),
+    "list_memories": lambda db, c: db.list_memories(limit=10),
+    "list_records": lambda db, c: db.list_records(limit=10),
+    "chain_head": lambda db, c: db.chain_head("default"),
+    "record_batch": lambda db, c: db.record_batch([{"text": "witness batch"}]),
+    "embed": None,  # engine-embedder path; its own test below
+    # sync
+    "maintenance_debt": lambda db, c: db.maintenance_debt(),
+    "session_digest": lambda db, c: db.session_digest(),
+    "what_changed_since": lambda db, c: db.what_changed_since(0.0),
+    # Raises here: the engine embeds the drafts itself and cannot reach a
+    # Python embedder (pre-existing; #271 follow-up). The error comes back
+    # from inside the detached call.
+    "draft_memories_from_summary": lambda db, c: _swallow(
+        db.draft_memories_from_summary, "We decided to ship on Friday."
+    ),
+    "record_turn": lambda db, c: db.record_turn("default", "user", "hello"),
+    "recent_turns": lambda db, c: db.recent_turns("default"),
+    "clear_turns": lambda db, c: db.clear_turns("default"),
+    "knowledge_gaps": lambda db, c: db.knowledge_gaps(),
+    "task_add": lambda db, c: db.task_add("default", "witness task"),
+    "task_update": lambda db, c: db.task_update(c["task"], status="done"),
+    "task_list": lambda db, c: db.task_list("default"),
+    "task_get": lambda db, c: db.task_get(c["task"]),
+    "task_delete": lambda db, c: db.task_delete("no-such-task"),
+    # graph
+    "relate": lambda db, c: db.relate("alice", "acme", "works_at"),
+    "attach_claims": lambda db, c: _swallow(
+        db.attach_claims, c["rid"], [{"src": "alice", "rel_type": "works_at", "dst": "acme"}]
+    ),
+    "search_entities": lambda db, c: db.search_entities("ali"),
+    # conflicts and triggers
+    "get_conflicts": lambda db, c: db.get_conflicts(),
+    "resolve_conflict": lambda db, c: _swallow(db.resolve_conflict, "no-such-conflict", "keep_a"),
+    "get_pending_triggers": lambda db, c: db.get_pending_triggers(),
+    "deliver_trigger": lambda db, c: _swallow(db.deliver_trigger, "no-such-trigger"),
+    "acknowledge_trigger": lambda db, c: _swallow(db.acknowledge_trigger, "no-such-trigger"),
+    "act_on_trigger": lambda db, c: _swallow(db.act_on_trigger, "no-such-trigger"),
+    "dismiss_trigger": lambda db, c: _swallow(db.dismiss_trigger, "no-such-trigger"),
+    # packs and identity
+    "trusted_publishers": lambda db, c: db.trusted_publishers(),
+    "embedder_identity": lambda db, c: db.embedder_identity(),
+}
+
+# Detached, but not witnessable offline: see the module docstring's limit.
+UNWITNESSED = {
+    "set_embedder_named": (
+        "the fetch (download on first use, load from the cache after) runs "
+        "detached, but offline an unknown name fails within a microsecond or "
+        "two inside the detach, and a real fetch needs the network or a "
+        "cached model; the wait for exclusive access and stopping the workers "
+        "run detached too, and only the swap and restarting the workers hold it"
+    ),
+}
+
+_FOLLOW_UP = "not yet detached: #271 follow-up"
+
+HOLDS = {
+    # no store involved
+    "with_default": "constructor",
+    "convert_pack": "static helper: no store",
+    "generate_pack_keypair": "static helper: no store",
+    "pubkey_of": "static helper: no store",
+    "read_pack_manifest": "static helper: no store",
+    "sign_bytes": "static helper: no store",
+    "sign_pack": "static helper: no store",
+    "verify_bytes": "static helper: no store",
+    # calls Python before it reaches the store, so the GIL stays held
+    "set_embedder": (
+        "its probe and identity check call the Python embedder; #295 "
+        "released the wrapper's borrow there, not the GIL"
+    ),
+    # in flight in their own PRs
+    "correct": "#296",
+    "record": "#297",
+}
+HOLDS.update(
+    {
+        name: _FOLLOW_UP
+        for name in """
+        active_session adopt_embedder_identity apply_ops archive audit_leak_candidates
+        audit_synthesis_evidence auto_relate auto_resolve_conflicts backfill_memory_entities
+        claim_chain_gate_mode claims_for_memory decay derive_personality detect_embedder_window
+        dismiss_conflict entity_profile evict extract_ops_since extract_standing_instructions
+        extraction_refusal_counts extraction_refusals extraction_silver_recall
+        finalize_rollup_outcome foreign_sqlite_detected foreign_sqlite_mode
+        forget_learned_relation_patterns get_claims get_conflict get_edges get_patterns
+        get_peer_watermark get_personality get_trigger_history has_embedder history hydrate
+        install_pack installed_packs integrity_check last_learning_report
+        last_maintenance_cycle learn_category_members learned_relation_patterns
+        learned_weights link link_memory_entity linked_records maintain_source_turn_backfill
+        memory_entities mount_pack mounted_packs note_rollup_expansion
+        note_rollup_expansion_features note_rollup_impression note_rollup_impression_features
+        note_rollup_selection oplog_plaintext_rows pack_context pack_context_for pack_dir
+        procedural_stats provenance_gate_mode prune_triggers rebuild_graph_index
+        rebuild_vec_index recalibrate_unused_importance recall_facets recall_feedback
+        recall_from_packs_for recall_thread recall_thread_v2 recall_with_links
+        rechunk_long_records reclassify_conflict record_procedural record_with_links
+        record_with_links_partial reembed reextract_claims reextract_entities
+        refresh_embeddings reify_supersedes_links reinforce_procedural reject_recalled
+        relationship_depth remount_installed repair_tool_call_artifacts
+        reset_category_to_seed revision_history rollup_membership_examples
+        rollup_membership_report rollup_outcome_examples rollup_outcome_report run_learning
+        run_maintenance_cycle seal_pack session_abandon_stale session_end session_history
+        session_start set_claim_chain_gate_mode set_foreign_sqlite_mode set_peer_watermark
+        set_personality_trait set_provenance_gate_mode set_status_read_policy
+        set_synthesis_fanout_cap skill_outcome_count split_oversized_episodes stale
+        status_read_policy substitution_categories substitution_members surface_procedural
+        synthesis_fanout_cap trust_publisher uninstall_pack unlink unmount_all_packs
+        unmount_pack untrust_publisher upcoming
+        """.split()
+    }
+)
+
+
+def test_every_public_method_is_classified():
+    public = {
+        n for n in dir(YantrikDB) if not n.startswith("_") and callable(getattr(YantrikDB, n))
+    }
+    lists = {"RELEASES": set(RELEASES), "UNWITNESSED": set(UNWITNESSED), "HOLDS": set(HOLDS)}
+    names = list(lists)
+    for i, a in enumerate(names):
+        for b in names[i + 1 :]:
+            both = lists[a] & lists[b]
+            assert not both, f"listed in {a} AND {b}: {sorted(both)}"
+    classified = set().union(*lists.values())
+    unclassified = public - classified
+    assert not unclassified, (
+        f"new public methods must go in RELEASES (with a witness), UNWITNESSED or HOLDS: "
+        f"{sorted(unclassified)}"
+    )
+    stale = classified - public
+    assert not stale, f"listed but no longer public: {sorted(stale)}"
+
+
+@pytest.fixture
+def small_db(tmp_path):
+    store = YantrikDB(os.path.join(str(tmp_path), "coverage.db"), DIM)
+    store.set_embedder(Emb(), allow_unverified_embedder=True)
+    rids = [store.record(f"record {i} about topic {i % 11}") for i in range(60)]
+    ctx = {"rid": rids[0], "q": Emb().encode("topic 3")}
+    ctx["task"] = store.task_add("default", "a task to update")
+    yield store, ctx
+    store.close()
+
+
+@needs_a_second_cpu
+@pytest.mark.parametrize("name", sorted(n for n, call in RELEASES.items() if call is not None))
+def test_binding_releases_the_gil(small_db, name):
+    db, ctx = small_db
+    call = RELEASES[name]
+    assert _seen_during(lambda: call(db, ctx)) >= 1, f"{name}() held the GIL"
+
+
+@needs_a_second_cpu
+def test_embed_with_the_engine_embedder_releases_the_gil(tmp_path):
+    store = YantrikDB(os.path.join(str(tmp_path), "native-embed.db"), 64)
+    try:
+        if not store.has_embedder():
+            pytest.skip("this build has no bundled engine embedder")
+        assert _seen_during(lambda: store.embed("some text to embed")) >= 1
+    finally:
+        store.close()
+
+
+# ── a closed store says so before it judges the arguments ───────────────
+#
+# Before the sweep a method checked for a closed store as it took its borrow,
+# before reading its arguments. A detached method reads them first, so each one
+# here must take its engine handle before it parses anything.
+
+CLOSED_FIRST = {
+    "attach_claims": lambda db: db.attach_claims("some-rid", [{"rel_type": "works_at"}]),
+}
+
+
+@pytest.mark.parametrize("name", sorted(CLOSED_FIRST))
+def test_a_closed_store_is_reported_before_a_bad_argument(tmp_path, name):
+    store = YantrikDB(os.path.join(str(tmp_path), "closed.db"), DIM)
+    store.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        CLOSED_FIRST[name](store)
+
+
+# ── HOLDS entries that open PRs will change ──────────────────────────────
+#
+# correct and record are being detached in their own PRs. Until
+# those merge they must still hold the GIL; once one does, this fails, and the
+# method moves from HOLDS to RELEASES with a witness entry.
+
+OWNED_BY_OPEN_PRS = {
+    "correct": ("#296", lambda db, c: db.correct(c["rid"], "witness", new_importance=0.7)),
+    "record": ("#297", lambda db, c: db.record("witness record")),
+}
+
+
+@pytest.mark.parametrize("name", sorted(OWNED_BY_OPEN_PRS))
+def test_bindings_owned_by_open_prs_still_hold_the_gil(small_db, name):
+    pr, call = OWNED_BY_OPEN_PRS[name]
+    db, ctx = small_db
+    assert name in HOLDS
+    seen = _seen_during(lambda: call(db, ctx), attempts=200)
+    assert seen == 0, (
+        f"{name}() now releases the GIL: whoever merged {pr} should move it from "
+        f"HOLDS to RELEASES with a witness entry, and drop it here"
+    )
+
+
+# ── the other shapes of bindings witnessed above ─────────────────────────
+
+
+@needs_a_second_cpu
+def test_recall_text_with_explain_releases_the_gil(small_db):
+    db, _ = small_db
+    assert _seen_during(lambda: db.recall_text("topic 3", 5, explain=True)) >= 1
+
+
+ENGINE_EMBEDDER_RELEASES = {
+    "record_text": lambda db: db.record_text("witness record_text, engine embedder"),
+    "record_batch": lambda db: db.record_batch([{"text": "witness batch, engine embedder"}]),
+    "query": lambda db: db.query(query="engine embedder query"),
+}
+
+
+@pytest.fixture
+def engine_embedder_db(tmp_path):
+    # 64 dims: the engine attaches its bundled embedder, and no Python
+    # embedder is set, so these calls take the engine-embedder route.
+    store = YantrikDB(os.path.join(str(tmp_path), "native.db"), 64)
+    if not store.has_embedder():
+        store.close()
+        pytest.skip("this build has no bundled engine embedder")
+    for i in range(40):
+        store.record_text(f"native record {i} about topic {i % 7}")
+    yield store
+    store.close()
+
+
+@needs_a_second_cpu
+@pytest.mark.parametrize("name", sorted(ENGINE_EMBEDDER_RELEASES))
+def test_engine_embedder_paths_release_the_gil(engine_embedder_db, name):
+    call = ENGINE_EMBEDDER_RELEASES[name]
+    assert _seen_during(lambda: call(engine_embedder_db)) >= 1, f"{name}() held the GIL"

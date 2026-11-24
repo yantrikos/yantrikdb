@@ -25,6 +25,10 @@ use crate::py_types::*;
 pub struct PyYantrikDB {
     pub(crate) inner: Option<Arc<YantrikDB>>,
     pub(crate) embedder: Option<PyObject>,
+    /// Bumped whenever `embedder` is replaced (`set_embedder`). A binding
+    /// that planned its vector with one Python embedder checks it before it
+    /// uses the vector (`planned`).
+    embedder_epoch: u64,
     /// Background worker pool (materializers + compactor). MUST be held for the
     /// engine's lifetime: without the compactor the in-memory delta tier fills
     /// to `delta_max` (256) and every subsequent write returns Backpressure
@@ -32,7 +36,77 @@ pub struct PyYantrikDB {
     /// these, wedging any long write session (e.g. writing a full novel) after
     /// ~256 records. Dropped with the struct → Weak<YantrikDB> upgrade fails →
     /// workers shut down cleanly.
-    pub(crate) _workers: Option<AllWorkerGuards>,
+    ///
+    /// Held behind its own lock, not the wrapper's borrow: `set_embedder_named`
+    /// and `close()` stop and restart it while other threads may hold the
+    /// wrapper's borrow, and a restart that needed that borrow could be
+    /// refused and skipped, leaving the store without workers (#302 review 3).
+    pub(crate) workers: Arc<WorkerPool>,
+    /// Set while `set_embedder_named` waits for exclusive access to the
+    /// engine. Calls that take an engine snapshot wait (with the GIL
+    /// released) while it is set, so steady traffic cannot keep the engine
+    /// shared forever; in-flight calls finish normally. See
+    /// [`PyYantrikDB::snapshot_borrow`].
+    pub(crate) swap_pending: Arc<std::sync::atomic::AtomicBool>,
+    /// Held by the one `set_embedder_named` running on this wrapper: swaps
+    /// take turns (#302 review 4). Only that method uses it, so the slim
+    /// build (`--no-default-features`) has none.
+    #[cfg(feature = "embedder-download")]
+    swap_turn: Arc<std::sync::atomic::AtomicBool>,
+    /// Tests only (`_inject_swap_panic`): the next swap panics just before
+    /// it installs the new embedder, where the workers are stopped.
+    inject_swap_panic: bool,
+}
+
+/// The wrapper's background worker pool (materializers + compactor), with
+/// its own lock so it can be stopped and restarted without the wrapper's
+/// borrow.
+pub(crate) struct WorkerPool {
+    guards: std::sync::Mutex<Option<AllWorkerGuards>>,
+    /// How many pools have been spawned. Read by the tests
+    /// (`_worker_spawns`): a swap that waits must not restart the pool on
+    /// every try.
+    spawns: std::sync::atomic::AtomicU64,
+}
+
+impl WorkerPool {
+    /// A pool already running against `engine`.
+    fn running(engine: &Arc<YantrikDB>) -> Arc<Self> {
+        Arc::new(Self {
+            guards: std::sync::Mutex::new(Some(spawn_all_workers(
+                engine,
+                recommended_worker_count(),
+            ))),
+            spawns: std::sync::atomic::AtomicU64::new(1),
+        })
+    }
+
+    fn guards(&self) -> std::sync::MutexGuard<'_, Option<AllWorkerGuards>> {
+        // A panic while the lock was held leaves the Option intact.
+        self.guards.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Take the running workers out. Dropping what this returns stops them
+    /// (it joins the threads, a materializer mid-drain included), so drop it
+    /// with the GIL released.
+    fn take(&self) -> Option<AllWorkerGuards> {
+        self.guards().take()
+    }
+
+    /// Whether workers are running (tests only, through `_workers_running`).
+    fn is_running(&self) -> bool {
+        self.guards().is_some()
+    }
+
+    /// Start workers against `engine` unless some are running.
+    fn ensure_running(&self, engine: &Arc<YantrikDB>) {
+        let mut guards = self.guards();
+        if guards.is_none() {
+            *guards = Some(spawn_all_workers(engine, recommended_worker_count()));
+            self.spawns
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 impl PyYantrikDB {
@@ -41,11 +115,16 @@ impl PyYantrikDB {
     /// "don't forget the compactor" rule for the Python binding.
     pub(crate) fn from_engine(inner: YantrikDB, embedder: Option<PyObject>) -> Self {
         let inner = Arc::new(inner);
-        let workers = spawn_all_workers(&inner, recommended_worker_count());
+        let workers = WorkerPool::running(&inner);
         Self {
             inner: Some(inner),
             embedder,
-            _workers: Some(workers),
+            embedder_epoch: 0,
+            workers,
+            swap_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(feature = "embedder-download")]
+            swap_turn: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            inject_swap_panic: false,
         }
     }
 
@@ -175,18 +254,6 @@ impl PyYantrikDB {
                      new space; or pass allow_unverified_embedder=True if you accept the risk."
                 )))
             }
-        }
-    }
-
-    /// (Re)spawn the background worker pool against the live engine `Arc`.
-    /// Paired with `self._workers = None` (which drops the guards and JOINs
-    /// the worker threads) around any operation that needs exclusive
-    /// `Arc::get_mut` access — the workers hold `Weak<YantrikDB>` refs, and
-    /// `get_mut` requires weak count 0. No-op if the engine is closed.
-    #[cfg(feature = "embedder-download")]
-    fn respawn_workers(&mut self) {
-        if let Some(arc) = self.inner.as_ref() {
-            self._workers = Some(spawn_all_workers(arc, recommended_worker_count()));
         }
     }
 }
@@ -638,7 +705,9 @@ impl PyYantrikDB {
             .check_embedder_identity(py, &embedder, allow_unverified_embedder)?;
 
         // Phase 3, mutable borrow for the store alone — one field
-        // assignment, no Python call inside it. A close() can now land
+        // assignment, no Python call inside it. The embedder it replaces is
+        // dropped after the borrow ends: dropping it can run its __del__,
+        // which may call back into this store. A close() can now land
         // between validation and the store, so re-check the engine is
         // still there. This changes behaviour: on main, set_embedder()
         // on a closed wrapper returned None, because
@@ -647,11 +716,15 @@ impl PyYantrikDB {
         // wrapper must not look like success. (has_embedder() is not
         // the concern here: it goes through get_inner()? and already
         // raises on a closed wrapper.)
-        let mut borrowed = slf.try_borrow_mut()?;
-        if borrowed.inner.is_none() {
-            return Err(PyRuntimeError::new_err("YantrikDB is closed"));
-        }
-        borrowed.embedder = Some(embedder);
+        let previous = {
+            let mut borrowed = slf.try_borrow_mut()?;
+            if borrowed.inner.is_none() {
+                return Err(PyRuntimeError::new_err("YantrikDB is closed"));
+            }
+            borrowed.embedder_epoch += 1;
+            borrowed.embedder.replace(embedder)
+        };
+        drop(previous);
         Ok(())
     }
 
@@ -685,39 +758,212 @@ impl PyYantrikDB {
     ///
     /// Raises `RuntimeError` if the wheel was built with
     /// `--no-default-features` (the `embedder-download` Cargo feature is
-    /// off) or if exclusive access to the engine isn't available (e.g.
-    /// any `_conn` proxy is still live — drop it first).
+    /// off), or if exclusive access to the engine is still unavailable
+    /// after 10 seconds: another thread's call on this database never
+    /// finished, or a `_conn` proxy or cloned reference is still alive.
     #[cfg(feature = "embedder-download")]
-    fn set_embedder_named(&mut self, name: &str) -> PyResult<()> {
-        if self.inner.is_none() {
+    fn set_embedder_named(slf: &Bound<'_, Self>, name: &str) -> PyResult<()> {
+        if slf.try_borrow()?.inner.is_none() {
             return Err(PyRuntimeError::new_err("YantrikDB is closed"));
         }
+        // #271: fetch() downloads the model on first use (tens of MB),
+        // verifies its SHA-256 and loads it, from the cache on later calls.
+        // All of that runs with no borrow of the wrapper and the GIL
+        // released, so every other thread keeps running and keeps using
+        // this store. The swap below waits for exclusive access with the
+        // GIL released too; it holds the GIL only for the engine swap
+        // itself and to restart the workers' handles. The workers are
+        // stopped (joined) with the GIL released.
+        let downloaded = slf
+            .py()
+            .detach(|| yantrikdb_core::embedder::DownloadedEmbedder::fetch(name))
+            .map_err(map_err)?;
+
         // The engine swap needs exclusive (`&mut`) access via `Arc::get_mut`,
-        // which requires strong count 1 AND weak count 0. Since v0.9.0 the
-        // constructors spawn a background worker pool (materializer + compactor)
-        // whose threads hold `Weak<YantrikDB>` refs (issue #58) — those alone
-        // make `get_mut` return `None`. So stop the workers first: dropping the
-        // guards JOINs the threads, releasing their weak refs. Respawn after the
-        // swap (success or failure) so the engine keeps its compactor — without
-        // it, writes wedge at delta_max. This is an infrequent, operator-
-        // initiated call, so the brief worker pause is acceptable.
-        self._workers = None;
-
-        let swap = {
-            let arc = self.inner.as_mut().expect("checked is_some above");
-            match Arc::get_mut(arc) {
-                Some(engine) => engine.set_embedder_named(name).map_err(map_err),
-                // A real external clone is still live (e.g. a ConnectionProxy or
-                // a cloned YantrikDB) — the original, legitimate guard. Preserve
-                // its actionable message.
-                None => Err(PyRuntimeError::new_err(
-                    "set_embedder_named requires exclusive access to the engine; \
-                     drop any ConnectionProxy / cloned YantrikDB references before calling",
-                )),
+        // which requires strong count 1 AND weak count 0. The background
+        // workers (materializers + compactor) hold `Weak<YantrikDB>` refs
+        // (issue #58), which alone make `get_mut` return `None`, so they are
+        // stopped for the swap itself. Not for the wait: the calls the swap
+        // waits for can need them (a write past delta_max waits on the
+        // compactor), and stopping and restarting them on every try started
+        // a pool every ~1.5 ms.
+        //
+        // Every detached call holds a strong ref while it runs. Under the GIL
+        // those calls had finished before this one started; now they overlap,
+        // and steady traffic keeps starting new ones. So raise the swap gate:
+        // new calls wait at their engine snapshot (`snapshot_borrow`) while
+        // the ones in flight finish, and this call waits, with no borrow held,
+        // the GIL released and the workers running, until only the wrapper
+        // holds the engine. Then it stops the workers, takes the wrapper's
+        // mutable borrow and swaps. If the engine was taken again in between,
+        // or another thread holds the wrapper's borrow (a call inside a
+        // Python embedder's encode()), it restarts the workers and waits on,
+        // trying again at most every 50 ms. Past the deadline the holder is
+        // most likely a `_conn` proxy or a cloned reference, which no wait
+        // releases.
+        //
+        // The swap holds no reference to the engine, not even a Weak: it
+        // reads the strong count through the wrapper's own Arc on each try.
+        // A Weak held across the wait blocks `get_mut` too, so two swaps
+        // pending at once each blocked the other until both deadlines ran
+        // out. Swaps on one wrapper also take turns (`swap_turn`), the second
+        // waiting with the GIL released (#302 review 4).
+        //
+        // The workers are restarted on every way out (`Restart`), an early
+        // `?` and a panic included, from their own pool, which needs no
+        // borrow of the wrapper: a store left without workers wedges at
+        // delta_max (256 writes) (#302 review 3).
+        const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+        const RETRY_EVERY: std::time::Duration = std::time::Duration::from_millis(50);
+        const BORROW_FOR: std::time::Duration = std::time::Duration::from_millis(10);
+        struct LowerGate(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for LowerGate {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::Release);
             }
+        }
+        /// Gives up this wrapper's swap turn when dropped.
+        struct EndTurn(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for EndTurn {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::Release);
+            }
+        }
+        /// Restarts stopped workers when dropped, from the wrapper's current
+        /// engine, unless the wrapper is closed. It needs no reference of its
+        /// own to the engine, so it can restart them from anywhere in the
+        /// swap, a panic while the new embedder is installed included.
+        struct Restart<'a, 'py> {
+            slf: &'a Bound<'py, PyYantrikDB>,
+            pool: Arc<WorkerPool>,
+        }
+        impl Restart<'_, '_> {
+            fn now(&self) {
+                let this = retry_until(self.slf.py(), std::time::Duration::from_secs(1), || {
+                    self.slf.try_borrow()
+                });
+                if let Some(engine) = this.ok().and_then(|this| this.inner.clone()) {
+                    self.pool.ensure_running(&engine);
+                }
+            }
+        }
+        impl Drop for Restart<'_, '_> {
+            fn drop(&mut self) {
+                self.now();
+            }
+        }
+        let (pool, gate_flag, turn) = {
+            let this = Self::borrow_briefly(slf)?;
+            if this.inner.is_none() {
+                return Err(PyRuntimeError::new_err("YantrikDB is closed"));
+            }
+            (
+                this.workers.clone(),
+                this.swap_pending.clone(),
+                this.swap_turn.clone(),
+            )
         };
+        // Another swap on this wrapper finishes first; its own deadline
+        // bounds this wait.
+        while turn
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err()
+        {
+            slf.py()
+                .detach(|| std::thread::sleep(std::time::Duration::from_millis(1)));
+        }
+        let _turn = EndTurn(turn);
+        gate_flag.store(true, std::sync::atomic::Ordering::Release);
+        let gate = LowerGate(gate_flag);
+        let restart = Restart { slf, pool };
 
-        self.respawn_workers();
+        let mut downloaded = Some(downloaded);
+        let deadline = std::time::Instant::now() + WAIT;
+        let mut last_try: Option<std::time::Instant> = None;
+        // What stood in the way last: the wrapper's borrow (held by another
+        // thread) rather than another holder of the engine. The timeout
+        // message names it.
+        let mut borrow_blocked = false;
+        let swap = loop {
+            let now = std::time::Instant::now();
+            let late = now >= deadline;
+            // Look at the engine through the wrapper. A close() that landed
+            // meanwhile has settled the workers for whatever still holds the
+            // engine (it restarts them when a proxy or a call keeps it
+            // alive): stop nothing and restart nothing (#302 review 4). A
+            // mutable borrow held elsewhere: not this time.
+            let holders = match slf.try_borrow() {
+                Ok(this) => match this.inner.as_ref() {
+                    None => break Err(PyRuntimeError::new_err("YantrikDB is closed")),
+                    Some(arc) => Some(Arc::strong_count(arc)),
+                },
+                Err(_) => None,
+            };
+            let quiet = holders.is_some_and(|n| n <= 1);
+            match holders {
+                None => borrow_blocked = true,
+                Some(n) if n > 1 => borrow_blocked = false,
+                Some(_) => {}
+            }
+            let due = last_try.is_none_or(|t| now.duration_since(t) >= RETRY_EVERY);
+            if quiet && (due || late) {
+                last_try = Some(now);
+                let stopped = restart.pool.take();
+                slf.py().detach(move || drop(stopped));
+                match Self::borrow_mut_within(slf, BORROW_FOR) {
+                    Ok(mut this) => {
+                        let inject_panic = std::mem::take(&mut this.inject_swap_panic);
+                        let Some(arc) = this.inner.as_mut() else {
+                            break Err(PyRuntimeError::new_err("YantrikDB is closed"));
+                        };
+                        if let Some(engine) = Arc::get_mut(arc) {
+                            if inject_panic {
+                                panic!("injected by _inject_swap_panic (tests only)");
+                            }
+                            let swapped = engine
+                                .set_downloaded_embedder(downloaded.take().expect("swapped once"))
+                                .map_err(map_err);
+                            restart.pool.ensure_running(arc);
+                            break swapped;
+                        }
+                        restart.pool.ensure_running(arc);
+                        borrow_blocked = false;
+                    }
+                    Err(_) => {
+                        borrow_blocked = true;
+                        restart.now();
+                    }
+                }
+            }
+            if late && borrow_blocked {
+                break Err(PyRuntimeError::new_err(format!(
+                    "set_embedder_named needs exclusive access to the engine and did not \
+                     get it within {}s: the engine was free, but another thread held a \
+                     borrow of this YantrikDB each time (a record() inside its Python \
+                     embedder's encode(), for example). Retry once that call is done.",
+                    WAIT.as_secs()
+                )));
+            }
+            if late {
+                break Err(PyRuntimeError::new_err(format!(
+                    "set_embedder_named needs exclusive access to the engine and did not \
+                     get it within {}s: another thread's call on this database is still \
+                     running (waiting on a lock held by another process, for example), \
+                     or a ConnectionProxy (`_conn`) or cloned YantrikDB reference is \
+                     still alive. Let the call finish or drop the reference, then retry.",
+                    WAIT.as_secs()
+                )));
+            }
+            slf.py()
+                .detach(|| std::thread::sleep(std::time::Duration::from_millis(1)));
+        };
+        drop(restart);
+        drop(gate);
         swap
     }
 
@@ -764,6 +1010,36 @@ impl PyYantrikDB {
             "reembed requires the 'embedder-download' Cargo feature, \
              which is on by default. This wheel was built --no-default-features.",
         ))
+    }
+
+    /// Make the next `set_embedder_named` panic just before it installs
+    /// the new embedder, where the workers are stopped (tests only).
+    ///
+    /// It ships in every wheel, so it refuses unless the environment
+    /// variable `YANTRIKDB_TEST_HOOKS` is `1`: a stray call in production
+    /// raises instead of arming a panic.
+    fn _inject_swap_panic(&mut self) -> PyResult<()> {
+        if std::env::var("YANTRIKDB_TEST_HOOKS").as_deref() != Ok("1") {
+            return Err(PyRuntimeError::new_err(
+                "_inject_swap_panic is a test hook that makes the next set_embedder_named                  panic; it is enabled only when YANTRIKDB_TEST_HOOKS=1",
+            ));
+        }
+        self.inject_swap_panic = true;
+        Ok(())
+    }
+
+    /// Whether this wrapper's worker pool is running (tests only).
+    #[getter]
+    fn _workers_running(&self) -> bool {
+        self.workers.is_running()
+    }
+
+    /// How many worker pools this wrapper has spawned (tests only).
+    #[getter]
+    fn _worker_spawns(&self) -> u64 {
+        self.workers
+            .spawns
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// The _conn property — returns a ConnectionProxy for test compatibility.
@@ -953,27 +1229,31 @@ impl PyYantrikDB {
         // WAL checkpoint) with the GIL released: held through both, a thread
         // beside the close froze for its whole length, up to 1.8 s under
         // write load (#271 review).
-        let (arc, workers) = {
+        //
+        // Nothing after the first borrow needs the wrapper again: the
+        // workers come from their own pool, so a borrow another thread holds
+        // by then cannot cost the store its workers (#302 review 3). That is
+        // defensive: since #295 no method holds the wrapper's borrow for any
+        // length once the store is closed (set_embedder() no longer holds it
+        // across its probe, and every other method reports a closed store
+        // at once), so the public API cannot reach that state, and no test
+        // drives it.
+        let (arc, pool) = {
             let mut this = Self::borrow_mut_briefly(slf)?;
             match this.inner.take() {
-                Some(arc) => (arc, this._workers.take()),
+                Some(arc) => (arc, this.workers.clone()),
                 // Already closed: idempotent, and truthfully "no exclusive
                 // close performed by this call".
                 None => return Ok(false),
             }
         };
-        enum Outcome {
-            Closed,
-            StillShared(AllWorkerGuards),
-        }
-        let outcome = slf
-            .py()
-            .detach(move || -> Result<Outcome, yantrikdb_core::YantrikDbError> {
-                drop(workers);
+        slf.py()
+            .detach(move || -> Result<bool, yantrikdb_core::YantrikDbError> {
+                drop(pool.take());
                 match Arc::try_unwrap(arc) {
                     Ok(db) => {
                         db.close()?;
-                        Ok(Outcome::Closed)
+                        Ok(true)
                     }
                     // Other references still exist (another thread's call in
                     // flight, or a `_conn` proxy); ours drops here and the DB
@@ -983,19 +1263,30 @@ impl PyYantrikDB {
                     // workers: without the compactor, writes wedge at
                     // delta_max. They hold only Weak refs and exit when the
                     // engine is finally dropped.
-                    Err(arc) => Ok(Outcome::StillShared(spawn_all_workers(
-                        &arc,
-                        recommended_worker_count(),
-                    ))),
+                    Err(arc) => {
+                        pool.ensure_running(&arc);
+                        Ok(false)
+                    }
                 }
             })
-            .map_err(map_err)?;
-        match outcome {
-            Outcome::Closed => Ok(true),
-            Outcome::StillShared(workers) => {
-                Self::borrow_mut_briefly(slf)?._workers = Some(workers);
-                Ok(false)
-            }
+            .map_err(map_err)
+    }
+}
+
+/// Call `attempt` until it succeeds or `within` has passed, sleeping a
+/// millisecond with the GIL released between tries. The last refusal is
+/// the error.
+fn retry_until<T, E: Into<PyErr>>(
+    py: Python<'_>,
+    within: std::time::Duration,
+    mut attempt: impl FnMut() -> Result<T, E>,
+) -> PyResult<T> {
+    let deadline = std::time::Instant::now() + within;
+    loop {
+        match attempt() {
+            Ok(value) => return Ok(value),
+            Err(e) if std::time::Instant::now() >= deadline => return Err(e.into()),
+            Err(_) => py.detach(|| std::thread::sleep(std::time::Duration::from_millis(1))),
         }
     }
 }
@@ -1013,8 +1304,18 @@ pub(crate) fn py_vector(py: Python<'_>, result: &PyObject) -> PyResult<Vec<f32>>
     list.extract::<Vec<f32>>(py)
 }
 
-/// Where a binding's vector comes from, decided once, from the snapshot
-/// [`PyYantrikDB::engine_and_embedder`] took (#271).
+/// What a binding plans its vector with, taken under one brief borrow and
+/// holding no reference to the engine (see [`PyYantrikDB::planned`]).
+pub(crate) struct EmbedderSnapshot {
+    /// The caller-attached Python embedder, which outranks the engine's.
+    pub(crate) embedder: Option<PyObject>,
+    /// Whether the engine has an embedder of its own.
+    pub(crate) native: bool,
+    epoch: u64,
+}
+
+/// Where a binding's vector comes from, decided once, from the embedder
+/// snapshot [`PyYantrikDB::planned`] took (#271).
 pub(crate) enum EmbedPlan<'a> {
     /// A vector already in hand: passed by the caller, or produced by the
     /// caller-attached Python embedder (with the GIL held, as any Python
@@ -1040,26 +1341,65 @@ impl EmbedPlan<'_> {
     }
 }
 
-/// `embed_text`'s precedence, without a borrow held across `encode()`:
-/// an embedder the caller ATTACHED wins over one the engine resolved for
-/// this store's dimension (yantrikdb-hermes-plugin #84), then the engine's
-/// own, else the same error `embed_text` raises.
+/// Run one engine call with the GIL released (#271).
+///
+/// `db` is an owned handle ([`PyYantrikDB::engine_handle`] or
+/// [`PyYantrikDB::planned`]), so no borrow of the wrapper is held
+/// while `f` runs. Every binding that reaches SQLite goes through here, not
+/// only the slow ones: the engine serialises on one connection mutex, so even
+/// a point read can wait out another thread's write (up to `busy_timeout`),
+/// and a binding that waits with the GIL held stops every Python thread in
+/// the host for that long.
+///
+/// `f` may borrow the call's `&str` and other plain-Rust arguments: they are
+/// `Send`, and the Python objects they come from are kept alive by the call
+/// itself. Anything Python-bound (a dict, a callback) must be converted
+/// before the call and the result converted after it; the `Send` bounds
+/// enforce that.
+pub(crate) fn run_detached<T, F>(py: Python<'_>, db: Arc<YantrikDB>, f: F) -> PyResult<T>
+where
+    F: FnOnce(&YantrikDB) -> Result<T, yantrikdb_core::YantrikDbError> + Send,
+    T: Send,
+{
+    py.detach(move || f(&db)).map_err(map_err)
+}
+
+/// `embed_text`'s precedence, with nothing of the store held across
+/// `encode()` (see [`PyYantrikDB::planned`]): an embedder the caller
+/// ATTACHED wins over one the engine resolved for this store's dimension
+/// (yantrikdb-hermes-plugin #84), then the engine's own, else the same
+/// error `embed_text` raises.
 pub(crate) fn plan_embed<'a>(
     py: Python<'_>,
-    db: &YantrikDB,
-    embedder: Option<&PyObject>,
+    snapshot: &EmbedderSnapshot,
     text: &'a str,
 ) -> PyResult<EmbedPlan<'a>> {
-    if let Some(emb) = embedder {
+    if let Some(emb) = snapshot.embedder.as_ref() {
         let result = emb.call_method1(py, "encode", (text,))?;
         return Ok(EmbedPlan::Ready(py_vector(py, &result)?));
     }
-    if db.has_embedder() {
+    if snapshot.native {
         return Ok(EmbedPlan::Native(text));
     }
     Err(PyRuntimeError::new_err(
         "No embedder configured. Pass an embedder to YantrikDB() or call set_embedder().",
     ))
+}
+
+/// The usual query shape: a vector the caller passed wins, else `text` is
+/// embedded with [`plan_embed`], else `ValueError(missing)`.
+pub(crate) fn query_plan<'a>(
+    py: Python<'_>,
+    snapshot: &EmbedderSnapshot,
+    given: Option<Vec<f32>>,
+    text: Option<&'a str>,
+    missing: &'static str,
+) -> PyResult<EmbedPlan<'a>> {
+    match (given, text) {
+        (Some(v), _) => Ok(EmbedPlan::Ready(v)),
+        (None, Some(t)) => plan_embed(py, snapshot, t),
+        (None, None) => Err(PyValueError::new_err(missing)),
+    }
 }
 
 impl PyYantrikDB {
@@ -1068,21 +1408,29 @@ impl PyYantrikDB {
     /// can hold a shared borrow for a moment (taking its engine snapshot,
     /// or around a Python embedder's encode()), and a close() or swap that
     /// arrives then was refused with "Already borrowed" (#271 review). The
-    /// GIL is released between tries, so the holder can finish.
+    /// GIL is released between tries, so the holder can finish. The second
+    /// is a deadline, not a count of tries: 1000 one-millisecond sleeps ran
+    /// 1.3-2.4 s (#302 review 3).
     pub(crate) fn borrow_mut_briefly<'py>(slf: &Bound<'py, Self>) -> PyResult<PyRefMut<'py, Self>> {
-        const TRIES: u32 = 1000;
-        let mut tries = 0;
-        loop {
-            match slf.try_borrow_mut() {
-                Ok(this) => return Ok(this),
-                Err(e) if tries >= TRIES => return Err(e.into()),
-                Err(_) => {
-                    tries += 1;
-                    slf.py()
-                        .detach(|| std::thread::sleep(std::time::Duration::from_millis(1)));
-                }
-            }
-        }
+        Self::borrow_mut_within(slf, std::time::Duration::from_secs(1))
+    }
+
+    /// [`borrow_mut_briefly`](Self::borrow_mut_briefly), retried for `within`.
+    fn borrow_mut_within<'py>(
+        slf: &Bound<'py, Self>,
+        within: std::time::Duration,
+    ) -> PyResult<PyRefMut<'py, Self>> {
+        retry_until(slf.py(), within, || slf.try_borrow_mut())
+    }
+
+    /// The wrapper's shared borrow, retried for up to a second: refused only
+    /// while another thread holds the mutable one (a `close()`, a swap, or
+    /// `set_embedder()` storing its embedder).
+    #[cfg(feature = "embedder-download")]
+    fn borrow_briefly<'py>(slf: &Bound<'py, Self>) -> PyResult<PyRef<'py, Self>> {
+        retry_until(slf.py(), std::time::Duration::from_secs(1), || {
+            slf.try_borrow()
+        })
     }
 
     /// An owned engine handle for a call that releases the GIL (#271).
@@ -1098,14 +1446,73 @@ impl PyYantrikDB {
     /// wrapper's handle and returns `False`; the engine closes when the
     /// detached call releases the last reference.
     pub(crate) fn engine_handle(slf: &Bound<'_, Self>) -> PyResult<Arc<YantrikDB>> {
-        // try_borrow, not borrow: a `&mut self` method (`close`,
-        // `set_embedder_named`) can hold the mutable borrow while another
-        // thread arrives here mid-call. That must surface as
-        // RuntimeError, never as a panic.
-        slf.try_borrow()?
+        Self::snapshot_borrow(slf)?
             .inner
             .clone()
             .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))
+    }
+
+    /// The shared borrow a call takes to snapshot the engine.
+    ///
+    /// While `set_embedder_named` waits for exclusive access
+    /// (`swap_pending`), a new call waits here with the GIL released, so it
+    /// does not take a fresh reference that keeps the engine shared; it then
+    /// proceeds on the swapped engine.
+    ///
+    /// It waits for as long as the swap does: until the gate drops or the
+    /// store closes. A call that went ahead mid-swap would take exactly the
+    /// reference the gate keeps out, so a time limit of its own (this was
+    /// 2 s) let steady traffic starve the swap again once it passed (#302
+    /// review 3). The wait is still bounded: the swap gives up at its own
+    /// deadline (10 s) and the gate drops on every way out of it.
+    ///
+    /// No call the swap waits for is itself waiting here. A binding runs a
+    /// Python embedder's `encode()` before it takes the engine
+    /// ([`planned`](Self::planned)), so a call that `encode()` makes back
+    /// into the store, on its own thread or by handing it to another one,
+    /// holds up nothing the swap waits for: it waits here, then runs on the
+    /// swapped engine (#302 review 4). No detached call calls back into
+    /// Python on this branch. `record()` and the other methods that embed
+    /// through `embed_text` still hold the wrapper's borrow (but no engine
+    /// reference) across `encode()`; a swap then waits on that borrow, and
+    /// a call `encode()` makes back into the store waits here until the
+    /// swap gives up (#297 moves them).
+    ///
+    /// try_borrow, not borrow: a method holding the mutable borrow
+    /// (`close()`, the swap, `set_embedder()` storing its embedder) can be
+    /// mid-call when another thread arrives here; that surfaces as
+    /// RuntimeError, never as a panic. A refusal is retried for up to 10 ms
+    /// first, which covers those brief mutable borrows; a longer one still
+    /// gets the error.
+    pub(crate) fn snapshot_borrow<'py>(slf: &Bound<'py, Self>) -> PyResult<PyRef<'py, Self>> {
+        Self::shared_borrow(slf, true)
+    }
+
+    /// [`snapshot_borrow`](Self::snapshot_borrow), or with `gated` false
+    /// the same borrow without waiting at the swap gate: for a look that
+    /// takes no engine reference.
+    fn shared_borrow<'py>(slf: &Bound<'py, Self>, gated: bool) -> PyResult<PyRef<'py, Self>> {
+        const BORROW_RETRY: std::time::Duration = std::time::Duration::from_millis(10);
+        let mut refused_since: Option<std::time::Instant> = None;
+        loop {
+            match slf.try_borrow() {
+                Ok(this) => {
+                    let pending =
+                        gated && this.swap_pending.load(std::sync::atomic::Ordering::Acquire);
+                    if !pending || this.inner.is_none() {
+                        return Ok(this);
+                    }
+                }
+                Err(e) => {
+                    let since = *refused_since.get_or_insert_with(std::time::Instant::now);
+                    if since.elapsed() >= BORROW_RETRY {
+                        return Err(e.into());
+                    }
+                }
+            }
+            slf.py()
+                .detach(|| std::thread::sleep(std::time::Duration::from_millis(1)));
+        }
     }
 
     /// Get a reference to the inner YantrikDB engine (for use by consolidation/trigger wrappers).
@@ -1115,28 +1522,72 @@ impl PyYantrikDB {
             .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))
     }
 
-    /// The engine handle and the caller-attached Python embedder, taken
-    /// under ONE short borrow (#271).
+    /// [`run_detached`] on this wrapper's engine: the common case, a binding
+    /// that does not embed.
+    pub(crate) fn detached<T, F>(slf: &Bound<'_, Self>, f: F) -> PyResult<T>
+    where
+        F: FnOnce(&YantrikDB) -> Result<T, yantrikdb_core::YantrikDbError> + Send,
+        T: Send,
+    {
+        run_detached(slf.py(), Self::engine_handle(slf)?, f)
+    }
+
+    /// The engine handle and a binding's embedding plan, the plan made while
+    /// the call holds nothing of the store (#302 review 4).
     ///
-    /// `embed_text(&self)` runs the Python embedder's `encode()` while the
-    /// wrapper is borrowed, so a `set_embedder()` or `close()` from another
-    /// thread fails with `RuntimeError: Already borrowed` for as long as
-    /// `encode()` takes. A binding that embeds takes this snapshot instead,
-    /// drops the borrow, and embeds with [`plan_embed`]. Taking both from one
-    /// borrow matters: the same snapshot must decide how the call is routed
-    /// and which embedder produces the vector, or a `set_embedder()` landing
-    /// between two borrows could split them. A swap that lands after the
-    /// snapshot is ordered after this call, as if the call had finished first.
-    pub(crate) fn engine_and_embedder(
+    /// A Python embedder's `encode()` can call back into the store, on its
+    /// own thread or by handing the call to another thread and waiting for
+    /// it. While it runs, this call holds no borrow of the wrapper and no
+    /// reference to the engine: the embedder is taken under a brief borrow
+    /// (not at the swap gate: it takes no engine reference), `plan` runs,
+    /// and only then is the engine handle taken, at the gate. Holding the
+    /// engine across `encode()` made a pending `set_embedder_named` wait for
+    /// this call while the call's own callback waited at the gate for the
+    /// swap, until the swap's 10 s deadline failed it.
+    ///
+    /// The plan must still fit the engine it is used on:
+    /// - A Python vector depends only on the Python embedder that made it.
+    ///   `set_embedder_named` replaces the engine's own embedder, which a
+    ///   caller-attached Python one outranks, so a swap landing in between
+    ///   leaves that vector valid.
+    /// - A native plan embeds inside the detached call, on the engine taken
+    ///   here.
+    /// - What can make a plan stale is `set_embedder()` replacing (or first
+    ///   attaching) the Python embedder in between. It bumps
+    ///   `embedder_epoch`; the plan is then made again with the new one, at
+    ///   most three times.
+    pub(crate) fn planned<T>(
         slf: &Bound<'_, Self>,
-    ) -> PyResult<(Arc<YantrikDB>, Option<PyObject>)> {
-        let this = slf.try_borrow()?;
-        let db = this
-            .inner
-            .clone()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
-        let embedder = this.embedder.as_ref().map(|e| e.clone_ref(slf.py()));
-        Ok((db, embedder))
+        mut plan: impl FnMut(&EmbedderSnapshot) -> PyResult<T>,
+    ) -> PyResult<(Arc<YantrikDB>, T)> {
+        const TRIES: usize = 3;
+        let py = slf.py();
+        for _ in 0..TRIES {
+            let snapshot = {
+                let this = Self::shared_borrow(slf, false)?;
+                let Some(db) = this.inner.as_deref() else {
+                    return Err(PyRuntimeError::new_err("YantrikDB is closed"));
+                };
+                EmbedderSnapshot {
+                    embedder: this.embedder.as_ref().map(|e| e.clone_ref(py)),
+                    native: db.has_embedder(),
+                    epoch: this.embedder_epoch,
+                }
+            };
+            let made = plan(&snapshot)?;
+            let this = Self::snapshot_borrow(slf)?;
+            let db = this
+                .inner
+                .clone()
+                .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+            if this.embedder_epoch == snapshot.epoch {
+                return Ok((db, made));
+            }
+        }
+        Err(PyRuntimeError::new_err(
+            "this store's Python embedder was replaced three times while this call was \
+             embedding with it; retry the call",
+        ))
     }
 
     pub(crate) fn embed_text(&self, py: Python<'_>, text: &str) -> PyResult<Vec<f32>> {
