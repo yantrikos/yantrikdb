@@ -2116,8 +2116,10 @@ impl YantrikDB {
             .unwrap_or(false);
         // Stale temp copies from installs that died mid-write. Under the
         // install lock no install of this engine is writing one, and an
-        // age bound keeps any other process's live copy safe.
+        // age bound keeps any other process's live copy safe. Then the
+        // aside copies an install that died between its two renames left.
         sweep_stale_install_temps(&dir);
+        recover_install_asides(&dir);
 
         // 1. Write the new copy (or converted copy) beside the destination
         //    BEFORE touching the current mount: that is the slow step, and
@@ -2169,7 +2171,8 @@ impl YantrikDB {
         // Keep the installed file aside until the new copy has mounted: a
         // copy that turns out unmountable (say, modified after sealing) must
         // not cost the working install. Not named like a temp copy, so the
-        // stale-temp sweep never takes it.
+        // stale-temp sweep never takes it; `recover_install_asides` puts
+        // back or removes one an install that died here left.
         let mut aside: Option<std::path::PathBuf> = None;
         if let Some(tmp) = tmp.as_ref() {
             if dest.exists() {
@@ -2379,6 +2382,7 @@ impl YantrikDB {
         // review): the install lock orders them.
         let _serial = self.pack_install_lock.lock();
         sweep_stale_install_temps(&dir);
+        recover_install_asides(&dir);
         let installed = match self.installed_packs() {
             Ok(v) => v,
             Err(e) => {
@@ -2751,9 +2755,6 @@ impl YantrikDB {
     }
 }
 
-/// A per-process counter for install temp files, so two installs never
-/// write the same temp path (installs are also serialised; this keeps the
-/// name unique even if that ever changes).
 /// Remove install temp copies (`.<file>.tmp.<pid>.<n>`) left by installs
 /// that died mid-write. Only copies untouched for an hour go: a live
 /// install keeps writing its copy (and any install of this engine is
@@ -2802,6 +2803,83 @@ fn rename_retrying(from: &std::path::Path, to: &std::path::Path) -> std::io::Res
     result
 }
 
+/// Put back or remove the aside copies (`.<file>.prev.<pid>.<n>`) of
+/// installs that died between moving the installed copy aside and
+/// finishing (#304 review 4). Died before the new copy was renamed in:
+/// the installed path is empty and the aside copy is the working install,
+/// so it is renamed back. Died after: the installed path holds the new
+/// copy and the aside one is left over, so it is removed.
+///
+/// Callers hold the install lock, so no install of this process is
+/// between its renames, and an aside copy named with this process's id is
+/// always a dead install's. Another process's install holds one only for
+/// its two renames and a mount, so its copies are touched only once a
+/// minute old. Best-effort; errors are ignored.
+fn recover_install_asides(dir: &std::path::Path) {
+    const OTHERS_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+    const MARK: &str = ".ydbpack.prev.";
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let own_pid = std::process::id().to_string();
+    // Per installed file name, the aside copies that may be acted on.
+    let mut asides: std::collections::BTreeMap<
+        String,
+        Vec<(std::path::PathBuf, std::time::SystemTime)>,
+    > = std::collections::BTreeMap::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(at) = name.find(MARK) else {
+            continue;
+        };
+        if !name.starts_with('.') {
+            continue;
+        }
+        let installed = name[1..at + ".ydbpack".len()].to_string();
+        let pid = name[at + MARK.len()..].split('.').next().unwrap_or("");
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let ours = pid == own_pid;
+        let old = modified.elapsed().is_ok_and(|age| age >= OTHERS_AFTER);
+        if ours || old {
+            asides
+                .entry(installed)
+                .or_default()
+                .push((entry.path(), modified));
+        }
+    }
+    for (installed, mut copies) in asides {
+        let dest = dir.join(&installed);
+        if !dest.exists() {
+            // The newest copy is the last working install.
+            copies.sort_by_key(|(_, modified)| *modified);
+            if let Some((newest, _)) = copies.pop() {
+                if let Err(e) = rename_retrying(&newest, &dest) {
+                    tracing::warn!(
+                        file = %installed,
+                        error = %e,
+                        "could not put back a pack copy a failed install left aside"
+                    );
+                    continue;
+                }
+                tracing::info!(
+                    file = %installed,
+                    "put back a pack copy an interrupted install left aside"
+                );
+            }
+        }
+        for (path, _) in copies {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// A per-process counter for install temp files, so two installs never
+/// write the same temp path (installs are also serialised; this keeps the
+/// name unique even if that ever changes).
 fn next_install_tmp() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)

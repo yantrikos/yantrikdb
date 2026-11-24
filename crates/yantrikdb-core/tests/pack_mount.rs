@@ -1781,3 +1781,75 @@ fn reinstall_waits_briefly_for_a_reader_holding_the_installed_file() {
     let texts = recall_texts(&db, &vec_on(3, 0.05), 5);
     assert!(texts.iter().any(|t| t == "gluons bind quarks"), "{texts:?}");
 }
+
+/// An install moves the installed copy aside (`.<file>.prev.<pid>.<n>`)
+/// before renaming the new copy in. One that died between the two renames
+/// left the installed path empty with the working copy beside it, and one
+/// that died after left the aside copy for good: nothing swept them
+/// (#304 review 4). Remount and install now put the copy back, or remove
+/// the leftover.
+fn installed_with_aside(
+    tag: &str,
+) -> (
+    std::path::PathBuf,
+    YantrikDB,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let dir = tmpdir(tag);
+    let pack = dir.join("physics.ydbpack");
+    build_pack(
+        &dir,
+        pack.to_str().unwrap(),
+        "E0",
+        &[("gluons bind quarks", 3)],
+    );
+    let db = host(&dir, "E0");
+    db.install_pack(pack.to_str().unwrap()).unwrap();
+    let packs = db.pack_dir().unwrap();
+    let installed = packs.join("physics-1.0.0.ydbpack");
+    let aside = packs.join(format!(
+        ".physics-1.0.0.ydbpack.prev.{}.900",
+        std::process::id()
+    ));
+    db.unmount_all_packs();
+    (pack, db, installed, aside)
+}
+
+#[test]
+fn remount_puts_back_a_copy_an_interrupted_install_left_aside() {
+    let (_pack, db, installed, aside) = installed_with_aside("aside-back");
+    // Died after the move aside, before the new copy was renamed in.
+    std::fs::rename(&installed, &aside).unwrap();
+    let outcomes = db.remount_installed();
+    assert!(outcomes.iter().all(|o| o.mounted), "{outcomes:?}");
+    assert!(installed.exists());
+    assert!(!aside.exists());
+    let texts = recall_texts(&db, &vec_on(3, 0.05), 5);
+    assert!(texts.iter().any(|t| t == "gluons bind quarks"), "{texts:?}");
+}
+
+#[test]
+fn install_removes_an_aside_copy_an_interrupted_install_left_behind() {
+    let (pack, db, installed, aside) = installed_with_aside("aside-left");
+    // Died after the new copy was renamed in: the aside copy is left over.
+    std::fs::copy(&installed, &aside).unwrap();
+    db.install_pack(pack.to_str().unwrap()).unwrap();
+    assert!(installed.exists());
+    assert!(!aside.exists(), "the leftover aside copy is removed");
+    assert_eq!(db.mounted_packs().len(), 1);
+}
+
+#[test]
+fn a_fresh_aside_copy_of_another_process_is_left_alone() {
+    let (_pack, db, installed, _aside) = installed_with_aside("aside-other");
+    // Another live process's install, between its renames: not ours to touch.
+    let other = installed
+        .parent()
+        .unwrap()
+        .join(".physics-1.0.0.ydbpack.prev.0.1");
+    std::fs::copy(&installed, &other).unwrap();
+    let outcomes = db.remount_installed();
+    assert!(outcomes.iter().all(|o| o.mounted), "{outcomes:?}");
+    assert!(other.exists());
+}
