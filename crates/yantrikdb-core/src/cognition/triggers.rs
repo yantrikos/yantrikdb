@@ -334,8 +334,8 @@ fn check_redundancy_in_namespace(
 
     for i in 0..rows.len() {
         for j in (i + 1)..rows.len() {
-            let emb_a = crate::serde_helpers::deserialize_f32(&rows[i].2);
-            let emb_b = crate::serde_helpers::deserialize_f32(&rows[j].2);
+            let emb_a = crate::compression::decode_embedding_blob(&rows[i].2);
+            let emb_b = crate::compression::decode_embedding_blob(&rows[j].2);
             let sim = crate::consolidate::cosine_similarity(&emb_a, &emb_b);
 
             if sim > threshold {
@@ -473,8 +473,8 @@ fn check_redundancy_in_namespace(
     let cat_threshold = 0.65;
     for i in 0..rows.len() {
         for j in (i + 1)..rows.len() {
-            let emb_a = crate::serde_helpers::deserialize_f32(&rows[i].2);
-            let emb_b = crate::serde_helpers::deserialize_f32(&rows[j].2);
+            let emb_a = crate::compression::decode_embedding_blob(&rows[i].2);
+            let emb_b = crate::compression::decode_embedding_blob(&rows[j].2);
             let sim = crate::consolidate::cosine_similarity(&emb_a, &emb_b);
 
             if sim > cat_threshold && sim <= threshold {

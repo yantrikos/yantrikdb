@@ -304,13 +304,16 @@ pub struct RefreshReport {
     pub errors: Vec<RepairError>,
 }
 
-struct PendingRefresh {
-    rid: String,
-    scanned_ciphertext: String,
+pub(crate) struct PendingRefresh {
+    pub(crate) rid: String,
+    pub(crate) scanned_ciphertext: String,
     /// The tier the row was scanned in: the blob is encoded for it, so the
     /// UPDATE applies only if an archive/hydrate has not moved it since.
-    scanned_tier: String,
-    new_embedding_blob: Vec<u8>,
+    pub(crate) scanned_tier: String,
+    pub(crate) new_embedding_blob: Vec<u8>,
+    /// The plain vector, appended to the index after the commit for a row
+    /// refreshed in the hot tier.
+    pub(crate) embedding: Vec<f32>,
 }
 
 impl YantrikDB {
@@ -340,6 +343,11 @@ impl YantrikDB {
     /// `embedding_model` and `embedding_generation` entirely, so replicated
     /// rows arrive active in SQL and invisible to semantic recall. This is
     /// the repair for them.
+    ///
+    /// Cold rows hold their vector compressed, so for them (as for
+    /// encrypted stores) only a NULL vector counts as unusable; a vector
+    /// written to a cold row is stored compressed and stays out of the
+    /// index until the row is hydrated.
     ///
     /// # Safety
     ///
@@ -473,6 +481,7 @@ impl YantrikDB {
                 scanned_ciphertext,
                 scanned_tier,
                 new_embedding_blob,
+                embedding,
             });
         }
 
@@ -480,18 +489,44 @@ impl YantrikDB {
             return Ok(report);
         }
 
+        self.apply_refreshes(&pending, &mut report)?;
+
+        tracing::info!(
+            target: "yantrikdb::audit::repair",
+            namespace = ?report.namespace,
+            scanned = report.scanned,
+            unusable_found = report.unusable_found,
+            refreshed = report.refreshed,
+            skipped_concurrent = report.skipped_concurrent_modification,
+            errors = report.errors.len(),
+            "same-space embedding refresh complete",
+        );
+
+        Ok(report)
+    }
+
+    /// Phases 3–4 of [`Self::refresh_embeddings`]: write the re-encoded
+    /// vectors in one transaction, each guarded on the text and tier it was
+    /// scanned with, then make the hot ones searchable. Split out so the
+    /// guards can be tested without racing a real refresh.
+    pub(crate) fn apply_refreshes(
+        &self,
+        pending: &[PendingRefresh],
+        report: &mut RefreshReport,
+    ) -> Result<()> {
         // ── Phase 3: apply in one transaction. The generation is READ, never
         // bumped: this is the same space the store was already in, and
         // advancing the store-wide watermark for a repair would make every
         // untouched row look stale.
         let state = self.search_state.load_full();
         let generation = state.generation as i64;
+        let mut refreshed_hot: Vec<(&str, &[f32])> = Vec::new();
         let model = state.runtime_embedder_name.clone();
         let updated_at = now();
         {
             let conn = self.conn();
             let sp = crate::engine::savepoint::SavepointGuard::new(&conn, "refresh_embeddings")?;
-            for p in &pending {
+            for p in pending {
                 // Guarded on the exact ciphertext scanned: if a
                 // concurrent write changed the text, the vector just
                 // computed describes content that no longer exists.
@@ -515,27 +550,33 @@ impl YantrikDB {
                     continue;
                 }
                 report.refreshed += 1;
+                if p.scanned_tier == "hot" {
+                    refreshed_hot.push((p.rid.as_str(), p.embedding.as_slice()));
+                }
             }
             sp.release()?;
         }
 
-        // ── Phase 4: one rebuild, so the newly-filled vectors become
-        // searchable. Refuses to install across a cutover.
-        if report.refreshed > 0 {
+        // ── Phase 4: make the newly-filled hot vectors searchable. Cold rows
+        // stay out of the index by design (archive tombstones them), so a
+        // refresh that only touched cold rows rebuilds nothing.
+        //
+        // The rebuild alone is not enough: it installs a new cold tier but
+        // leaves the delta alone, and a row archived and then hydrated
+        // while it had no vector still has archive()'s tombstone there,
+        // which outranks the rebuilt entry. Appending each refreshed vector
+        // at a fresh seq, as insert_vector does, supersedes it. The rebuild
+        // refuses to install across a reembed cutover, and the appends are
+        // skipped if one landed after it: those vectors belong to the old
+        // space.
+        if !refreshed_hot.is_empty() {
             self.rebuild_vec_index()?;
+            if self.search_state.load().generation as i64 == generation {
+                for (rid, embedding) in &refreshed_hot {
+                    self.insert_vector(rid, embedding)?;
+                }
+            }
         }
-
-        tracing::info!(
-            target: "yantrikdb::audit::repair",
-            namespace = ?report.namespace,
-            scanned = report.scanned,
-            unusable_found = report.unusable_found,
-            refreshed = report.refreshed,
-            skipped_concurrent = report.skipped_concurrent_modification,
-            errors = report.errors.len(),
-            "same-space embedding refresh complete",
-        );
-
-        Ok(report)
+        Ok(())
     }
 }

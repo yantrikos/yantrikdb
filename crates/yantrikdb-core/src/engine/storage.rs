@@ -27,7 +27,8 @@ impl YantrikDB {
             let conn = self.conn();
             // A row can have no vector: replication's follower insert omits
             // the embedding (see `refresh_embeddings`). It still archives;
-            // there is just nothing to compress or tombstone.
+            // there is just nothing to compress (the index entry is
+            // tombstoned regardless, below).
             let row = conn.query_row(
                 "SELECT embedding FROM memories WHERE rid = ?1 AND storage_tier = 'hot' AND consolidation_status = 'active'",
                 params![rid],
@@ -144,11 +145,7 @@ impl YantrikDB {
             let (embedding, stored_raw) = match &stored_blob {
                 Some(blob) => {
                     let stored_plain = self.decrypt_embedding(blob)?;
-                    let embedding = if crate::compression::is_compressed(&stored_plain) {
-                        crate::compression::decompress_embedding(&stored_plain)
-                    } else {
-                        crate::serde_helpers::deserialize_f32(&stored_plain)
-                    };
+                    let embedding = crate::compression::decode_embedding_blob(&stored_plain);
                     let raw_blob = serialize_f32(&embedding);
                     let stored_raw = self.encrypt_embedding(&raw_blob)?;
                     (Some(embedding), Some(stored_raw))

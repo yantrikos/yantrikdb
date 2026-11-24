@@ -957,7 +957,7 @@ fn find_consolidation_candidates_page(
                     rid,
                     memory_type,
                     text,
-                    embedding: deserialize_f32(&emb_blob),
+                    embedding: crate::compression::decode_embedding_blob(&emb_blob),
                     created_at,
                     importance,
                     valence,

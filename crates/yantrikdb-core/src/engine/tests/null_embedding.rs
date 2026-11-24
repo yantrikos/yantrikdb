@@ -259,6 +259,118 @@ mod with_engine_embedder {
         assert_eq!(embedding_blob(&db, &rids[1]).unwrap(), before);
         assert!(db.hydrate(&rids[1]).unwrap());
     }
+
+    /// archive() tombstones the row's index entry; hydrate() of a row with
+    /// no vector appends nothing; a later refresh fills the vector. The
+    /// rebuild that follows does not touch the delta, so without an append
+    /// at a fresh seq the old tombstone kept the row out of vector recall.
+    #[test]
+    fn archive_hydrate_then_refresh_is_vector_searchable() {
+        let (db, rids) = store();
+        let rid = &rids[2];
+        strip_vectors(&db, std::slice::from_ref(rid));
+        assert!(db.archive(rid).unwrap());
+        assert!(db.hydrate(rid).unwrap());
+        assert!(embedding_blob(&db, rid).is_none());
+
+        let report = db.refresh_embeddings(None, false).unwrap();
+        assert_eq!(report.refreshed, 1, "{report:?}");
+
+        let text = db.get(rid).unwrap().unwrap().text;
+        let query = db.embed(&text).unwrap();
+        let hits = db
+            .recall(
+                &query, 10, None, None, false, false, None, true, None, None, None, None, None,
+                false, None, None,
+            )
+            .unwrap();
+        assert!(
+            hits.iter().any(|h| &h.rid == rid),
+            "the refreshed row must be back in vector recall"
+        );
+    }
+
+    /// A store whose first row was archived reopens: the dimension probe
+    /// must not read a compressed blob's byte length as a dimension.
+    #[test]
+    fn store_reopens_after_its_first_row_is_archived() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("reopen.db");
+        let path = path.to_str().unwrap();
+        let first = {
+            let db = YantrikDB::with_default(path).unwrap();
+            let rids: Vec<String> = (0..8)
+                .map(|i| {
+                    db.record_text(
+                        &format!("reopen probe {i} about the harbour"),
+                        "episodic",
+                        0.5,
+                        0.0,
+                        604800.0,
+                        &empty_meta(),
+                        "default",
+                        0.8,
+                        "general",
+                        "user",
+                        None,
+                    )
+                    .unwrap()
+                })
+                .collect();
+            let first: String = db
+                .conn()
+                .query_row(
+                    "SELECT rid FROM memories WHERE embedding IS NOT NULL LIMIT 1",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(rids.contains(&first));
+            assert!(db.archive(&first).unwrap());
+            db.close().unwrap();
+            first
+        };
+        let db = YantrikDB::with_default(path).expect("the store must reopen");
+        assert!(db.hydrate(&first).unwrap());
+    }
+
+    /// The tier guard: a vector re-encoded for the tier it was scanned in
+    /// is not written if an archive moved the row meanwhile.
+    #[test]
+    fn refresh_skips_a_row_whose_tier_changed_after_the_scan() {
+        let (db, rids) = store();
+        let rid = &rids[3];
+        let text: String = db
+            .conn()
+            .query_row(
+                "SELECT text FROM memories WHERE rid = ?1",
+                params![rid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let vector = db.embed(&db.get(rid).unwrap().unwrap().text).unwrap();
+        // Scanned hot, encoded raw...
+        let pending = vec![crate::engine::repair::PendingRefresh {
+            rid: rid.clone(),
+            scanned_ciphertext: text,
+            scanned_tier: "hot".to_string(),
+            new_embedding_blob: crate::serde_helpers::serialize_f32(&vector),
+            embedding: vector,
+        }];
+        // ...then archived before the write.
+        assert!(db.archive(rid).unwrap());
+        let before = embedding_blob(&db, rid).unwrap();
+
+        let mut report = crate::engine::repair::RefreshReport::default();
+        db.apply_refreshes(&pending, &mut report).unwrap();
+        assert_eq!(report.skipped_concurrent_modification, 1, "{report:?}");
+        assert_eq!(report.refreshed, 0);
+        assert_eq!(
+            embedding_blob(&db, rid).unwrap(),
+            before,
+            "a raw vector must not land in a cold row"
+        );
+    }
 }
 
 /// archive() tombstones the index entry even when SQL holds no vector: the
@@ -333,4 +445,43 @@ fn encrypted_store_tolerates_rows_without_a_vector() {
     assert!(db.archive(&with_vec).unwrap());
     assert!(db.hydrate(&with_vec).unwrap());
     assert!(db.get(&with_vec).unwrap().is_some());
+}
+
+fn record_vector(db: &YantrikDB, text: &str, vector: &[f32]) -> String {
+    db.record(
+        text,
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        vector,
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap()
+}
+
+/// The redundancy scan reads every tier. Compressed cold blobs read as raw
+/// floats are garbage vectors that look similar to each other.
+#[test]
+fn redundancy_scan_decodes_cold_vectors() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rids: Vec<String> = (0..8)
+        .map(|i| {
+            let mut v = vec![0.0f32; 8];
+            v[i] = 1.0;
+            record_vector(&db, &format!("orthogonal row {i}"), &v)
+        })
+        .collect();
+    let hot = crate::triggers::check_redundancy(&db, 0.9).unwrap().len();
+    assert_eq!(hot, 0, "orthogonal vectors are not redundant");
+    for rid in &rids {
+        assert!(db.archive(rid).unwrap());
+    }
+    let cold = crate::triggers::check_redundancy(&db, 0.9).unwrap().len();
+    assert_eq!(cold, hot, "archiving must not change what is redundant");
 }
