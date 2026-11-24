@@ -862,3 +862,38 @@ def test_two_swaps_pending_at_once_both_go_through(tmp_path):
             assert max(o[1] for o in out) < 8, out
         finally:
             db.close()
+
+
+@_needs_potion
+def test_a_swap_kept_out_by_a_held_borrow_says_so(tmp_path):
+    # The engine is free, but another thread holds the wrapper's borrow for
+    # the whole wait (here a record() inside an 11 s encode()). The swap's
+    # timeout message blamed another call or a proxy (#302 review 4).
+    db = YantrikDB(os.path.join(str(tmp_path), "held-msg.db"), 256)
+    try:
+        proxy = db._conn  # the swap is waiting when the borrow is taken
+        out = {}
+
+        def swapper():
+            try:
+                db.set_embedder_named("potion-base-8M")
+            except Exception as e:  # noqa: BLE001
+                out["error"] = str(e)
+
+        sw = threading.Thread(target=swapper)
+        sw.start()
+        time.sleep(0.5)
+        emb = _SlowEncodeEmb(11.0, dim=256)
+        db.set_embedder(emb, allow_unverified_embedder=True)
+        emb.armed = True
+        setter = threading.Thread(target=lambda: db.record("a write held across encode()"))
+        setter.start()
+        assert emb.entered.wait(10)
+        del proxy
+        sw.join(60)
+        setter.join(60)
+        msg = out.get("error", "")
+        assert "held a borrow" in msg and "ConnectionProxy" not in msg, msg
+        assert "  " not in msg, f"broken line continuations: {msg!r}"
+    finally:
+        db.close()

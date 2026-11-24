@@ -871,6 +871,10 @@ impl PyYantrikDB {
         let mut downloaded = Some(downloaded);
         let deadline = std::time::Instant::now() + WAIT;
         let mut last_try: Option<std::time::Instant> = None;
+        // What stood in the way last: the wrapper's borrow (held by another
+        // thread) rather than another holder of the engine. The timeout
+        // message names it.
+        let mut borrow_blocked = false;
         let swap = loop {
             let now = std::time::Instant::now();
             let late = now >= deadline;
@@ -887,6 +891,11 @@ impl PyYantrikDB {
                 Err(_) => None,
             };
             let quiet = holders.is_some_and(|n| n <= 1);
+            match holders {
+                None => borrow_blocked = true,
+                Some(n) if n > 1 => borrow_blocked = false,
+                Some(_) => {}
+            }
             let due = last_try.is_none_or(|t| now.duration_since(t) >= RETRY_EVERY);
             if quiet && (due || late) {
                 last_try = Some(now);
@@ -909,9 +918,22 @@ impl PyYantrikDB {
                             break swapped;
                         }
                         restart.pool.ensure_running(arc);
+                        borrow_blocked = false;
                     }
-                    Err(_) => restart.now(),
+                    Err(_) => {
+                        borrow_blocked = true;
+                        restart.now();
+                    }
                 }
+            }
+            if late && borrow_blocked {
+                break Err(PyRuntimeError::new_err(format!(
+                    "set_embedder_named needs exclusive access to the engine and did not \
+                     get it within {}s: the engine was free, but another thread held a \
+                     borrow of this YantrikDB each time (a record() inside its Python \
+                     embedder's encode(), for example). Retry once that call is done.",
+                    WAIT.as_secs()
+                )));
             }
             if late {
                 break Err(PyRuntimeError::new_err(format!(
