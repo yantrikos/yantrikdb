@@ -23,7 +23,7 @@ impl YantrikDB {
     /// "fix" any half of this in isolation — decide the policy first.
     #[tracing::instrument(skip(self))]
     pub fn archive(&self, rid: &str) -> Result<bool> {
-        let (ts, had_vector) = {
+        let ts = {
             let conn = self.conn();
             // A row can have no vector: replication's follower insert omits
             // the embedding (see `refresh_embeddings`). It still archives;
@@ -57,7 +57,7 @@ impl YantrikDB {
                 params![stored_compressed, ts, rid],
             )?;
 
-            (ts, stored_blob.is_some())
+            ts
         }; // drop conn before acquiring vec_index write lock
 
         // Chunked embeddings: window vectors follow the parent's tier —
@@ -93,9 +93,10 @@ impl YantrikDB {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
         // **Issue #41 brainstorm-4 §1.** Snapshot through SearchState.
-        if had_vector {
-            self.search_state.load().vec_index.tombstone(rid, seq);
-        }
+        // Tombstoned even when the row has no vector in SQL: what the index
+        // holds is not derivable from the column, and a stale entry left
+        // behind would keep an archived row vector-searchable.
+        self.search_state.load().vec_index.tombstone(rid, seq);
         // Exact-string matching: the parent's tombstone does not cover
         // its window keys.
         for idx in &chunk_idxs {
@@ -136,11 +137,18 @@ impl YantrikDB {
                 Err(e) => return Err(e.into()),
             };
 
-            // Decrypt if encrypted, decompress, then re-encrypt for hot storage
+            // Decrypt if encrypted, decompress, then re-encrypt for hot storage.
+            // A cold row can hold an uncompressed blob: refresh_embeddings()
+            // and a text correct() write hot format without knowing the
+            // tier. Decompressing that panicked inside zstd; read it as is.
             let (embedding, stored_raw) = match &stored_blob {
                 Some(blob) => {
-                    let compressed_blob = self.decrypt_embedding(blob)?;
-                    let embedding = crate::compression::decompress_embedding(&compressed_blob);
+                    let stored_plain = self.decrypt_embedding(blob)?;
+                    let embedding = if crate::compression::is_compressed(&stored_plain) {
+                        crate::compression::decompress_embedding(&stored_plain)
+                    } else {
+                        crate::serde_helpers::deserialize_f32(&stored_plain)
+                    };
                     let raw_blob = serialize_f32(&embedding);
                     let stored_raw = self.encrypt_embedding(&raw_blob)?;
                     (Some(embedding), Some(stored_raw))

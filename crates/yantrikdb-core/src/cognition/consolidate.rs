@@ -1093,7 +1093,8 @@ pub fn consolidate(
             "SELECT COUNT(*) FROM memories \
              WHERE consolidation_status = 'active' \
              AND storage_tier = 'hot' \
-             AND type IN ('episodic', 'semantic')",
+             AND type IN ('episodic', 'semantic') \
+             AND embedding IS NOT NULL",
             [],
             |row| row.get::<_, i64>(0),
         )? as usize;

@@ -68,7 +68,8 @@ def test_refresh_embeddings_still_repairs_them(tmp_path):
     # refresh_embeddings() embeds with the engine's own embedder, so both
     # stores use the bundled one here.
     src = YantrikDB.with_default(str(tmp_path / "leader.db"))
-    for i in range(10):
+    # 12, not 10: clear of think()'s min_active_memories threshold.
+    for i in range(12):
         src.record(f"replicated record {i} about alice and topic {i % 5}")
     ops = src.extract_ops_since(limit=5000)
     src.close()
@@ -80,9 +81,40 @@ def test_refresh_embeddings_still_repairs_them(tmp_path):
             "SELECT count(*) AS n FROM memories WHERE embedding IS NULL"
         ).fetchall()[0]["n"]
 
-    assert bare() == 10, "precondition: replicated rows carry no vector"
+    assert bare() == 12, "precondition: replicated rows carry no vector"
     db.think()
     db.refresh_embeddings(dry_run=False)
     assert bare() == 0
     db.think()
+    db.close()
+
+
+def test_evict_then_refresh_while_cold_then_hydrate(tmp_path):
+    # The chain that used to end in a zstd panic: replicated rows are
+    # evicted to the cold tier, repaired there, then hydrated.
+    src = YantrikDB.with_default(str(tmp_path / "leader.db"))
+    for i in range(12):
+        src.record(f"replicated record {i} about alice and topic {i % 5}")
+    ops = src.extract_ops_since(limit=5000)
+    src.close()
+    db = YantrikDB.with_default(str(tmp_path / "follower.db"))
+    db.apply_ops(ops)
+
+    db.evict(2)
+    cold = [
+        r["rid"]
+        for r in db._conn.execute(
+            "SELECT rid FROM memories WHERE storage_tier = 'cold' "
+            "AND embedding IS NULL"
+        ).fetchall()
+    ]
+    assert cold, "precondition: eviction moved rows with no vector to cold"
+
+    report = db.refresh_embeddings(dry_run=False)
+    assert report["refreshed"] >= len(cold)
+    for rid in cold:
+        assert db.hydrate(rid) is True
+    assert db._conn.execute(
+        "SELECT count(*) AS n FROM memories WHERE embedding IS NULL"
+    ).fetchall()[0]["n"] == 0
     db.close()
