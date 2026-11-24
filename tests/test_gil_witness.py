@@ -829,3 +829,79 @@ def test_pack_witness_lambdas_release_nothing_themselves(small_db, name):
     db, ctx = small_db
     shape = PACK_WITNESS_SHAPES[name]
     assert _seen_during(lambda: shape(db, ctx), attempts=200) == 0
+
+
+# ── coverage beyond the YantrikDB class ──────────────────────────────────
+#
+# The extension's module-level functions and TenantManager reach the store
+# too. Same rule as the methods: witnessed in MODULE_RELEASES, or listed in
+# MODULE_HOLDS with the reason.
+
+import yantrikdb._yantrikdb_rust as _ext  # noqa: E402
+
+
+MODULE_RELEASES = {
+    "check_decay_triggers": lambda db, c: _ext.check_decay_triggers(db),
+    "check_consolidation_triggers": lambda db, c: _ext.check_consolidation_triggers(db),
+    "check_all_triggers": lambda db, c: _ext.check_all_triggers(db),
+    "consolidate": None,  # witnessed above (test_consolidate_releases_the_gil)
+    "find_consolidation_candidates": lambda db, c: _ext.find_consolidation_candidates(db),
+    # Retires its sources on the first call; later calls are refused inside
+    # the detached call, after reading them.
+    "consolidate_cluster": lambda db, c: _swallow(
+        _ext.consolidate_cluster, db, [c["rid"], c["rid2"]], "witness summary"
+    ),
+    "summarize_cluster": lambda db, c: _ext.summarize_cluster(
+        db, [c["rid"], c["rid2"]], "witness synthesis", idempotency_key="witness-summary"
+    ),
+    "restore_from_consolidation": lambda db, c: _swallow(
+        _ext.restore_from_consolidation, db, "no-such-summary"
+    ),
+    "record_synthesis": lambda db, c: _ext.record_synthesis(
+        db, [c["rid"], c["rid2"]], "witness synthesis", "topic", "witness-synthesis"
+    ),
+    "TenantManager.get": lambda db, c: c["tenants"].get("acme"),
+}
+
+MODULE_HOLDS = {
+    "_cosine_similarity": "pure computation over the vectors passed in, no store",
+    "_extractive_summary": "pure computation over the dicts passed in, no store",
+    "_find_clusters": "pure computation over the dicts passed in, no store",
+    "tuning_fingerprint": "a compile-time constant",
+    "TenantManager.register_tenant": "records a tenant's config in memory, no store",
+    "TenantManager.discovered_tenants": "lists a directory, no SQLite",
+}
+
+
+def test_every_module_function_and_tenant_method_is_classified():
+    public = {
+        n
+        for n in dir(_ext)
+        if not n.startswith("__")
+        and callable(getattr(_ext, n))
+        and not isinstance(getattr(_ext, n), type)
+    }
+    public |= {
+        f"TenantManager.{n}"
+        for n in dir(_ext.TenantManager)
+        if not n.startswith("_") and callable(getattr(_ext.TenantManager, n))
+    }
+    both = set(MODULE_RELEASES) & set(MODULE_HOLDS)
+    assert not both, f"listed in MODULE_RELEASES AND MODULE_HOLDS: {sorted(both)}"
+    classified = set(MODULE_RELEASES) | set(MODULE_HOLDS)
+    assert not public - classified, (
+        f"classify these in MODULE_RELEASES (with a witness) or MODULE_HOLDS: "
+        f"{sorted(public - classified)}"
+    )
+    assert not classified - public, f"listed but gone: {sorted(classified - public)}"
+
+
+@needs_a_second_cpu
+@pytest.mark.parametrize(
+    "name", sorted(n for n, call in MODULE_RELEASES.items() if call is not None)
+)
+def test_module_function_releases_the_gil(small_db, tmp_path, name):
+    db, ctx = small_db
+    ctx["tenants"] = _ext.TenantManager(os.path.join(str(tmp_path), "tenants"), DIM)
+    call = MODULE_RELEASES[name]
+    assert _seen_during(lambda: call(db, ctx)) >= 1, f"{name}() held the GIL"

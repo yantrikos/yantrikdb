@@ -75,22 +75,26 @@ pub fn py_find_clusters(
 #[pyo3(signature = (db, sim_threshold=0.6, time_window_days=7.0, min_cluster_size=2, limit=100))]
 pub fn find_consolidation_candidates(
     py: Python<'_>,
-    db: &PyYantrikDB,
+    db: Bound<'_, PyYantrikDB>,
     sim_threshold: f64,
     time_window_days: f64,
     min_cluster_size: usize,
     limit: usize,
 ) -> PyResult<Vec<Vec<PyObject>>> {
-    let inner = db.get_inner()?;
-    let clusters = yantrikdb_core::consolidate::find_consolidation_candidates(
-        inner,
-        sim_threshold,
-        time_window_days,
-        min_cluster_size,
-        limit,
-        true, // require_entity_overlap — default since v0.6.0
-    )
-    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    // Reaches SQLite: with the GIL released and no borrow of `db` held (#271).
+    let inner = PyYantrikDB::engine_handle(&db)?;
+    let clusters = py
+        .detach(|| {
+            yantrikdb_core::consolidate::find_consolidation_candidates(
+                &inner,
+                sim_threshold,
+                time_window_days,
+                min_cluster_size,
+                limit,
+                true, // require_entity_overlap — default since v0.6.0
+            )
+        })
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     // Convert clusters to Python dicts
     clusters
@@ -274,29 +278,31 @@ fn mem_with_emb_to_dict(py: Python<'_>, m: &MemoryWithEmbedding) -> PyResult<PyO
 )]
 pub fn py_summarize_cluster(
     py: Python<'_>,
-    db: &PyYantrikDB,
+    db: Bound<'_, PyYantrikDB>,
     source_rids: Vec<String>,
     text: &str,
     embedding: Option<Vec<f32>>,
     idempotency_key: Option<&str>,
 ) -> PyResult<PyObject> {
-    let inner = db.get_inner()?;
-    let out = match idempotency_key {
-        Some(key) => yantrikdb_core::consolidate::summarize_cluster_with_key(
-            inner,
-            &source_rids,
-            text,
-            embedding.as_deref(),
-            key,
-        ),
-        None => yantrikdb_core::consolidate::summarize_cluster(
-            inner,
-            &source_rids,
-            text,
-            embedding.as_deref(),
-        ),
-    }
-    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    // Reaches SQLite: with the GIL released and no borrow of `db` held (#271).
+    let inner = PyYantrikDB::engine_handle(&db)?;
+    let out = py
+        .detach(|| match idempotency_key {
+            Some(key) => yantrikdb_core::consolidate::summarize_cluster_with_key(
+                &inner,
+                &source_rids,
+                text,
+                embedding.as_deref(),
+                key,
+            ),
+            None => yantrikdb_core::consolidate::summarize_cluster(
+                &inner,
+                &source_rids,
+                text,
+                embedding.as_deref(),
+            ),
+        })
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     json_to_py(py, &out)
 }
 
@@ -319,14 +325,21 @@ pub fn py_summarize_cluster(
 )]
 pub fn py_restore_from_consolidation(
     py: Python<'_>,
-    db: &PyYantrikDB,
+    db: Bound<'_, PyYantrikDB>,
     summary_rid: &str,
     allow_inferred: bool,
 ) -> PyResult<PyObject> {
-    let inner = db.get_inner()?;
-    let out =
-        yantrikdb_core::consolidate::restore_from_consolidation(inner, summary_rid, allow_inferred)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    // Reaches SQLite: with the GIL released and no borrow of `db` held (#271).
+    let inner = PyYantrikDB::engine_handle(&db)?;
+    let out = py
+        .detach(|| {
+            yantrikdb_core::consolidate::restore_from_consolidation(
+                &inner,
+                summary_rid,
+                allow_inferred,
+            )
+        })
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     json_to_py(py, &out)
 }
 
@@ -356,7 +369,7 @@ pub fn py_restore_from_consolidation(
 #[allow(clippy::too_many_arguments)]
 pub fn py_record_synthesis(
     py: Python<'_>,
-    db: &PyYantrikDB,
+    db: Bound<'_, PyYantrikDB>,
     source_rids: Vec<String>,
     text: &str,
     axis: &str,
@@ -365,22 +378,26 @@ pub fn py_record_synthesis(
     embedding: Option<Vec<f32>>,
     metadata: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyObject> {
-    let inner = db.get_inner()?;
+    // Reaches SQLite: with the GIL released and no borrow of `db` held (#271).
+    let inner = PyYantrikDB::engine_handle(&db)?;
     let metadata = match metadata {
         Some(value) => py_to_json(&value.as_any())?,
         None => serde_json::json!({}),
     };
-    let out = yantrikdb_core::consolidate::record_synthesis(
-        inner,
-        &source_rids,
-        text,
-        embedding.as_deref(),
-        axis,
-        granularity,
-        &metadata,
-        idempotency_key,
-    )
-    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    let out = py
+        .detach(|| {
+            yantrikdb_core::consolidate::record_synthesis(
+                &inner,
+                &source_rids,
+                text,
+                embedding.as_deref(),
+                axis,
+                granularity,
+                &metadata,
+                idempotency_key,
+            )
+        })
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     json_to_py(py, &out)
 }
 
@@ -388,18 +405,22 @@ pub fn py_record_synthesis(
 #[pyo3(name = "consolidate_cluster", signature = (db, source_rids, text, embedding=None))]
 pub fn py_consolidate_cluster(
     py: Python<'_>,
-    db: &PyYantrikDB,
+    db: Bound<'_, PyYantrikDB>,
     source_rids: Vec<String>,
     text: &str,
     embedding: Option<Vec<f32>>,
 ) -> PyResult<PyObject> {
-    let inner = db.get_inner()?;
-    let out = yantrikdb_core::consolidate::consolidate_cluster(
-        inner,
-        &source_rids,
-        text,
-        embedding.as_deref(),
-    )
-    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    // Reaches SQLite: with the GIL released and no borrow of `db` held (#271).
+    let inner = PyYantrikDB::engine_handle(&db)?;
+    let out = py
+        .detach(|| {
+            yantrikdb_core::consolidate::consolidate_cluster(
+                &inner,
+                &source_rids,
+                text,
+                embedding.as_deref(),
+            )
+        })
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     json_to_py(py, &out)
 }

@@ -84,22 +84,37 @@ impl PyTenantManager {
     /// Each call creates a new connection to the tenant's DB file.
     /// If the tenant has a registered encryption key, the DB is opened encrypted.
     #[pyo3(signature = (tenant_id, embedder=None))]
-    fn get(&self, tenant_id: &str, embedder: Option<PyObject>) -> PyResult<PyYantrikDB> {
-        let db_path = self
-            .base_dir
-            .join(format!("{tenant_id}.db"))
-            .to_string_lossy()
-            .to_string();
-
-        let config = self.configs.get(tenant_id);
-        let dim = config
-            .and_then(|c| c.embedding_dim)
-            .unwrap_or(self.default_embedding_dim);
-
-        let inner = match config.and_then(|c| c.encryption_key.as_ref()) {
-            Some(key) => YantrikDB::new_encrypted(&db_path, dim, key).map_err(map_err)?,
-            None => YantrikDB::new(&db_path, dim).map_err(map_err)?,
+    fn get(
+        slf: &Bound<'_, Self>,
+        tenant_id: &str,
+        embedder: Option<PyObject>,
+    ) -> PyResult<PyYantrikDB> {
+        // Copy what the open needs under a brief borrow, then open the
+        // tenant's database (SQLite, schema migrations, possibly a wait on
+        // another process's lock) with the GIL released and no borrow held
+        // (#271): a register_tenant() from another thread meanwhile is not
+        // refused with "Already borrowed".
+        let (db_path, dim, key) = {
+            let this = slf.try_borrow()?;
+            let db_path = this
+                .base_dir
+                .join(format!("{tenant_id}.db"))
+                .to_string_lossy()
+                .to_string();
+            let config = this.configs.get(tenant_id);
+            let dim = config
+                .and_then(|c| c.embedding_dim)
+                .unwrap_or(this.default_embedding_dim);
+            let key = config.and_then(|c| c.encryption_key);
+            (db_path, dim, key)
         };
+        let inner = slf
+            .py()
+            .detach(|| match key {
+                Some(key) => YantrikDB::new_encrypted(&db_path, dim, &key),
+                None => YantrikDB::new(&db_path, dim),
+            })
+            .map_err(map_err)?;
 
         Ok(PyYantrikDB::from_engine(inner, embedder))
     }
