@@ -146,7 +146,6 @@ def test_refresh_at_follower_scale(tmp_path):
 
     report = db.refresh_embeddings(dry_run=False)
     assert report["errors"] == []
-    assert report["reindex_deferred"] == 0
     assert db._conn.execute(
         "SELECT count(*) AS n FROM memories WHERE embedding IS NULL"
     ).fetchall()[0]["n"] == 0

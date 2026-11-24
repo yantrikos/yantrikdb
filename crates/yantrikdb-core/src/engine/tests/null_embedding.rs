@@ -366,16 +366,15 @@ mod with_engine_embedder {
             scanned_ciphertext: ciphertext,
             scanned_tier: tier,
             new_embedding_blob: blob,
-            embedding: vector,
         }
     }
-
     /// A follower with more rows than the delta tier holds (256 by
-    /// default): re-indexing them all at once used to fail the repair with
-    /// Backpressure after its SQL had committed, leaving rows out of recall
-    /// and nothing for a retry to do.
+    /// default), workers running: the repair fills every vector and the
+    /// rows come back in vector recall. (An earlier take on #305 re-indexed
+    /// by appending each vector to the delta and failed here with
+    /// Backpressure after its SQL had committed.)
     #[test]
-    fn refresh_at_scale_waits_out_backpressure() {
+    fn refresh_at_follower_scale() {
         let db = std::sync::Arc::new(YantrikDB::with_default(":memory:").unwrap());
         let _workers = crate::engine::materializer::spawn_all_workers(&db, 2);
         // The setup's own writes outrun the compactor too; a caller is
@@ -407,29 +406,9 @@ mod with_engine_embedder {
 
         let report = db.refresh_embeddings(None, false).unwrap();
         assert_eq!(report.refreshed, rids.len(), "{report:?}");
-        assert_eq!(report.reindex_deferred, 0, "{report:?}");
         for rid in rids.iter().step_by(97) {
             assert!(recalls(&db, rid), "{rid} must be back in vector recall");
         }
-    }
-
-    /// An archive that lands between the refresh's commit and its
-    /// re-index wins: the row stays archived and out of vector recall.
-    #[test]
-    fn archive_between_commit_and_reindex_keeps_the_row_archived() {
-        let (db, rids) = store();
-        let rid = &rids[4];
-        strip_vectors(&db, std::slice::from_ref(rid));
-        let pending = vec![pending_for(&db, rid)];
-
-        let mut report = crate::engine::repair::RefreshReport::default();
-        let hot = db.commit_refreshes(&pending, &mut report).unwrap();
-        assert_eq!(report.refreshed, 1);
-        assert!(db.archive(rid).unwrap());
-        db.reindex_refreshed(hot, &mut report).unwrap();
-
-        assert_eq!(tier(&db, rid), "cold");
-        assert!(!recalls(&db, rid), "an archived row must not be re-indexed");
     }
 
     /// The tier guard, cold to hot: a compressed vector encoded for a cold
@@ -475,7 +454,6 @@ mod with_engine_embedder {
             scanned_ciphertext: text,
             scanned_tier: "hot".to_string(),
             new_embedding_blob: crate::serde_helpers::serialize_f32(&vector),
-            embedding: vector,
         }];
         // ...then archived before the write.
         assert!(db.archive(rid).unwrap());
@@ -491,48 +469,6 @@ mod with_engine_embedder {
             "a raw vector must not land in a cold row"
         );
     }
-}
-
-/// archive() tombstones the index entry even when SQL holds no vector: the
-/// index's content is not derivable from the column, and a stale entry
-/// would keep an archived row vector-searchable.
-#[test]
-fn archive_tombstones_an_index_entry_the_column_no_longer_shows() {
-    let db = YantrikDB::new(":memory:", 8).unwrap();
-    record(&db, "a neighbour row", 7.0);
-    let rid = record(&db, "indexed, then its column blanked", 6.0);
-    db.conn()
-        .execute(
-            "UPDATE memories SET embedding = NULL WHERE rid = ?1",
-            params![rid],
-        )
-        .unwrap();
-    assert!(db.archive(&rid).unwrap());
-
-    let hits = db
-        .recall(
-            &vec_seed(6.0, 8),
-            10,
-            None,
-            None,
-            true,
-            false,
-            None,
-            true,
-            None,
-            None,
-            None,
-            None,
-            None,
-            false,
-            None,
-            None,
-        )
-        .unwrap();
-    assert!(
-        hits.iter().all(|h| h.rid != rid),
-        "an archived row must not stay vector-searchable"
-    );
 }
 
 /// The same paths on an encrypted store, where every stored vector is
@@ -604,4 +540,25 @@ fn redundancy_scan_decodes_cold_vectors() {
     }
     let cold = crate::triggers::check_redundancy(&db, 0.9).unwrap().len();
     assert_eq!(cold, hot, "archiving must not change what is redundant");
+}
+
+/// A cold blob that carries the zstd magic but does not decode: hydrate()
+/// refuses before touching the row, which stays cold.
+#[test]
+fn hydrate_refuses_a_corrupt_cold_vector_without_moving_the_row() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rid = record(&db, "a cold row with a corrupt vector", 9.0);
+    assert!(db.archive(&rid).unwrap());
+    db.conn()
+        .execute(
+            "UPDATE memories SET embedding = ?1 WHERE rid = ?2",
+            params![vec![0x28u8, 0xB5, 0x2F, 0xFD, 1, 2, 3, 4], rid],
+        )
+        .unwrap();
+
+    assert!(
+        db.hydrate(&rid).is_err(),
+        "a corrupt vector must not hydrate"
+    );
+    assert_eq!(tier(&db, &rid), "cold", "the row must stay where it was");
 }

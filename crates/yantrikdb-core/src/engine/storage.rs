@@ -23,12 +23,11 @@ impl YantrikDB {
     /// "fix" any half of this in isolation — decide the policy first.
     #[tracing::instrument(skip(self))]
     pub fn archive(&self, rid: &str) -> Result<bool> {
-        let ts = {
+        let (ts, had_vector) = {
             let conn = self.conn();
             // A row can have no vector: replication's follower insert omits
             // the embedding (see `refresh_embeddings`). It still archives;
-            // there is just nothing to compress (the index entry is
-            // tombstoned regardless, below).
+            // there is just nothing to compress or tombstone.
             let row = conn.query_row(
                 "SELECT embedding FROM memories WHERE rid = ?1 AND storage_tier = 'hot' AND consolidation_status = 'active'",
                 params![rid],
@@ -58,7 +57,7 @@ impl YantrikDB {
                 params![stored_compressed, ts, rid],
             )?;
 
-            ts
+            (ts, stored_blob.is_some())
         }; // drop conn before acquiring vec_index write lock
 
         // Chunked embeddings: window vectors follow the parent's tier —
@@ -94,10 +93,18 @@ impl YantrikDB {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
         // **Issue #41 brainstorm-4 §1.** Snapshot through SearchState.
-        // Tombstoned even when the row has no vector in SQL: what the index
-        // holds is not derivable from the column, and a stale entry left
-        // behind would keep an archived row vector-searchable.
-        self.search_state.load().vec_index.tombstone(rid, seq);
+        //
+        // Only a row with a vector is tombstoned. A row with none is not in
+        // the index: no writer ever clears the vector of an indexed row
+        // (every UPDATE of `embedding` stores a vector, archive/hydrate keep
+        // a NULL as NULL, and the reembed swap is guarded on
+        // `embedding_new IS NOT NULL`). A tombstone for it would outlive
+        // the row's return to the hot tier and hide the vector a later
+        // `refresh_embeddings` gives it, because the index rebuild that
+        // follows a refresh does not touch the delta.
+        if had_vector {
+            self.search_state.load().vec_index.tombstone(rid, seq);
+        }
         // Exact-string matching: the parent's tombstone does not cover
         // its window keys.
         for idx in &chunk_idxs {
@@ -146,6 +153,15 @@ impl YantrikDB {
                 Some(blob) => {
                     let stored_plain = self.decrypt_embedding(blob)?;
                     let embedding = crate::compression::decode_embedding_blob(&stored_plain);
+                    // Refuse before the UPDATE: a blob that does not decode
+                    // to this store's dimension must not leave the row hot
+                    // with an unusable vector and no index entry.
+                    if embedding.len() != self.embedding_dim {
+                        return Err(crate::error::YantrikDbError::EmbeddingDimensionMismatch {
+                            expected: self.embedding_dim,
+                            got: embedding.len(),
+                        });
+                    }
                     let raw_blob = serialize_f32(&embedding);
                     let stored_raw = self.encrypt_embedding(&raw_blob)?;
                     (Some(embedding), Some(stored_raw))
