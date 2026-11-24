@@ -688,8 +688,22 @@ impl PyYantrikDB {
     /// off) or if exclusive access to the engine isn't available (e.g.
     /// any `_conn` proxy is still live — drop it first).
     #[cfg(feature = "embedder-download")]
-    fn set_embedder_named(&mut self, name: &str) -> PyResult<()> {
-        if self.inner.is_none() {
+    fn set_embedder_named(slf: &Bound<'_, Self>, name: &str) -> PyResult<()> {
+        if slf.try_borrow()?.inner.is_none() {
+            return Err(PyRuntimeError::new_err("YantrikDB is closed"));
+        }
+        // #271: the first call for a name downloads the model (tens of MB),
+        // verifies its SHA-256 and loads it. Do that with no borrow of the
+        // wrapper and the GIL released: every other thread keeps running and
+        // keeps using this store meanwhile. Only the swap below needs
+        // exclusive access, and with the model in hand it is quick.
+        let downloaded = slf
+            .py()
+            .detach(|| yantrikdb_core::embedder::DownloadedEmbedder::fetch(name))
+            .map_err(map_err)?;
+        let mut this = slf.try_borrow_mut()?;
+        // A close() can land while the model is fetched.
+        if this.inner.is_none() {
             return Err(PyRuntimeError::new_err("YantrikDB is closed"));
         }
         // The engine swap needs exclusive (`&mut`) access via `Arc::get_mut`,
@@ -701,12 +715,14 @@ impl PyYantrikDB {
         // swap (success or failure) so the engine keeps its compactor — without
         // it, writes wedge at delta_max. This is an infrequent, operator-
         // initiated call, so the brief worker pause is acceptable.
-        self._workers = None;
+        this._workers = None;
 
         let swap = {
-            let arc = self.inner.as_mut().expect("checked is_some above");
+            let arc = this.inner.as_mut().expect("checked is_some above");
             match Arc::get_mut(arc) {
-                Some(engine) => engine.set_embedder_named(name).map_err(map_err),
+                Some(engine) => engine
+                    .set_downloaded_embedder(name, downloaded)
+                    .map_err(map_err),
                 // A real external clone is still live (e.g. a ConnectionProxy or
                 // a cloned YantrikDB) — the original, legitimate guard. Preserve
                 // its actionable message.
@@ -717,7 +733,7 @@ impl PyYantrikDB {
             }
         };
 
-        self.respawn_workers();
+        this.respawn_workers();
         swap
     }
 
@@ -1040,6 +1056,29 @@ impl EmbedPlan<'_> {
     }
 }
 
+/// Run one engine call with the GIL released (#271).
+///
+/// `db` is an owned handle ([`PyYantrikDB::engine_handle`] or
+/// [`PyYantrikDB::engine_and_embedder`]), so no borrow of the wrapper is held
+/// while `f` runs. Every binding that reaches SQLite goes through here, not
+/// only the slow ones: the engine serialises on one connection mutex, so even
+/// a point read can wait out another thread's write (up to `busy_timeout`),
+/// and a binding that waits with the GIL held stops every Python thread in
+/// the host for that long.
+///
+/// `f` may borrow the call's `&str` and other plain-Rust arguments: they are
+/// `Send`, and the Python objects they come from are kept alive by the call
+/// itself. Anything Python-bound (a dict, a callback) must be converted
+/// before the call and the result converted after it; the `Send` bounds
+/// enforce that.
+pub(crate) fn run_detached<T, F>(py: Python<'_>, db: Arc<YantrikDB>, f: F) -> PyResult<T>
+where
+    F: FnOnce(&YantrikDB) -> Result<T, yantrikdb_core::YantrikDbError> + Send,
+    T: Send,
+{
+    py.detach(move || f(&db)).map_err(map_err)
+}
+
 /// `embed_text`'s precedence, without a borrow held across `encode()`:
 /// an embedder the caller ATTACHED wins over one the engine resolved for
 /// this store's dimension (yantrikdb-hermes-plugin #84), then the engine's
@@ -1060,6 +1099,23 @@ pub(crate) fn plan_embed<'a>(
     Err(PyRuntimeError::new_err(
         "No embedder configured. Pass an embedder to YantrikDB() or call set_embedder().",
     ))
+}
+
+/// The usual query shape: a vector the caller passed wins, else `text` is
+/// embedded with [`plan_embed`], else `ValueError(missing)`.
+pub(crate) fn query_plan<'a>(
+    py: Python<'_>,
+    db: &YantrikDB,
+    embedder: Option<&PyObject>,
+    given: Option<Vec<f32>>,
+    text: Option<&'a str>,
+    missing: &'static str,
+) -> PyResult<EmbedPlan<'a>> {
+    match (given, text) {
+        (Some(v), _) => Ok(EmbedPlan::Ready(v)),
+        (None, Some(t)) => plan_embed(py, db, embedder, t),
+        (None, None) => Err(PyValueError::new_err(missing)),
+    }
 }
 
 impl PyYantrikDB {
@@ -1113,6 +1169,16 @@ impl PyYantrikDB {
         self.inner
             .as_deref()
             .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))
+    }
+
+    /// [`run_detached`] on this wrapper's engine: the common case, a binding
+    /// that does not embed.
+    pub(crate) fn detached<T, F>(slf: &Bound<'_, Self>, f: F) -> PyResult<T>
+    where
+        F: FnOnce(&YantrikDB) -> Result<T, yantrikdb_core::YantrikDbError> + Send,
+        T: Send,
+    {
+        run_detached(slf.py(), Self::engine_handle(slf)?, f)
     }
 
     /// The engine handle and the caller-attached Python embedder, taken
