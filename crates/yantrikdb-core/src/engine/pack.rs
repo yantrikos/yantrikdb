@@ -2178,7 +2178,7 @@ impl YantrikDB {
                     std::process::id(),
                     next_install_tmp()
                 ));
-                if let Err(e) = std::fs::rename(&dest, &kept) {
+                if let Err(e) = rename_retrying(&dest, &kept) {
                     let _ = std::fs::remove_file(tmp);
                     restore_previous();
                     return Err(YantrikDbError::PackUnreadable {
@@ -2191,7 +2191,7 @@ impl YantrikDB {
             if let Err(e) = std::fs::rename(tmp, &dest) {
                 let _ = std::fs::remove_file(tmp);
                 if let Some(kept) = aside.as_ref() {
-                    let _ = std::fs::rename(kept, &dest);
+                    let _ = rename_retrying(kept, &dest);
                 }
                 restore_previous();
                 return Err(YantrikDbError::PackUnreadable {
@@ -2252,7 +2252,7 @@ impl YantrikDB {
                     match aside.as_ref() {
                         Some(kept) => {
                             let _ = std::fs::remove_file(&dest);
-                            let _ = std::fs::rename(kept, &dest);
+                            let _ = rename_retrying(kept, &dest);
                         }
                         None => {
                             if !self.pack_is_installed(&pack_id)? {
@@ -2780,6 +2780,26 @@ fn sweep_stale_install_temps(dir: &std::path::Path) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
+}
+
+/// `std::fs::rename`, retried for about 100 ms. On Windows a recall still
+/// reading a pack holds its file open (SQLite opens without
+/// FILE_SHARE_DELETE), and moving that file fails with a sharing
+/// violation (os error 32) until the read finishes, usually within a few
+/// milliseconds: 19-24 of 60 re-installs beside recall traffic failed
+/// that way, and each succeeded within three tries 2 ms apart (#304
+/// review 4). Any error is retried; past the last try it is returned.
+fn rename_retrying(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    const BACKOFF_MS: [u64; 6] = [2, 4, 8, 16, 32, 38];
+    let mut result = std::fs::rename(from, to);
+    for ms in BACKOFF_MS {
+        if result.is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        result = std::fs::rename(from, to);
+    }
+    result
 }
 
 fn next_install_tmp() -> u64 {

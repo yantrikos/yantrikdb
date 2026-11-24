@@ -1736,3 +1736,48 @@ fn reinstall_of_an_unmountable_copy_keeps_the_working_install() {
         "the next open remounts it"
     );
 }
+
+/// On Windows a recall still reading the old mount holds the installed file
+/// open without FILE_SHARE_DELETE, so moving it aside failed with a sharing
+/// violation (os error 32) for the few milliseconds the read took: 19-24 of
+/// 60 re-installs beside recall traffic failed (#304 review 4). The move is
+/// retried briefly. Here a handle opened the way SQLite opens it is let go
+/// 5 ms after the install unmounts the old copy, just before it moves it.
+#[cfg(windows)]
+#[test]
+fn reinstall_waits_briefly_for_a_reader_holding_the_installed_file() {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x1;
+    const FILE_SHARE_WRITE: u32 = 0x2;
+    let dir = tmpdir("reinstall-held");
+    let pack = dir.join("physics.ydbpack");
+    build_pack(
+        &dir,
+        pack.to_str().unwrap(),
+        "E0",
+        &[("gluons bind quarks", 3)],
+    );
+    let db = host(&dir, "E0");
+    db.install_pack(pack.to_str().unwrap()).unwrap();
+    let installed = db.pack_dir().unwrap().join("physics-1.0.0.ydbpack");
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(&installed)
+        .unwrap();
+    let result = std::thread::scope(|s| {
+        s.spawn(|| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !db.mounted_packs().is_empty() && std::time::Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            drop(held);
+        });
+        db.install_pack(pack.to_str().unwrap())
+    });
+    result.expect("the re-install waits out a brief reader");
+    assert_eq!(db.mounted_packs().len(), 1);
+    let texts = recall_texts(&db, &vec_on(3, 0.05), 5);
+    assert!(texts.iter().any(|t| t == "gluons bind quarks"), "{texts:?}");
+}
