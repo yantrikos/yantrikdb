@@ -200,25 +200,19 @@ impl PyYantrikDB {
         event_after: Option<f64>,
         event_before: Option<f64>,
     ) -> PyResult<Vec<PyObject>> {
-        // Owned handle and owned strings: everything below moves into the
-        // detached closure, which may not borrow `self` or any Python-bound
-        // argument. `Arc<YantrikDB>` is Send + Sync, the strings are owned, and
-        // the numeric arguments are Copy — that is what `Ungil` requires.
+        // An owned engine handle, so the detached closure borrows nothing of
+        // `self`. `Arc<YantrikDB>` is Send + Sync; the `&str` arguments are
+        // Rust strings PyO3 has already extracted, valid for the whole call;
+        // the numeric arguments are Copy. That is what `Ungil` requires.
         let py = slf.py();
         // No borrow of `slf` is held across the Python embedder's `encode()`
         // or the detached call; see `engine_and_embedder` for why that
         // matters.
         let (db, embedder) = Self::engine_and_embedder(slf)?;
-        let query = query.map(str::to_owned);
-        let memory_type = memory_type.map(str::to_owned);
-        let namespace = namespace.map(str::to_owned);
-        let domain = domain.map(str::to_owned);
-        let source = source.map(str::to_owned);
-        let order = order.map(str::to_owned);
 
         let plan = match query_embedding {
             Some(e) => EmbedPlan::Ready(e),
-            None => match query.as_deref() {
+            None => match query {
                 Some(q) => plan_embed(py, &db, embedder.as_ref(), q)?,
                 None => {
                     return Err(PyValueError::new_err(
@@ -242,16 +236,16 @@ impl PyYantrikDB {
                     &emb,
                     top_k,
                     time_window,
-                    memory_type.as_deref(),
+                    memory_type,
                     include_consolidated,
                     expand_entities,
-                    query.as_deref(),
+                    query,
                     skip_reinforce,
-                    namespace.as_deref(),
-                    domain.as_deref(),
-                    source.as_deref(),
+                    namespace,
+                    domain,
+                    source,
                     certainty_min,
-                    order.as_deref(),
+                    order,
                     include_superseded,
                     event_after,
                     event_before,

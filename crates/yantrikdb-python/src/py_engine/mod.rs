@@ -990,18 +990,19 @@ pub(crate) fn py_vector(py: Python<'_>, result: &PyObject) -> PyResult<Vec<f32>>
 
 /// Where a binding's vector comes from, decided once, from the snapshot
 /// [`PyYantrikDB::engine_and_embedder`] took (#271).
-pub(crate) enum EmbedPlan {
+pub(crate) enum EmbedPlan<'a> {
     /// A vector already in hand: passed by the caller, or produced by the
     /// caller-attached Python embedder (with the GIL held, as any Python
     /// call must be, but with no borrow of the wrapper).
     Ready(Vec<f32>),
     /// The engine's own embedder, run inside the detached closure with the
     /// engine call it feeds: native inference needs no GIL, and one detach
-    /// per call keeps the cost to one GIL handoff.
-    Native(String),
+    /// per call keeps the cost to one GIL handoff. Borrows the caller's
+    /// text: a `&str` argument outlives the call, detach included.
+    Native(&'a str),
 }
 
-impl EmbedPlan {
+impl EmbedPlan<'_> {
     /// The vector, inside `py.detach`.
     pub(crate) fn into_vector(
         self,
@@ -1009,7 +1010,7 @@ impl EmbedPlan {
     ) -> Result<Vec<f32>, yantrikdb_core::YantrikDbError> {
         match self {
             EmbedPlan::Ready(v) => Ok(v),
-            EmbedPlan::Native(text) => db.embed(&text),
+            EmbedPlan::Native(text) => db.embed(text),
         }
     }
 }
@@ -1018,18 +1019,18 @@ impl EmbedPlan {
 /// an embedder the caller ATTACHED wins over one the engine resolved for
 /// this store's dimension (yantrikdb-hermes-plugin #84), then the engine's
 /// own, else the same error `embed_text` raises.
-pub(crate) fn plan_embed(
+pub(crate) fn plan_embed<'a>(
     py: Python<'_>,
     db: &YantrikDB,
     embedder: Option<&PyObject>,
-    text: &str,
-) -> PyResult<EmbedPlan> {
+    text: &'a str,
+) -> PyResult<EmbedPlan<'a>> {
     if let Some(emb) = embedder {
         let result = emb.call_method1(py, "encode", (text,))?;
         return Ok(EmbedPlan::Ready(py_vector(py, &result)?));
     }
     if db.has_embedder() {
-        return Ok(EmbedPlan::Native(text.to_owned()));
+        return Ok(EmbedPlan::Native(text));
     }
     Err(PyRuntimeError::new_err(
         "No embedder configured. Pass an embedder to YantrikDB() or call set_embedder().",
@@ -1037,7 +1038,6 @@ pub(crate) fn plan_embed(
 }
 
 impl PyYantrikDB {
-    /// Get a reference to the inner YantrikDB engine (for use by consolidation/trigger wrappers).
     /// An owned engine handle for a call that releases the GIL (#271).
     ///
     /// A `&self` pymethod keeps its `PyRef` borrow for the whole call. Once
@@ -1061,6 +1061,7 @@ impl PyYantrikDB {
             .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))
     }
 
+    /// Get a reference to the inner YantrikDB engine (for use by consolidation/trigger wrappers).
     pub fn get_inner(&self) -> PyResult<&YantrikDB> {
         self.inner
             .as_deref()
