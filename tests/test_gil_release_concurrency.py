@@ -557,15 +557,21 @@ def test_set_embedder_named_succeeds_under_steady_traffic(tmp_path, traffic):
             db.set_embedder_named("potion-base-8M")
         finally:
             took = time.perf_counter() - started
+            # Wait for the traffic to resume rather than sample a fixed
+            # window: under load four threads finished as few as 4 calls in
+            # 0.2 s, so a window that short can see none.
             before = calls[0]
-            time.sleep(0.2)
+            resumed_by = time.perf_counter() + 5
+            while calls[0] == before and time.perf_counter() < resumed_by:
+                time.sleep(0.01)
             after = calls[0]
             stop.set()
             for t in threads:
                 t.join(30)
-        assert not errors, errors[:3]
-        assert took < 8, f"the swap took {took:.1f} s"
-        assert after > before, "traffic resumed after the swap"
+        seen = f"swap {took:.2f} s, {before} calls before it, {after} after"
+        assert not errors, (seen, errors[:3])
+        assert took < 8, seen
+        assert after > before, f"traffic never resumed after the swap: {seen}"
     finally:
         db.close()
 
