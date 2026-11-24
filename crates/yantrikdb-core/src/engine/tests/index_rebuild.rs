@@ -150,9 +150,10 @@ fn rebuild_retires_the_delta_entries_its_read_subsumes() {
 }
 
 /// The keys a rebuild retires are taken BEFORE its SQL read. An entry
-/// published after the read (here: by a hook just before the install) is
-/// not in the rebuilt tier and must survive in the delta; taking the keys
-/// at install time retired it, losing the write.
+/// published after the read (here: by a hook at the earliest such point,
+/// just after the read) is not in the rebuilt tier and must survive in the
+/// delta; taking the keys anywhere after the read retired it, losing the
+/// write.
 #[test]
 fn rebuild_keeps_entries_published_after_its_read() {
     use crate::engine::indices::rebuild_hooks;
@@ -178,7 +179,7 @@ fn rebuild_keeps_entries_published_after_its_read() {
     late[6] = 1.0;
     let late_for_hook = late.clone();
     rebuild_hooks::set(Box::new(move |stage, idx| {
-        if stage == "before_install" {
+        if stage == "after_sql_read" {
             idx.append(
                 "published_after_the_read".to_string(),
                 late_for_hook.clone(),

@@ -127,7 +127,8 @@ without SQL (`insert_vector` before the caller writes the column) is
 dropped by a rebuild, as by a reopen. The compare-and-swap in step 3 is
 a second line against a cold tier replaced mid-merge; it does not stop
 an installer that skips the gate from losing writes, which is why the
-only non-test installer is the rebuild (`install_rebuilt`). Lock order:
+only installer besides compaction is the rebuild (`install_rebuilt`),
+and it takes the gate. Lock order:
 the gate, then `conn`; compaction never takes `conn`.
 
 Adding a "scheduler with priorities" that introduces a shared lock

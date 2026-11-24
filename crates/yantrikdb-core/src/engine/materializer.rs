@@ -168,8 +168,9 @@ pub fn recommended_worker_count() -> usize {
 ///      60s; epic 5 task 13). The age trigger closes the gap where a
 ///      low-write namespace's delta sits forever and reads pay the
 ///      linear scan indefinitely.
-///   2. Run `compact()` — clone-rebuild cold from old cold + sealed delta,
-///      then ArcSwap the new cold in.
+///   2. Run `compact()` — merge a snapshot of the published delta into a
+///      clone of cold, install it by compare-and-swap, retire the merged
+///      entries (under the compaction gate; CONCURRENCY.md Rule 3).
 ///
 /// Drop the returned [`CompactorGuard`] (or let the engine `Arc<YantrikDB>`
 /// drop) for clean shutdown.
