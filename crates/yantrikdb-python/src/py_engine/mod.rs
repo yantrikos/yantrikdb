@@ -685,27 +685,26 @@ impl PyYantrikDB {
     ///
     /// Raises `RuntimeError` if the wheel was built with
     /// `--no-default-features` (the `embedder-download` Cargo feature is
-    /// off) or if exclusive access to the engine isn't available (e.g.
-    /// any `_conn` proxy is still live — drop it first).
+    /// off), or if exclusive access to the engine is still unavailable
+    /// after 10 seconds: another thread's call on this database never
+    /// finished, or a `_conn` proxy or cloned reference is still alive.
     #[cfg(feature = "embedder-download")]
     fn set_embedder_named(slf: &Bound<'_, Self>, name: &str) -> PyResult<()> {
         if slf.try_borrow()?.inner.is_none() {
             return Err(PyRuntimeError::new_err("YantrikDB is closed"));
         }
-        // #271: the first call for a name downloads the model (tens of MB),
-        // verifies its SHA-256 and loads it. Do that with no borrow of the
-        // wrapper and the GIL released: every other thread keeps running and
-        // keeps using this store meanwhile. Only the swap below needs
-        // exclusive access, and with the model in hand it is quick.
+        // #271: fetch() downloads the model on first use (tens of MB),
+        // verifies its SHA-256 and loads it, from the cache on later calls.
+        // All of that runs with no borrow of the wrapper and the GIL
+        // released, so every other thread keeps running and keeps using
+        // this store. The swap below needs exclusive access and holds the
+        // GIL: stopping the workers (under a millisecond), the engine
+        // swap, and respawning them.
         let downloaded = slf
             .py()
             .detach(|| yantrikdb_core::embedder::DownloadedEmbedder::fetch(name))
             .map_err(map_err)?;
-        let mut this = slf.try_borrow_mut()?;
-        // A close() can land while the model is fetched.
-        if this.inner.is_none() {
-            return Err(PyRuntimeError::new_err("YantrikDB is closed"));
-        }
+
         // The engine swap needs exclusive (`&mut`) access via `Arc::get_mut`,
         // which requires strong count 1 AND weak count 0. Since v0.9.0 the
         // constructors spawn a background worker pool (materializer + compactor)
@@ -713,26 +712,53 @@ impl PyYantrikDB {
         // make `get_mut` return `None`. So stop the workers first: dropping the
         // guards JOINs the threads, releasing their weak refs. Respawn after the
         // swap (success or failure) so the engine keeps its compactor — without
-        // it, writes wedge at delta_max. This is an infrequent, operator-
-        // initiated call, so the brief worker pause is acceptable.
-        this._workers = None;
-
-        let swap = {
-            let arc = this.inner.as_mut().expect("checked is_some above");
-            match Arc::get_mut(arc) {
-                Some(engine) => engine.set_downloaded_embedder(downloaded).map_err(map_err),
-                // A real external clone is still live (e.g. a ConnectionProxy or
-                // a cloned YantrikDB) — the original, legitimate guard. Preserve
-                // its actionable message.
-                None => Err(PyRuntimeError::new_err(
-                    "set_embedder_named requires exclusive access to the engine; \
-                     drop any ConnectionProxy / cloned YantrikDB references before calling",
-                )),
+        // it, writes wedge at delta_max.
+        //
+        // Another thread's detached call holds a strong ref for as long as
+        // it runs (a write waiting on SQLite's lock, up to busy_timeout).
+        // Under the GIL that call finished before this one started; now it
+        // overlaps, so wait for it: poll with no borrow held and the GIL
+        // released between tries, and stop the workers only when nothing
+        // else seems to hold the engine. Past the deadline the holder is
+        // most likely a `_conn` proxy or a cloned reference, which no wait
+        // will release.
+        const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+        const FORCE_TRY: std::time::Duration = std::time::Duration::from_millis(50);
+        let deadline = std::time::Instant::now() + WAIT;
+        let mut last_try: Option<std::time::Instant> = None;
+        loop {
+            {
+                let mut this = slf.try_borrow_mut()?;
+                // A close() can land while the model is fetched or we wait.
+                let Some(arc) = this.inner.as_ref() else {
+                    return Err(PyRuntimeError::new_err("YantrikDB is closed"));
+                };
+                // Cheap check first: our handle plus at most one worker's
+                // momentary upgrade. Busy workers can keep the count up
+                // even when no call is in flight, so stop them and try
+                // regardless at least every FORCE_TRY.
+                let quiet = Arc::strong_count(arc) <= 2;
+                if quiet || last_try.is_none_or(|t| t.elapsed() >= FORCE_TRY) {
+                    last_try = Some(std::time::Instant::now());
+                    this._workers = None;
+                    let arc = this.inner.as_mut().expect("checked is_some above");
+                    if let Some(engine) = Arc::get_mut(arc) {
+                        let swap = engine.set_downloaded_embedder(downloaded).map_err(map_err);
+                        this.respawn_workers();
+                        return swap;
+                    }
+                    this.respawn_workers();
+                }
+                if std::time::Instant::now() >= deadline {
+                    return Err(PyRuntimeError::new_err(format!(
+                        "set_embedder_named needs exclusive access to the engine and did not                          get it within {}s: another thread's call on this database is still                          running (waiting on a lock held by another process, for example),                          or a ConnectionProxy (`_conn`) or cloned YantrikDB reference is                          still alive. Let the call finish or drop the reference, then retry.",
+                        WAIT.as_secs()
+                    )));
+                }
             }
-        };
-
-        this.respawn_workers();
-        swap
+            slf.py()
+                .detach(|| std::thread::sleep(std::time::Duration::from_millis(1)));
+        }
     }
 
     /// Slim-build stub. When the Python crate is built with

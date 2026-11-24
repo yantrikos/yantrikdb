@@ -372,3 +372,131 @@ def test_set_embedder_raises_closed_when_probe_closes_the_store(tmp_path):
 
     with pytest.raises(RuntimeError, match="YantrikDB is closed"):
         store.set_embedder(ClosingEmb(), allow_unverified_embedder=True)
+
+
+# ── a call waiting on another process's write lock ───────────────────────
+#
+# A detached write that waits on SQLite's lock holds the engine for as long as
+# it waits (up to busy_timeout). Under the GIL it had finished before any other
+# call started; now `close()` and `set_embedder_named()` can arrive mid-wait.
+
+_HOLDER = r"""
+import sqlite3, sys, time
+conn = sqlite3.connect(sys.argv[1], timeout=30, isolation_level=None)
+conn.execute("BEGIN IMMEDIATE")
+print("locked", flush=True)
+time.sleep(float(sys.argv[2]))
+conn.execute("COMMIT")
+"""
+
+
+def _hold_write_lock(path, seconds):
+    # Another process, as in production: two SQLite libraries in one process
+    # can corrupt a store.
+    import subprocess
+    import sys
+
+    p = subprocess.Popen(
+        [sys.executable, "-c", _HOLDER, path, str(seconds)], stdout=subprocess.PIPE, text=True
+    )
+    assert p.stdout.readline().strip() == "locked"
+    return p
+
+
+def _turn_in_a_thread(db):
+    out = {}
+
+    def worker():
+        try:
+            out["id"] = db.record_turn("default", "user", "said while the lock was held")
+        except Exception as e:  # noqa: BLE001 - every failure is the finding
+            out["error"] = repr(e)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    time.sleep(0.3)  # record_turn() is now waiting on the lock, detached
+    return t, out
+
+
+def test_close_while_a_write_waits_on_the_lock_lets_the_write_land(tmp_path):
+    path = os.path.join(str(tmp_path), "lockwait.db")
+    db = YantrikDB(path, DIM)
+    db.record_turn("default", "user", "before")
+    holder = _hold_write_lock(path, 1.5)
+    t, out = _turn_in_a_thread(db)
+    try:
+        # The waiting write still holds the engine, so this close() is not the
+        # exclusive one.
+        assert db.close() is False
+    finally:
+        t.join(30)
+        holder.wait(30)
+    assert "error" not in out, out.get("error")
+    reopened = YantrikDB(path, DIM)
+    try:
+        said = [turn["content"] for turn in reopened.recent_turns("default")]
+        assert "said while the lock was held" in said
+    finally:
+        reopened.close()
+
+
+def _model_is_cached(name, tag):
+    # dirs::cache_dir(), as the engine resolves it.
+    import sys
+
+    if sys.platform == "win32":
+        base = os.environ.get("LOCALAPPDATA", "")
+    elif sys.platform == "darwin":
+        base = os.path.expanduser("~/Library/Caches")
+    else:
+        base = os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache")
+    d = os.path.join(base, "yantrikdb", "models", f"{name}-{tag}")
+    files = ("model.safetensors", "tokenizer.json", "config.json", "modules.json")
+    return all(os.path.isfile(os.path.join(d, f)) and os.path.getsize(os.path.join(d, f)) for f in files)
+
+
+@pytest.mark.skipif(
+    not _model_is_cached("potion-base-8M", "v0.1.0"),
+    reason="potion-base-8M is not in the local model cache; this test never downloads",
+)
+def test_set_embedder_named_waits_for_a_write_waiting_on_the_lock(tmp_path):
+    # Before the wait, the swap found the waiting write's reference and raised
+    # "requires exclusive access … drop any ConnectionProxy", which named the
+    # wrong cause and failed a call that succeeds sequentially.
+    path = os.path.join(str(tmp_path), "named.db")
+    db = YantrikDB(path, 256)
+    try:
+        db.record_turn("default", "user", "before")
+        holder = _hold_write_lock(path, 1.5)
+        t, out = _turn_in_a_thread(db)
+        try:
+            db.set_embedder_named("potion-base-8M")
+        finally:
+            t.join(30)
+            holder.wait(30)
+        assert "error" not in out, out.get("error")
+        said = [turn["content"] for turn in db.recent_turns("default")]
+        assert "said while the lock was held" in said
+        assert db.has_embedder()
+    finally:
+        db.close()
+
+
+@pytest.mark.skipif(
+    not _model_is_cached("potion-base-8M", "v0.1.0"),
+    reason="potion-base-8M is not in the local model cache; this test never downloads",
+)
+def test_set_embedder_named_names_both_causes_when_a_proxy_holds_the_engine(tmp_path):
+    # A live _conn proxy never lets go, so the wait runs out (10 s) and the
+    # error must name it as well as an in-flight call.
+    db = YantrikDB(os.path.join(str(tmp_path), "proxy.db"), 256)
+    try:
+        proxy = db._conn
+        with pytest.raises(RuntimeError) as err:
+            db.set_embedder_named("potion-base-8M")
+        msg = str(err.value)
+        assert "ConnectionProxy" in msg and "another thread's call" in msg, msg
+        del proxy
+        assert db.record_turn("default", "user", "workers still running") > 0
+    finally:
+        db.close()

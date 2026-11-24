@@ -406,9 +406,11 @@ RELEASES = {
 # Detached, but not witnessable offline: see the module docstring's limit.
 UNWITNESSED = {
     "set_embedder_named": (
-        "the model fetch runs detached, but offline it can only fail, and an "
-        "unknown name fails within a microsecond or two inside the detach; "
-        "a real fetch needs the network"
+        "the fetch (download on first use, load from the cache after) runs "
+        "detached, but offline an unknown name fails within a microsecond or "
+        "two inside the detach, and a real fetch needs the network or a "
+        "cached model; stopping the workers (under a millisecond), the swap "
+        "and the respawn hold the GIL"
     ),
 }
 
