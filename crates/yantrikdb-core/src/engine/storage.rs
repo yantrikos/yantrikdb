@@ -309,16 +309,33 @@ impl YantrikDB {
         //   there this is the whole cost of the check. A different vector
         //   would be a stray index entry that the next rebuild or reopen
         //   drops; it is not appended.
-        let index_it = {
+        // The seq is minted while the conn is still held: an archive() that
+        // lands after this check takes the conn after us, so its tombstone
+        // gets a later seq and outranks the append.
+        let seq = {
             let conn = self.conn();
             let row: Option<(String, Option<Vec<u8>>)> = conn
                 .query_row(
-                    "SELECT storage_tier, embedding FROM memories WHERE rid = ?1",
+                    "SELECT storage_tier, embedding FROM memories WHERE rid = ?1 \
+                     AND consolidation_status IN ('active', 'consolidated')",
                     params![rid],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()?;
-            match row {
+            let forgotten = row.is_none()
+                && conn
+                    .query_row(
+                        "SELECT 1 FROM memories WHERE rid = ?1",
+                        params![rid],
+                        |_| Ok(()),
+                    )
+                    .optional()?
+                    .is_some();
+            let index_it = match row {
+                // A row that exists but is not active or consolidated
+                // (forgotten, tombstoned) is not indexed: build_vec_index
+                // would not index it either.
+                None if forgotten => false,
                 // No row: nothing to fill or check against (the documented
                 // contract is that the row exists).
                 None => true,
@@ -352,15 +369,14 @@ impl YantrikDB {
                         false
                     }
                 }
+            };
+            if !index_it {
+                return Ok(());
             }
+            self.vec_seq
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+                + 1
         };
-        if !index_it {
-            return Ok(());
-        }
-        let seq = self
-            .vec_seq
-            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-            + 1;
         // **Issue #41 brainstorm-4 §1.** Replication-backfill writes
         // route through the active SearchState's DeltaIndex.
         state

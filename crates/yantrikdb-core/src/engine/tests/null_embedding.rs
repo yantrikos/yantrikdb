@@ -773,3 +773,23 @@ fn insert_vector_indexes_only_what_sql_agrees_with() {
     db.insert_vector(&hot_rid, &held).unwrap();
     assert!(vector_hits(&db, &held, &hot_rid));
 }
+
+/// A forgotten row is not put back in the index by insert_vector, even
+/// with the vector it still holds: build_vec_index would not index it.
+#[test]
+fn insert_vector_skips_a_forgotten_row() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let v = vec_seed(18.0, 8);
+    let rid = record(&db, "a row that will be forgotten", 18.0);
+    assert!(db.forget(&rid).unwrap());
+    db.insert_vector(&rid, &v).unwrap();
+    let back = db
+        .search_state
+        .load()
+        .vec_index
+        .search(&v, 5)
+        .unwrap()
+        .iter()
+        .any(|(r, _)| r == &rid);
+    assert!(!back, "a forgotten row must not be re-indexed");
+}
