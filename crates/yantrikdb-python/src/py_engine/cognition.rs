@@ -1,11 +1,10 @@
-use pyo3::exceptions::PyRuntimeError;
 use pyo3::prelude::*;
 use pyo3::types::PyDict;
 type PyObject = pyo3::Py<pyo3::PyAny>;
 
 use crate::py_types::*;
 
-use super::{map_err, PyYantrikDB};
+use super::{map_err, to_py, PyYantrikDB};
 
 #[pymethods]
 impl PyYantrikDB {
@@ -147,15 +146,12 @@ impl PyYantrikDB {
 
     #[pyo3(signature = (trigger_type=None, limit=50))]
     fn get_trigger_history(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         trigger_type: Option<&str>,
         limit: usize,
     ) -> PyResult<Vec<PyObject>> {
-        let db = self.get_inner()?;
-        let triggers = db
-            .get_trigger_history(trigger_type, limit)
-            .map_err(map_err)?;
+        let py = slf.py();
+        let triggers = Self::detached(slf, |db| db.get_trigger_history(trigger_type, limit))?;
         triggers
             .iter()
             .map(|t| persisted_trigger_to_dict(py, t))
@@ -164,37 +160,31 @@ impl PyYantrikDB {
 
     #[pyo3(signature = (pattern_type=None, status=None, limit=50))]
     fn get_patterns(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         pattern_type: Option<&str>,
         status: Option<&str>,
         limit: usize,
     ) -> PyResult<Vec<PyObject>> {
-        let db = self.get_inner()?;
-        let patterns = db
-            .get_patterns(pattern_type, status, limit)
-            .map_err(map_err)?;
+        let py = slf.py();
+        let patterns = Self::detached(slf, |db| db.get_patterns(pattern_type, status, limit))?;
         patterns.iter().map(|p| pattern_to_dict(py, p)).collect()
     }
 
     // ── Personality API (V11) ──
 
-    fn get_personality(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let profile = db.get_personality().map_err(map_err)?;
-        personality_profile_to_dict(py, &profile)
+    fn get_personality(slf: &Bound<'_, Self>) -> PyResult<PyObject> {
+        let profile = Self::detached(slf, |db| db.get_personality())?;
+        personality_profile_to_dict(slf.py(), &profile)
     }
 
-    fn derive_personality(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let profile = db.derive_personality().map_err(map_err)?;
-        personality_profile_to_dict(py, &profile)
+    fn derive_personality(slf: &Bound<'_, Self>) -> PyResult<PyObject> {
+        let profile = Self::detached(slf, |db| db.derive_personality())?;
+        personality_profile_to_dict(slf.py(), &profile)
     }
 
     #[pyo3(signature = (name, score))]
-    fn set_personality_trait(&self, name: &str, score: f64) -> PyResult<bool> {
-        let db = self.get_inner()?;
-        db.set_personality_trait(name, score).map_err(map_err)
+    fn set_personality_trait(slf: &Bound<'_, Self>, name: &str, score: f64) -> PyResult<bool> {
+        Self::detached(slf, |db| db.set_personality_trait(name, score))
     }
 
     // ── Conflict resolution API (V2) ──
@@ -216,10 +206,9 @@ impl PyYantrikDB {
         conflicts.iter().map(|c| conflict_to_dict(py, c)).collect()
     }
 
-    fn get_conflict(&self, py: Python<'_>, conflict_id: &str) -> PyResult<Option<PyObject>> {
-        let db = self.get_inner()?;
-        match db.get_conflict(conflict_id).map_err(map_err)? {
-            Some(c) => Ok(Some(conflict_to_dict(py, &c)?)),
+    fn get_conflict(slf: &Bound<'_, Self>, conflict_id: &str) -> PyResult<Option<PyObject>> {
+        match Self::detached(slf, |db| db.get_conflict(conflict_id))? {
+            Some(c) => Ok(Some(conflict_to_dict(slf.py(), &c)?)),
             None => Ok(None),
         }
     }
@@ -247,9 +236,12 @@ impl PyYantrikDB {
     }
 
     #[pyo3(signature = (conflict_id, note=None))]
-    fn dismiss_conflict(&self, conflict_id: &str, note: Option<&str>) -> PyResult<()> {
-        let db = self.get_inner()?;
-        db.dismiss_conflict(conflict_id, note).map_err(map_err)
+    fn dismiss_conflict(
+        slf: &Bound<'_, Self>,
+        conflict_id: &str,
+        note: Option<&str>,
+    ) -> PyResult<()> {
+        Self::detached(slf, |db| db.dismiss_conflict(conflict_id, note))
     }
 
     fn scan_conflicts(slf: &Bound<'_, Self>) -> PyResult<Vec<PyObject>> {
@@ -286,18 +278,14 @@ impl PyYantrikDB {
     /// false-fire audit surface. Returns the audit counters as a dict.
     #[pyo3(signature = (namespace="default", dry_run=false))]
     fn extract_standing_instructions(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         namespace: &str,
         dry_run: bool,
     ) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let audit = db
-            .extract_standing_instructions(namespace, dry_run)
-            .map_err(map_err)?;
-        let val =
-            serde_json::to_value(&audit).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        crate::py_types::json_to_py(py, &val)
+        let audit = Self::detached(slf, |db| {
+            db.extract_standing_instructions(namespace, dry_run)
+        })?;
+        to_py(slf.py(), serde_json::to_value(&audit))
     }
 
     /// The standing-instruction salience lane: verified facets for a
@@ -305,11 +293,9 @@ impl PyYantrikDB {
     /// deterministic prefix with an explicit `omitted` count otherwise.
     /// Ordinary `recall` is untouched; callers compose the two.
     #[pyo3(signature = (namespace="default", limit=8))]
-    fn recall_facets(&self, py: Python<'_>, namespace: &str, limit: usize) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let out = db.recall_facets(namespace, limit).map_err(map_err)?;
-        let val = serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        crate::py_types::json_to_py(py, &val)
+    fn recall_facets(slf: &Bound<'_, Self>, namespace: &str, limit: usize) -> PyResult<PyObject> {
+        let out = Self::detached(slf, |db| db.recall_facets(namespace, limit))?;
+        to_py(slf.py(), serde_json::to_value(&out))
     }
 
     /// Coverage-first thread retrieval (opt-in): ALL visible rows in the
@@ -336,36 +322,30 @@ impl PyYantrikDB {
     /// decrypt-derived turns, independent of the persisted columns).
     #[pyo3(signature = (namespace, entities, limit=100, phrases=None, topic_rids=None))]
     fn recall_thread(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         namespace: &str,
         entities: Vec<String>,
         limit: usize,
         phrases: Option<Vec<String>>,
         topic_rids: Option<Vec<String>>,
     ) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
         let phrases = phrases.unwrap_or_default();
         let topic_rids = topic_rids.unwrap_or_default();
         let val = if phrases.is_empty() && topic_rids.is_empty() {
             // Legacy shape for entity-only calls (v1 compatibility).
             let entity_refs: Vec<&str> = entities.iter().map(String::as_str).collect();
-            let out = db
-                .recall_thread(namespace, &entity_refs, limit)
-                .map_err(map_err)?;
-            serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+            let out = Self::detached(slf, |db| db.recall_thread(namespace, &entity_refs, limit))?;
+            serde_json::to_value(&out)
         } else {
             let query = yantrikdb_core::ThreadQuery {
                 entities,
                 phrases,
                 topic_rids,
             };
-            let out = db
-                .recall_thread_v2(namespace, &query, limit)
-                .map_err(map_err)?;
-            serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?
+            let out = Self::detached(slf, |db| db.recall_thread_v2(namespace, &query, limit))?;
+            serde_json::to_value(&out)
         };
-        crate::py_types::json_to_py(py, &val)
+        to_py(slf.py(), val)
     }
 
     /// The EXPLICIT v2 entry point (final reviewer batch 11): ALWAYS takes
@@ -381,25 +361,20 @@ impl PyYantrikDB {
     /// above stays byte-for-byte legacy v1 for entity-only calls.
     #[pyo3(signature = (namespace, entities=None, limit=100, phrases=None, topic_rids=None))]
     fn recall_thread_v2(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         namespace: &str,
         entities: Option<Vec<String>>,
         limit: usize,
         phrases: Option<Vec<String>>,
         topic_rids: Option<Vec<String>>,
     ) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
         let query = yantrikdb_core::ThreadQuery {
             entities: entities.unwrap_or_default(),
             phrases: phrases.unwrap_or_default(),
             topic_rids: topic_rids.unwrap_or_default(),
         };
-        let out = db
-            .recall_thread_v2(namespace, &query, limit)
-            .map_err(map_err)?;
-        let val = serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        crate::py_types::json_to_py(py, &val)
+        let out = Self::detached(slf, |db| db.recall_thread_v2(namespace, &query, limit))?;
+        to_py(slf.py(), serde_json::to_value(&out))
     }
 
     /// Drop every extractor-minted claim (heuristic_v1 / learned_v1),
@@ -410,15 +385,12 @@ impl PyYantrikDB {
     /// after_by_rel, ...}`.
     #[pyo3(signature = (namespace=None, dry_run=false))]
     fn reextract_claims(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         namespace: Option<&str>,
         dry_run: bool,
     ) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let out = db.reextract_claims(namespace, dry_run).map_err(map_err)?;
-        let val = serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        crate::py_types::json_to_py(py, &val)
+        let out = Self::detached(slf, |db| db.reextract_claims(namespace, dry_run))?;
+        to_py(slf.py(), serde_json::to_value(&out))
     }
 
     /// Entity-table heal (issue #213): re-apply today's admission predicate to
@@ -426,11 +398,9 @@ impl PyYantrikDB {
     /// extractor claim on them) unless a manual/stated claim asserts them,
     /// then rebuild the graph index. Idempotent; `dry_run=True` only reports.
     #[pyo3(signature = (dry_run=false))]
-    fn reextract_entities(&self, py: Python<'_>, dry_run: bool) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let out = db.reextract_entities(dry_run).map_err(map_err)?;
-        let val = serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        crate::py_types::json_to_py(py, &val)
+    fn reextract_entities(slf: &Bound<'_, Self>, dry_run: bool) -> PyResult<PyObject> {
+        let out = Self::detached(slf, |db| db.reextract_entities(dry_run))?;
+        to_py(slf.py(), serde_json::to_value(&out))
     }
 
     /// The extraction refusal ledger as a histogram keyed `rel_type:reason`
@@ -438,29 +408,23 @@ impl PyYantrikDB {
     /// it. The instrument the next binding rule is chosen from.
     #[pyo3(signature = (namespace=None))]
     fn extraction_refusal_counts(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         namespace: Option<&str>,
     ) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let out = db.extraction_refusal_counts(namespace).map_err(map_err)?;
-        let val = serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        crate::py_types::json_to_py(py, &val)
+        let out = Self::detached(slf, |db| db.extraction_refusal_counts(namespace))?;
+        to_py(slf.py(), serde_json::to_value(&out))
     }
 
     /// The ledger rows, newest first: memory_rid, rel_type, trigger, reason,
     /// left_token, right_token, at (byte offset), extractor_version.
     #[pyo3(signature = (namespace=None, limit=200))]
     fn extraction_refusals(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         namespace: Option<&str>,
         limit: usize,
     ) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let out = db.extraction_refusals(namespace, limit).map_err(map_err)?;
-        let val = serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        crate::py_types::json_to_py(py, &val)
+        let out = Self::detached(slf, |db| db.extraction_refusals(namespace, limit))?;
+        to_py(slf.py(), serde_json::to_value(&out))
     }
 
     /// Silver recall: re-derive every cooperative (`agent_stated`) claim
@@ -469,14 +433,11 @@ impl PyYantrikDB {
     /// recall (recovered over supported relations). Read-only; judge-free.
     #[pyo3(signature = (namespace=None))]
     fn extraction_silver_recall(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         namespace: Option<&str>,
     ) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let out = db.extraction_silver_recall(namespace).map_err(map_err)?;
-        let val = serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        crate::py_types::json_to_py(py, &val)
+        let out = Self::detached(slf, |db| db.extraction_silver_recall(namespace))?;
+        to_py(slf.py(), serde_json::to_value(&out))
     }
 
     /// One batch of the v50 source_turn recompute/repair pass — the
@@ -484,10 +445,8 @@ impl PyYantrikDB {
     /// Returns `{"processed", "remaining", "complete"}`; call repeatedly
     /// until `complete` is true.
     #[pyo3(signature = (batch=10_000))]
-    fn maintain_source_turn_backfill(&self, py: Python<'_>, batch: usize) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let out = db.maintain_source_turn_backfill(batch).map_err(map_err)?;
-        let val = serde_json::to_value(&out).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
-        crate::py_types::json_to_py(py, &val)
+    fn maintain_source_turn_backfill(slf: &Bound<'_, Self>, batch: usize) -> PyResult<PyObject> {
+        let out = Self::detached(slf, |db| db.maintain_source_turn_backfill(batch))?;
+        to_py(slf.py(), serde_json::to_value(&out))
     }
 }

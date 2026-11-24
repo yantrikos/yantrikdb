@@ -15,7 +15,7 @@ use yantrikdb_core::{MountOptions, PackEmbedder, PackManifest, PackRecallOptions
 
 use crate::py_types::recall_result_to_dict;
 
-use super::{map_err, PyYantrikDB};
+use super::{map_err, query_plan, run_detached, PyYantrikDB};
 
 #[pymethods]
 impl PyYantrikDB {
@@ -40,8 +40,7 @@ impl PyYantrikDB {
     ))]
     #[allow(clippy::too_many_arguments)]
     fn seal_pack(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         dest_path: &str,
         name: &str,
         version: &str,
@@ -56,54 +55,51 @@ impl PyYantrikDB {
         recommended_top_k: Option<u32>,
         recommended_min_similarity: Option<f64>,
     ) -> PyResult<PyObject> {
-        let db = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+        let constitution = constitution.unwrap_or_default();
+        let coverage = coverage.unwrap_or_default();
+        let sealed = Self::detached(slf, |db| {
+            // Default the declared embedder to what this database actually
+            // recorded. Sealing with a digest the vectors do not have would
+            // produce a pack that mounts cleanly and returns nonsense —
+            // exactly the failure the mount check exists to stop — so the
+            // safe value is the one on disk, not one the caller guessed.
+            let recorded = db.embedder_identity()?;
+            let embedder = PackEmbedder {
+                name: embedder_name
+                    .map(|s| s.to_string())
+                    .or_else(|| recorded.as_ref().and_then(|(n, _, _)| n.clone())),
+                digest: embedder_digest
+                    .map(|s| s.to_string())
+                    .or_else(|| recorded.as_ref().map(|(_, d, _)| d.clone())),
+                dim: embedder_dim
+                    .or_else(|| recorded.as_ref().map(|(_, _, dim)| *dim))
+                    .unwrap_or_else(|| db.embedding_dim()),
+            };
 
-        // Default the declared embedder to what this database actually
-        // recorded. Sealing with a digest the vectors do not have would
-        // produce a pack that mounts cleanly and returns nonsense —
-        // exactly the failure the mount check exists to stop — so the
-        // safe value is the one on disk, not one the caller guessed.
-        let recorded = db.embedder_identity().map_err(map_err)?;
-        let embedder = PackEmbedder {
-            name: embedder_name
-                .map(|s| s.to_string())
-                .or_else(|| recorded.as_ref().and_then(|(n, _, _)| n.clone())),
-            digest: embedder_digest
-                .map(|s| s.to_string())
-                .or_else(|| recorded.as_ref().map(|(_, d, _)| d.clone())),
-            dim: embedder_dim
-                .or_else(|| recorded.as_ref().map(|(_, _, dim)| *dim))
-                .unwrap_or_else(|| db.embedding_dim()),
-        };
+            let manifest = PackManifest {
+                name: name.to_string(),
+                version: version.to_string(),
+                origin: origin.to_string(),
+                description: description.map(|s| s.to_string()),
+                embedder,
+                content_digest: None,
+                corpus_rows: 0,
+                namespace: None,
+                publisher_pubkey: None,
+                signature: None,
+                reembedded_from: None,
+                constitution,
+                coverage,
+                // Passed through rather than defaulted: an absent value must
+                // stay absent so the host knows the author did not measure
+                // one, instead of inheriting a number invented here.
+                recommended_top_k,
+                recommended_min_similarity,
+            };
 
-        let manifest = PackManifest {
-            name: name.to_string(),
-            version: version.to_string(),
-            origin: origin.to_string(),
-            description: description.map(|s| s.to_string()),
-            embedder,
-            content_digest: None,
-            corpus_rows: 0,
-            namespace: None,
-            publisher_pubkey: None,
-            signature: None,
-            reembedded_from: None,
-            constitution: constitution.unwrap_or_default(),
-            coverage: coverage.unwrap_or_default(),
-            // Passed through rather than defaulted: an absent value must
-            // stay absent so the host knows the author did not measure
-            // one, instead of inheriting a number invented here.
-            recommended_top_k,
-            recommended_min_similarity,
-        };
-
-        let sealed = db
-            .seal_pack(dest_path, &manifest, namespace)
-            .map_err(map_err)?;
-        manifest_to_dict(py, &sealed, dest_path)
+            db.seal_pack(dest_path, &manifest, namespace)
+        })?;
+        manifest_to_dict(slf.py(), &sealed, dest_path)
     }
 
     /// Mount a sealed pack read-only. Returns its pack id
@@ -116,20 +112,16 @@ impl PyYantrikDB {
     /// covers *unproven* compatibility and never a *proven* mismatch.
     #[pyo3(signature = (path, allow_unverified_embedder=false, skip_content_digest=false))]
     fn mount_pack(
-        &self,
+        slf: &Bound<'_, Self>,
         path: &str,
         allow_unverified_embedder: bool,
         skip_content_digest: bool,
     ) -> PyResult<String> {
-        let db = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
         let opts = MountOptions {
             allow_unverified_embedder,
             skip_content_digest,
         };
-        db.mount_pack_opts(path, &opts).map_err(map_err)
+        Self::detached(slf, |db| db.mount_pack_opts(path, &opts))
     }
 
     /// Unmount a pack. Returns `False` if no pack with that id was
@@ -197,34 +189,24 @@ impl PyYantrikDB {
     /// This is the durable counterpart to `mount_pack`, which stays
     /// transient so that merely mounting never writes to your database.
     /// Returns the pack id.
-    fn install_pack(&self, path: &str) -> PyResult<String> {
-        let db = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
-        db.install_pack(path).map_err(map_err)
+    fn install_pack(slf: &Bound<'_, Self>, path: &str) -> PyResult<String> {
+        Self::detached(slf, |db| db.install_pack(path))
     }
 
     /// Uninstall a pack: unmount it, forget it, and delete the copy in
     /// the pack directory. Returns `False` if it was not installed.
-    fn uninstall_pack(&self, pack_id: &str) -> PyResult<bool> {
-        let db = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
-        db.uninstall_pack(pack_id).map_err(map_err)
+    fn uninstall_pack(slf: &Bound<'_, Self>, pack_id: &str) -> PyResult<bool> {
+        Self::detached(slf, |db| db.uninstall_pack(pack_id))
     }
 
     /// Packs recorded as installed, whether or not they mounted this
     /// session. Compare with `mounted_packs()` to spot one that failed
     /// to re-mount.
-    fn installed_packs(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let db = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+    fn installed_packs(slf: &Bound<'_, Self>) -> PyResult<PyObject> {
+        let py = slf.py();
+        let installed = Self::detached(slf, |db| db.installed_packs())?;
         let out = PyList::empty(py);
-        for p in db.installed_packs().map_err(map_err)? {
+        for p in installed {
             let d = PyDict::new(py);
             d.set_item("pack_id", p.pack_id)?;
             d.set_item("file_name", p.file_name)?;
@@ -250,13 +232,11 @@ impl PyYantrikDB {
     /// Re-mount every installed pack, returning what happened to each.
     /// Runs automatically at open; exposed for diagnosing a pack that
     /// did not come back.
-    fn remount_installed(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let db = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+    fn remount_installed(slf: &Bound<'_, Self>) -> PyResult<PyObject> {
+        let py = slf.py();
+        let outcomes = Self::detached(slf, |db| Ok(db.remount_installed()))?;
         let out = PyList::empty(py);
-        for o in db.remount_installed() {
+        for o in outcomes {
             let d = PyDict::new(py);
             d.set_item("pack_id", o.pack_id)?;
             d.set_item("mounted", o.mounted)?;
@@ -351,22 +331,18 @@ impl PyYantrikDB {
     /// Trust a publisher key: packs validly signed by it mount at the
     /// `signed` tier (higher recall-ranking multiplier) from now on.
     #[pyo3(signature = (pubkey_hex, label=None))]
-    fn trust_publisher(&self, pubkey_hex: &str, label: Option<&str>) -> PyResult<()> {
-        let db = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
-        db.trust_publisher(pubkey_hex, label).map_err(map_err)
+    fn trust_publisher(
+        slf: &Bound<'_, Self>,
+        pubkey_hex: &str,
+        label: Option<&str>,
+    ) -> PyResult<()> {
+        Self::detached(slf, |db| db.trust_publisher(pubkey_hex, label))
     }
 
     /// Stop trusting a publisher key. Mounted packs keep their tier
     /// until remount. Returns `False` if the key was not trusted.
-    fn untrust_publisher(&self, pubkey_hex: &str) -> PyResult<bool> {
-        let db = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
-        db.untrust_publisher(pubkey_hex).map_err(map_err)
+    fn untrust_publisher(slf: &Bound<'_, Self>, pubkey_hex: &str) -> PyResult<bool> {
+        Self::detached(slf, |db| db.untrust_publisher(pubkey_hex))
     }
 
     /// Publisher keys this host trusts, as `[{"pubkey", "label"}]`.
@@ -426,8 +402,7 @@ impl PyYantrikDB {
     #[pyo3(signature = (pack_ids, query=None, query_embedding=None, top_k=10, *, min_similarity=None, namespace=None, memory_type=None, domain=None, source=None, certainty_min=None, include_consolidated=false, time_window=None))]
     #[allow(clippy::too_many_arguments)]
     fn recall_from_packs_for(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         pack_ids: Vec<String>,
         query: Option<&str>,
         query_embedding: Option<Vec<f32>>,
@@ -441,10 +416,7 @@ impl PyYantrikDB {
         include_consolidated: bool,
         time_window: Option<(f64, f64)>,
     ) -> PyResult<Vec<PyObject>> {
-        let db = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+        let py = slf.py();
         let ids: Vec<&str> = pack_ids.iter().map(|s| s.as_str()).collect();
         // Validated here, as ValueError, rather than by remapping the
         // engine's InvalidInput globally: that variant already crosses
@@ -458,25 +430,28 @@ impl PyYantrikDB {
             }
         }
         // Allowlist BEFORE the embedder: an unknown id must fail before a
-        // query string is encoded (review of #203).
-        db.validate_pack_allowlist(&ids).map_err(map_err)?;
+        // query string is encoded (review of #203). An in-memory check of
+        // the mounted set, so it runs with the GIL held, on a handle dropped
+        // before the query is encoded (nothing of the store is held across
+        // encode(): see `planned`).
+        Self::engine_handle(slf)?
+            .validate_pack_allowlist(&ids)
+            .map_err(map_err)?;
         // Nothing asked for, nothing back, nothing embedded: an empty
         // allowlist or top_k == 0 must not spend a (possibly remote)
         // embedder call or reject a missing query.
         if ids.is_empty() || top_k == 0 {
             return Ok(Vec::new());
         }
-        let emb = match query_embedding {
-            Some(e) => e,
-            None => match query {
-                Some(q) => self.embed_text(py, q)?,
-                None => {
-                    return Err(PyValueError::new_err(
-                        "Must provide either query or query_embedding",
-                    ))
-                }
-            },
-        };
+        let (db, plan) = Self::planned(slf, |e| {
+            query_plan(
+                py,
+                e,
+                query_embedding.clone(),
+                query,
+                "Must provide either query or query_embedding",
+            )
+        })?;
         let opts = PackRecallOptions {
             include_consolidated,
             memory_type,
@@ -487,9 +462,10 @@ impl PyYantrikDB {
             certainty_min,
             min_similarity,
         };
-        let results = db
-            .recall_from_packs_for(&ids, &emb, top_k, query, &opts)
-            .map_err(map_err)?;
+        let results = run_detached(py, db, |db| {
+            let emb = plan.into_vector(db)?;
+            db.recall_from_packs_for(&ids, &emb, top_k, query, &opts)
+        })?;
         results
             .iter()
             .map(|r| recall_result_to_dict(py, r))
@@ -508,12 +484,8 @@ impl PyYantrikDB {
     ///
     /// It is an assertion, not a measurement: nothing checks the claim,
     /// because nothing can. Returns the adopted digest.
-    fn adopt_embedder_identity(&self) -> PyResult<String> {
-        let db = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
-        db.adopt_embedder_identity().map_err(map_err)
+    fn adopt_embedder_identity(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Self::detached(slf, |db| db.adopt_embedder_identity())
     }
 
     /// The embedder identity recorded on disk for this database, as

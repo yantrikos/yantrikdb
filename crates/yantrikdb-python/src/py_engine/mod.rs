@@ -600,9 +600,8 @@ impl PyYantrikDB {
     /// (the migration seals pre-0.13.2 rows). On an UNencrypted
     /// database it counts every row, because nothing is sealed there
     /// and nothing should be — read it together with `is_encrypted`.
-    fn oplog_plaintext_rows(&self) -> PyResult<usize> {
-        let db = self.get_inner()?;
-        db.oplog_plaintext_rows().map_err(map_err)
+    fn oplog_plaintext_rows(slf: &Bound<'_, Self>) -> PyResult<usize> {
+        Self::detached(slf, |db| db.oplog_plaintext_rows())
     }
 
     /// Whether ANY embedder is configured (Rust-native or Python-side).
@@ -990,14 +989,14 @@ impl PyYantrikDB {
     /// `Pause` write policy, namespace scoping or `resume_from_checkpoint`),
     /// or if the model cannot be resolved.
     #[cfg(feature = "embedder-download")]
-    fn reembed(&self, py: Python<'_>, new_embedder_name: &str) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let report = db
-            .reembed(
+    fn reembed(slf: &Bound<'_, Self>, new_embedder_name: &str) -> PyResult<PyObject> {
+        let py = slf.py();
+        let report = Self::detached(slf, |db| {
+            db.reembed(
                 new_embedder_name,
                 yantrikdb_core::engine::reembed::ReembedOptions::default(),
             )
-            .map_err(map_err)?;
+        })?;
         let value =
             serde_json::to_value(&report).map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
         json_to_py(py, &value)
@@ -1005,7 +1004,7 @@ impl PyYantrikDB {
 
     /// Slim-build stub, mirroring set_embedder_named.
     #[cfg(not(feature = "embedder-download"))]
-    fn reembed(&self, _py: Python<'_>, _new_embedder_name: &str) -> PyResult<PyObject> {
+    fn reembed(_slf: &Bound<'_, Self>, _new_embedder_name: &str) -> PyResult<PyObject> {
         Err(PyRuntimeError::new_err(
             "reembed requires the 'embedder-download' Cargo feature, \
              which is on by default. This wheel was built --no-default-features.",
@@ -1093,22 +1092,18 @@ impl PyYantrikDB {
     /// `stats()["superseded_served_since_boot"]`, then call
     /// `set_status_read_policy(True)` to exclude superseded records
     /// from recall. `False` returns to legacy include-everything.
-    fn set_status_read_policy(&self, exclude_superseded: bool) -> PyResult<()> {
-        self.get_inner()?
-            .set_status_read_policy(exclude_superseded)
-            .map_err(map_err)
+    fn set_status_read_policy(slf: &Bound<'_, Self>, exclude_superseded: bool) -> PyResult<()> {
+        Self::detached(slf, |db| db.set_status_read_policy(exclude_superseded))
     }
 
     /// Maximum local verified-synthesis fan-out per evidence record.
-    fn synthesis_fanout_cap(&self) -> PyResult<usize> {
-        self.get_inner()?.synthesis_fanout_cap().map_err(map_err)
+    fn synthesis_fanout_cap(slf: &Bound<'_, Self>) -> PyResult<usize> {
+        Self::detached(slf, |db| db.synthesis_fanout_cap())
     }
 
     /// Durably set the local synthesis fan-out admission ceiling.
-    fn set_synthesis_fanout_cap(&self, cap: usize) -> PyResult<()> {
-        self.get_inner()?
-            .set_synthesis_fanout_cap(cap)
-            .map_err(map_err)
+    fn set_synthesis_fanout_cap(slf: &Bound<'_, Self>, cap: usize) -> PyResult<()> {
+        Self::detached(slf, |db| db.set_synthesis_fanout_cap(cap))
     }
 
     /// **v0.10 Item 4a.4** — the active anti-laundering gate mode:
@@ -1129,11 +1124,9 @@ impl PyYantrikDB {
     /// the flagged callers, then `set_provenance_gate_mode("enforce")`.
     /// Accepts `"off"` | `"warn"` | `"enforce"`; a malformed value is a loud
     /// error (never a silent disable).
-    fn set_provenance_gate_mode(&self, mode: &str) -> PyResult<()> {
+    fn set_provenance_gate_mode(slf: &Bound<'_, Self>, mode: &str) -> PyResult<()> {
         let parsed = yantrikdb_core::provenance::GateMode::parse(mode).map_err(map_err)?;
-        self.get_inner()?
-            .set_provenance_gate_mode(parsed)
-            .map_err(map_err)
+        Self::detached(slf, |db| db.set_provenance_gate_mode(parsed))
     }
 
     /// `"off"` | `"shadow"` | `"enforce"`: whether the claims lane admits
@@ -1150,11 +1143,9 @@ impl PyYantrikDB {
 
     /// Durably set the claim-chain gate mode. Read the suppression counters
     /// under `shadow` first; a malformed value is a loud error.
-    fn set_claim_chain_gate_mode(&self, mode: &str) -> PyResult<()> {
+    fn set_claim_chain_gate_mode(slf: &Bound<'_, Self>, mode: &str) -> PyResult<()> {
         let parsed = yantrikdb_core::ChainGateMode::parse(mode).map_err(map_err)?;
-        self.get_inner()?
-            .set_claim_chain_gate_mode(parsed)
-            .map_err(map_err)
+        Self::detached(slf, |db| db.set_claim_chain_gate_mode(parsed))
     }
 
     /// `"off"` | `"warn"` | `"refuse"`: what the engine does when another
@@ -1173,17 +1164,16 @@ impl PyYantrikDB {
 
     /// Durably set the guard mode. `warn` keeps writing and counts; `off`
     /// never scans. Both opt out of a corruption guard.
-    fn set_foreign_sqlite_mode(&self, mode: &str) -> PyResult<()> {
+    fn set_foreign_sqlite_mode(slf: &Bound<'_, Self>, mode: &str) -> PyResult<()> {
         let parsed = yantrikdb_core::ForeignSqliteMode::parse(mode).map_err(map_err)?;
-        self.get_inner()?
-            .set_foreign_sqlite_mode(parsed)
-            .map_err(map_err)
+        Self::detached(slf, |db| db.set_foreign_sqlite_mode(parsed))
     }
 
     /// Scan now: is a second SQLite library holding this store open in this
     /// process? Always False where detection is unsupported.
-    fn foreign_sqlite_detected(&self) -> PyResult<bool> {
-        Ok(self.get_inner()?.foreign_sqlite_detected())
+    fn foreign_sqlite_detected(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        // The scan reads the process's memory map; detached like any I/O.
+        Self::detached(slf, |db| Ok(db.foreign_sqlite_detected()))
     }
 
     /// `PRAGMA quick_check` on a read connection, recorded in
@@ -1193,22 +1183,22 @@ impl PyYantrikDB {
     /// after repairing the store, call this to resume writing (no reopen).
     /// Queued automatically whenever a commit from outside this engine is
     /// seen.
-    fn integrity_check(&self) -> PyResult<String> {
-        self.get_inner()?.integrity_check().map_err(map_err)
+    fn integrity_check(slf: &Bound<'_, Self>) -> PyResult<String> {
+        Self::detached(slf, |db| db.integrity_check())
     }
 
     /// Exposed for Python consolidate.py compatibility.
     #[pyo3(signature = (op_type, target_rid, payload))]
     fn _log_op(
-        &self,
+        slf: &Bound<'_, Self>,
         op_type: &str,
         target_rid: Option<&str>,
         payload: &Bound<'_, PyDict>,
     ) -> PyResult<String> {
-        let db = self.get_inner()?;
         let payload_json = py_to_json(&payload.as_any())?;
-        db.log_op(op_type, target_rid, &payload_json, None)
-            .map_err(map_err)
+        Self::detached(slf, |db| {
+            db.log_op(op_type, target_rid, &payload_json, None)
+        })
     }
 
     /// Close the engine. Returns `True` when THIS call performed the
@@ -1362,6 +1352,16 @@ where
     T: Send,
 {
     py.detach(move || f(&db)).map_err(map_err)
+}
+
+/// A serialized engine result as a Python object, built after the detached
+/// call returns: `to_py(py, serde_json::to_value(&out))`.
+pub(crate) fn to_py(
+    py: Python<'_>,
+    value: serde_json::Result<serde_json::Value>,
+) -> PyResult<PyObject> {
+    let value = value.map_err(|e| PyRuntimeError::new_err(e.to_string()))?;
+    json_to_py(py, &value)
 }
 
 /// `embed_text`'s precedence, with nothing of the store held across
@@ -1588,6 +1588,32 @@ impl PyYantrikDB {
             "this store's Python embedder was replaced three times while this call was \
              embedding with it; retry the call",
         ))
+    }
+
+    /// The engine handle and the caller-attached Python embedder, taken
+    /// under ONE short borrow, for a binding whose embedder runs INSIDE its
+    /// detached engine call (rechunk, detect_embedder_window,
+    /// refresh_embeddings, the cluster writes, a draft's chunk windows): the
+    /// engine decides what to embed as it goes, so the engine is held while
+    /// `encode()` runs, and the detached call marks its thread
+    /// (`in_engine_call`) so a call `encode()` makes back into the store
+    /// skips a pending swap's gate. A binding that embeds before it detaches
+    /// uses [`planned`](Self::planned) instead, which holds nothing of the
+    /// store across `encode()`.
+    ///
+    /// Taking both from one borrow matters: the same snapshot must decide
+    /// how the call is routed and which embedder produces the vector, or a
+    /// `set_embedder()` landing between two borrows could split them.
+    pub(crate) fn engine_and_embedder(
+        slf: &Bound<'_, Self>,
+    ) -> PyResult<(Arc<YantrikDB>, Option<PyObject>)> {
+        let this = Self::snapshot_borrow(slf)?;
+        let db = this
+            .inner
+            .clone()
+            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+        let embedder = this.embedder.as_ref().map(|e| e.clone_ref(slf.py()));
+        Ok((db, embedder))
     }
 
     pub(crate) fn embed_text(&self, py: Python<'_>, text: &str) -> PyResult<Vec<f32>> {

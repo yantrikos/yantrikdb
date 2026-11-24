@@ -5,7 +5,7 @@ type PyObject = pyo3::Py<pyo3::PyAny>;
 
 use crate::py_types::*;
 
-use super::{map_err, run_detached, PyYantrikDB};
+use super::{run_detached, to_py, PyYantrikDB};
 
 #[pymethods]
 impl PyYantrikDB {
@@ -62,29 +62,22 @@ impl PyYantrikDB {
             });
         }
         let report = run_detached(py, db, |db| db.attach_claims(memory_rid, &stated))?;
-        let val = serde_json::to_value(&report)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        json_to_py(py, &val)
+        to_py(py, serde_json::to_value(&report))
     }
 
     /// The relation templates this store has taught itself from stated
     /// claims in `namespace` (active ones are applied to plain writes).
     #[pyo3(signature = (namespace="default"))]
-    fn learned_relation_patterns(&self, py: Python<'_>, namespace: &str) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let rows = db.learned_relation_patterns(namespace).map_err(map_err)?;
-        let val = serde_json::to_value(&rows)
-            .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
-        json_to_py(py, &val)
+    fn learned_relation_patterns(slf: &Bound<'_, Self>, namespace: &str) -> PyResult<PyObject> {
+        let rows = Self::detached(slf, |db| db.learned_relation_patterns(namespace))?;
+        to_py(slf.py(), serde_json::to_value(&rows))
     }
 
     /// Forget every learned template in `namespace`; returns how many were
     /// removed. Claims already minted by them stay.
     #[pyo3(signature = (namespace="default"))]
-    fn forget_learned_relation_patterns(&self, namespace: &str) -> PyResult<usize> {
-        let db = self.get_inner()?;
-        db.forget_learned_relation_patterns(namespace)
-            .map_err(map_err)
+    fn forget_learned_relation_patterns(slf: &Bound<'_, Self>, namespace: &str) -> PyResult<usize> {
+        Self::detached(slf, |db| db.forget_learned_relation_patterns(namespace))
     }
 
     #[pyo3(signature = (src, dst, rel_type="related_to", weight=1.0))]
@@ -98,9 +91,9 @@ impl PyYantrikDB {
         Self::detached(slf, |db| db.relate(src, dst, rel_type, weight))
     }
 
-    fn get_edges(&self, py: Python<'_>, entity: &str) -> PyResult<Vec<PyObject>> {
-        let db = self.get_inner()?;
-        let edges = db.get_edges(entity).map_err(map_err)?;
+    fn get_edges(slf: &Bound<'_, Self>, entity: &str) -> PyResult<Vec<PyObject>> {
+        let py = slf.py();
+        let edges = Self::detached(slf, |db| db.get_edges(entity))?;
         edges.iter().map(|e| edge_to_dict(py, e)).collect()
     }
 
@@ -110,14 +103,12 @@ impl PyYantrikDB {
     /// the bare graph view; this is the claims-table view.
     #[pyo3(signature = (entity, namespace=None))]
     fn get_claims(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         entity: &str,
         namespace: Option<&str>,
     ) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let rows = db.get_claims(entity, namespace).map_err(map_err)?;
-        json_to_py(py, &serde_json::Value::Array(rows))
+        let rows = Self::detached(slf, |db| db.get_claims(entity, namespace))?;
+        json_to_py(slf.py(), &serde_json::Value::Array(rows))
     }
 
     #[pyo3(signature = (pattern=None, entity_type=None, limit=20))]
@@ -132,14 +123,15 @@ impl PyYantrikDB {
         entities.iter().map(|e| entity_to_dict(py, e)).collect()
     }
 
-    fn link_memory_entity(&self, memory_rid: &str, entity_name: &str) -> PyResult<()> {
-        let db = self.get_inner()?;
-        db.link_memory_entity(memory_rid, entity_name)
-            .map_err(map_err)
+    fn link_memory_entity(
+        slf: &Bound<'_, Self>,
+        memory_rid: &str,
+        entity_name: &str,
+    ) -> PyResult<()> {
+        Self::detached(slf, |db| db.link_memory_entity(memory_rid, entity_name))
     }
 
-    fn backfill_memory_entities(&self) -> PyResult<usize> {
-        let db = self.get_inner()?;
-        db.backfill_memory_entities().map_err(map_err)
+    fn backfill_memory_entities(slf: &Bound<'_, Self>) -> PyResult<usize> {
+        Self::detached(slf, |db| db.backfill_memory_entities())
     }
 }

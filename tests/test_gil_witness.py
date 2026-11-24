@@ -339,6 +339,25 @@ def test_close_under_write_load_keeps_other_threads_running(tmp_path):
 # test_every_public_method_is_classified until someone decides which.
 
 
+def _fresh_pack_path(c):
+    # seal_pack refuses an existing destination, so every call gets its own.
+    c["packs"] = c.get("packs", 0) + 1
+    return os.path.join(c["dir"], f"witness-{c['packs']}.ydbpack")
+
+
+def _pack(db, c):
+    if "pack" not in c:
+        c["pack"] = _fresh_pack_path(c)
+        db.seal_pack(c["pack"], "witness", "1.0", "witness")
+    return c["pack"]
+
+
+def _mounted(db, c):
+    if "pack_id" not in c:
+        c["pack_id"] = db.mount_pack(_pack(db, c), allow_unverified_embedder=True)
+    return c["pack_id"]
+
+
 def _swallow(fn, *args, **kwargs):
     # For calls that fail on purpose (an unknown id): the failure comes back
     # from inside the detached call, so the GIL was still given up.
@@ -409,6 +428,143 @@ RELEASES = {
     # packs and identity
     "trusted_publishers": lambda db, c: db.trusted_publishers(),
     "embedder_identity": lambda db, c: db.embedder_identity(),
+    # ── the long tail (#271 follow-up) ──
+    # memory: reads, links, rollups, learning
+    "decay": lambda db, c: db.decay(),
+    "history": lambda db, c: db.history(c["rid"]),
+    "detect_embedder_window": lambda db, c: db.detect_embedder_window(),
+    "rechunk_long_records": None,  # needs a window; its own test below
+    "record_with_links": lambda db, c: db.record_with_links("witness links", []),
+    "record_with_links_partial": lambda db, c: db.record_with_links_partial(
+        "witness partial links", []
+    ),
+    "link": lambda db, c: _swallow(db.link, c["rid"], c["rid2"], "supports"),
+    "unlink": lambda db, c: db.unlink(c["rid"], c["rid2"], "supports"),
+    "linked_records": lambda db, c: db.linked_records(c["rid"]),
+    "recall_with_links": lambda db, c: db.recall_with_links(query="topic 3"),
+    "reify_supersedes_links": lambda db, c: db.reify_supersedes_links(),
+    "audit_leak_candidates": lambda db, c: db.audit_leak_candidates(),
+    "audit_synthesis_evidence": lambda db, c: db.audit_synthesis_evidence(),
+    "recall_feedback": lambda db, c: db.recall_feedback(c["rid"], "relevant", query_text="topic 3"),
+    "reject_recalled": lambda db, c: db.reject_recalled([c["rid"]]),
+    "note_rollup_impression": lambda db, c: db.note_rollup_impression(c["rid"], "topic 3"),
+    "note_rollup_impression_features": lambda db, c: db.note_rollup_impression_features(
+        c["rid"], "topic 3"
+    ),
+    "note_rollup_expansion": lambda db, c: _swallow(
+        db.note_rollup_expansion, "no-such-impression", [c["rid2"]]
+    ),
+    "note_rollup_expansion_features": lambda db, c: _swallow(
+        db.note_rollup_expansion_features, "no-such-impression", [c["rid2"]], [0.5]
+    ),
+    "note_rollup_selection": lambda db, c: _swallow(
+        db.note_rollup_selection, "no-such-impression", c["rid2"]
+    ),
+    "finalize_rollup_outcome": lambda db, c: _swallow(
+        db.finalize_rollup_outcome, "no-such-impression", [c["rid2"]]
+    ),
+    "rollup_outcome_report": lambda db, c: db.rollup_outcome_report(),
+    "rollup_outcome_examples": lambda db, c: db.rollup_outcome_examples(),
+    "rollup_membership_report": lambda db, c: db.rollup_membership_report(),
+    "rollup_membership_examples": lambda db, c: db.rollup_membership_examples(),
+    "run_learning": lambda db, c: db.run_learning(),
+    "last_learning_report": lambda db, c: db.last_learning_report(),
+    "learned_weights": lambda db, c: db.learned_weights(),
+    # storage tiers and replication
+    "archive": lambda db, c: db.archive(c["rid2"]),
+    "hydrate": lambda db, c: db.hydrate(c["rid2"]),
+    "evict": lambda db, c: db.evict(10_000),
+    "extract_ops_since": lambda db, c: db.extract_ops_since(limit=20),
+    "apply_ops": lambda db, c: _swallow(db.apply_ops, c["ops"]),
+    "get_peer_watermark": lambda db, c: db.get_peer_watermark("peer_1"),
+    "set_peer_watermark": lambda db, c: db.set_peer_watermark("peer_1", b"\x00" * 16, "op-1"),
+    # maintenance
+    "rebuild_vec_index": lambda db, c: db.rebuild_vec_index(),
+    "rebuild_graph_index": lambda db, c: db.rebuild_graph_index(),
+    "repair_tool_call_artifacts": lambda db, c: db.repair_tool_call_artifacts(),
+    "refresh_embeddings": lambda db, c: db.refresh_embeddings(),
+    "recalibrate_unused_importance": lambda db, c: db.recalibrate_unused_importance(),
+    "split_oversized_episodes": lambda db, c: db.split_oversized_episodes(),
+    "auto_resolve_conflicts": lambda db, c: db.auto_resolve_conflicts(),
+    "prune_triggers": lambda db, c: db.prune_triggers(),
+    "skill_outcome_count": lambda db, c: db.skill_outcome_count(),
+    "run_maintenance_cycle": lambda db, c: db.run_maintenance_cycle(dry_run=True),
+    "last_maintenance_cycle": lambda db, c: db.last_maintenance_cycle(),
+    "auto_relate": lambda db, c: db.auto_relate(),
+    "maintain_source_turn_backfill": lambda db, c: db.maintain_source_turn_backfill(),
+    "integrity_check": lambda db, c: db.integrity_check(),
+    "oplog_plaintext_rows": lambda db, c: db.oplog_plaintext_rows(),
+    # settings stored in the database
+    "set_status_read_policy": lambda db, c: db.set_status_read_policy(True),
+    "synthesis_fanout_cap": lambda db, c: db.synthesis_fanout_cap(),
+    "set_synthesis_fanout_cap": lambda db, c: db.set_synthesis_fanout_cap(8),
+    "set_provenance_gate_mode": lambda db, c: db.set_provenance_gate_mode("enforce"),
+    "set_claim_chain_gate_mode": lambda db, c: db.set_claim_chain_gate_mode("shadow"),
+    "set_foreign_sqlite_mode": lambda db, c: db.set_foreign_sqlite_mode("refuse"),
+    # sessions, temporal, procedural, categories
+    "session_start": lambda db, c: db.session_start("default", "witness"),
+    "session_end": lambda db, c: _swallow(db.session_end, c["session"]),
+    "active_session": lambda db, c: db.active_session(),
+    "session_history": lambda db, c: db.session_history(),
+    "session_abandon_stale": lambda db, c: db.session_abandon_stale(),
+    "stale": lambda db, c: db.stale(),
+    "upcoming": lambda db, c: db.upcoming(),
+    # An unknown entity raises from inside the detached call.
+    "entity_profile": lambda db, c: _swallow(db.entity_profile, "alice"),
+    "relationship_depth": lambda db, c: _swallow(db.relationship_depth, "alice"),
+    "surface_procedural": lambda db, c: db.surface_procedural(c["q"]),
+    "record_procedural": lambda db, c: db.record_procedural("witness procedure"),
+    "reinforce_procedural": lambda db, c: _swallow(db.reinforce_procedural, c["rid"], 0.5),
+    "procedural_stats": lambda db, c: db.procedural_stats(),
+    "reclassify_conflict": lambda db, c: _swallow(
+        db.reclassify_conflict, "no-such-conflict", "preference"
+    ),
+    "substitution_categories": lambda db, c: db.substitution_categories(),
+    "substitution_members": lambda db, c: db.substitution_members("colors"),
+    "learn_category_members": lambda db, c: _swallow(
+        db.learn_category_members, "colors", [("teal", 0.9)]
+    ),
+    "reset_category_to_seed": lambda db, c: _swallow(db.reset_category_to_seed, "colors"),
+    # cognition: triggers, patterns, personality, conflicts, facets, threads
+    "get_trigger_history": lambda db, c: db.get_trigger_history(),
+    "get_patterns": lambda db, c: db.get_patterns(),
+    "get_personality": lambda db, c: db.get_personality(),
+    "derive_personality": lambda db, c: db.derive_personality(),
+    "set_personality_trait": lambda db, c: _swallow(db.set_personality_trait, "openness", 0.5),
+    "get_conflict": lambda db, c: db.get_conflict("no-such-conflict"),
+    "dismiss_conflict": lambda db, c: _swallow(db.dismiss_conflict, "no-such-conflict"),
+    "extract_standing_instructions": lambda db, c: db.extract_standing_instructions(dry_run=True),
+    "recall_facets": lambda db, c: db.recall_facets(),
+    "recall_thread": lambda db, c: db.recall_thread("default", ["alice"]),
+    "recall_thread_v2": lambda db, c: _swallow(db.recall_thread_v2, "default", ["alice"]),
+    "reextract_claims": lambda db, c: db.reextract_claims(dry_run=True),
+    "reextract_entities": lambda db, c: db.reextract_entities(dry_run=True),
+    "extraction_refusal_counts": lambda db, c: db.extraction_refusal_counts(),
+    "extraction_refusals": lambda db, c: db.extraction_refusals(),
+    "extraction_silver_recall": lambda db, c: db.extraction_silver_recall(),
+    # graph and inspection
+    "learned_relation_patterns": lambda db, c: db.learned_relation_patterns(),
+    "forget_learned_relation_patterns": lambda db, c: db.forget_learned_relation_patterns(),
+    "get_edges": lambda db, c: db.get_edges("alice"),
+    "get_claims": lambda db, c: db.get_claims("alice"),
+    "link_memory_entity": lambda db, c: db.link_memory_entity(c["rid"], "alice"),
+    "backfill_memory_entities": lambda db, c: db.backfill_memory_entities(),
+    "claims_for_memory": lambda db, c: db.claims_for_memory(c["rid"]),
+    "revision_history": lambda db, c: db.revision_history(c["rid"]),
+    "memory_entities": lambda db, c: db.memory_entities(c["rid"]),
+    # packs that touch the store or the filesystem
+    "seal_pack": lambda db, c: db.seal_pack(_fresh_pack_path(c), "witness", "1.0", "witness"),
+    "mount_pack": lambda db, c: _swallow(db.mount_pack, _pack(db, c), allow_unverified_embedder=True),
+    "install_pack": lambda db, c: _swallow(db.install_pack, _pack(db, c)),
+    "uninstall_pack": lambda db, c: db.uninstall_pack("no-such-pack@0"),
+    "installed_packs": lambda db, c: db.installed_packs(),
+    "remount_installed": lambda db, c: db.remount_installed(),
+    "trust_publisher": lambda db, c: db.trust_publisher(c["pubkey"], "witness"),
+    "untrust_publisher": lambda db, c: db.untrust_publisher(c["pubkey"]),
+    "adopt_embedder_identity": lambda db, c: _swallow(db.adopt_embedder_identity),
+    "recall_from_packs_for": lambda db, c: db.recall_from_packs_for(
+        [_mounted(db, c)], query="topic 3"
+    ),
 }
 
 # Detached, but not witnessable offline: see the module docstring's limit.
@@ -420,9 +576,15 @@ UNWITNESSED = {
         "cached model; the wait for exclusive access and stopping the workers "
         "run detached too, and only the swap and restarting the workers hold it"
     ),
+    "reembed": (
+        "the same: it resolves the model through the download registry, and "
+        "offline an unknown name fails at once inside the detach"
+    ),
+    "foreign_sqlite_detected": (
+        "the scan reads the process's memory map on Linux and macOS; where "
+        "detection is unsupported (Windows) it returns at once inside the detach"
+    ),
 }
-
-_FOLLOW_UP = "not yet detached: #271 follow-up"
 
 HOLDS = {
     # no store involved
@@ -442,44 +604,22 @@ HOLDS = {
     # in flight in their own PRs
     "correct": "#296",
     "record": "#297",
+    # pure in-memory reads: an atomic, a field or the mounted-pack list,
+    # whose lock is never held across I/O. Detaching would add a GIL handoff
+    # (milliseconds when another thread is CPU-bound) to a call that costs
+    # microseconds and touches no store.
+    "has_embedder": "reads two fields; the witness's held control above",
+    "status_read_policy": "atomic load, no store",
+    "provenance_gate_mode": "atomic load, no store",
+    "claim_chain_gate_mode": "atomic load, no store",
+    "foreign_sqlite_mode": "atomic load, no store",
+    "pack_dir": "computed from the open path, no store",
+    "mounted_packs": "in-memory mounted-pack list, brief lock, no store",
+    "pack_context": "in-memory mounted-pack list, brief lock, no store",
+    "pack_context_for": "in-memory mounted-pack list, brief lock, no store",
+    "unmount_pack": "in-memory mounted-pack list, brief lock, no store",
+    "unmount_all_packs": "in-memory mounted-pack list, brief lock, no store",
 }
-HOLDS.update(
-    {
-        name: _FOLLOW_UP
-        for name in """
-        active_session adopt_embedder_identity apply_ops archive audit_leak_candidates
-        audit_synthesis_evidence auto_relate auto_resolve_conflicts backfill_memory_entities
-        claim_chain_gate_mode claims_for_memory decay derive_personality detect_embedder_window
-        dismiss_conflict entity_profile evict extract_ops_since extract_standing_instructions
-        extraction_refusal_counts extraction_refusals extraction_silver_recall
-        finalize_rollup_outcome foreign_sqlite_detected foreign_sqlite_mode
-        forget_learned_relation_patterns get_claims get_conflict get_edges get_patterns
-        get_peer_watermark get_personality get_trigger_history has_embedder history hydrate
-        install_pack installed_packs integrity_check last_learning_report
-        last_maintenance_cycle learn_category_members learned_relation_patterns
-        learned_weights link link_memory_entity linked_records maintain_source_turn_backfill
-        memory_entities mount_pack mounted_packs note_rollup_expansion
-        note_rollup_expansion_features note_rollup_impression note_rollup_impression_features
-        note_rollup_selection oplog_plaintext_rows pack_context pack_context_for pack_dir
-        procedural_stats provenance_gate_mode prune_triggers rebuild_graph_index
-        rebuild_vec_index recalibrate_unused_importance recall_facets recall_feedback
-        recall_from_packs_for recall_thread recall_thread_v2 recall_with_links
-        rechunk_long_records reclassify_conflict record_procedural record_with_links
-        record_with_links_partial reembed reextract_claims reextract_entities
-        refresh_embeddings reify_supersedes_links reinforce_procedural reject_recalled
-        relationship_depth remount_installed repair_tool_call_artifacts
-        reset_category_to_seed revision_history rollup_membership_examples
-        rollup_membership_report rollup_outcome_examples rollup_outcome_report run_learning
-        run_maintenance_cycle seal_pack session_abandon_stale session_end session_history
-        session_start set_claim_chain_gate_mode set_foreign_sqlite_mode set_peer_watermark
-        set_personality_trait set_provenance_gate_mode set_status_read_policy
-        set_synthesis_fanout_cap skill_outcome_count split_oversized_episodes stale
-        status_read_policy substitution_categories substitution_members surface_procedural
-        synthesis_fanout_cap trust_publisher uninstall_pack unlink unmount_all_packs
-        unmount_pack untrust_publisher upcoming
-        """.split()
-    }
-)
 
 
 def test_every_public_method_is_classified():
@@ -507,8 +647,11 @@ def small_db(tmp_path):
     store = YantrikDB(os.path.join(str(tmp_path), "coverage.db"), DIM)
     store.set_embedder(Emb(), allow_unverified_embedder=True)
     rids = [store.record(f"record {i} about topic {i % 11}") for i in range(60)]
-    ctx = {"rid": rids[0], "q": Emb().encode("topic 3")}
+    ctx = {"rid": rids[0], "rid2": rids[1], "q": Emb().encode("topic 3"), "dir": str(tmp_path)}
     ctx["task"] = store.task_add("default", "a task to update")
+    ctx["session"] = store.session_start("default", "a session to end")
+    ctx["ops"] = store.extract_ops_since(limit=5)
+    ctx["pubkey"] = YantrikDB.generate_pack_keypair()[1]
     yield store, ctx
     store.close()
 
@@ -519,6 +662,29 @@ def test_binding_releases_the_gil(small_db, name):
     db, ctx = small_db
     call = RELEASES[name]
     assert _seen_during(lambda: call(db, ctx)) >= 1, f"{name}() held the GIL"
+
+
+class TruncEmb(Emb):
+    """Sees only the first 200 characters, like a model with an input window."""
+
+    def encode(self, text):
+        return super().encode(text[:200])
+
+
+@needs_a_second_cpu
+def test_rechunk_long_records_releases_the_gil(tmp_path):
+    # rechunk returns at once until a window is known, so give it one: the
+    # Python embedder's encode() runs with the GIL held, the store work
+    # between the embeds must not.
+    store = YantrikDB(os.path.join(str(tmp_path), "rechunk.db"), DIM)
+    try:
+        store.set_embedder(TruncEmb(), allow_unverified_embedder=True)
+        assert store.detect_embedder_window() is not None
+        for i in range(40):
+            store.record(f"long record {i} " + "and more words about topic %d " % i * 30)
+        assert _seen_during(lambda: store.rechunk_long_records()) >= 1
+    finally:
+        store.close()
 
 
 @needs_a_second_cpu

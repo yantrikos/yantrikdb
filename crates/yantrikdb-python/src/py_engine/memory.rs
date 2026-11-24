@@ -13,15 +13,23 @@ use super::{map_err, plan_embed, py_vector, query_plan, run_detached, EmbedPlan,
 /// The engine can only reach its own embedder; a callable attached through
 /// `set_embedder(obj)` lives here. Both the window probe and the chunk
 /// backfill need exactly this bridge (issue #273).
+///
+/// The closure runs inside a detached engine call (#271) and attaches to the
+/// GIL only for each `encode()`, so the engine's own work between embeds
+/// (SQLite reads and writes) runs with the GIL released. Both callers embed
+/// outside the engine's connection lock, so re-attaching here cannot wait on
+/// the GIL while holding a lock another GIL-holding thread wants.
 fn py_embed(
-    py: Python<'_>,
-    emb: PyObject,
-) -> impl Fn(&str) -> std::result::Result<Vec<f32>, yantrikdb_core::YantrikDbError> + '_ {
+    emb: &PyObject,
+) -> impl Fn(&str) -> std::result::Result<Vec<f32>, yantrikdb_core::YantrikDbError> + Send + '_ {
     move |text: &str| {
-        let out = emb
-            .call_method1(py, "encode", (text,))
-            .map_err(|e| yantrikdb_core::YantrikDbError::Inference(e.to_string()))?;
-        py_vector(py, &out).map_err(|e| yantrikdb_core::YantrikDbError::Inference(e.to_string()))
+        Python::attach(|py| {
+            let out = emb
+                .call_method1(py, "encode", (text,))
+                .map_err(|e| yantrikdb_core::YantrikDbError::Inference(e.to_string()))?;
+            py_vector(py, &out)
+                .map_err(|e| yantrikdb_core::YantrikDbError::Inference(e.to_string()))
+        })
     }
 }
 
@@ -301,23 +309,19 @@ impl PyYantrikDB {
     /// its head, so its tail cannot be retrieved. Run once after
     /// attaching an embedder; `stats()` then reports the window and a
     /// count of writes that exceeded it.
-    fn detect_embedder_window(&self, py: Python<'_>) -> PyResult<Option<usize>> {
-        let db = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+    fn detect_embedder_window(slf: &Bound<'_, Self>) -> PyResult<Option<usize>> {
+        let (db, embedder) = Self::engine_and_embedder(slf)?;
         // A caller-attached Python embedder outranks the engine's own — the
         // same precedence `embed_text()` applies. The core probe can only
         // reach the engine's embedder, so supply the embedding from here
         // (issue #273). Without this, a store with a Python embedder either
         // raised "No embedder configured" while `has_embedder()` was true, or
         // silently reported the *native* embedder's window.
-        if let Some(emb) = &self.embedder {
-            return db
-                .detect_embedder_window_with(py_embed(py, emb.clone_ref(py)))
-                .map_err(map_err);
-        }
-        db.detect_embedder_window().map_err(map_err)
+        let embedder = embedder.as_ref();
+        run_detached(slf.py(), db, move |db| match embedder {
+            Some(emb) => db.detect_embedder_window_with(py_embed(emb)),
+            None => db.detect_embedder_window(),
+        })
     }
 
     /// Backfill chunk (window) vectors for records written before the
@@ -329,20 +333,16 @@ impl PyYantrikDB {
     /// committed per record, live after one index rebuild at the end).
     /// Idempotent — an interrupted run continues where it stopped.
     /// Returns `(records_chunked, chunk_vectors_written)`.
-    fn rechunk_long_records(&self, py: Python<'_>) -> PyResult<(usize, usize)> {
-        let db = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+    fn rechunk_long_records(slf: &Bound<'_, Self>) -> PyResult<(usize, usize)> {
+        let (db, embedder) = Self::engine_and_embedder(slf)?;
         // Same precedence as the probe: the caller's embedder embeds the
         // windows, not the engine's (issue #273). Without this the backfill
         // raised NoEmbedder on a store whose only embedder is Python-side.
-        if let Some(emb) = &self.embedder {
-            return db
-                .rechunk_long_records_with(py_embed(py, emb.clone_ref(py)))
-                .map_err(map_err);
-        }
-        db.rechunk_long_records().map_err(map_err)
+        let embedder = embedder.as_ref();
+        run_detached(slf.py(), db, move |db| match embedder {
+            Some(emb) => db.rechunk_long_records_with(py_embed(emb)),
+            None => db.rechunk_long_records(),
+        })
     }
 
     /// Bitemporal recall — what did this database believe at `as_of`
@@ -876,9 +876,9 @@ impl PyYantrikDB {
     }
 
     #[pyo3(signature = (threshold=0.01))]
-    fn decay(&self, py: Python<'_>, threshold: f64) -> PyResult<Vec<PyObject>> {
-        let db = self.get_inner()?;
-        let decayed = db.decay(threshold).map_err(map_err)?;
+    fn decay(slf: &Bound<'_, Self>, threshold: f64) -> PyResult<Vec<PyObject>> {
+        let py = slf.py();
+        let decayed = Self::detached(slf, |db| db.decay(threshold))?;
         decayed.iter().map(|d| decayed_to_dict(py, d)).collect()
     }
 
@@ -962,9 +962,9 @@ impl PyYantrikDB {
 
     /// Issue #47: query the revision history for a record.
     /// Returns a list of dicts, oldest-first.
-    fn history(&self, py: Python<'_>, rid: &str) -> PyResult<Vec<PyObject>> {
-        let db = self.get_inner()?;
-        let revisions = db.history(rid).map_err(map_err)?;
+    fn history(slf: &Bound<'_, Self>, rid: &str) -> PyResult<Vec<PyObject>> {
+        let py = slf.py();
+        let revisions = Self::detached(slf, |db| db.history(rid))?;
         revisions
             .iter()
             .map(|r| {
@@ -997,8 +997,7 @@ impl PyYantrikDB {
     #[pyo3(signature = (text, links, memory_type="episodic", importance=0.5, valence=0.0, half_life=604800.0, metadata=None, embedding=None, namespace="default", certainty=0.8, domain="general", source="user", emotional_state=None))]
     #[allow(clippy::too_many_arguments)]
     fn record_with_links(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         text: &str,
         links: Vec<Bound<'_, PyDict>>,
         memory_type: &str,
@@ -1013,53 +1012,59 @@ impl PyYantrikDB {
         source: &str,
         emotional_state: Option<&str>,
     ) -> PyResult<String> {
-        let db = self.get_inner()?;
-        let emb = match embedding {
-            Some(e) => e,
-            None => self.embed_text(py, text)?,
-        };
+        let py = slf.py();
         let meta = match metadata {
             Some(d) => py_to_json(&d.as_any())?,
             None => serde_json::json!({}),
         };
         let parsed = parse_links(&links)?;
-        db.record_with_links(
-            text,
-            memory_type,
-            importance,
-            valence,
-            half_life,
-            &meta,
-            &emb,
-            namespace,
-            certainty,
-            domain,
-            source,
-            emotional_state,
-            &parsed,
-        )
-        .map_err(map_err)
+        let (db, plan) = Self::planned(slf, |e| match embedding.clone() {
+            Some(v) => Ok(EmbedPlan::Ready(v)),
+            None => plan_embed(py, e, text),
+        })?;
+        run_detached(py, db, |db| {
+            let emb = plan.into_vector(db)?;
+            db.record_with_links(
+                text,
+                memory_type,
+                importance,
+                valence,
+                half_life,
+                &meta,
+                &emb,
+                namespace,
+                certainty,
+                domain,
+                source,
+                emotional_state,
+                &parsed,
+            )
+        })
     }
 
     /// Add a single record-to-record link. Returns the link_id.
-    fn link(&self, source_rid: &str, target_rid: &str, link_type: &str) -> PyResult<String> {
-        let db = self.get_inner()?;
+    fn link(
+        slf: &Bound<'_, Self>,
+        source_rid: &str,
+        target_rid: &str,
+        link_type: &str,
+    ) -> PyResult<String> {
         let rl = yantrikdb_core::RecordLink {
             target_rid: target_rid.to_string(),
             link_type: yantrikdb_core::LinkType::from_str_lenient(link_type),
         };
-        db.link(source_rid, &rl).map_err(map_err)
+        Self::detached(slf, |db| db.link(source_rid, &rl))
     }
 
     /// Remove a single link. Returns True if a row was deleted.
-    fn unlink(&self, source_rid: &str, target_rid: &str, link_type: &str) -> PyResult<bool> {
-        let db = self.get_inner()?;
-        db.unlink(
-            source_rid,
-            target_rid,
-            &yantrikdb_core::LinkType::from_str_lenient(link_type),
-        )
-        .map_err(map_err)
+    fn unlink(
+        slf: &Bound<'_, Self>,
+        source_rid: &str,
+        target_rid: &str,
+        link_type: &str,
+    ) -> PyResult<bool> {
+        let lt = yantrikdb_core::LinkType::from_str_lenient(link_type);
+        Self::detached(slf, |db| db.unlink(source_rid, target_rid, &lt))
     }
 
     /// Traverse links from `rid`. `direction` is "outbound" | "inbound" |
@@ -1067,13 +1072,12 @@ impl PyYantrikDB {
     /// of dicts {rid, link_type, created_at, direction}.
     #[pyo3(signature = (rid, direction="both", link_type=None))]
     fn linked_records(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         rid: &str,
         direction: &str,
         link_type: Option<&str>,
     ) -> PyResult<Vec<PyObject>> {
-        let db = self.get_inner()?;
+        let py = slf.py();
         let dir = match direction {
             "outbound" => yantrikdb_core::LinkDirection::Outbound,
             "inbound" => yantrikdb_core::LinkDirection::Inbound,
@@ -1086,7 +1090,7 @@ impl PyYantrikDB {
             }
         };
         let lt = link_type.map(yantrikdb_core::LinkType::from_str_lenient);
-        let out = db.linked_records(rid, dir, lt.as_ref()).map_err(map_err)?;
+        let out = Self::detached(slf, |db| db.linked_records(rid, dir, lt.as_ref()))?;
         out.iter()
             .map(|l| {
                 let d = PyDict::new(py);
@@ -1104,8 +1108,7 @@ impl PyYantrikDB {
     #[pyo3(signature = (query=None, query_embedding=None, top_k=10, expand_links=1, time_window=None, memory_type=None, include_consolidated=false, expand_entities=false, skip_reinforce=false, namespace=None, domain=None, source=None, certainty_min=None, order=None))]
     #[allow(clippy::too_many_arguments)]
     fn recall_with_links(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         query: Option<&str>,
         query_embedding: Option<Vec<f32>>,
         top_k: usize,
@@ -1121,20 +1124,19 @@ impl PyYantrikDB {
         certainty_min: Option<f64>,
         order: Option<&str>,
     ) -> PyResult<Vec<PyObject>> {
-        let db = self.get_inner()?;
-        let emb = match query_embedding {
-            Some(e) => e,
-            None => match query {
-                Some(q) => self.embed_text(py, q)?,
-                None => {
-                    return Err(PyValueError::new_err(
-                        "Must provide either query or query_embedding",
-                    ))
-                }
-            },
-        };
-        let results = db
-            .recall_with_links(
+        let py = slf.py();
+        let (db, plan) = Self::planned(slf, |e| {
+            query_plan(
+                py,
+                e,
+                query_embedding.clone(),
+                query,
+                "Must provide either query or query_embedding",
+            )
+        })?;
+        let results = run_detached(py, db, |db| {
+            let emb = plan.into_vector(db)?;
+            db.recall_with_links(
                 &emb,
                 top_k,
                 time_window,
@@ -1150,7 +1152,7 @@ impl PyYantrikDB {
                 order,
                 expand_links,
             )
-            .map_err(map_err)?;
+        })?;
         results
             .iter()
             .map(|r| recall_result_to_dict(py, r))
@@ -1159,9 +1161,8 @@ impl PyYantrikDB {
 
     /// One-shot reification of legacy `metadata.supersedes` strings into
     /// Supersedes links. Returns the count created. Idempotent.
-    fn reify_supersedes_links(&self) -> PyResult<usize> {
-        let db = self.get_inner()?;
-        db.reify_supersedes_links().map_err(map_err)
+    fn reify_supersedes_links(slf: &Bound<'_, Self>) -> PyResult<usize> {
+        Self::detached(slf, |db| db.reify_supersedes_links())
     }
 
     /// Like `record_with_links` but returns `(rid, [per_link_result])`
@@ -1171,8 +1172,7 @@ impl PyYantrikDB {
     #[pyo3(signature = (text, links, memory_type="episodic", importance=0.5, valence=0.0, half_life=604800.0, metadata=None, embedding=None, namespace="default", certainty=0.8, domain="general", source="user", emotional_state=None))]
     #[allow(clippy::too_many_arguments)]
     fn record_with_links_partial(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         text: &str,
         links: Vec<Bound<'_, PyDict>>,
         memory_type: &str,
@@ -1187,18 +1187,19 @@ impl PyYantrikDB {
         source: &str,
         emotional_state: Option<&str>,
     ) -> PyResult<(String, Vec<PyObject>)> {
-        let db = self.get_inner()?;
-        let emb = match embedding {
-            Some(e) => e,
-            None => self.embed_text(py, text)?,
-        };
+        let py = slf.py();
         let meta = match metadata {
             Some(d) => py_to_json(&d.as_any())?,
             None => serde_json::json!({}),
         };
         let parsed = parse_links(&links)?;
-        let (rid, results) = db
-            .record_with_links_partial(
+        let (db, plan) = Self::planned(slf, |e| match embedding.clone() {
+            Some(v) => Ok(EmbedPlan::Ready(v)),
+            None => plan_embed(py, e, text),
+        })?;
+        let (rid, results) = run_detached(py, db, |db| {
+            let emb = plan.into_vector(db)?;
+            db.record_with_links_partial(
                 text,
                 memory_type,
                 importance,
@@ -1213,7 +1214,7 @@ impl PyYantrikDB {
                 emotional_state,
                 &parsed,
             )
-            .map_err(map_err)?;
+        })?;
         let dicts: Vec<PyObject> = results
             .iter()
             .map(|r| {
@@ -1258,9 +1259,9 @@ impl PyYantrikDB {
     /// compaction-confused "orphan" metric — only flags in-window memories
     /// that genuinely lack oplog + replication provenance.
     #[pyo3(signature = (max_rids=100))]
-    fn audit_leak_candidates(&self, py: Python<'_>, max_rids: usize) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let report = db.audit_leak_candidates(max_rids).map_err(map_err)?;
+    fn audit_leak_candidates(slf: &Bound<'_, Self>, max_rids: usize) -> PyResult<PyObject> {
+        let py = slf.py();
+        let report = Self::detached(slf, |db| db.audit_leak_candidates(max_rids))?;
         let d = PyDict::new(py);
         d.set_item("window_floor", report.window_floor)?;
         d.set_item("candidate_count", report.candidate_count)?;
@@ -1272,15 +1273,12 @@ impl PyYantrikDB {
     /// evidence revisions and provenance shape.
     #[pyo3(signature = (namespace=None, max_issues=100))]
     fn audit_synthesis_evidence(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         namespace: Option<&str>,
         max_issues: usize,
     ) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let report = db
-            .audit_synthesis_evidence(namespace, max_issues)
-            .map_err(map_err)?;
+        let py = slf.py();
+        let report = Self::detached(slf, |db| db.audit_synthesis_evidence(namespace, max_issues))?;
         let d = PyDict::new(py);
         d.set_item("verified_active_count", report.verified_active_count)?;
         d.set_item("candidate_count", report.candidate_count)?;
@@ -1479,7 +1477,7 @@ impl PyYantrikDB {
     /// Record feedback on a recall result for adaptive learning.
     #[pyo3(signature = (rid, feedback, query_text=None, query_embedding=None, score_at_retrieval=None, rank_at_retrieval=None))]
     fn recall_feedback(
-        &self,
+        slf: &Bound<'_, Self>,
         rid: &str,
         feedback: &str,
         query_text: Option<&str>,
@@ -1487,16 +1485,16 @@ impl PyYantrikDB {
         score_at_retrieval: Option<f64>,
         rank_at_retrieval: Option<i32>,
     ) -> PyResult<()> {
-        let db = self.get_inner()?;
-        db.recall_feedback(
-            query_text,
-            query_embedding.as_deref(),
-            rid,
-            feedback,
-            score_at_retrieval,
-            rank_at_retrieval,
-        )
-        .map_err(map_err)
+        Self::detached(slf, |db| {
+            db.recall_feedback(
+                query_text,
+                query_embedding.as_deref(),
+                rid,
+                feedback,
+                score_at_retrieval,
+                rank_at_retrieval,
+            )
+        })
     }
 
     /// v0.10 Item 2 — explicitly reject served results as IRRELEVANT to
@@ -1506,15 +1504,14 @@ impl PyYantrikDB {
     /// Rid-addressed: the engine binds each rejection to the rid's most
     /// recent impression within the horizon; rids the ranker never
     /// served bind nothing. Returns how many labels were recorded.
-    fn reject_recalled(&self, rids: Vec<String>) -> PyResult<usize> {
-        let db = self.get_inner()?;
+    fn reject_recalled(slf: &Bound<'_, Self>, rids: Vec<String>) -> PyResult<usize> {
         let refs: Vec<&str> = rids.iter().map(|s| s.as_str()).collect();
-        db.reject_recalled(&refs).map_err(map_err)
+        Self::detached(slf, |db| db.reject_recalled(&refs))
     }
 
     #[pyo3(signature = (rollup_rid, query_text, namespace=None, rank=0, score=0.0, impression_id=None))]
     fn note_rollup_impression(
-        &self,
+        slf: &Bound<'_, Self>,
         rollup_rid: &str,
         query_text: &str,
         namespace: Option<&str>,
@@ -1522,21 +1519,21 @@ impl PyYantrikDB {
         score: f64,
         impression_id: Option<&str>,
     ) -> PyResult<String> {
-        let db = self.get_inner()?;
-        db.note_rollup_impression(
-            rollup_rid,
-            query_text,
-            namespace,
-            rank,
-            score,
-            impression_id,
-        )
-        .map_err(map_err)
+        Self::detached(slf, |db| {
+            db.note_rollup_impression(
+                rollup_rid,
+                query_text,
+                namespace,
+                rank,
+                score,
+                impression_id,
+            )
+        })
     }
 
     #[pyo3(signature = (rollup_rid, query_text, namespace=None, rank=0, score=0.0, requested_count=None, query_shape=None, impression_id=None))]
     fn note_rollup_impression_features(
-        &self,
+        slf: &Bound<'_, Self>,
         rollup_rid: &str,
         query_text: &str,
         namespace: Option<&str>,
@@ -1546,33 +1543,31 @@ impl PyYantrikDB {
         query_shape: Option<&str>,
         impression_id: Option<&str>,
     ) -> PyResult<String> {
-        let db = self.get_inner()?;
-        db.note_rollup_impression_with_features(
-            rollup_rid,
-            query_text,
-            namespace,
-            rank,
-            score,
-            requested_count,
-            query_shape,
-            impression_id,
-        )
-        .map_err(map_err)
+        Self::detached(slf, |db| {
+            db.note_rollup_impression_with_features(
+                rollup_rid,
+                query_text,
+                namespace,
+                rank,
+                score,
+                requested_count,
+                query_shape,
+                impression_id,
+            )
+        })
     }
 
     fn note_rollup_expansion(
-        &self,
+        slf: &Bound<'_, Self>,
         impression_id: &str,
         returned_child_rids: Vec<String>,
     ) -> PyResult<usize> {
-        let db = self.get_inner()?;
         let refs: Vec<&str> = returned_child_rids.iter().map(String::as_str).collect();
-        db.note_rollup_expansion(impression_id, &refs)
-            .map_err(map_err)
+        Self::detached(slf, |db| db.note_rollup_expansion(impression_id, &refs))
     }
 
     fn note_rollup_expansion_features(
-        &self,
+        slf: &Bound<'_, Self>,
         impression_id: &str,
         returned_child_rids: Vec<String>,
         returned_child_scores: Vec<Option<f64>>,
@@ -1582,55 +1577,57 @@ impl PyYantrikDB {
                 "returned_child_rids and returned_child_scores must have equal length",
             ));
         }
-        let db = self.get_inner()?;
         let children: Vec<(&str, Option<f64>)> = returned_child_rids
             .iter()
             .zip(returned_child_scores)
             .map(|(rid, score)| (rid.as_str(), score))
             .collect();
-        db.note_rollup_expansion_with_scores(impression_id, &children)
-            .map_err(map_err)
+        Self::detached(slf, |db| {
+            db.note_rollup_expansion_with_scores(impression_id, &children)
+        })
     }
 
     #[pyo3(signature = (impression_id, child_rid, source="selected"))]
     fn note_rollup_selection(
-        &self,
+        slf: &Bound<'_, Self>,
         impression_id: &str,
         child_rid: &str,
         source: &str,
     ) -> PyResult<bool> {
-        let db = self.get_inner()?;
-        db.note_rollup_selection(impression_id, child_rid, source)
-            .map_err(map_err)
+        Self::detached(slf, |db| {
+            db.note_rollup_selection(impression_id, child_rid, source)
+        })
     }
 
     #[pyo3(signature = (impression_id, selected_child_rids, corrected_child_rids=vec![], omitted_child_rids=vec![]))]
     fn finalize_rollup_outcome(
-        &self,
+        slf: &Bound<'_, Self>,
         impression_id: &str,
         selected_child_rids: Vec<String>,
         corrected_child_rids: Vec<String>,
         omitted_child_rids: Vec<String>,
     ) -> PyResult<usize> {
-        let db = self.get_inner()?;
         let selected: Vec<&str> = selected_child_rids.iter().map(String::as_str).collect();
         let corrected: Vec<&str> = corrected_child_rids.iter().map(String::as_str).collect();
         let omitted: Vec<&str> = omitted_child_rids.iter().map(String::as_str).collect();
-        db.finalize_rollup_outcome_with_omissions(impression_id, &selected, &corrected, &omitted)
-            .map_err(map_err)
+        Self::detached(slf, |db| {
+            db.finalize_rollup_outcome_with_omissions(
+                impression_id,
+                &selected,
+                &corrected,
+                &omitted,
+            )
+        })
     }
 
     #[pyo3(signature = (namespace=None, since=None))]
     fn rollup_outcome_report(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         namespace: Option<&str>,
         since: Option<f64>,
     ) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let report = db
-            .rollup_outcome_report(namespace, since)
-            .map_err(map_err)?;
+        let py = slf.py();
+        let report = Self::detached(slf, |db| db.rollup_outcome_report(namespace, since))?;
         let value = serde_json::to_value(report).map_err(|error| {
             PyRuntimeError::new_err(format!(
                 "rollup outcome report serialization failed: {error}"
@@ -1641,17 +1638,16 @@ impl PyYantrikDB {
 
     #[pyo3(signature = (namespace=None, since=None, until=None, limit=1000))]
     fn rollup_outcome_examples(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         namespace: Option<&str>,
         since: Option<f64>,
         until: Option<f64>,
         limit: usize,
     ) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let examples = db
-            .rollup_outcome_examples(namespace, since, until, limit)
-            .map_err(map_err)?;
+        let py = slf.py();
+        let examples = Self::detached(slf, |db| {
+            db.rollup_outcome_examples(namespace, since, until, limit)
+        })?;
         let value = serde_json::to_value(examples).map_err(|error| {
             PyRuntimeError::new_err(format!(
                 "rollup outcome example serialization failed: {error}"
@@ -1662,15 +1658,12 @@ impl PyYantrikDB {
 
     #[pyo3(signature = (namespace=None, since=None))]
     fn rollup_membership_report(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         namespace: Option<&str>,
         since: Option<f64>,
     ) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let report = db
-            .rollup_membership_report(namespace, since)
-            .map_err(map_err)?;
+        let py = slf.py();
+        let report = Self::detached(slf, |db| db.rollup_membership_report(namespace, since))?;
         let value = serde_json::to_value(report).map_err(|error| {
             PyRuntimeError::new_err(format!(
                 "rollup membership report serialization failed: {error}"
@@ -1681,22 +1674,21 @@ impl PyYantrikDB {
 
     #[pyo3(signature = (namespace=None, finalized_since=None, finalized_until=None, limit_impressions=1000))]
     fn rollup_membership_examples(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         namespace: Option<&str>,
         finalized_since: Option<f64>,
         finalized_until: Option<f64>,
         limit_impressions: usize,
     ) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let examples = db
-            .rollup_membership_examples(
+        let py = slf.py();
+        let examples = Self::detached(slf, |db| {
+            db.rollup_membership_examples(
                 namespace,
                 finalized_since,
                 finalized_until,
                 limit_impressions,
             )
-            .map_err(map_err)?;
+        })?;
         let value = serde_json::to_value(examples).map_err(|error| {
             PyRuntimeError::new_err(format!(
                 "rollup membership example serialization failed: {error}"
@@ -1711,9 +1703,8 @@ impl PyYantrikDB {
     /// engine_resurface_positive_count, expired_unlabeled_impressions).
     /// Also runs automatically inside think(); this surface is for
     /// hosts that schedule learning themselves.
-    fn run_learning(&self) -> PyResult<String> {
-        let db = self.get_inner()?;
-        let report = db.run_learning().map_err(map_err)?;
+    fn run_learning(slf: &Bound<'_, Self>) -> PyResult<String> {
+        let report = Self::detached(slf, |db| db.run_learning())?;
         serde_json::to_string(&report).map_err(|e| {
             // Never report "{}" for an operation that ran — the caller
             // cannot tell "ran, report lost" from "did nothing".
@@ -1724,15 +1715,14 @@ impl PyYantrikDB {
     /// v0.10 Item 2 — the most recent learning report (JSON), or None
     /// if the loop has never run. Interim surface until Item 5's typed
     /// diagnostics().
-    fn last_learning_report(&self) -> PyResult<Option<String>> {
-        let db = self.get_inner()?;
-        db.last_learning_report().map_err(map_err)
+    fn last_learning_report(slf: &Bound<'_, Self>) -> PyResult<Option<String>> {
+        Self::detached(slf, |db| db.last_learning_report())
     }
 
     /// Get the current learned scoring weights.
-    fn learned_weights(&self, py: Python<'_>) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let w = db.load_learned_weights().map_err(map_err)?;
+    fn learned_weights(slf: &Bound<'_, Self>) -> PyResult<PyObject> {
+        let py = slf.py();
+        let w = Self::detached(slf, |db| db.load_learned_weights())?;
         let dict = PyDict::new(py);
         dict.set_item("w_sim", w.w_sim)?;
         dict.set_item("w_decay", w.w_decay)?;
