@@ -46,6 +46,7 @@ mod metamorphic;
 mod migrations;
 mod mobility_contest;
 mod moves;
+mod null_embedding;
 mod recall_confidence;
 mod recall_graph;
 mod reembed_router;

@@ -370,6 +370,17 @@ pub enum YantrikDbError {
     )]
     DeterministicWriteDeferredDuringReembed { rid: String },
 
+    /// `insert_vector` was called while a reembed cutover is in progress.
+    /// Its vector would be stamped with a generation it may not belong to,
+    /// so it is refused instead; nothing was written. Retry once the
+    /// reembed completes, with a vector from the embedder then active.
+    #[error(
+        "insert_vector({rid}) deferred: a db.reembed() cutover is in progress. Nothing was \
+         written — retry once the reembed completes, with a vector from the embedder active \
+         then."
+    )]
+    VectorInsertDeferredDuringReembed { rid: String },
+
     /// **2026-08-17 — the F1/F2 forget-resurrection race.** `forget()` /
     /// `tombstone_with_rid()` could not acquire a `SyncWriteGuard` because a
     /// `db.reembed()` cutover is in flight.

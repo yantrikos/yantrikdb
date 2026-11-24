@@ -392,27 +392,43 @@ mod tests {
             // Use the seq-allocated single-node path (None) to match
             // the wedge_repro and Pranab's lane-b@algo iter shape.
             let _ = serialize_f32(&embedding);
-            db.record_with_rid(
-                &format!("seq-test-rid-{i}"),
-                &format!("seq-test-text-{i}"),
-                "episodic",
-                0.5,
-                0.0,
-                604800.0,
-                &serde_json::json!({}),
-                &embedding,
-                "default",
-                0.8,
-                "general",
-                "user",
-                None,
-                (i as i64) * 1_000_000,
-                &[],
-                "test-embedder",
-                None,
-                crate::provenance::WriteAdmission::Admitted,
-            )
-            .expect("with the compactor running, 350 writes must not 503 at delta_max=256");
+            // A slow runner can lag the compactor briefly, so Backpressure is
+            // retried for a bounded time, as a caller must. A wedge (no
+            // compactor) never drains, so it still fails, after 30 s.
+            let started = std::time::Instant::now();
+            loop {
+                match db.record_with_rid(
+                    &format!("seq-test-rid-{i}"),
+                    &format!("seq-test-text-{i}"),
+                    "episodic",
+                    0.5,
+                    0.0,
+                    604800.0,
+                    &serde_json::json!({}),
+                    &embedding,
+                    "default",
+                    0.8,
+                    "general",
+                    "user",
+                    None,
+                    (i as i64) * 1_000_000,
+                    &[],
+                    "test-embedder",
+                    None,
+                    crate::provenance::WriteAdmission::Admitted,
+                ) {
+                    Ok(()) => break,
+                    Err(crate::error::YantrikDbError::Backpressure { retry_after_ms, .. })
+                        if started.elapsed() < std::time::Duration::from_secs(30) =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(retry_after_ms));
+                    }
+                    Err(e) => panic!(
+                        "with the compactor running, 350 writes must not stay refused \
+                         at delta_max=256: {e}"
+                    ),
+                }
+            }
         }
 
         // Sanity: at least most rows landed in SQL. (Exact equality

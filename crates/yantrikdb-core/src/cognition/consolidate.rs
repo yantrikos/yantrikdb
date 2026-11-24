@@ -905,6 +905,7 @@ fn find_consolidation_candidates_page(
              WHERE consolidation_status = 'active' \
              AND storage_tier = 'hot' \
              AND type IN ('episodic', 'semantic') \
+             AND embedding IS NOT NULL \
              ORDER BY namespace ASC, created_at ASC, rid ASC \
              LIMIT ?1 OFFSET ?2";
         let mut stmt = conn.prepare(&sql)?;
@@ -956,7 +957,7 @@ fn find_consolidation_candidates_page(
                     rid,
                     memory_type,
                     text,
-                    embedding: deserialize_f32(&emb_blob),
+                    embedding: crate::compression::decode_embedding_blob(&emb_blob),
                     created_at,
                     importance,
                     valence,
@@ -1092,7 +1093,8 @@ pub fn consolidate(
             "SELECT COUNT(*) FROM memories \
              WHERE consolidation_status = 'active' \
              AND storage_tier = 'hot' \
-             AND type IN ('episodic', 'semantic')",
+             AND type IN ('episodic', 'semantic') \
+             AND embedding IS NOT NULL",
             [],
             |row| row.get::<_, i64>(0),
         )? as usize;

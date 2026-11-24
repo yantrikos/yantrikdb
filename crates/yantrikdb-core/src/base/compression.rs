@@ -16,6 +16,34 @@ pub fn decompress_embedding(blob: &[u8]) -> Vec<f32> {
     deserialize_f32(&raw)
 }
 
+/// Decode a stored embedding blob (already decrypted) in either format.
+///
+/// Cold rows hold their vector compressed, hot rows raw; but writers that
+/// do not know the tier (a text `correct()`, the reembed swap, an external
+/// backfill) can leave a raw blob in a cold row. Every reader that is not
+/// restricted to one tier must decode by content, not by tier.
+///
+/// Never panics: a blob that carries the zstd magic but does not decode
+/// (corruption, truncation) yields an empty vector, which callers already
+/// treat as unusable (a dimension mismatch), with a warning logged.
+pub fn decode_embedding_blob(blob: &[u8]) -> Vec<f32> {
+    if is_compressed(blob) {
+        match zstd::decode_all(blob) {
+            Ok(raw) => deserialize_f32(&raw),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    bytes = blob.len(),
+                    "stored embedding has the zstd magic but does not decode; treating it as missing"
+                );
+                Vec::new()
+            }
+        }
+    } else {
+        deserialize_f32(blob)
+    }
+}
+
 /// Check whether a blob is zstd-compressed by inspecting the magic bytes.
 pub fn is_compressed(blob: &[u8]) -> bool {
     blob.len() >= 4 && blob[0] == 0x28 && blob[1] == 0xB5 && blob[2] == 0x2F && blob[3] == 0xFD
@@ -31,6 +59,18 @@ mod tests {
         let compressed = compress_embedding(&embedding);
         let decompressed = decompress_embedding(&compressed);
         assert_eq!(embedding, decompressed);
+    }
+
+    #[test]
+    fn decode_embedding_blob_reads_either_format() {
+        let embedding = vec![0.5f32, -1.25, 3.0, 0.0];
+        assert_eq!(
+            decode_embedding_blob(&compress_embedding(&embedding)),
+            embedding
+        );
+        assert_eq!(decode_embedding_blob(&serialize_f32(&embedding)), embedding);
+        // A corrupt blob behind the zstd magic must not panic.
+        assert!(decode_embedding_blob(&[0x28, 0xB5, 0x2F, 0xFD, 1, 2, 3]).is_empty());
     }
 
     #[test]
