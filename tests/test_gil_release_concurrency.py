@@ -3,7 +3,8 @@
 `recall()` and `think()` run the engine inside `py.detach` (#271, #279, #280), so
 other Python threads keep running while they work. `stats()` releases the GIL the
 same way, and the third test below covers it. `scan_conflicts()` does the same,
-and the fourth test below covers it. The first version kept the
+and the fourth test below covers it. `consolidate()` does the same, and the
+fifth test below covers it. The first version kept the
 wrapper's `PyRef` borrow for the whole call. While a recall loop ran in one
 thread, every `set_embedder()` from another thread failed with
 `RuntimeError: Already borrowed` (3.5M of 3.5M calls in 5 s), and `close()`
@@ -22,6 +23,7 @@ import time
 import pytest
 
 from yantrikdb import YantrikDB
+from yantrikdb.consolidate import consolidate
 
 DIM = 32  # not 64/256: those dims auto-attach a bundled engine-native embedder
 

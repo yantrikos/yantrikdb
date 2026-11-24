@@ -1353,8 +1353,8 @@ impl super::YantrikDB {
         // materializer drain 70% slower on the 0.21.0 wheel (10.5 s -> 17.8 s
         // for 300 memories). A savepoint nests safely under any outer
         // transaction the caller may hold.
-        conn.execute_batch("SAVEPOINT token_case_stats")?;
-        let result = (|| -> Result<()> {
+        let sp = crate::engine::savepoint::SavepointGuard::new(conn, "token_case_stats")?;
+        {
             let mut stmt = conn.prepare_cached(
                 "INSERT INTO token_case_stats (token, lower_n, cap_mid_n, cap_start_n) \
                  VALUES (?1, ?2, ?3, ?4) \
@@ -1369,16 +1369,8 @@ impl super::YantrikDB {
                 };
                 stmt.execute(params![token, l, m, st])?;
             }
-            Ok(())
-        })();
-        match result {
-            Ok(()) => conn.execute_batch("RELEASE token_case_stats")?,
-            Err(e) => {
-                let _ =
-                    conn.execute_batch("ROLLBACK TO token_case_stats; RELEASE token_case_stats");
-                return Err(e);
-            }
         }
+        sp.release()?;
         Ok(())
     }
 
@@ -1386,8 +1378,14 @@ impl super::YantrikDB {
     /// first step, and the backfill for stores that predate v52).
     pub(crate) fn rebuild_token_case_stats(&self) -> Result<usize> {
         let conn = self.conn();
+        // One transaction for the whole rebuild, the DELETE included: 6,449
+        // memories of per-token upserts is the heal's dominant cost
+        // otherwise, and a failed rebuild keeps the old counts instead of
+        // leaving the table empty.
+        let sp = crate::engine::savepoint::SavepointGuard::new(&conn, "token_case_rebuild")?;
         conn.execute("DELETE FROM token_case_stats", [])?;
         if self.is_encrypted() {
+            sp.release()?;
             return Ok(0);
         }
         let texts: Vec<String> = {
@@ -1398,20 +1396,13 @@ impl super::YantrikDB {
                 .collect::<std::result::Result<_, _>>()?;
             rows
         };
-        // One transaction for the whole rebuild: 6,449 memories of
-        // per-token upserts is the heal's dominant cost otherwise.
-        conn.execute_batch("SAVEPOINT token_case_rebuild")?;
         let mut n = 0usize;
         for stored in &texts {
             let text = self.decrypt_text(stored).unwrap_or_else(|_| stored.clone());
-            if let Err(e) = self.record_token_case_observations(&conn, &text) {
-                let _ = conn
-                    .execute_batch("ROLLBACK TO token_case_rebuild; RELEASE token_case_rebuild");
-                return Err(e);
-            }
+            self.record_token_case_observations(&conn, &text)?;
             n += 1;
         }
-        conn.execute_batch("RELEASE token_case_rebuild")?;
+        sp.release()?;
         Ok(n)
     }
 

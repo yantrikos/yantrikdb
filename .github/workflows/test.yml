@@ -91,8 +91,12 @@ jobs:
       # Slim build path (`--no-default-features`) is a real deployment
       # surface — users who want to BYO their own embedder strip the
       # bundled-embedder + embedder-download Cargo features.
+      # Core alone: in a workspace run, yantrikdb-tui's dependency on the
+      # core enables `embedder-download` and the core's default features,
+      # and Cargo unifies features across the workspace, so the core was
+      # never actually built slim there.
       - name: Run Rust Tests (slim, --no-default-features)
-        run: cargo test --workspace --exclude yantrikdb-python --no-default-features --verbose
+        run: cargo test -p yantrikdb --no-default-features --verbose
 
       - name: Run Rust Tests
         run: cargo test --workspace --exclude yantrikdb-python --verbose
