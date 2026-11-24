@@ -210,17 +210,14 @@ impl PyYantrikDB {
         // matters.
         let (db, embedder) = Self::engine_and_embedder(slf)?;
 
-        let plan = match query_embedding {
-            Some(e) => EmbedPlan::Ready(e),
-            None => match query {
-                Some(q) => plan_embed(py, &db, embedder.as_ref(), q)?,
-                None => {
-                    return Err(PyValueError::new_err(
-                        "Must provide either query or query_embedding",
-                    ))
-                }
-            },
-        };
+        let plan = query_plan(
+            py,
+            &db,
+            embedder.as_ref(),
+            query_embedding,
+            query,
+            "Must provide either query or query_embedding",
+        )?;
 
         // Release the GIL for the engine call (#271). Measured on a 23k-record
         // store: recall() took 274 ms wall and held the GIL for 267 ms of it —
@@ -1320,8 +1317,8 @@ impl PyYantrikDB {
 
         let mut record_inputs = Vec::with_capacity(inputs.len());
         // Items the engine's own embedder will embed, inside the detached
-        // call below: (index into record_inputs, text).
-        let mut native: Vec<(usize, String)> = Vec::new();
+        // call below (indexes into record_inputs, whose text it embeds).
+        let mut native: Vec<usize> = Vec::new();
         for d in &inputs {
             let text: String = d
                 .get_item("text")?
@@ -1388,8 +1385,8 @@ impl PyYantrikDB {
                 }
                 _ => match plan_embed(py, &db, embedder.as_ref(), &text)? {
                     EmbedPlan::Ready(v) => v,
-                    EmbedPlan::Native(t) => {
-                        native.push((record_inputs.len(), t.to_string()));
+                    EmbedPlan::Native(_) => {
+                        native.push(record_inputs.len());
                         Vec::new()
                     }
                 },
@@ -1463,8 +1460,8 @@ impl PyYantrikDB {
 
         run_detached(py, db, move |db| {
             let mut record_inputs = record_inputs;
-            for (i, text) in native {
-                record_inputs[i].embedding = db.embed(&text)?;
+            for i in native {
+                record_inputs[i].embedding = db.embed(&record_inputs[i].text)?;
             }
             db.record_batch(&record_inputs)
         })

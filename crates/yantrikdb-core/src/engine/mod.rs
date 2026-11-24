@@ -654,7 +654,7 @@ impl YantrikDB {
     #[cfg(feature = "embedder-download")]
     pub fn set_embedder_named(&mut self, name: &str) -> Result<()> {
         let downloaded = crate::embedder::DownloadedEmbedder::fetch(name)?;
-        self.set_downloaded_embedder(name, downloaded)
+        self.set_downloaded_embedder(downloaded)
     }
 
     /// The second half of [`Self::set_embedder_named`]: install a model
@@ -665,10 +665,10 @@ impl YantrikDB {
     #[cfg(feature = "embedder-download")]
     pub fn set_downloaded_embedder(
         &mut self,
-        name: &str,
         downloaded: crate::embedder::DownloadedEmbedder,
     ) -> Result<()> {
         if downloaded.dim() != self.embedding_dim() {
+            let name = crate::Embedder::name(&downloaded).unwrap_or_default();
             return Err(crate::error::YantrikDbError::InvalidInput(format!(
                 "embedder {name:?} dim={} but engine was opened with dim={}; \
                  either reopen with `YantrikDB::new(path, {})` or pick a \

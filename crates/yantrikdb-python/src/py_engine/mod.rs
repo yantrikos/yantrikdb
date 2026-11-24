@@ -720,9 +720,7 @@ impl PyYantrikDB {
         let swap = {
             let arc = this.inner.as_mut().expect("checked is_some above");
             match Arc::get_mut(arc) {
-                Some(engine) => engine
-                    .set_downloaded_embedder(name, downloaded)
-                    .map_err(map_err),
+                Some(engine) => engine.set_downloaded_embedder(downloaded).map_err(map_err),
                 // A real external clone is still live (e.g. a ConnectionProxy or
                 // a cloned YantrikDB) — the original, legitimate guard. Preserve
                 // its actionable message.
