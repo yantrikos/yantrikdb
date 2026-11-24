@@ -11,8 +11,9 @@ thread, every `set_embedder()` from another thread failed with
 during `think()` failed the same way. A host that shuts down while maintenance
 runs would have hit this.
 
-These tests use the call pattern a host actually has: a worker thread inside the
-engine, and the main thread calling the `&mut self` methods.
+These tests use the call pattern a host actually has: a worker thread inside
+the engine, and the main thread calling the wrapper's `&mut self` methods
+(`close()` among them; `set_embedder()` was one too, before #282).
 """
 
 import os
@@ -88,13 +89,9 @@ def test_set_embedder_while_recall_runs_in_another_thread(db):
     )
     # #282 contract: set_embedder() no longer holds a mutable borrow
     # across its probe, so a recall() arriving mid-call is NOT refused
-    # either. Neither direction may refuse the other with a borrow error;
-    # any other worker error is still a finding, and a panic always is.
-    refusals = [e for e in recall_errors if "borrowed" in e]
-    assert not refusals, refusals[:2]
-    unexpected = [e for e in recall_errors if "Already mutably borrowed" not in e]
-    assert not unexpected, unexpected[:2]
-    assert not any("PanicException" in e for e in recall_errors)
+    # either. Any worker error at all is a finding: a borrow refusal
+    # breaks the contract, and anything else is unexpected by definition.
+    assert not recall_errors, recall_errors[:2]
 
 
 def test_set_embedder_while_stats_runs_in_another_thread(db):
@@ -133,13 +130,8 @@ def test_set_embedder_while_stats_runs_in_another_thread(db):
         f"{len(errors)}/{calls} set_embedder() calls failed while stats() was "
         f"detached: {errors[:1]}"
     )
-    # Same #282 contract as recall(): neither direction may refuse the
-    # other with a borrow error, and a panic never may happen.
-    refusals = [e for e in stats_errors if "borrowed" in e]
-    assert not refusals, refusals[:2]
-    unexpected = [e for e in stats_errors if "Already mutably borrowed" not in e]
-    assert not unexpected, unexpected[:2]
-    assert not any("PanicException" in e for e in stats_errors)
+    # Same #282 contract as recall(): any worker error is a finding.
+    assert not stats_errors, stats_errors[:2]
 
 
 def test_close_while_think_runs_in_another_thread(db):
@@ -213,13 +205,63 @@ def test_set_embedder_while_scan_conflicts_runs_in_another_thread(db):
         f"{len(errors)}/{calls} set_embedder() calls failed while "
         f"scan_conflicts() was detached: {errors[:1]}"
     )
+    # Same #282 contract as recall(): any worker error is a finding.
+    assert not scan_errors, scan_errors[:2]
+
+
+def test_set_embedder_while_consolidate_runs_in_another_thread(db):
+    # consolidate() is a module-level function taking the engine, not a
+    # method; the borrow hazard is the same. Before the fix it held the
+    # wrapper's shared borrow (and the GIL) for the whole pass, so every
+    # set_embedder() from another thread failed "Already borrowed" while
+    # a consolidation pass was running.
+    stop = threading.Event()
+    consol_calls = []
+    consol_errors = []
+
+    def worker():
+        while not stop.is_set():
+            consol_calls.append(1)
+            try:
+                consolidate(db)
+            except Exception as e:  # noqa: BLE001 - every failure is the finding
+                consol_errors.append(repr(e))
+
+    t = threading.Thread(target=worker)
+    t.start()
+    errors = []
+    calls = 0
+    try:
+        # Open the contention window only once the worker has provably
+        # run: on a slow runner a fixed window can elapse before the
+        # worker gets through even a few passes, and the count below
+        # then fails with nothing actually wrong. Wait for a floor of
+        # passes first, bounded so a wedged worker still fails the
+        # assert instead of hanging the suite.
+        warm_deadline = time.time() + 30.0
+        while len(consol_calls) < 10 and time.time() < warm_deadline:
+            time.sleep(0.005)
+        deadline = time.time() + 2.0
+        while time.time() < deadline:
+            try:
+                db.set_embedder(Emb(), allow_unverified_embedder=True)
+            except Exception as e:  # noqa: BLE001
+                errors.append(repr(e))
+            calls += 1
+    finally:
+        stop.set()
+        t.join()
+
+    # The test only means something if both threads really ran concurrently.
+    assert len(consol_calls) > 5, "the consolidate worker barely ran; nothing was contended"
+    assert calls > 5
+    assert not _borrow_errors(errors), (
+        f"{len(errors)}/{calls} set_embedder() calls failed while "
+        f"consolidate() was detached: {errors[:1]}"
+    )
     # Same #282 contract as recall(): neither direction may refuse the
-    # other with a borrow error, and a panic never may happen.
-    refusals = [e for e in scan_errors if "borrowed" in e]
-    assert not refusals, refusals[:2]
-    unexpected = [e for e in scan_errors if "Already mutably borrowed" not in e]
-    assert not unexpected, unexpected[:2]
-    assert not any("PanicException" in e for e in scan_errors)
+    # other with a borrow error, and any other worker error is a finding.
+    assert not consol_errors, consol_errors[:2]
 
 
 class _DeclaringEmb:
@@ -236,14 +278,17 @@ class _DeclaringEmb:
         return [x / n for x in v]
 
 
-def test_set_embedder_identity_check_under_recall_load(tmp_path):
+def test_set_embedder_identity_check_with_recall_traffic(tmp_path):
     # The other tests pass allow_unverified_embedder=True, so the #117
     # identity check early-returns and only the probe path is exercised.
     # This arm runs the identity check for real — a store whose vectors
     # were built by the bundled engine embedder (recorded identity), and
-    # an embedder declaring the matching fingerprint — under the same
-    # concurrent recall load, asserting the #282 contract holds on the
-    # phase that runs under a shared borrow too.
+    # an embedder declaring the matching fingerprint — while recall
+    # traffic runs, and asserts the full check completes cleanly
+    # alongside it. It does not prove phase 2 itself is contended:
+    # nothing inside the check yields the GIL, and recall() takes only
+    # shared borrows, which a shared borrow cannot refuse (maintainer
+    # note on #295; the test is named for exactly what it proves).
     import re
 
     path = os.path.join(str(tmp_path), "gil-identity.db")
@@ -293,7 +338,26 @@ def test_set_embedder_identity_check_under_recall_load(tmp_path):
 
     assert len(recall_calls) > 5, "the recall worker barely ran; nothing was contended"
     assert calls > 5
-    assert not errors, f"identity-checked set_embedder() failed under load: {errors[:1]}"
-    refusals = [e for e in recall_errors if "borrowed" in e]
-    assert not refusals, refusals[:2]
-    assert not any("PanicException" in e for e in recall_errors)
+    assert not errors, f"identity-checked set_embedder() failed during recall traffic: {errors[:1]}"
+    assert not recall_errors, recall_errors[:2]
+
+
+def test_set_embedder_raises_closed_when_probe_closes_the_store(tmp_path):
+    # Deterministic, no threads (maintainer request on #295): the
+    # embedder's encode() closes the store during the phase-1 probe.
+    # The identity check passes trivially with
+    # allow_unverified_embedder=True, so the phase-3 re-check is what
+    # must refuse the store, raising the closed error. On main this
+    # call returned None: the identity check returns Ok when the
+    # engine is already gone, and the embedder landed on a closed
+    # wrapper as if the call had succeeded.
+    path = os.path.join(str(tmp_path), "gil-close-probe.db")
+    store = YantrikDB(path, DIM)
+
+    class ClosingEmb:
+        def encode(self, text):
+            store.close()
+            return Emb().encode(text)
+
+    with pytest.raises(RuntimeError, match="YantrikDB is closed"):
+        store.set_embedder(ClosingEmb(), allow_unverified_embedder=True)

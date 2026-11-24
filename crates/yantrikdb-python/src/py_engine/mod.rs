@@ -640,8 +640,13 @@ impl PyYantrikDB {
         // Phase 3, mutable borrow for the store alone — one field
         // assignment, no Python call inside it. A close() can now land
         // between validation and the store, so re-check the engine is
-        // still there: storing onto a closed wrapper would leave
-        // has_embedder() reporting true on a closed database.
+        // still there. This changes behaviour: on main, set_embedder()
+        // on a closed wrapper returned None, because
+        // check_embedder_identity returns Ok when inner is None. It
+        // now raises instead — storing an embedder onto a closed
+        // wrapper must not look like success. (has_embedder() is not
+        // the concern here: it goes through get_inner()? and already
+        // raises on a closed wrapper.)
         let mut borrowed = slf.try_borrow_mut()?;
         if borrowed.inner.is_none() {
             return Err(PyRuntimeError::new_err("YantrikDB is closed"));
@@ -976,7 +981,7 @@ impl PyYantrikDB {
     ///
     /// A `&self` pymethod keeps its `PyRef` borrow for the whole call. Once
     /// the engine call runs inside `py.detach`, other Python threads run
-    /// too, and any `&mut self` method they call (`close`, `set_embedder`,
+    /// too, and any `&mut self` method they call (`close`,
     /// `set_embedder_named`) fails with `RuntimeError: Already borrowed`
     /// for as long as the detached call lasts. Methods that detach therefore
     /// take `slf: &Bound<Self>`, borrow only long enough to clone the `Arc`,
