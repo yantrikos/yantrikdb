@@ -10,23 +10,34 @@ const SUMMARY: &str = "We decided to use keyset cursors for list_records. \
                        The production launch slipped to March 30 because of it.";
 
 /// Every column a drafted memory's write path chooses, for one rid.
-fn draft_row(db: &YantrikDB, rid: &str) -> (String, String, f64, f64, f64, String, String, String) {
+#[derive(Debug, PartialEq)]
+struct DraftRow {
+    text: String,
+    memory_type: String,
+    importance: f64,
+    half_life: f64,
+    certainty: f64,
+    source: String,
+    domain: String,
+    namespace: String,
+}
+
+fn draft_row(db: &YantrikDB, rid: &str) -> DraftRow {
     let conn = db.conn();
     conn.query_row(
-        "SELECT text, type, importance, half_life, certainty, source, domain, namespace \
-         FROM memories WHERE rid = ?1",
+        "SELECT text, type, importance, half_life, certainty, source, domain, namespace          FROM memories WHERE rid = ?1",
         params![rid],
         |r| {
-            Ok((
-                r.get(0)?,
-                r.get(1)?,
-                r.get(2)?,
-                r.get(3)?,
-                r.get(4)?,
-                r.get(5)?,
-                r.get(6)?,
-                r.get(7)?,
-            ))
+            Ok(DraftRow {
+                text: r.get(0)?,
+                memory_type: r.get(1)?,
+                importance: r.get(2)?,
+                half_life: r.get(3)?,
+                certainty: r.get(4)?,
+                source: r.get(5)?,
+                domain: r.get(6)?,
+                namespace: r.get(7)?,
+            })
         },
     )
     .unwrap()
@@ -76,15 +87,15 @@ fn record_drafted_facts_writes_provisional_auto_capture_memories() {
     assert_eq!(rids.len(), facts.len(), "one memory per fact, in order");
 
     for (rid, fact) in rids.iter().zip(&facts) {
-        let (text, ty, importance, half_life, certainty, source, domain, ns) = draft_row(&db, rid);
-        assert_eq!(&text, fact);
-        assert_eq!(ty, "semantic");
-        assert_eq!(importance, 0.5);
-        assert_eq!(half_life, 604_800.0);
-        assert_eq!(certainty, 0.7);
-        assert_eq!(source, "session_auto_capture");
-        assert_eq!(domain, "work");
-        assert_eq!(ns, "session");
+        let row = draft_row(&db, rid);
+        assert_eq!(&row.text, fact);
+        assert_eq!(row.memory_type, "semantic");
+        assert_eq!(row.importance, 0.5);
+        assert_eq!(row.half_life, 604_800.0);
+        assert_eq!(row.certainty, 0.7);
+        assert_eq!(row.source, "session_auto_capture");
+        assert_eq!(row.domain, "work");
+        assert_eq!(row.namespace, "session");
         let meta = draft_meta(&db, rid);
         assert_eq!(meta["provisional"], serde_json::json!(true));
         assert_eq!(meta["kind"], serde_json::json!("session_auto_capture"));
