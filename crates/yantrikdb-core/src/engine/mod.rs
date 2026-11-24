@@ -376,15 +376,26 @@ pub struct YantrikDB {
     /// separate connection locks (materialization takes the lock itself), so
     /// two callers applying the same batch both applied, and both counted,
     /// the ops they raced on. The GIL used to serialise the Python callers.
+    ///
+    /// Lock order (Rule 1): taken before `conn`; held across the whole
+    /// batch, which takes `conn` and later locks itself.
     pub(crate) apply_ops_lock: Mutex<()>,
     /// Serialises pack installs (#271 review): an install unmounts, copies
     /// (or converts) and remounts one file, and two installs of the same
     /// pack interleaving those steps double-mounted it or read a
     /// half-copied file.
+    ///
+    /// Lock order (Rule 1): taken before `conn` and the `packs` registry;
+    /// held across the whole install, uninstall or remount.
     pub(crate) pack_install_lock: Mutex<()>,
     /// Serialises chunk backfills (`rechunk_long_records*`): two runs at
     /// once both embedded and wrote every window. Ending consistent, at
     /// twice the cost; the second now finds nothing left to do.
+    ///
+    /// Lock order (Rule 1): taken before `conn`; held across the whole
+    /// backfill. The Python binding's embed callback re-takes the GIL
+    /// while it is held, so it must never be taken with the GIL held: the
+    /// binding releases the GIL before calling into the backfill.
     pub(crate) rechunk_lock: Mutex<()>,
 
     /// Whether this database's embedder identity is already on disk.
