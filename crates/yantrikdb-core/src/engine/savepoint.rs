@@ -13,11 +13,13 @@
 //! anything rolls back. Two error arms, two different manual unwind attempts,
 //! both wrong: the rule wants ONE owner.
 //!
-//! The guard is that owner. Construct it right after `SAVEPOINT`; every early
-//! `?`-return and every unwinding panic hits `Drop`, which runs
-//! `ROLLBACK TO name; RELEASE name` — SQLite's idiom for "undo the work AND
-//! close the frame". The happy path calls [`SavepointGuard::release`], which
-//! consumes the guard so a released savepoint cannot also be rolled back.
+//! The guard is that owner. [`SavepointGuard::new`] opens the savepoint;
+//! every early `?`-return and every unwinding panic hits `Drop`. A nested
+//! guard runs `ROLLBACK TO name; RELEASE name`, SQLite's idiom for "undo the
+//! work AND close the frame". The outermost guard opened the transaction
+//! itself with `BEGIN IMMEDIATE` (#298), so it runs a plain `ROLLBACK`. The
+//! happy path calls [`SavepointGuard::release`], which consumes the guard so
+//! a released savepoint cannot also be rolled back.
 
 use rusqlite::Connection;
 
@@ -150,7 +152,7 @@ mod tests {
 
         assert!(
             conn.is_autocommit(),
-            "drop must ROLLBACK TO *and* RELEASE — a bare ROLLBACK TO leaves \
+            "drop must end the transaction — a bare ROLLBACK TO leaves \
              the transaction open (#91)"
         );
         let missing = conn

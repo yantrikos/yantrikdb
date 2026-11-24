@@ -311,10 +311,48 @@ at open, so `unchecked_transaction()` complies without extra work.
 `SavepointGuard` opens `BEGIN IMMEDIATE` when it is the outermost frame.
 Never write a bare `SAVEPOINT` or `BEGIN` on the write connection; use
 `SavepointGuard`. A single-statement write outside a transaction is
-fine, because its first step already asks for the write lock.
+fine, because its first step already asks for the write lock. That holds
+only while no statement on the same connection is still stepping: a
+live cursor keeps a read transaction open, and the write is then an
+upgrade again. Finish or drop every cursor before writing on the
+connection it came from.
 
-`engine/tests/lock_wait.rs` holds the lock from a second connection
-and checks that both routes wait for it.
+Caveats:
+
+- **A read-only snapshot opens `Deferred` by name.** `read_conn()` falls
+  back to the write connection when `YANTRIKDB_READ_POOL=0`, and that
+  connection now defaults to `IMMEDIATE`, so a read snapshot taken there
+  with `unchecked_transaction()` would take the write lock. The thread
+  read in `thread.rs` uses
+  `Transaction::new_unchecked(.., TransactionBehavior::Deferred)` for
+  this reason.
+- **Any correction-epoch or similar seqlock goes odd only after
+  `BEGIN IMMEDIATE` returns.** The wait can last up to `busy_timeout`.
+  A recall spinning on an odd epoch gives up after about 1M spins with
+  `RecallContended`.
+- **The wait happens while holding the connection mutex.** It also holds
+  the GIL in bindings that have not yet released it (#271). Waiting is
+  the point, but anything else in the process that needs the write
+  connection waits behind it, including recall's trust stamping and
+  impression logging. Before #298 those writes failed at once instead.
+- **An empty transaction now fires the commit hook.** `BEGIN IMMEDIATE;
+  COMMIT` with no writes runs it, which a deferred read-only commit does
+  not. A read of the engine found no path that commits an empty
+  transaction outside a pre-checked write. Don't add one that relies on
+  the hook staying quiet.
+- **The Python `_conn` test proxy passes SQL through verbatim.** A test
+  that writes `BEGIN` there gets exactly what it wrote.
+
+`engine/tests/lock_wait.rs` checks the rule in four ways:
+- it holds the lock from a second connection and checks that both
+  routes wait for it;
+- it checks that a transaction holds the lock from `BEGIN`;
+- it runs writes beside a connection that commits continually;
+- it checks that `correct()` waiting for the lock does not starve
+  `recall()`.
+
+It also scans the source for a bare `SAVEPOINT`, `BEGIN` or `RELEASE`
+outside the guard.
 
 ---
 

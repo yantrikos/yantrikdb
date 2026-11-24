@@ -477,31 +477,29 @@ impl YantrikDB {
         {
             let conn = self.conn();
             let sp = crate::engine::savepoint::SavepointGuard::new(&conn, "refresh_embeddings")?;
-            {
-                for p in &pending {
-                    // Guarded on the exact ciphertext scanned: if a
-                    // concurrent write changed the text, the vector just
-                    // computed describes content that no longer exists.
-                    let updated = conn.execute(
-                        "UPDATE memories \
-                         SET embedding = ?1, embedding_model = ?2, \
-                             embedding_generation = ?3, updated_at = ?4 \
-                         WHERE rid = ?5 AND text = ?6",
-                        params![
-                            p.new_embedding_blob,
-                            model,
-                            generation,
-                            updated_at,
-                            p.rid,
-                            p.scanned_ciphertext,
-                        ],
-                    )?;
-                    if updated == 0 {
-                        report.skipped_concurrent_modification += 1;
-                        continue;
-                    }
-                    report.refreshed += 1;
+            for p in &pending {
+                // Guarded on the exact ciphertext scanned: if a
+                // concurrent write changed the text, the vector just
+                // computed describes content that no longer exists.
+                let updated = conn.execute(
+                    "UPDATE memories \
+                     SET embedding = ?1, embedding_model = ?2, \
+                         embedding_generation = ?3, updated_at = ?4 \
+                     WHERE rid = ?5 AND text = ?6",
+                    params![
+                        p.new_embedding_blob,
+                        model,
+                        generation,
+                        updated_at,
+                        p.rid,
+                        p.scanned_ciphertext,
+                    ],
+                )?;
+                if updated == 0 {
+                    report.skipped_concurrent_modification += 1;
+                    continue;
                 }
+                report.refreshed += 1;
             }
             sp.release()?;
         }
