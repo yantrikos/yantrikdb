@@ -571,9 +571,11 @@ impl YantrikDB {
     /// no chunk vectors here, because the engine cannot embed windows with
     /// an embedder it cannot reach, and no write path takes caller-made
     /// chunk vectors yet (as with `record()` and a caller vector, #274).
-    /// The engine path chunks such a fact as it writes it. The splitter
-    /// merges a short tail into the last fact, so that one fact can run
-    /// long. `rechunk_long_records_with` backfills it afterwards.
+    /// The engine path chunks such a fact as it writes it. A drafted fact
+    /// runs long in two ways: the splitter never cuts a sentence, so one
+    /// sentence past the 120-character target stays whole, and past 60
+    /// facts it merges the overflow into the 60th.
+    /// `rechunk_long_records_with` backfills the chunks afterwards.
     ///
     /// [`draft_facts_from_summary`]: Self::draft_facts_from_summary
     /// [`draft_memories_from_summary`]: Self::draft_memories_from_summary
