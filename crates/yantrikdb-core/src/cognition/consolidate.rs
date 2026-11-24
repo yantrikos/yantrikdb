@@ -689,8 +689,13 @@ pub fn restore_from_consolidation(
         let ts = crate::time::now_secs();
         let conn = db.conn();
         let tx = conn.unchecked_transaction()?;
-        for (rid, importance, _) in &plan {
-            tx.execute(
+        // Keep only the sources this call actually restored: a concurrent
+        // restore (detached since #271) may have planned the same ones, and
+        // the guarded UPDATE changes each row once. The rest are reported
+        // as already active, as a sequential second call reports them.
+        let mut done = Vec::with_capacity(plan.len());
+        for (rid, importance, basis) in std::mem::take(&mut plan) {
+            let changed = tx.execute(
                 "UPDATE memories \
                  SET consolidation_status = 'active', consolidated_into = NULL, \
                      importance = ?1, updated_at = ?2 \
@@ -698,7 +703,13 @@ pub fn restore_from_consolidation(
                    AND consolidated_into = ?4",
                 rusqlite::params![importance, ts, rid, summary_rid],
             )?;
+            if changed == 1 {
+                done.push((rid, importance, basis));
+            } else {
+                skipped.push(serde_json::json!({"rid": rid, "reason": "already_active"}));
+            }
         }
+        plan = done;
         tx.commit()?;
         for (rid, importance, _) in &plan {
             db.cache_mark_restored(rid, *importance);
@@ -2415,6 +2426,79 @@ mod restore_tests {
             .unwrap()
             .iter()
             .all(|s| s["reason"] == "already_active"));
+    }
+
+    /// Two restores at once report (and replicate) each source once. The
+    /// UPDATE was already guarded, but both calls reported, cache-marked and
+    /// logged every planned source; restore runs with the GIL released
+    /// (#271), so both could plan the same sources.
+    #[test]
+    fn concurrent_restores_report_each_source_once() {
+        for trial in 0..20 {
+            let db = YantrikDB::new(":memory:", 8).unwrap();
+            let rids = seed(
+                &db,
+                &[
+                    ("alpha fact", 0.65),
+                    ("beta fact", 0.5),
+                    ("gamma fact", 0.6),
+                    ("delta fact", 0.55),
+                ],
+            );
+            let summary = consolidated(&db, &rids);
+            let barrier = std::sync::Barrier::new(3);
+            let restored: usize = std::thread::scope(|s| {
+                let handles: Vec<_> = (0..3)
+                    .map(|_| {
+                        s.spawn(|| {
+                            barrier.wait();
+                            super::restore_from_consolidation(&db, &summary, false).unwrap()
+                                ["restored"]
+                                .as_array()
+                                .unwrap()
+                                .len()
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).sum()
+            });
+            assert_eq!(
+                restored,
+                rids.len(),
+                "trial {trial}: sources reported restored"
+            );
+            let logged: i64 = db
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM oplog WHERE op_type = 'consolidation_restore'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert!(logged >= 1, "trial {trial}");
+            let entries: usize = {
+                let conn = db.conn();
+                let mut stmt = conn
+                    .prepare("SELECT payload FROM oplog WHERE op_type = 'consolidation_restore'")
+                    .unwrap();
+                let rows: Vec<String> = stmt
+                    .query_map([], |r| r.get(0))
+                    .unwrap()
+                    .collect::<std::result::Result<_, _>>()
+                    .unwrap();
+                rows.iter()
+                    .map(|p| {
+                        let v: serde_json::Value = serde_json::from_str(p).unwrap();
+                        v["restored"].as_array().map(|a| a.len()).unwrap_or(0)
+                    })
+                    .sum()
+            };
+            assert_eq!(
+                entries,
+                rids.len(),
+                "trial {trial}: sources replicated as restored"
+            );
+        }
     }
 
     #[test]
