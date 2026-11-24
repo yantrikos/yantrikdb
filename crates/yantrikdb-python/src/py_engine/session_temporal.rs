@@ -20,11 +20,16 @@ impl PyYantrikDB {
         client_id: &str,
         metadata: Option<&Bound<'_, PyDict>>,
     ) -> PyResult<String> {
+        // Closed is reported before any argument error, as before the
+        // GIL sweep (#271).
+        let db = Self::engine_handle(slf)?;
         let meta = match metadata {
             Some(d) => py_to_json(&d.as_any())?,
             None => serde_json::json!({}),
         };
-        Self::detached(slf, |db| db.session_start(namespace, client_id, &meta))
+        run_detached(slf.py(), db, |db| {
+            db.session_start(namespace, client_id, &meta)
+        })
     }
 
     #[pyo3(signature = (session_id, summary=None))]

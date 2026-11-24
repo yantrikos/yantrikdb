@@ -708,8 +708,25 @@ def test_embed_with_the_engine_embedder_releases_the_gil(tmp_path):
 # before reading its arguments. A detached method reads them first, so each one
 # here must take its engine handle before it parses anything.
 
+class _Unconvertible:
+    # py_to_json falls back to str(); this is the one value it cannot convert.
+    def __str__(self):
+        raise ValueError("not convertible")
+
+
 CLOSED_FIRST = {
     "attach_claims": lambda db: db.attach_claims("some-rid", [{"rel_type": "works_at"}]),
+    "record_with_links": lambda db: db.record_with_links("text", [{"link_type": "supports"}]),
+    "record_with_links_partial": lambda db: db.record_with_links_partial(
+        "text", [{"link_type": "supports"}]
+    ),
+    "linked_records": lambda db: db.linked_records("some-rid", "sideways"),
+    "note_rollup_expansion_features": lambda db: db.note_rollup_expansion_features(
+        "some-impression", ["a", "b"], [0.5]
+    ),
+    "_log_op": lambda db: db._log_op("witness", None, {"x": _Unconvertible()}),
+    "session_start": lambda db: db.session_start("default", "c", {"x": _Unconvertible()}),
+    "apply_ops": lambda db: db.apply_ops([{}]),
 }
 
 

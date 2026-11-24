@@ -1039,6 +1039,10 @@ impl PyYantrikDB {
         source: &str,
         emotional_state: Option<&str>,
     ) -> PyResult<String> {
+        // Closed is reported before any argument error, as before the
+        // GIL sweep (#271), without taking the engine: it is taken after
+        // the Python embedder runs (`planned`).
+        Self::check_open(slf)?;
         let py = slf.py();
         let meta = match metadata {
             Some(d) => py_to_json(&d.as_any())?,
@@ -1104,6 +1108,9 @@ impl PyYantrikDB {
         direction: &str,
         link_type: Option<&str>,
     ) -> PyResult<Vec<PyObject>> {
+        // Closed is reported before any argument error, as before the
+        // GIL sweep (#271).
+        let db = Self::engine_handle(slf)?;
         let py = slf.py();
         let dir = match direction {
             "outbound" => yantrikdb_core::LinkDirection::Outbound,
@@ -1117,7 +1124,7 @@ impl PyYantrikDB {
             }
         };
         let lt = link_type.map(yantrikdb_core::LinkType::from_str_lenient);
-        let out = Self::detached(slf, |db| db.linked_records(rid, dir, lt.as_ref()))?;
+        let out = run_detached(slf.py(), db, |db| db.linked_records(rid, dir, lt.as_ref()))?;
         out.iter()
             .map(|l| {
                 let d = PyDict::new(py);
@@ -1214,6 +1221,10 @@ impl PyYantrikDB {
         source: &str,
         emotional_state: Option<&str>,
     ) -> PyResult<(String, Vec<PyObject>)> {
+        // Closed is reported before any argument error, as before the
+        // GIL sweep (#271), without taking the engine: it is taken after
+        // the Python embedder runs (`planned`).
+        Self::check_open(slf)?;
         let py = slf.py();
         let meta = match metadata {
             Some(d) => py_to_json(&d.as_any())?,
@@ -1599,6 +1610,9 @@ impl PyYantrikDB {
         returned_child_rids: Vec<String>,
         returned_child_scores: Vec<Option<f64>>,
     ) -> PyResult<usize> {
+        // Closed is reported before any argument error, as before the
+        // GIL sweep (#271).
+        let db = Self::engine_handle(slf)?;
         if returned_child_rids.len() != returned_child_scores.len() {
             return Err(PyValueError::new_err(
                 "returned_child_rids and returned_child_scores must have equal length",
@@ -1609,7 +1623,7 @@ impl PyYantrikDB {
             .zip(returned_child_scores)
             .map(|(rid, score)| (rid.as_str(), score))
             .collect();
-        Self::detached(slf, |db| {
+        run_detached(slf.py(), db, |db| {
             db.note_rollup_expansion_with_scores(impression_id, &children)
         })
     }

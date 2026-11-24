@@ -1199,8 +1199,11 @@ impl PyYantrikDB {
         target_rid: Option<&str>,
         payload: &Bound<'_, PyDict>,
     ) -> PyResult<String> {
+        // Closed is reported before any argument error, as before the
+        // GIL sweep (#271).
+        let db = Self::engine_handle(slf)?;
         let payload_json = py_to_json(&payload.as_any())?;
-        Self::detached(slf, |db| {
+        run_detached(slf.py(), db, |db| {
             db.log_op(op_type, target_rid, &payload_json, None)
         })
     }
@@ -1534,6 +1537,17 @@ impl PyYantrikDB {
         T: Send,
     {
         run_detached(slf.py(), Self::engine_handle(slf)?, f)
+    }
+
+    /// "YantrikDB is closed" if it is, taking no engine reference and not
+    /// waiting at the swap gate: for a binding that reports a closed store
+    /// before its argument errors and then embeds through
+    /// [`planned`](Self::planned).
+    pub(crate) fn check_open(slf: &Bound<'_, Self>) -> PyResult<()> {
+        if Self::shared_borrow(slf, false)?.inner.is_none() {
+            return Err(PyRuntimeError::new_err("YantrikDB is closed"));
+        }
+        Ok(())
     }
 
     /// The engine handle and a binding's embedding plan, the plan made while

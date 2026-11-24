@@ -83,6 +83,9 @@ impl PyYantrikDB {
     }
 
     fn apply_ops(slf: &Bound<'_, Self>, ops: Vec<Bound<'_, PyDict>>) -> PyResult<PyObject> {
+        // Closed is reported before any argument error, as before the
+        // GIL sweep (#271).
+        let db = Self::engine_handle(slf)?;
         let py = slf.py();
         let mut entries = Vec::with_capacity(ops.len());
         for d in &ops {
@@ -147,7 +150,7 @@ impl PyYantrikDB {
             });
         }
 
-        let stats = Self::detached(slf, |db| {
+        let stats = run_detached(slf.py(), db, |db| {
             yantrikdb_core::replication::apply_ops(db, &entries)
         })?;
         let dict = PyDict::new(py);
