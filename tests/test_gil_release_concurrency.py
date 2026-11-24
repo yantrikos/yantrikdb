@@ -842,7 +842,7 @@ def test_two_swaps_pending_at_once_both_go_through(tmp_path):
         db = YantrikDB(os.path.join(str(tmp_path), f"two{rep}.db"), 256)
         try:
             proxy = db._conn  # both swaps are pending before either can go
-            out = [None, None]
+            out = [("not run", 0.0), ("not run", 0.0)]
 
             def swapper(k):
                 started = time.perf_counter()
