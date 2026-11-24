@@ -518,7 +518,9 @@ impl PyYantrikDB {
         // reach a Python embedder, so its `draft_memories_from_summary`
         // raised "No embedder configured" on a store that had only one: split
         // here, embed each fact with the GIL held and no borrow of the
-        // wrapper, then write them all in one detached call.
+        // wrapper, then write them all in one detached call. A fact longer
+        // than a known embedder window gets no chunk vectors on this path
+        // (see `record_drafted_facts`); `rechunk_long_records()` adds them.
         let Some(emb) = embedder else {
             return run_detached(py, db, |db| {
                 db.draft_memories_from_summary(summary, namespace, domain)

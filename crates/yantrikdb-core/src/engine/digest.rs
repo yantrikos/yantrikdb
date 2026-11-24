@@ -562,10 +562,18 @@ impl YantrikDB {
     }
 
     /// Record facts from [`draft_facts_from_summary`] with vectors the
-    /// caller embedded, exactly as [`draft_memories_from_summary`] records
-    /// them (same type, importance, half-life, certainty, source and
+    /// caller embedded, with the same fields [`draft_memories_from_summary`]
+    /// writes (type, importance, half-life, certainty, source and
     /// provisional metadata). For an embedder the engine cannot reach: the
     /// Python binding's caller-attached one. Returns the new rids in order.
+    ///
+    /// One difference: a fact longer than the embedder's known window gets
+    /// no chunk vectors here, because the engine cannot embed windows with
+    /// an embedder it cannot reach, and no write path takes caller-made
+    /// chunk vectors yet (as with `record()` and a caller vector, #274).
+    /// The engine path chunks such a fact as it writes it. The splitter
+    /// merges a short tail into the last fact, so that one fact can run
+    /// long. `rechunk_long_records_with` backfills it afterwards.
     ///
     /// [`draft_facts_from_summary`]: Self::draft_facts_from_summary
     /// [`draft_memories_from_summary`]: Self::draft_memories_from_summary

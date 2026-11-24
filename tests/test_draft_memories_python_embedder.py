@@ -6,6 +6,10 @@ one the call raised "No embedder configured"; on a store with both it used the
 engine's, against the precedence every other write follows. The binding now
 splits the summary, embeds each fact with the caller's embedder and records
 them with the same fields the engine path writes.
+
+One difference stays, documented on `record_drafted_facts`: with a known
+embedder window, a fact longer than the window gets chunk vectors on the engine
+path as it is written, and on this path only once `rechunk_long_records()` runs.
 """
 
 import os
@@ -41,8 +45,13 @@ class Emb:
         return [x / n for x in v]
 
 
+def _chunks(db, rid):
+    row = db._conn.execute("SELECT COUNT(*) AS n FROM memory_chunks WHERE rid = ?", (rid,)).fetchone()
+    return row["n"]
+
+
 def _drafted(db, rids):
-    return [{k: db.get(rid)[k] for k in FIELDS} for rid in rids]
+    return [dict({k: db.get(rid)[k] for k in FIELDS}, chunks=_chunks(db, rid)) for rid in rids]
 
 
 def test_drafts_with_only_a_python_embedder(tmp_path):
@@ -104,5 +113,31 @@ def test_an_attached_python_embedder_outranks_the_engine_one(tmp_path):
         rids = db.draft_memories_from_summary(SUMMARY)
         assert rids
         assert emb.calls == len(rids), "the attached embedder made the vectors"
+    finally:
+        db.close()
+
+
+class TruncEmb(Emb):
+    """Sees only the first 120 characters, like a model with an input window."""
+
+    def encode(self, text):
+        return super().encode(text[:120])
+
+
+def test_a_long_fact_is_chunked_by_rechunk_on_the_python_path(tmp_path):
+    # The documented difference, pinned: no chunk vectors at write time, and
+    # rechunk_long_records() adds them with the caller's embedder.
+    db = YantrikDB(os.path.join(str(tmp_path), "long.db"), DIM)
+    try:
+        db.set_embedder(TruncEmb(), allow_unverified_embedder=True)
+        assert db.detect_embedder_window() is not None
+        long_tail = " ".join(f"detail {i} of the migration plan" for i in range(40))
+        rids = db.draft_memories_from_summary(SUMMARY + " " + long_tail + ".")
+        longest = max(rids, key=lambda r: len(db.get(r)["text"]))
+        assert len(db.get(longest)["text"]) > 400
+        assert _chunks(db, longest) == 0
+        records, vectors = db.rechunk_long_records()
+        assert records >= 1 and vectors >= 1
+        assert _chunks(db, longest) > 0
     finally:
         db.close()
