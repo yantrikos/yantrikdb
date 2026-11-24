@@ -17,6 +17,14 @@ fails at once, inside the detach) can be missed, and such a call is not
 witnessed here. Controls keep the witness honest: a no-op must be seen 0 times,
 a `sleep` at least once.
 
+The "releases" half needs a second CPU. With one usable CPU, a detached stretch
+of a few microseconds ends before the scheduler gets around to the observer,
+and with the switch interval at 100 s nothing forces a handoff, so short calls
+are missed: under `taskset -c 8` on Linux, 7 of 53 witnesses failed. Those
+tests skip there, while the held half and the controls still run. The same
+misses happen when all but one CPU is busy. CI runs pytest serially on runners
+with 3 or more vCPUs, so it is not affected.
+
 Call the binding bare. Wrapping it in anything that sleeps or blocks (a retry
 with backoff, a lock) releases the GIL on the wrapper's behalf and fakes a pass.
 """
@@ -33,6 +41,20 @@ from yantrikdb import YantrikDB
 from yantrikdb.consolidate import consolidate
 
 DIM = 32  # not 64/256: those dims auto-attach a bundled engine-native embedder
+
+
+def _usable_cpus():
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:  # not on Windows or macOS
+        return os.cpu_count() or 1
+
+
+# For tests that need to SEE a release (the module docstring explains why).
+needs_a_second_cpu = pytest.mark.skipif(
+    _usable_cpus() < 2,
+    reason="seeing a short GIL release needs a second CPU for the observer",
+)
 
 
 class Emb:
@@ -158,16 +180,19 @@ def test_witness_sees_nothing_through_a_binding_that_holds_the_gil(db):
 # ── the bindings #271 has detached so far ───────────────────────────────
 
 
+@needs_a_second_cpu
 def test_recall_with_an_embedding_releases_the_gil(db):
     q = Emb().encode("topic 3")
     assert _seen_during(lambda: db.recall(query_embedding=q, top_k=5)) >= 1
 
 
+@needs_a_second_cpu
 def test_recall_with_a_python_embedder_releases_the_gil(db):
     # encode() runs with the GIL held (it is Python); the search after it must not.
     assert _seen_during(lambda: db.recall(query="topic 3", top_k=5)) >= 1
 
 
+@needs_a_second_cpu
 def test_recall_with_the_engine_embedder_releases_the_gil(tmp_path):
     # 64 dims: the bundled engine-native embedder is attached, no Python one.
     store = YantrikDB(os.path.join(str(tmp_path), "native.db"), 64)
@@ -181,18 +206,22 @@ def test_recall_with_the_engine_embedder_releases_the_gil(tmp_path):
         store.close()
 
 
+@needs_a_second_cpu
 def test_stats_releases_the_gil(db):
     assert _seen_during(lambda: db.stats()) >= 1
 
 
+@needs_a_second_cpu
 def test_think_releases_the_gil(db):
     assert _seen_during(lambda: db.think()) >= 1
 
 
+@needs_a_second_cpu
 def test_scan_conflicts_releases_the_gil(db):
     assert _seen_during(lambda: db.scan_conflicts()) >= 1
 
 
+@needs_a_second_cpu
 def test_consolidate_releases_the_gil(db):
     assert _seen_during(lambda: consolidate(db)) >= 1
 
