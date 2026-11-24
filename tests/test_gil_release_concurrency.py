@@ -503,9 +503,10 @@ def test_set_embedder_named_names_both_causes_when_a_proxy_holds_the_engine(tmp_
         msg = str(err.value)
         assert "ConnectionProxy" in msg and "another thread's call" in msg, msg
         assert "  " not in msg, f"broken line continuations in the message: {msg!r}"
-        # The workers stay stopped for the whole wait and are respawned once.
-        # Respawning on every try started a whole pool every ~1.5 ms.
-        assert db._worker_spawns - spawns == 1, db._worker_spawns - spawns
+        # The engine never looked free, so the workers ran through the whole
+        # wait: never stopped, never restarted. They used to be stopped for
+        # the whole wait, and the calls it waited for could need them.
+        assert db._worker_spawns - spawns == 0, db._worker_spawns - spawns
         del proxy
         assert db.record_turn("default", "user", "workers still running") > 0
     finally:
@@ -650,8 +651,8 @@ def test_set_embedder_named_beside_a_held_borrow_leaves_the_workers_running(tmp_
     # the borrow with `?` after
     # stopping the workers, and a refusal skipped the respawn: the store
     # was left without workers, and writes past the 256th failed with
-    # Backpressure ("ingest queue full"). Now the workers are restarted on
-    # every way out, and the swap waits on and goes through once the
+    # Backpressure ("ingest queue full"). Now the workers are restarted, the
+    # swap tries again at most every 50 ms, and it goes through once the
     # borrow is free.
     db = YantrikDB(os.path.join(str(tmp_path), "held.db"), 256)
     try:
@@ -684,6 +685,9 @@ def test_set_embedder_named_beside_a_held_borrow_leaves_the_workers_running(tmp_
         assert "error" not in out, out.get("error")
         for i in range(700):
             db.record(f"after the swap {i}", embedding=[0.05] * 256)
+        # Restarted at most once per 50 ms try, and once at the end.
+        restarts = db._worker_spawns - spawns
+        assert restarts <= out["took"] / 0.05 + 3, (restarts, out["took"])
     finally:
         db.close()
 
