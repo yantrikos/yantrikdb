@@ -550,6 +550,9 @@ RELEASES = {
     "uninstall_pack": lambda db, c: db.uninstall_pack("no-such-pack@0"),
     "installed_packs": lambda db, c: db.installed_packs(),
     "remount_installed": lambda db, c: db.remount_installed(),
+    # Reads /proc/self/maps on Linux and walks the loaded images on macOS;
+    # on Windows it returns at once (see WITNESS_SKIPPED_ON).
+    "foreign_sqlite_detected": lambda db, c: db.foreign_sqlite_detected(),
     # Static, but they open (and sign_pack writes) a pack's SQLite file.
     "read_pack_manifest": lambda db, c: YantrikDB.read_pack_manifest(c["pack"]),
     "sign_pack": lambda db, c: YantrikDB.sign_pack(c["pack"], c["secret"]),
@@ -583,10 +586,6 @@ UNWITNESSED = {
     "reembed": (
         "the same: it resolves the model through the download registry, and "
         "offline an unknown name fails at once inside the detach"
-    ),
-    "foreign_sqlite_detected": (
-        "the scan reads the process's memory map on Linux and macOS; where "
-        "detection is unsupported (Windows) it returns at once inside the detach"
     ),
     "convert_pack": (
         "static, detached for the re-embed; a real conversion needs the target "
@@ -666,9 +665,18 @@ def small_db(tmp_path):
     store.close()
 
 
+# Detached everywhere, but with nothing to do on some platforms, where the
+# call is too short to see.
+WITNESS_SKIPPED_ON = {
+    "foreign_sqlite_detected": ("win32", "on Windows the scan has no maps file to read"),
+}
+
+
 @needs_a_second_cpu
 @pytest.mark.parametrize("name", sorted(n for n, call in RELEASES.items() if call is not None))
 def test_binding_releases_the_gil(small_db, name):
+    if name in WITNESS_SKIPPED_ON and sys.platform == WITNESS_SKIPPED_ON[name][0]:
+        pytest.skip(WITNESS_SKIPPED_ON[name][1])
     db, ctx = small_db
     call = RELEASES[name]
     assert _seen_during(lambda: call(db, ctx)) >= 1, f"{name}() held the GIL"
