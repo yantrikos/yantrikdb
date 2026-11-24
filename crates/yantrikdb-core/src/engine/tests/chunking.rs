@@ -563,3 +563,57 @@ fn concurrent_rechunks_do_the_work_once() {
     );
     assert_eq!(db.stats(None).unwrap().chunk_vectors as usize, vectors);
 }
+
+/// The batch backfill hands many records' windows to one `embed` call:
+/// the Python binding re-takes the GIL once per call, so per-record calls
+/// cost one GIL handoff per record beside a busy Python thread (#271).
+#[test]
+fn batch_rechunk_embeds_many_records_per_call() {
+    let db = YantrikDB::new(":memory:", 32).unwrap();
+    let probe = TruncatingEmbedder {
+        window: 400,
+        dim: 32,
+    };
+    let one = |text: &str| {
+        probe
+            .embed(text)
+            .map_err(|e| crate::YantrikDbError::Inference(e.to_string()))
+    };
+    for i in 0..8 {
+        let text = format!("{i} {}", long_text_with_tail(TAIL));
+        db.record(
+            &text,
+            "episodic",
+            0.5,
+            0.0,
+            604_800.0,
+            &serde_json::json!({}),
+            &probe.embed(&text).unwrap(),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+    }
+    db.detect_embedder_window_with(one)
+        .unwrap()
+        .expect("truncation");
+
+    let calls = std::sync::atomic::AtomicUsize::new(0);
+    let (records, vectors) = db
+        .rechunk_long_records_with_batch(|texts: &[&str]| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            texts.iter().map(|t| one(t)).collect()
+        })
+        .unwrap();
+    assert_eq!(records, 8);
+    assert!(vectors < 256, "the fixture must fit one group: {vectors}");
+    assert_eq!(
+        calls.load(std::sync::atomic::Ordering::Relaxed),
+        1,
+        "{vectors} windows of 8 records fit one call"
+    );
+    assert_eq!(db.stats(None).unwrap().chunk_vectors as usize, vectors);
+}

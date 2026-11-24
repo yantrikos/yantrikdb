@@ -33,6 +33,33 @@ fn py_embed(
     }
 }
 
+/// [`py_embed`] for a batch: ONE attach to the GIL for all of `texts`.
+///
+/// With another Python thread busy, every attach waits about one switch
+/// interval for the GIL, so attaching per window made a backfill of 660
+/// windows take 1,242 ms instead of 186 ms. The engine hands over up to
+/// 256 windows (whole records) per call; the same backfill now takes about
+/// 185 ms beside a busy thread.
+fn py_embed_batch(
+    emb: &PyObject,
+) -> impl Fn(&[&str]) -> std::result::Result<Vec<Vec<f32>>, yantrikdb_core::YantrikDbError> + Send + '_
+{
+    move |texts: &[&str]| {
+        Python::attach(|py| {
+            texts
+                .iter()
+                .map(|text| {
+                    let out = emb
+                        .call_method1(py, "encode", (*text,))
+                        .map_err(|e| yantrikdb_core::YantrikDbError::Inference(e.to_string()))?;
+                    py_vector(py, &out)
+                        .map_err(|e| yantrikdb_core::YantrikDbError::Inference(e.to_string()))
+                })
+                .collect()
+        })
+    }
+}
+
 #[pymethods]
 impl PyYantrikDB {
     /// `idempotency_key` (v0.10, 4a.6c): dedups caller retries durably. Same
@@ -340,7 +367,7 @@ impl PyYantrikDB {
         // raised NoEmbedder on a store whose only embedder is Python-side.
         let embedder = embedder.as_ref();
         run_detached(slf.py(), db, move |db| match embedder {
-            Some(emb) => db.rechunk_long_records_with(py_embed(emb)),
+            Some(emb) => db.rechunk_long_records_with_batch(py_embed_batch(emb)),
             None => db.rechunk_long_records(),
         })
     }

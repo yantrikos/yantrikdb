@@ -298,12 +298,15 @@ impl PyYantrikDB {
     /// resolves the target model through the embedder-download registry.
     #[cfg(not(feature = "embedder-download"))]
     #[staticmethod]
+    // Same parameter names as the real method: Python callers pass them by
+    // keyword, and a renamed one raised TypeError instead of this error.
     fn convert_pack(
-        _py: Python<'_>,
-        _src: &str,
-        _dest: &str,
-        _embedder_name: &str,
+        py: Python<'_>,
+        src: &str,
+        dest: &str,
+        embedder_name: &str,
     ) -> PyResult<PyObject> {
+        let _ = (py, src, dest, embedder_name);
         Err(PyRuntimeError::new_err(
             "convert_pack requires the 'embedder-download' Cargo feature, \
              which is on by default. This wheel was built --no-default-features.",

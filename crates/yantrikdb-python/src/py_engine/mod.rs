@@ -973,7 +973,9 @@ impl PyYantrikDB {
     /// 'set_embedder_named'` (which is the wrong shape — they didn't
     /// mistype, the feature is just absent).
     #[cfg(not(feature = "embedder-download"))]
-    fn set_embedder_named(&mut self, _name: &str) -> PyResult<()> {
+    // Same parameter name as the real method, for keyword callers.
+    fn set_embedder_named(&mut self, name: &str) -> PyResult<()> {
+        let _ = name;
         Err(PyRuntimeError::new_err(
             "set_embedder_named requires the 'embedder-download' Cargo feature, \
              which is on by default. This wheel was built --no-default-features. \
@@ -1004,7 +1006,9 @@ impl PyYantrikDB {
 
     /// Slim-build stub, mirroring set_embedder_named.
     #[cfg(not(feature = "embedder-download"))]
-    fn reembed(_slf: &Bound<'_, Self>, _new_embedder_name: &str) -> PyResult<PyObject> {
+    // Same parameter name as the real method, for keyword callers.
+    fn reembed(_slf: &Bound<'_, Self>, new_embedder_name: &str) -> PyResult<PyObject> {
+        let _ = new_embedder_name;
         Err(PyRuntimeError::new_err(
             "reembed requires the 'embedder-download' Cargo feature, \
              which is on by default. This wheel was built --no-default-features.",
