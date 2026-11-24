@@ -206,7 +206,20 @@ impl YantrikDB {
     /// space that is no longer current and is discarded rather than
     /// installed; the caller retries against the new generation.
     pub fn rebuild_vec_index(&self) -> Result<usize> {
-        let generation_before = self.search_state.load_full().generation;
+        let state_before = self.search_state.load_full();
+        let generation_before = state_before.generation;
+        let vec_index = std::sync::Arc::clone(&state_before.vec_index);
+        drop(state_before);
+
+        // Hold compaction off from BEFORE the SQL read until the install.
+        // A compaction finishing in between retired delta entries the read
+        // below may predate, and a compaction started before it installed
+        // its merge over the rebuilt tier; either way writes left the
+        // index. With the gate held, entries published after the read stay
+        // in the delta and the next compaction merges them into this tier.
+        // Lock order: compaction gate, then conn (compaction never takes
+        // the conn).
+        let _compaction_paused = vec_index.pause_compaction();
 
         let conn = self.conn.lock();
         let new_index =
@@ -234,9 +247,17 @@ impl YantrikDB {
             );
         }
 
+        if !std::sync::Arc::ptr_eq(&state.vec_index, &vec_index) {
+            return Err(
+                crate::error::YantrikDbError::IndexRebuildDeferredDuringReembed {
+                    reason: "the vector index was replaced during the rebuild".to_string(),
+                },
+            );
+        }
+
         // **Issue #41 brainstorm-4 §1.** Install the rebuilt cold tier
         // into the active-generation DeltaIndex via SearchState.
-        state.vec_index.install_cold(new_index);
+        vec_index.install_cold(new_index);
         Ok(count)
     }
 

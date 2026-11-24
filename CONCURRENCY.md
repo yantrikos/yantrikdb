@@ -78,23 +78,43 @@ If you add a new write primitive, mirror the pattern in
 ## Rule 3 — Background compaction must NOT share lock primitives with the foreground
 
 `DeltaIndex::compact` does the expensive HNSW work: clone-rebuild cold
-from the prior cold + sealed delta entries. It holds the `delta`
-RwLock only for the *seal* (briefly, at the start, to swap out the
-pending entries) and at the *install* (briefly, at the end, to ArcSwap
-the new cold tier in). Between those two points it does NOT hold any
-lock that foreground writes acquire.
+from the prior cold + a snapshot of the published delta entries. It
+holds the `delta` RwLock only briefly at the start, to snapshot those
+entries, and briefly at the end, to retire them once the new cold tier
+is installed. Between those two points it does NOT hold any lock that
+foreground writes acquire.
 
 **Invariant.** The compactor must:
 
-1. Call `seal_delta_for_compaction()` to atomically swap the delta for
-   an empty new one. Foreground writes proceed against the new delta
-   immediately. The sealed delta is owned by the compactor.
+1. Snapshot the published delta entries
+   (`snapshot_published_for_compaction()`). They stay in the live delta,
+   visible to every read, until the merged tier is installed, and they
+   stop counting toward `delta_max` meanwhile, so writers stay admitted.
 2. Clone-rebuild a new cold `HnswIndex` *off the live ArcSwap*
    (`(*self.cold.load_full()).clone()`). Readers continue against the
    prior epoch.
-3. ArcSwap-store the new cold tier when done. The store is the
-   visible-epoch boundary for new readers; old readers finish on the
-   prior `Arc<HnswIndex>`.
+3. Install the new cold tier with a compare-and-swap against the tier
+   it cloned, then retire exactly the merged `(rid, seq)` entries. If the
+   cold tier was replaced meanwhile, abandon the merge: the entries
+   never left the delta, so the next compaction merges them into the
+   new tier.
+
+**The compaction gate.** `DeltaIndex` has one lock that compaction
+holds for its whole build and install. Its only other holder is
+`rebuild_vec_index()`, which takes it (`pause_compaction()`) from
+before its SQL read until it installs the rebuilt tier. Without it the
+two overwrote each other:
+- A compaction started before a rebuild installed its merge over the
+  rebuilt tier.
+- A compaction finishing during a rebuild retired delta entries the
+  rebuild's earlier SQL read did not contain, so those writes left the
+  index until the next rebuild.
+
+Foreground writes never take the gate. While a rebuild holds it, the
+delta can fill and writers see `Backpressure` until the rebuild installs.
+The compare-and-swap in step 3 covers any `install_cold` caller that
+does not take the gate. Lock order: the gate, then `conn`; compaction
+never takes `conn`.
 
 Adding a "scheduler with priorities" that introduces a shared lock
 primitive between foreground (P1) and compaction (P3) silently breaks
