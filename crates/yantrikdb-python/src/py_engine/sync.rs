@@ -5,7 +5,7 @@ type PyObject = pyo3::Py<pyo3::PyAny>;
 
 use crate::py_types::*;
 
-use super::PyYantrikDB;
+use super::{py_vector, run_detached, PyYantrikDB};
 
 /// Convert a core `Task` into a Python dict.
 fn task_to_dict(py: Python<'_>, t: &yantrikdb_core::Task) -> PyResult<PyObject> {
@@ -511,8 +511,28 @@ impl PyYantrikDB {
         namespace: &str,
         domain: &str,
     ) -> PyResult<Vec<String>> {
-        Self::detached(slf, |db| {
-            db.draft_memories_from_summary(summary, namespace, domain)
+        let py = slf.py();
+        let (db, embedder) = Self::engine_and_embedder(slf)?;
+        // An embedder the caller attached outranks the engine's own, as in
+        // every other write (`embed_text`'s precedence). The engine cannot
+        // reach a Python embedder, so its `draft_memories_from_summary`
+        // raised "No embedder configured" on a store that had only one: split
+        // here, embed each fact with the GIL held and no borrow of the
+        // wrapper, then write them all in one detached call.
+        let Some(emb) = embedder else {
+            return run_detached(py, db, |db| {
+                db.draft_memories_from_summary(summary, namespace, domain)
+            });
+        };
+        let drafts = yantrikdb_core::YantrikDB::draft_facts_from_summary(summary)
+            .into_iter()
+            .map(|fact| {
+                let out = emb.call_method1(py, "encode", (fact.as_str(),))?;
+                Ok((fact, py_vector(py, &out)?))
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        run_detached(py, db, |db| {
+            db.record_drafted_facts(&drafts, namespace, domain)
         })
     }
 

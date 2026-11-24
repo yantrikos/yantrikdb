@@ -396,11 +396,8 @@ RELEASES = {
     "maintenance_debt": lambda db, c: db.maintenance_debt(),
     "session_digest": lambda db, c: db.session_digest(),
     "what_changed_since": lambda db, c: db.what_changed_since(0.0),
-    # Raises here: the engine embeds the drafts itself and cannot reach a
-    # Python embedder (pre-existing; #271 follow-up). The error comes back
-    # from inside the detached call.
-    "draft_memories_from_summary": lambda db, c: _swallow(
-        db.draft_memories_from_summary, "We decided to ship on Friday."
+    "draft_memories_from_summary": lambda db, c: db.draft_memories_from_summary(
+        "We decided to ship on Friday."
     ),
     "record_turn": lambda db, c: db.record_turn("default", "user", "hello"),
     "recent_turns": lambda db, c: db.recent_turns("default"),

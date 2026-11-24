@@ -530,30 +530,84 @@ impl YantrikDB {
         namespace: &str,
         domain: &str,
     ) -> Result<Vec<String>> {
-        // Smaller target than the mega-blob split — auto-capture wants
-        // granular candidate facts (one thought each) for review.
-        let facts = super::split::segment_into_atomic_facts(summary, 120, 60);
-        let meta = serde_json::json!({
-            "provisional": true,
-            "kind": "session_auto_capture",
-        });
-        let mut rids = Vec::with_capacity(facts.len());
-        for fact in facts {
+        let meta = draft_metadata();
+        let mut rids = Vec::new();
+        for fact in Self::draft_facts_from_summary(summary) {
             let rid = self.record_text(
                 &fact,
-                "semantic",
-                0.5,
+                DRAFT_MEMORY_TYPE,
+                DRAFT_IMPORTANCE,
                 0.0,
-                604_800.0,
+                DRAFT_HALF_LIFE,
                 &meta,
                 namespace,
-                0.7,
+                DRAFT_CERTAINTY,
                 domain,
-                "session_auto_capture",
+                DRAFT_SOURCE,
                 None,
             )?;
             rids.push(rid);
         }
         Ok(rids)
     }
+
+    /// The candidate facts [`draft_memories_from_summary`] records, one
+    /// thought each, in summary order.
+    ///
+    /// [`draft_memories_from_summary`]: Self::draft_memories_from_summary
+    pub fn draft_facts_from_summary(summary: &str) -> Vec<String> {
+        // Smaller target than the mega-blob split — auto-capture wants
+        // granular candidate facts (one thought each) for review.
+        super::split::segment_into_atomic_facts(summary, 120, 60)
+    }
+
+    /// Record facts from [`draft_facts_from_summary`] with vectors the
+    /// caller embedded, exactly as [`draft_memories_from_summary`] records
+    /// them (same type, importance, half-life, certainty, source and
+    /// provisional metadata). For an embedder the engine cannot reach: the
+    /// Python binding's caller-attached one. Returns the new rids in order.
+    ///
+    /// [`draft_facts_from_summary`]: Self::draft_facts_from_summary
+    /// [`draft_memories_from_summary`]: Self::draft_memories_from_summary
+    pub fn record_drafted_facts(
+        &self,
+        drafts: &[(String, Vec<f32>)],
+        namespace: &str,
+        domain: &str,
+    ) -> Result<Vec<String>> {
+        let meta = draft_metadata();
+        let mut rids = Vec::with_capacity(drafts.len());
+        for (fact, embedding) in drafts {
+            let rid = self.record(
+                fact,
+                DRAFT_MEMORY_TYPE,
+                DRAFT_IMPORTANCE,
+                0.0,
+                DRAFT_HALF_LIFE,
+                &meta,
+                embedding,
+                namespace,
+                DRAFT_CERTAINTY,
+                domain,
+                DRAFT_SOURCE,
+                None,
+            )?;
+            rids.push(rid);
+        }
+        Ok(rids)
+    }
+}
+
+// What a drafted session memory is: one definition for both write paths.
+const DRAFT_MEMORY_TYPE: &str = "semantic";
+const DRAFT_IMPORTANCE: f64 = 0.5;
+const DRAFT_HALF_LIFE: f64 = 604_800.0;
+const DRAFT_CERTAINTY: f64 = 0.7;
+const DRAFT_SOURCE: &str = "session_auto_capture";
+
+fn draft_metadata() -> serde_json::Value {
+    serde_json::json!({
+        "provisional": true,
+        "kind": "session_auto_capture",
+    })
 }
