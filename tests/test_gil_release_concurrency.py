@@ -612,3 +612,77 @@ def test_close_beside_recalls_with_a_python_embedder_is_not_refused(tmp_path):
             stop.set()
             t.join(30)
         assert not errors, errors[:2]
+
+
+_needs_potion = pytest.mark.skipif(
+    not _model_is_cached("potion-base-8M", "v0.1.0"),
+    reason="potion-base-8M is not in the local model cache; this test never downloads",
+)
+
+
+class _SlowEncodeEmb(Emb):
+    # Once armed, its next encode() takes `hold` seconds with the GIL given
+    # up. record() runs encode() holding the wrapper's shared borrow (until
+    # #297), so that record() holds the borrow the whole time. (Since #295
+    # set_embedder() holds no borrow across its own probe.)
+    def __init__(self, hold, dim=DIM):
+        self.hold = hold
+        self.dim = dim
+        self.armed = False
+        self.entered = threading.Event()
+
+    def encode(self, text):
+        if self.armed:
+            self.armed = False
+            self.entered.set()
+            time.sleep(self.hold)
+        r = random.Random(hash(text) & 0xFFFFFFFF)
+        v = [r.random() for _ in range(self.dim)]
+        n = sum(x * x for x in v) ** 0.5
+        return [x / n for x in v]
+
+
+@_needs_potion
+def test_set_embedder_named_beside_a_held_borrow_leaves_the_workers_running(tmp_path):
+    # The swap stops the workers once the engine looks free, then takes the
+    # wrapper's mutable borrow. Another thread can hold the borrow then: a
+    # record() inside its Python embedder's encode(), as here. The swap took
+    # the borrow with `?` after
+    # stopping the workers, and a refusal skipped the respawn: the store
+    # was left without workers, and writes past the 256th failed with
+    # Backpressure ("ingest queue full"). Now the workers are restarted on
+    # every way out, and the swap waits on and goes through once the
+    # borrow is free.
+    db = YantrikDB(os.path.join(str(tmp_path), "held.db"), 256)
+    try:
+        proxy = db._conn  # holds the engine: the swap is waiting when the borrow is taken
+        spawns = db._worker_spawns
+        out = {}
+
+        def swapper():
+            started = time.perf_counter()
+            try:
+                db.set_embedder_named("potion-base-8M")
+            except Exception as e:  # noqa: BLE001 - the failure is the finding
+                out["error"] = repr(e)
+            out["took"] = time.perf_counter() - started
+
+        sw = threading.Thread(target=swapper)
+        sw.start()
+        time.sleep(0.5)
+        # Held for longer than the old borrow retry (1.3-2.4 s measured).
+        emb = _SlowEncodeEmb(3.5, dim=256)
+        db.set_embedder(emb, allow_unverified_embedder=True)
+        emb.armed = True
+        holder = threading.Thread(target=lambda: db.record("a write held across encode()"))
+        holder.start()
+        assert emb.entered.wait(10)
+        del proxy  # the engine is free; only the held borrow stands in the way
+        holder.join(30)
+        sw.join(30)
+        assert not sw.is_alive()
+        assert "error" not in out, out.get("error")
+        for i in range(700):
+            db.record(f"after the swap {i}", embedding=[0.05] * 256)
+    finally:
+        db.close()

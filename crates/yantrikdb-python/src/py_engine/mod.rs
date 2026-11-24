@@ -32,17 +32,64 @@ pub struct PyYantrikDB {
     /// these, wedging any long write session (e.g. writing a full novel) after
     /// ~256 records. Dropped with the struct → Weak<YantrikDB> upgrade fails →
     /// workers shut down cleanly.
-    pub(crate) _workers: Option<AllWorkerGuards>,
+    ///
+    /// Held behind its own lock, not the wrapper's borrow: `set_embedder_named`
+    /// and `close()` stop and restart it while other threads may hold the
+    /// wrapper's borrow, and a restart that needed that borrow could be
+    /// refused and skipped, leaving the store without workers (#302 review 3).
+    pub(crate) workers: Arc<WorkerPool>,
     /// Set while `set_embedder_named` waits for exclusive access to the
     /// engine. Calls that take an engine snapshot wait (with the GIL
     /// released) while it is set, so steady traffic cannot keep the engine
     /// shared forever; in-flight calls finish normally. See
     /// [`PyYantrikDB::snapshot_borrow`].
     pub(crate) swap_pending: Arc<std::sync::atomic::AtomicBool>,
-    /// How many worker pools this wrapper has spawned. Read by the tests
-    /// (`_worker_spawns`): a swap that waits must not respawn the pool on
+}
+
+/// The wrapper's background worker pool (materializers + compactor), with
+/// its own lock so it can be stopped and restarted without the wrapper's
+/// borrow.
+pub(crate) struct WorkerPool {
+    guards: std::sync::Mutex<Option<AllWorkerGuards>>,
+    /// How many pools have been spawned. Read by the tests
+    /// (`_worker_spawns`): a swap that waits must not restart the pool on
     /// every try.
-    pub(crate) worker_spawns: std::sync::atomic::AtomicU64,
+    spawns: std::sync::atomic::AtomicU64,
+}
+
+impl WorkerPool {
+    /// A pool already running against `engine`.
+    fn running(engine: &Arc<YantrikDB>) -> Arc<Self> {
+        Arc::new(Self {
+            guards: std::sync::Mutex::new(Some(spawn_all_workers(
+                engine,
+                recommended_worker_count(),
+            ))),
+            spawns: std::sync::atomic::AtomicU64::new(1),
+        })
+    }
+
+    fn guards(&self) -> std::sync::MutexGuard<'_, Option<AllWorkerGuards>> {
+        // A panic while the lock was held leaves the Option intact.
+        self.guards.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Take the running workers out. Dropping what this returns stops them
+    /// (it joins the threads, a materializer mid-drain included), so drop it
+    /// with the GIL released.
+    fn take(&self) -> Option<AllWorkerGuards> {
+        self.guards().take()
+    }
+
+    /// Start workers against `engine` unless some are running.
+    fn ensure_running(&self, engine: &Arc<YantrikDB>) {
+        let mut guards = self.guards();
+        if guards.is_none() {
+            *guards = Some(spawn_all_workers(engine, recommended_worker_count()));
+            self.spawns
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 impl PyYantrikDB {
@@ -51,13 +98,12 @@ impl PyYantrikDB {
     /// "don't forget the compactor" rule for the Python binding.
     pub(crate) fn from_engine(inner: YantrikDB, embedder: Option<PyObject>) -> Self {
         let inner = Arc::new(inner);
-        let workers = spawn_all_workers(&inner, recommended_worker_count());
+        let workers = WorkerPool::running(&inner);
         Self {
             inner: Some(inner),
             embedder,
-            _workers: Some(workers),
+            workers,
             swap_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            worker_spawns: std::sync::atomic::AtomicU64::new(1),
         }
     }
 
@@ -187,20 +233,6 @@ impl PyYantrikDB {
                      new space; or pass allow_unverified_embedder=True if you accept the risk."
                 )))
             }
-        }
-    }
-
-    /// (Re)spawn the background worker pool against the live engine `Arc`.
-    /// Paired with `self._workers = None` (which drops the guards and JOINs
-    /// the worker threads) around any operation that needs exclusive
-    /// `Arc::get_mut` access — the workers hold `Weak<YantrikDB>` refs, and
-    /// `get_mut` requires weak count 0. No-op if the engine is closed.
-    #[cfg(feature = "embedder-download")]
-    fn respawn_workers(&mut self) {
-        if let Some(arc) = self.inner.as_ref() {
-            self._workers = Some(spawn_all_workers(arc, recommended_worker_count()));
-            self.worker_spawns
-                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }
 }
@@ -725,9 +757,10 @@ impl PyYantrikDB {
         // whose threads hold `Weak<YantrikDB>` refs (issue #58) — those alone
         // make `get_mut` return `None`. So stop the workers first: dropping the
         // guards JOINs the threads, releasing their weak refs. They stay
-        // stopped for the whole wait and are respawned once, on every exit
-        // path, so the engine keeps its compactor: without it, writes wedge at
-        // delta_max.
+        // stopped for the whole wait and are restarted once, on every way
+        // out, an early `?` included (`Restart`), from their own pool, which
+        // needs no borrow of the wrapper: a store left without workers
+        // wedges at delta_max (256 writes) (#302 review 3).
         //
         // Every detached call holds a strong ref while it runs. Under the GIL
         // those calls had finished before this one started; now they overlap,
@@ -735,6 +768,8 @@ impl PyYantrikDB {
         // new calls wait at their engine snapshot (`snapshot_borrow`) while
         // the ones in flight finish, and this call waits, with no borrow held
         // and the GIL released, until only the wrapper holds the engine.
+        // Another thread can hold the wrapper's borrow then (a call inside a
+        // Python embedder's encode()); the swap waits on through that too.
         // Past the deadline the holder is most likely a `_conn` proxy or a
         // cloned reference, which no wait releases.
         const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -744,37 +779,64 @@ impl PyYantrikDB {
                 self.0.store(false, std::sync::atomic::Ordering::Release);
             }
         }
-        let (gate, workers, weak) = {
-            let mut this = Self::borrow_mut_briefly(slf)?;
+        /// Restarts the stopped workers when dropped, unless the engine is
+        /// gone. `engine` is also how the wait sees the engine's strong
+        /// count; it is `None` only while `get_mut` is tried, which no `?`
+        /// interrupts.
+        struct Restart {
+            pool: Arc<WorkerPool>,
+            engine: Option<std::sync::Weak<YantrikDB>>,
+        }
+        impl Drop for Restart {
+            fn drop(&mut self) {
+                if let Some(engine) = self.engine.as_ref().and_then(std::sync::Weak::upgrade) {
+                    self.pool.ensure_running(&engine);
+                }
+            }
+        }
+        let (gate, mut restart, stopped) = {
+            let this = Self::borrow_mut_briefly(slf)?;
             let Some(arc) = this.inner.as_ref() else {
                 return Err(PyRuntimeError::new_err("YantrikDB is closed"));
             };
-            let weak = Arc::downgrade(arc);
             this.swap_pending
                 .store(true, std::sync::atomic::Ordering::Release);
             (
                 LowerGate(this.swap_pending.clone()),
-                this._workers.take(),
-                weak,
+                Restart {
+                    pool: this.workers.clone(),
+                    engine: Some(Arc::downgrade(arc)),
+                },
+                this.workers.take(),
             )
         };
-        slf.py().detach(move || drop(workers));
+        slf.py().detach(move || drop(stopped));
 
+        let mut downloaded = Some(downloaded);
         let deadline = std::time::Instant::now() + WAIT;
-        let mut weak = Some(weak);
         let swap = loop {
-            let quiet = weak.as_ref().is_some_and(|w| w.strong_count() <= 1);
+            // A close() that lands meanwhile drops the count to 0: the try
+            // below then reports the store closed.
+            let quiet = restart
+                .engine
+                .as_ref()
+                .is_some_and(|w| w.strong_count() <= 1);
             let late = std::time::Instant::now() >= deadline;
             if quiet || late {
-                // Our Weak would block get_mut too.
-                drop(weak.take());
-                let mut this = Self::borrow_mut_briefly(slf)?;
-                // A close() can land while the model is fetched or we wait.
-                let Some(arc) = this.inner.as_mut() else {
-                    break Err(PyRuntimeError::new_err("YantrikDB is closed"));
-                };
-                if let Some(engine) = Arc::get_mut(arc) {
-                    break engine.set_downloaded_embedder(downloaded).map_err(map_err);
+                if let Ok(mut this) = slf.try_borrow_mut() {
+                    // Our Weak would block get_mut too.
+                    drop(restart.engine.take());
+                    let Some(arc) = this.inner.as_mut() else {
+                        break Err(PyRuntimeError::new_err("YantrikDB is closed"));
+                    };
+                    if let Some(engine) = Arc::get_mut(arc) {
+                        let swapped = engine
+                            .set_downloaded_embedder(downloaded.take().expect("swapped once"))
+                            .map_err(map_err);
+                        restart.pool.ensure_running(arc);
+                        break swapped;
+                    }
+                    restart.engine = Some(Arc::downgrade(arc));
                 }
                 if late {
                     break Err(PyRuntimeError::new_err(format!(
@@ -786,14 +848,11 @@ impl PyYantrikDB {
                         WAIT.as_secs()
                     )));
                 }
-                weak = Some(Arc::downgrade(this.inner.as_ref().expect("checked above")));
             }
             slf.py()
                 .detach(|| std::thread::sleep(std::time::Duration::from_millis(1)));
         };
-        if let Ok(mut this) = Self::borrow_mut_briefly(slf) {
-            this.respawn_workers();
-        }
+        drop(restart);
         drop(gate);
         swap
     }
@@ -847,7 +906,8 @@ impl PyYantrikDB {
     /// How many worker pools this wrapper has spawned (tests only).
     #[getter]
     fn _worker_spawns(&self) -> u64 {
-        self.worker_spawns
+        self.workers
+            .spawns
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
@@ -1037,27 +1097,31 @@ impl PyYantrikDB {
         // WAL checkpoint) with the GIL released: held through both, a thread
         // beside the close froze for its whole length, up to 1.8 s under
         // write load (#271 review).
-        let (arc, workers) = {
+        //
+        // Nothing after the first borrow needs the wrapper again: the
+        // workers come from their own pool, so a borrow another thread holds
+        // by then cannot cost the store its workers (#302 review 3). That is
+        // defensive: since #295 no method holds the wrapper's borrow for any
+        // length once the store is closed (set_embedder() no longer holds it
+        // across its probe, and every other method reports a closed store
+        // at once), so the public API cannot reach that state, and no test
+        // drives it.
+        let (arc, pool) = {
             let mut this = Self::borrow_mut_briefly(slf)?;
             match this.inner.take() {
-                Some(arc) => (arc, this._workers.take()),
+                Some(arc) => (arc, this.workers.clone()),
                 // Already closed: idempotent, and truthfully "no exclusive
                 // close performed by this call".
                 None => return Ok(false),
             }
         };
-        enum Outcome {
-            Closed,
-            StillShared(AllWorkerGuards),
-        }
-        let outcome = slf
-            .py()
-            .detach(move || -> Result<Outcome, yantrikdb_core::YantrikDbError> {
-                drop(workers);
+        slf.py()
+            .detach(move || -> Result<bool, yantrikdb_core::YantrikDbError> {
+                drop(pool.take());
                 match Arc::try_unwrap(arc) {
                     Ok(db) => {
                         db.close()?;
-                        Ok(Outcome::Closed)
+                        Ok(true)
                     }
                     // Other references still exist (another thread's call in
                     // flight, or a `_conn` proxy); ours drops here and the DB
@@ -1067,23 +1131,13 @@ impl PyYantrikDB {
                     // workers: without the compactor, writes wedge at
                     // delta_max. They hold only Weak refs and exit when the
                     // engine is finally dropped.
-                    Err(arc) => Ok(Outcome::StillShared(spawn_all_workers(
-                        &arc,
-                        recommended_worker_count(),
-                    ))),
+                    Err(arc) => {
+                        pool.ensure_running(&arc);
+                        Ok(false)
+                    }
                 }
             })
-            .map_err(map_err)?;
-        match outcome {
-            Outcome::Closed => Ok(true),
-            Outcome::StillShared(workers) => {
-                let mut this = Self::borrow_mut_briefly(slf)?;
-                this._workers = Some(workers);
-                this.worker_spawns
-                    .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                Ok(false)
-            }
-        }
+            .map_err(map_err)
     }
 }
 
