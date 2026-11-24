@@ -13,6 +13,7 @@ written, embedded by the caller's embedder, as on the engine path.
 
 import os
 import random
+import threading
 
 import pytest
 
@@ -137,5 +138,58 @@ def test_a_long_fact_is_chunked_as_it_is_drafted_on_the_python_path(tmp_path):
         assert len(db.get(longest)["text"]) > 400
         assert _chunks(db, longest) > 0
         assert db.rechunk_long_records() == (0, 0), "nothing left to backfill"
+    finally:
+        db.close()
+
+
+class _SpinWatchEmb(Emb):
+    # Records, at each encode(), how far a spinning thread has counted.
+    def __init__(self, ticks):
+        super().__init__()
+        self.ticks = ticks
+        self.seen = []
+
+    def encode(self, text):
+        self.seen.append(self.ticks[0])
+        return super().encode(text)
+
+
+@pytest.mark.skipif((os.cpu_count() or 1) < 2, reason="needs a second CPU for the spinning thread")
+def test_python_embedded_drafts_encode_their_facts_under_one_hold_of_the_gil(tmp_path):
+    # Each fact's encode() used to run inside the detached call, re-taking
+    # the GIL for every fact, so a busy thread ran between almost every two
+    # of them, and each re-take waited about a switch interval for it: 60
+    # drafts took 1,021 ms beside a CPU-bound thread against 164 ms alone.
+    # The facts are now encoded before the call detaches, back to back
+    # under one hold of the GIL (#304 review 4).
+    summary = " ".join(
+        f"Decision number {i} was to adopt option {i} for subsystem {i} after a long debate."
+        for i in range(60)
+    )
+    db = YantrikDB(os.path.join(str(tmp_path), "spin.db"), DIM)
+    try:
+        ticks = [0]
+        emb = _SpinWatchEmb(ticks)
+        db.set_embedder(emb, allow_unverified_embedder=True)
+        emb.seen.clear()
+        stop = threading.Event()
+
+        def spinner():
+            while not stop.is_set():
+                ticks[0] += 1
+
+        t = threading.Thread(target=spinner)
+        t.start()
+        try:
+            rids = db.draft_memories_from_summary(summary)
+        finally:
+            stop.set()
+            t.join()
+        assert len(rids) >= 50, len(rids)
+        seen = emb.seen[: len(rids)]
+        interleaved = sum(1 for a, b in zip(seen, seen[1:]) if b != a)
+        # Before: the spinner ran between 59 of 59 pairs. Now a switch can
+        # still land inside an encode() now and then.
+        assert interleaved <= len(seen) // 4, (interleaved, len(seen))
     finally:
         db.close()

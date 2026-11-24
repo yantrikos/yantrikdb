@@ -558,15 +558,35 @@ impl PyYantrikDB {
         };
         // The facts go through the engine's record_text route with the
         // caller's embedder: a fact past the known window gets its chunk
-        // vectors as it is written, as on the engine path. encode() runs
-        // inside the detached call, re-taking the GIL for each call.
+        // vectors as it is written, as on the engine path.
+        //
+        // Every fact is encoded here, before the call detaches, under one
+        // hold of the GIL and with the store marked (a call encode() makes
+        // back into the store skips a pending swap's gate). Re-taking the
+        // GIL inside the detached call for each fact waited about a switch
+        // interval per fact whenever another thread was busy: 60 drafts
+        // took 1,021 ms beside a CPU-bound thread against 164 ms alone
+        // (#304 review 4). The detached call re-takes the GIL only for
+        // texts it was not handed, the chunk windows of a long fact.
+        let facts = yantrikdb_core::YantrikDB::draft_facts_from_summary(summary);
+        let mut vectors: std::collections::HashMap<String, Vec<f32>> =
+            std::collections::HashMap::with_capacity(facts.len());
+        super::in_engine_call(&db, || -> PyResult<()> {
+            for fact in facts {
+                let out = emb.call_method1(py, "encode", (fact.as_str(),))?;
+                let vector = py_vector(py, &out)?;
+                vectors.insert(fact, vector);
+            }
+            Ok(())
+        })?;
+        let embed_window = super::py_embed(&emb);
         run_detached(py, db, |db| {
-            db.draft_memories_from_summary_embedded_by(
-                summary,
-                namespace,
-                domain,
-                super::py_embed(&emb),
-            )
+            db.draft_memories_from_summary_embedded_by(summary, namespace, domain, |text: &str| {
+                match vectors.get(text) {
+                    Some(vector) => Ok(vector.clone()),
+                    None => embed_window(text),
+                }
+            })
         })
     }
 
