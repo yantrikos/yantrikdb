@@ -905,6 +905,7 @@ fn find_consolidation_candidates_page(
              WHERE consolidation_status = 'active' \
              AND storage_tier = 'hot' \
              AND type IN ('episodic', 'semantic') \
+             AND embedding IS NOT NULL \
              ORDER BY namespace ASC, created_at ASC, rid ASC \
              LIMIT ?1 OFFSET ?2";
         let mut stmt = conn.prepare(&sql)?;

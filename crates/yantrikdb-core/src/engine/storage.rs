@@ -23,12 +23,15 @@ impl YantrikDB {
     /// "fix" any half of this in isolation — decide the policy first.
     #[tracing::instrument(skip(self))]
     pub fn archive(&self, rid: &str) -> Result<bool> {
-        let ts = {
+        let (ts, had_vector) = {
             let conn = self.conn();
+            // A row can have no vector: replication's follower insert omits
+            // the embedding (see `refresh_embeddings`). It still archives;
+            // there is just nothing to compress or tombstone.
             let row = conn.query_row(
                 "SELECT embedding FROM memories WHERE rid = ?1 AND storage_tier = 'hot' AND consolidation_status = 'active'",
                 params![rid],
-                |row| row.get::<_, Vec<u8>>(0),
+                |row| row.get::<_, Option<Vec<u8>>>(0),
             );
 
             let stored_blob = match row {
@@ -38,10 +41,15 @@ impl YantrikDB {
             };
 
             // Decrypt if encrypted, then compress, then re-encrypt for cold storage
-            let raw_blob = self.decrypt_embedding(&stored_blob)?;
-            let embedding = crate::serde_helpers::deserialize_f32(&raw_blob);
-            let compressed = crate::compression::compress_embedding(&embedding);
-            let stored_compressed = self.encrypt_embedding(&compressed)?;
+            let stored_compressed = match &stored_blob {
+                Some(blob) => {
+                    let raw_blob = self.decrypt_embedding(blob)?;
+                    let embedding = crate::serde_helpers::deserialize_f32(&raw_blob);
+                    let compressed = crate::compression::compress_embedding(&embedding);
+                    Some(self.encrypt_embedding(&compressed)?)
+                }
+                None => None,
+            };
             let ts = now();
 
             conn.execute(
@@ -49,7 +57,7 @@ impl YantrikDB {
                 params![stored_compressed, ts, rid],
             )?;
 
-            ts
+            (ts, stored_blob.is_some())
         }; // drop conn before acquiring vec_index write lock
 
         // Chunked embeddings: window vectors follow the parent's tier —
@@ -85,7 +93,9 @@ impl YantrikDB {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1;
         // **Issue #41 brainstorm-4 §1.** Snapshot through SearchState.
-        self.search_state.load().vec_index.tombstone(rid, seq);
+        if had_vector {
+            self.search_state.load().vec_index.tombstone(rid, seq);
+        }
         // Exact-string matching: the parent's tombstone does not cover
         // its window keys.
         for idx in &chunk_idxs {
@@ -112,10 +122,12 @@ impl YantrikDB {
     pub fn hydrate(&self, rid: &str) -> Result<bool> {
         let (ts, embedding) = {
             let conn = self.conn();
+            // No vector (a replicated row never repaired): hydrate the
+            // tier and skip the index, as archive() does.
             let row = conn.query_row(
                 "SELECT embedding FROM memories WHERE rid = ?1 AND storage_tier = 'cold'",
                 params![rid],
-                |row| row.get::<_, Vec<u8>>(0),
+                |row| row.get::<_, Option<Vec<u8>>>(0),
             );
 
             let stored_blob = match row {
@@ -125,10 +137,16 @@ impl YantrikDB {
             };
 
             // Decrypt if encrypted, decompress, then re-encrypt for hot storage
-            let compressed_blob = self.decrypt_embedding(&stored_blob)?;
-            let embedding = crate::compression::decompress_embedding(&compressed_blob);
-            let raw_blob = serialize_f32(&embedding);
-            let stored_raw = self.encrypt_embedding(&raw_blob)?;
+            let (embedding, stored_raw) = match &stored_blob {
+                Some(blob) => {
+                    let compressed_blob = self.decrypt_embedding(blob)?;
+                    let embedding = crate::compression::decompress_embedding(&compressed_blob);
+                    let raw_blob = serialize_f32(&embedding);
+                    let stored_raw = self.encrypt_embedding(&raw_blob)?;
+                    (Some(embedding), Some(stored_raw))
+                }
+                None => (None, None),
+            };
             let ts = now();
 
             conn.execute(
@@ -173,10 +191,12 @@ impl YantrikDB {
             + 1;
         // **Issue #41 brainstorm-4 §1.** Hydration writes land on the
         // active-generation DeltaIndex via SearchState.
-        self.search_state
-            .load()
-            .vec_index
-            .append(rid.to_string(), embedding.clone(), seq)?;
+        if let Some(embedding) = &embedding {
+            self.search_state
+                .load()
+                .vec_index
+                .append(rid.to_string(), embedding.clone(), seq)?;
+        }
         // Windows re-enter at the same seq, AFTER the parent (a chunk
         // hit collapses to the parent, which must be findable first).
         for (idx, emb) in &chunk_vecs {
