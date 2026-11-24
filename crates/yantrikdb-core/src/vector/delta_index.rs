@@ -86,8 +86,8 @@ pub struct DeltaEntry {
 }
 
 /// Default soft cap on delta size. Hitting this triggers backpressure on
-/// `append()`. Phase 5 compaction will keep the delta below this in steady
-/// state by sealing + swapping when it crosses the cap. Tunable per
+/// `append()`. Compaction keeps the delta below this in steady state by
+/// merging published entries into cold and retiring them. Tunable per
 /// deployment via `DeltaIndex::with_capacity` or the `YANTRIKDB_DELTA_MAX`
 /// environment variable.
 ///
@@ -683,9 +683,9 @@ impl DeltaIndex {
         self.cold_len() == 0 && self.delta_len() == 0
     }
 
-    /// Snapshot the delta entries — used by the compactor (Phase 5) to
-    /// build a new cold tier. Returns a clone of the current delta vector;
-    /// the actual seal-and-swap is `seal_delta_for_compaction`.
+    /// Snapshot every delta entry (published or reserved). Returns a clone
+    /// of the current delta vector. Compaction itself snapshots only the
+    /// published entries (`snapshot_published_for_compaction`).
     pub fn snapshot_delta(&self) -> Vec<DeltaEntry> {
         self.delta.read().clone()
     }
@@ -818,8 +818,8 @@ impl DeltaIndex {
     /// Hold off compaction until the guard drops: an in-flight compaction
     /// finishes first, and none starts meanwhile. For rebuilding the cold
     /// tier from SQL: take the guard BEFORE reading SQL and install with
-    /// [`Self::install_cold`] while still holding it, so every delta entry
-    /// published after the read is still in the delta at the install.
+    /// [`Self::install_rebuilt`] while still holding it, so every delta
+    /// entry published after the read is still in the delta at the install.
     pub(crate) fn pause_compaction(&self) -> parking_lot::MutexGuard<'_, ()> {
         self.compaction_gate.lock()
     }
@@ -942,8 +942,8 @@ impl DeltaIndex {
     ///
     /// Installs only if the cold tier is still the one the merge was built
     /// from. The compaction gate already keeps a rebuild from installing
-    /// mid-merge; this is the second line, for any `install_cold` caller
-    /// that does not take the gate. Storing the merge unconditionally
+    /// mid-merge; this is the second line, should any installer of a cold
+    /// tier ever skip the gate. Storing the merge unconditionally
     /// threw a replacement tier away and put back a merge of the tier it
     /// replaced. Abandoning is safe: the sealed entries never left the
     /// delta, so the next compaction merges them into the new tier.
@@ -967,11 +967,8 @@ impl DeltaIndex {
                 .store(0, std::sync::atomic::Ordering::Release);
             tracing::debug!(
                 sealed = sealed.len(),
-                "cold tier replaced during compaction; merge abandoned, retried now"
+                "cold tier replaced during compaction; merge abandoned, retried next tick"
             );
-            // Retry without waiting out the compactor's tick: the entries
-            // still occupy the delta and may be holding writers off.
-            self.compactor_wake_cv.notify_one();
             return 0;
         }
         let merged: std::collections::HashSet<(String, u64)> =

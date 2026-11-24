@@ -118,14 +118,17 @@ two overwrote each other:
 Foreground writes never take the gate. A rebuild also holds `conn` for
 its SQL read and build, so writers wait on `conn` while it reads, exactly
 as without the gate; what the gate adds is that no compaction installs
-or retires anything until the rebuild has installed. The rebuild then
-retires the delta entries its SQL read subsumed (every entry published
-before the read has its SQL write committed), so a stale entry cannot
-shadow the rebuilt vector. The compare-and-swap in step 3 is a second
-line against a cold tier replaced mid-merge; it does not stop an
-installer that skips the gate from losing writes, which is why
-`install_cold` is crate-private and only the rebuild calls it. Lock
-order: the gate, then `conn`; compaction never takes `conn`.
+or retires anything until the rebuild has installed. SQL is
+authoritative: the rebuilt tier is what SQL holds as of the read, so the
+rebuild retires the delta entries published before the read, and a stale
+one cannot shadow the rebuilt vector. Every engine write path commits SQL
+before it publishes, so this loses nothing SQL has; a vector published
+without SQL (`insert_vector` before the caller writes the column) is
+dropped by a rebuild, as by a reopen. The compare-and-swap in step 3 is
+a second line against a cold tier replaced mid-merge; it does not stop
+an installer that skips the gate from losing writes, which is why the
+only non-test installer is the rebuild (`install_rebuilt`). Lock order:
+the gate, then `conn`; compaction never takes `conn`.
 
 Adding a "scheduler with priorities" that introduces a shared lock
 primitive between foreground (P1) and compaction (P3) silently breaks

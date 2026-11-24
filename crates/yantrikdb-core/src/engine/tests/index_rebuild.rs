@@ -87,8 +87,12 @@ fn rebuild_holds_the_gate_from_before_its_read_through_the_install() {
 
     assert_eq!(
         *seen.lock().unwrap(),
-        vec![("before_sql_read", true), ("before_install", true)],
-        "the compaction gate must be held at both points"
+        vec![
+            ("before_sql_read", true),
+            ("after_sql_read", true),
+            ("before_install", true),
+        ],
+        "the compaction gate must be held throughout"
     );
 }
 
@@ -142,5 +146,56 @@ fn rebuild_retires_the_delta_entries_its_read_subsumes() {
     assert!(
         dist < 1e-3,
         "a compaction must not merge the stale vector back: {dist}"
+    );
+}
+
+/// The keys a rebuild retires are taken BEFORE its SQL read. An entry
+/// published after the read (here: by a hook just before the install) is
+/// not in the rebuilt tier and must survive in the delta; taking the keys
+/// at install time retired it, losing the write.
+#[test]
+fn rebuild_keeps_entries_published_after_its_read() {
+    use crate::engine::indices::rebuild_hooks;
+
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    db.record(
+        "a row",
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &vec_seed(1.0, 8),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap();
+
+    let mut late = vec![0.0f32; 8];
+    late[6] = 1.0;
+    let late_for_hook = late.clone();
+    rebuild_hooks::set(Box::new(move |stage, idx| {
+        if stage == "before_install" {
+            idx.append(
+                "published_after_the_read".to_string(),
+                late_for_hook.clone(),
+                1_000_000,
+            )
+            .unwrap();
+        }
+    }));
+    let rebuilt = db.rebuild_vec_index();
+    rebuild_hooks::clear();
+    rebuilt.unwrap();
+
+    let vec_index = std::sync::Arc::clone(&db.search_state.load().vec_index);
+    let hits = vec_index.search(&late, 1).unwrap();
+    assert_eq!(
+        hits.first().map(|(rid, _)| rid.as_str()),
+        Some("published_after_the_read"),
+        "an entry published after the rebuild's read must survive its install"
     );
 }

@@ -245,7 +245,10 @@ impl YantrikDB {
     }
 
     /// Insert a single (rid, embedding) pair into the in-memory HNSW vector
-    /// index. The matching SQLite memory row must already exist (this is a
+    /// index. The matching SQLite memory row must already exist, and should
+    /// already hold this embedding: the index is rebuilt from SQL, so a
+    /// vector that is only in the index is dropped by the next
+    /// `rebuild_vec_index()` or reopen (this is a
     /// backfill helper for replication followers and similar callers that
     /// receive memory rows out-of-band of `record()` and need to bring the
     /// HNSW index up to date piecewise).

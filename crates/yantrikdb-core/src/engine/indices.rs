@@ -224,13 +224,21 @@ impl YantrikDB {
         rebuild_hooks::fire("before_sql_read", &vec_index);
 
         let conn = self.conn.lock();
-        // Every entry published by now has its SQL write committed (writers
-        // commit before they publish), so the read below subsumes it.
+        // SQL is authoritative: the rebuilt tier is what SQL holds as of the
+        // read below, so the delta entries published before it are retired
+        // at the install. Every engine write path commits SQL before it
+        // publishes, so this loses nothing SQL has. A vector published
+        // without SQL (insert_vector before the caller writes the column,
+        // record_with_rid onto an existing row) is dropped by a rebuild, as
+        // it always was by a reopen. Taken here, under conn and before the
+        // read: entries published after the read must survive the install.
         let subsumed = vec_index.published_keys();
         let new_index =
             Self::build_vec_index_with_enc(&conn, self.embedding_dim, self.enc.as_ref())?;
         let count = new_index.len();
         drop(conn);
+        #[cfg(test)]
+        rebuild_hooks::fire("after_sql_read", &vec_index);
 
         let Some(_sync_guard) = self.write_router.try_enter_sync_writer() else {
             return Err(
