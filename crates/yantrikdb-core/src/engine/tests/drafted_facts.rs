@@ -25,7 +25,8 @@ struct DraftRow {
 fn draft_row(db: &YantrikDB, rid: &str) -> DraftRow {
     let conn = db.conn();
     conn.query_row(
-        "SELECT text, type, importance, half_life, certainty, source, domain, namespace          FROM memories WHERE rid = ?1",
+        "SELECT text, type, importance, half_life, certainty, source, domain, namespace \
+         FROM memories WHERE rid = ?1",
         params![rid],
         |r| {
             Ok(DraftRow {

@@ -364,7 +364,8 @@ impl YantrikDB {
                 let tx = conn.unchecked_transaction()?;
                 let current: Option<String> = tx
                     .query_row(
-                        "SELECT text FROM memories WHERE rid = ?1                          AND consolidation_status = 'active' AND storage_tier = 'hot'",
+                        "SELECT text FROM memories WHERE rid = ?1 \
+                         AND consolidation_status = 'active' AND storage_tier = 'hot'",
                         params![rid],
                         |row| row.get(0),
                     )
@@ -378,7 +379,8 @@ impl YantrikDB {
                         let blob =
                             self.encrypt_embedding(&crate::serde_helpers::serialize_f32(v))?;
                         tx.execute(
-                            "INSERT OR REPLACE INTO memory_chunks (rid, chunk_idx, embedding)                              VALUES (?1, ?2, ?3)",
+                            "INSERT OR REPLACE INTO memory_chunks (rid, chunk_idx, embedding) \
+                             VALUES (?1, ?2, ?3)",
                             params![rid, *idx as i64, blob],
                         )?;
                         vectors += 1;

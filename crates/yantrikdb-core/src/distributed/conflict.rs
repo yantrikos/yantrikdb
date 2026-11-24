@@ -1269,7 +1269,8 @@ mod tests {
             let (rows, pairs): (i64, i64) = db
                 .conn()
                 .query_row(
-                    "SELECT COUNT(*), COUNT(DISTINCT min(memory_a, memory_b) || '|' ||                      max(memory_a, memory_b)) FROM conflicts",
+                    "SELECT COUNT(*), COUNT(DISTINCT min(memory_a, memory_b) || '|' || \
+                     max(memory_a, memory_b)) FROM conflicts",
                     [],
                     |r| Ok((r.get(0)?, r.get(1)?)),
                 )
