@@ -812,13 +812,14 @@ def test_close_during_a_pending_swap_leaves_the_still_shared_engine_its_workers(
 
 
 @_needs_potion
-def test_a_panic_inside_the_swap_leaves_the_workers_running(tmp_path):
+def test_a_panic_inside_the_swap_leaves_the_workers_running(tmp_path, monkeypatch):
     # The swap holds no reference to the engine while it installs the new
     # embedder (a Weak would block Arc::get_mut), and its workers are
     # stopped then. A panic there unwound with nothing to restart them
     # from, and writes past the 256th failed (#302 review 4). The restart
     # now reaches the engine through the wrapper.
     db = YantrikDB(os.path.join(str(tmp_path), "panic.db"), 256)
+    monkeypatch.setenv("YANTRIKDB_TEST_HOOKS", "1")  # the hook is off by default
     try:
         db._inject_swap_panic()
         with pytest.raises(BaseException, match="injected"):
@@ -1076,3 +1077,18 @@ def test_set_embedder_on_a_closed_store_raises(tmp_path):
     db.close()
     with pytest.raises(RuntimeError, match="YantrikDB is closed"):
         db.set_embedder(Emb(), allow_unverified_embedder=True)
+
+
+def test_the_swap_panic_hook_refuses_without_the_test_hooks_switch(tmp_path, monkeypatch):
+    # _inject_swap_panic ships in the wheel; without YANTRIKDB_TEST_HOOKS=1
+    # it raises instead of arming a panic, and nothing is armed.
+    monkeypatch.delenv("YANTRIKDB_TEST_HOOKS", raising=False)
+    db = YantrikDB(os.path.join(str(tmp_path), "hook-off.db"), DIM)
+    try:
+        with pytest.raises(RuntimeError, match="YANTRIKDB_TEST_HOOKS"):
+            db._inject_swap_panic()
+        monkeypatch.setenv("YANTRIKDB_TEST_HOOKS", "0")
+        with pytest.raises(RuntimeError, match="YANTRIKDB_TEST_HOOKS"):
+            db._inject_swap_panic()
+    finally:
+        db.close()

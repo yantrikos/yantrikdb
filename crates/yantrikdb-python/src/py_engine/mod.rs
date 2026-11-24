@@ -1014,8 +1014,18 @@ impl PyYantrikDB {
 
     /// Make the next `set_embedder_named` panic just before it installs
     /// the new embedder, where the workers are stopped (tests only).
-    fn _inject_swap_panic(&mut self) {
+    ///
+    /// It ships in every wheel, so it refuses unless the environment
+    /// variable `YANTRIKDB_TEST_HOOKS` is `1`: a stray call in production
+    /// raises instead of arming a panic.
+    fn _inject_swap_panic(&mut self) -> PyResult<()> {
+        if std::env::var("YANTRIKDB_TEST_HOOKS").as_deref() != Ok("1") {
+            return Err(PyRuntimeError::new_err(
+                "_inject_swap_panic is a test hook that makes the next set_embedder_named                  panic; it is enabled only when YANTRIKDB_TEST_HOOKS=1",
+            ));
+        }
         self.inject_swap_panic = true;
+        Ok(())
     }
 
     /// Whether this wrapper's worker pool is running (tests only).
