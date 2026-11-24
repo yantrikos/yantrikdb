@@ -263,6 +263,9 @@ impl YantrikDB {
     where
         F: Fn(&str) -> Result<Vec<f32>>,
     {
+        // One backfill at a time (see `rechunk_lock`): a second caller waits,
+        // then finds the records the first one chunked already done.
+        let _serial = self.rechunk_lock.lock();
         // Candidates: active + hot + vectored, no chunk rows yet. Text
         // length cannot be filtered in SQL (it may be encrypted), so
         // every candidate is read and measured client-side.

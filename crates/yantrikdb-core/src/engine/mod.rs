@@ -382,6 +382,10 @@ pub struct YantrikDB {
     /// pack interleaving those steps double-mounted it or read a
     /// half-copied file.
     pub(crate) pack_install_lock: Mutex<()>,
+    /// Serialises chunk backfills (`rechunk_long_records*`): two runs at
+    /// once both embedded and wrote every window. Ending consistent, at
+    /// twice the cost; the second now finds nothing left to do.
+    pub(crate) rechunk_lock: Mutex<()>,
 
     /// Whether this database's embedder identity is already on disk.
     /// Keeps `stamp_embedder_identity_once` to a relaxed atomic load on
@@ -1814,6 +1818,7 @@ impl YantrikDB {
             packs: parking_lot::RwLock::new(Vec::new()),
             apply_ops_lock: Mutex::new(()),
             pack_install_lock: Mutex::new(()),
+            rechunk_lock: Mutex::new(()),
             embedder_identity_stamped: std::sync::atomic::AtomicBool::new(
                 persisted_embedder_present,
             ),
