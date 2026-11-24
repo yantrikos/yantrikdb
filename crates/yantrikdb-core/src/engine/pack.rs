@@ -2174,13 +2174,19 @@ impl YantrikDB {
         // stale-temp sweep never takes it; `recover_install_asides` puts
         // back or removes one an install that died here left.
         let mut aside: Option<std::path::PathBuf> = None;
+        // Registered as in flight until this install returns, on every path:
+        // another engine of this process sharing the pack directory must not
+        // take it for a dead install's (see `recover_install_asides`).
+        let mut _in_flight: Option<AsideInFlight> = None;
         if let Some(tmp) = tmp.as_ref() {
             if dest.exists() {
-                let kept = dir.join(format!(
+                let kept_name = format!(
                     ".{file_name}.prev.{}.{}",
                     std::process::id(),
                     next_install_tmp()
-                ));
+                );
+                _in_flight = Some(AsideInFlight::new(&kept_name));
+                let kept = dir.join(&kept_name);
                 if let Err(e) = rename_retrying(&dest, &kept) {
                     let _ = std::fs::remove_file(tmp);
                     restore_previous();
@@ -2810,11 +2816,14 @@ fn rename_retrying(from: &std::path::Path, to: &std::path::Path) -> std::io::Res
 /// so it is renamed back. Died after: the installed path holds the new
 /// copy and the aside one is left over, so it is removed.
 ///
-/// Callers hold the install lock, so no install of this process is
-/// between its renames, and an aside copy named with this process's id is
-/// always a dead install's. Another process's install holds one only for
-/// its two renames and a mount, so its copies are touched only once a
-/// minute old. Best-effort; errors are ignored.
+/// An aside copy named with this process's id belongs to a dead install
+/// unless an install of this process still holds it (`AsideInFlight`).
+/// The callers' install lock is per engine, and two engines on one store
+/// in one process (TenantManager.get opens one per call) share a pack
+/// directory, so the lock alone does not say no install of this process is
+/// between its renames. Another process's install holds one only for its
+/// two renames and a mount, so its copies are touched only once a minute
+/// old. Best-effort; errors are ignored.
 fn recover_install_asides(dir: &std::path::Path) {
     const OTHERS_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
     const MARK: &str = ".ydbpack.prev.";
@@ -2842,7 +2851,7 @@ fn recover_install_asides(dir: &std::path::Path) {
             .metadata()
             .and_then(|m| m.modified())
             .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-        let ours = pid == own_pid;
+        let ours = pid == own_pid && !AsideInFlight::holds(&name);
         let old = modified.elapsed().is_ok_and(|age| age >= OTHERS_AFTER);
         if ours || old {
             asides
@@ -2877,10 +2886,74 @@ fn recover_install_asides(dir: &std::path::Path) {
     }
 }
 
+/// The aside copies (by file name) that installs in this process are
+/// holding right now. File names are unique within a process (pid and a
+/// per-process counter), so the name is enough, however two engines spell
+/// the pack directory.
+fn asides_in_flight() -> std::sync::MutexGuard<'static, std::collections::HashSet<String>> {
+    static IN_FLIGHT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    IN_FLIGHT
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Registers an install's aside copy as in flight, from before it is moved
+/// aside until the install returns (#304 review 5).
+struct AsideInFlight(String);
+
+impl AsideInFlight {
+    fn new(name: &str) -> Self {
+        asides_in_flight().insert(name.to_string());
+        Self(name.to_string())
+    }
+
+    fn holds(name: &str) -> bool {
+        asides_in_flight().contains(name)
+    }
+}
+
+impl Drop for AsideInFlight {
+    fn drop(&mut self) {
+        asides_in_flight().remove(&self.0);
+    }
+}
+
 /// A per-process counter for install temp files, so two installs never
 /// write the same temp path (installs are also serialised; this keeps the
 /// name unique even if that ever changes).
 fn next_install_tmp() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod aside_tests {
+    use super::*;
+
+    /// Two engines of one process share a pack directory, and each holds
+    /// only its own install lock. An aside copy named with this process's
+    /// id was taken for a dead install's by the other engine's recovery,
+    /// even while its install was between its renames (#304 review 5).
+    #[test]
+    fn an_aside_copy_held_by_an_install_in_this_process_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("physics-1.0.0.ydbpack");
+        let name = format!(".physics-1.0.0.ydbpack.prev.{}.4242", std::process::id());
+        let aside = dir.path().join(&name);
+        // Between the two renames: the installed path is empty, and the
+        // working copy is aside.
+        std::fs::write(&aside, b"the working copy").unwrap();
+        {
+            let _held = AsideInFlight::new(&name);
+            recover_install_asides(dir.path());
+            assert!(aside.exists(), "an aside copy in flight was taken");
+            assert!(!installed.exists());
+        }
+        // The install died there: once nothing holds it, it is put back.
+        recover_install_asides(dir.path());
+        assert!(!aside.exists());
+        assert_eq!(std::fs::read(&installed).unwrap(), b"the working copy");
+    }
 }
