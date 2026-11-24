@@ -6,7 +6,7 @@ type PyObject = pyo3::Py<pyo3::PyAny>;
 
 use yantrikdb_core::types::MemoryWithEmbedding;
 
-use crate::py_engine::PyYantrikDB;
+use crate::py_engine::{py_vector, PyYantrikDB};
 use crate::py_types::*;
 
 /// Compute cosine similarity between two vectors.
@@ -285,7 +285,7 @@ pub fn py_summarize_cluster(
     idempotency_key: Option<&str>,
 ) -> PyResult<PyObject> {
     // Reaches SQLite: with the GIL released and no borrow of `db` held (#271).
-    let inner = PyYantrikDB::engine_handle(&db)?;
+    let (inner, embedding) = handle_and_vector(&db, text, embedding)?;
     let out = py
         .detach(|| match idempotency_key {
             Some(key) => yantrikdb_core::consolidate::summarize_cluster_with_key(
@@ -379,7 +379,7 @@ pub fn py_record_synthesis(
     metadata: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyObject> {
     // Reaches SQLite: with the GIL released and no borrow of `db` held (#271).
-    let inner = PyYantrikDB::engine_handle(&db)?;
+    let (inner, embedding) = handle_and_vector(&db, text, embedding)?;
     let metadata = match metadata {
         Some(value) => py_to_json(&value.as_any())?,
         None => serde_json::json!({}),
@@ -411,7 +411,7 @@ pub fn py_consolidate_cluster(
     embedding: Option<Vec<f32>>,
 ) -> PyResult<PyObject> {
     // Reaches SQLite: with the GIL released and no borrow of `db` held (#271).
-    let inner = PyYantrikDB::engine_handle(&db)?;
+    let (inner, embedding) = handle_and_vector(&db, text, embedding)?;
     let out = py
         .detach(|| {
             yantrikdb_core::consolidate::consolidate_cluster(
@@ -423,4 +423,28 @@ pub fn py_consolidate_cluster(
         })
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     json_to_py(py, &out)
+}
+
+/// The engine handle, and the vector to write for `text`: the one passed
+/// in, else the caller-attached Python embedder's (called here, with the GIL
+/// held and no borrow of the wrapper), else `None` for the engine to embed
+/// with its own. Without this a store whose only embedder is a Python one
+/// raised "No embedder configured" whenever no vector was passed: the engine
+/// embeds the text itself and cannot reach a Python embedder (#271 sweep;
+/// the same gap draft_memories_from_summary had).
+fn handle_and_vector(
+    db: &Bound<'_, PyYantrikDB>,
+    text: &str,
+    embedding: Option<Vec<f32>>,
+) -> PyResult<(std::sync::Arc<yantrikdb_core::YantrikDB>, Option<Vec<f32>>)> {
+    let (inner, embedder) = PyYantrikDB::engine_and_embedder(db)?;
+    let embedding = match (embedding, embedder) {
+        (Some(v), _) => Some(v),
+        (None, Some(emb)) => {
+            let out = emb.call_method1(db.py(), "encode", (text,))?;
+            Some(py_vector(db.py(), &out)?)
+        }
+        (None, None) => None,
+    };
+    Ok((inner, embedding))
 }
