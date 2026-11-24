@@ -503,6 +503,7 @@ def small_db(tmp_path):
     store.close()
 
 
+@needs_a_second_cpu
 @pytest.mark.parametrize("name", sorted(n for n, call in RELEASES.items() if call is not None))
 def test_binding_releases_the_gil(small_db, name):
     db, ctx = small_db
@@ -510,6 +511,7 @@ def test_binding_releases_the_gil(small_db, name):
     assert _seen_during(lambda: call(db, ctx)) >= 1, f"{name}() held the GIL"
 
 
+@needs_a_second_cpu
 def test_embed_with_the_engine_embedder_releases_the_gil(tmp_path):
     store = YantrikDB(os.path.join(str(tmp_path), "native-embed.db"), 64)
     try:
@@ -537,3 +539,65 @@ def test_a_closed_store_is_reported_before_a_bad_argument(tmp_path, name):
     store.close()
     with pytest.raises(RuntimeError, match="closed"):
         CLOSED_FIRST[name](store)
+
+
+# ── HOLDS entries that open PRs will change ──────────────────────────────
+#
+# set_embedder, correct and record are being detached in their own PRs. Until
+# those merge they must still hold the GIL; once one does, this fails, and the
+# method moves from HOLDS to RELEASES with a witness entry.
+
+OWNED_BY_OPEN_PRS = {
+    "set_embedder": ("#295", lambda db, c: db.set_embedder(Emb(), allow_unverified_embedder=True)),
+    "correct": ("#296", lambda db, c: db.correct(c["rid"], "witness", new_importance=0.7)),
+    "record": ("#297", lambda db, c: db.record("witness record")),
+}
+
+
+@pytest.mark.parametrize("name", sorted(OWNED_BY_OPEN_PRS))
+def test_bindings_owned_by_open_prs_still_hold_the_gil(small_db, name):
+    pr, call = OWNED_BY_OPEN_PRS[name]
+    db, ctx = small_db
+    assert name in HOLDS
+    seen = _seen_during(lambda: call(db, ctx), attempts=200)
+    assert seen == 0, (
+        f"{name}() now releases the GIL: whoever merged {pr} should move it from "
+        f"HOLDS to RELEASES with a witness entry, and drop it here"
+    )
+
+
+# ── the other shapes of bindings witnessed above ─────────────────────────
+
+
+@needs_a_second_cpu
+def test_recall_text_with_explain_releases_the_gil(small_db):
+    db, _ = small_db
+    assert _seen_during(lambda: db.recall_text("topic 3", 5, explain=True)) >= 1
+
+
+ENGINE_EMBEDDER_RELEASES = {
+    "record_text": lambda db: db.record_text("witness record_text, engine embedder"),
+    "record_batch": lambda db: db.record_batch([{"text": "witness batch, engine embedder"}]),
+    "query": lambda db: db.query(query="engine embedder query"),
+}
+
+
+@pytest.fixture
+def engine_embedder_db(tmp_path):
+    # 64 dims: the engine attaches its bundled embedder, and no Python
+    # embedder is set, so these calls take the engine-embedder route.
+    store = YantrikDB(os.path.join(str(tmp_path), "native.db"), 64)
+    if not store.has_embedder():
+        store.close()
+        pytest.skip("this build has no bundled engine embedder")
+    for i in range(40):
+        store.record_text(f"native record {i} about topic {i % 7}")
+    yield store
+    store.close()
+
+
+@needs_a_second_cpu
+@pytest.mark.parametrize("name", sorted(ENGINE_EMBEDDER_RELEASES))
+def test_engine_embedder_paths_release_the_gil(engine_embedder_db, name):
+    call = ENGINE_EMBEDDER_RELEASES[name]
+    assert _seen_during(lambda: call(engine_embedder_db)) >= 1, f"{name}() held the GIL"
