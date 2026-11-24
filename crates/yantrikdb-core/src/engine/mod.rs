@@ -371,6 +371,17 @@ pub struct YantrikDB {
     /// request, so mounting or unmounting never blocks a recall in
     /// flight.
     pub(crate) packs: parking_lot::RwLock<Vec<std::sync::Arc<crate::engine::pack::MountedPack>>>,
+    /// Serialises `distributed::replication::apply_ops` (#271 review). Each
+    /// op is checked against the oplog, materialized, then inserted, under
+    /// separate connection locks (materialization takes the lock itself), so
+    /// two callers applying the same batch both applied, and both counted,
+    /// the ops they raced on. The GIL used to serialise the Python callers.
+    pub(crate) apply_ops_lock: Mutex<()>,
+    /// Serialises pack installs (#271 review): an install unmounts, copies
+    /// (or converts) and remounts one file, and two installs of the same
+    /// pack interleaving those steps double-mounted it or read a
+    /// half-copied file.
+    pub(crate) pack_install_lock: Mutex<()>,
 
     /// Whether this database's embedder identity is already on disk.
     /// Keeps `stamp_embedder_identity_once` to a relaxed atomic load on
@@ -1801,6 +1812,8 @@ impl YantrikDB {
             })),
             index_write_lock: parking_lot::Mutex::new(()),
             packs: parking_lot::RwLock::new(Vec::new()),
+            apply_ops_lock: Mutex::new(()),
+            pack_install_lock: Mutex::new(()),
             embedder_identity_stamped: std::sync::atomic::AtomicBool::new(
                 persisted_embedder_present,
             ),
