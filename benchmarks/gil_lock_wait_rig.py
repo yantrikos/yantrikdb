@@ -16,9 +16,12 @@ Usage, against an installed wheel in a clean venv (not PYTHONPATH=src):
     python benchmarks/gil_lock_wait_rig.py <label>
 Prints one line per binding: call time, and the ticker's longest gap during it.
 
-On 0.23.6 the three writes that wait each freeze the ticker for the whole
-hold (about 2,050 ms); with every binding detached the longest gap stays near
-the ticker's own 10 ms.
+On 0.23.6 the three writes that waited each froze the ticker for the whole
+hold (about 2,050 ms), and record_text and record failed at once with
+"database is locked" (#298). Since #303 those two wait as well. On this
+branch every binding here waits with the GIL released (longest gap 11-16 ms)
+except record(), which still holds it for the whole wait (about 2,000 ms gap)
+until #297 detaches it.
 """
 import os
 import random
@@ -99,8 +102,10 @@ def main():
         "record_turn": lambda: db.record_turn("default", "user", "hello"),
         "task_add": lambda: db.task_add("default", "a task"),
         "relate": lambda: db.relate("alice", "acme", "works_at"),
-        # These two fail at once with "database is locked" instead of
-        # waiting busy_timeout: #298, reproduced. Kept here so a fix shows up.
+        # Both wait for the lock since #303 (before, they failed at once with
+        # "database is locked": #298), about 2,000 ms here. record_text waits
+        # with the GIL released; record() still holds it for the whole wait
+        # (ticker gap about 2,000 ms) until #297 detaches it.
         "record_text": lambda: db.record_text("a new record while the lock is held"),
         "record": lambda: db.record("explicit embedding", embedding=Emb().encode("x")),
     }
