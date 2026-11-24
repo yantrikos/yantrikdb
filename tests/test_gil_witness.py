@@ -434,8 +434,12 @@ HOLDS = {
     "sign_bytes": "static helper: no store",
     "sign_pack": "static helper: no store",
     "verify_bytes": "static helper: no store",
+    # calls Python before it reaches the store, so the GIL stays held
+    "set_embedder": (
+        "its probe and identity check call the Python embedder; #295 "
+        "released the wrapper's borrow there, not the GIL"
+    ),
     # in flight in their own PRs
-    "set_embedder": "#295 (and its identity check reads the store)",
     "correct": "#296",
     "record": "#297",
 }
@@ -549,12 +553,11 @@ def test_a_closed_store_is_reported_before_a_bad_argument(tmp_path, name):
 
 # ── HOLDS entries that open PRs will change ──────────────────────────────
 #
-# set_embedder, correct and record are being detached in their own PRs. Until
+# correct and record are being detached in their own PRs. Until
 # those merge they must still hold the GIL; once one does, this fails, and the
 # method moves from HOLDS to RELEASES with a witness entry.
 
 OWNED_BY_OPEN_PRS = {
-    "set_embedder": ("#295", lambda db, c: db.set_embedder(Emb(), allow_unverified_embedder=True)),
     "correct": ("#296", lambda db, c: db.correct(c["rid"], "witness", new_importance=0.7)),
     "record": ("#297", lambda db, c: db.record("witness record")),
 }
