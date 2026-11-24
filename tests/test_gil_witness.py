@@ -401,8 +401,15 @@ RELEASES = {
     # packs and identity
     "trusted_publishers": lambda db, c: db.trusted_publishers(),
     "embedder_identity": lambda db, c: db.embedder_identity(),
-    # The fetch runs detached; an unknown name fails inside it, offline.
-    "set_embedder_named": lambda db, c: _swallow(db.set_embedder_named, "no-such-model"),
+}
+
+# Detached, but not witnessable offline: see the module docstring's limit.
+UNWITNESSED = {
+    "set_embedder_named": (
+        "the model fetch runs detached, but offline it can only fail, and an "
+        "unknown name fails within a microsecond or two inside the detach; "
+        "a real fetch needs the network"
+    ),
 }
 
 _FOLLOW_UP = "not yet detached: #271 follow-up"
@@ -467,13 +474,19 @@ def test_every_public_method_is_classified():
     public = {
         n for n in dir(YantrikDB) if not n.startswith("_") and callable(getattr(YantrikDB, n))
     }
-    both = set(RELEASES) & set(HOLDS)
-    assert not both, f"listed as releasing AND holding: {sorted(both)}"
-    unclassified = public - set(RELEASES) - set(HOLDS)
+    lists = {"RELEASES": set(RELEASES), "UNWITNESSED": set(UNWITNESSED), "HOLDS": set(HOLDS)}
+    names = list(lists)
+    for i, a in enumerate(names):
+        for b in names[i + 1 :]:
+            both = lists[a] & lists[b]
+            assert not both, f"listed in {a} AND {b}: {sorted(both)}"
+    classified = set().union(*lists.values())
+    unclassified = public - classified
     assert not unclassified, (
-        f"new public methods must go in RELEASES (with a witness) or HOLDS: {sorted(unclassified)}"
+        f"new public methods must go in RELEASES (with a witness), UNWITNESSED or HOLDS: "
+        f"{sorted(unclassified)}"
     )
-    stale = (set(RELEASES) | set(HOLDS)) - public
+    stale = classified - public
     assert not stale, f"listed but no longer public: {sorted(stale)}"
 
 
