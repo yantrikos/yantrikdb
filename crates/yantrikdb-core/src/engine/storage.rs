@@ -98,8 +98,11 @@ impl YantrikDB {
         // the index: no writer ever clears the vector of an indexed row
         // (every UPDATE of `embedding` stores a vector, archive/hydrate keep
         // a NULL as NULL, and the reembed swap is guarded on
-        // `embedding_new IS NOT NULL`). A tombstone for it would outlive
-        // the row's return to the hot tier and hide the vector a later
+        // `embedding_new IS NOT NULL`), and nothing indexes a row without
+        // giving SQL its vector (`record_with_rid` on an existing row and
+        // `insert_vector` fill a hot row's missing one). A tombstone for
+        // it would outlive the row's return to the hot tier and hide the
+        // vector a later
         // `refresh_embeddings` gives it, because the index rebuild that
         // follows a refresh does not touch the delta.
         if had_vector {
@@ -251,9 +254,13 @@ impl YantrikDB {
     /// is a no-op (the underlying HNSW layer is responsible for de-duping).
     /// Errors propagate from the HNSW backend.
     ///
-    /// Lock ordering: takes `vec_index.write()` only — caller must NOT hold
-    /// a `conn` guard across this call, per the engine-wide ordering rule
-    /// (conn → … → vec_index).
+    /// If the row is hot and has no vector in SQL (a replicated row), the
+    /// vector is written there too, so a row in the index always has its
+    /// vector in SQL; `archive()` relies on that.
+    ///
+    /// Lock ordering: takes the `conn` briefly for that write, then
+    /// `vec_index.write()` — caller must NOT hold a `conn` guard across
+    /// this call, per the engine-wide ordering rule (conn → … → vec_index).
     ///
     /// Added in yantrikdb 0.6.5 (RFC 022 §2): exposes the previously
     /// `pub(crate)` HNSW insert path so the server's replication backfill
@@ -269,6 +276,19 @@ impl YantrikDB {
         // poisons distance math). Reject with a typed error instead, and do
         // it BEFORE the seq counter bumps so a rejected call is a no-op.
         crate::validate::validate_embedding("insert_vector", embedding, self.embedding_dim)?;
+        // A hot row with no vector in SQL gets this one too, so a row in
+        // the index always has its vector in SQL (archive() relies on it
+        // to decide whether to tombstone). The server's backfill writes the
+        // column first, which makes this a no-op there.
+        {
+            let stored = self.encrypt_embedding(&serialize_f32(embedding))?;
+            let generation = self.search_state.load().generation as i64;
+            self.conn().execute(
+                "UPDATE memories SET embedding = ?1, embedding_generation = ?2 \
+                 WHERE rid = ?3 AND embedding IS NULL AND storage_tier = 'hot'",
+                params![stored, generation, rid],
+            )?;
+        }
         let seq = self
             .vec_seq
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)

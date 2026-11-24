@@ -34,8 +34,11 @@ fn record(db: &YantrikDB, text: &str, seed: f32) -> String {
 }
 
 /// Blank the vector of `rids` and rebuild the index, so the rows look like
-/// a follower's replicated rows: no vector in SQL, none in the index.
+/// a follower's replicated rows: no vector in SQL, none in the index. The
+/// delta is compacted first: a rebuild replaces the cold tier but leaves
+/// the delta, where the rows' original entries would otherwise survive.
 fn strip_vectors(db: &YantrikDB, rids: &[String]) {
+    db.search_state.load().vec_index.compact().unwrap();
     {
         let conn = db.conn();
         for rid in rids {
@@ -469,6 +472,31 @@ mod with_engine_embedder {
             "a raw vector must not land in a cold row"
         );
     }
+
+    /// A cold row whose blob does not decode is not "usable" just because
+    /// it is non-empty: the repair re-encodes it, and it hydrates after.
+    #[test]
+    fn refresh_repairs_a_corrupt_cold_vector() {
+        let (db, rids) = store();
+        let rid = &rids[0];
+        assert!(db.archive(rid).unwrap());
+        db.conn()
+            .execute(
+                "UPDATE memories SET embedding = ?1 WHERE rid = ?2",
+                params![vec![0x28u8, 0xB5, 0x2F, 0xFD, 1, 2, 3, 4], rid],
+            )
+            .unwrap();
+        assert!(db.hydrate(rid).is_err(), "precondition: it cannot hydrate");
+
+        let report = db.refresh_embeddings(None, false).unwrap();
+        assert_eq!(report.unusable_found, 1, "{report:?}");
+        assert_eq!(report.refreshed, 1, "{report:?}");
+        assert!(db.hydrate(rid).unwrap());
+        assert_eq!(
+            embedding_blob(&db, rid).unwrap().len(),
+            db.embedding_dim() * 4
+        );
+    }
 }
 
 /// The same paths on an encrypted store, where every stored vector is
@@ -561,4 +589,75 @@ fn hydrate_refuses_a_corrupt_cold_vector_without_moving_the_row() {
         "a corrupt vector must not hydrate"
     );
     assert_eq!(tier(&db, &rid), "cold", "the row must stay where it was");
+}
+
+fn vector_hits(db: &YantrikDB, query: &[f32], rid: &str) -> bool {
+    db.recall(
+        query, 10, None, None, true, false, None, true, None, None, None, None, None, false, None,
+        None,
+    )
+    .unwrap()
+    .iter()
+    .any(|h| h.rid == rid)
+}
+
+/// The invariant archive() relies on: a row in the index has its vector in
+/// SQL. record_with_rid on an existing row with no vector (a replicated row
+/// re-delivered through the apply path) used to index the vector and leave
+/// the column NULL, so archive() skipped the tombstone and the cold row
+/// stayed vector-searchable.
+#[test]
+fn record_with_rid_fills_a_missing_vector() {
+    let (db, bare) = store_with_bare_rows(1);
+    let rid = &bare[0];
+    let v = vec_seed(11.0, 8);
+    db.record_with_rid(
+        rid,
+        "replicated note 0 about the harbour",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &v,
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+        1_700_000_000_000_000,
+        &[],
+        "test-embedder",
+        None,
+        crate::provenance::WriteAdmission::Admitted,
+    )
+    .unwrap();
+    assert!(
+        embedding_blob(&db, rid).is_some(),
+        "the indexed vector must land in SQL too"
+    );
+    assert!(vector_hits(&db, &v, rid));
+    assert!(db.archive(rid).unwrap());
+    assert!(
+        !vector_hits(&db, &v, rid),
+        "an archived row must not stay vector-searchable"
+    );
+}
+
+/// Same invariant through the public backfill helper.
+#[test]
+fn insert_vector_fills_a_missing_vector() {
+    let (db, bare) = store_with_bare_rows(1);
+    let rid = &bare[0];
+    let v = vec_seed(12.0, 8);
+    db.insert_vector(rid, &v).unwrap();
+    assert!(
+        embedding_blob(&db, rid).is_some(),
+        "the indexed vector must land in SQL too"
+    );
+    assert!(db.archive(rid).unwrap());
+    assert!(
+        !vector_hits(&db, &v, rid),
+        "an archived row must not stay vector-searchable"
+    );
 }

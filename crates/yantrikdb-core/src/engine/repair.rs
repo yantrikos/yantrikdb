@@ -378,16 +378,20 @@ impl YantrikDB {
         // ── Phase 1: scan. Read-only, conn released before any embedding.
         // Matches build_vec_index's visible set so text and index stay in
         // step, exactly as the sibling repair does.
-        type Scanned = (String, String, Option<usize>, String);
+        type Scanned = (String, String, Option<usize>, String, Option<Vec<u8>>);
         let scanned: Vec<Scanned> = {
             let conn = self.conn();
             let sql = if namespace.is_some() {
-                "SELECT rid, text, length(embedding), storage_tier FROM memories \
+                "SELECT rid, text, length(embedding), storage_tier, \
+                        CASE WHEN storage_tier = 'cold' THEN embedding END \
+                 FROM memories \
                  WHERE consolidation_status IN ('active', 'consolidated') \
                    AND namespace = ?1 \
                  ORDER BY rid"
             } else {
-                "SELECT rid, text, length(embedding), storage_tier FROM memories \
+                "SELECT rid, text, length(embedding), storage_tier, \
+                        CASE WHEN storage_tier = 'cold' THEN embedding END \
+                 FROM memories \
                  WHERE consolidation_status IN ('active', 'consolidated') \
                  ORDER BY rid"
             };
@@ -398,6 +402,7 @@ impl YantrikDB {
                     r.get::<_, String>(1)?,
                     r.get::<_, Option<i64>>(2)?.map(|n| n as usize),
                     r.get::<_, String>(3)?,
+                    r.get::<_, Option<Vec<u8>>>(4)?,
                 ))
             }
             match namespace {
@@ -414,17 +419,25 @@ impl YantrikDB {
         // ── Phase 2: select the unusable rows and, in apply mode, encode
         // them OUTSIDE the conn lock.
         let mut pending: Vec<PendingRefresh> = Vec::new();
-        for (rid, scanned_ciphertext, blob_len, scanned_tier) in scanned {
-            // Encrypted stores pad the blob, and cold rows hold it
-            // compressed, so a strict length check would false-positive on
-            // every such row; there, only a NULL vector is provably
-            // unusable. Better to under-repair than to churn a whole corpus
-            // (or overwrite a compressed cold vector) on a bad predicate.
+        for (rid, scanned_ciphertext, blob_len, scanned_tier, cold_blob) in scanned {
+            // Cold rows hold the blob compressed, so its length says nothing:
+            // decode it (only cold blobs are fetched). Encrypted hot rows pad
+            // the blob, so a strict length check would false-positive on
+            // every row; there, only a NULL vector is provably unusable.
+            // Better to under-repair than to churn a whole corpus on a bad
+            // predicate.
             let cold = scanned_tier == "cold";
-            let usable = match blob_len {
-                None => false,
-                Some(n) if self.is_encrypted() || cold => n > 0,
-                Some(n) => n == expected_len,
+            let usable = match (blob_len, cold_blob) {
+                (None, _) => false,
+                (Some(_), Some(blob)) if cold => self
+                    .decrypt_embedding(&blob)
+                    .map(|plain| {
+                        crate::compression::decode_embedding_blob(&plain).len()
+                            == self.embedding_dim()
+                    })
+                    .unwrap_or(false),
+                (Some(n), _) if self.is_encrypted() => n > 0,
+                (Some(n), _) => n == expected_len,
             };
             if usable {
                 continue;
