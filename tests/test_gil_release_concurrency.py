@@ -218,14 +218,17 @@ def test_set_embedder_while_consolidate_runs_in_another_thread(db):
     stop = threading.Event()
     consol_calls = []
     consol_errors = []
+    in_pass = [False]
 
     def worker():
         while not stop.is_set():
             consol_calls.append(1)
+            in_pass[0] = True
             try:
                 consolidate(db)
             except Exception as e:  # noqa: BLE001 - every failure is the finding
                 consol_errors.append(repr(e))
+            in_pass[0] = False
 
     t = threading.Thread(target=worker)
     t.start()
@@ -241,6 +244,11 @@ def test_set_embedder_while_consolidate_runs_in_another_thread(db):
         warm_deadline = time.time() + 30.0
         while len(consol_calls) < 10 and time.time() < warm_deadline:
             time.sleep(0.005)
+        # The warm-up proves the worker runs, not that it was inside a pass
+        # while set_embedder() was called. Count the calls that overlapped
+        # one: sampled per call, so a pass longer than the window still
+        # counts, and a runner's speed cannot fail it.
+        overlapped = 0
         deadline = time.time() + 2.0
         while time.time() < deadline:
             try:
@@ -248,12 +256,15 @@ def test_set_embedder_while_consolidate_runs_in_another_thread(db):
             except Exception as e:  # noqa: BLE001
                 errors.append(repr(e))
             calls += 1
+            if in_pass[0]:
+                overlapped += 1
     finally:
         stop.set()
         t.join()
 
     # The test only means something if both threads really ran concurrently.
-    assert len(consol_calls) > 5, "the consolidate worker barely ran; nothing was contended"
+    assert len(consol_calls) >= 10, "the consolidate worker never warmed up"
+    assert overlapped >= 1, "no set_embedder() call overlapped a consolidate pass"
     assert calls > 5
     assert not _borrow_errors(errors), (
         f"{len(errors)}/{calls} set_embedder() calls failed while "

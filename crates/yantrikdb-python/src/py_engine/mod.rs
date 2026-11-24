@@ -975,6 +975,54 @@ pub(crate) fn py_vector(py: Python<'_>, result: &PyObject) -> PyResult<Vec<f32>>
     list.extract::<Vec<f32>>(py)
 }
 
+/// Where a binding's vector comes from, decided once, from the snapshot
+/// [`PyYantrikDB::engine_and_embedder`] took (#271).
+pub(crate) enum EmbedPlan {
+    /// A vector already in hand: passed by the caller, or produced by the
+    /// caller-attached Python embedder (with the GIL held, as any Python
+    /// call must be, but with no borrow of the wrapper).
+    Ready(Vec<f32>),
+    /// The engine's own embedder, run inside the detached closure with the
+    /// engine call it feeds: native inference needs no GIL, and one detach
+    /// per call keeps the cost to one GIL handoff.
+    Native(String),
+}
+
+impl EmbedPlan {
+    /// The vector, inside `py.detach`.
+    pub(crate) fn into_vector(
+        self,
+        db: &YantrikDB,
+    ) -> Result<Vec<f32>, yantrikdb_core::YantrikDbError> {
+        match self {
+            EmbedPlan::Ready(v) => Ok(v),
+            EmbedPlan::Native(text) => db.embed(&text),
+        }
+    }
+}
+
+/// `embed_text`'s precedence, without a borrow held across `encode()`:
+/// an embedder the caller ATTACHED wins over one the engine resolved for
+/// this store's dimension (yantrikdb-hermes-plugin #84), then the engine's
+/// own, else the same error `embed_text` raises.
+pub(crate) fn plan_embed(
+    py: Python<'_>,
+    db: &YantrikDB,
+    embedder: Option<&PyObject>,
+    text: &str,
+) -> PyResult<EmbedPlan> {
+    if let Some(emb) = embedder {
+        let result = emb.call_method1(py, "encode", (text,))?;
+        return Ok(EmbedPlan::Ready(py_vector(py, &result)?));
+    }
+    if db.has_embedder() {
+        return Ok(EmbedPlan::Native(text.to_owned()));
+    }
+    Err(PyRuntimeError::new_err(
+        "No embedder configured. Pass an embedder to YantrikDB() or call set_embedder().",
+    ))
+}
+
 impl PyYantrikDB {
     /// Get a reference to the inner YantrikDB engine (for use by consolidation/trigger wrappers).
     /// An owned engine handle for a call that releases the GIL (#271).
@@ -1004,6 +1052,30 @@ impl PyYantrikDB {
         self.inner
             .as_deref()
             .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))
+    }
+
+    /// The engine handle and the caller-attached Python embedder, taken
+    /// under ONE short borrow (#271).
+    ///
+    /// `embed_text(&self)` runs the Python embedder's `encode()` while the
+    /// wrapper is borrowed, so a `set_embedder()` or `close()` from another
+    /// thread fails with `RuntimeError: Already borrowed` for as long as
+    /// `encode()` takes. A binding that embeds takes this snapshot instead,
+    /// drops the borrow, and embeds with [`plan_embed`]. Taking both from one
+    /// borrow matters: the same snapshot must decide how the call is routed
+    /// and which embedder produces the vector, or a `set_embedder()` landing
+    /// between two borrows could split them. A swap that lands after the
+    /// snapshot is ordered after this call, as if the call had finished first.
+    pub(crate) fn engine_and_embedder(
+        slf: &Bound<'_, Self>,
+    ) -> PyResult<(Arc<YantrikDB>, Option<PyObject>)> {
+        let this = slf.try_borrow()?;
+        let db = this
+            .inner
+            .clone()
+            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
+        let embedder = this.embedder.as_ref().map(|e| e.clone_ref(slf.py()));
+        Ok((db, embedder))
     }
 
     pub(crate) fn embed_text(&self, py: Python<'_>, text: &str) -> PyResult<Vec<f32>> {
