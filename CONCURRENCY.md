@@ -319,6 +319,13 @@ connection it came from.
 
 Caveats:
 
+- **Waiting is not a guarantee.** SQLite's busy handler polls with
+  backoff and no fairness. Another process that retakes the write lock
+  almost continuously can still starve an engine write until
+  `busy_timeout` (5 s) runs out, and the write then fails with
+  `database is locked`. The fix turns the instant failure into a bounded
+  wait; it cannot make the wait succeed. A writer that keeps its
+  transactions short avoids this.
 - **A read-only snapshot opens `Deferred` by name.** `read_conn()` falls
   back to the write connection when `YANTRIKDB_READ_POOL=0`, and that
   connection now defaults to `IMMEDIATE`, so a read snapshot taken there

@@ -109,7 +109,12 @@ fn write_lock_is_free(path: &std::path::Path) -> bool {
             probe.execute_batch("ROLLBACK").unwrap();
             true
         }
-        Err(_) => false,
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if e.code == rusqlite::ErrorCode::DatabaseBusy =>
+        {
+            false
+        }
+        Err(e) => panic!("probing the write lock failed for another reason: {e}"),
     }
 }
 
@@ -197,8 +202,13 @@ fn engine_transactions_take_the_write_lock_up_front() {
 
 /// The SQLITE_BUSY_SNAPSHOT shape: another connection commits writes
 /// continually while the engine records. A deferred read-then-write
-/// transaction fails whenever a commit lands between its read and its
-/// write; one that takes the write lock first never does.
+/// transaction fails at once whenever a commit lands between its read and
+/// its write; one that takes the write lock first waits instead.
+///
+/// Only a FAST failure is the bug. A contender that retakes the lock this
+/// often can still starve a write past busy_timeout (SQLite's busy handler
+/// polls with no fairness; slow commits on a Windows runner make it likely),
+/// and that write then fails after ~5 s — the wait the fix exists to give.
 #[test]
 fn writes_survive_a_continually_committing_second_connection() {
     let dir = tempfile::tempdir().unwrap();
@@ -220,8 +230,14 @@ fn writes_survive_a_continually_committing_second_connection() {
         std::thread::spawn(move || {
             let other = rusqlite::Connection::open(&path).unwrap();
             other.busy_timeout(Duration::from_secs(5)).unwrap();
+            // Short lock holds: with the default synchronous=FULL each commit
+            // flushes while holding the lock, which on a slow runner keeps
+            // it held almost all the time and turns the test into a
+            // starvation test.
             other
-                .execute_batch("CREATE TABLE IF NOT EXISTS contender (x INTEGER)")
+                .execute_batch(
+                    "PRAGMA synchronous=OFF;                      CREATE TABLE IF NOT EXISTS contender (x INTEGER)",
+                )
                 .unwrap();
             while !stop.load(Ordering::SeqCst) {
                 other
@@ -238,10 +254,12 @@ fn writes_survive_a_continually_committing_second_connection() {
 
     let first = commits.load(Ordering::SeqCst);
     let mut failures = Vec::new();
+    let mut starved = 0usize;
     for i in 0..WRITES {
         let seed = 3.0 + i as f32 * 0.01;
         let text = format!("contended write number {i} about the harbour");
         let before = commits.load(Ordering::SeqCst);
+        let started = std::time::Instant::now();
         let result = if i % 2 == 0 {
             db.record(
                 &text,
@@ -262,7 +280,12 @@ fn writes_survive_a_continually_committing_second_connection() {
             db.record_batch(&[batch_item(&text, seed)]).map(|_| ())
         };
         if let Err(e) = result {
-            failures.push(e.to_string());
+            let took = started.elapsed();
+            if took < Duration::from_secs(1) {
+                failures.push(format!("{e} after {took:?}"));
+            } else {
+                starved += 1;
+            }
         }
         let deadline = std::time::Instant::now() + Duration::from_millis(200);
         while commits.load(Ordering::SeqCst) == before && std::time::Instant::now() < deadline {
@@ -274,12 +297,16 @@ fn writes_survive_a_continually_committing_second_connection() {
     contender.join().unwrap();
 
     assert!(
+        starved * 4 < WRITES,
+        "{starved} of {WRITES} writes timed out after busy_timeout; the test          no longer exercises the race it is for"
+    );
+    assert!(
         interleaved >= MIN_INTERLEAVED_COMMITS,
         "only {interleaved} contender commits landed during {WRITES} writes"
     );
     assert!(
         failures.is_empty(),
-        "{} of {WRITES} writes failed beside a committing connection: {:?}",
+        "{} of {WRITES} writes failed fast beside a committing connection          (the #298 shape; {starved} more were starved past busy_timeout): {:?}",
         failures.len(),
         &failures[..failures.len().min(3)]
     );
@@ -359,6 +386,34 @@ fn correct_waiting_for_the_lock_does_not_starve_recall() {
     );
 }
 
+/// A read-only snapshot must not take the write lock, even when it runs on
+/// the write connection: with YANTRIKDB_READ_POOL=0, read_conn() falls back
+/// to it, and that connection's default is now IMMEDIATE.
+#[test]
+fn thread_read_snapshot_does_not_wait_for_the_write_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut db, path) = file_db(&dir);
+    // The pool the env var would leave empty, without touching the env
+    // (other tests run in parallel in this process).
+    db.read_conns.clear();
+    let query = crate::engine::thread::ThreadQuery {
+        entities: vec!["harbour".to_string()],
+        phrases: Vec::new(),
+        topic_rids: Vec::new(),
+    };
+
+    let holder = Holder::take(&path);
+    let out = db.recall_thread_v2("default", &query, 10);
+    let waited = holder.released();
+    holder.join();
+
+    out.expect("a read snapshot must succeed under another writer's lock");
+    assert!(
+        !waited,
+        "recall_thread_v2 waited for the write lock: its read snapshot took it"
+    );
+}
+
 /// The rebuild runs its DELETE inside its own transaction, so a rebuild that
 /// fails part-way keeps the previous counts instead of an empty table.
 #[test]
@@ -434,8 +489,11 @@ fn nested_savepoint_does_not_commit_the_outer_transaction() {
 
 /// Rule 10 (CONCURRENCY.md), enforced on the source: every engine
 /// transaction goes through `unchecked_transaction()` (IMMEDIATE by default
-/// on the write connection) or `SavepointGuard`. A bare `SAVEPOINT` or
-/// `BEGIN` string would open a DEFERRED transaction and bring #298 back.
+/// on the write connection) or `SavepointGuard`. A raw `SAVEPOINT`/`BEGIN`/
+/// `RELEASE` string would open a DEFERRED transaction and bring #298 back,
+/// and an explicit `Deferred` is allowed only for the one read-only snapshot
+/// that may run on the write connection. A tripwire, not a proof: it reads
+/// string literals and spellings, not what the code executes.
 #[test]
 fn no_bare_savepoint_or_begin_outside_the_guard() {
     fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
@@ -448,34 +506,61 @@ fn no_bare_savepoint_or_begin_outside_the_guard() {
             }
         }
     }
-    let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    /// A string literal whose text starts (after whitespace) with a
+    /// transaction keyword. Upper case anywhere (the codebase's SQL
+    /// convention); any case on a line that executes SQL, so word lists
+    /// that happen to contain "begin" or "release" stay quiet.
+    fn opens_transaction_literal(code: &str) -> bool {
+        let runs_sql = ["execute", "prepare", "query"]
+            .iter()
+            .any(|m| code.contains(m));
+        let lower = code.to_ascii_lowercase();
+        lower.match_indices('"').any(|(i, _)| {
+            let rest = lower[i + 1..].trim_start();
+            let original = code[i + 1..].trim_start();
+            ["savepoint", "begin", "release"].iter().any(|kw| {
+                let word = rest.starts_with(kw)
+                    && rest[kw.len()..]
+                        .chars()
+                        .next()
+                        .is_none_or(|c| !c.is_ascii_alphanumeric() && c != '_');
+                word && (runs_sql || original.starts_with(&kw.to_ascii_uppercase()))
+            })
+        })
+    }
+
+    let crates = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .to_path_buf();
     let mut files = Vec::new();
-    walk(&src, &mut files);
+    walk(&crates.join("yantrikdb-core").join("src"), &mut files);
+    walk(&crates.join("yantrikdb-python").join("src"), &mut files);
     assert!(files.len() > 50, "walked too few files: {}", files.len());
 
-    let allowed = |p: &std::path::Path| {
-        let s = p.to_string_lossy().replace('\\', "/");
+    let norm = |p: &std::path::Path| p.to_string_lossy().replace('\\', "/");
+    let mut offenders = Vec::new();
+    for f in &files {
+        let path = norm(f);
         // The guard itself, and tests that drive SQLite directly on their
         // own connections (this file's holders, the guard's own tests).
-        s.ends_with("engine/savepoint.rs") || s.contains("engine/tests/")
-    };
-    let mut offenders = Vec::new();
-    for f in files.iter().filter(|f| !allowed(f)) {
+        if path.ends_with("engine/savepoint.rs") || path.contains("engine/tests/") {
+            continue;
+        }
         let text = std::fs::read_to_string(f).unwrap();
         for (i, line) in text.lines().enumerate() {
             let code = line.split("//").next().unwrap_or("");
-            if code.contains("\"SAVEPOINT")
-                || code.contains("\"BEGIN")
-                || code.contains("\"RELEASE ")
-            {
-                offenders.push(format!("{}:{}: {}", f.display(), i + 1, line.trim()));
+            let deferred = code.contains("TransactionBehavior::Deferred")
+                && !path.ends_with("engine/thread.rs");
+            if opens_transaction_literal(code) || deferred {
+                offenders.push(format!("{path}:{}: {}", i + 1, line.trim()));
             }
         }
     }
     assert!(
         offenders.is_empty(),
         "open transactions with SavepointGuard or unchecked_transaction(), \
-         not raw SQL (Rule 10, #298):\n{}",
+         not raw SQL or an explicit Deferred (Rule 10, #298):\n{}",
         offenders.join("\n")
     );
 }
