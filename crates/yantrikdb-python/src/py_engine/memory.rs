@@ -11,12 +11,15 @@ use super::{map_err, plan_embed, py_vector, query_plan, run_detached, EmbedPlan,
 /// signature.
 ///
 /// The engine can only reach its own embedder; a callable attached through
-/// `set_embedder(obj)` lives here. Both the window probe and the chunk
-/// backfill need exactly this bridge (issue #273).
+/// `set_embedder(obj)` lives here (issue #273). Its callers: the window probe
+/// (`detect_embedder_window`) and the cluster writes that embed their text
+/// on the caller's behalf (`summarize_cluster`, `record_synthesis`,
+/// `consolidate_cluster`). The chunk backfill and `refresh_embeddings` embed
+/// many texts per call and use [`py_embed_batch`] instead.
 ///
 /// The closure runs inside a detached engine call (#271) and attaches to the
 /// GIL only for each `encode()`, so the engine's own work between embeds
-/// (SQLite reads and writes) runs with the GIL released. Both callers embed
+/// (SQLite reads and writes) runs with the GIL released. Every caller embeds
 /// outside the engine's connection lock, so re-attaching here cannot wait on
 /// the GIL while holding a lock another GIL-holding thread wants.
 pub(crate) fn py_embed(
