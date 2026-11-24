@@ -1902,27 +1902,25 @@ mod tests {
     fn concurrent_apply_ops_applies_each_op_once() {
         let a = YantrikDB::new_with_actor(":memory:", 8, "A").unwrap();
         for i in 0..15 {
-            let rid = a
-                .record(
-                    &format!("from A, memory {i} about alice and acme"),
-                    "episodic",
-                    0.5,
-                    0.0,
-                    604800.0,
-                    &empty_meta(),
-                    &vec_seed(1.0 + i as f32, 8),
-                    "default",
-                    0.8,
-                    "general",
-                    "user",
-                    None,
-                )
-                .unwrap();
+            a.record(
+                &format!("from A, memory {i} about alice and acme"),
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &empty_meta(),
+                &vec_seed(1.0 + i as f32, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
             a.relate(&format!("Alice{i}"), "Acme", "works_at", 1.0)
                 .unwrap();
-            let _ = rid;
         }
-        let ops = extract_ops_since(&*a.conn(), None, None, None, 1000).unwrap();
+        let ops = extract_ops_since(&a.conn(), None, None, None, 1000).unwrap();
 
         for trial in 0..6 {
             let b = YantrikDB::new_with_actor(":memory:", 8, "B").unwrap();

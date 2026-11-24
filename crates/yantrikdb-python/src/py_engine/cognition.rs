@@ -447,6 +447,6 @@ impl PyYantrikDB {
     #[pyo3(signature = (batch=10_000))]
     fn maintain_source_turn_backfill(slf: &Bound<'_, Self>, batch: usize) -> PyResult<PyObject> {
         let out = Self::detached(slf, |db| db.maintain_source_turn_backfill(batch))?;
-        to_py(slf.py(), serde_json::to_value(&out))
+        to_py(slf.py(), serde_json::to_value(out))
     }
 }

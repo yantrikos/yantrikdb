@@ -38,6 +38,9 @@ pub(crate) const META_WINDOW_DIGEST: &str = "embedder_window_digest";
 /// protocol: `(chunk_idx, embedding)`, idx 1-based.
 pub(crate) type ChunkVectors = Vec<(usize, Vec<f32>)>;
 
+/// A record's window byte ranges, as `chunk::chunk_ranges` returns them.
+type ChunkRanges = Vec<(usize, usize)>;
+
 impl YantrikDB {
     /// Persist the probed window so a restart does not silently
     /// deactivate chunking. Best-effort: the window is an optimization
@@ -310,7 +313,8 @@ impl YantrikDB {
         const BATCH_WINDOWS: usize = 256;
         let mut records = 0usize;
         let mut vectors = 0usize;
-        let mut group: Vec<(String, String, Vec<(usize, usize)>)> = Vec::new();
+        // (rid, plaintext, window byte ranges) of the records in this group.
+        let mut group: Vec<(String, String, ChunkRanges)> = Vec::new();
         let mut group_windows = 0usize;
         let mut candidates = candidates.into_iter().peekable();
         while let Some((rid, stored_text)) = candidates.next() {
