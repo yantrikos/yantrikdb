@@ -1537,3 +1537,79 @@ fn concurrent_installs_of_one_pack_end_mounted_once() {
     let texts = recall_texts(&db, &vec_on(3, 0.05), 5);
     assert!(texts.iter().any(|t| t.contains("gluons")), "{texts:?}");
 }
+
+/// A re-install that cannot replace the installed file leaves the pack
+/// mounted. The install unmounted first and then failed the rename when
+/// something still held the old file open (a recall's reference, here a
+/// second SQLite handle; on Windows SQLite opens without FILE_SHARE_DELETE),
+/// leaving the pack unmounted. Elsewhere the rename succeeds and the
+/// re-install does too; either way the pack must stay mounted and served.
+#[test]
+fn reinstall_that_cannot_replace_the_file_keeps_the_pack_mounted() {
+    let dir = tmpdir("reinstall-held");
+    let pack = dir.join("physics.ydbpack");
+    build_pack(
+        &dir,
+        pack.to_str().unwrap(),
+        "E0",
+        &[("gluons bind quarks", 3)],
+    );
+    let db = host(&dir, "E0");
+    db.install_pack(pack.to_str().unwrap()).unwrap();
+    let installed = db.pack_dir().unwrap().join("physics-1.0.0.ydbpack");
+    let holder = rusqlite::Connection::open(&installed).unwrap();
+    let _: i64 = holder
+        .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+        .unwrap();
+
+    let again = db.install_pack(pack.to_str().unwrap());
+    if cfg!(windows) {
+        assert!(
+            again.is_err(),
+            "the held file cannot be replaced on Windows"
+        );
+    }
+    assert_eq!(db.mounted_packs().len(), 1, "re-install result: {again:?}");
+    let texts = recall_texts(&db, &vec_on(3, 0.05), 5);
+    assert!(texts.iter().any(|t| t.contains("gluons")), "{texts:?}");
+    drop(holder);
+}
+
+/// A re-install whose final mount loses to a concurrent mount of the same
+/// pack keeps the installed copy. The error arm deleted it while the
+/// pack_mounts row stayed, so the pack was gone at the next open.
+#[test]
+fn reinstall_racing_a_mount_keeps_the_installed_copy() {
+    let dir = tmpdir("reinstall-race");
+    let pack = dir.join("physics.ydbpack");
+    build_pack(
+        &dir,
+        pack.to_str().unwrap(),
+        "E0",
+        &[("gluons bind quarks", 3)],
+    );
+    let db = host(&dir, "E0");
+    let path = pack.to_str().unwrap().to_string();
+    db.install_pack(&path).unwrap();
+    let installed = db.pack_dir().unwrap().join("physics-1.0.0.ydbpack");
+    for trial in 0..20 {
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let result = std::thread::scope(|s| {
+            s.spawn(|| {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = db.mount_pack(&path);
+                }
+            });
+            let r = db.install_pack(&path);
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            r
+        });
+        assert!(result.is_ok(), "trial {trial}: {result:?}");
+        assert!(
+            installed.exists(),
+            "trial {trial}: the installed copy was deleted"
+        );
+        assert_eq!(db.installed_packs().unwrap().len(), 1, "trial {trial}");
+        assert_eq!(db.mounted_packs().len(), 1, "trial {trial}");
+    }
+}

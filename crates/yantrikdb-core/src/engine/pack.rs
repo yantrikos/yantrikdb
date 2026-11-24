@@ -2103,61 +2103,121 @@ impl YantrikDB {
             .zip(dest.canonicalize().ok())
             .map(|(a, b)| a == b)
             .unwrap_or(false);
-        // Unmount any current mount of this pack BEFORE replacing its file:
-        // a mounted pack holds its file open, and on Windows SQLite opens
-        // without FILE_SHARE_DELETE, so the file cannot be replaced under
-        // it. (A recall still holding the old mount keeps it open; the
-        // replace then fails cleanly rather than tearing that reader.)
-        if self.packs.read().iter().any(|p| p.pack_id() == pack_id) {
-            self.unmount_pack(&pack_id)?;
-        }
-        if !same {
-            // Write the new copy beside the destination and rename it into
-            // place, so nothing ever mounts or reads a half-written pack.
-            let tmp = dir.join(format!(
+
+        // 1. Write the new copy (or converted copy) beside the destination
+        //    BEFORE touching the current mount: that is the slow step, and
+        //    the pack stays mounted and served while it runs.
+        let tmp = (!same).then(|| {
+            dir.join(format!(
                 ".{file_name}.tmp.{}.{}",
                 std::process::id(),
                 next_install_tmp()
-            ));
-            let written = self.write_install_copy(path, &tmp, &manifest, &dir);
-            if let Err(e) = written.and_then(|()| {
-                std::fs::rename(&tmp, &dest).map_err(|e| YantrikDbError::PackUnreadable {
-                    path: dest.display().to_string(),
-                    reason: format!("could not move the new copy into place: {e}"),
-                })
-            }) {
-                let _ = std::fs::remove_file(&tmp);
+            ))
+        });
+        if let Some(tmp) = tmp.as_ref() {
+            if let Err(e) = self.write_install_copy(path, tmp, &manifest, &dir) {
+                let _ = std::fs::remove_file(tmp);
                 return Err(e);
             }
         }
-        // Mount before recording: a pack that cannot be mounted must not
-        // be left in the table for open() to trip over every time.
+
+        // 2. Unmount the current mount, then move the new copy into place.
+        //    A mounted pack holds its file open, and on Windows SQLite opens
+        //    without FILE_SHARE_DELETE, so the file cannot be replaced under
+        //    it. A recall still holding the old mount keeps it open too; the
+        //    rename then fails, and the old mount is put back so a failed
+        //    re-install leaves the pack exactly as it was.
+        let previous: Option<(String, PackTrust)> = self
+            .packs
+            .read()
+            .iter()
+            .find(|p| p.pack_id() == pack_id)
+            .map(|p| (p.path.clone(), p.trust));
+        if previous.is_some() {
+            self.unmount_pack(&pack_id)?;
+        }
+        let restore_previous = || {
+            if let Some((old_path, trust)) = previous.as_ref() {
+                let opts = MountOptions {
+                    allow_unverified_embedder: *trust == PackTrust::Unverified,
+                    ..MountOptions::default()
+                };
+                if let Err(e) = self.mount_pack_opts(old_path, &opts) {
+                    tracing::warn!(
+                        pack = %pack_id,
+                        error = %e,
+                        "could not put the previous mount back after a failed re-install"
+                    );
+                }
+            }
+        };
+        if let Some(tmp) = tmp.as_ref() {
+            if let Err(e) = std::fs::rename(tmp, &dest) {
+                let _ = std::fs::remove_file(tmp);
+                restore_previous();
+                return Err(YantrikDbError::PackUnreadable {
+                    path: dest.display().to_string(),
+                    reason: format!("could not move the new copy into place: {e}"),
+                });
+            }
+        }
+
+        // 3. Mount, then record. A pack that cannot be mounted must not be
+        //    left in the table for open() to trip over every time.
         let dest_str = dest.to_string_lossy().to_string();
+        let record = |id: &str| -> Result<()> {
+            let conn = self.conn.lock();
+            conn.execute(
+                "INSERT OR REPLACE INTO pack_mounts \
+                 (pack_id, file_name, name, version, content_digest, installed_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    id,
+                    &file_name,
+                    &manifest.name,
+                    &manifest.version,
+                    manifest.content_digest.as_deref(),
+                    super::now(),
+                ],
+            )?;
+            Ok(())
+        };
         match self.mount_pack(&dest_str) {
             Ok(id) => {
-                let conn = self.conn.lock();
-                conn.execute(
-                    "INSERT OR REPLACE INTO pack_mounts \
-                     (pack_id, file_name, name, version, content_digest, installed_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    rusqlite::params![
-                        &id,
-                        &file_name,
-                        &manifest.name,
-                        &manifest.version,
-                        manifest.content_digest.as_deref(),
-                        super::now(),
-                    ],
-                )?;
+                record(&id)?;
                 Ok(id)
             }
+            // A concurrent mount_pack of the same pack (mounts do not take
+            // the install lock) landed between the unmount and this mount.
+            // The pack is mounted and the installed copy is in place: record
+            // it, so the next open remounts the installed copy, and succeed
+            // as a sequential re-install would. Deleting the copy here lost
+            // the pack at the next open while its row stayed.
+            Err(YantrikDbError::PackAlreadyMounted { .. }) => {
+                record(&pack_id)?;
+                Ok(pack_id)
+            }
             Err(e) => {
-                if !same {
+                // Remove the file only if no install of this pack is on
+                // record: a recorded install's copy is what the next open
+                // remounts.
+                if !same && !self.pack_is_installed(&pack_id)? {
                     let _ = std::fs::remove_file(&dest);
                 }
+                restore_previous();
                 Err(e)
             }
         }
+    }
+
+    /// Whether `pack_id` has a row in `pack_mounts`.
+    fn pack_is_installed(&self, pack_id: &str) -> Result<bool> {
+        let conn = self.conn.lock();
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pack_mounts WHERE pack_id = ?1)",
+            rusqlite::params![pack_id],
+            |r| r.get(0),
+        )?)
     }
 
     /// Write the copy an install mounts, at `tmp`; the caller renames it
@@ -2258,6 +2318,9 @@ impl YantrikDB {
         let Some(dir) = self.pack_dir() else {
             return Vec::new();
         };
+        // Not while an install or uninstall is replacing a file (#271
+        // review): the install lock orders them.
+        let _serial = self.pack_install_lock.lock();
         let installed = match self.installed_packs() {
             Ok(v) => v,
             Err(e) => {
