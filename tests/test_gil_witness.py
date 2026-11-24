@@ -5,12 +5,17 @@ call holds no borrow of the wrapper. They cannot prove the GIL is released: with
 the GIL held, another thread never runs during the call, so it never sees a
 borrow either, and those tests pass on a build with no `py.detach` at all.
 
-This file proves the release itself, deterministically. With the switch interval
-at 100 s the interpreter never forces a GIL handoff during a test, so an observer
-thread can run while a call is in progress only if the call gives the GIL up
-itself. A call that holds the GIL is seen exactly 0 times, on any runner; a slow
-runner can only delay a release being seen, never invent one. Two controls keep
-the witness honest: a no-op must be seen 0 times, a `sleep` at least once.
+This file proves the release itself. With the switch interval at 100 s the
+interpreter never forces a GIL handoff during a test, so an observer thread can
+run while a call is in progress only if the call gives the GIL up itself. That
+half is deterministic: a call that holds the GIL is seen exactly 0 times, on any
+runner. The other half is a matter of attempts: the observer wakes every half
+millisecond, so a call is seen once one of its detached stretches overlaps a
+wake-up. Calls that spend tens of microseconds or more detached are seen within
+a few hundred attempts; a detached stretch of a microsecond or two (a call that
+fails at once, inside the detach) can be missed, and such a call is not
+witnessed here. Controls keep the witness honest: a no-op must be seen 0 times,
+a `sleep` at least once.
 
 Call the binding bare. Wrapping it in anything that sleeps or blocks (a retry
 with backoff, a lock) releases the GIL on the wrapper's behalf and fakes a pass.
@@ -67,11 +72,16 @@ def db(tmp_path):
     store.close()
 
 
-def _seen_during(call, attempts=300, interval=100):
+def _seen_during(call, attempts=2000, interval=100):
     """How many times an observer thread ran while `call()` was in progress.
 
-    Stops at the first sighting. 0 after `attempts` calls means the call never
-    gave the GIL up.
+    Stops at the first sighting, so a call that releases the GIL costs a few
+    attempts; only one that holds it runs all of them. 0 after `attempts` calls
+    means the call never gave the GIL up for long enough to be seen.
+
+    The pause between calls is jittered: a fixed pause can fall into step with
+    the observer's own sleep, so every call starts while the observer is still
+    asleep and a short release is missed every time (seen on Linux runners).
 
     Between calls the main thread sleeps, outside the window, and that is not
     optional. CPython forces a handoff once a waiting thread has waited a full
@@ -82,6 +92,7 @@ def _seen_during(call, attempts=300, interval=100):
     that holds the GIL for the whole interval.
     """
     state = {"in_call": False, "seen": 0, "stop": False}
+    jitter = random.Random(271)
 
     def observer():
         while not state["stop"]:
@@ -100,7 +111,7 @@ def _seen_during(call, attempts=300, interval=100):
             state["in_call"] = False
             if state["seen"]:
                 break
-            time.sleep(0.001)
+            time.sleep(0.001 + 0.001 * jitter.random())
     finally:
         state["in_call"] = False
         state["stop"] = True
