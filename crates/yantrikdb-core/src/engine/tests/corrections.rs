@@ -1319,6 +1319,7 @@ fn forget_deletes_durable_entity_links() {
 /// claim because both endpoints occur in the memory's text, `correct()` then
 /// rewrote the text out from under it, and the claim stayed `valid_to` NULL
 /// with `status_suggestion = "active"` next to its own replacement.
+#[cfg(feature = "bundled-embedder")] // with_default needs the bundled embedder
 #[test]
 fn correct_closes_the_window_on_claims_whose_grounding_left_the_text() {
     use crate::engine::graph_ops::StatedClaim;
@@ -1420,6 +1421,7 @@ fn correct_closes_the_window_on_claims_whose_grounding_left_the_text() {
 /// `relate()` edges carry no `source_memory_rid`, so a correction elsewhere
 /// must never close them — the scope of the safety half is this memory's own
 /// provenance, nothing wider.
+#[cfg(feature = "bundled-embedder")] // with_default needs the bundled embedder
 #[test]
 fn correct_leaves_manual_relate_edges_alone() {
     let db = YantrikDB::with_default(":memory:").unwrap();
