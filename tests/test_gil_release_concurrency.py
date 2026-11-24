@@ -1225,3 +1225,57 @@ def test_a_call_back_from_a_pre_detach_encode_skips_a_pending_swap(tmp_path, nam
         assert emb.latencies and max(emb.latencies) < 1.0, emb.latencies
     finally:
         db.close()
+
+
+@_needs_potion
+def test_a_relayed_call_back_from_a_draft_encode_does_not_hold_up_a_swap(tmp_path):
+    # draft_memories_from_summary encodes its facts before it detaches. It
+    # took the engine first and marked its thread, which covers a call
+    # encode() makes back into the store on the same thread, but not one it
+    # hands to a helper thread and waits on: that call waited at the swap
+    # gate while the swap waited for the draft, until the swap failed at
+    # its 10 s deadline. The facts are now encoded before the engine is
+    # taken (`planned`, #302 review 4), so nothing holds the swap up.
+    db = YantrikDB(os.path.join(str(tmp_path), "draft-relay.db"), 256)
+    helper = concurrent.futures.ThreadPoolExecutor(1)
+    try:
+        seed = db.record("seed", embedding=[0.05] * 256)
+
+        class Relays:
+            armed = False
+            entered = threading.Event()
+
+            def encode(self, text):
+                if self.armed and text != "__yantrikdb_probe__":
+                    self.armed = False
+                    self.entered.set()
+                    time.sleep(0.3)  # the swap is pending by now
+                    helper.submit(db.get, seed).result()
+                return _vec(text, 256)
+
+        emb = Relays()
+        db.set_embedder(emb, allow_unverified_embedder=True)
+        emb.armed = True
+        out = {}
+
+        def drafter():
+            try:
+                out["rids"] = db.draft_memories_from_summary("We decided to ship on Friday.")
+            except Exception as e:  # noqa: BLE001
+                out["error"] = repr(e)
+
+        t = threading.Thread(target=drafter)
+        t.start()
+        assert emb.entered.wait(10)
+        started = time.perf_counter()
+        try:
+            db.set_embedder_named("potion-base-8M")
+        finally:
+            took = time.perf_counter() - started
+            t.join(30)
+        assert took < 5, took
+        assert "error" not in out, out
+        assert out["rids"]
+    finally:
+        helper.shutdown()
+        db.close()

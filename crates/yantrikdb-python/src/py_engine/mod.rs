@@ -1522,28 +1522,29 @@ impl PyYantrikDB {
     /// passed (#302 review 3). The wait is still bounded: the swap gives up
     /// at its own deadline (10 s) and the gate drops on every way out of it.
     ///
-    /// Two waits the marker cannot tell apart from a new call, and that
-    /// only that deadline ends. The swap then fails ("did not get it within
-    /// 10s") and the parked call goes ahead:
-    /// - a relayed callback: an `encode()` that hands its call into the
-    ///   store to another thread and waits for it. The other thread holds
-    ///   no mark, so its call waits at the gate while the swap waits for the
-    ///   `encode()` caller. (With the gate's old 2 s limit this was a 2 s
-    ///   stall and the swap went through.)
-    /// - two stores swapping at once, each with a call in flight whose
-    ///   callback calls into the other.
-    ///
     /// A binding that embeds before it detaches runs the Python embedder's
     /// `encode()` before it takes the engine ([`planned`](Self::planned)),
     /// so a call that `encode()` makes back into the store, on its own
     /// thread or by handing it to another one, holds up nothing the swap
     /// waits for: it waits here, then runs on the swapped engine (#302
-    /// review 4). The marker above is for the bindings whose embedder runs
-    /// inside the detached call, holding the engine. `record()` and the
-    /// other methods that embed through `embed_text` hold the wrapper's
-    /// borrow (but no engine reference) across `encode()`; a swap then
-    /// waits on that borrow, and a call `encode()` makes back into the
-    /// store waits here until the swap gives up (#297 moves them).
+    /// review 4). The marker above is for the calls that do hold something
+    /// across `encode()`: the bindings whose embedder runs inside the
+    /// detached call, holding the engine (rechunk, detect_embedder_window,
+    /// refresh_embeddings, the cluster writes, a draft's chunk windows),
+    /// and `record()` and the other methods that embed through
+    /// `embed_text`, holding the wrapper's borrow.
+    ///
+    /// Two waits the marker cannot tell apart from a new call, and that
+    /// only the swap's deadline ends. The swap then fails ("did not get it
+    /// within 10s") and the parked call goes ahead:
+    /// - a relayed callback from one of those calls: an `encode()` that
+    ///   hands its call into the store to another thread and waits for it.
+    ///   The other thread holds no mark, so its call waits at the gate
+    ///   while the swap waits for the `encode()` caller. (With the gate's
+    ///   old 2 s limit this was a 2 s stall and the swap went through.) The
+    ///   planning bindings are not affected: they hold nothing to wait for.
+    /// - two stores swapping at once, each with a call in flight whose
+    ///   callback calls into the other.
     ///
     /// try_borrow, not borrow: a method holding the mutable borrow
     /// (`close()`, the swap, `set_embedder()` storing its embedder) can be

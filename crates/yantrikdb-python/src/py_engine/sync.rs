@@ -546,39 +546,43 @@ impl PyYantrikDB {
         domain: &str,
     ) -> PyResult<Vec<String>> {
         let py = slf.py();
-        let (db, embedder) = Self::engine_and_embedder(slf)?;
         // An embedder the caller attached outranks the engine's own, as in
         // every other write (`embed_text`'s precedence). The engine cannot
         // hold a Python embedder, so its `draft_memories_from_summary` raised
         // "No embedder configured" on a store that had only one.
-        let Some(emb) = embedder else {
-            return run_detached(py, db, |db| {
-                db.draft_memories_from_summary(summary, namespace, domain)
-            });
-        };
+        //
         // The facts go through the engine's record_text route with the
         // caller's embedder: a fact past the known window gets its chunk
         // vectors as it is written, as on the engine path.
         //
-        // Every fact is encoded here, before the call detaches, under one
-        // hold of the GIL and with the store marked (a call encode() makes
-        // back into the store skips a pending swap's gate). Re-taking the
+        // Every fact is encoded before the call detaches, under one hold of
+        // the GIL, and before the engine is taken (`planned`), so a call
+        // encode() makes back into the store holds up no swap. Re-taking the
         // GIL inside the detached call for each fact waited about a switch
         // interval per fact whenever another thread was busy: 60 drafts
         // took 1,021 ms beside a CPU-bound thread against 164 ms alone
         // (#304 review 4). The detached call re-takes the GIL only for
-        // texts it was not handed, the chunk windows of a long fact.
-        let facts = yantrikdb_core::YantrikDB::draft_facts_from_summary(summary);
-        let mut vectors: std::collections::HashMap<String, Vec<f32>> =
-            std::collections::HashMap::with_capacity(facts.len());
-        super::in_engine_call(&db, || -> PyResult<()> {
+        // texts it was not handed, the chunk windows of a long fact; it
+        // marks its thread for those (`run_detached`).
+        type Planned = Option<(std::collections::HashMap<String, Vec<f32>>, PyObject)>;
+        let (db, planned) = Self::planned(slf, |e| -> PyResult<Planned> {
+            let Some(emb) = e.embedder.as_ref() else {
+                return Ok(None);
+            };
+            let facts = yantrikdb_core::YantrikDB::draft_facts_from_summary(summary);
+            let mut vectors = std::collections::HashMap::with_capacity(facts.len());
             for fact in facts {
                 let out = emb.call_method1(py, "encode", (fact.as_str(),))?;
                 let vector = py_vector(py, &out)?;
                 vectors.insert(fact, vector);
             }
-            Ok(())
+            Ok(Some((vectors, emb.clone_ref(py))))
         })?;
+        let Some((vectors, emb)) = planned else {
+            return run_detached(py, db, |db| {
+                db.draft_memories_from_summary(summary, namespace, domain)
+            });
+        };
         let embed_window = super::py_embed(&emb);
         run_detached(py, db, |db| {
             db.draft_memories_from_summary_embedded_by(summary, namespace, domain, |text: &str| {
