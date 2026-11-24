@@ -401,7 +401,7 @@ fn check_redundancy_in_namespace(
                     });
                 } else if let Some((cat_name, token_a, token_b)) = {
                     // CRITICAL: bind the conn guard inside this block so it
-                    // is dropped before conflict_exists() below tries to take
+                    // is dropped before create_conflict_if_absent() below takes
                     // the same connection mutex. Without this scoping, the
                     // if-let scrutinee's temporary MutexGuard lives through
                     // the body and self-deadlocks the calling thread (the
@@ -420,11 +420,12 @@ fn check_redundancy_in_namespace(
                         rows[i].0,
                         rows[j].0
                     );
-                    if !crate::conflict::conflict_exists(db, &rows[i].0, &rows[j].0).unwrap_or(true)
                     {
+                        // One statement checks and inserts, so concurrent
+                        // checks (detached since #271) record it once.
                         let conflict_type =
                             crate::distributed::conflict::category_to_conflict_type(&cat_name);
-                        let _ = crate::conflict::create_conflict(
+                        let _ = crate::conflict::create_conflict_if_absent(
                             db,
                             &conflict_type,
                             &rows[i].0,
@@ -480,7 +481,7 @@ fn check_redundancy_in_namespace(
             if sim > cat_threshold && sim <= threshold {
                 // Same self-deadlock fix as the first pass above: bind the
                 // conn guard inside a scrutinee block so it drops before
-                // conflict_exists() reacquires the connection mutex.
+                // create_conflict_if_absent() reacquires the connection mutex.
                 if let Some((cat_name, token_a, token_b)) = {
                     let conn = db.conn();
                     check_substitution_category_pair(&*conn, &rows[i].1, &rows[j].1)
@@ -494,11 +495,12 @@ fn check_redundancy_in_namespace(
                         rows[i].0,
                         rows[j].0
                     );
-                    if !crate::conflict::conflict_exists(db, &rows[i].0, &rows[j].0).unwrap_or(true)
                     {
+                        // One statement checks and inserts, so concurrent
+                        // checks (detached since #271) record it once.
                         let conflict_type =
                             crate::distributed::conflict::category_to_conflict_type(&cat_name);
-                        let _ = crate::conflict::create_conflict(
+                        let _ = crate::conflict::create_conflict_if_absent(
                             db,
                             &conflict_type,
                             &rows[i].0,
@@ -1583,6 +1585,82 @@ mod tests {
     /// inappropriate here because this is a pure sync core test. If the
     /// bug regresses, the entire test binary will hang and CI will catch
     /// it via the 60-second default cargo test timeout.
+    /// Concurrent redundancy checks record each substitution conflict once.
+    /// check_redundancy checked conflict_exists() and then created the
+    /// conflict under separate connection guards, and the trigger checks run
+    /// with the GIL released (#271), so two checks at once both wrote it.
+    #[test]
+    fn concurrent_redundancy_checks_record_each_substitution_conflict_once() {
+        use rusqlite::params;
+
+        const PAIRS: usize = 8;
+        for trial in 0..20 {
+            let db = YantrikDB::new(":memory:", 8).unwrap();
+            let ts = now();
+            let hlc_bytes = db.tick_hlc().to_bytes().to_vec();
+            db.conn()
+                .execute(
+                    "INSERT INTO substitution_categories
+                     (id, name, conflict_mode, status, created_at, updated_at, hlc, origin_actor)
+                     VALUES ('cat-race', 'race_category', 'exclusive', 'active', ?1, ?1, ?2, 'test')",
+                    params![ts, hlc_bytes],
+                )
+                .unwrap();
+            for p in 0..PAIRS {
+                for side in ["a", "b"] {
+                    let tok = format!("qzrace{p}{side}");
+                    let hlc_bytes = db.tick_hlc().to_bytes().to_vec();
+                    db.conn()
+                        .execute(
+                            "INSERT INTO substitution_members
+                             (id, category_id, token_normalized, token_display,
+                              confidence, source, status, created_at, updated_at,
+                              hlc, origin_actor)
+                             VALUES (?1, 'cat-race', ?2, ?2, 0.9, 'test', 'active',
+                                     ?3, ?3, ?4, 'test')",
+                            params![format!("m-{p}-{side}"), tok, ts, hlc_bytes],
+                        )
+                        .unwrap();
+                    db.record(
+                        &format!("project {p} keeps its user profiles in {tok} for auth"),
+                        "semantic",
+                        0.8,
+                        0.0,
+                        604800.0,
+                        &serde_json::json!({}),
+                        &vec_seed(1.0 + p as f32 * 3.0, 8),
+                        &format!("ns{p}"),
+                        0.9,
+                        "general",
+                        "user",
+                        None,
+                    )
+                    .unwrap();
+                }
+            }
+            let barrier = std::sync::Barrier::new(3);
+            std::thread::scope(|s| {
+                for _ in 0..3 {
+                    s.spawn(|| {
+                        barrier.wait();
+                        check_redundancy(&db, 0.85).unwrap();
+                    });
+                }
+            });
+            let (rows, pairs): (i64, i64) = db
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*), COUNT(DISTINCT min(memory_a, memory_b) || '|' || \
+                     max(memory_a, memory_b)) FROM conflicts",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert!(pairs > 0, "trial {trial}: the seed produced no conflicts");
+            assert_eq!(rows, pairs, "trial {trial}: duplicate conflict rows");
+        }
+    }
+
     #[test]
     fn test_check_redundancy_no_self_deadlock_on_substitution_category() {
         use rusqlite::params;
