@@ -1453,3 +1453,46 @@ fn mounted_pack_preserves_standing_instruction_facet_lane() {
         "v1.1: a mounted pack's preserved facet must be lane-visible"
     );
 }
+
+/// Two threads mounting the same pack: one mounts, the other gets the
+/// `PackAlreadyMounted` a sequential second mount gets. The check ran under
+/// a read lock and the push under a separate write lock, so both mounted
+/// it once the Python binding stopped serialising them on the GIL (#271).
+#[test]
+fn concurrent_mounts_of_one_pack_mount_it_once() {
+    let dir = tmpdir("concurrent-mount");
+    let pack = dir.join("physics.ydbpack");
+    build_pack(
+        &dir,
+        pack.to_str().unwrap(),
+        "E0",
+        &[("gluons bind quarks", 3)],
+    );
+    let db = host(&dir, "E0");
+    let path = pack.to_str().unwrap().to_string();
+    for trial in 0..20 {
+        let barrier = std::sync::Barrier::new(2);
+        let results: Vec<_> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    s.spawn(|| {
+                        barrier.wait();
+                        db.mount_pack(&path)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let ok = results.iter().filter(|r| r.is_ok()).count();
+        let already = results
+            .iter()
+            .filter(|r| matches!(r, Err(YantrikDbError::PackAlreadyMounted { .. })))
+            .count();
+        assert_eq!(
+            (ok, already, db.mounted_packs().len()),
+            (1, 1, 1),
+            "trial {trial}: {results:?}"
+        );
+        db.unmount_all_packs();
+    }
+}

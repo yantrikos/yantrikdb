@@ -1094,7 +1094,18 @@ impl YantrikDB {
         let index = Self::build_vec_index_with_enc(&conn, manifest.embedder.dim, None)?;
         let scoring = Self::load_scoring_cache(&conn)?;
 
-        self.packs.write().push(Arc::new(MountedPack {
+        // Check again under the write lock: the check above ran under a
+        // read lock that was released for the slow work since, and two
+        // mounts of one pack (two threads, now that the Python binding
+        // releases the GIL, #271) both passed it.
+        let mut packs = self.packs.write();
+        if packs.iter().any(|p| p.pack_id() == pack_id) {
+            return Err(YantrikDbError::PackAlreadyMounted {
+                pack_id,
+                path: path.to_string(),
+            });
+        }
+        packs.push(Arc::new(MountedPack {
             manifest,
             path: path.to_string(),
             trust,
@@ -1438,18 +1449,25 @@ impl YantrikDB {
     /// calibration counter — which is the property that makes mounting
     /// reversible in a way importing is not.
     pub fn unmount_pack(&self, pack_id: &str) -> Result<bool> {
-        let mut packs = self.packs.write();
-        let before = packs.len();
-        packs.retain(|p| p.pack_id() != pack_id);
-        Ok(packs.len() != before)
+        // Take the removed packs out under the write lock and drop them
+        // after it: the last Arc closes the pack's SQLite connection, which
+        // must not happen while every mount and recall waits on the lock.
+        let removed: Vec<Arc<MountedPack>> = {
+            let mut packs = self.packs.write();
+            let (removed, kept) = std::mem::take(&mut *packs)
+                .into_iter()
+                .partition(|p| p.pack_id() == pack_id);
+            *packs = kept;
+            removed
+        };
+        Ok(!removed.is_empty())
     }
 
     /// Unmount every mounted pack. Returns how many were unmounted.
     pub fn unmount_all_packs(&self) -> usize {
-        let mut packs = self.packs.write();
-        let n = packs.len();
-        packs.clear();
-        n
+        // Dropped after the lock is released, as in unmount_pack.
+        let removed = std::mem::take(&mut *self.packs.write());
+        removed.len()
     }
 
     /// Currently mounted packs, in mount order.
