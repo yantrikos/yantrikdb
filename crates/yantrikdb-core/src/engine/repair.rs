@@ -378,7 +378,8 @@ impl YantrikDB {
         // ── Phase 1: scan. Read-only, conn released before any embedding.
         // Matches build_vec_index's visible set so text and index stay in
         // step, exactly as the sibling repair does.
-        type Scanned = (String, String, Option<usize>, String, Option<Vec<u8>>);
+        // (rid, text, blob length, tier, for a cold row: does its blob decode)
+        type Scanned = (String, String, Option<usize>, String, Option<bool>);
         let scanned: Vec<Scanned> = {
             let conn = self.conn();
             let sql = if namespace.is_some() {
@@ -396,15 +397,23 @@ impl YantrikDB {
                  ORDER BY rid"
             };
             let mut stmt = conn.prepare(sql)?;
-            fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<Scanned> {
+            // A cold blob is decoded here, row by row, so the scan never
+            // holds every cold vector in memory at once.
+            let dim = self.embedding_dim();
+            let map_row = |r: &rusqlite::Row<'_>| -> rusqlite::Result<Scanned> {
+                let cold_decodes = r.get::<_, Option<Vec<u8>>>(4)?.map(|blob| {
+                    self.decrypt_embedding(&blob)
+                        .map(|plain| crate::compression::decode_embedding_blob(&plain).len() == dim)
+                        .unwrap_or(false)
+                });
                 Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, Option<i64>>(2)?.map(|n| n as usize),
                     r.get::<_, String>(3)?,
-                    r.get::<_, Option<Vec<u8>>>(4)?,
+                    cold_decodes,
                 ))
-            }
+            };
             match namespace {
                 Some(ns) => stmt
                     .query_map(params![ns], map_row)?
@@ -419,7 +428,7 @@ impl YantrikDB {
         // ── Phase 2: select the unusable rows and, in apply mode, encode
         // them OUTSIDE the conn lock.
         let mut pending: Vec<PendingRefresh> = Vec::new();
-        for (rid, scanned_ciphertext, blob_len, scanned_tier, cold_blob) in scanned {
+        for (rid, scanned_ciphertext, blob_len, scanned_tier, cold_decodes) in scanned {
             // Cold rows hold the blob compressed, so its length says nothing:
             // decode it (only cold blobs are fetched). Encrypted hot rows pad
             // the blob, so a strict length check would false-positive on
@@ -427,15 +436,9 @@ impl YantrikDB {
             // Better to under-repair than to churn a whole corpus on a bad
             // predicate.
             let cold = scanned_tier == "cold";
-            let usable = match (blob_len, cold_blob) {
+            let usable = match (blob_len, cold_decodes) {
                 (None, _) => false,
-                (Some(_), Some(blob)) if cold => self
-                    .decrypt_embedding(&blob)
-                    .map(|plain| {
-                        crate::compression::decode_embedding_blob(&plain).len()
-                            == self.embedding_dim()
-                    })
-                    .unwrap_or(false),
+                (Some(_), Some(decodes)) if cold => decodes,
                 (Some(n), _) if self.is_encrypted() => n > 0,
                 (Some(n), _) => n == expected_len,
             };

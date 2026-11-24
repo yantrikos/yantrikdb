@@ -661,3 +661,79 @@ fn insert_vector_fills_a_missing_vector() {
         "an archived row must not stay vector-searchable"
     );
 }
+
+/// The fills cover cold rows too, in the cold-tier (compressed) format:
+/// a cold row with no vector that one of these APIs indexes must not stay
+/// NULL in SQL, or a later archive skips its tombstone.
+#[test]
+fn record_with_rid_and_insert_vector_fill_a_cold_row_compressed() {
+    let (db, bare) = store_with_bare_rows(2);
+    for rid in &bare {
+        assert!(db.archive(rid).unwrap());
+        assert!(embedding_blob(&db, rid).is_none());
+    }
+
+    let v0 = vec_seed(13.0, 8);
+    db.record_with_rid(
+        &bare[0],
+        "replicated note 0 about the harbour",
+        "episodic",
+        0.5,
+        0.0,
+        604800.0,
+        &empty_meta(),
+        &v0,
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+        1_700_000_000_000_000,
+        &[],
+        "test-embedder",
+        None,
+        crate::provenance::WriteAdmission::Admitted,
+    )
+    .unwrap();
+    let v1 = vec_seed(14.0, 8);
+    db.insert_vector(&bare[1], &v1).unwrap();
+
+    for (rid, v) in [(&bare[0], &v0), (&bare[1], &v1)] {
+        let blob = embedding_blob(&db, rid).expect("the vector must land in SQL");
+        assert!(
+            crate::compression::is_compressed(&blob),
+            "a cold row's vector is stored compressed"
+        );
+        assert!(db.hydrate(rid).unwrap());
+        assert!(db.archive(rid).unwrap());
+        assert!(
+            !vector_hits(&db, v, rid),
+            "an archived row must not stay vector-searchable"
+        );
+    }
+}
+
+/// insert_vector reads the generation, fills SQL and appends to the index
+/// under the sync-writer guard: during a reembed cutover it is refused
+/// rather than stamping an old-space vector as current.
+#[test]
+fn insert_vector_is_refused_during_a_cutover() {
+    let (db, bare) = store_with_bare_rows(1);
+    db.write_router.switch_to_queueing();
+    let refused = db.insert_vector(&bare[0], &vec_seed(15.0, 8));
+    db.write_router.switch_to_normal();
+
+    assert!(
+        matches!(
+            refused,
+            Err(crate::error::YantrikDbError::DeterministicWriteDeferredDuringReembed { .. })
+        ),
+        "{refused:?}"
+    );
+    assert!(
+        embedding_blob(&db, &bare[0]).is_none(),
+        "nothing may be written while refused"
+    );
+    db.insert_vector(&bare[0], &vec_seed(15.0, 8)).unwrap();
+    assert!(embedding_blob(&db, &bare[0]).is_some());
+}

@@ -100,7 +100,7 @@ impl YantrikDB {
         // a NULL as NULL, and the reembed swap is guarded on
         // `embedding_new IS NOT NULL`), and nothing indexes a row without
         // giving SQL its vector (`record_with_rid` on an existing row and
-        // `insert_vector` fill a hot row's missing one). A tombstone for
+        // `insert_vector` fill a row's missing one). A tombstone for
         // it would outlive the row's return to the hot tier and hide the
         // vector a later
         // `refresh_embeddings` gives it, because the index rebuild that
@@ -254,9 +254,11 @@ impl YantrikDB {
     /// is a no-op (the underlying HNSW layer is responsible for de-duping).
     /// Errors propagate from the HNSW backend.
     ///
-    /// If the row is hot and has no vector in SQL (a replicated row), the
-    /// vector is written there too, so a row in the index always has its
-    /// vector in SQL; `archive()` relies on that.
+    /// If the row has no vector in SQL (a replicated row), the vector is
+    /// written there too, compressed for a cold row, so a row in the index
+    /// always has its vector in SQL; `archive()` relies on that. Refused
+    /// with `DeterministicWriteDeferredDuringReembed` while a reembed
+    /// cutover is in progress; retry after it.
     ///
     /// Lock ordering: takes the `conn` briefly for that write, then
     /// `vec_index.write()` — caller must NOT hold a `conn` guard across
@@ -276,17 +278,32 @@ impl YantrikDB {
         // poisons distance math). Reject with a typed error instead, and do
         // it BEFORE the seq counter bumps so a rejected call is a no-op.
         crate::validate::validate_embedding("insert_vector", embedding, self.embedding_dim)?;
-        // A hot row with no vector in SQL gets this one too, so a row in
-        // the index always has its vector in SQL (archive() relies on it
-        // to decide whether to tombstone). The server's backfill writes the
-        // column first, which makes this a no-op there.
+        // The generation read, the SQL fill and the index append happen
+        // under the sync-writer guard, so a reembed cutover cannot land
+        // between them and leave an old-space vector stamped as current.
+        let Some(_sync_guard) = self.write_router.try_enter_sync_writer() else {
+            return Err(
+                crate::error::YantrikDbError::DeterministicWriteDeferredDuringReembed {
+                    rid: rid.to_string(),
+                },
+            );
+        };
+        let state = self.search_state.load_full();
+        // A row with no vector in SQL gets this one too (compressed for a
+        // cold row), so a row in the index always has its vector in SQL;
+        // archive() relies on that to decide whether to tombstone. The
+        // server's backfill writes the column first, which makes this a
+        // no-op there.
         {
-            let stored = self.encrypt_embedding(&serialize_f32(embedding))?;
-            let generation = self.search_state.load().generation as i64;
+            let stored_hot = self.encrypt_embedding(&serialize_f32(embedding))?;
+            let stored_cold =
+                self.encrypt_embedding(&crate::compression::compress_embedding(embedding))?;
             self.conn().execute(
-                "UPDATE memories SET embedding = ?1, embedding_generation = ?2 \
-                 WHERE rid = ?3 AND embedding IS NULL AND storage_tier = 'hot'",
-                params![stored, generation, rid],
+                "UPDATE memories SET embedding = CASE storage_tier \
+                     WHEN 'cold' THEN ?2 ELSE ?1 END, \
+                 embedding_generation = ?3 \
+                 WHERE rid = ?4 AND embedding IS NULL",
+                params![stored_hot, stored_cold, state.generation as i64, rid],
             )?;
         }
         let seq = self
@@ -295,8 +312,7 @@ impl YantrikDB {
             + 1;
         // **Issue #41 brainstorm-4 §1.** Replication-backfill writes
         // route through the active SearchState's DeltaIndex.
-        self.search_state
-            .load()
+        state
             .vec_index
             .append(rid.to_string(), embedding.to_vec(), seq)
             .map(|_| ())
