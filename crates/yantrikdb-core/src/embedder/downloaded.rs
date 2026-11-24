@@ -315,13 +315,11 @@ fn fetch_and_extract(model: &DownloadableModel, name: &str) -> Result<PathBuf> {
         .ok_or_else(|| YantrikDbError::InvalidInput("cache dir has no parent".into()))?;
     std::fs::create_dir_all(parent)
         .map_err(|e| YantrikDbError::InvalidInput(format!("mkdir {}: {e}", parent.display())))?;
-    let tmp_dir = parent.join(format!(
-        "{}-{}.tmp.{}",
-        name,
-        model.release_tag,
-        std::process::id()
-    ));
-    let _ = std::fs::remove_dir_all(&tmp_dir); // cleanup any prior crash
+    // One directory per fetch, never shared: since #271 the Python binding
+    // fetches with the GIL released, so two threads of one process can be
+    // here at once, and a name keyed by pid alone let the second one
+    // `remove_dir_all` the first one's half-extracted files.
+    let tmp_dir = parent.join(extract_dir_name(name, model.release_tag));
     std::fs::create_dir_all(&tmp_dir).map_err(|e| {
         YantrikDbError::InvalidInput(format!("mkdir tmp {}: {e}", tmp_dir.display()))
     })?;
@@ -341,21 +339,7 @@ fn fetch_and_extract(model: &DownloadableModel, name: &str) -> Result<PathBuf> {
         e
     })?;
 
-    // Final move: rename tmp_dir → final_dir. If a concurrent process
-    // beat us to it, both renames may run; the second one fails and we
-    // accept whatever's already there.
-    if !cache_is_populated(&final_dir) {
-        std::fs::rename(&tmp_dir, &final_dir).map_err(|e| {
-            YantrikDbError::InvalidInput(format!(
-                "rename {} -> {}: {e}",
-                tmp_dir.display(),
-                final_dir.display()
-            ))
-        })?;
-    } else {
-        // Cleanup our tmp on the rare race-loss path.
-        let _ = std::fs::remove_dir_all(&tmp_dir);
-    }
+    promote_extracted(&tmp_dir, &final_dir)?;
 
     if !cache_is_populated(&final_dir) {
         return Err(YantrikDbError::InvalidInput(format!(
@@ -371,6 +355,39 @@ fn fetch_and_extract(model: &DownloadableModel, name: &str) -> Result<PathBuf> {
         "model ready"
     );
     Ok(final_dir)
+}
+
+/// The extraction directory's name for one fetch: unique per process
+/// (pid) AND per fetch within it (a process-wide counter), so concurrent
+/// fetches never share one. A crashed fetch's directory is left behind
+/// rather than removed by the next fetch: nothing can tell a dead fetch's
+/// directory from a live one's in another thread.
+fn extract_dir_name(name: &str, release_tag: &str) -> String {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{name}-{release_tag}.tmp.{}.{n}", std::process::id())
+}
+
+/// Move a fully extracted `tmp_dir` into place as `final_dir`. A fetch
+/// that loses the race to another (thread or process) finds the cache
+/// already populated, before or after its own rename fails, and accepts
+/// it; either way `tmp_dir` is gone afterwards.
+fn promote_extracted(tmp_dir: &std::path::Path, final_dir: &std::path::Path) -> Result<()> {
+    if cache_is_populated(final_dir) {
+        let _ = std::fs::remove_dir_all(tmp_dir);
+        return Ok(());
+    }
+    if let Err(e) = std::fs::rename(tmp_dir, final_dir) {
+        let _ = std::fs::remove_dir_all(tmp_dir);
+        if !cache_is_populated(final_dir) {
+            return Err(YantrikDbError::InvalidInput(format!(
+                "rename {} -> {}: {e}",
+                tmp_dir.display(),
+                final_dir.display()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// Wrapper `Embedder` impl that delegates to a loaded `StaticModel`.
@@ -650,5 +667,67 @@ mod tests {
         let total: u64 = (1..DOWNLOAD_ATTEMPTS).map(|a| 1u64 << (a - 1)).sum();
         assert_eq!(total, 7, "expected 1s+2s+4s of backoff, got {total}s");
         assert!(total <= 10, "an offline caller must not wait minutes");
+    }
+
+    /// Two fetches in one process must never share an extraction dir: the
+    /// binding fetches with the GIL released (#271), and with a pid-only
+    /// name the second fetch deleted the first one's files mid-extract.
+    #[test]
+    fn concurrent_fetches_get_distinct_extraction_dirs() {
+        let names: Vec<String> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    s.spawn(|| {
+                        (0..50)
+                            .map(|_| extract_dir_name("potion-base-8M", "v0.1.0"))
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().unwrap())
+                .collect()
+        });
+        let distinct: std::collections::HashSet<_> = names.iter().collect();
+        assert_eq!(distinct.len(), names.len(), "extraction dirs collided");
+        assert!(names
+            .iter()
+            .all(|n| n.contains(&format!(".tmp.{}.", std::process::id()))));
+    }
+
+    /// The fetch that loses the race finds the cache populated and accepts
+    /// it; neither extraction dir is left behind.
+    #[test]
+    fn promoting_twice_into_one_cache_dir_accepts_the_winner() {
+        let root = tempfile::tempdir().unwrap();
+        let final_dir = root.path().join("potion-base-8M-v0.1.0");
+        let mut tmps = Vec::new();
+        for i in 0..2 {
+            let tmp = root.path().join(format!("extract-{i}"));
+            std::fs::create_dir_all(&tmp).unwrap();
+            for f in [
+                "model.safetensors",
+                "tokenizer.json",
+                "config.json",
+                "modules.json",
+            ] {
+                std::fs::write(tmp.join(f), format!("from {i}")).unwrap();
+            }
+            tmps.push(tmp);
+        }
+        for tmp in &tmps {
+            promote_extracted(tmp, &final_dir).unwrap();
+        }
+        assert!(cache_is_populated(&final_dir));
+        assert_eq!(
+            std::fs::read_to_string(final_dir.join("config.json")).unwrap(),
+            "from 0",
+            "the first promotion wins; the second must not replace it"
+        );
+        assert!(
+            tmps.iter().all(|t| !t.exists()),
+            "extraction dirs left behind"
+        );
     }
 }
