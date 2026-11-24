@@ -518,3 +518,22 @@ def test_embed_with_the_engine_embedder_releases_the_gil(tmp_path):
         assert _seen_during(lambda: store.embed("some text to embed")) >= 1
     finally:
         store.close()
+
+
+# ── a closed store says so before it judges the arguments ───────────────
+#
+# Before the sweep a method checked for a closed store as it took its borrow,
+# before reading its arguments. A detached method reads them first, so each one
+# here must take its engine handle before it parses anything.
+
+CLOSED_FIRST = {
+    "attach_claims": lambda db: db.attach_claims("some-rid", [{"rel_type": "works_at"}]),
+}
+
+
+@pytest.mark.parametrize("name", sorted(CLOSED_FIRST))
+def test_a_closed_store_is_reported_before_a_bad_argument(tmp_path, name):
+    store = YantrikDB(os.path.join(str(tmp_path), "closed.db"), DIM)
+    store.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        CLOSED_FIRST[name](store)

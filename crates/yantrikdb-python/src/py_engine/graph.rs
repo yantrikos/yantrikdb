@@ -5,7 +5,7 @@ type PyObject = pyo3::Py<pyo3::PyAny>;
 
 use crate::py_types::*;
 
-use super::{map_err, PyYantrikDB};
+use super::{map_err, run_detached, PyYantrikDB};
 
 #[pymethods]
 impl PyYantrikDB {
@@ -22,6 +22,9 @@ impl PyYantrikDB {
         claims: Vec<Bound<'_, PyDict>>,
     ) -> PyResult<PyObject> {
         let py = slf.py();
+        // Closed before anything else, as when the whole call ran under one
+        // borrow: a closed store reports that, not a malformed claim.
+        let db = Self::engine_handle(slf)?;
         let mut stated = Vec::with_capacity(claims.len());
         for d in &claims {
             let pick = |keys: &[&str]| -> PyResult<Option<String>> {
@@ -58,7 +61,7 @@ impl PyYantrikDB {
                 valid_to: window("valid_to")?,
             });
         }
-        let report = Self::detached(slf, |db| db.attach_claims(memory_rid, &stated))?;
+        let report = run_detached(py, db, |db| db.attach_claims(memory_rid, &stated))?;
         let val = serde_json::to_value(&report)
             .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
         json_to_py(py, &val)

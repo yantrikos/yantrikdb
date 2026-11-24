@@ -1308,6 +1308,15 @@ impl PyYantrikDB {
         Ok(d.into())
     }
 
+    /// Record many memories in one transaction; all or nothing.
+    ///
+    /// Each item is a dict with `text` and the optional fields `record()`
+    /// takes. An item without `embedding` is embedded by the Python
+    /// embedder if one is attached, in item order, before anything is
+    /// written. With only the engine's own embedder, embedding happens
+    /// after every item has been read, with the GIL released (#271). So if
+    /// item 3 has a bad argument and the engine cannot embed item 1, the
+    /// argument error is the one reported. Either way nothing is recorded.
     fn record_batch(
         slf: &Bound<'_, Self>,
         inputs: Vec<Bound<'_, PyDict>>,
