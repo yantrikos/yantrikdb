@@ -70,10 +70,13 @@ class NamedEmb64(Emb):
         return [x / n for x in v]
 
 
-def test_rows_refreshed_by_a_python_embedder_carry_its_name_not_the_engines(tmp_path):
-    # A 64-dim follower has the bundled engine embedder and a Python one. The
-    # rows the Python embedder refreshes record its declared name as their
-    # embedding_model, not the bundled model's.
+def test_rows_refreshed_by_a_python_embedder_record_no_model(tmp_path):
+    # A 64-dim follower has the bundled engine embedder and a Python one that
+    # declares a name. The rows the Python embedder refreshes record no
+    # embedding_model (NULL), like every other row a Python embedder writes:
+    # not the bundled model's name (it did not make the vectors), and not
+    # the Python embedder's self-declared one, which the engine cannot vouch
+    # for (#304 review 4).
     leader = YantrikDB(os.path.join(str(tmp_path), "leader64.db"), 64)
     follower = YantrikDB(os.path.join(str(tmp_path), "follower64.db"), 64)
     try:
@@ -94,7 +97,13 @@ def test_rows_refreshed_by_a_python_embedder_carry_its_name_not_the_engines(tmp_
                 "SELECT DISTINCT embedding_model AS m FROM memories"
             ).fetchall()
         }
-        assert models == {"caller-model-64"}, models
+        assert models == {None}, models
+        # The same store's own Python-embedded write, for comparison.
+        rid = follower.record("a note the follower wrote itself")
+        own = follower._conn.execute(
+            "SELECT embedding_model AS m FROM memories WHERE rid = ?", (rid,)
+        ).fetchone()["m"]
+        assert own is None, own
     finally:
         leader.close()
         follower.close()
