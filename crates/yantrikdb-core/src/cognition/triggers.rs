@@ -762,8 +762,6 @@ pub fn persist_trigger(db: &YantrikDB, trigger: &Trigger, ts: f64) -> Result<Opt
     let cooldown_secs = trigger_type.default_cooldown_secs();
 
     let trigger_id = crate::id::new_id();
-    let hlc_ts = db.tick_hlc();
-    let hlc_bytes = hlc_ts.to_bytes().to_vec();
     let actor_id = db.actor_id().to_string();
     let expires_at = ts + trigger_type.default_expiry_secs();
     let source_rids_json = serde_json::to_string(&trigger.source_rids)?;
@@ -787,6 +785,10 @@ pub fn persist_trigger(db: &YantrikDB, trigger: &Trigger, ts: f64) -> Result<Opt
         if active_exists {
             return Ok(None);
         }
+        // Tick only for a trigger that is actually written: a suppressed
+        // one must not advance the HLC. Under the guard, per the documented
+        // lock order (conn -> hlc, CONCURRENCY.md Rule 1).
+        let hlc_bytes = db.tick_hlc().to_bytes().to_vec();
         conn.execute(
             "INSERT INTO trigger_log \
              (trigger_id, trigger_type, urgency, status, reason, suggested_action, \
@@ -1481,6 +1483,26 @@ mod tests {
                 .unwrap();
             assert_eq!((fired, rows), (1, 1), "trial {trial}");
         }
+    }
+
+    /// A trigger its cooldown suppresses writes nothing, so it must not
+    /// advance the HLC either.
+    #[test]
+    fn a_suppressed_trigger_leaves_the_hlc_alone() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let trigger = Trigger {
+            trigger_type: "decay_review".to_string(),
+            reason: "test".to_string(),
+            urgency: 0.8,
+            source_rids: vec!["rid-1".to_string()],
+            suggested_action: "test".to_string(),
+            context: HashMap::new(),
+        };
+        let ts = now();
+        assert!(persist_trigger(&db, &trigger, ts).unwrap().is_some());
+        let before = db.hlc.lock().latest();
+        assert!(persist_trigger(&db, &trigger, ts).unwrap().is_none());
+        assert_eq!(db.hlc.lock().latest(), before);
     }
 
     #[test]

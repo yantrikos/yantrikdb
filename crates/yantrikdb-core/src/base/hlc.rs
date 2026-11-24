@@ -114,6 +114,11 @@ impl HLC {
         ts
     }
 
+    /// The latest timestamp issued, without advancing the clock.
+    pub(crate) fn latest(&self) -> HLCTimestamp {
+        self.latest
+    }
+
     /// Receive a remote timestamp and advance the local clock.
     pub fn recv(&mut self, remote: HLCTimestamp) -> HLCTimestamp {
         let wall = wall_clock_ms();

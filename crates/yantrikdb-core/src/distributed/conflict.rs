@@ -341,8 +341,6 @@ fn create_conflict_inner(
     let conflict_id = crate::id::new_id();
     let ts = crate::time::now_secs();
     let priority = conflict_type.default_priority();
-    let hlc_ts = db.tick_hlc();
-    let hlc_bytes = hlc_ts.to_bytes().to_vec();
     let actor_id = db.actor_id().to_string();
 
     let sql = if only_if_absent {
@@ -361,7 +359,27 @@ fn create_conflict_inner(
           hlc, origin_actor)
          VALUES (?1, ?2, ?3, 'open', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
     };
-    let inserted = db.conn().execute(
+    // Check, tick and insert under ONE connection guard: the HLC advances
+    // only for a conflict that is actually written, never for one an
+    // existing record suppresses, and no in-process writer can slip a
+    // duplicate in between (the guard serialises them). Ticking under the
+    // guard follows the documented lock order (conn -> hlc, CONCURRENCY.md
+    // Rule 1). The insert keeps its NOT EXISTS for a writer in another
+    // process.
+    let conn = db.conn();
+    if only_if_absent {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM conflicts \
+             WHERE (memory_a = ?1 AND memory_b = ?2) OR (memory_a = ?2 AND memory_b = ?1))",
+            params![memory_a, memory_b],
+            |r| r.get(0),
+        )?;
+        if exists {
+            return Ok(None);
+        }
+    }
+    let hlc_bytes = db.tick_hlc().to_bytes().to_vec();
+    let inserted = conn.execute(
         sql,
         params![
             conflict_id,
@@ -378,6 +396,7 @@ fn create_conflict_inner(
             actor_id,
         ],
     )?;
+    drop(conn);
     if only_if_absent && inserted == 0 {
         return Ok(None);
     }
@@ -1278,6 +1297,37 @@ mod tests {
             assert!(rows > 0, "trial {trial}: the seed produced no conflicts");
             assert_eq!(rows, pairs, "trial {trial}: duplicate conflict rows");
         }
+    }
+
+    /// A conflict that is already recorded writes nothing on a second
+    /// detection, so it must not advance the HLC either.
+    #[test]
+    fn a_suppressed_conflict_leaves_the_hlc_alone() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        assert!(create_conflict_if_absent(
+            &db,
+            &ConflictType::Minor,
+            "rid-a",
+            "rid-b",
+            None,
+            None,
+            "first"
+        )
+        .unwrap()
+        .is_some());
+        let before = db.hlc.lock().latest();
+        assert!(create_conflict_if_absent(
+            &db,
+            &ConflictType::Minor,
+            "rid-b",
+            "rid-a",
+            None,
+            None,
+            "again, reversed"
+        )
+        .unwrap()
+        .is_none());
+        assert_eq!(db.hlc.lock().latest(), before);
     }
 
     #[test]
