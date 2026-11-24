@@ -404,6 +404,11 @@ pub struct YantrikDB {
     pub(crate) embedder_identity_stamped: std::sync::atomic::AtomicBool,
 }
 
+/// An embedder the engine does not hold, called on a write's text: the
+/// Python binding's caller-attached one (see
+/// `record_text_embedded_by_sync_only`).
+pub(crate) type TextEmbedder<'a> = dyn Fn(&str) -> Result<Vec<f32>> + Sync + 'a;
+
 impl YantrikDB {
     /// Acquire a read connection from the pool. Round-robin across pool
     /// slots, with try_lock fast-path to avoid blocking when any slot
@@ -3094,7 +3099,7 @@ impl YantrikDB {
         idempotency_key: Option<&str>,
         created_at: Option<f64>,
         synthesis: Option<&SynthesisAdmission>,
-        text_embedder: &(dyn Fn(&str) -> Result<Vec<f32>> + Sync),
+        text_embedder: &TextEmbedder<'_>,
     ) -> Result<String> {
         self.record_text_with_idempotency_routed(
             text,
@@ -3136,7 +3141,7 @@ impl YantrikDB {
         synthesis: Option<&SynthesisAdmission>,
         // An embedder the engine does not hold, used in place of the
         // runtime one (see `record_text_embedded_by_sync_only`).
-        text_embedder: Option<&(dyn Fn(&str) -> Result<Vec<f32>> + Sync)>,
+        text_embedder: Option<&TextEmbedder<'_>>,
     ) -> Result<String> {
         self.foreign_commit_precheck()?;
         // v0.9.3 contract gate: scalars validated BEFORE calibration mutates

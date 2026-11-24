@@ -115,6 +115,7 @@ impl HLC {
     }
 
     /// The latest timestamp issued, without advancing the clock.
+    #[cfg(test)]
     pub(crate) fn latest(&self) -> HLCTimestamp {
         self.latest
     }
