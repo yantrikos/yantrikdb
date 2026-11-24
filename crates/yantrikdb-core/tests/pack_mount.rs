@@ -1496,3 +1496,44 @@ fn concurrent_mounts_of_one_pack_mount_it_once() {
         db.unmount_all_packs();
     }
 }
+
+/// Two threads installing the same pack end with it installed and mounted
+/// once, both calls succeeding as two sequential installs do. Interleaved,
+/// they double-mounted it, failed with PackAlreadyMounted or an unreadable
+/// pack, and once read a half-copied file ("database disk image is
+/// malformed").
+#[test]
+fn concurrent_installs_of_one_pack_end_mounted_once() {
+    let dir = tmpdir("concurrent-install");
+    let pack = dir.join("physics.ydbpack");
+    build_pack(
+        &dir,
+        pack.to_str().unwrap(),
+        "E0",
+        &[("gluons bind quarks", 3)],
+    );
+    let db = host(&dir, "E0");
+    let path = pack.to_str().unwrap().to_string();
+    for trial in 0..10 {
+        let barrier = std::sync::Barrier::new(2);
+        let results: Vec<_> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    s.spawn(|| {
+                        barrier.wait();
+                        db.install_pack(&path)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(
+            results.iter().all(|r| r.is_ok()),
+            "trial {trial}: {results:?}"
+        );
+        assert_eq!(db.mounted_packs().len(), 1, "trial {trial}");
+        assert_eq!(db.installed_packs().unwrap().len(), 1, "trial {trial}");
+    }
+    let texts = recall_texts(&db, &vec_on(3, 0.05), 5);
+    assert!(texts.iter().any(|t| t.contains("gluons")), "{texts:?}");
+}

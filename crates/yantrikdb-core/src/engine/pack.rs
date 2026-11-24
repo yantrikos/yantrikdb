@@ -2050,6 +2050,11 @@ impl YantrikDB {
     }
 
     pub fn install_pack(&self, path: &str) -> Result<String> {
+        // One install at a time (#271 review): an install unmounts, writes
+        // and remounts one file, and two installs of the same pack
+        // interleaving those steps double-mounted it, failed on a file the
+        // other was copying, or mounted a half-written copy.
+        let _serial = self.pack_install_lock.lock();
         let dir = self.pack_dir().ok_or_else(|| {
             YantrikDbError::InvalidInput(
                 "an in-memory database cannot install packs (there is no directory to \
@@ -2098,36 +2103,36 @@ impl YantrikDB {
             .zip(dest.canonicalize().ok())
             .map(|(a, b)| a == b)
             .unwrap_or(false);
-        if !same {
-            // A pack published in a different embedding space is converted
-            // into this host's space rather than refused. Done HERE and not
-            // in `mount_pack` on purpose: install is the durable, one-time,
-            // explicit step, so the re-embedding cost is paid once and the
-            // converted file is what gets remounted on every subsequent
-            // open. `mount_pack` stays a read-only attach that writes
-            // nothing.
-            //
-            // Only possible when this host's embedder is a registry model,
-            // since conversion has to name the space it is converting INTO.
-            // A host on an external embedder (a sentence-transformers
-            // MiniLM, say) falls through to the plain copy and gets the
-            // usual dimension refusal at mount, which is honest: the engine
-            // cannot reproduce an embedder it does not own.
-            let converted = self.convert_pack_into_host_space(path, &dest, &manifest)?;
-            if !converted {
-                std::fs::copy(src, &dest).map_err(|e| YantrikDbError::PackUnreadable {
-                    path: path.to_string(),
-                    reason: format!("could not copy into {}: {e}", dir.display()),
-                })?;
-            }
-        }
-
-        // Mount before recording: a pack that cannot be mounted must not
-        // be left in the table for open() to trip over every time.
-        let dest_str = dest.to_string_lossy().to_string();
+        // Unmount any current mount of this pack BEFORE replacing its file:
+        // a mounted pack holds its file open, and on Windows SQLite opens
+        // without FILE_SHARE_DELETE, so the file cannot be replaced under
+        // it. (A recall still holding the old mount keeps it open; the
+        // replace then fails cleanly rather than tearing that reader.)
         if self.packs.read().iter().any(|p| p.pack_id() == pack_id) {
             self.unmount_pack(&pack_id)?;
         }
+        if !same {
+            // Write the new copy beside the destination and rename it into
+            // place, so nothing ever mounts or reads a half-written pack.
+            let tmp = dir.join(format!(
+                ".{file_name}.tmp.{}.{}",
+                std::process::id(),
+                next_install_tmp()
+            ));
+            let written = self.write_install_copy(path, &tmp, &manifest, &dir);
+            if let Err(e) = written.and_then(|()| {
+                std::fs::rename(&tmp, &dest).map_err(|e| YantrikDbError::PackUnreadable {
+                    path: dest.display().to_string(),
+                    reason: format!("could not move the new copy into place: {e}"),
+                })
+            }) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
+        }
+        // Mount before recording: a pack that cannot be mounted must not
+        // be left in the table for open() to trip over every time.
+        let dest_str = dest.to_string_lossy().to_string();
         match self.mount_pack(&dest_str) {
             Ok(id) => {
                 let conn = self.conn.lock();
@@ -2155,10 +2160,44 @@ impl YantrikDB {
         }
     }
 
+    /// Write the copy an install mounts, at `tmp`; the caller renames it
+    /// into place.
+    ///
+    /// A pack published in a different embedding space is converted into
+    /// this host's space rather than refused. Done at install and not in
+    /// `mount_pack` on purpose: install is the durable, one-time, explicit
+    /// step, so the re-embedding cost is paid once and the converted file
+    /// is what gets remounted on every subsequent open. `mount_pack` stays
+    /// a read-only attach that writes nothing.
+    ///
+    /// Only possible when this host's embedder is a registry model, since
+    /// conversion has to name the space it is converting INTO. A host on an
+    /// external embedder (a sentence-transformers MiniLM, say) falls
+    /// through to the plain copy and gets the usual dimension refusal at
+    /// mount, which is honest: the engine cannot reproduce an embedder it
+    /// does not own.
+    fn write_install_copy(
+        &self,
+        path: &str,
+        tmp: &std::path::Path,
+        manifest: &PackManifest,
+        dir: &std::path::Path,
+    ) -> Result<()> {
+        let converted = self.convert_pack_into_host_space(path, tmp, manifest)?;
+        if !converted {
+            std::fs::copy(path, tmp).map_err(|e| YantrikDbError::PackUnreadable {
+                path: path.to_string(),
+                reason: format!("could not copy into {}: {e}", dir.display()),
+            })?;
+        }
+        Ok(())
+    }
+
     /// Uninstall a pack: unmount it, drop its record, and delete the
     /// copy in the pack directory. Returns `false` if it was not
     /// installed.
     pub fn uninstall_pack(&self, pack_id: &str) -> Result<bool> {
+        let _serial = self.pack_install_lock.lock();
         let file_name: Option<String> = {
             let conn = self.conn.lock();
             conn.query_row(
@@ -2589,4 +2628,12 @@ impl YantrikDB {
         }
         Ok(out)
     }
+}
+
+/// A per-process counter for install temp files, so two installs never
+/// write the same temp path (installs are also serialised; this keeps the
+/// name unique even if that ever changes).
+fn next_install_tmp() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
