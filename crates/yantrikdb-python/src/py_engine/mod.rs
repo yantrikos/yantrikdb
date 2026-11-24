@@ -2,6 +2,7 @@ mod cognition;
 mod graph;
 mod inspect;
 mod memory;
+pub(crate) use memory::py_embed;
 mod pack;
 mod session_temporal;
 mod sync;

@@ -3014,6 +3014,7 @@ impl YantrikDB {
             created_at,
             true,
             None,
+            None,
         )
     }
 
@@ -3053,6 +3054,54 @@ impl YantrikDB {
             created_at,
             false,
             synthesis,
+            None,
+        )
+    }
+
+    /// [`Self::record_text_with_idempotency_sync_only`] with the text
+    /// embedded by `text_embedder` instead of the engine's own embedder:
+    /// for an embedder the engine cannot hold (the Python binding's
+    /// caller-attached one). Everything else is the engine path's: the
+    /// RecordText digest (the vector is not part of the payload, so a retry
+    /// is judged on what the caller supplied), the pre-admission probe (an
+    /// idempotent retry returns before `text_embedder` is ever called), the
+    /// chunk plan, and the reembed revalidation.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_text_embedded_by_sync_only(
+        &self,
+        text: &str,
+        memory_type: &str,
+        importance: f64,
+        valence: f64,
+        half_life: f64,
+        metadata: &serde_json::Value,
+        namespace: &str,
+        certainty: f64,
+        domain: &str,
+        source: &str,
+        emotional_state: Option<&str>,
+        idempotency_key: Option<&str>,
+        created_at: Option<f64>,
+        synthesis: Option<&SynthesisAdmission>,
+        text_embedder: &(dyn Fn(&str) -> Result<Vec<f32>> + Sync),
+    ) -> Result<String> {
+        self.record_text_with_idempotency_routed(
+            text,
+            memory_type,
+            importance,
+            valence,
+            half_life,
+            metadata,
+            namespace,
+            certainty,
+            domain,
+            source,
+            emotional_state,
+            idempotency_key,
+            created_at,
+            false,
+            synthesis,
+            Some(text_embedder),
         )
     }
 
@@ -3074,6 +3123,9 @@ impl YantrikDB {
         created_at: Option<f64>,
         allow_queued_route: bool,
         synthesis: Option<&SynthesisAdmission>,
+        // An embedder the engine does not hold, used in place of the
+        // runtime one (see `record_text_embedded_by_sync_only`).
+        text_embedder: Option<&(dyn Fn(&str) -> Result<Vec<f32>> + Sync)>,
     ) -> Result<String> {
         self.foreign_commit_precheck()?;
         // v0.9.3 contract gate: scalars validated BEFORE calibration mutates
@@ -3193,11 +3245,27 @@ impl YantrikDB {
             let state_for_embed = self.search_state.load_full();
             let gen_pre = state_for_embed.generation;
             let digest_pre = state_for_embed.runtime_embedder_digest.clone();
-            let embedder = state_for_embed
-                .embedder
-                .as_ref()
-                .ok_or(YantrikDbError::NoEmbedder)?
-                .clone();
+            // The caller's embedder when given, else the runtime one; the
+            // caller's needs no engine embedder at all.
+            let engine_embedder = match text_embedder {
+                Some(_) => None,
+                None => Some(
+                    state_for_embed
+                        .embedder
+                        .as_ref()
+                        .ok_or(YantrikDbError::NoEmbedder)?
+                        .clone(),
+                ),
+            };
+            let embed_one = |t: &str| -> Result<Vec<f32>> {
+                match (text_embedder, engine_embedder.as_ref()) {
+                    (Some(f), _) => f(t),
+                    (None, Some(e)) => e
+                        .embed(t)
+                        .map_err(|err| YantrikDbError::Inference(err.to_string())),
+                    (None, None) => Err(YantrikDbError::NoEmbedder),
+                }
+            };
             // v0.9.3: capture the snapshot's dim for output validation below
             // (authoritative for THIS generation; the step-5 revalidation
             // retries if a swap lands mid-embed).
@@ -3209,9 +3277,7 @@ impl YantrikDB {
             drop(state_for_embed);
 
             // Step 2: embed OUTSIDE any guard. Slow step.
-            let embedding = embedder
-                .embed(text)
-                .map_err(|e| YantrikDbError::Inference(e.to_string()))?;
+            let embedding = embed_one(text)?;
             // v0.9.3 contract gate: validate the embedder's output before
             // committing (this loop bypasses `self.embed()`, so it needs
             // its own gate — an external embedder can emit NaN, issue #60).
@@ -3227,9 +3293,7 @@ impl YantrikDB {
                 Some(ranges) => {
                     let mut cv = Vec::with_capacity(ranges.len());
                     for (i, (a, b)) in ranges.iter().enumerate() {
-                        let v = embedder
-                            .embed(&text[*a..*b])
-                            .map_err(|e| YantrikDbError::Inference(e.to_string()))?;
+                        let v = embed_one(&text[*a..*b])?;
                         crate::validate::validate_embedding("record_text#chunk", &v, dim_pre)?;
                         cv.push((i + 1, v));
                     }

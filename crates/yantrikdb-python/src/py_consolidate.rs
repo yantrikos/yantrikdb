@@ -6,7 +6,7 @@ type PyObject = pyo3::Py<pyo3::PyAny>;
 
 use yantrikdb_core::types::MemoryWithEmbedding;
 
-use crate::py_engine::{py_vector, PyYantrikDB};
+use crate::py_engine::{py_embed, PyYantrikDB};
 use crate::py_types::*;
 
 /// Compute cosine similarity between two vectors.
@@ -285,22 +285,18 @@ pub fn py_summarize_cluster(
     idempotency_key: Option<&str>,
 ) -> PyResult<PyObject> {
     // Reaches SQLite: with the GIL released and no borrow of `db` held (#271).
-    let (inner, embedding) = handle_and_vector(&db, text, embedding)?;
+    let (inner, embedder) = PyYantrikDB::engine_and_embedder(&db)?;
+    let from_text = embedder.as_ref().map(py_embed);
+    let vector = summary_vector(embedding.as_deref(), from_text.as_ref());
     let out = py
-        .detach(|| match idempotency_key {
-            Some(key) => yantrikdb_core::consolidate::summarize_cluster_with_key(
+        .detach(|| {
+            yantrikdb_core::consolidate::summarize_cluster_with(
                 &inner,
                 &source_rids,
                 text,
-                embedding.as_deref(),
-                key,
-            ),
-            None => yantrikdb_core::consolidate::summarize_cluster(
-                &inner,
-                &source_rids,
-                text,
-                embedding.as_deref(),
-            ),
+                vector,
+                idempotency_key,
+            )
         })
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     json_to_py(py, &out)
@@ -379,18 +375,20 @@ pub fn py_record_synthesis(
     metadata: Option<&Bound<'_, PyDict>>,
 ) -> PyResult<PyObject> {
     // Reaches SQLite: with the GIL released and no borrow of `db` held (#271).
-    let (inner, embedding) = handle_and_vector(&db, text, embedding)?;
+    let (inner, embedder) = PyYantrikDB::engine_and_embedder(&db)?;
+    let from_text = embedder.as_ref().map(py_embed);
+    let vector = summary_vector(embedding.as_deref(), from_text.as_ref());
     let metadata = match metadata {
         Some(value) => py_to_json(&value.as_any())?,
         None => serde_json::json!({}),
     };
     let out = py
         .detach(|| {
-            yantrikdb_core::consolidate::record_synthesis(
+            yantrikdb_core::consolidate::record_synthesis_with(
                 &inner,
                 &source_rids,
                 text,
-                embedding.as_deref(),
+                vector,
                 axis,
                 granularity,
                 &metadata,
@@ -411,40 +409,44 @@ pub fn py_consolidate_cluster(
     embedding: Option<Vec<f32>>,
 ) -> PyResult<PyObject> {
     // Reaches SQLite: with the GIL released and no borrow of `db` held (#271).
-    let (inner, embedding) = handle_and_vector(&db, text, embedding)?;
+    let (inner, embedder) = PyYantrikDB::engine_and_embedder(&db)?;
+    let from_text = embedder.as_ref().map(py_embed);
+    let vector = summary_vector(embedding.as_deref(), from_text.as_ref());
     let out = py
         .detach(|| {
-            yantrikdb_core::consolidate::consolidate_cluster(
+            yantrikdb_core::consolidate::consolidate_cluster_with(
                 &inner,
                 &source_rids,
                 text,
-                embedding.as_deref(),
+                vector,
             )
         })
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     json_to_py(py, &out)
 }
 
-/// The engine handle, and the vector to write for `text`: the one passed
-/// in, else the caller-attached Python embedder's (called here, with the GIL
-/// held and no borrow of the wrapper), else `None` for the engine to embed
-/// with its own. Without this a store whose only embedder is a Python one
-/// raised "No embedder configured" whenever no vector was passed: the engine
-/// embeds the text itself and cannot reach a Python embedder (#271 sweep;
-/// the same gap draft_memories_from_summary had).
-fn handle_and_vector(
-    db: &Bound<'_, PyYantrikDB>,
-    text: &str,
-    embedding: Option<Vec<f32>>,
-) -> PyResult<(std::sync::Arc<yantrikdb_core::YantrikDB>, Option<Vec<f32>>)> {
-    let (inner, embedder) = PyYantrikDB::engine_and_embedder(db)?;
-    let embedding = match (embedding, embedder) {
-        (Some(v), _) => Some(v),
-        (None, Some(emb)) => {
-            let out = emb.call_method1(db.py(), "encode", (text,))?;
-            Some(py_vector(db.py(), &out)?)
-        }
-        (None, None) => None,
-    };
-    Ok((inner, embedding))
+/// Where a cluster write's vector comes from, in the precedence every other
+/// write follows: a vector the caller passed (part of a keyed write's
+/// payload), else the caller-attached Python embedder, else the engine's
+/// own. The Python embedder is called on the text inside the detached call,
+/// re-taking the GIL just for `encode()`, and only if the write goes ahead:
+/// a keyed retry returns at the engine's pre-admission probe without
+/// embedding. Such a write is digested on its text and fields, like an
+/// engine-embedded one, so a retry is not refused because an embedder did
+/// not reproduce its vector bit for bit (#271 review). Without a Python
+/// embedder path, a store whose only embedder was a Python one raised "No
+/// embedder configured" whenever no vector was passed.
+fn summary_vector<'a, F>(
+    explicit: Option<&'a [f32]>,
+    from_text: Option<&'a F>,
+) -> yantrikdb_core::consolidate::SummaryVector<'a>
+where
+    F: Fn(&str) -> yantrikdb_core::error::Result<Vec<f32>> + Sync,
+{
+    use yantrikdb_core::consolidate::SummaryVector;
+    match (explicit, from_text) {
+        (Some(v), _) => SummaryVector::Explicit(v),
+        (None, Some(f)) => SummaryVector::FromText(f),
+        (None, None) => SummaryVector::Engine,
+    }
 }

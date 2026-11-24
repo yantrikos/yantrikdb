@@ -240,6 +240,17 @@ pub fn consolidate_cluster(
     text: &str,
     embedding: Option<&[f32]>,
 ) -> Result<serde_json::Value> {
+    consolidate_cluster_with(db, source_rids, text, embedding.into())
+}
+
+/// [`consolidate_cluster`] with the vector's source named (see
+/// [`SummaryVector`]).
+pub fn consolidate_cluster_with(
+    db: &YantrikDB,
+    source_rids: &[String],
+    text: &str,
+    embedding: SummaryVector<'_>,
+) -> Result<serde_json::Value> {
     if source_rids.is_empty() {
         return Err(crate::error::YantrikDbError::InvalidInput(
             "consolidate_cluster: source_rids is empty".into(),
@@ -250,19 +261,11 @@ pub fn consolidate_cluster(
             "consolidate_cluster: text is empty — the caller owns the synthesis".into(),
         ));
     }
-    if let Some(v) = embedding {
+    if let SummaryVector::Explicit(v) = embedding {
         crate::validate::validate_embedding("consolidate_cluster", v, db.embedding_dim())?;
     }
     let members = load_cluster_members(db, source_rids)?;
-    commit_consolidation(
-        db,
-        &members,
-        text,
-        embedding.map(|v| v.to_vec()),
-        false,
-        None,
-        None,
-    )
+    commit_consolidation(db, &members, text, embedding.into(), false, None, None)
 }
 
 /// Store a synthesis of `source_rids` BESIDE them, leaving every source live.
@@ -296,14 +299,14 @@ pub fn summarize_cluster(
     text: &str,
     embedding: Option<&[f32]>,
 ) -> Result<serde_json::Value> {
-    summarize_cluster_impl(db, source_rids, text, embedding, None)
+    summarize_cluster_impl(db, source_rids, text, embedding.into(), None)
 }
 
 fn summarize_cluster_impl(
     db: &YantrikDB,
     source_rids: &[String],
     text: &str,
-    embedding: Option<&[f32]>,
+    embedding: SummaryVector<'_>,
     idempotency_key: Option<&str>,
 ) -> Result<serde_json::Value> {
     if source_rids.is_empty() {
@@ -316,7 +319,7 @@ fn summarize_cluster_impl(
             "summarize_cluster: text is empty — the caller owns the synthesis".into(),
         ));
     }
-    if let Some(v) = embedding {
+    if let SummaryVector::Explicit(v) = embedding {
         crate::validate::validate_embedding("summarize_cluster", v, db.embedding_dim())?;
     }
     let members = load_cluster_members(db, source_rids)?;
@@ -324,7 +327,7 @@ fn summarize_cluster_impl(
         db,
         &members,
         text,
-        embedding.map(|v| v.to_vec()),
+        embedding.into(),
         true,
         None,
         idempotency_key,
@@ -478,6 +481,31 @@ pub fn record_synthesis(
     metadata: &serde_json::Value,
     idempotency_key: &str,
 ) -> Result<serde_json::Value> {
+    record_synthesis_with(
+        db,
+        source_rids,
+        text,
+        embedding.into(),
+        axis,
+        granularity,
+        metadata,
+        idempotency_key,
+    )
+}
+
+/// [`record_synthesis`] with the vector's source named (see
+/// [`SummaryVector`]).
+#[allow(clippy::too_many_arguments)]
+pub fn record_synthesis_with(
+    db: &YantrikDB,
+    source_rids: &[String],
+    text: &str,
+    embedding: SummaryVector<'_>,
+    axis: &str,
+    granularity: &str,
+    metadata: &serde_json::Value,
+    idempotency_key: &str,
+) -> Result<serde_json::Value> {
     if source_rids.is_empty() {
         return Err(crate::error::YantrikDbError::InvalidInput(
             "record_synthesis: source_rids is empty".into(),
@@ -509,7 +537,7 @@ pub fn record_synthesis(
             "record_synthesis: metadata must be an object or null".into(),
         ));
     }
-    if let Some(v) = embedding {
+    if let SummaryVector::Explicit(v) = embedding {
         crate::validate::validate_embedding("record_synthesis", v, db.embedding_dim())?;
     }
     let mut canonical_rids = source_rids.to_vec();
@@ -526,7 +554,7 @@ pub fn record_synthesis(
         db,
         &members,
         text,
-        embedding.map(|v| v.to_vec()),
+        embedding.into(),
         true,
         Some(&write),
         None,
@@ -538,6 +566,57 @@ pub fn record_synthesis(
 /// `materialize_consolidate` apply it as a literal; this constant is what an
 /// INFERRED restore divides by, and a test pins the two together.
 pub const CONSOLIDATED_SOURCE_IMPORTANCE_FACTOR: f64 = 0.3;
+
+/// Where a cluster write's (summary's) vector comes from.
+#[derive(Clone, Copy)]
+pub enum SummaryVector<'a> {
+    /// The engine embeds the summary text with its own embedder.
+    Engine,
+    /// The caller supplied this vector. It is part of the write's
+    /// idempotency payload: a keyed retry must pass the same bytes.
+    Explicit(&'a [f32]),
+    /// The caller's own embedder, called on the summary text only if the
+    /// write goes ahead (an idempotent retry returns before it is called).
+    /// Digested like [`SummaryVector::Engine`]: the vector is derived from
+    /// the text, so a retry is judged on the text and fields the caller
+    /// supplied, not on a recomputed vector an embedder may not reproduce
+    /// bit for bit. For the Python binding's caller-attached embedder.
+    FromText(&'a (dyn Fn(&str) -> Result<Vec<f32>> + Sync)),
+}
+
+impl<'a> From<Option<&'a [f32]>> for SummaryVector<'a> {
+    fn from(v: Option<&'a [f32]>) -> Self {
+        match v {
+            Some(v) => SummaryVector::Explicit(v),
+            None => SummaryVector::Engine,
+        }
+    }
+}
+
+/// [`summarize_cluster`] / [`summarize_cluster_with_key`] with the vector's
+/// source named (see [`SummaryVector`]).
+pub fn summarize_cluster_with(
+    db: &YantrikDB,
+    source_rids: &[String],
+    text: &str,
+    vector: SummaryVector<'_>,
+    idempotency_key: Option<&str>,
+) -> Result<serde_json::Value> {
+    match idempotency_key {
+        Some(key) => {
+            if key.trim().is_empty() {
+                return Err(crate::error::YantrikDbError::InvalidInput(
+                    "summarize_cluster: idempotency_key is empty".into(),
+                ));
+            }
+            let mut canonical = source_rids.to_vec();
+            canonical.sort();
+            canonical.dedup();
+            summarize_cluster_impl(db, &canonical, text, vector, Some(key))
+        }
+        None => summarize_cluster_impl(db, source_rids, text, vector, None),
+    }
+}
 
 /// [`summarize_cluster`] with a caller-supplied idempotency key (#291).
 ///
@@ -562,7 +641,13 @@ pub fn summarize_cluster_with_key(
     let mut canonical = source_rids.to_vec();
     canonical.sort();
     canonical.dedup();
-    summarize_cluster_impl(db, &canonical, text, embedding, Some(idempotency_key))
+    summarize_cluster_impl(
+        db,
+        &canonical,
+        text,
+        embedding.into(),
+        Some(idempotency_key),
+    )
 }
 
 /// Undo a REPLACING consolidation: return its sources to recall (#291).
@@ -1148,7 +1233,7 @@ pub fn consolidate(
             db,
             cluster,
             &summary_text,
-            Some(mean_emb),
+            ClusterVector::Explicit(mean_emb),
             false,
             None,
             None,
@@ -1180,11 +1265,38 @@ pub fn consolidate(
 /// `summary_text` with the engine's embedder — which is the point of the
 /// caller-supplied path, since a vector derived from the actual text
 /// retrieves for what the record says rather than for a cluster average.
+/// [`SummaryVector`], owned where the vector is (the default consolidate
+/// pass computes a mean vector it owns).
+enum ClusterVector<'a> {
+    Engine,
+    Explicit(Vec<f32>),
+    FromText(&'a (dyn Fn(&str) -> Result<Vec<f32>> + Sync)),
+}
+
+impl<'a> From<SummaryVector<'a>> for ClusterVector<'a> {
+    fn from(v: SummaryVector<'a>) -> Self {
+        match v {
+            SummaryVector::Engine => ClusterVector::Engine,
+            SummaryVector::Explicit(v) => ClusterVector::Explicit(v.to_vec()),
+            SummaryVector::FromText(f) => ClusterVector::FromText(f),
+        }
+    }
+}
+
+impl From<Option<Vec<f32>>> for ClusterVector<'_> {
+    fn from(v: Option<Vec<f32>>) -> Self {
+        match v {
+            Some(v) => ClusterVector::Explicit(v),
+            None => ClusterVector::Engine,
+        }
+    }
+}
+
 fn commit_consolidation(
     db: &YantrikDB,
     cluster: &[MemoryWithEmbedding],
     summary_text: &str,
-    embedding: Option<Vec<f32>>,
+    embedding: ClusterVector<'_>,
     // ADDITIVE mode keeps the sources fully live: the synthesis is stored
     // beside them rather than over them. See `summarize_cluster`.
     additive: bool,
@@ -1378,8 +1490,40 @@ fn commit_consolidation(
             None
         };
 
+        // The vector the FromText embedder produced for the summary text
+        // (the longest text it is asked to embed; chunk windows are
+        // shorter), kept for the oplog's embedding hash below.
+        let from_text_vector: parking_lot::Mutex<(usize, Option<Vec<f32>>)> =
+            parking_lot::Mutex::new((0, None));
         let consolidated_rid = match &embedding {
-            Some(emb) => db.record_with_idempotency_sync_only(
+            ClusterVector::FromText(embed) => {
+                let capturing = |t: &str| -> Result<Vec<f32>> {
+                    let v = embed(t)?;
+                    let mut kept = from_text_vector.lock();
+                    if t.len() >= kept.0 {
+                        *kept = (t.len(), Some(v.clone()));
+                    }
+                    Ok(v)
+                };
+                db.record_text_embedded_by_sync_only(
+                    summary_text,
+                    "semantic",
+                    consolidated_importance,
+                    mean_valence,
+                    consolidated_half_life,
+                    &meta,
+                    cluster_namespace,
+                    0.8,
+                    "general",
+                    record_source,
+                    None,
+                    idempotency_key,
+                    summary_created_at,
+                    admission.as_ref(),
+                    &capturing,
+                )?
+            }
+            ClusterVector::Explicit(emb) => db.record_with_idempotency_sync_only(
                 summary_text,
                 "semantic",
                 consolidated_importance,
@@ -1397,7 +1541,7 @@ fn commit_consolidation(
                 admission.as_ref(),
             )?,
             // Engine-embedded: the vector comes from the synthesis itself.
-            None => db.record_text_with_idempotency_sync_only(
+            ClusterVector::Engine => db.record_text_with_idempotency_sync_only(
                 summary_text,
                 "semantic",
                 consolidated_importance,
@@ -1428,7 +1572,7 @@ fn commit_consolidation(
                 "cluster_size": cluster.len(),
                 "summary": summary_text,
                 "importance": consolidated_importance,
-                "embedded_from_text": embedding.is_none(),
+                "embedded_from_text": !matches!(embedding, ClusterVector::Explicit(_)),
                 "first_mention_at": first_mention_at,
                 "evidence_span_end_at": evidence_span_end_at,
                 "synthesis_logical_key": admission.as_ref().map(|a| &a.logical_key),
@@ -1511,10 +1655,11 @@ fn commit_consolidation(
 
         // 7. Log the operation
         let logged_emb = match &embedding {
-            Some(v) => v.clone(),
+            ClusterVector::Explicit(v) => v.clone(),
+            ClusterVector::FromText(_) => from_text_vector.lock().1.clone().unwrap_or_default(),
             // Engine-embedded path: hash the stored vector so the oplog entry
             // still identifies what was written.
-            None => db.embed(summary_text).unwrap_or_default(),
+            ClusterVector::Engine => db.embed(summary_text).unwrap_or_default(),
         };
         let emb_hash = blake3::hash(&serialize_f32(&logged_emb))
             .as_bytes()
@@ -1548,7 +1693,7 @@ fn commit_consolidation(
             "summary": summary_text,
             "importance": consolidated_importance,
             "entities_linked": all_entities.len(),
-            "embedded_from_text": embedding.is_none(),
+            "embedded_from_text": !matches!(embedding, ClusterVector::Explicit(_)),
             "first_mention_at": first_mention_at,
             "evidence_span_end_at": evidence_span_end_at,
             "idempotent_replay": false,
@@ -2038,7 +2183,7 @@ mod tests {
             &db,
             &members,
             "merged summary",
-            Some(emb.clone()),
+            Some(emb.clone()).into(),
             false,
             None,
             None,
@@ -2093,7 +2238,7 @@ mod tests {
             &db,
             &members,
             "alice mail summary",
-            Some(emb.clone()),
+            Some(emb.clone()).into(),
             false,
             None,
             None,
@@ -2156,7 +2301,7 @@ mod tests {
             &db,
             &members,
             "merged summary",
-            Some(emb.clone()),
+            Some(emb.clone()).into(),
             false,
             None,
             None,

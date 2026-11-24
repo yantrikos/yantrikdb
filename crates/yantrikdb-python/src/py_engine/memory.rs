@@ -19,9 +19,10 @@ use super::{map_err, plan_embed, py_vector, query_plan, run_detached, EmbedPlan,
 /// (SQLite reads and writes) runs with the GIL released. Both callers embed
 /// outside the engine's connection lock, so re-attaching here cannot wait on
 /// the GIL while holding a lock another GIL-holding thread wants.
-fn py_embed(
+pub(crate) fn py_embed(
     emb: &PyObject,
-) -> impl Fn(&str) -> std::result::Result<Vec<f32>, yantrikdb_core::YantrikDbError> + Send + '_ {
+) -> impl Fn(&str) -> std::result::Result<Vec<f32>, yantrikdb_core::YantrikDbError> + Send + Sync + '_
+{
     move |text: &str| {
         Python::attach(|py| {
             let out = emb
