@@ -743,9 +743,10 @@ impl PyYantrikDB {
         // verifies its SHA-256 and loads it, from the cache on later calls.
         // All of that runs with no borrow of the wrapper and the GIL
         // released, so every other thread keeps running and keeps using
-        // this store. The swap below needs exclusive access and holds the
-        // GIL: stopping the workers (under a millisecond), the engine
-        // swap, and respawning them.
+        // this store. The swap below waits for exclusive access with the
+        // GIL released too; it holds the GIL only for the engine swap
+        // itself and to restart the workers' handles. The workers are
+        // stopped (joined) with the GIL released.
         let downloaded = slf
             .py()
             .detach(|| yantrikdb_core::embedder::DownloadedEmbedder::fetch(name))
@@ -922,7 +923,6 @@ impl PyYantrikDB {
         ))
     }
 
-    /// The _conn property — returns a ConnectionProxy for test compatibility.
     /// How many worker pools this wrapper has spawned (tests only).
     #[getter]
     fn _worker_spawns(&self) -> u64 {
@@ -931,6 +931,7 @@ impl PyYantrikDB {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// The _conn property — returns a ConnectionProxy for test compatibility.
     #[getter]
     fn _conn(&self) -> PyResult<ConnectionProxy> {
         let db = self

@@ -353,6 +353,10 @@ RELEASES = {
     "think": None,
     "stats": None,
     "scan_conflicts": None,
+    # stops the workers and closes SQLite detached; its witness is
+    # test_close_under_write_load_keeps_other_threads_running above (one
+    # call per store, so it cannot run in the loop below)
+    "close": None,
     # memory
     "recall_as_of": lambda db, c: db.recall_as_of(time.time() + 60, query="topic 3"),
     "record_text": lambda db, c: db.record_text("witness record_text"),
@@ -412,8 +416,8 @@ UNWITNESSED = {
         "the fetch (download on first use, load from the cache after) runs "
         "detached, but offline an unknown name fails within a microsecond or "
         "two inside the detach, and a real fetch needs the network or a "
-        "cached model; stopping the workers (under a millisecond), the swap "
-        "and the respawn hold the GIL"
+        "cached model; the wait for exclusive access and stopping the workers "
+        "run detached too, and only the swap and restarting the workers hold it"
     ),
 }
 
@@ -429,8 +433,6 @@ HOLDS = {
     "sign_bytes": "static helper: no store",
     "sign_pack": "static helper: no store",
     "verify_bytes": "static helper: no store",
-    # exclusive access by design
-    "close": "needs the wrapper exclusively; drops its handle, never waits on in-flight calls",
     # in flight in their own PRs
     "set_embedder": "#295 (and its identity check reads the store)",
     "correct": "#296",
