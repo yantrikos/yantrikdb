@@ -829,3 +829,36 @@ def test_a_panic_inside_the_swap_leaves_the_workers_running(tmp_path):
             db.record(f"after the panic {i}", embedding=[0.05] * 256)
     finally:
         db.close()
+
+
+@_needs_potion
+def test_two_swaps_pending_at_once_both_go_through(tmp_path):
+    # Each pending swap kept a Weak<YantrikDB> across its wait, and
+    # Arc::get_mut needs no Weak at all, so two swaps pending at once
+    # blocked each other until both 10 s deadlines ran out (#302 review 4).
+    # Swaps now take turns, and neither holds a reference while it waits.
+    for rep in range(2):
+        db = YantrikDB(os.path.join(str(tmp_path), f"two{rep}.db"), 256)
+        try:
+            proxy = db._conn  # both swaps are pending before either can go
+            out = [None, None]
+
+            def swapper(k):
+                started = time.perf_counter()
+                try:
+                    db.set_embedder_named("potion-base-8M")
+                    out[k] = ("ok", time.perf_counter() - started)
+                except Exception as e:  # noqa: BLE001
+                    out[k] = (repr(e), time.perf_counter() - started)
+
+            threads = [threading.Thread(target=swapper, args=(k,)) for k in range(2)]
+            for t in threads:
+                t.start()
+            time.sleep(0.5)
+            del proxy
+            for t in threads:
+                t.join(60)
+            assert [o[0] for o in out] == ["ok", "ok"], out
+            assert max(o[1] for o in out) < 8, out
+        finally:
+            db.close()
