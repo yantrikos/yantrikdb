@@ -554,28 +554,24 @@ impl PyYantrikDB {
         let (db, embedder) = Self::engine_and_embedder(slf)?;
         // An embedder the caller attached outranks the engine's own, as in
         // every other write (`embed_text`'s precedence). The engine cannot
-        // reach a Python embedder, so its `draft_memories_from_summary`
-        // raised "No embedder configured" on a store that had only one: split
-        // here, embed each fact with the GIL held and no borrow of the
-        // wrapper, then write them all in one detached call. A fact longer
-        // than a known embedder window gets no chunk vectors on this path
-        // (see `record_drafted_facts`); `rechunk_long_records()` adds them.
+        // hold a Python embedder, so its `draft_memories_from_summary` raised
+        // "No embedder configured" on a store that had only one.
         let Some(emb) = embedder else {
             return run_detached(py, db, |db| {
                 db.draft_memories_from_summary(summary, namespace, domain)
             });
         };
-        let drafts = yantrikdb_core::YantrikDB::draft_facts_from_summary(summary)
-            .into_iter()
-            .map(|fact| {
-                let out = super::in_engine_call(&db, || {
-                    emb.call_method1(py, "encode", (fact.as_str(),))
-                })?;
-                Ok((fact, py_vector(py, &out)?))
-            })
-            .collect::<PyResult<Vec<_>>>()?;
+        // The facts go through the engine's record_text route with the
+        // caller's embedder: a fact past the known window gets its chunk
+        // vectors as it is written, as on the engine path. encode() runs
+        // inside the detached call, re-taking the GIL for each call.
         run_detached(py, db, |db| {
-            db.record_drafted_facts(&drafts, namespace, domain)
+            db.draft_memories_from_summary_embedded_by(
+                summary,
+                namespace,
+                domain,
+                super::py_embed(&emb),
+            )
         })
     }
 

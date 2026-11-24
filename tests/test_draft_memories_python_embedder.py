@@ -7,9 +7,8 @@ engine's, against the precedence every other write follows. The binding now
 splits the summary, embeds each fact with the caller's embedder and records
 them with the same fields the engine path writes.
 
-One difference stays, documented on `record_drafted_facts`: with a known
-embedder window, a fact longer than the window gets chunk vectors on the engine
-path as it is written, and on this path only once `rechunk_long_records()` runs.
+A fact longer than a known embedder window gets its chunk vectors as it is
+written, embedded by the caller's embedder, as on the engine path.
 """
 
 import os
@@ -124,9 +123,10 @@ class TruncEmb(Emb):
         return super().encode(text[:120])
 
 
-def test_a_long_fact_is_chunked_by_rechunk_on_the_python_path(tmp_path):
-    # The documented difference, pinned: no chunk vectors at write time, and
-    # rechunk_long_records() adds them with the caller's embedder.
+def test_a_long_fact_is_chunked_as_it_is_drafted_on_the_python_path(tmp_path):
+    # A drafted fact past the known window gets its chunk vectors at write
+    # time, as on the engine path. It used to get none until
+    # rechunk_long_records() ran.
     db = YantrikDB(os.path.join(str(tmp_path), "long.db"), DIM)
     try:
         db.set_embedder(TruncEmb(), allow_unverified_embedder=True)
@@ -135,9 +135,7 @@ def test_a_long_fact_is_chunked_by_rechunk_on_the_python_path(tmp_path):
         rids = db.draft_memories_from_summary(SUMMARY + " " + long_tail + ".")
         longest = max(rids, key=lambda r: len(db.get(r)["text"]))
         assert len(db.get(longest)["text"]) > 400
-        assert _chunks(db, longest) == 0
-        records, vectors = db.rechunk_long_records()
-        assert records >= 1 and vectors >= 1
         assert _chunks(db, longest) > 0
+        assert db.rechunk_long_records() == (0, 0), "nothing left to backfill"
     finally:
         db.close()

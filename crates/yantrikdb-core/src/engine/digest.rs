@@ -551,6 +551,55 @@ impl YantrikDB {
         Ok(rids)
     }
 
+    /// [`draft_memories_from_summary`] with each fact embedded by `embed`
+    /// instead of the engine's own embedder: for an embedder the engine
+    /// cannot hold (the Python binding's caller-attached one). Each fact
+    /// goes through the engine's `record_text` route with `embed` in place
+    /// of the runtime embedder, so a fact longer than the known window gets
+    /// its chunk vectors (embedded by `embed`) as it is written, and a
+    /// truncated one is counted, exactly as on the engine path. The engine
+    /// stamps no identity for these vectors.
+    ///
+    /// The route is the sync-only one: during a re-embed cutover it refuses
+    /// (`ConsolidationDeferredDuringReembed`) rather than queue a write that
+    /// the engine would later re-encode with an embedder that is not
+    /// `embed`.
+    ///
+    /// [`draft_memories_from_summary`]: Self::draft_memories_from_summary
+    pub fn draft_memories_from_summary_embedded_by<F>(
+        &self,
+        summary: &str,
+        namespace: &str,
+        domain: &str,
+        embed: F,
+    ) -> Result<Vec<String>>
+    where
+        F: Fn(&str) -> Result<Vec<f32>> + Sync,
+    {
+        let meta = draft_metadata();
+        let mut rids = Vec::new();
+        for fact in Self::draft_facts_from_summary(summary) {
+            rids.push(self.record_text_embedded_by_sync_only(
+                &fact,
+                DRAFT_MEMORY_TYPE,
+                DRAFT_IMPORTANCE,
+                0.0,
+                DRAFT_HALF_LIFE,
+                &meta,
+                namespace,
+                DRAFT_CERTAINTY,
+                domain,
+                DRAFT_SOURCE,
+                None,
+                None,
+                None,
+                None,
+                &embed,
+            )?);
+        }
+        Ok(rids)
+    }
+
     /// The candidate facts [`draft_memories_from_summary`] records, one
     /// thought each, in summary order.
     ///
