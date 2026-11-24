@@ -780,3 +780,33 @@ def test_calls_wait_at_the_gate_for_as_long_as_the_swap_waits(tmp_path):
         assert any(d > released for d in done), "traffic resumed after the swap"
     finally:
         db.close()
+
+
+@_needs_potion
+def test_close_during_a_pending_swap_leaves_the_still_shared_engine_its_workers(tmp_path):
+    # close() with a proxy alive keeps the engine's workers running: the
+    # engine still takes writes through the proxy. With a swap pending, the
+    # swap then saw the engine free (only the proxy held it), stopped the
+    # workers and found the wrapper closed, leaving them stopped (#302
+    # review 4).
+    db = YantrikDB(os.path.join(str(tmp_path), "close-swap.db"), 256)
+    proxy = db._conn
+    out = {}
+
+    def swapper():
+        try:
+            db.set_embedder_named("potion-base-8M")
+        except Exception as e:  # noqa: BLE001
+            out["error"] = repr(e)
+
+    sw = threading.Thread(target=swapper)
+    sw.start()
+    try:
+        time.sleep(1.0)  # the swap is waiting on the proxy
+        assert db.close() is False
+        sw.join(30)
+        assert not sw.is_alive()
+        assert "closed" in out.get("error", ""), out
+        assert db._workers_running, "the still-shared engine lost its workers"
+    finally:
+        del proxy

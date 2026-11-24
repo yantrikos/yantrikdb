@@ -81,6 +81,11 @@ impl WorkerPool {
         self.guards().take()
     }
 
+    /// Whether workers are running (tests only, through `_workers_running`).
+    fn is_running(&self) -> bool {
+        self.guards().is_some()
+    }
+
     /// Start workers against `engine` unless some are running.
     fn ensure_running(&self, engine: &Arc<YantrikDB>) {
         let mut guards = self.guards();
@@ -835,6 +840,15 @@ impl PyYantrikDB {
                 .engine
                 .as_ref()
                 .is_some_and(|w| w.strong_count() <= 1);
+            // A close() that landed meanwhile has settled the workers for
+            // whatever still holds the engine (it restarts them when a proxy
+            // or a call keeps it alive). Stop nothing and restart nothing:
+            // a swap that stopped them here left a still-shared engine
+            // without workers (#302 review 4).
+            if slf.try_borrow().is_ok_and(|this| this.inner.is_none()) {
+                drop(restart.engine.take());
+                break Err(PyRuntimeError::new_err("YantrikDB is closed"));
+            }
             let due = last_try.is_none_or(|t| now.duration_since(t) >= RETRY_EVERY);
             if quiet && (due || late) {
                 last_try = Some(now);
@@ -921,6 +935,12 @@ impl PyYantrikDB {
             "reembed requires the 'embedder-download' Cargo feature, \
              which is on by default. This wheel was built --no-default-features.",
         ))
+    }
+
+    /// Whether this wrapper's worker pool is running (tests only).
+    #[getter]
+    fn _workers_running(&self) -> bool {
+        self.workers.is_running()
     }
 
     /// How many worker pools this wrapper has spawned (tests only).
