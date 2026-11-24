@@ -397,18 +397,18 @@ RELEASES = {
     "task_delete": lambda db, c: db.task_delete("no-such-task"),
     # graph
     "relate": lambda db, c: db.relate("alice", "acme", "works_at"),
-    "attach_claims": lambda db, c: _swallow(
-        db.attach_claims, c["rid"], [{"src": "alice", "rel_type": "works_at", "dst": "acme"}]
+    "attach_claims": lambda db, c: db.attach_claims(
+        c["rid"], [{"src": "alice", "rel_type": "works_at", "dst": "acme"}]
     ),
     "search_entities": lambda db, c: db.search_entities("ali"),
     # conflicts and triggers
     "get_conflicts": lambda db, c: db.get_conflicts(),
     "resolve_conflict": lambda db, c: _swallow(db.resolve_conflict, "no-such-conflict", "keep_a"),
     "get_pending_triggers": lambda db, c: db.get_pending_triggers(),
-    "deliver_trigger": lambda db, c: _swallow(db.deliver_trigger, "no-such-trigger"),
-    "acknowledge_trigger": lambda db, c: _swallow(db.acknowledge_trigger, "no-such-trigger"),
-    "act_on_trigger": lambda db, c: _swallow(db.act_on_trigger, "no-such-trigger"),
-    "dismiss_trigger": lambda db, c: _swallow(db.dismiss_trigger, "no-such-trigger"),
+    "deliver_trigger": lambda db, c: db.deliver_trigger("no-such-trigger"),
+    "acknowledge_trigger": lambda db, c: db.acknowledge_trigger("no-such-trigger"),
+    "act_on_trigger": lambda db, c: db.act_on_trigger("no-such-trigger"),
+    "dismiss_trigger": lambda db, c: db.dismiss_trigger("no-such-trigger"),
     # packs and identity
     "trusted_publishers": lambda db, c: db.trusted_publishers(),
     "embedder_identity": lambda db, c: db.embedder_identity(),
@@ -422,7 +422,7 @@ RELEASES = {
     "record_with_links_partial": lambda db, c: db.record_with_links_partial(
         "witness partial links", []
     ),
-    "link": lambda db, c: _swallow(db.link, c["rid"], c["rid2"], "supports"),
+    "link": lambda db, c: db.link(c["rid"], c["rid2"], "supports"),
     "unlink": lambda db, c: db.unlink(c["rid"], c["rid2"], "supports"),
     "linked_records": lambda db, c: db.linked_records(c["rid"]),
     "recall_with_links": lambda db, c: db.recall_with_links(query="topic 3"),
@@ -441,8 +441,8 @@ RELEASES = {
     "note_rollup_expansion_features": lambda db, c: _swallow(
         db.note_rollup_expansion_features, "no-such-impression", [c["rid2"]], [0.5]
     ),
-    "note_rollup_selection": lambda db, c: _swallow(
-        db.note_rollup_selection, "no-such-impression", c["rid2"]
+    "note_rollup_selection": lambda db, c: db.note_rollup_selection(
+        "no-such-impression", c["rid2"]
     ),
     "finalize_rollup_outcome": lambda db, c: _swallow(
         db.finalize_rollup_outcome, "no-such-impression", [c["rid2"]]
@@ -459,7 +459,7 @@ RELEASES = {
     "hydrate": lambda db, c: db.hydrate(c["rid2"]),
     "evict": lambda db, c: db.evict(10_000),
     "extract_ops_since": lambda db, c: db.extract_ops_since(limit=20),
-    "apply_ops": lambda db, c: _swallow(db.apply_ops, c["ops"]),
+    "apply_ops": lambda db, c: db.apply_ops(c["ops"]),
     "get_peer_watermark": lambda db, c: db.get_peer_watermark("peer_1"),
     "set_peer_watermark": lambda db, c: db.set_peer_watermark("peer_1", b"\x00" * 16, "op-1"),
     # maintenance
@@ -489,7 +489,7 @@ RELEASES = {
     # A second start for the same client raises "active session already
     # exists" from inside the detached call; the first one starts it.
     "session_start": lambda db, c: _swallow(db.session_start, "default", "witness"),
-    "session_end": lambda db, c: _swallow(db.session_end, c["session"]),
+    "session_end": lambda db, c: db.session_end(c["session"]),
     "active_session": lambda db, c: db.active_session(),
     "session_history": lambda db, c: db.session_history(),
     "session_abandon_stale": lambda db, c: db.session_abandon_stale(),
@@ -500,15 +500,15 @@ RELEASES = {
     "relationship_depth": lambda db, c: _swallow(db.relationship_depth, "alice"),
     "surface_procedural": lambda db, c: db.surface_procedural(c["q"]),
     "record_procedural": lambda db, c: db.record_procedural("witness procedure"),
-    "reinforce_procedural": lambda db, c: _swallow(db.reinforce_procedural, c["rid"], 0.5),
+    "reinforce_procedural": lambda db, c: db.reinforce_procedural(c["rid"], 0.5),
     "procedural_stats": lambda db, c: db.procedural_stats(),
     "reclassify_conflict": lambda db, c: _swallow(
         db.reclassify_conflict, "no-such-conflict", "preference"
     ),
     "substitution_categories": lambda db, c: db.substitution_categories(),
     "substitution_members": lambda db, c: db.substitution_members("colors"),
-    "learn_category_members": lambda db, c: _swallow(
-        db.learn_category_members, "colors", [("teal", 0.9)]
+    "learn_category_members": lambda db, c: db.learn_category_members(
+        "colors", [("teal", 0.9)]
     ),
     "reset_category_to_seed": lambda db, c: _swallow(db.reset_category_to_seed, "colors"),
     # cognition: triggers, patterns, personality, conflicts, facets, threads
@@ -516,13 +516,13 @@ RELEASES = {
     "get_patterns": lambda db, c: db.get_patterns(),
     "get_personality": lambda db, c: db.get_personality(),
     "derive_personality": lambda db, c: db.derive_personality(),
-    "set_personality_trait": lambda db, c: _swallow(db.set_personality_trait, "openness", 0.5),
+    "set_personality_trait": lambda db, c: db.set_personality_trait("openness", 0.5),
     "get_conflict": lambda db, c: db.get_conflict("no-such-conflict"),
-    "dismiss_conflict": lambda db, c: _swallow(db.dismiss_conflict, "no-such-conflict"),
+    "dismiss_conflict": lambda db, c: db.dismiss_conflict("no-such-conflict"),
     "extract_standing_instructions": lambda db, c: db.extract_standing_instructions(dry_run=True),
     "recall_facets": lambda db, c: db.recall_facets(),
     "recall_thread": lambda db, c: db.recall_thread("default", ["alice"]),
-    "recall_thread_v2": lambda db, c: _swallow(db.recall_thread_v2, "default", ["alice"]),
+    "recall_thread_v2": lambda db, c: db.recall_thread_v2("default", ["alice"]),
     "reextract_claims": lambda db, c: db.reextract_claims(dry_run=True),
     "reextract_entities": lambda db, c: db.reextract_entities(dry_run=True),
     "extraction_refusal_counts": lambda db, c: db.extraction_refusal_counts(),
