@@ -278,6 +278,7 @@ impl PyYantrikDB {
     ///
     /// Raises `RuntimeError` if `dest` exists, if the embedder name is
     /// unknown, or if the pack is already in that space.
+    #[cfg(feature = "embedder-download")]
     #[staticmethod]
     fn convert_pack(
         py: Python<'_>,
@@ -285,9 +286,28 @@ impl PyYantrikDB {
         dest: &str,
         embedder_name: &str,
     ) -> PyResult<PyObject> {
-        let m =
-            yantrikdb_core::YantrikDB::convert_pack(src, dest, embedder_name).map_err(map_err)?;
+        // Re-embeds every row of the pack (and may download the model
+        // first): with the GIL released, like any long engine call (#271).
+        let m = py
+            .detach(|| yantrikdb_core::YantrikDB::convert_pack(src, dest, embedder_name))
+            .map_err(map_err)?;
         manifest_to_dict(py, &m, dest)
+    }
+
+    /// Slim-build stub, mirroring set_embedder_named: converting a pack
+    /// resolves the target model through the embedder-download registry.
+    #[cfg(not(feature = "embedder-download"))]
+    #[staticmethod]
+    fn convert_pack(
+        _py: Python<'_>,
+        _src: &str,
+        _dest: &str,
+        _embedder_name: &str,
+    ) -> PyResult<PyObject> {
+        Err(PyRuntimeError::new_err(
+            "convert_pack requires the 'embedder-download' Cargo feature, \
+             which is on by default. This wheel was built --no-default-features.",
+        ))
     }
 
     /// Generate a publisher keypair as `(secret_hex, public_hex)`.

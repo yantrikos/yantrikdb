@@ -584,12 +584,15 @@ UNWITNESSED = {
         "the scan reads the process's memory map on Linux and macOS; where "
         "detection is unsupported (Windows) it returns at once inside the detach"
     ),
+    "convert_pack": (
+        "static, detached for the re-embed; a real conversion needs the target "
+        "model, which offline means a download that can only fail at once"
+    ),
 }
 
 HOLDS = {
     # no store involved
     "with_default": "constructor",
-    "convert_pack": "static helper: no store",
     "generate_pack_keypair": "static helper: no store",
     "pubkey_of": "static helper: no store",
     "read_pack_manifest": "static helper: no store",
