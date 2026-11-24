@@ -198,6 +198,9 @@ pub(crate) fn category_to_conflict_type(cat_name: &str) -> ConflictType {
 
 /// Check if a conflict already exists for this (memory_a, memory_b) pair.
 /// Checks both orderings.
+// Detectors create through create_conflict_if_absent (one statement, no
+// check-then-insert race); this check remains for the tests.
+#[cfg(test)]
 pub(crate) fn conflict_exists(db: &YantrikDB, rid_a: &str, rid_b: &str) -> Result<bool> {
     let conn = db.conn();
     let exists: bool = conn.query_row(
@@ -281,6 +284,58 @@ pub fn create_conflict(
     rel_type: Option<&str>,
     detection_reason: &str,
 ) -> Result<Conflict> {
+    create_conflict_inner(
+        db,
+        conflict_type,
+        memory_a,
+        memory_b,
+        entity,
+        rel_type,
+        detection_reason,
+        false,
+    )
+    .map(|c| c.expect("an unconditional insert always creates the conflict"))
+}
+
+/// [`create_conflict`], unless a conflict between the same two memories
+/// (either order) is already recorded, in which case nothing is written and
+/// `None` comes back. The check and the insert are ONE statement: detectors
+/// that checked `conflict_exists` and then created could both pass the
+/// check when two scans ran at once (scan_conflicts and think() run with
+/// the GIL released, #271), recording one conflict twice.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_conflict_if_absent(
+    db: &YantrikDB,
+    conflict_type: &ConflictType,
+    memory_a: &str,
+    memory_b: &str,
+    entity: Option<&str>,
+    rel_type: Option<&str>,
+    detection_reason: &str,
+) -> Result<Option<Conflict>> {
+    create_conflict_inner(
+        db,
+        conflict_type,
+        memory_a,
+        memory_b,
+        entity,
+        rel_type,
+        detection_reason,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn create_conflict_inner(
+    db: &YantrikDB,
+    conflict_type: &ConflictType,
+    memory_a: &str,
+    memory_b: &str,
+    entity: Option<&str>,
+    rel_type: Option<&str>,
+    detection_reason: &str,
+    only_if_absent: bool,
+) -> Result<Option<Conflict>> {
     if memory_a == memory_b {
         return Err(YantrikDbError::InvalidInput(format!(
             "conflict: memory_a == memory_b ({memory_a}) — a record cannot conflict with itself"
@@ -289,16 +344,46 @@ pub fn create_conflict(
     let conflict_id = crate::id::new_id();
     let ts = crate::time::now_secs();
     let priority = conflict_type.default_priority();
-    let hlc_ts = db.tick_hlc();
-    let hlc_bytes = hlc_ts.to_bytes().to_vec();
     let actor_id = db.actor_id().to_string();
 
-    db.conn().execute(
+    let sql = if only_if_absent {
         "INSERT OR IGNORE INTO conflicts
          (conflict_id, conflict_type, priority, status, memory_a, memory_b,
           entity, rel_type, detected_at, detected_by, detection_reason,
           hlc, origin_actor)
-         VALUES (?1, ?2, ?3, 'open', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
+         SELECT ?1, ?2, ?3, 'open', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12
+         WHERE NOT EXISTS (SELECT 1 FROM conflicts
+                           WHERE (memory_a = ?4 AND memory_b = ?5)
+                              OR (memory_a = ?5 AND memory_b = ?4))"
+    } else {
+        "INSERT OR IGNORE INTO conflicts
+         (conflict_id, conflict_type, priority, status, memory_a, memory_b,
+          entity, rel_type, detected_at, detected_by, detection_reason,
+          hlc, origin_actor)
+         VALUES (?1, ?2, ?3, 'open', ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)"
+    };
+    // Check, tick and insert under ONE connection guard: the HLC advances
+    // only for a conflict that is actually written, never for one an
+    // existing record suppresses, and no in-process writer can slip a
+    // duplicate in between (the guard serialises them). Ticking under the
+    // guard follows the documented lock order (conn -> hlc, CONCURRENCY.md
+    // Rule 1). The insert keeps its NOT EXISTS for a writer in another
+    // process.
+    let conn = db.conn();
+    if only_if_absent {
+        let exists: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM conflicts \
+             WHERE (memory_a = ?1 AND memory_b = ?2) OR (memory_a = ?2 AND memory_b = ?1))",
+            params![memory_a, memory_b],
+            |r| r.get(0),
+        )?;
+        if exists {
+            return Ok(None);
+        }
+    }
+    let hlc_bytes = db.tick_hlc().to_bytes().to_vec();
+    let inserted = conn.execute(
+        sql,
         params![
             conflict_id,
             conflict_type.as_str(),
@@ -314,6 +399,10 @@ pub fn create_conflict(
             actor_id,
         ],
     )?;
+    drop(conn);
+    if only_if_absent && inserted == 0 {
+        return Ok(None);
+    }
 
     // Log to oplog for replication
     db.log_op(
@@ -334,7 +423,7 @@ pub fn create_conflict(
         None,
     )?;
 
-    Ok(Conflict {
+    Ok(Some(Conflict {
         conflict_id,
         conflict_type: conflict_type.as_str().to_string(),
         priority: priority.to_string(),
@@ -351,7 +440,7 @@ pub fn create_conflict(
         strategy: None,
         winner_rid: None,
         resolution_note: None,
-    })
+    }))
 }
 
 /// Detect edge-based contradictions for a newly materialized edge.
@@ -410,19 +499,18 @@ pub fn detect_edge_conflicts(
             if !conflict_pair_eligible(db, mem_a, mem_b)? {
                 continue;
             }
-            if !conflict_exists(db, mem_a, mem_b)? {
-                let conflict = create_conflict(
-                    db,
-                    &conflict_type,
-                    mem_a,
-                    mem_b,
-                    Some(src),
-                    Some(rel_type),
-                    &format!(
-                        "Entity '{}' has conflicting {} values: '{}' vs '{}'",
-                        src, rel_type, existing_dst, dst
-                    ),
-                )?;
+            if let Some(conflict) = create_conflict_if_absent(
+                db,
+                &conflict_type,
+                mem_a,
+                mem_b,
+                Some(src),
+                Some(rel_type),
+                &format!(
+                    "Entity '{}' has conflicting {} values: '{}' vs '{}'",
+                    src, rel_type, existing_dst, dst
+                ),
+            )? {
                 conflicts.push(conflict);
             }
         }
@@ -566,20 +654,19 @@ pub fn scan_conflicts_limited(db: &YantrikDB, max_conflicts: usize) -> Result<Ve
             if !conflict_pair_eligible(db, a, b)? {
                 continue;
             }
-            if !conflict_exists(db, a, b)? {
-                let conflict_type = classify_conflict(rel_type);
-                let conflict = create_conflict(
-                    db,
-                    &conflict_type,
-                    a,
-                    b,
-                    Some(src),
-                    Some(rel_type),
-                    &format!(
-                        "Entity '{}' has conflicting {} values: '{}' vs '{}'",
-                        src, rel_type, dst_i, dst_j
-                    ),
-                )?;
+            let conflict_type = classify_conflict(rel_type);
+            if let Some(conflict) = create_conflict_if_absent(
+                db,
+                &conflict_type,
+                a,
+                b,
+                Some(src),
+                Some(rel_type),
+                &format!(
+                    "Entity '{}' has conflicting {} values: '{}' vs '{}'",
+                    src, rel_type, dst_i, dst_j
+                ),
+            )? {
                 conflicts.push(conflict);
             }
         }
@@ -598,19 +685,18 @@ pub fn scan_conflicts_limited(db: &YantrikDB, max_conflicts: usize) -> Result<Ve
         }
         seen_pairs.insert(pair);
 
-        if !conflict_exists(db, &rid_a, &rid_b)? {
-            let conflict = create_conflict(
-                db,
-                &ConflictType::Consolidation,
-                &rid_a,
-                &rid_b,
-                None,
-                None,
-                &format!(
-                    "Concurrent consolidation: both '{}' and '{}' consumed source '{}'",
-                    rid_a, rid_b, shared_source
-                ),
-            )?;
+        if let Some(conflict) = create_conflict_if_absent(
+            db,
+            &ConflictType::Consolidation,
+            &rid_a,
+            &rid_b,
+            None,
+            None,
+            &format!(
+                "Concurrent consolidation: both '{}' and '{}' consumed source '{}'",
+                rid_a, rid_b, shared_source
+            ),
+        )? {
             conflicts.push(conflict);
         }
     }
@@ -934,17 +1020,15 @@ pub fn scan_claim_conflicts(db: &YantrikDB, max_conflicts: usize) -> Result<Vec<
             continue;
         }
 
-        if !conflict_exists(db, &rid_a, &rid_b)? {
-            let mut conflict = create_conflict(
-                db,
-                &ConflictType::IdentityFact,
-                &rid_a,
-                &rid_b,
-                Some(&src_canonical),
-                Some(&c.rel_type),
-                &reason,
-            )?;
-
+        if let Some(mut conflict) = create_conflict_if_absent(
+            db,
+            &ConflictType::IdentityFact,
+            &rid_a,
+            &rid_b,
+            Some(&src_canonical),
+            Some(&c.rel_type),
+            &reason,
+        )? {
             // Override priority based on our temporal analysis
             {
                 let conn = db.conn();
@@ -1007,12 +1091,12 @@ pub fn scan_claim_conflicts(db: &YantrikDB, max_conflicts: usize) -> Result<Vec<
                 // ambiguity, not a conflict pair — never self-conflict.
                 continue;
             }
-            if rid_a != "unknown" && rid_b != "unknown" && !conflict_exists(db, rid_a, rid_b)? {
+            if rid_a != "unknown" && rid_b != "unknown" {
                 let reason = format!(
                     "Polarity contradiction: '{}' has both positive and negative claims for {} → {}. Reasons: [{}]",
                     src, rel_type, dst, reason_codes::POLARITY_CONTRADICTION
                 );
-                let conflict = create_conflict(
+                let Some(conflict) = create_conflict_if_absent(
                     db,
                     &ConflictType::IdentityFact,
                     rid_a,
@@ -1020,7 +1104,10 @@ pub fn scan_claim_conflicts(db: &YantrikDB, max_conflicts: usize) -> Result<Vec<
                     Some(src),
                     Some(rel_type),
                     &reason,
-                )?;
+                )?
+                else {
+                    continue;
+                };
                 // Polarity contradictions are always high priority
                 {
                     let conn = db.conn();
@@ -1177,6 +1264,73 @@ mod tests {
         assert!(!conflicts.is_empty());
         assert_eq!(conflicts[0].conflict_type, "identity_fact");
         assert_eq!(conflicts[0].entity.as_deref(), Some("User"));
+    }
+
+    /// Two scans running at once must not record one conflict twice:
+    /// scan_conflicts and think() run with the GIL released (#271), and
+    /// the existence check and the insert took separate connection guards.
+    #[test]
+    fn concurrent_scans_record_each_conflict_once() {
+        for trial in 0..10 {
+            let db = YantrikDB::new(":memory:", 8).unwrap();
+            for i in 0..12 {
+                db.relate(&format!("Person{i}"), &format!("Alpha{i}"), "works_at", 1.0)
+                    .unwrap();
+                db.relate(&format!("Person{i}"), &format!("Beta{i}"), "works_at", 1.0)
+                    .unwrap();
+            }
+            let barrier = std::sync::Barrier::new(3);
+            std::thread::scope(|s| {
+                for _ in 0..3 {
+                    s.spawn(|| {
+                        barrier.wait();
+                        scan_conflicts(&db).unwrap();
+                    });
+                }
+            });
+            let (rows, pairs): (i64, i64) = db
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*), COUNT(DISTINCT min(memory_a, memory_b) || '|' || \
+                     max(memory_a, memory_b)) FROM conflicts",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert!(rows > 0, "trial {trial}: the seed produced no conflicts");
+            assert_eq!(rows, pairs, "trial {trial}: duplicate conflict rows");
+        }
+    }
+
+    /// A conflict that is already recorded writes nothing on a second
+    /// detection, so it must not advance the HLC either.
+    #[test]
+    fn a_suppressed_conflict_leaves_the_hlc_alone() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        assert!(create_conflict_if_absent(
+            &db,
+            &ConflictType::Minor,
+            "rid-a",
+            "rid-b",
+            None,
+            None,
+            "first"
+        )
+        .unwrap()
+        .is_some());
+        let before = db.hlc.lock().latest();
+        assert!(create_conflict_if_absent(
+            &db,
+            &ConflictType::Minor,
+            "rid-b",
+            "rid-a",
+            None,
+            None,
+            "again, reversed"
+        )
+        .unwrap()
+        .is_none());
+        assert_eq!(db.hlc.lock().latest(), before);
     }
 
     #[test]

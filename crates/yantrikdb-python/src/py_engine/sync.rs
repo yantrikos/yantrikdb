@@ -5,7 +5,7 @@ type PyObject = pyo3::Py<pyo3::PyAny>;
 
 use crate::py_types::*;
 
-use super::{map_err, PyYantrikDB};
+use super::{py_vector, run_detached, PyYantrikDB};
 
 /// Convert a core `Task` into a Python dict.
 fn task_to_dict(py: Python<'_>, t: &yantrikdb_core::Task) -> PyResult<PyObject> {
@@ -25,46 +25,43 @@ fn task_to_dict(py: Python<'_>, t: &yantrikdb_core::Task) -> PyResult<PyObject> 
 impl PyYantrikDB {
     // ── Storage tier operations ──
 
-    fn archive(&self, rid: &str) -> PyResult<bool> {
-        let db = self.get_inner()?;
-        db.archive(rid).map_err(map_err)
+    fn archive(slf: &Bound<'_, Self>, rid: &str) -> PyResult<bool> {
+        Self::detached(slf, |db| db.archive(rid))
     }
 
-    fn hydrate(&self, rid: &str) -> PyResult<bool> {
-        let db = self.get_inner()?;
-        db.hydrate(rid).map_err(map_err)
+    fn hydrate(slf: &Bound<'_, Self>, rid: &str) -> PyResult<bool> {
+        Self::detached(slf, |db| db.hydrate(rid))
     }
 
     #[pyo3(signature = (max_active,))]
-    fn evict(&self, max_active: usize) -> PyResult<Vec<String>> {
-        let db = self.get_inner()?;
-        db.evict(max_active).map_err(map_err)
+    fn evict(slf: &Bound<'_, Self>, max_active: usize) -> PyResult<Vec<String>> {
+        Self::detached(slf, |db| db.evict(max_active))
     }
 
     // ── Replication API (V5 P2P Sync) ──
 
     #[pyo3(signature = (since_hlc=None, since_op_id=None, exclude_actor=None, limit=1000))]
     fn extract_ops_since(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         since_hlc: Option<Vec<u8>>,
         since_op_id: Option<&str>,
         exclude_actor: Option<&str>,
         limit: usize,
     ) -> PyResult<Vec<PyObject>> {
-        let db = self.get_inner()?;
+        let py = slf.py();
         // 0.13.2: pass the provider so sealed payloads unseal — without
         // it a sealed row would parse to an EMPTY payload and the op
         // would replicate as a no-op.
-        let ops = yantrikdb_core::replication::extract_ops_since_enc(
-            &*db.conn(),
-            db.encryption(),
-            since_hlc.as_deref(),
-            since_op_id,
-            exclude_actor,
-            limit,
-        )
-        .map_err(map_err)?;
+        let ops = Self::detached(slf, |db| {
+            yantrikdb_core::replication::extract_ops_since_enc(
+                &db.conn(),
+                db.encryption(),
+                since_hlc.as_deref(),
+                since_op_id,
+                exclude_actor,
+                limit,
+            )
+        })?;
 
         let mut result = Vec::with_capacity(ops.len());
         for op in &ops {
@@ -85,9 +82,11 @@ impl PyYantrikDB {
         Ok(result)
     }
 
-    fn apply_ops(&self, py: Python<'_>, ops: Vec<Bound<'_, PyDict>>) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-
+    fn apply_ops(slf: &Bound<'_, Self>, ops: Vec<Bound<'_, PyDict>>) -> PyResult<PyObject> {
+        // Closed is reported before any argument error, as before the
+        // GIL sweep (#271).
+        let db = Self::engine_handle(slf)?;
+        let py = slf.py();
         let mut entries = Vec::with_capacity(ops.len());
         for d in &ops {
             let op_id: String = d
@@ -151,20 +150,22 @@ impl PyYantrikDB {
             });
         }
 
-        let stats = yantrikdb_core::replication::apply_ops(db, &entries).map_err(map_err)?;
+        let stats = run_detached(slf.py(), db, |db| {
+            yantrikdb_core::replication::apply_ops(db, &entries)
+        })?;
         let dict = PyDict::new(py);
         dict.set_item("ops_applied", stats.ops_applied)?;
         dict.set_item("ops_skipped", stats.ops_skipped)?;
         Ok(dict.into())
     }
 
-    fn get_peer_watermark(&self, py: Python<'_>, peer_actor: &str) -> PyResult<Option<PyObject>> {
-        let db = self.get_inner()?;
-        match yantrikdb_core::replication::get_peer_watermark(&*db.conn(), peer_actor)
-            .map_err(map_err)?
-        {
+    fn get_peer_watermark(slf: &Bound<'_, Self>, peer_actor: &str) -> PyResult<Option<PyObject>> {
+        let watermark = Self::detached(slf, |db| {
+            yantrikdb_core::replication::get_peer_watermark(&db.conn(), peer_actor)
+        })?;
+        match watermark {
             Some((hlc, op_id)) => {
-                let dict = PyDict::new(py);
+                let dict = PyDict::new(slf.py());
                 dict.set_item("hlc", &hlc)?;
                 dict.set_item("op_id", &op_id)?;
                 Ok(Some(dict.into()))
@@ -173,29 +174,32 @@ impl PyYantrikDB {
         }
     }
 
-    fn set_peer_watermark(&self, peer_actor: &str, hlc: Vec<u8>, op_id: &str) -> PyResult<()> {
-        let db = self.get_inner()?;
-        yantrikdb_core::replication::set_peer_watermark(&*db.conn(), peer_actor, &hlc, op_id)
-            .map_err(map_err)
+    fn set_peer_watermark(
+        slf: &Bound<'_, Self>,
+        peer_actor: &str,
+        hlc: Vec<u8>,
+        op_id: &str,
+    ) -> PyResult<()> {
+        Self::detached(slf, |db| {
+            yantrikdb_core::replication::set_peer_watermark(&db.conn(), peer_actor, &hlc, op_id)
+        })
     }
 
-    fn rebuild_vec_index(&self) -> PyResult<usize> {
-        let db = self.get_inner()?;
-        db.rebuild_vec_index().map_err(map_err)
+    fn rebuild_vec_index(slf: &Bound<'_, Self>) -> PyResult<usize> {
+        Self::detached(slf, |db| db.rebuild_vec_index())
     }
 
-    fn rebuild_graph_index(&self) -> PyResult<usize> {
-        let db = self.get_inner()?;
-        db.rebuild_graph_index().map_err(map_err)
+    fn rebuild_graph_index(slf: &Bound<'_, Self>) -> PyResult<usize> {
+        Self::detached(slf, |db| db.rebuild_graph_index())
     }
 
     /// Repair memories whose stored text carries a leaked tool-call
     /// serialization artifact (task 30). Call with `dry_run=True` first to
     /// see the scope, then `dry_run=False` to apply. Returns a report dict.
     #[pyo3(signature = (dry_run = true))]
-    fn repair_tool_call_artifacts(&self, py: Python<'_>, dry_run: bool) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let report = db.repair_tool_call_artifacts(dry_run).map_err(map_err)?;
+    fn repair_tool_call_artifacts(slf: &Bound<'_, Self>, dry_run: bool) -> PyResult<PyObject> {
+        let py = slf.py();
+        let report = Self::detached(slf, |db| db.repair_tool_call_artifacts(dry_run))?;
 
         let dict = PyDict::new(py);
         dict.set_item("dry_run", report.dry_run)?;
@@ -240,13 +244,43 @@ impl PyYantrikDB {
     /// first; it reports what it would touch without writing.
     #[pyo3(signature = (namespace = None, dry_run = true))]
     fn refresh_embeddings(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         namespace: Option<&str>,
         dry_run: bool,
     ) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let report = db.refresh_embeddings(namespace, dry_run).map_err(map_err)?;
+        let py = slf.py();
+        // An attached Python embedder re-encodes the rows, in the precedence
+        // every write follows. The engine's refresh_embeddings could only use
+        // its own, so on a follower whose only embedder is a Python one the
+        // replicated rows (which arrive without vectors) could never be
+        // repaired: it raised "No embedder configured". The rows are encoded
+        // inside the detached call, re-taking the GIL once per batch of up
+        // to 256 texts.
+        let (db, embedder) = Self::engine_and_embedder(slf)?;
+        // The rows record no embedding_model (NULL): never the engine's
+        // embedder, which did not make these vectors (#304 review 3), and
+        // not the Python embedder's self-declared `name` either, which the
+        // engine cannot vouch for. Every other write a Python embedder makes
+        // leaves it NULL too (#304 review 4).
+        let report = run_detached(py, db, |db| match embedder.as_ref() {
+            Some(emb) => {
+                db.refresh_embeddings_with_batch(namespace, dry_run, None, |texts: &[&str]| {
+                    Python::attach(|py| {
+                        texts
+                            .iter()
+                            .map(|text| {
+                                emb.call_method1(py, "encode", (*text,))
+                                    .and_then(|out| py_vector(py, &out))
+                                    .map_err(|e| {
+                                        yantrikdb_core::YantrikDbError::Inference(e.to_string())
+                                    })
+                            })
+                            .collect()
+                    })
+                })
+            }
+            None => db.refresh_embeddings(namespace, dry_run),
+        })?;
 
         let dict = PyDict::new(py);
         dict.set_item("dry_run", report.dry_run)?;
@@ -276,9 +310,9 @@ impl PyYantrikDB {
     /// (use-it-or-lose-it, task 32). Background maintenance; call with
     /// `dry_run=True` first. Returns a report dict.
     #[pyo3(signature = (dry_run = true))]
-    fn recalibrate_unused_importance(&self, py: Python<'_>, dry_run: bool) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let report = db.recalibrate_unused_importance(dry_run).map_err(map_err)?;
+    fn recalibrate_unused_importance(slf: &Bound<'_, Self>, dry_run: bool) -> PyResult<PyObject> {
+        let py = slf.py();
+        let report = Self::detached(slf, |db| db.recalibrate_unused_importance(dry_run))?;
 
         let dict = PyDict::new(py);
         dict.set_item("dry_run", report.dry_run)?;
@@ -295,15 +329,12 @@ impl PyYantrikDB {
     /// which an episode is a candidate. Returns a report dict.
     #[pyo3(signature = (dry_run = true, min_chars = 1500))]
     fn split_oversized_episodes(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         dry_run: bool,
         min_chars: usize,
     ) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let report = db
-            .split_oversized_episodes(dry_run, min_chars)
-            .map_err(map_err)?;
+        let py = slf.py();
+        let report = Self::detached(slf, |db| db.split_oversized_episodes(dry_run, min_chars))?;
 
         let dict = PyDict::new(py);
         dict.set_item("dry_run", report.dry_run)?;
@@ -319,9 +350,9 @@ impl PyYantrikDB {
     /// (newer-supersedes) and leave ambiguous/high-stakes ones for an
     /// operator (task 26). Dry-run first. Returns a report dict.
     #[pyo3(signature = (dry_run = true))]
-    fn auto_resolve_conflicts(&self, py: Python<'_>, dry_run: bool) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let report = db.auto_resolve_conflicts(dry_run).map_err(map_err)?;
+    fn auto_resolve_conflicts(slf: &Bound<'_, Self>, dry_run: bool) -> PyResult<PyObject> {
+        let py = slf.py();
+        let report = Self::detached(slf, |db| db.auto_resolve_conflicts(dry_run))?;
 
         let dict = PyDict::new(py);
         dict.set_item("dry_run", report.dry_run)?;
@@ -337,13 +368,12 @@ impl PyYantrikDB {
     /// the lowest-urgency excess over `max_pending` (task 27). Dry-run first.
     #[pyo3(signature = (dry_run = true, max_pending = 64))]
     fn prune_triggers(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         dry_run: bool,
         max_pending: usize,
     ) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let report = db.prune_triggers(dry_run, max_pending).map_err(map_err)?;
+        let py = slf.py();
+        let report = Self::detached(slf, |db| db.prune_triggers(dry_run, max_pending))?;
 
         let dict = PyDict::new(py);
         dict.set_item("dry_run", report.dry_run)?;
@@ -356,9 +386,8 @@ impl PyYantrikDB {
     }
 
     /// Total skill outcomes recorded in the durable timeline (task 28).
-    fn skill_outcome_count(&self) -> PyResult<usize> {
-        let db = self.get_inner()?;
-        db.skill_outcome_count().map_err(map_err)
+    fn skill_outcome_count(slf: &Bound<'_, Self>) -> PyResult<usize> {
+        Self::detached(slf, |db| db.skill_outcome_count())
     }
 
     /// Run one maintenance cycle — the sleep cycle (task 24). Drives the
@@ -381,7 +410,7 @@ impl PyYantrikDB {
     ))]
     #[allow(clippy::too_many_arguments)]
     fn run_maintenance_cycle(
-        &self,
+        slf: &Bound<'_, Self>,
         run_think: bool,
         burn_down_conflicts: bool,
         prune_triggers: bool,
@@ -395,7 +424,6 @@ impl PyYantrikDB {
         repair_artifacts: bool,
         dry_run: bool,
     ) -> PyResult<String> {
-        let db = self.get_inner()?;
         let cfg = yantrikdb_core::MaintenanceCycleConfig {
             run_think,
             burn_down_conflicts,
@@ -410,7 +438,7 @@ impl PyYantrikDB {
             repair_artifacts,
             dry_run,
         };
-        let report = db.run_maintenance_cycle(&cfg).map_err(map_err)?;
+        let report = Self::detached(slf, |db| db.run_maintenance_cycle(&cfg))?;
         Ok(serde_json::to_string(&report).map_err(|e| {
             // A maintenance cycle that RAN must never report as "{}" — the
             // caller could not tell "ran, report lost" from "did nothing".
@@ -421,9 +449,8 @@ impl PyYantrikDB {
     }
 
     /// The last persisted maintenance-cycle summary (JSON), or None.
-    fn last_maintenance_cycle(&self) -> PyResult<Option<String>> {
-        let db = self.get_inner()?;
-        db.last_maintenance_cycle().map_err(map_err)
+    fn last_maintenance_cycle(slf: &Bound<'_, Self>) -> PyResult<Option<String>> {
+        Self::detached(slf, |db| db.last_maintenance_cycle())
     }
 
     /// The maintenance-debt ledger — how overdue is cognition? Returns a dict
@@ -518,17 +545,61 @@ impl PyYantrikDB {
         namespace: &str,
         domain: &str,
     ) -> PyResult<Vec<String>> {
-        Self::detached(slf, |db| {
-            db.draft_memories_from_summary(summary, namespace, domain)
+        let py = slf.py();
+        // An embedder the caller attached outranks the engine's own, as in
+        // every other write (`embed_text`'s precedence). The engine cannot
+        // hold a Python embedder, so its `draft_memories_from_summary` raised
+        // "No embedder configured" on a store that had only one.
+        //
+        // The facts go through the engine's record_text route with the
+        // caller's embedder: a fact past the known window gets its chunk
+        // vectors as it is written, as on the engine path.
+        //
+        // Every fact is encoded before the call detaches, under one hold of
+        // the GIL, and before the engine is taken (`planned`), so a call
+        // encode() makes back into the store holds up no swap. Re-taking the
+        // GIL inside the detached call for each fact waited about a switch
+        // interval per fact whenever another thread was busy: 60 drafts
+        // took 1,021 ms beside a CPU-bound thread against 164 ms alone
+        // (#304 review 4). The detached call re-takes the GIL only for
+        // texts it was not handed, the chunk windows of a long fact; it
+        // marks its thread for those (`run_detached`).
+        type Planned = Option<(std::collections::HashMap<String, Vec<f32>>, PyObject)>;
+        let (db, planned) = Self::planned(slf, |e| -> PyResult<Planned> {
+            let Some(emb) = e.embedder.as_ref() else {
+                return Ok(None);
+            };
+            let facts = yantrikdb_core::YantrikDB::draft_facts_from_summary(summary);
+            let mut vectors = std::collections::HashMap::with_capacity(facts.len());
+            for fact in facts {
+                let out = emb.call_method1(py, "encode", (fact.as_str(),))?;
+                let vector = py_vector(py, &out)?;
+                vectors.insert(fact, vector);
+            }
+            Ok(Some((vectors, emb.clone_ref(py))))
+        })?;
+        let Some((vectors, emb)) = planned else {
+            return run_detached(py, db, |db| {
+                db.draft_memories_from_summary(summary, namespace, domain)
+            });
+        };
+        let embed_window = super::py_embed(&emb);
+        run_detached(py, db, |db| {
+            db.draft_memories_from_summary_embedded_by(summary, namespace, domain, |text: &str| {
+                match vectors.get(text) {
+                    Some(vector) => Ok(vector.clone()),
+                    None => embed_window(text),
+                }
+            })
         })
     }
 
     /// Auto-relate co-occurring entities to raise graph density (task 44).
     /// Dry-run first. Returns a report dict.
     #[pyo3(signature = (dry_run = true, max_edges = 500))]
-    fn auto_relate(&self, py: Python<'_>, dry_run: bool, max_edges: usize) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
-        let report = db.auto_relate(dry_run, max_edges).map_err(map_err)?;
+    fn auto_relate(slf: &Bound<'_, Self>, dry_run: bool, max_edges: usize) -> PyResult<PyObject> {
+        let py = slf.py();
+        let report = Self::detached(slf, |db| db.auto_relate(dry_run, max_edges))?;
         let dict = PyDict::new(py);
         dict.set_item("dry_run", report.dry_run)?;
         dict.set_item("pairs_considered", report.pairs_considered)?;

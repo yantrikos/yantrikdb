@@ -1092,3 +1092,190 @@ def test_the_swap_panic_hook_refuses_without_the_test_hooks_switch(tmp_path, mon
             db._inject_swap_panic()
     finally:
         db.close()
+
+
+class _SlowTruncEmb:
+    """A 256-dim embedder with a 200-character window that yields in encode().
+
+    With `calls_back`, encode() also calls into the store, as an embedder that
+    logs or looks something up might.
+    """
+
+    def __init__(self, db=None):
+        self.db = db
+
+    def encode(self, text):
+        time.sleep(0.002)
+        if self.db is not None:
+            self.db.maintenance_debt()
+        r = random.Random(hash(text[:200]) & 0xFFFFFFFF)
+        v = [r.random() for _ in range(256)]
+        n = sum(x * x for x in v) ** 0.5
+        return [x / n for x in v]
+
+
+@pytest.mark.skipif(
+    not _model_is_cached("potion-base-8M", "v0.1.0"),
+    reason="potion-base-8M is not in the local model cache; this test never downloads",
+)
+@pytest.mark.parametrize("calls_back", [False, True], ids=["plain", "encode-calls-back"])
+def test_set_embedder_named_beside_a_rechunk_does_not_deadlock(tmp_path, calls_back):
+    # rechunk_long_records runs detached and re-takes the GIL for each batch
+    # of encode() calls. A swap that held the GIL while it waited would
+    # deadlock against it. The gate does not stop the in-flight backfill,
+    # and an encode() that calls back into the store re-enters a call the
+    # swap is waiting for, so it skips the gate: the backfill finishes and
+    # the swap goes through.
+    db = YantrikDB(os.path.join(str(tmp_path), f"rechunk-{calls_back}.db"), 256)
+    try:
+        emb = _SlowTruncEmb()
+        db.set_embedder(emb, allow_unverified_embedder=True)
+        assert db.detect_embedder_window() is not None
+        for i in range(30):
+            db.record(f"long record {i} " + "and more words about the harbour " * 40)
+        if calls_back:
+            emb.db = db
+        out = {}
+
+        def backfill():
+            try:
+                out["rechunk"] = db.rechunk_long_records()
+            except Exception as e:  # noqa: BLE001
+                out["error"] = repr(e)
+
+        t = threading.Thread(target=backfill)
+        t.start()
+        time.sleep(0.05)
+        started = time.perf_counter()
+        db.set_embedder_named("potion-base-8M")
+        took = time.perf_counter() - started
+        t.join(60)
+        assert not t.is_alive(), "the backfill never finished"
+        assert "error" not in out, out.get("error")
+        assert out["rechunk"][0] > 0
+        assert took < 30, f"the swap took {took:.1f} s"
+    finally:
+        db.close()
+
+
+class _CallingBackEmb:
+    """A 256-dim embedder whose encode() pauses, then calls into the store."""
+
+    def __init__(self):
+        self.target = None
+        self.entered = threading.Event()
+        self.latencies = []
+
+    def encode(self, text):
+        if self.target is not None:
+            self.entered.set()
+            time.sleep(0.6)
+            started = time.perf_counter()
+            self.target.maintenance_debt()
+            self.latencies.append(time.perf_counter() - started)
+        r = random.Random(hash(text) & 0xFFFFFFFF)
+        v = [r.random() for _ in range(256)]
+        n = sum(x * x for x in v) ** 0.5
+        return [x / n for x in v]
+
+
+PRE_DETACH_ENCODES = {
+    "recall": lambda db: db.recall(query="topic 3", top_k=3),
+    "record_text": lambda db: db.record_text("a new note about topic 3"),
+    "draft_memories_from_summary": lambda db: db.draft_memories_from_summary(
+        "We decided to ship on Friday."
+    ),
+}
+
+
+@pytest.mark.skipif(
+    not _model_is_cached("potion-base-8M", "v0.1.0"),
+    reason="potion-base-8M is not in the local model cache; this test never downloads",
+)
+@pytest.mark.parametrize("name", sorted(PRE_DETACH_ENCODES))
+def test_a_call_back_from_a_pre_detach_encode_skips_a_pending_swap(tmp_path, name):
+    # The binding runs a Python embedder's encode() before it detaches.
+    # While a swap is pending, a call that encode() makes back into the
+    # store must not hold the swap up, nor be held up by it for long. It
+    # waited out the gate's 2 s limit when the binding held the engine
+    # across encode(); recall and record_text now hold nothing of the store
+    # there (#302 review 4), and the draft loop marks its thread.
+    db = YantrikDB(os.path.join(str(tmp_path), f"callback-{name}.db"), 256)
+    try:
+        emb = _CallingBackEmb()
+        db.set_embedder(emb, allow_unverified_embedder=True)
+        for i in range(10):
+            db.record(f"short record {i} about topic {i % 5}")
+        emb.target = db
+        out = {}
+
+        def worker():
+            try:
+                PRE_DETACH_ENCODES[name](db)
+                out["ok"] = True
+            except Exception as e:  # noqa: BLE001
+                out["error"] = repr(e)
+
+        t = threading.Thread(target=worker)
+        t.start()
+        assert emb.entered.wait(10)
+        db.set_embedder_named("potion-base-8M")
+        t.join(60)
+        assert "error" not in out, out.get("error")
+        assert emb.latencies and max(emb.latencies) < 1.0, emb.latencies
+    finally:
+        db.close()
+
+
+@_needs_potion
+def test_a_relayed_call_back_from_a_draft_encode_does_not_hold_up_a_swap(tmp_path):
+    # draft_memories_from_summary encodes its facts before it detaches. It
+    # took the engine first and marked its thread, which covers a call
+    # encode() makes back into the store on the same thread, but not one it
+    # hands to a helper thread and waits on: that call waited at the swap
+    # gate while the swap waited for the draft, until the swap failed at
+    # its 10 s deadline. The facts are now encoded before the engine is
+    # taken (`planned`, #302 review 4), so nothing holds the swap up.
+    db = YantrikDB(os.path.join(str(tmp_path), "draft-relay.db"), 256)
+    helper = concurrent.futures.ThreadPoolExecutor(1)
+    try:
+        seed = db.record("seed", embedding=[0.05] * 256)
+
+        class Relays:
+            armed = False
+            entered = threading.Event()
+
+            def encode(self, text):
+                if self.armed and text != "__yantrikdb_probe__":
+                    self.armed = False
+                    self.entered.set()
+                    time.sleep(0.3)  # the swap is pending by now
+                    helper.submit(db.get, seed).result()
+                return _vec(text, 256)
+
+        emb = Relays()
+        db.set_embedder(emb, allow_unverified_embedder=True)
+        emb.armed = True
+        out = {}
+
+        def drafter():
+            try:
+                out["rids"] = db.draft_memories_from_summary("We decided to ship on Friday.")
+            except Exception as e:  # noqa: BLE001
+                out["error"] = repr(e)
+
+        t = threading.Thread(target=drafter)
+        t.start()
+        assert emb.entered.wait(10)
+        started = time.perf_counter()
+        try:
+            db.set_embedder_named("potion-base-8M")
+        finally:
+            took = time.perf_counter() - started
+            t.join(30)
+        assert took < 5, took
+        assert "error" not in out, out
+        assert out["rids"]
+    finally:
+        helper.shutdown()
+        db.close()

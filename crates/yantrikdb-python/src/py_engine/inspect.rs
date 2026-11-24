@@ -4,7 +4,7 @@ type PyObject = pyo3::Py<pyo3::PyAny>;
 
 use crate::py_types::*;
 
-use super::{map_err, PyYantrikDB};
+use super::PyYantrikDB;
 
 /// Inspection reads for one memory; see `yantrikdb_core::engine::inspect`.
 /// These are the three reads an explorer (atlas, CLI, MCP, TUI) needs and
@@ -14,9 +14,9 @@ impl PyYantrikDB {
     /// Active claims whose source memory is `rid`, newest first, in the
     /// same dict shape as entity claims, including `status_suggestion`.
     /// Read-only; leaves no access trace.
-    fn claims_for_memory(&self, py: Python<'_>, rid: &str) -> PyResult<Vec<PyObject>> {
-        let db = self.get_inner()?;
-        let claims = db.claims_for_memory(rid).map_err(map_err)?;
+    fn claims_for_memory(slf: &Bound<'_, Self>, rid: &str) -> PyResult<Vec<PyObject>> {
+        let py = slf.py();
+        let claims = Self::detached(slf, |db| db.claims_for_memory(rid))?;
         claims.iter().map(|c| json_to_py(py, c)).collect()
     }
 
@@ -26,9 +26,9 @@ impl PyYantrikDB {
     /// (unix seconds, transaction time) and `origin_actor`. Empty when the
     /// memory was never corrected or the rid is unknown. Decrypted on
     /// encrypted stores.
-    fn revision_history(&self, py: Python<'_>, rid: &str) -> PyResult<Vec<PyObject>> {
-        let db = self.get_inner()?;
-        let revs = db.revision_history(rid).map_err(map_err)?;
+    fn revision_history(slf: &Bound<'_, Self>, rid: &str) -> PyResult<Vec<PyObject>> {
+        let py = slf.py();
+        let revs = Self::detached(slf, |db| db.revision_history(rid))?;
         revs.iter()
             .map(|r| {
                 let d = PyDict::new(py);
@@ -49,8 +49,7 @@ impl PyYantrikDB {
 
     /// Stored entity names linked to `rid`, sorted. Empty for an unlinked
     /// or unknown rid.
-    fn memory_entities(&self, rid: &str) -> PyResult<Vec<String>> {
-        let db = self.get_inner()?;
-        db.memory_entities(rid).map_err(map_err)
+    fn memory_entities(slf: &Bound<'_, Self>, rid: &str) -> PyResult<Vec<String>> {
+        Self::detached(slf, |db| db.memory_entities(rid))
     }
 }

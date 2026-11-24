@@ -75,3 +75,12 @@ jobs:
       # were missing the v0.7.6-added domain + source params.
       - name: Run Clippy
         run: cargo clippy --all-targets --all-features --workspace --exclude yantrikdb-python -- --cap-lints warn
+
+      # The slim wheel (`--no-default-features`, no embedder-download) is a
+      # documented build: every binding that needs the feature compiles to a
+      # stub that raises. Nothing else builds it, so a binding that calls a
+      # feature-gated core API unconditionally went unnoticed (convert_pack).
+      # `check` does not link, so the pyo3 linking problem above does not
+      # apply.
+      - name: Check the slim Python build
+        run: cargo check -p yantrikdb-python --no-default-features

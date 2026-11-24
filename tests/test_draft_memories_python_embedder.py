@@ -1,0 +1,195 @@
+"""draft_memories_from_summary with a Python embedder.
+
+The engine drafts memories through its own embedder, which cannot reach one
+attached with `set_embedder(obj)`. On a store whose only embedder was a Python
+one the call raised "No embedder configured"; on a store with both it used the
+engine's, against the precedence every other write follows. The binding now
+splits the summary, embeds each fact with the caller's embedder and records
+them with the same fields the engine path writes.
+
+A fact longer than a known embedder window gets its chunk vectors as it is
+written, embedded by the caller's embedder, as on the engine path.
+"""
+
+import os
+import random
+import threading
+
+import pytest
+
+from yantrikdb import YantrikDB
+
+DIM = 32  # not 64/256: those dims auto-attach a bundled engine-native embedder
+
+SUMMARY = (
+    "We decided to use keyset cursors for list_records. "
+    "Alice will own the database migration next sprint. "
+    "The production launch slipped to March 30 because of it."
+)
+
+# What a drafted memory is, minus rid, timestamps and vector.
+FIELDS = ("type", "text", "importance", "half_life", "certainty", "source", "domain",
+          "namespace", "metadata", "valence", "emotional_state")
+
+
+class Emb:
+    def __init__(self, dim=DIM):
+        self.dim = dim
+        self.calls = 0
+
+    def encode(self, text):
+        self.calls += 1
+        r = random.Random(hash(text) & 0xFFFFFFFF)
+        v = [r.random() for _ in range(self.dim)]
+        n = sum(x * x for x in v) ** 0.5
+        return [x / n for x in v]
+
+
+def _chunks(db, rid):
+    row = db._conn.execute("SELECT COUNT(*) AS n FROM memory_chunks WHERE rid = ?", (rid,)).fetchone()
+    return row["n"]
+
+
+def _drafted(db, rids):
+    return [dict({k: db.get(rid)[k] for k in FIELDS}, chunks=_chunks(db, rid)) for rid in rids]
+
+
+def test_drafts_with_only_a_python_embedder(tmp_path):
+    db = YantrikDB(os.path.join(str(tmp_path), "py.db"), DIM)
+    try:
+        emb = Emb()
+        db.set_embedder(emb, allow_unverified_embedder=True)
+        emb.calls = 0
+        rids = db.draft_memories_from_summary(SUMMARY, namespace="session", domain="work")
+        assert len(rids) >= 2
+        assert emb.calls == len(rids), "one encode() per drafted fact"
+        for row in _drafted(db, rids):
+            assert row["type"] == "semantic"
+            assert row["importance"] == 0.5
+            assert row["half_life"] == 604800.0
+            assert row["certainty"] == 0.7
+            assert row["source"] == "session_auto_capture"
+            assert row["domain"] == "work"
+            assert row["namespace"] == "session"
+            assert row["metadata"] == {"provisional": True, "kind": "session_auto_capture"}
+        # The stored vectors are the Python embedder's: each fact is its own
+        # nearest neighbour under that embedder.
+        for rid in rids:
+            text = db.get(rid)["text"]
+            hit = db.recall(query_embedding=Emb().encode(text), top_k=1, skip_reinforce=True)
+            assert hit[0]["rid"] == rid
+    finally:
+        db.close()
+
+
+def _native_store(path):
+    db = YantrikDB(path, 64)
+    if not db.has_embedder():
+        db.close()
+        pytest.skip("this build has no bundled engine embedder")
+    return db
+
+
+def test_python_path_matches_the_engine_path(tmp_path):
+    engine = _native_store(os.path.join(str(tmp_path), "engine.db"))
+    caller = YantrikDB(os.path.join(str(tmp_path), "caller.db"), DIM)
+    try:
+        caller.set_embedder(Emb(), allow_unverified_embedder=True)
+        a = engine.draft_memories_from_summary(SUMMARY, namespace="session", domain="work")
+        b = caller.draft_memories_from_summary(SUMMARY, namespace="session", domain="work")
+        assert len(a) == len(b) >= 2
+        assert _drafted(engine, a) == _drafted(caller, b)
+    finally:
+        engine.close()
+        caller.close()
+
+
+def test_an_attached_python_embedder_outranks_the_engine_one(tmp_path):
+    db = _native_store(os.path.join(str(tmp_path), "both.db"))
+    try:
+        emb = Emb(dim=64)
+        db.set_embedder(emb, allow_unverified_embedder=True)
+        emb.calls = 0
+        rids = db.draft_memories_from_summary(SUMMARY)
+        assert rids
+        assert emb.calls == len(rids), "the attached embedder made the vectors"
+    finally:
+        db.close()
+
+
+class TruncEmb(Emb):
+    """Sees only the first 120 characters, like a model with an input window."""
+
+    def encode(self, text):
+        return super().encode(text[:120])
+
+
+def test_a_long_fact_is_chunked_as_it_is_drafted_on_the_python_path(tmp_path):
+    # A drafted fact past the known window gets its chunk vectors at write
+    # time, as on the engine path. It used to get none until
+    # rechunk_long_records() ran.
+    db = YantrikDB(os.path.join(str(tmp_path), "long.db"), DIM)
+    try:
+        db.set_embedder(TruncEmb(), allow_unverified_embedder=True)
+        assert db.detect_embedder_window() is not None
+        long_tail = " ".join(f"detail {i} of the migration plan" for i in range(40))
+        rids = db.draft_memories_from_summary(SUMMARY + " " + long_tail + ".")
+        longest = max(rids, key=lambda r: len(db.get(r)["text"]))
+        assert len(db.get(longest)["text"]) > 400
+        assert _chunks(db, longest) > 0
+        assert db.rechunk_long_records() == (0, 0), "nothing left to backfill"
+    finally:
+        db.close()
+
+
+class _SpinWatchEmb(Emb):
+    # Records, at each encode(), how far a spinning thread has counted.
+    def __init__(self, ticks):
+        super().__init__()
+        self.ticks = ticks
+        self.seen = []
+
+    def encode(self, text):
+        self.seen.append(self.ticks[0])
+        return super().encode(text)
+
+
+@pytest.mark.skipif((os.cpu_count() or 1) < 2, reason="needs a second CPU for the spinning thread")
+def test_python_embedded_drafts_encode_their_facts_under_one_hold_of_the_gil(tmp_path):
+    # Each fact's encode() used to run inside the detached call, re-taking
+    # the GIL for every fact, so a busy thread ran between almost every two
+    # of them, and each re-take waited about a switch interval for it: 60
+    # drafts took 1,021 ms beside a CPU-bound thread against 164 ms alone.
+    # The facts are now encoded before the call detaches, back to back
+    # under one hold of the GIL (#304 review 4).
+    summary = " ".join(
+        f"Decision number {i} was to adopt option {i} for subsystem {i} after a long debate."
+        for i in range(60)
+    )
+    db = YantrikDB(os.path.join(str(tmp_path), "spin.db"), DIM)
+    try:
+        ticks = [0]
+        emb = _SpinWatchEmb(ticks)
+        db.set_embedder(emb, allow_unverified_embedder=True)
+        emb.seen.clear()
+        stop = threading.Event()
+
+        def spinner():
+            while not stop.is_set():
+                ticks[0] += 1
+
+        t = threading.Thread(target=spinner)
+        t.start()
+        try:
+            rids = db.draft_memories_from_summary(summary)
+        finally:
+            stop.set()
+            t.join()
+        assert len(rids) >= 50, len(rids)
+        seen = emb.seen[: len(rids)]
+        interleaved = sum(1 for a, b in zip(seen, seen[1:]) if b != a)
+        # Before: the spinner ran between 59 of 59 pairs. Now a switch can
+        # still land inside an encode() now and then.
+        assert interleaved <= len(seen) // 4, (interleaved, len(seen))
+    finally:
+        db.close()

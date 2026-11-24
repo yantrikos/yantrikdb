@@ -1453,3 +1453,403 @@ fn mounted_pack_preserves_standing_instruction_facet_lane() {
         "v1.1: a mounted pack's preserved facet must be lane-visible"
     );
 }
+
+/// Two threads mounting the same pack: one mounts, the other gets the
+/// `PackAlreadyMounted` a sequential second mount gets. The check ran under
+/// a read lock and the push under a separate write lock, so both mounted
+/// it once the Python binding stopped serialising them on the GIL (#271).
+#[test]
+fn concurrent_mounts_of_one_pack_mount_it_once() {
+    let dir = tmpdir("concurrent-mount");
+    let pack = dir.join("physics.ydbpack");
+    build_pack(
+        &dir,
+        pack.to_str().unwrap(),
+        "E0",
+        &[("gluons bind quarks", 3)],
+    );
+    let db = host(&dir, "E0");
+    let path = pack.to_str().unwrap().to_string();
+    for trial in 0..20 {
+        let barrier = std::sync::Barrier::new(2);
+        let results: Vec<_> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    s.spawn(|| {
+                        barrier.wait();
+                        db.mount_pack(&path)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let ok = results.iter().filter(|r| r.is_ok()).count();
+        let already = results
+            .iter()
+            .filter(|r| matches!(r, Err(YantrikDbError::PackAlreadyMounted { .. })))
+            .count();
+        assert_eq!(
+            (ok, already, db.mounted_packs().len()),
+            (1, 1, 1),
+            "trial {trial}: {results:?}"
+        );
+        db.unmount_all_packs();
+    }
+}
+
+/// Two threads installing the same pack end with it installed and mounted
+/// once, both calls succeeding as two sequential installs do. Interleaved,
+/// they double-mounted it, failed with PackAlreadyMounted or an unreadable
+/// pack, and once read a half-copied file ("database disk image is
+/// malformed").
+#[test]
+fn concurrent_installs_of_one_pack_end_mounted_once() {
+    let dir = tmpdir("concurrent-install");
+    let pack = dir.join("physics.ydbpack");
+    build_pack(
+        &dir,
+        pack.to_str().unwrap(),
+        "E0",
+        &[("gluons bind quarks", 3)],
+    );
+    let db = host(&dir, "E0");
+    let path = pack.to_str().unwrap().to_string();
+    for trial in 0..10 {
+        let barrier = std::sync::Barrier::new(2);
+        let results: Vec<_> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    s.spawn(|| {
+                        barrier.wait();
+                        db.install_pack(&path)
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert!(
+            results.iter().all(|r| r.is_ok()),
+            "trial {trial}: {results:?}"
+        );
+        assert_eq!(db.mounted_packs().len(), 1, "trial {trial}");
+        assert_eq!(db.installed_packs().unwrap().len(), 1, "trial {trial}");
+    }
+    let texts = recall_texts(&db, &vec_on(3, 0.05), 5);
+    assert!(texts.iter().any(|t| t.contains("gluons")), "{texts:?}");
+}
+
+/// A re-install that cannot replace the installed file leaves the pack
+/// mounted. The install unmounted first and then failed the rename when
+/// something still held the old file open (a recall's reference, here a
+/// second SQLite handle; on Windows SQLite opens without FILE_SHARE_DELETE),
+/// leaving the pack unmounted. Elsewhere the rename succeeds and the
+/// re-install does too; either way the pack must stay mounted and served.
+#[test]
+fn reinstall_that_cannot_replace_the_file_keeps_the_pack_mounted() {
+    let dir = tmpdir("reinstall-held");
+    let pack = dir.join("physics.ydbpack");
+    build_pack(
+        &dir,
+        pack.to_str().unwrap(),
+        "E0",
+        &[("gluons bind quarks", 3)],
+    );
+    let db = host(&dir, "E0");
+    db.install_pack(pack.to_str().unwrap()).unwrap();
+    let installed = db.pack_dir().unwrap().join("physics-1.0.0.ydbpack");
+    let holder = rusqlite::Connection::open(&installed).unwrap();
+    let _: i64 = holder
+        .query_row("SELECT COUNT(*) FROM memories", [], |r| r.get(0))
+        .unwrap();
+
+    let again = db.install_pack(pack.to_str().unwrap());
+    if cfg!(windows) {
+        assert!(
+            again.is_err(),
+            "the held file cannot be replaced on Windows"
+        );
+    }
+    assert_eq!(db.mounted_packs().len(), 1, "re-install result: {again:?}");
+    let texts = recall_texts(&db, &vec_on(3, 0.05), 5);
+    assert!(texts.iter().any(|t| t.contains("gluons")), "{texts:?}");
+    drop(holder);
+}
+
+/// A re-install whose final mount loses to a concurrent mount of the same
+/// pack keeps the installed copy. The error arm deleted it while the
+/// pack_mounts row stayed, so the pack was gone at the next open.
+#[test]
+fn reinstall_racing_a_mount_keeps_the_installed_copy() {
+    let dir = tmpdir("reinstall-race");
+    let pack = dir.join("physics.ydbpack");
+    build_pack(
+        &dir,
+        pack.to_str().unwrap(),
+        "E0",
+        &[("gluons bind quarks", 3)],
+    );
+    let db = host(&dir, "E0");
+    let path = pack.to_str().unwrap().to_string();
+    db.install_pack(&path).unwrap();
+    let installed = db.pack_dir().unwrap().join("physics-1.0.0.ydbpack");
+    for trial in 0..20 {
+        let stop = std::sync::atomic::AtomicBool::new(false);
+        let result = std::thread::scope(|s| {
+            s.spawn(|| {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = db.mount_pack(&path);
+                }
+            });
+            let r = db.install_pack(&path);
+            stop.store(true, std::sync::atomic::Ordering::Relaxed);
+            r
+        });
+        assert!(result.is_ok(), "trial {trial}: {result:?}");
+        assert!(
+            installed.exists(),
+            "trial {trial}: the installed copy was deleted"
+        );
+        assert_eq!(db.installed_packs().unwrap().len(), 1, "trial {trial}");
+        assert_eq!(db.mounted_packs().len(), 1, "trial {trial}");
+    }
+}
+
+/// An install sweeps temp copies that dead installs left behind, but only
+/// ones untouched for an hour: a fresh one may be another install's work in
+/// progress.
+#[test]
+fn install_sweeps_stale_temp_copies_only() {
+    let dir = tmpdir("install-sweep");
+    let pack = dir.join("physics.ydbpack");
+    build_pack(
+        &dir,
+        pack.to_str().unwrap(),
+        "E0",
+        &[("gluons bind quarks", 3)],
+    );
+    let db = host(&dir, "E0");
+    let pack_dir = db.pack_dir().unwrap();
+    std::fs::create_dir_all(&pack_dir).unwrap();
+    let stale = pack_dir.join(".physics-1.0.0.ydbpack.tmp.4242.7");
+    let fresh = pack_dir.join(".physics-1.0.0.ydbpack.tmp.4242.8");
+    std::fs::write(&stale, b"half a pack").unwrap();
+    std::fs::write(&fresh, b"half a pack").unwrap();
+    let two_hours_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(7200);
+    std::fs::File::options()
+        .write(true)
+        .open(&stale)
+        .unwrap()
+        .set_modified(two_hours_ago)
+        .unwrap();
+
+    db.install_pack(pack.to_str().unwrap()).unwrap();
+    assert!(!stale.exists(), "the stale temp copy must be swept");
+    assert!(fresh.exists(), "a fresh temp copy may be a live install's");
+}
+
+/// Two seals to one destination: one writes the pack, the other gets the
+/// PackDestinationExists a sequential second seal gets. The loser's
+/// VACUUM INTO found the winner's file and surfaced SQLite's "output file
+/// already exists" as a bare database error.
+#[test]
+fn concurrent_seals_to_one_destination_refuse_the_loser_cleanly() {
+    let dir = tmpdir("concurrent-seal");
+    let db = host(&dir, "E0");
+    record(&db, "gluons bind quarks", &vec_on(3, 0.05), "physics");
+    for trial in 0..10 {
+        let dest = dir.join(format!("sealed-{trial}.ydbpack"));
+        let dest = dest.to_str().unwrap().to_string();
+        let barrier = std::sync::Barrier::new(2);
+        let results: Vec<_> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    s.spawn(|| {
+                        barrier.wait();
+                        db.seal_pack(&dest, &manifest(Some("E0")), Some("physics"))
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let ok = results.iter().filter(|r| r.is_ok()).count();
+        let exists = results
+            .iter()
+            .filter(|r| matches!(r, Err(YantrikDbError::PackDestinationExists { .. })))
+            .count();
+        assert_eq!((ok, exists), (1, 1), "trial {trial}: {results:?}");
+    }
+}
+
+/// A re-install whose new copy cannot be mounted (here: modified after
+/// sealing, so its content digest fails) leaves the working install as it
+/// was. The install replaced the installed file and then tried to put the
+/// old mount back from that same, now bad, file: the pack ended up
+/// unmounted, with the modified copy at the installed path.
+#[test]
+fn reinstall_of_an_unmountable_copy_keeps_the_working_install() {
+    let dir = tmpdir("reinstall-bad");
+    let pack = dir.join("physics.ydbpack");
+    build_pack(
+        &dir,
+        pack.to_str().unwrap(),
+        "E0",
+        &[("gluons bind quarks", 3)],
+    );
+    let bad = dir.join("physics-edited.ydbpack");
+    std::fs::copy(&pack, &bad).unwrap();
+    {
+        let c = rusqlite::Connection::open(&bad).unwrap();
+        c.execute(
+            "UPDATE memories SET text = text || ' (edited)' \
+             WHERE rowid = (SELECT min(rowid) FROM memories)",
+            [],
+        )
+        .unwrap();
+    }
+    let db = host(&dir, "E0");
+    db.install_pack(pack.to_str().unwrap()).unwrap();
+    let installed = db.pack_dir().unwrap().join("physics-1.0.0.ydbpack");
+
+    assert!(db.install_pack(bad.to_str().unwrap()).is_err());
+    assert_eq!(
+        db.mounted_packs().len(),
+        1,
+        "the working install stays mounted"
+    );
+    let texts = recall_texts(&db, &vec_on(3, 0.05), 5);
+    assert!(texts.iter().any(|t| t == "gluons bind quarks"), "{texts:?}");
+    let edited: i64 = rusqlite::Connection::open(&installed)
+        .unwrap()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE text LIKE '%(edited)'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        edited, 0,
+        "the installed path still holds the original copy"
+    );
+    db.unmount_all_packs();
+    assert!(
+        db.remount_installed().iter().all(|o| o.mounted),
+        "the next open remounts it"
+    );
+}
+
+/// On Windows a recall still reading the old mount holds the installed file
+/// open without FILE_SHARE_DELETE, so moving it aside failed with a sharing
+/// violation (os error 32) for the few milliseconds the read took: 19-24 of
+/// 60 re-installs beside recall traffic failed (#304 review 4). The move is
+/// retried briefly. Here a handle opened the way SQLite opens it is let go
+/// 5 ms after the install unmounts the old copy, just before it moves it.
+#[cfg(windows)]
+#[test]
+fn reinstall_waits_briefly_for_a_reader_holding_the_installed_file() {
+    use std::os::windows::fs::OpenOptionsExt;
+    const FILE_SHARE_READ: u32 = 0x1;
+    const FILE_SHARE_WRITE: u32 = 0x2;
+    let dir = tmpdir("reinstall-held");
+    let pack = dir.join("physics.ydbpack");
+    build_pack(
+        &dir,
+        pack.to_str().unwrap(),
+        "E0",
+        &[("gluons bind quarks", 3)],
+    );
+    let db = host(&dir, "E0");
+    db.install_pack(pack.to_str().unwrap()).unwrap();
+    let installed = db.pack_dir().unwrap().join("physics-1.0.0.ydbpack");
+    let held = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+        .open(&installed)
+        .unwrap();
+    let result = std::thread::scope(|s| {
+        s.spawn(|| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            while !db.mounted_packs().is_empty() && std::time::Instant::now() < deadline {
+                std::thread::yield_now();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+            drop(held);
+        });
+        db.install_pack(pack.to_str().unwrap())
+    });
+    result.expect("the re-install waits out a brief reader");
+    assert_eq!(db.mounted_packs().len(), 1);
+    let texts = recall_texts(&db, &vec_on(3, 0.05), 5);
+    assert!(texts.iter().any(|t| t == "gluons bind quarks"), "{texts:?}");
+}
+
+/// An install moves the installed copy aside (`.<file>.prev.<pid>.<n>`)
+/// before renaming the new copy in. One that died between the two renames
+/// left the installed path empty with the working copy beside it, and one
+/// that died after left the aside copy for good: nothing swept them
+/// (#304 review 4). Remount and install now put the copy back, or remove
+/// the leftover.
+fn installed_with_aside(
+    tag: &str,
+) -> (
+    std::path::PathBuf,
+    YantrikDB,
+    std::path::PathBuf,
+    std::path::PathBuf,
+) {
+    let dir = tmpdir(tag);
+    let pack = dir.join("physics.ydbpack");
+    build_pack(
+        &dir,
+        pack.to_str().unwrap(),
+        "E0",
+        &[("gluons bind quarks", 3)],
+    );
+    let db = host(&dir, "E0");
+    db.install_pack(pack.to_str().unwrap()).unwrap();
+    let packs = db.pack_dir().unwrap();
+    let installed = packs.join("physics-1.0.0.ydbpack");
+    let aside = packs.join(format!(
+        ".physics-1.0.0.ydbpack.prev.{}.900",
+        std::process::id()
+    ));
+    db.unmount_all_packs();
+    (pack, db, installed, aside)
+}
+
+#[test]
+fn remount_puts_back_a_copy_an_interrupted_install_left_aside() {
+    let (_pack, db, installed, aside) = installed_with_aside("aside-back");
+    // Died after the move aside, before the new copy was renamed in.
+    std::fs::rename(&installed, &aside).unwrap();
+    let outcomes = db.remount_installed();
+    assert!(outcomes.iter().all(|o| o.mounted), "{outcomes:?}");
+    assert!(installed.exists());
+    assert!(!aside.exists());
+    let texts = recall_texts(&db, &vec_on(3, 0.05), 5);
+    assert!(texts.iter().any(|t| t == "gluons bind quarks"), "{texts:?}");
+}
+
+#[test]
+fn install_removes_an_aside_copy_an_interrupted_install_left_behind() {
+    let (pack, db, installed, aside) = installed_with_aside("aside-left");
+    // Died after the new copy was renamed in: the aside copy is left over.
+    std::fs::copy(&installed, &aside).unwrap();
+    db.install_pack(pack.to_str().unwrap()).unwrap();
+    assert!(installed.exists());
+    assert!(!aside.exists(), "the leftover aside copy is removed");
+    assert_eq!(db.mounted_packs().len(), 1);
+}
+
+#[test]
+fn a_fresh_aside_copy_of_another_process_is_left_alone() {
+    let (_pack, db, installed, _aside) = installed_with_aside("aside-other");
+    // Another live process's install, between its renames: not ours to touch.
+    let other = installed
+        .parent()
+        .unwrap()
+        .join(".physics-1.0.0.ydbpack.prev.0.1");
+    std::fs::copy(&installed, &other).unwrap();
+    let outcomes = db.remount_installed();
+    assert!(outcomes.iter().all(|o| o.mounted), "{outcomes:?}");
+    assert!(other.exists());
+}
