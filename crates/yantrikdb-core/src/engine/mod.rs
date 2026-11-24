@@ -804,7 +804,18 @@ impl YantrikDB {
             })
         }
 
-        let conn = at("open", Connection::open(db_path))?;
+        let mut conn = at("open", Connection::open(db_path))?;
+
+        // Every transaction on the write connection starts with the write
+        // lock (BEGIN IMMEDIATE), not DEFERRED (#298). A deferred transaction
+        // that reads before it writes has to upgrade a read lock to a write
+        // lock, and SQLite never runs the busy handler for that upgrade:
+        // sqlite3BtreeBeginTrans retries only while the connection holds no
+        // transaction at all. So while another process held the write lock,
+        // record() failed at once with "database is locked" instead of waiting
+        // busy_timeout. Taking the lock up front makes the wait apply. The
+        // savepoint guard does the same for an outermost savepoint.
+        conn.set_transaction_behavior(rusqlite::TransactionBehavior::Immediate);
 
         // Enforce SQLite pragmas for durability + performance.
         // See CONCURRENCY.md and ops/runbooks/disk-full.md.

@@ -1548,7 +1548,7 @@ impl YantrikDB {
 
             // #91: RAII, not manual unwinding. EVERY fallible statement below
             // — serde, the encrypt wrappers, each INSERT, the stats advances —
-            // may `?`-return and the guard's Drop runs `ROLLBACK TO; RELEASE`.
+            // may `?`-return and the guard's Drop rolls the batch back.
             // The old error arm rolled back WITHOUT releasing (and the paths
             // before the INSERT returned without even the rollback), leaving
             // the savepoint open on the engine's single shared connection so

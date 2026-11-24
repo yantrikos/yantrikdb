@@ -292,6 +292,77 @@ it persists to `meta` and disarms both refusals for every future open.
 
 ---
 
+## Rule 10 — Every write-connection transaction takes the write lock first
+
+`busy_timeout` only helps a transaction that asks for the write lock
+before anything else. A `DEFERRED` transaction that reads and then
+writes has to upgrade a read lock, and SQLite never runs the busy
+handler for that upgrade: `sqlite3BtreeBeginTrans` retries only while
+the connection holds no transaction. If another connection holds the
+write lock at that moment, the write fails at once with `database is
+locked`, and that connection can be in another process. If another
+writer has committed since the read, it fails with `SQLITE_BUSY_SNAPSHOT`.
+That was issue #298: `record()` failed in under a millisecond while
+another process held the lock.
+
+**Invariant.** Every transaction on the write connection is `BEGIN
+IMMEDIATE`. The connection's transaction behaviour is set to `Immediate`
+at open, so `unchecked_transaction()` complies without extra work.
+`SavepointGuard` opens `BEGIN IMMEDIATE` when it is the outermost frame.
+Never write a bare `SAVEPOINT` or `BEGIN` on the write connection; use
+`SavepointGuard`. A single-statement write outside a transaction is
+fine, because its first step already asks for the write lock. That holds
+only while no statement on the same connection is still stepping: a
+live cursor keeps a read transaction open, and the write is then an
+upgrade again. Finish or drop every cursor before writing on the
+connection it came from.
+
+Caveats:
+
+- **Waiting is not a guarantee.** SQLite's busy handler polls with
+  backoff and no fairness. Another process that retakes the write lock
+  almost continuously can still starve an engine write until
+  `busy_timeout` (5 s) runs out, and the write then fails with
+  `database is locked`. The fix turns the instant failure into a bounded
+  wait; it cannot make the wait succeed. A writer that keeps its
+  transactions short avoids this.
+- **A read-only snapshot opens `Deferred` by name.** `read_conn()` falls
+  back to the write connection when `YANTRIKDB_READ_POOL=0`, and that
+  connection now defaults to `IMMEDIATE`, so a read snapshot taken there
+  with `unchecked_transaction()` would take the write lock. The thread
+  read in `thread.rs` uses
+  `Transaction::new_unchecked(.., TransactionBehavior::Deferred)` for
+  this reason.
+- **Any correction-epoch or similar seqlock goes odd only after
+  `BEGIN IMMEDIATE` returns.** The wait can last up to `busy_timeout`.
+  A recall spinning on an odd epoch gives up after about 1M spins with
+  `RecallContended`.
+- **The wait happens while holding the connection mutex.** It also holds
+  the GIL in bindings that have not yet released it (#271). Waiting is
+  the point, but anything else in the process that needs the write
+  connection waits behind it, including recall's trust stamping and
+  impression logging. Before #298 those writes failed at once instead.
+- **An empty transaction now fires the commit hook.** `BEGIN IMMEDIATE;
+  COMMIT` with no writes runs it, which a deferred read-only commit does
+  not. A read of the engine found no path that commits an empty
+  transaction outside a pre-checked write. Don't add one that relies on
+  the hook staying quiet.
+- **The Python `_conn` test proxy passes SQL through verbatim.** A test
+  that writes `BEGIN` there gets exactly what it wrote.
+
+`engine/tests/lock_wait.rs` checks the rule in four ways:
+- it holds the lock from a second connection and checks that both
+  routes wait for it;
+- it checks that a transaction holds the lock from `BEGIN`;
+- it runs writes beside a connection that commits continually;
+- it checks that `correct()` waiting for the lock does not starve
+  `recall()`.
+
+It also scans the source for a bare `SAVEPOINT`, `BEGIN` or `RELEASE`
+outside the guard.
+
+---
+
 ## Cross-stack rule — engine pressure suppresses enrichment, NEVER decay
 
 This rule lives in yantrikdb-server's tick loop (it's the consumer of

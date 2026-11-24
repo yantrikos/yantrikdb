@@ -40,6 +40,7 @@ mod interactive_recall;
 #[cfg(feature = "bundled-embedder")]
 mod learned_templates;
 mod learning_categories;
+mod lock_wait;
 mod maintenance_debt;
 mod metamorphic;
 mod migrations;
