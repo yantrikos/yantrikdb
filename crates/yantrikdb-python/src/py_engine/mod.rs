@@ -1359,36 +1359,48 @@ where
     F: FnOnce(&YantrikDB) -> Result<T, yantrikdb_core::YantrikDbError> + Send,
     T: Send,
 {
-    py.detach(move || in_engine_call(|| f(&db)))
+    py.detach(move || in_engine_call(&db, || f(&db)))
         .map_err(map_err)
 }
 
 thread_local! {
-    /// How many detached engine calls this thread is inside. A Python
-    /// callback such a call makes (an embedder's `encode()`, re-taking the
-    /// GIL) runs on the same thread, so this tells a re-entrant call from
-    /// a new one.
-    static IN_ENGINE_CALL: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+    /// The stores this thread is holding while it may call back into
+    /// Python: inside a detached engine call, or around an `encode()` run
+    /// while the binding holds the wrapper's borrow (`embed_text`) or the
+    /// engine. A callback runs on the same thread, so this tells a call
+    /// re-entered from it (into the same store) from a new one.
+    static IN_ENGINE_CALL: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
-/// Run `f` marked as inside a detached engine call (see
-/// [`PyYantrikDB::snapshot_borrow`]). Every detached call whose engine work
-/// can call back into Python goes through here.
-pub(crate) fn in_engine_call<T>(f: impl FnOnce() -> T) -> T {
+/// The key a store is marked under: its engine's address.
+fn store_key(db: &YantrikDB) -> usize {
+    db as *const YantrikDB as usize
+}
+
+/// Run `f` with this thread marked as holding `db`'s engine (see
+/// [`PyYantrikDB::snapshot_borrow`]). Every path that can call back into
+/// Python while it holds the engine or the wrapper's borrow goes through
+/// here: detached engine calls with Python callbacks, and `encode()` calls
+/// made under either. A binding that plans before it detaches holds
+/// neither while it encodes ([`PyYantrikDB::planned`]) and needs no mark.
+pub(crate) fn in_engine_call<T>(db: &YantrikDB, f: impl FnOnce() -> T) -> T {
     struct Leave;
     impl Drop for Leave {
         fn drop(&mut self) {
-            IN_ENGINE_CALL.with(|c| c.set(c.get().saturating_sub(1)));
+            IN_ENGINE_CALL.with(|c| {
+                c.borrow_mut().pop();
+            });
         }
     }
-    IN_ENGINE_CALL.with(|c| c.set(c.get() + 1));
+    IN_ENGINE_CALL.with(|c| c.borrow_mut().push(store_key(db)));
     let _leave = Leave;
     f()
 }
 
-/// Whether this thread is inside a detached engine call.
-fn inside_engine_call() -> bool {
-    IN_ENGINE_CALL.with(|c| c.get() > 0)
+/// Whether this thread is holding `db`'s engine further up its stack.
+fn inside_engine_call(db: &YantrikDB) -> bool {
+    let key = store_key(db);
+    IN_ENGINE_CALL.with(|c| c.borrow().contains(&key))
 }
 
 /// A serialized engine result as a Python object, built after the detached
@@ -1498,7 +1510,10 @@ impl PyYantrikDB {
     /// in-flight call's callback (an `encode()` that calls back into this
     /// store) does not wait at all: the swap is waiting for that in-flight
     /// call, which cannot finish until its callback returns. The thread
-    /// marks those calls (`in_engine_call`).
+    /// marks the stores it holds (`in_engine_call`), so the bypass is per
+    /// store: a callback that calls into a different store meets that
+    /// store's gate like any new call. None of this decides exclusivity:
+    /// the swap still happens only under `Arc::get_mut`.
     ///
     /// Any other call waits for as long as the swap does: until the gate
     /// drops or the store closes. A call that went ahead mid-swap would
@@ -1506,6 +1521,9 @@ impl PyYantrikDB {
     /// own (this was 2 s) let steady traffic starve the swap again once it
     /// passed (#302 review 3). The wait is still bounded: the swap gives up
     /// at its own deadline (10 s) and the gate drops on every way out of it.
+    /// That bound also ends the one wait no marker can tell apart: two
+    /// stores swapping at once, each with a call in flight whose callback
+    /// calls into the other.
     ///
     /// A binding that embeds before it detaches runs the Python embedder's
     /// `encode()` before it takes the engine ([`planned`](Self::planned)),
@@ -1540,7 +1558,10 @@ impl PyYantrikDB {
                 Ok(this) => {
                     let pending =
                         gated && this.swap_pending.load(std::sync::atomic::Ordering::Acquire);
-                    if !pending || this.inner.is_none() || inside_engine_call() {
+                    if !pending
+                        || this.inner.is_none()
+                        || this.inner.as_deref().is_some_and(inside_engine_call)
+                    {
                         return Ok(this);
                     }
                 }
@@ -1688,7 +1709,10 @@ impl PyYantrikDB {
         // `check_embedder_identity` before accepting the object, so attaching
         // one to a store with a recorded identity is refused as before.
         if let Some(emb) = &self.embedder {
-            let result = emb.call_method1(py, "encode", (text,))?;
+            let result = match self.inner.as_deref() {
+                Some(db) => in_engine_call(db, || emb.call_method1(py, "encode", (text,)))?,
+                None => emb.call_method1(py, "encode", (text,))?,
+            };
             return py_vector(py, &result);
         }
 

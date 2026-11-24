@@ -1156,3 +1156,72 @@ def test_set_embedder_named_beside_a_rechunk_does_not_deadlock(tmp_path, calls_b
         assert took < 30, f"the swap took {took:.1f} s"
     finally:
         db.close()
+
+
+class _CallingBackEmb:
+    """A 256-dim embedder whose encode() pauses, then calls into the store."""
+
+    def __init__(self):
+        self.target = None
+        self.entered = threading.Event()
+        self.latencies = []
+
+    def encode(self, text):
+        if self.target is not None:
+            self.entered.set()
+            time.sleep(0.6)
+            started = time.perf_counter()
+            self.target.maintenance_debt()
+            self.latencies.append(time.perf_counter() - started)
+        r = random.Random(hash(text) & 0xFFFFFFFF)
+        v = [r.random() for _ in range(256)]
+        n = sum(x * x for x in v) ** 0.5
+        return [x / n for x in v]
+
+
+PRE_DETACH_ENCODES = {
+    "recall": lambda db: db.recall(query="topic 3", top_k=3),
+    "record_text": lambda db: db.record_text("a new note about topic 3"),
+    "draft_memories_from_summary": lambda db: db.draft_memories_from_summary(
+        "We decided to ship on Friday."
+    ),
+}
+
+
+@pytest.mark.skipif(
+    not _model_is_cached("potion-base-8M", "v0.1.0"),
+    reason="potion-base-8M is not in the local model cache; this test never downloads",
+)
+@pytest.mark.parametrize("name", sorted(PRE_DETACH_ENCODES))
+def test_a_call_back_from_a_pre_detach_encode_skips_a_pending_swap(tmp_path, name):
+    # The binding runs a Python embedder's encode() before it detaches.
+    # While a swap is pending, a call that encode() makes back into the
+    # store must not hold the swap up, nor be held up by it for long. It
+    # waited out the gate's 2 s limit when the binding held the engine
+    # across encode(); recall and record_text now hold nothing of the store
+    # there (#302 review 4), and the draft loop marks its thread.
+    db = YantrikDB(os.path.join(str(tmp_path), f"callback-{name}.db"), 256)
+    try:
+        emb = _CallingBackEmb()
+        db.set_embedder(emb, allow_unverified_embedder=True)
+        for i in range(10):
+            db.record(f"short record {i} about topic {i % 5}")
+        emb.target = db
+        out = {}
+
+        def worker():
+            try:
+                PRE_DETACH_ENCODES[name](db)
+                out["ok"] = True
+            except Exception as e:  # noqa: BLE001
+                out["error"] = repr(e)
+
+        t = threading.Thread(target=worker)
+        t.start()
+        assert emb.entered.wait(10)
+        db.set_embedder_named("potion-base-8M")
+        t.join(60)
+        assert "error" not in out, out.get("error")
+        assert emb.latencies and max(emb.latencies) < 1.0, emb.latencies
+    finally:
+        db.close()

@@ -568,7 +568,9 @@ impl PyYantrikDB {
         let drafts = yantrikdb_core::YantrikDB::draft_facts_from_summary(summary)
             .into_iter()
             .map(|fact| {
-                let out = emb.call_method1(py, "encode", (fact.as_str(),))?;
+                let out = super::in_engine_call(&db, || {
+                    emb.call_method1(py, "encode", (fact.as_str(),))
+                })?;
                 Ok((fact, py_vector(py, &out)?))
             })
             .collect::<PyResult<Vec<_>>>()?;

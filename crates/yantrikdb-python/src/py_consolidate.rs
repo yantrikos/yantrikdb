@@ -290,7 +290,7 @@ pub fn py_summarize_cluster(
     let vector = summary_vector(embedding.as_deref(), from_text.as_ref());
     let out = py
         .detach(|| {
-            crate::py_engine::in_engine_call(|| {
+            crate::py_engine::in_engine_call(&inner, || {
                 yantrikdb_core::consolidate::summarize_cluster_with(
                     &inner,
                     &source_rids,
@@ -386,7 +386,7 @@ pub fn py_record_synthesis(
     };
     let out = py
         .detach(|| {
-            crate::py_engine::in_engine_call(|| {
+            crate::py_engine::in_engine_call(&inner, || {
                 yantrikdb_core::consolidate::record_synthesis_with(
                     &inner,
                     &source_rids,
@@ -418,7 +418,7 @@ pub fn py_consolidate_cluster(
     let vector = summary_vector(embedding.as_deref(), from_text.as_ref());
     let out = py
         .detach(|| {
-            crate::py_engine::in_engine_call(|| {
+            crate::py_engine::in_engine_call(&inner, || {
                 yantrikdb_core::consolidate::consolidate_cluster_with(
                     &inner,
                     &source_rids,
