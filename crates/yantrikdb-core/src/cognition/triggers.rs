@@ -759,19 +759,6 @@ pub fn persist_trigger(db: &YantrikDB, trigger: &Trigger, ts: f64) -> Result<Opt
     let cooldown_key = build_cooldown_key(trigger);
     let cooldown_secs = trigger_type.default_cooldown_secs();
 
-    let active_exists: bool = db.conn().query_row(
-        "SELECT COUNT(*) > 0 FROM trigger_log \
-         WHERE cooldown_key = ?1 \
-         AND status IN ('pending', 'delivered') \
-         AND created_at > ?2",
-        params![cooldown_key, ts - cooldown_secs],
-        |row| row.get(0),
-    )?;
-
-    if active_exists {
-        return Ok(None);
-    }
-
     let trigger_id = crate::id::new_id();
     let hlc_ts = db.tick_hlc();
     let hlc_bytes = hlc_ts.to_bytes().to_vec();
@@ -781,7 +768,23 @@ pub fn persist_trigger(db: &YantrikDB, trigger: &Trigger, ts: f64) -> Result<Opt
     let context_json = serde_json::to_string(&trigger.context)?;
 
     {
+        // The cooldown check and the insert share ONE connection guard, so
+        // two concurrent persists of one trigger (think() and the trigger
+        // checks run with the GIL released, #271) cannot both pass the
+        // check. Nothing slow happens under the guard.
         let conn = db.conn();
+        let active_exists: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM trigger_log \
+             WHERE cooldown_key = ?1 \
+             AND status IN ('pending', 'delivered') \
+             AND created_at > ?2",
+            params![cooldown_key, ts - cooldown_secs],
+            |row| row.get(0),
+        )?;
+
+        if active_exists {
+            return Ok(None);
+        }
         conn.execute(
             "INSERT INTO trigger_log \
              (trigger_id, trigger_type, urgency, status, reason, suggested_action, \
@@ -1439,6 +1442,43 @@ mod tests {
         // Same trigger should be suppressed by cooldown
         let second = persist_trigger(&db, &trigger, ts).unwrap();
         assert!(second.is_none());
+    }
+
+    /// The cooldown must hold for concurrent callers too: think() and the
+    /// trigger checks run with the GIL released (#271), and the check and
+    /// the insert took the connection lock separately, so two persists of
+    /// one trigger could both pass the check.
+    #[test]
+    fn concurrent_persists_of_one_trigger_fire_it_once() {
+        for trial in 0..50 {
+            let db = YantrikDB::new(":memory:", 8).unwrap();
+            let trigger = Trigger {
+                trigger_type: "decay_review".to_string(),
+                reason: "test".to_string(),
+                urgency: 0.8,
+                source_rids: vec!["rid-1".to_string()],
+                suggested_action: "test".to_string(),
+                context: HashMap::new(),
+            };
+            let ts = now();
+            let barrier = std::sync::Barrier::new(4);
+            let fired: usize = std::thread::scope(|s| {
+                let handles: Vec<_> = (0..4)
+                    .map(|_| {
+                        s.spawn(|| {
+                            barrier.wait();
+                            persist_trigger(&db, &trigger, ts).unwrap().is_some() as usize
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).sum()
+            });
+            let rows: i64 = db
+                .conn()
+                .query_row("SELECT COUNT(*) FROM trigger_log", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!((fired, rows), (1, 1), "trial {trial}");
+        }
     }
 
     #[test]
