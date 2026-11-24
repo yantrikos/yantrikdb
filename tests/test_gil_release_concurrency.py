@@ -688,6 +688,11 @@ def test_set_embedder_named_beside_a_held_borrow_leaves_the_workers_running(tmp_
         # Restarted at most once per 50 ms try, and once at the end.
         restarts = db._worker_spawns - spawns
         assert restarts <= out["took"] / 0.05 + 3, (restarts, out["took"])
+        # And the held borrow did turn the swap away: it stopped and
+        # restarted the workers on several tries before it went through.
+        # Without a borrow holder the swap goes through at once (1), and the
+        # test above proves nothing.
+        assert restarts >= 3, ("the borrow never held the swap up", restarts)
     finally:
         db.close()
 
