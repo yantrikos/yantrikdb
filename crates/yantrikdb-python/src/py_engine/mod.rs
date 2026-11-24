@@ -767,7 +767,7 @@ impl PyYantrikDB {
             let late = std::time::Instant::now() >= deadline;
             if quiet || late {
                 // Our Weak would block get_mut too.
-                weak = None;
+                drop(weak.take());
                 let mut this = Self::borrow_mut_briefly(slf)?;
                 // A close() can land while the model is fetched or we wait.
                 let Some(arc) = this.inner.as_mut() else {
