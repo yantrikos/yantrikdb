@@ -1043,3 +1043,27 @@ def test_a_named_swap_during_encode_leaves_the_python_vector_valid(tmp_path):
         assert took < 5, took
     finally:
         db.close()
+
+
+def test_the_replaced_embedder_is_dropped_outside_the_borrow(tmp_path):
+    # set_embedder() stores the new embedder under the wrapper's mutable
+    # borrow (#295's phase 3). It dropped the one it replaced there too, so
+    # an old embedder whose __del__ calls the store (to log, say) was
+    # refused with "Already mutably borrowed". It is now dropped after the
+    # borrow ends.
+    db = YantrikDB(os.path.join(str(tmp_path), "drop-old.db"), DIM)
+    seen = []
+
+    class CallsOnDel(Emb):
+        def __del__(self):
+            try:
+                seen.append(db.has_embedder())
+            except Exception as e:  # noqa: BLE001 - the refusal is the finding
+                seen.append(repr(e))
+
+    try:
+        db.set_embedder(CallsOnDel(), allow_unverified_embedder=True)
+        db.set_embedder(Emb(), allow_unverified_embedder=True)
+        assert seen == [True], seen
+    finally:
+        db.close()

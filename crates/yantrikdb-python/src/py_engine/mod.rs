@@ -705,7 +705,9 @@ impl PyYantrikDB {
             .check_embedder_identity(py, &embedder, allow_unverified_embedder)?;
 
         // Phase 3, mutable borrow for the store alone — one field
-        // assignment, no Python call inside it. A close() can now land
+        // assignment, no Python call inside it. The embedder it replaces is
+        // dropped after the borrow ends: dropping it can run its __del__,
+        // which may call back into this store. A close() can now land
         // between validation and the store, so re-check the engine is
         // still there. This changes behaviour: on main, set_embedder()
         // on a closed wrapper returned None, because
@@ -714,12 +716,15 @@ impl PyYantrikDB {
         // wrapper must not look like success. (has_embedder() is not
         // the concern here: it goes through get_inner()? and already
         // raises on a closed wrapper.)
-        let mut borrowed = slf.try_borrow_mut()?;
-        if borrowed.inner.is_none() {
-            return Err(PyRuntimeError::new_err("YantrikDB is closed"));
-        }
-        borrowed.embedder = Some(embedder);
-        borrowed.embedder_epoch += 1;
+        let previous = {
+            let mut borrowed = slf.try_borrow_mut()?;
+            if borrowed.inner.is_none() {
+                return Err(PyRuntimeError::new_err("YantrikDB is closed"));
+            }
+            borrowed.embedder_epoch += 1;
+            borrowed.embedder.replace(embedder)
+        };
+        drop(previous);
         Ok(())
     }
 
