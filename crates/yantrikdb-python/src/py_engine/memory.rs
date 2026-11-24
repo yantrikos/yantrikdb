@@ -1611,14 +1611,14 @@ impl PyYantrikDB {
         returned_child_rids: Vec<String>,
         returned_child_scores: Vec<Option<f64>>,
     ) -> PyResult<usize> {
-        // Closed is reported before any argument error, as before the
-        // GIL sweep (#271).
-        let db = Self::engine_handle(slf)?;
+        // The length check comes before the closed check, as it did before
+        // the GIL sweep (#271): 0.23.6 raised this ValueError first.
         if returned_child_rids.len() != returned_child_scores.len() {
             return Err(PyValueError::new_err(
                 "returned_child_rids and returned_child_scores must have equal length",
             ));
         }
+        let db = Self::engine_handle(slf)?;
         let children: Vec<(&str, Option<f64>)> = returned_child_rids
             .iter()
             .zip(returned_child_scores)

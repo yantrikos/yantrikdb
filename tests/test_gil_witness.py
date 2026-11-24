@@ -718,8 +718,9 @@ def test_embed_with_the_engine_embedder_releases_the_gil(tmp_path):
 
 # ── a closed store says so before it judges the arguments ───────────────
 #
-# Before the sweep a method checked for a closed store as it took its borrow,
-# before reading its arguments. A detached method reads them first, so each one
+# Before the sweep most methods checked for a closed store as it took its
+# borrow, before reading their arguments (ARGUMENT_FIRST lists the exceptions,
+# which validated an argument first). A detached method reads them first, so each one
 # here must take its engine handle before it parses anything.
 
 class _Unconvertible:
@@ -735,13 +736,27 @@ CLOSED_FIRST = {
         "text", [{"link_type": "supports"}]
     ),
     "linked_records": lambda db: db.linked_records("some-rid", "sideways"),
-    "note_rollup_expansion_features": lambda db: db.note_rollup_expansion_features(
-        "some-impression", ["a", "b"], [0.5]
-    ),
     "_log_op": lambda db: db._log_op("witness", None, {"x": _Unconvertible()}),
     "session_start": lambda db: db.session_start("default", "c", {"x": _Unconvertible()}),
     "apply_ops": lambda db: db.apply_ops([{}]),
 }
+
+
+# The other way round: argument-shape errors that 0.23.6 raised before it
+# checked for a closed store keep that order.
+ARGUMENT_FIRST = {
+    "note_rollup_expansion_features": lambda db: db.note_rollup_expansion_features(
+        "some-impression", ["a", "b"], [0.5]
+    ),
+}
+
+
+@pytest.mark.parametrize("name", sorted(ARGUMENT_FIRST))
+def test_a_bad_argument_is_reported_before_a_closed_store_where_it_was(tmp_path, name):
+    store = YantrikDB(os.path.join(str(tmp_path), "closed.db"), DIM)
+    store.close()
+    with pytest.raises(ValueError):
+        ARGUMENT_FIRST[name](store)
 
 
 @pytest.mark.parametrize("name", sorted(CLOSED_FIRST))
