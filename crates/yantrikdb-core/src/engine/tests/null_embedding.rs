@@ -737,3 +737,39 @@ fn insert_vector_is_refused_during_a_cutover() {
     db.insert_vector(&bare[0], &vec_seed(15.0, 8)).unwrap();
     assert!(embedding_blob(&db, &bare[0]).is_some());
 }
+
+/// insert_vector keeps the index in agreement with SQL: a cold row is not
+/// indexed (even when the call fills its missing vector), and a hot row
+/// that already holds a different vector keeps serving that one.
+#[test]
+fn insert_vector_indexes_only_what_sql_agrees_with() {
+    let (db, bare) = store_with_bare_rows(1);
+
+    // Cold row with no vector: filled (compressed) but not indexed.
+    let cold_rid = &bare[0];
+    assert!(db.archive(cold_rid).unwrap());
+    let v_cold = vec_seed(16.0, 8);
+    db.insert_vector(cold_rid, &v_cold).unwrap();
+    assert!(crate::compression::is_compressed(
+        &embedding_blob(&db, cold_rid).unwrap()
+    ));
+    assert!(
+        !vector_hits(&db, &v_cold, cold_rid),
+        "a cold row must not be indexed"
+    );
+
+    // Hot row holding a vector: a different one is not indexed...
+    let held = vec_seed(17.0, 8);
+    let hot_rid = record(&db, "a hot row with its own vector", 17.0);
+    let mut other = vec![0.0f32; 8];
+    other[5] = 1.0;
+    db.insert_vector(&hot_rid, &other).unwrap();
+    let nearest = db.search_state.load().vec_index.search(&other, 1).unwrap();
+    assert!(
+        nearest.first().map(|(r, _)| r != &hot_rid).unwrap_or(true),
+        "a vector that disagrees with SQL must not be indexed"
+    );
+    // ...and the same one is (the server's write-the-column-first path).
+    db.insert_vector(&hot_rid, &held).unwrap();
+    assert!(vector_hits(&db, &held, &hot_rid));
+}

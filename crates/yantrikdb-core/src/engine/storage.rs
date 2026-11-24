@@ -256,7 +256,11 @@ impl YantrikDB {
     ///
     /// If the row has no vector in SQL (a replicated row), the vector is
     /// written there too, compressed for a cold row, so a row in the index
-    /// always has its vector in SQL; `archive()` relies on that. Refused
+    /// always has its vector in SQL; `archive()` relies on that. SQL is
+    /// authoritative: a cold row is not indexed (it rejoins the index when
+    /// hydrated), and neither is a vector that differs from the one the row
+    /// already holds (it is logged and skipped; write the column first if
+    /// the vector is meant to replace it). Refused
     /// with `VectorInsertDeferredDuringReembed` while a reembed cutover is
     /// in progress; retry after it.
     ///
@@ -294,36 +298,64 @@ impl YantrikDB {
             );
         };
         let state = self.search_state.load_full();
-        // A row with no vector in SQL gets this one too (compressed for a
-        // cold row), so a row in the index always has its vector in SQL;
-        // archive() relies on that to decide whether to tombstone. The
-        // server's backfill writes the column first, which makes this a
-        // no-op there.
-        {
+        // SQL is authoritative, and the index must agree with it:
+        // - a row with no vector gets this one (compressed for a cold row),
+        //   so a row in the index always has its vector in SQL; archive()
+        //   relies on that to decide whether to tombstone;
+        // - a cold row is never indexed (archive tombstoned it; it rejoins
+        //   the index when hydrated);
+        // - a hot row that already holds a vector is indexed only if it is
+        //   this one. The server's backfill writes the column first, so
+        //   there this is the whole cost of the check. A different vector
+        //   would be a stray index entry that the next rebuild or reopen
+        //   drops; it is not appended.
+        let index_it = {
             let conn = self.conn();
-            // Only a row with no vector needs the fill; on the server's
-            // backfill (which writes the column first) this is the whole
-            // cost of the check.
-            let bare_tier: Option<String> = conn
+            let row: Option<(String, Option<Vec<u8>>)> = conn
                 .query_row(
-                    "SELECT storage_tier FROM memories WHERE rid = ?1 AND embedding IS NULL",
+                    "SELECT storage_tier, embedding FROM memories WHERE rid = ?1",
                     params![rid],
-                    |r| r.get(0),
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )
                 .optional()?;
-            if let Some(tier) = bare_tier {
-                let encoded = if tier == "cold" {
-                    crate::compression::compress_embedding(embedding)
-                } else {
-                    serialize_f32(embedding)
-                };
-                let stored = self.encrypt_embedding(&encoded)?;
-                conn.execute(
-                    "UPDATE memories SET embedding = ?1, embedding_generation = ?2 \
-                     WHERE rid = ?3 AND embedding IS NULL AND storage_tier = ?4",
-                    params![stored, state.generation as i64, rid, tier],
-                )?;
+            match row {
+                // No row: nothing to fill or check against (the documented
+                // contract is that the row exists).
+                None => true,
+                Some((tier, None)) => {
+                    let cold = tier == "cold";
+                    let encoded = if cold {
+                        crate::compression::compress_embedding(embedding)
+                    } else {
+                        serialize_f32(embedding)
+                    };
+                    let stored = self.encrypt_embedding(&encoded)?;
+                    conn.execute(
+                        "UPDATE memories SET embedding = ?1, embedding_generation = ?2 \
+                         WHERE rid = ?3 AND embedding IS NULL AND storage_tier = ?4",
+                        params![stored, state.generation as i64, rid, tier],
+                    )?;
+                    !cold
+                }
+                Some((tier, Some(_))) if tier == "cold" => false,
+                Some((_, Some(blob))) => {
+                    let held =
+                        crate::compression::decode_embedding_blob(&self.decrypt_embedding(&blob)?);
+                    if held.as_slice() == embedding {
+                        true
+                    } else {
+                        tracing::warn!(
+                            rid,
+                            "insert_vector: SQL holds a different vector for this row; SQL is \
+                             authoritative, so the index is left as it is"
+                        );
+                        false
+                    }
+                }
             }
+        };
+        if !index_it {
+            return Ok(());
         }
         let seq = self
             .vec_seq
