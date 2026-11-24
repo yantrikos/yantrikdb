@@ -304,6 +304,10 @@ pub struct RefreshReport {
     pub errors: Vec<RepairError>,
 }
 
+/// A batch re-encoder for [`YantrikDB::refresh_embeddings_with_batch`]:
+/// one result per text, in order.
+type BatchEmbed<'a> = dyn Fn(&[&str]) -> Vec<Result<Vec<f32>>> + 'a;
+
 pub(crate) struct PendingRefresh {
     pub(crate) rid: String,
     pub(crate) scanned_ciphertext: String,
@@ -361,17 +365,47 @@ impl YantrikDB {
         namespace: Option<&str>,
         dry_run: bool,
     ) -> Result<RefreshReport> {
-        let mut report = RefreshReport {
-            dry_run,
-            namespace: namespace.map(|s| s.to_string()),
-            ..Default::default()
-        };
-
         // Apply mode re-encodes; fail fast rather than reporting success
         // while leaving the rows exactly as unusable as they were.
         if !dry_run && !self.has_embedder() {
             return Err(YantrikDbError::NoEmbedder);
         }
+        self.refresh_embeddings_inner(namespace, dry_run, &|texts: &[&str]| {
+            texts.iter().map(|t| self.embed(t)).collect()
+        })
+    }
+
+    /// [`Self::refresh_embeddings`] with the rows re-encoded by `embed`
+    /// instead of the engine's own embedder: for an embedder the engine
+    /// cannot hold (the Python binding's caller-attached one, on a follower
+    /// whose replicated rows arrived without vectors). `embed` gets up to
+    /// 256 texts per call and returns one result per text, in order, so the
+    /// caller can reach its embedder once per batch. The scan, the
+    /// usability check, the per-tier encoding, the per-row error reporting
+    /// and the guarded apply are the same code as the engine path's.
+    pub fn refresh_embeddings_with_batch<F>(
+        &self,
+        namespace: Option<&str>,
+        dry_run: bool,
+        embed: F,
+    ) -> Result<RefreshReport>
+    where
+        F: Fn(&[&str]) -> Vec<Result<Vec<f32>>>,
+    {
+        self.refresh_embeddings_inner(namespace, dry_run, &embed)
+    }
+
+    fn refresh_embeddings_inner(
+        &self,
+        namespace: Option<&str>,
+        dry_run: bool,
+        embed: &BatchEmbed<'_>,
+    ) -> Result<RefreshReport> {
+        let mut report = RefreshReport {
+            dry_run,
+            namespace: namespace.map(|s| s.to_string()),
+            ..Default::default()
+        };
 
         let expected_len = self.embedding_dim() * 4;
 
@@ -427,7 +461,8 @@ impl YantrikDB {
 
         // ── Phase 2: select the unusable rows and, in apply mode, encode
         // them OUTSIDE the conn lock.
-        let mut pending: Vec<PendingRefresh> = Vec::new();
+        // (rid, scanned ciphertext, scanned tier, plaintext)
+        let mut to_encode: Vec<(String, String, String, String)> = Vec::new();
         for (rid, scanned_ciphertext, blob_len, scanned_tier, cold_decodes) in scanned {
             // Cold rows hold the blob compressed, so its length says nothing:
             // decode it (only cold blobs are fetched). Encrypted hot rows pad
@@ -453,48 +488,73 @@ impl YantrikDB {
                 continue;
             }
 
-            let plaintext = match self.decrypt_text(&scanned_ciphertext) {
-                Ok(t) => t,
-                Err(e) => {
-                    report.errors.push(RepairError {
-                        rid,
-                        message: format!("decrypt failed: {e}"),
-                    });
-                    continue;
-                }
-            };
-            let embedding = match self.embed(&plaintext) {
-                Ok(v) => v,
-                Err(e) => {
-                    report.errors.push(RepairError {
-                        rid,
-                        message: format!("embed failed: {e}"),
-                    });
-                    continue;
-                }
-            };
-            // Cold rows hold their vector compressed, by convention.
-            let encoded = if cold {
-                crate::compression::compress_embedding(&embedding)
-            } else {
-                serialize_f32(&embedding)
-            };
-            let new_embedding_blob = match self.encrypt_embedding(&encoded) {
-                Ok(b) => b,
-                Err(e) => {
-                    report.errors.push(RepairError {
-                        rid,
-                        message: format!("encrypt embedding failed: {e}"),
-                    });
-                    continue;
-                }
-            };
-            pending.push(PendingRefresh {
-                rid,
-                scanned_ciphertext,
-                scanned_tier,
-                new_embedding_blob,
-            });
+            match self.decrypt_text(&scanned_ciphertext) {
+                Ok(plaintext) => to_encode.push((rid, scanned_ciphertext, scanned_tier, plaintext)),
+                Err(e) => report.errors.push(RepairError {
+                    rid,
+                    message: format!("decrypt failed: {e}"),
+                }),
+            }
+        }
+
+        // Encode a batch at a time, so an embedder that is costly to reach
+        // per call (the binding's Python one re-takes the GIL) pays that
+        // cost per batch.
+        const BATCH: usize = 256;
+        let dim = self.embedding_dim();
+        let mut pending: Vec<PendingRefresh> = Vec::new();
+        for batch in to_encode.chunks(BATCH) {
+            let texts: Vec<&str> = batch.iter().map(|(_, _, _, t)| t.as_str()).collect();
+            let mut vectors = embed(&texts);
+            if vectors.len() != texts.len() {
+                let got = vectors.len();
+                vectors = (0..texts.len())
+                    .map(|_| {
+                        Err(YantrikDbError::Inference(format!(
+                            "the embedder returned {got} results for {} texts",
+                            texts.len()
+                        )))
+                    })
+                    .collect();
+            }
+            for ((rid, scanned_ciphertext, scanned_tier, _), embedded) in batch.iter().zip(vectors)
+            {
+                let embedding = match embedded.and_then(|v| {
+                    crate::validate::validate_embedding("refresh_embeddings", &v, dim)?;
+                    Ok(v)
+                }) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        report.errors.push(RepairError {
+                            rid: rid.clone(),
+                            message: format!("embed failed: {e}"),
+                        });
+                        continue;
+                    }
+                };
+                // Cold rows hold their vector compressed, by convention.
+                let encoded = if scanned_tier == "cold" {
+                    crate::compression::compress_embedding(&embedding)
+                } else {
+                    serialize_f32(&embedding)
+                };
+                let new_embedding_blob = match self.encrypt_embedding(&encoded) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        report.errors.push(RepairError {
+                            rid: rid.clone(),
+                            message: format!("encrypt embedding failed: {e}"),
+                        });
+                        continue;
+                    }
+                };
+                pending.push(PendingRefresh {
+                    rid: rid.clone(),
+                    scanned_ciphertext: scanned_ciphertext.clone(),
+                    scanned_tier: scanned_tier.clone(),
+                    new_embedding_blob,
+                });
+            }
         }
 
         if dry_run || pending.is_empty() {

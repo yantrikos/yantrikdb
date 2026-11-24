@@ -249,7 +249,33 @@ impl PyYantrikDB {
         dry_run: bool,
     ) -> PyResult<PyObject> {
         let py = slf.py();
-        let report = Self::detached(slf, |db| db.refresh_embeddings(namespace, dry_run))?;
+        // An attached Python embedder re-encodes the rows, in the precedence
+        // every write follows. The engine's refresh_embeddings could only use
+        // its own, so on a follower whose only embedder is a Python one the
+        // replicated rows (which arrive without vectors) could never be
+        // repaired: it raised "No embedder configured". The rows are encoded
+        // inside the detached call, re-taking the GIL once per batch of up
+        // to 256 texts.
+        let (db, embedder) = Self::engine_and_embedder(slf)?;
+        let report = run_detached(py, db, |db| match embedder.as_ref() {
+            Some(emb) => {
+                db.refresh_embeddings_with_batch(namespace, dry_run, |texts: &[&str]| {
+                    Python::attach(|py| {
+                        texts
+                            .iter()
+                            .map(|text| {
+                                emb.call_method1(py, "encode", (*text,))
+                                    .and_then(|out| py_vector(py, &out))
+                                    .map_err(|e| {
+                                        yantrikdb_core::YantrikDbError::Inference(e.to_string())
+                                    })
+                            })
+                            .collect()
+                    })
+                })
+            }
+            None => db.refresh_embeddings(namespace, dry_run),
+        })?;
 
         let dict = PyDict::new(py);
         dict.set_item("dry_run", report.dry_run)?;
