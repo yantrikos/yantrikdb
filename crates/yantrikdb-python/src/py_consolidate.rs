@@ -290,13 +290,15 @@ pub fn py_summarize_cluster(
     let vector = summary_vector(embedding.as_deref(), from_text.as_ref());
     let out = py
         .detach(|| {
-            yantrikdb_core::consolidate::summarize_cluster_with(
-                &inner,
-                &source_rids,
-                text,
-                vector,
-                idempotency_key,
-            )
+            crate::py_engine::in_engine_call(|| {
+                yantrikdb_core::consolidate::summarize_cluster_with(
+                    &inner,
+                    &source_rids,
+                    text,
+                    vector,
+                    idempotency_key,
+                )
+            })
         })
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     json_to_py(py, &out)
@@ -384,16 +386,18 @@ pub fn py_record_synthesis(
     };
     let out = py
         .detach(|| {
-            yantrikdb_core::consolidate::record_synthesis_with(
-                &inner,
-                &source_rids,
-                text,
-                vector,
-                axis,
-                granularity,
-                &metadata,
-                idempotency_key,
-            )
+            crate::py_engine::in_engine_call(|| {
+                yantrikdb_core::consolidate::record_synthesis_with(
+                    &inner,
+                    &source_rids,
+                    text,
+                    vector,
+                    axis,
+                    granularity,
+                    &metadata,
+                    idempotency_key,
+                )
+            })
         })
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     json_to_py(py, &out)
@@ -414,12 +418,14 @@ pub fn py_consolidate_cluster(
     let vector = summary_vector(embedding.as_deref(), from_text.as_ref());
     let out = py
         .detach(|| {
-            yantrikdb_core::consolidate::consolidate_cluster_with(
-                &inner,
-                &source_rids,
-                text,
-                vector,
-            )
+            crate::py_engine::in_engine_call(|| {
+                yantrikdb_core::consolidate::consolidate_cluster_with(
+                    &inner,
+                    &source_rids,
+                    text,
+                    vector,
+                )
+            })
         })
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
     json_to_py(py, &out)

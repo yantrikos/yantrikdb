@@ -1092,3 +1092,67 @@ def test_the_swap_panic_hook_refuses_without_the_test_hooks_switch(tmp_path, mon
             db._inject_swap_panic()
     finally:
         db.close()
+
+
+class _SlowTruncEmb:
+    """A 256-dim embedder with a 200-character window that yields in encode().
+
+    With `calls_back`, encode() also calls into the store, as an embedder that
+    logs or looks something up might.
+    """
+
+    def __init__(self, db=None):
+        self.db = db
+
+    def encode(self, text):
+        time.sleep(0.002)
+        if self.db is not None:
+            self.db.maintenance_debt()
+        r = random.Random(hash(text[:200]) & 0xFFFFFFFF)
+        v = [r.random() for _ in range(256)]
+        n = sum(x * x for x in v) ** 0.5
+        return [x / n for x in v]
+
+
+@pytest.mark.skipif(
+    not _model_is_cached("potion-base-8M", "v0.1.0"),
+    reason="potion-base-8M is not in the local model cache; this test never downloads",
+)
+@pytest.mark.parametrize("calls_back", [False, True], ids=["plain", "encode-calls-back"])
+def test_set_embedder_named_beside_a_rechunk_does_not_deadlock(tmp_path, calls_back):
+    # rechunk_long_records runs detached and re-takes the GIL for each batch
+    # of encode() calls. A swap that held the GIL while it waited would
+    # deadlock against it. The gate does not stop the in-flight backfill,
+    # and an encode() that calls back into the store re-enters a call the
+    # swap is waiting for, so it skips the gate: the backfill finishes and
+    # the swap goes through.
+    db = YantrikDB(os.path.join(str(tmp_path), f"rechunk-{calls_back}.db"), 256)
+    try:
+        emb = _SlowTruncEmb()
+        db.set_embedder(emb, allow_unverified_embedder=True)
+        assert db.detect_embedder_window() is not None
+        for i in range(30):
+            db.record(f"long record {i} " + "and more words about the harbour " * 40)
+        if calls_back:
+            emb.db = db
+        out = {}
+
+        def backfill():
+            try:
+                out["rechunk"] = db.rechunk_long_records()
+            except Exception as e:  # noqa: BLE001
+                out["error"] = repr(e)
+
+        t = threading.Thread(target=backfill)
+        t.start()
+        time.sleep(0.05)
+        started = time.perf_counter()
+        db.set_embedder_named("potion-base-8M")
+        took = time.perf_counter() - started
+        t.join(60)
+        assert not t.is_alive(), "the backfill never finished"
+        assert "error" not in out, out.get("error")
+        assert out["rechunk"][0] > 0
+        assert took < 30, f"the swap took {took:.1f} s"
+    finally:
+        db.close()

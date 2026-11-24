@@ -1359,7 +1359,36 @@ where
     F: FnOnce(&YantrikDB) -> Result<T, yantrikdb_core::YantrikDbError> + Send,
     T: Send,
 {
-    py.detach(move || f(&db)).map_err(map_err)
+    py.detach(move || in_engine_call(|| f(&db)))
+        .map_err(map_err)
+}
+
+thread_local! {
+    /// How many detached engine calls this thread is inside. A Python
+    /// callback such a call makes (an embedder's `encode()`, re-taking the
+    /// GIL) runs on the same thread, so this tells a re-entrant call from
+    /// a new one.
+    static IN_ENGINE_CALL: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
+/// Run `f` marked as inside a detached engine call (see
+/// [`PyYantrikDB::snapshot_borrow`]). Every detached call whose engine work
+/// can call back into Python goes through here.
+pub(crate) fn in_engine_call<T>(f: impl FnOnce() -> T) -> T {
+    struct Leave;
+    impl Drop for Leave {
+        fn drop(&mut self) {
+            IN_ENGINE_CALL.with(|c| c.set(c.get().saturating_sub(1)));
+        }
+    }
+    IN_ENGINE_CALL.with(|c| c.set(c.get() + 1));
+    let _leave = Leave;
+    f()
+}
+
+/// Whether this thread is inside a detached engine call.
+fn inside_engine_call() -> bool {
+    IN_ENGINE_CALL.with(|c| c.get() > 0)
 }
 
 /// A serialized engine result as a Python object, built after the detached
@@ -1465,26 +1494,30 @@ impl PyYantrikDB {
     /// While `set_embedder_named` waits for exclusive access
     /// (`swap_pending`), a new call waits here with the GIL released, so it
     /// does not take a fresh reference that keeps the engine shared; it then
-    /// proceeds on the swapped engine.
+    /// proceeds on the swapped engine. A call re-entered from inside an
+    /// in-flight call's callback (an `encode()` that calls back into this
+    /// store) does not wait at all: the swap is waiting for that in-flight
+    /// call, which cannot finish until its callback returns. The thread
+    /// marks those calls (`in_engine_call`).
     ///
-    /// It waits for as long as the swap does: until the gate drops or the
-    /// store closes. A call that went ahead mid-swap would take exactly the
-    /// reference the gate keeps out, so a time limit of its own (this was
-    /// 2 s) let steady traffic starve the swap again once it passed (#302
-    /// review 3). The wait is still bounded: the swap gives up at its own
-    /// deadline (10 s) and the gate drops on every way out of it.
+    /// Any other call waits for as long as the swap does: until the gate
+    /// drops or the store closes. A call that went ahead mid-swap would
+    /// take exactly the reference the gate keeps out, so a time limit of its
+    /// own (this was 2 s) let steady traffic starve the swap again once it
+    /// passed (#302 review 3). The wait is still bounded: the swap gives up
+    /// at its own deadline (10 s) and the gate drops on every way out of it.
     ///
-    /// No call the swap waits for is itself waiting here. A binding runs a
-    /// Python embedder's `encode()` before it takes the engine
-    /// ([`planned`](Self::planned)), so a call that `encode()` makes back
-    /// into the store, on its own thread or by handing it to another one,
-    /// holds up nothing the swap waits for: it waits here, then runs on the
-    /// swapped engine (#302 review 4). No detached call calls back into
-    /// Python on this branch. `record()` and the other methods that embed
-    /// through `embed_text` still hold the wrapper's borrow (but no engine
-    /// reference) across `encode()`; a swap then waits on that borrow, and
-    /// a call `encode()` makes back into the store waits here until the
-    /// swap gives up (#297 moves them).
+    /// A binding that embeds before it detaches runs the Python embedder's
+    /// `encode()` before it takes the engine ([`planned`](Self::planned)),
+    /// so a call that `encode()` makes back into the store, on its own
+    /// thread or by handing it to another one, holds up nothing the swap
+    /// waits for: it waits here, then runs on the swapped engine (#302
+    /// review 4). The marker above is for the bindings whose embedder runs
+    /// inside the detached call, holding the engine. `record()` and the
+    /// other methods that embed through `embed_text` hold the wrapper's
+    /// borrow (but no engine reference) across `encode()`; a swap then
+    /// waits on that borrow, and a call `encode()` makes back into the
+    /// store waits here until the swap gives up (#297 moves them).
     ///
     /// try_borrow, not borrow: a method holding the mutable borrow
     /// (`close()`, the swap, `set_embedder()` storing its embedder) can be
@@ -1507,7 +1540,7 @@ impl PyYantrikDB {
                 Ok(this) => {
                     let pending =
                         gated && this.swap_pending.load(std::sync::atomic::Ordering::Acquire);
-                    if !pending || this.inner.is_none() {
+                    if !pending || this.inner.is_none() || inside_engine_call() {
                         return Ok(this);
                     }
                 }
