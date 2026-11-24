@@ -1,4 +1,4 @@
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 
 use crate::error::Result;
 use crate::serde_helpers::serialize_f32;
@@ -257,8 +257,13 @@ impl YantrikDB {
     /// If the row has no vector in SQL (a replicated row), the vector is
     /// written there too, compressed for a cold row, so a row in the index
     /// always has its vector in SQL; `archive()` relies on that. Refused
-    /// with `DeterministicWriteDeferredDuringReembed` while a reembed
-    /// cutover is in progress; retry after it.
+    /// with `VectorInsertDeferredDuringReembed` while a reembed cutover is
+    /// in progress; retry after it.
+    ///
+    /// The vector is stamped with the generation active when this call
+    /// runs. Pass one from the embedder active now: a vector computed
+    /// before a cutover that has since completed is from the old space,
+    /// and nothing here can tell.
     ///
     /// Lock ordering: takes the `conn` briefly for that write, then
     /// `vec_index.write()` — caller must NOT hold a `conn` guard across
@@ -283,7 +288,7 @@ impl YantrikDB {
         // between them and leave an old-space vector stamped as current.
         let Some(_sync_guard) = self.write_router.try_enter_sync_writer() else {
             return Err(
-                crate::error::YantrikDbError::DeterministicWriteDeferredDuringReembed {
+                crate::error::YantrikDbError::VectorInsertDeferredDuringReembed {
                     rid: rid.to_string(),
                 },
             );
@@ -295,16 +300,30 @@ impl YantrikDB {
         // server's backfill writes the column first, which makes this a
         // no-op there.
         {
-            let stored_hot = self.encrypt_embedding(&serialize_f32(embedding))?;
-            let stored_cold =
-                self.encrypt_embedding(&crate::compression::compress_embedding(embedding))?;
-            self.conn().execute(
-                "UPDATE memories SET embedding = CASE storage_tier \
-                     WHEN 'cold' THEN ?2 ELSE ?1 END, \
-                 embedding_generation = ?3 \
-                 WHERE rid = ?4 AND embedding IS NULL",
-                params![stored_hot, stored_cold, state.generation as i64, rid],
-            )?;
+            let conn = self.conn();
+            // Only a row with no vector needs the fill; on the server's
+            // backfill (which writes the column first) this is the whole
+            // cost of the check.
+            let bare_tier: Option<String> = conn
+                .query_row(
+                    "SELECT storage_tier FROM memories WHERE rid = ?1 AND embedding IS NULL",
+                    params![rid],
+                    |r| r.get(0),
+                )
+                .optional()?;
+            if let Some(tier) = bare_tier {
+                let encoded = if tier == "cold" {
+                    crate::compression::compress_embedding(embedding)
+                } else {
+                    serialize_f32(embedding)
+                };
+                let stored = self.encrypt_embedding(&encoded)?;
+                conn.execute(
+                    "UPDATE memories SET embedding = ?1, embedding_generation = ?2 \
+                     WHERE rid = ?3 AND embedding IS NULL AND storage_tier = ?4",
+                    params![stored, state.generation as i64, rid, tier],
+                )?;
+            }
         }
         let seq = self
             .vec_seq

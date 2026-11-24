@@ -726,7 +726,7 @@ fn insert_vector_is_refused_during_a_cutover() {
     assert!(
         matches!(
             refused,
-            Err(crate::error::YantrikDbError::DeterministicWriteDeferredDuringReembed { .. })
+            Err(crate::error::YantrikDbError::VectorInsertDeferredDuringReembed { .. })
         ),
         "{refused:?}"
     );
