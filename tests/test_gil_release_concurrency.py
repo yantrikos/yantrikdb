@@ -492,11 +492,73 @@ def test_set_embedder_named_names_both_causes_when_a_proxy_holds_the_engine(tmp_
     db = YantrikDB(os.path.join(str(tmp_path), "proxy.db"), 256)
     try:
         proxy = db._conn
+        spawns = db._worker_spawns
         with pytest.raises(RuntimeError) as err:
             db.set_embedder_named("potion-base-8M")
         msg = str(err.value)
         assert "ConnectionProxy" in msg and "another thread's call" in msg, msg
+        assert "  " not in msg, f"broken line continuations in the message: {msg!r}"
+        # The workers stay stopped for the whole wait and are respawned once.
+        # Respawning on every try started a whole pool every ~1.5 ms.
+        assert db._worker_spawns - spawns == 1, db._worker_spawns - spawns
         del proxy
         assert db.record_turn("default", "user", "workers still running") > 0
+    finally:
+        db.close()
+
+
+@pytest.mark.skipif(
+    not _model_is_cached("potion-base-8M", "v0.1.0"),
+    reason="potion-base-8M is not in the local model cache; this test never downloads",
+)
+@pytest.mark.parametrize("traffic", ["recall", "record_turn", "recall_text"])
+def test_set_embedder_named_succeeds_under_steady_traffic(tmp_path, traffic):
+    # Four threads keep calling the store. Each detached call holds the
+    # engine while it runs, and new ones keep starting, so a swap that only
+    # waited for the engine to come free could wait forever (it gave up after
+    # 10 s where 0.23.6 swapped in 1-2 s). The swap gate holds new calls at
+    # their snapshot while the ones in flight finish; they then run on the
+    # swapped engine, and none of them fails.
+    db = YantrikDB(os.path.join(str(tmp_path), f"traffic-{traffic}.db"), 256)
+    try:
+        if traffic != "record_turn":
+            for i in range(300):
+                db.record_text(f"seed {i} about topic {i % 13} and thing {i % 7}")
+        q = db.embed("topic 3")
+        ops = {
+            "recall": lambda k: db.recall(query_embedding=q, top_k=10),
+            "record_turn": lambda k: db.record_turn(f"ns{k}", "user", "hello"),
+            "recall_text": lambda k: db.recall_text("topic 3", 5),
+        }
+        stop = threading.Event()
+        errors = []
+        calls = [0]
+
+        def worker(k):
+            while not stop.is_set():
+                try:
+                    ops[traffic](k)
+                    calls[0] += 1
+                except Exception as e:  # noqa: BLE001 - every failure is the finding
+                    errors.append(repr(e))
+
+        threads = [threading.Thread(target=worker, args=(k,)) for k in range(4)]
+        for t in threads:
+            t.start()
+        time.sleep(0.3)
+        started = time.perf_counter()
+        try:
+            db.set_embedder_named("potion-base-8M")
+        finally:
+            took = time.perf_counter() - started
+            before = calls[0]
+            time.sleep(0.2)
+            after = calls[0]
+            stop.set()
+            for t in threads:
+                t.join(30)
+        assert not errors, errors[:3]
+        assert took < 8, f"the swap took {took:.1f} s"
+        assert after > before, "traffic resumed after the swap"
     finally:
         db.close()
