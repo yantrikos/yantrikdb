@@ -714,3 +714,63 @@ def test_a_refused_close_gives_up_after_about_a_second(tmp_path):
     assert 0.9 <= took < 1.25, f"the refused close() took {took:.2f} s"
     db.record("still open", embedding=[0.1] * DIM)
     assert db.close() is True
+
+
+@_needs_potion
+def test_calls_wait_at_the_gate_for_as_long_as_the_swap_waits(tmp_path):
+    # While the swap waits, new calls wait at their snapshot until it is done.
+    # They used to go ahead after 2 s of their own, each taking the
+    # reference the gate is there to keep out, so a swap held up for longer
+    # was starved again by the traffic it had parked. Here a proxy holds the
+    # engine for 4 s; no call may finish between the gate going up and the
+    # proxy going away.
+    db = YantrikDB(os.path.join(str(tmp_path), "gate.db"), 256)
+    try:
+        for i in range(100):
+            db.record(f"seed {i} about topic {i % 13}", embedding=[0.05 + 0.001 * (i % 7)] * 256)
+        q = [0.05] * 256
+        proxy = db._conn
+        stop = threading.Event()
+        done = []
+        errors = []
+
+        def worker():
+            while not stop.is_set():
+                try:
+                    db.recall(query_embedding=q, top_k=5)
+                    done.append(time.perf_counter())
+                except Exception as e:  # noqa: BLE001
+                    errors.append(repr(e))
+
+        threads = [threading.Thread(target=worker) for _ in range(4)]
+        for t in threads:
+            t.start()
+        time.sleep(0.2)
+        out = {}
+
+        def swapper():
+            try:
+                db.set_embedder_named("potion-base-8M")
+            except Exception as e:  # noqa: BLE001
+                out["error"] = repr(e)
+
+        started = time.perf_counter()
+        sw = threading.Thread(target=swapper)
+        sw.start()
+        time.sleep(4.0)
+        released = time.perf_counter()
+        del proxy
+        sw.join(30)
+        time.sleep(0.2)
+        stop.set()
+        for t in threads:
+            t.join(30)
+        assert "error" not in out, out.get("error")
+        assert not errors, errors[:3]
+        # The fetch takes well under 1.5 s from the cache; from then on the
+        # gate is up until the proxy goes.
+        during = [d for d in done if started + 1.5 <= d < released - 0.05]
+        assert not during, f"{len(during)} calls finished while the swap waited"
+        assert any(d > released for d in done), "traffic resumed after the swap"
+    finally:
+        db.close()

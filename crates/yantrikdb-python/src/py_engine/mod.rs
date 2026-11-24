@@ -1336,10 +1336,16 @@ impl PyYantrikDB {
     /// While `set_embedder_named` waits for exclusive access
     /// (`swap_pending`), a new call waits here with the GIL released, so it
     /// does not take a fresh reference that keeps the engine shared; it then
-    /// proceeds on the swapped engine. The wait is bounded (2 s), so a call
-    /// re-entered from inside an in-flight call's callback (an `encode()`
-    /// that calls back into this store), which the swap is itself waiting
-    /// for, proceeds rather than waiting on its own swap.
+    /// proceeds on the swapped engine.
+    ///
+    /// It waits for as long as the swap does: until the gate drops or the
+    /// store closes. A call that went ahead mid-swap would take exactly the
+    /// reference the gate keeps out, so a time limit of its own (this was
+    /// 2 s) let steady traffic starve the swap again once it passed (#302
+    /// review 3). The wait is still bounded: the swap gives up at its own
+    /// deadline (10 s) and the gate drops on every way out of it. No call
+    /// in flight waits for one parked here: no detached call calls back
+    /// into Python, so none can re-enter the store mid-call.
     ///
     /// try_borrow, not borrow: a method holding the mutable borrow
     /// (`close()`, the swap, `set_embedder()` storing its embedder) can be
@@ -1348,15 +1354,13 @@ impl PyYantrikDB {
     /// first, which covers those brief mutable borrows; a longer one still
     /// gets the error.
     pub(crate) fn snapshot_borrow<'py>(slf: &Bound<'py, Self>) -> PyResult<PyRef<'py, Self>> {
-        const GATE_WAIT: std::time::Duration = std::time::Duration::from_secs(2);
         const BORROW_RETRY: std::time::Duration = std::time::Duration::from_millis(10);
-        let started = std::time::Instant::now();
         let mut refused_since: Option<std::time::Instant> = None;
         loop {
             match slf.try_borrow() {
                 Ok(this) => {
                     let pending = this.swap_pending.load(std::sync::atomic::Ordering::Acquire);
-                    if !pending || this.inner.is_none() || started.elapsed() >= GATE_WAIT {
+                    if !pending || this.inner.is_none() {
                         return Ok(this);
                     }
                 }
