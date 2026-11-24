@@ -93,6 +93,9 @@ libc = "0.2"
 criterion = "0.5"
 toml = "0.8"
 tempfile = "3"
+# Backdates directories in the model-cache sweep test (already in the
+# tree through `tar`).
+filetime = "0.2"
 # Pack tests hash the host file to prove unmount mutates nothing, and
 # tamper with a sealed pack to prove the content digest catches it.
 blake3 = "1"

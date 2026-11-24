@@ -319,6 +319,7 @@ fn fetch_and_extract(model: &DownloadableModel, name: &str) -> Result<PathBuf> {
     // fetches with the GIL released, so two threads of one process can be
     // here at once, and a name keyed by pid alone let the second one
     // `remove_dir_all` the first one's half-extracted files.
+    sweep_stale_extract_dirs(parent);
     let tmp_dir = parent.join(extract_dir_name(name, model.release_tag));
     std::fs::create_dir_all(&tmp_dir).map_err(|e| {
         YantrikDbError::InvalidInput(format!("mkdir tmp {}: {e}", tmp_dir.display()))
@@ -361,11 +362,39 @@ fn fetch_and_extract(model: &DownloadableModel, name: &str) -> Result<PathBuf> {
 /// (pid) AND per fetch within it (a process-wide counter), so concurrent
 /// fetches never share one. A crashed fetch's directory is left behind
 /// rather than removed by the next fetch: nothing can tell a dead fetch's
-/// directory from a live one's in another thread.
+/// directory from a live one's in another thread. They are swept by age
+/// instead ([`sweep_stale_extract_dirs`]).
 fn extract_dir_name(name: &str, release_tag: &str) -> String {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     format!("{name}-{release_tag}.tmp.{}.{n}", std::process::id())
+}
+
+/// Remove extraction directories (`<name>-<tag>.tmp.<pid>.<n>`) that crashed
+/// fetches left in the model cache, but only ones untouched for a day. A
+/// live fetch writes its directory within minutes (download, verify,
+/// extract), so a day-old one is no fetch's work in progress; a fresh one
+/// may be another thread's or another process's, and stays. Best-effort.
+fn sweep_stale_extract_dirs(cache_root: &std::path::Path) {
+    const STALE: std::time::Duration = std::time::Duration::from_secs(24 * 3600);
+    let Ok(entries) = std::fs::read_dir(cache_root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name.to_string_lossy().contains(".tmp.") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= STALE);
+        if stale && entry.path().is_dir() {
+            let _ = std::fs::remove_dir_all(entry.path());
+        }
+    }
 }
 
 /// Move a fully extracted `tmp_dir` into place as `final_dir`. A fetch
@@ -729,5 +758,29 @@ mod tests {
             tmps.iter().all(|t| !t.exists()),
             "extraction dirs left behind"
         );
+    }
+
+    /// Extraction dirs a crashed fetch left are swept once they are a day
+    /// old; a fresh one, possibly a live fetch's, stays.
+    #[test]
+    fn stale_extraction_dirs_are_swept_and_fresh_ones_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let stale = root.path().join("potion-base-8M-v0.1.0.tmp.4242.0");
+        let fresh = root.path().join("potion-base-8M-v0.1.0.tmp.4242.1");
+        let cache = root.path().join("potion-base-8M-v0.1.0");
+        for d in [&stale, &fresh, &cache] {
+            std::fs::create_dir_all(d).unwrap();
+            std::fs::write(d.join("config.json"), b"{}").unwrap();
+        }
+        let two_days_ago = filetime::FileTime::from_system_time(
+            std::time::SystemTime::now() - std::time::Duration::from_secs(2 * 24 * 3600),
+        );
+        filetime::set_file_mtime(&stale, two_days_ago).unwrap();
+        filetime::set_file_mtime(&cache, two_days_ago).unwrap();
+
+        sweep_stale_extract_dirs(root.path());
+        assert!(!stale.exists(), "a day-old extraction dir must be swept");
+        assert!(fresh.exists(), "a fresh one may be a live fetch's");
+        assert!(cache.exists(), "a populated cache dir is never touched");
     }
 }
