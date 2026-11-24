@@ -30,28 +30,51 @@ pub(crate) struct SavepointGuard<'a> {
     conn: &'a Connection,
     name: &'static str,
     released: bool,
+    /// True when this guard opened the transaction itself (the connection
+    /// was in autocommit), so release commits it and drop rolls it back.
+    outermost: bool,
 }
 
 impl<'a> SavepointGuard<'a> {
     /// Open the savepoint. On an autocommit connection this BEGINS a
     /// transaction that stays open until this guard releases or drops.
+    ///
+    /// That transaction is `BEGIN IMMEDIATE` (#298). A bare outermost
+    /// `SAVEPOINT` starts a DEFERRED transaction, and one that reads before
+    /// it writes must upgrade its read lock, which SQLite does without ever
+    /// running the busy handler: under another process's write lock the
+    /// write failed at once with "database is locked" instead of waiting
+    /// busy_timeout. Taking the write lock first makes the wait apply.
     pub(crate) fn new(conn: &'a Connection, name: &'static str) -> rusqlite::Result<Self> {
-        conn.execute_batch(&format!("SAVEPOINT {name}"))?;
+        let outermost = conn.is_autocommit();
+        if outermost {
+            conn.execute_batch("BEGIN IMMEDIATE")?;
+        }
+        if let Err(e) = conn.execute_batch(&format!("SAVEPOINT {name}")) {
+            if outermost {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+            return Err(e);
+        }
         Ok(Self {
             conn,
             name,
             released: false,
+            outermost,
         })
     }
 
     /// Commit the savepoint's work. Consumes the guard: released and rolled
     /// back are mutually exclusive by construction.
     ///
-    /// If the RELEASE itself fails (e.g. `SQLITE_FULL` at the outermost
-    /// commit), the guard drops un-released and `Drop` rolls the work back —
-    /// an Err from this method means NOT COMMITTED, never "maybe".
+    /// If the RELEASE or the COMMIT fails (e.g. `SQLITE_FULL` at the
+    /// outermost commit), the guard drops un-released and `Drop` rolls the
+    /// work back — an Err from this method means NOT COMMITTED, never "maybe".
     pub(crate) fn release(mut self) -> rusqlite::Result<()> {
         self.conn.execute_batch(&format!("RELEASE {}", self.name))?;
+        if self.outermost {
+            self.conn.execute_batch("COMMIT")?;
+        }
         self.released = true;
         Ok(())
     }
@@ -61,13 +84,17 @@ impl Drop for SavepointGuard<'_> {
     fn drop(&mut self) {
         if !self.released {
             // ROLLBACK TO undoes the work but leaves the savepoint frame on
-            // the stack; the RELEASE closes it (and, for the outermost
-            // savepoint, ends the transaction). Best-effort: an unwind path
-            // has no way to surface a second error, and the conn poisons no
-            // locks — the next writer's own savepoint would otherwise nest.
-            let _ = self
-                .conn
-                .execute_batch(&format!("ROLLBACK TO {n}; RELEASE {n}", n = self.name));
+            // the stack; the RELEASE closes it. When this guard opened the
+            // transaction, a plain ROLLBACK undoes everything and ends it.
+            // Best-effort: an unwind path has no way to surface a second
+            // error, and the conn poisons no locks — the next writer's own
+            // savepoint would otherwise nest.
+            let sql = if self.outermost {
+                "ROLLBACK".to_string()
+            } else {
+                format!("ROLLBACK TO {n}; RELEASE {n}", n = self.name)
+            };
+            let _ = self.conn.execute_batch(&sql);
         }
     }
 }

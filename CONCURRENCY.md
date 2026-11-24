@@ -292,6 +292,32 @@ it persists to `meta` and disarms both refusals for every future open.
 
 ---
 
+## Rule 10 — Every write-connection transaction takes the write lock first
+
+`busy_timeout` only helps a transaction that asks for the write lock
+before anything else. A `DEFERRED` transaction that reads and then
+writes has to upgrade a read lock, and SQLite never runs the busy
+handler for that upgrade: `sqlite3BtreeBeginTrans` retries only while
+the connection holds no transaction. If another connection holds the
+write lock at that moment, the write fails at once with `database is
+locked`, and that connection can be in another process. If another
+writer has committed since the read, it fails with `SQLITE_BUSY_SNAPSHOT`.
+That was issue #298: `record()` failed in under a millisecond while
+another process held the lock.
+
+**Invariant.** Every transaction on the write connection is `BEGIN
+IMMEDIATE`. The connection's transaction behaviour is set to `Immediate`
+at open, so `unchecked_transaction()` complies without extra work.
+`SavepointGuard` opens `BEGIN IMMEDIATE` when it is the outermost frame.
+Never write a bare `SAVEPOINT` or `BEGIN` on the write connection; use
+`SavepointGuard`. A single-statement write outside a transaction is
+fine, because its first step already asks for the write lock.
+
+`engine/tests/lock_wait.rs` holds the lock from a second connection
+and checks that both routes wait for it.
+
+---
+
 ## Cross-stack rule — engine pressure suppresses enrichment, NEVER decay
 
 This rule lives in yantrikdb-server's tick loop (it's the consumer of

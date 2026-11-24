@@ -476,8 +476,8 @@ impl YantrikDB {
         let updated_at = now();
         {
             let conn = self.conn();
-            conn.execute_batch("SAVEPOINT refresh_embeddings")?;
-            let apply: Result<()> = (|| {
+            let sp = crate::engine::savepoint::SavepointGuard::new(&conn, "refresh_embeddings")?;
+            {
                 for p in &pending {
                     // Guarded on the exact ciphertext scanned: if a
                     // concurrent write changed the text, the vector just
@@ -502,17 +502,8 @@ impl YantrikDB {
                     }
                     report.refreshed += 1;
                 }
-                Ok(())
-            })();
-            match apply {
-                Ok(()) => conn.execute_batch("RELEASE refresh_embeddings")?,
-                Err(e) => {
-                    let _ = conn.execute_batch(
-                        "ROLLBACK TO refresh_embeddings; RELEASE refresh_embeddings",
-                    );
-                    return Err(e);
-                }
             }
+            sp.release()?;
         }
 
         // ── Phase 4: one rebuild, so the newly-filled vectors become
