@@ -14,19 +14,23 @@
 //!   acquire the delta write lock briefly to append. Reader latency adds
 //!   `O(delta.len() * dim)` distance computations — bounded by `delta_max`.
 //!
-//! - **Compaction** (Phase 5): periodically clones cold + applies delta
-//!   entries to build a new cold, then atomically swaps via ArcSwap. The
-//!   delta is sealed during compaction and a new mutable delta is allocated
-//!   so writers don't block.
+//! - **Compaction** (Phase 5): periodically clones cold + applies a
+//!   snapshot of the published delta entries to build a new cold, installs
+//!   it with a compare-and-swap, then retires exactly the merged entries.
+//!   The entries stay in the delta (visible) for the whole build, and
+//!   writers keep appending. Compaction and an index rebuild from SQL
+//!   exclude each other through the compaction gate (CONCURRENCY.md
+//!   Rule 3).
 //!
 //! ## Lock-acquisition contract
 //!
 //! - Reads: `cold.load()` (no lock) + `delta.read()` (parking_lot RwLock
-//!   read; only contends with the brief append lock and the
-//!   sealing-for-compaction swap).
+//!   read; only contends with the brief append lock and compaction's
+//!   brief snapshot and retire).
 //! - Writes: `delta.write()` for one append + drop. Never touches cold.
-//! - Compaction (Phase 5): clones cold off-thread, swaps cold via ArcSwap,
-//!   swaps delta atomically. Brief writer lock, no impact on readers.
+//! - Compaction (Phase 5): holds the compaction gate, clones cold, swaps
+//!   the merge in by CAS, retires the merged entries. Brief delta locks,
+//!   no impact on readers.
 //!
 //! ## Visibility / read-your-writes
 //!
@@ -82,8 +86,8 @@ pub struct DeltaEntry {
 }
 
 /// Default soft cap on delta size. Hitting this triggers backpressure on
-/// `append()`. Phase 5 compaction will keep the delta below this in steady
-/// state by sealing + swapping when it crosses the cap. Tunable per
+/// `append()`. Compaction keeps the delta below this in steady state by
+/// merging published entries into cold and retiring them. Tunable per
 /// deployment via `DeltaIndex::with_capacity` or the `YANTRIKDB_DELTA_MAX`
 /// environment variable.
 ///
@@ -117,6 +121,16 @@ pub const DEFAULT_DELTA_MAX: usize = 256;
 /// or the `YANTRIKDB_MAX_DIRTY_AGE_SECS` environment variable.
 pub const DEFAULT_MAX_DIRTY_AGE: std::time::Duration = std::time::Duration::from_secs(60);
 
+/// A compaction merge built by [`DeltaIndex::prepare_compaction`], not yet
+/// installed.
+pub(crate) struct PreparedCompaction {
+    /// The cold tier the merge was cloned from.
+    base: Arc<HnswIndex>,
+    new_cold: HnswIndex,
+    sealed: Vec<DeltaEntry>,
+    applied: usize,
+}
+
 /// Per-DB two-tier vector index used by the decoupled write path.
 ///
 /// Wraps an `HnswIndex` cold tier (atomically swapped via ArcSwap at
@@ -128,8 +142,8 @@ pub struct DeltaIndex {
     delta_max: usize,
     dim: usize,
     /// Wall-clock instant when the delta most recently transitioned from
-    /// empty to non-empty. Cleared (set to `None`) at every successful
-    /// `seal_delta_for_compaction`. The compactor reads this to decide
+    /// empty to non-empty. Reset whenever entries are retired
+    /// (`retire_compacted`), from what remains. The compactor reads this to decide
     /// whether the age-based trigger fires.
     ///
     /// Lives on `DeltaIndex` rather than per-`DeltaEntry` so a busy
@@ -169,6 +183,14 @@ pub struct DeltaIndex {
     /// lock, so the lock provides the ordering; the atomic is only there
     /// so `append_inner` needs no extra lock on its hot path.
     compacting: std::sync::atomic::AtomicUsize,
+    /// Held by a compaction for its whole build-and-install, and by an
+    /// index rebuild from SQL ([`Self::pause_compaction`]) from before its
+    /// SQL read until its install. Without it the two overwrote each other:
+    /// a compaction that started before a rebuild installed its merge over
+    /// the rebuilt tier, and a compaction that finished during a rebuild
+    /// retired delta entries the rebuild's earlier SQL snapshot did not
+    /// contain, so those writes left the index until the next rebuild.
+    compaction_gate: parking_lot::Mutex<()>,
 }
 
 /// Outcome of [`DeltaIndex::append_reserved`]. `#[must_use]` is the
@@ -220,6 +242,7 @@ impl DeltaIndex {
             compactor_wake_cv: parking_lot::Condvar::new(),
             compactor_wake_mu: parking_lot::Mutex::new(()),
             compacting: std::sync::atomic::AtomicUsize::new(0),
+            compaction_gate: parking_lot::Mutex::new(()),
         }
     }
 
@@ -248,6 +271,7 @@ impl DeltaIndex {
             compactor_wake_cv: parking_lot::Condvar::new(),
             compactor_wake_mu: parking_lot::Mutex::new(()),
             compacting: std::sync::atomic::AtomicUsize::new(0),
+            compaction_gate: parking_lot::Mutex::new(()),
         }
     }
 
@@ -659,9 +683,9 @@ impl DeltaIndex {
         self.cold_len() == 0 && self.delta_len() == 0
     }
 
-    /// Snapshot the delta entries — used by the compactor (Phase 5) to
-    /// build a new cold tier. Returns a clone of the current delta vector;
-    /// the actual seal-and-swap is `seal_delta_for_compaction`.
+    /// Snapshot every delta entry (published or reserved). Returns a clone
+    /// of the current delta vector. Compaction itself snapshots only the
+    /// published entries (`snapshot_published_for_compaction`).
     pub fn snapshot_delta(&self) -> Vec<DeltaEntry> {
         self.delta.read().clone()
     }
@@ -672,7 +696,8 @@ impl DeltaIndex {
     ///
     /// Also clears the dirty-age clock — once entries are sealed, the
     /// next append against the now-empty delta restarts the age window.
-    pub fn seal_delta_for_compaction(&self) -> Vec<DeltaEntry> {
+    #[cfg(test)]
+    pub(crate) fn seal_delta_for_compaction(&self) -> Vec<DeltaEntry> {
         let mut delta = self.delta.write();
         // **v0.10 Item 3.** RESERVED (unpublished) entries are corrections
         // whose SQL has not yet committed — they must NOT be sealed into
@@ -708,7 +733,8 @@ impl DeltaIndex {
     /// Atomically install a new cold tier (post-compaction).
     /// Old readers continue against the prior Arc; new readers see the
     /// new tier on their next `cold.load()`.
-    pub fn install_cold(&self, new_cold: HnswIndex) {
+    #[cfg(test)]
+    pub(crate) fn install_cold(&self, new_cold: HnswIndex) {
         self.cold.store(Arc::new(new_cold));
     }
 
@@ -773,7 +799,8 @@ impl DeltaIndex {
     ///        - live with rid not in cold: HnswIndex::insert
     ///        - live with rid in cold (update): remove + re-insert
     ///   4. ensure_all_reachable() on the merged clone.
-    ///   5. ArcSwap.store(Arc::new(new_cold)), THEN retire_compacted()
+    ///   5. compare-and-swap the merged cold in (abandoned if cold was
+    ///      replaced meanwhile), THEN retire_compacted()
     ///      removes exactly the merged (rid, seq) pairs from the delta.
     ///      At no instant is a sealed entry in neither tier.
     ///
@@ -781,18 +808,72 @@ impl DeltaIndex {
     ///
     /// Idempotent on empty delta — returns 0 without touching cold.
     pub fn compact(&self) -> Result<usize> {
+        let _gate = self.compaction_gate.lock();
+        match self.prepare_compaction()? {
+            Some(prepared) => Ok(self.install_compaction(prepared)),
+            None => Ok(0),
+        }
+    }
+
+    /// Hold off compaction until the guard drops: an in-flight compaction
+    /// finishes first, and none starts meanwhile. For rebuilding the cold
+    /// tier from SQL: take the guard BEFORE reading SQL and install with
+    /// [`Self::install_rebuilt`] while still holding it, so every delta
+    /// entry published after the read is still in the delta at the install.
+    pub(crate) fn pause_compaction(&self) -> parking_lot::MutexGuard<'_, ()> {
+        self.compaction_gate.lock()
+    }
+
+    /// The `(rid, seq)` keys of every published delta entry, for a rebuild
+    /// to retire once its tier, read from SQL after these were published,
+    /// is installed. Only published entries: a reserved one belongs to a
+    /// write that has not committed, so SQL does not show it yet.
+    pub(crate) fn published_keys(&self) -> std::collections::HashSet<(String, u64)> {
+        self.delta
+            .read()
+            .iter()
+            .filter(|e| e.published)
+            .map(|e| (e.rid.clone(), e.seq))
+            .collect()
+    }
+
+    /// Install a cold tier rebuilt from SQL and retire the delta entries it
+    /// subsumes (`published_keys` taken while the rebuild read SQL). A
+    /// subsumed entry left in the delta would shadow the rebuilt vector for
+    /// its rid — a stale vector serving until the next compaction merged it
+    /// back over the rebuilt one. Call with the compaction gate held.
+    pub(crate) fn install_rebuilt(
+        &self,
+        new_cold: HnswIndex,
+        subsumed: &std::collections::HashSet<(String, u64)>,
+    ) {
+        self.cold.store(Arc::new(new_cold));
+        self.retire_compacted(subsumed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compaction_gate_is_held(&self) -> bool {
+        self.compaction_gate.is_locked()
+    }
+
+    /// The build half of [`Self::compact`]: snapshot the published delta and
+    /// merge it into a clone of the current cold tier. Nothing is installed.
+    /// `None` when there is nothing to compact.
+    pub(crate) fn prepare_compaction(&self) -> Result<Option<PreparedCompaction>> {
         // SNAPSHOT, not drain: the sealed entries stay in the live delta —
         // visible to every recall — until the merged cold is installed
         // below. See snapshot_published_for_compaction for the visibility
         // bug this replaces.
         let sealed = self.snapshot_published_for_compaction();
         if sealed.is_empty() {
-            return Ok(0);
+            return Ok(None);
         }
 
         // Clone cold off the live ArcSwap so readers continue against
-        // the prior epoch while we build the new one.
-        let mut new_cold: HnswIndex = (*self.cold.load_full()).clone();
+        // the prior epoch while we build the new one. `base` is kept: the
+        // install only succeeds if cold is still this exact tier.
+        let base = self.cold.load_full();
+        let mut new_cold: HnswIndex = (*base).clone();
 
         // Apply sealed entries by seq order. Same-rid duplicates within the
         // sealed batch resolve via "highest seq wins" — same rule as search.
@@ -848,16 +929,52 @@ impl DeltaIndex {
             tracing::warn!(rescued, "delta compaction reconnected unreachable nodes");
         }
 
+        Ok(Some(PreparedCompaction {
+            base,
+            new_cold,
+            sealed,
+            applied,
+        }))
+    }
+
+    /// The install half of [`Self::compact`]. Returns the number of delta
+    /// entries applied, or 0 if the merge was abandoned.
+    ///
+    /// Installs only if the cold tier is still the one the merge was built
+    /// from. The compaction gate already keeps a rebuild from installing
+    /// mid-merge; this is the second line, should any installer of a cold
+    /// tier ever skip the gate. Storing the merge unconditionally
+    /// threw a replacement tier away and put back a merge of the tier it
+    /// replaced. Abandoning is safe: the sealed entries never left the
+    /// delta, so the next compaction merges them into the new tier.
+    pub(crate) fn install_compaction(&self, prepared: PreparedCompaction) -> usize {
+        let PreparedCompaction {
+            base,
+            new_cold,
+            sealed,
+            applied,
+        } = prepared;
         // Install the merged cold FIRST — now every sealed entry is in
         // cold AND still in the delta (search dedupes by highest seq, so
         // no double-count) — THEN retire exactly the merged (rid, seq)
         // pairs from the delta. At no instant is a sealed entry in neither
         // tier, which is the whole point of the snapshot design.
-        self.cold.store(Arc::new(new_cold));
+        let previous = self.cold.compare_and_swap(&base, Arc::new(new_cold));
+        if !Arc::ptr_eq(&previous, &base) {
+            // Close the admission window the snapshot opened; the entries
+            // are still counted as live delta occupancy.
+            self.compacting
+                .store(0, std::sync::atomic::Ordering::Release);
+            tracing::debug!(
+                sealed = sealed.len(),
+                "cold tier replaced during compaction; merge abandoned, retried next tick"
+            );
+            return 0;
+        }
         let merged: std::collections::HashSet<(String, u64)> =
             sealed.iter().map(|e| (e.rid.clone(), e.seq)).collect();
         self.retire_compacted(&merged);
-        Ok(applied)
+        applied
     }
 
     /// Whether the delta should be compacted on the next compactor tick.
@@ -929,6 +1046,112 @@ mod tests {
         let raw: Vec<f32> = (0..dim).map(|i| (seed + i as f32) * 0.1).collect();
         let norm: f32 = raw.iter().map(|x| x * x).sum::<f32>().sqrt().max(1e-9);
         raw.iter().map(|x| x / norm).collect()
+    }
+
+    /// An index rebuild (install_cold) that lands while a compaction is
+    /// building its merge must survive: the merge was cloned from the tier
+    /// the rebuild replaced, and storing it unconditionally threw the
+    /// rebuilt tier away. The compaction abandons instead, and the next one
+    /// merges the delta into the rebuilt tier.
+    #[test]
+    fn rebuild_installed_during_compaction_is_kept() {
+        let idx = DeltaIndex::new(8);
+        let rids: Vec<String> = (0..4).map(|i| format!("delta_{i}")).collect();
+        for (i, rid) in rids.iter().enumerate() {
+            idx.append(rid.clone(), vec_seed(i as f32, 8), i as u64 + 1)
+                .unwrap();
+        }
+
+        let prepared = idx.prepare_compaction().unwrap().expect("work to do");
+
+        // The rebuild: a fresh tier holding a row the delta never saw.
+        let mut rebuilt = HnswIndex::new(8);
+        rebuilt.insert("rebuilt_only", &vec_seed(40.0, 8)).unwrap();
+        idx.install_cold(rebuilt);
+
+        assert_eq!(
+            idx.install_compaction(prepared),
+            0,
+            "a merge built on a replaced tier must be abandoned"
+        );
+        assert_eq!(
+            idx.compacting.load(std::sync::atomic::Ordering::Acquire),
+            0,
+            "an abandoned merge must close the admission window it opened"
+        );
+        let found = |rid: &str, seed: f32| {
+            idx.search(&vec_seed(seed, 8), 10)
+                .unwrap()
+                .iter()
+                .any(|(r, _)| r == rid)
+        };
+        assert!(
+            found("rebuilt_only", 40.0),
+            "the rebuilt tier must stay installed"
+        );
+        assert_eq!(
+            idx.delta_len(),
+            rids.len(),
+            "the sealed entries stay in the delta"
+        );
+        for (i, rid) in rids.iter().enumerate() {
+            assert!(
+                found(rid, i as f32),
+                "{rid} stays visible through the delta"
+            );
+        }
+
+        // The next compaction merges the delta into the rebuilt tier.
+        assert_eq!(idx.compact().unwrap(), rids.len());
+        assert_eq!(idx.delta_len(), 0);
+        assert!(found("rebuilt_only", 40.0));
+        for (i, rid) in rids.iter().enumerate() {
+            assert!(found(rid, i as f32), "{rid} merged into the rebuilt tier");
+        }
+
+        // And an uncontended compaction still installs.
+        idx.append("late".to_string(), vec_seed(60.0, 8), 99)
+            .unwrap();
+        assert_eq!(idx.compact().unwrap(), 1);
+        assert!(found("late", 60.0));
+    }
+
+    /// While a rebuild holds the compaction gate, no compaction installs:
+    /// the delta keeps every entry published after the rebuild's SQL read,
+    /// and they are merged into the rebuilt tier once the gate opens.
+    #[test]
+    fn paused_compaction_waits_for_the_rebuild() {
+        let idx = Arc::new(DeltaIndex::new(8));
+        for i in 0..3u64 {
+            idx.append(format!("pre_{i}"), vec_seed(i as f32, 8), i + 1)
+                .unwrap();
+        }
+
+        let pause = idx.pause_compaction();
+        let compactor = {
+            let idx = Arc::clone(&idx);
+            thread::spawn(move || idx.compact().unwrap())
+        };
+        thread::sleep(Duration::from_millis(150));
+        assert_eq!(idx.delta_len(), 3, "no compaction while the gate is held");
+
+        // The rebuild installs while still holding the gate.
+        let mut rebuilt = HnswIndex::new(8);
+        rebuilt.insert("rebuilt_only", &vec_seed(40.0, 8)).unwrap();
+        idx.install_cold(rebuilt);
+        drop(pause);
+
+        assert_eq!(compactor.join().unwrap(), 3, "it compacts once released");
+        assert_eq!(idx.delta_len(), 0);
+        for (rid, seed) in [("rebuilt_only", 40.0), ("pre_0", 0.0), ("pre_2", 2.0)] {
+            assert!(
+                idx.search(&vec_seed(seed, 8), 10)
+                    .unwrap()
+                    .iter()
+                    .any(|(r, _)| r == rid),
+                "{rid} must be in the merged rebuilt tier"
+            );
+        }
     }
 
     #[test]

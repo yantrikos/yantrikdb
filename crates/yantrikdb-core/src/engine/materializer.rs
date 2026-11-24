@@ -168,8 +168,9 @@ pub fn recommended_worker_count() -> usize {
 ///      60s; epic 5 task 13). The age trigger closes the gap where a
 ///      low-write namespace's delta sits forever and reads pay the
 ///      linear scan indefinitely.
-///   2. Run `compact()` — clone-rebuild cold from old cold + sealed delta,
-///      then ArcSwap the new cold in.
+///   2. Run `compact()` — merge a snapshot of the published delta into a
+///      clone of cold, install it by compare-and-swap, retire the merged
+///      entries (under the compaction gate; CONCURRENCY.md Rule 3).
 ///
 /// Drop the returned [`CompactorGuard`] (or let the engine `Arc<YantrikDB>`
 /// drop) for clean shutdown.
@@ -321,7 +322,7 @@ fn compactor_loop(weak: Weak<YantrikDB>, shutdown: Arc<AtomicBool>) {
         //
         // If a Phase-2 swap publishes a NEW SearchState mid-iteration,
         // this iteration's `vec_index` Arc is the OLD DeltaIndex. The
-        // install_cold call (inside compact) writes to the OLD
+        // cold install inside compact() writes to the OLD
         // DeltaIndex's internal cold slot — harmless waste, not
         // corruption, because the OLD DeltaIndex is no longer the
         // published vec_index. The next loop iteration loads the NEW
@@ -392,27 +393,43 @@ mod tests {
             // Use the seq-allocated single-node path (None) to match
             // the wedge_repro and Pranab's lane-b@algo iter shape.
             let _ = serialize_f32(&embedding);
-            db.record_with_rid(
-                &format!("seq-test-rid-{i}"),
-                &format!("seq-test-text-{i}"),
-                "episodic",
-                0.5,
-                0.0,
-                604800.0,
-                &serde_json::json!({}),
-                &embedding,
-                "default",
-                0.8,
-                "general",
-                "user",
-                None,
-                (i as i64) * 1_000_000,
-                &[],
-                "test-embedder",
-                None,
-                crate::provenance::WriteAdmission::Admitted,
-            )
-            .expect("with the compactor running, 350 writes must not 503 at delta_max=256");
+            // A slow runner can lag the compactor briefly, so Backpressure is
+            // retried for a bounded time, as a caller must. A wedge (no
+            // compactor) never drains, so it still fails, after 30 s.
+            let started = std::time::Instant::now();
+            loop {
+                match db.record_with_rid(
+                    &format!("seq-test-rid-{i}"),
+                    &format!("seq-test-text-{i}"),
+                    "episodic",
+                    0.5,
+                    0.0,
+                    604800.0,
+                    &serde_json::json!({}),
+                    &embedding,
+                    "default",
+                    0.8,
+                    "general",
+                    "user",
+                    None,
+                    (i as i64) * 1_000_000,
+                    &[],
+                    "test-embedder",
+                    None,
+                    crate::provenance::WriteAdmission::Admitted,
+                ) {
+                    Ok(()) => break,
+                    Err(crate::error::YantrikDbError::Backpressure { retry_after_ms, .. })
+                        if started.elapsed() < std::time::Duration::from_secs(30) =>
+                    {
+                        std::thread::sleep(std::time::Duration::from_millis(retry_after_ms));
+                    }
+                    Err(e) => panic!(
+                        "with the compactor running, 350 writes must not stay refused \
+                         at delta_max=256: {e}"
+                    ),
+                }
+            }
         }
 
         // Sanity: at least most rows landed in SQL. (Exact equality

@@ -586,14 +586,19 @@ impl YantrikDB {
         )
         .ok()?;
 
+        // Prefer a hot row, and decode a compressed (cold-tier) blob before
+        // measuring: its byte length says nothing about the dimension, and
+        // a store whose first row was archived failed to reopen with
+        // "embedding dimension mismatch".
         let measured = conn
             .query_row(
-                "SELECT length(embedding) FROM memories WHERE embedding IS NOT NULL LIMIT 1",
+                "SELECT embedding FROM memories WHERE embedding IS NOT NULL \
+                 ORDER BY (storage_tier = 'cold') LIMIT 1",
                 [],
-                |r| r.get::<_, i64>(0),
+                |r| r.get::<_, Vec<u8>>(0),
             )
             .ok()
-            .map(|bytes| bytes as usize / std::mem::size_of::<f32>())
+            .map(|blob| crate::compression::decode_embedding_blob(&blob).len())
             .filter(|d| *d > 0);
         let claimed = match Self::read_embedder_identity(&conn) {
             Ok(Some((_, _, dim))) if dim > 0 => Some(dim),

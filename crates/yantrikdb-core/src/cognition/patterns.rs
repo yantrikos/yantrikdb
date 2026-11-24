@@ -9,7 +9,6 @@ use rusqlite::params;
 use crate::consolidate::{compression_gist_cannot_seed, find_clusters};
 use crate::engine::YantrikDB;
 use crate::error::Result;
-use crate::serde_helpers::deserialize_f32;
 use crate::types::{MemoryWithEmbedding, Pattern, PatternConfig, PatternMiningResult};
 
 fn now() -> f64 {
@@ -306,7 +305,7 @@ fn mine_topic_clusters(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<Raw
                     rid,
                     memory_type,
                     text,
-                    embedding: deserialize_f32(&emb_blob),
+                    embedding: crate::compression::decode_embedding_blob(&emb_blob),
                     created_at,
                     importance,
                     valence,
@@ -490,7 +489,11 @@ fn mine_cross_domain_patterns(db: &YantrikDB, config: &PatternConfig) -> Result<
         for row in rows {
             let (rid, emb_blob) = row?;
             let emb_blob = db.decrypt_embedding(&emb_blob)?;
-            candidates.push((rid, domain.clone(), deserialize_f32(&emb_blob)));
+            candidates.push((
+                rid,
+                domain.clone(),
+                crate::compression::decode_embedding_blob(&emb_blob),
+            ));
         }
 
         // By recency
@@ -505,7 +508,11 @@ fn mine_cross_domain_patterns(db: &YantrikDB, config: &PatternConfig) -> Result<
         for row in rows {
             let (rid, emb_blob) = row?;
             let emb_blob = db.decrypt_embedding(&emb_blob)?;
-            candidates.push((rid, domain.clone(), deserialize_f32(&emb_blob)));
+            candidates.push((
+                rid,
+                domain.clone(),
+                crate::compression::decode_embedding_blob(&emb_blob),
+            ));
         }
 
         // Random sample
@@ -520,7 +527,11 @@ fn mine_cross_domain_patterns(db: &YantrikDB, config: &PatternConfig) -> Result<
         for row in rows {
             let (rid, emb_blob) = row?;
             let emb_blob = db.decrypt_embedding(&emb_blob)?;
-            candidates.push((rid, domain.clone(), deserialize_f32(&emb_blob)));
+            candidates.push((
+                rid,
+                domain.clone(),
+                crate::compression::decode_embedding_blob(&emb_blob),
+            ));
         }
     }
 

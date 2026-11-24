@@ -35,6 +35,7 @@ mod event_time_recall;
 #[cfg(feature = "bundled-embedder")]
 mod explain;
 mod idempotency;
+mod index_rebuild;
 mod inspect;
 mod interactive_recall;
 #[cfg(feature = "bundled-embedder")]
@@ -46,6 +47,7 @@ mod metamorphic;
 mod migrations;
 mod mobility_contest;
 mod moves;
+mod null_embedding;
 mod recall_confidence;
 mod recall_graph;
 mod reembed_router;

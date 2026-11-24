@@ -206,13 +206,40 @@ impl YantrikDB {
     /// space that is no longer current and is discarded rather than
     /// installed; the caller retries against the new generation.
     pub fn rebuild_vec_index(&self) -> Result<usize> {
-        let generation_before = self.search_state.load_full().generation;
+        let state_before = self.search_state.load_full();
+        let generation_before = state_before.generation;
+        let vec_index = std::sync::Arc::clone(&state_before.vec_index);
+        drop(state_before);
+
+        // Hold compaction off from BEFORE the SQL read until the install.
+        // A compaction finishing in between retired delta entries the read
+        // below may predate, and a compaction started before it installed
+        // its merge over the rebuilt tier; either way writes left the
+        // index. With the gate held, entries published after the read stay
+        // in the delta and the next compaction merges them into this tier.
+        // Lock order: compaction gate, then conn (compaction never takes
+        // the conn).
+        let _compaction_paused = vec_index.pause_compaction();
+        #[cfg(test)]
+        rebuild_hooks::fire("before_sql_read", &vec_index);
 
         let conn = self.conn.lock();
+        // SQL is authoritative: the rebuilt tier is what SQL holds as of the
+        // read below, so the delta entries published before it are retired
+        // at the install. Every engine write path commits SQL before it
+        // publishes, so this loses nothing SQL has. A vector that reaches
+        // the index without SQL agreeing (record_with_rid onto an existing
+        // row whose SQL holds another vector or is cold; insert_vector for
+        // a rid with no row) is dropped by a rebuild, as it always was by a
+        // reopen. Taken here, under conn and before the
+        // read: entries published after the read must survive the install.
+        let subsumed = vec_index.published_keys();
         let new_index =
             Self::build_vec_index_with_enc(&conn, self.embedding_dim, self.enc.as_ref())?;
         let count = new_index.len();
         drop(conn);
+        #[cfg(test)]
+        rebuild_hooks::fire("after_sql_read", &vec_index);
 
         let Some(_sync_guard) = self.write_router.try_enter_sync_writer() else {
             return Err(
@@ -234,9 +261,21 @@ impl YantrikDB {
             );
         }
 
+        if !std::sync::Arc::ptr_eq(&state.vec_index, &vec_index) {
+            return Err(
+                crate::error::YantrikDbError::IndexRebuildDeferredDuringReembed {
+                    reason: "the vector index was replaced during the rebuild".to_string(),
+                },
+            );
+        }
+
+        #[cfg(test)]
+        rebuild_hooks::fire("before_install", &vec_index);
         // **Issue #41 brainstorm-4 §1.** Install the rebuilt cold tier
-        // into the active-generation DeltaIndex via SearchState.
-        state.vec_index.install_cold(new_index);
+        // into the active-generation DeltaIndex via SearchState, retiring
+        // the delta entries the SQL read subsumed (a stale one would shadow
+        // the rebuilt vector for its rid).
+        vec_index.install_rebuilt(new_index, &subsumed);
         Ok(count)
     }
 
@@ -251,5 +290,36 @@ impl YantrikDB {
         drop(conn);
         *self.graph_index.write() = new_index;
         Ok(count)
+    }
+}
+
+/// Test-only observation points inside `rebuild_vec_index`, so a test can
+/// check what holds at each stage (e.g. that the compaction gate is already
+/// held before the SQL read and still held at the install). Thread-local:
+/// only a rebuild running on the test's own thread fires them.
+#[cfg(test)]
+pub(crate) mod rebuild_hooks {
+    use std::cell::RefCell;
+
+    type Hook = Box<dyn FnMut(&'static str, &crate::vector::delta_index::DeltaIndex)>;
+
+    thread_local! {
+        static HOOK: RefCell<Option<Hook>> = RefCell::new(None);
+    }
+
+    pub(crate) fn set(hook: Hook) {
+        HOOK.with(|h| *h.borrow_mut() = Some(hook));
+    }
+
+    pub(crate) fn clear() {
+        HOOK.with(|h| *h.borrow_mut() = None);
+    }
+
+    pub(crate) fn fire(stage: &'static str, idx: &crate::vector::delta_index::DeltaIndex) {
+        HOOK.with(|h| {
+            if let Some(f) = h.borrow_mut().as_mut() {
+                f(stage, idx)
+            }
+        });
     }
 }
