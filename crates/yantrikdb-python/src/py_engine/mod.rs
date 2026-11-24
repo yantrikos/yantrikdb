@@ -941,17 +941,30 @@ impl PyYantrikDB {
     /// reference drops. The old signature returned bare Ok(()) in both
     /// cases, so "db.close() succeeded" could mean "still open and
     /// writable through the proxy" (2026-08-15 binding audit).
+    ///
+    /// The background workers are stopped first. They hold only `Weak`
+    /// refs, but each one upgrades to a strong ref while it works, and the
+    /// compactor used to hold one across its whole idle wait, so this
+    /// returned False almost every time with nothing else holding the
+    /// engine (#271 review).
     fn close(&mut self) -> PyResult<bool> {
         if let Some(arc) = self.inner.take() {
+            self._workers = None;
             match Arc::try_unwrap(arc) {
                 Ok(db) => {
                     db.close().map_err(map_err)?;
                     return Ok(true);
                 }
-                Err(_arc) => {
-                    // Other references still exist; ours is dropped, the
-                    // DB closes on last drop — but NOT yet, and the caller
-                    // deserves to know.
+                Err(arc) => {
+                    // Other references still exist (another thread's call
+                    // in flight, or a `_conn` proxy); ours is dropped and
+                    // the DB closes on the last drop — but NOT yet, and the
+                    // caller deserves to know. Until then the engine still
+                    // takes writes through those references, so it keeps
+                    // its workers: without the compactor, writes wedge at
+                    // delta_max. They hold only Weak refs and exit when the
+                    // engine is finally dropped.
+                    self._workers = Some(spawn_all_workers(&arc, recommended_worker_count()));
                     return Ok(false);
                 }
             }

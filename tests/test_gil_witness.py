@@ -233,10 +233,18 @@ def test_set_embedder_while_recall_is_inside_encode(db):
     assert out["results"]
 
 
+def test_close_with_nothing_in_flight_closes(db):
+    # The documented contract: True when this call performed the exclusive
+    # close. It returned False almost every time, because the idle compactor
+    # held a strong engine ref across its wait (#271 review).
+    assert db.close() is True
+    assert db.close() is False  # already closed: idempotent, no second close
+
+
 def test_close_while_recall_is_inside_encode(db):
-    # close() mid-call drops the wrapper's handle and reports False; the
-    # in-flight recall() finishes on its own reference, and the engine closes
-    # when that reference goes.
+    # close() mid-call drops the wrapper's handle and reports False, because
+    # the in-flight recall() still holds the engine; it finishes on that
+    # reference, and the engine closes when it goes.
     emb, t, out = _recall_in_a_thread_blocked_in_encode(db)
     try:
         assert db.close() is False
