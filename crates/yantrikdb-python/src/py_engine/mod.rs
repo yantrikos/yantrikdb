@@ -947,31 +947,56 @@ impl PyYantrikDB {
     /// compactor used to hold one across its whole idle wait, so this
     /// returned False almost every time with nothing else holding the
     /// engine (#271 review).
-    fn close(&mut self) -> PyResult<bool> {
-        if let Some(arc) = self.inner.take() {
-            self._workers = None;
-            match Arc::try_unwrap(arc) {
-                Ok(db) => {
-                    db.close().map_err(map_err)?;
-                    return Ok(true);
-                }
-                Err(arc) => {
-                    // Other references still exist (another thread's call
-                    // in flight, or a `_conn` proxy); ours is dropped and
-                    // the DB closes on the last drop — but NOT yet, and the
-                    // caller deserves to know. Until then the engine still
-                    // takes writes through those references, so it keeps
-                    // its workers: without the compactor, writes wedge at
+    fn close(slf: &Bound<'_, Self>) -> PyResult<bool> {
+        // Take the handle and the workers under a brief borrow, then stop
+        // the workers (joining a materializer mid-drain) and close SQLite (a
+        // WAL checkpoint) with the GIL released: held through both, a thread
+        // beside the close froze for its whole length, up to 1.8 s under
+        // write load (#271 review).
+        let (arc, workers) = {
+            let mut this = Self::borrow_mut_briefly(slf)?;
+            match this.inner.take() {
+                Some(arc) => (arc, this._workers.take()),
+                // Already closed: idempotent, and truthfully "no exclusive
+                // close performed by this call".
+                None => return Ok(false),
+            }
+        };
+        enum Outcome {
+            Closed,
+            StillShared(AllWorkerGuards),
+        }
+        let outcome = slf
+            .py()
+            .detach(move || -> Result<Outcome, yantrikdb_core::YantrikDbError> {
+                drop(workers);
+                match Arc::try_unwrap(arc) {
+                    Ok(db) => {
+                        db.close()?;
+                        Ok(Outcome::Closed)
+                    }
+                    // Other references still exist (another thread's call in
+                    // flight, or a `_conn` proxy); ours drops here and the DB
+                    // closes on the last drop, but NOT yet, and the caller
+                    // deserves to know. Until then the engine still takes
+                    // writes through those references, so it keeps its
+                    // workers: without the compactor, writes wedge at
                     // delta_max. They hold only Weak refs and exit when the
                     // engine is finally dropped.
-                    self._workers = Some(spawn_all_workers(&arc, recommended_worker_count()));
-                    return Ok(false);
+                    Err(arc) => Ok(Outcome::StillShared(spawn_all_workers(
+                        &arc,
+                        recommended_worker_count(),
+                    ))),
                 }
+            })
+            .map_err(map_err)?;
+        match outcome {
+            Outcome::Closed => Ok(true),
+            Outcome::StillShared(workers) => {
+                Self::borrow_mut_briefly(slf)?._workers = Some(workers);
+                Ok(false)
             }
         }
-        // Already closed: idempotent, and truthfully "no exclusive close
-        // performed by this call".
-        Ok(false)
     }
 }
 
@@ -1038,6 +1063,28 @@ pub(crate) fn plan_embed<'a>(
 }
 
 impl PyYantrikDB {
+    /// The wrapper's mutable borrow, retried for up to a second instead of
+    /// failing at once. Since the bindings release the GIL, another thread
+    /// can hold a shared borrow for a moment (taking its engine snapshot,
+    /// or around a Python embedder's encode()), and a close() or swap that
+    /// arrives then was refused with "Already borrowed" (#271 review). The
+    /// GIL is released between tries, so the holder can finish.
+    pub(crate) fn borrow_mut_briefly<'py>(slf: &Bound<'py, Self>) -> PyResult<PyRefMut<'py, Self>> {
+        const TRIES: u32 = 1000;
+        let mut tries = 0;
+        loop {
+            match slf.try_borrow_mut() {
+                Ok(this) => return Ok(this),
+                Err(e) if tries >= TRIES => return Err(e.into()),
+                Err(_) => {
+                    tries += 1;
+                    slf.py()
+                        .detach(|| std::thread::sleep(std::time::Duration::from_millis(1)));
+                }
+            }
+        }
+    }
+
     /// An owned engine handle for a call that releases the GIL (#271).
     ///
     /// A `&self` pymethod keeps its `PyRef` borrow for the whole call. Once

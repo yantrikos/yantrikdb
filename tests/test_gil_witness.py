@@ -283,3 +283,44 @@ def test_close_while_recall_is_inside_encode(db):
     assert not t.is_alive()
     assert "error" not in out, out.get("error")
     assert out["results"]
+
+
+def test_close_under_write_load_keeps_other_threads_running(tmp_path):
+    # close() stops the worker pool (joining a materializer mid-drain) and
+    # closes SQLite (a WAL checkpoint). With the GIL held through both, a
+    # Python thread beside it froze for the whole close: 15-20 ms idle, up
+    # to 1.8 s under write load in the review. Detached, the thread runs.
+    for attempt in range(5):
+        store = YantrikDB(os.path.join(str(tmp_path), f"busy{attempt}.db"), DIM)
+        store.set_embedder(Emb(), allow_unverified_embedder=True)
+        for i in range(800):
+            store.record(f"pending write {i} about topic {i % 13} and thing {i % 7}")
+        gaps = []
+        stop = threading.Event()
+
+        def ticker():
+            last = time.perf_counter()
+            while not stop.is_set():
+                time.sleep(0.002)
+                now = time.perf_counter()
+                gaps.append(now - last)
+                last = now
+
+        t = threading.Thread(target=ticker)
+        t.start()
+        time.sleep(0.05)
+        gaps.clear()
+        started = time.perf_counter()
+        store.close()
+        took = time.perf_counter() - started
+        time.sleep(0.05)
+        stop.set()
+        t.join()
+        worst = max(gaps)
+        if took < 0.04:
+            continue  # too quick to tell a held GIL from a released one
+        assert worst < took / 2, (
+            f"the ticker stalled {worst * 1000:.0f} ms during a {took * 1000:.0f} ms close()"
+        )
+        return
+    pytest.skip("close() never took long enough to measure on this machine")
