@@ -345,19 +345,6 @@ def _fresh_pack_path(c):
     return os.path.join(c["dir"], f"witness-{c['packs']}.ydbpack")
 
 
-def _pack(db, c):
-    if "pack" not in c:
-        c["pack"] = _fresh_pack_path(c)
-        db.seal_pack(c["pack"], "witness", "1.0", "witness")
-    return c["pack"]
-
-
-def _mounted(db, c):
-    if "pack_id" not in c:
-        c["pack_id"] = db.mount_pack(_pack(db, c), allow_unverified_embedder=True)
-    return c["pack_id"]
-
-
 def _swallow(fn, *args, **kwargs):
     # For calls that fail on purpose (an unknown id): the failure comes back
     # from inside the detached call, so the GIL was still given up.
@@ -553,16 +540,24 @@ RELEASES = {
     "memory_entities": lambda db, c: db.memory_entities(c["rid"]),
     # packs that touch the store or the filesystem
     "seal_pack": lambda db, c: db.seal_pack(_fresh_pack_path(c), "witness", "1.0", "witness"),
-    "mount_pack": lambda db, c: _swallow(db.mount_pack, _pack(db, c), allow_unverified_embedder=True),
-    "install_pack": lambda db, c: _swallow(db.install_pack, _pack(db, c)),
+    # The packs are sealed (and one mounted) by the fixture, so only the
+    # binding under test runs inside the observed window: a helper that
+    # sealed or mounted on first use put a detached call in the window and
+    # faked a sighting. test_pack_witness_lambdas_release_nothing_themselves
+    # checks the shape.
+    "mount_pack": lambda db, c: _swallow(db.mount_pack, c["pack"], allow_unverified_embedder=True),
+    "install_pack": lambda db, c: _swallow(db.install_pack, c["pack"]),
     "uninstall_pack": lambda db, c: db.uninstall_pack("no-such-pack@0"),
     "installed_packs": lambda db, c: db.installed_packs(),
     "remount_installed": lambda db, c: db.remount_installed(),
     "trust_publisher": lambda db, c: db.trust_publisher(c["pubkey"], "witness"),
     "untrust_publisher": lambda db, c: db.untrust_publisher(c["pubkey"]),
-    "adopt_embedder_identity": lambda db, c: _swallow(db.adopt_embedder_identity),
+    # Needs an engine-side embedder to reach the store; witnessed on the
+    # engine-embedder store below. With only a Python embedder it fails
+    # before touching SQLite.
+    "adopt_embedder_identity": None,
     "recall_from_packs_for": lambda db, c: db.recall_from_packs_for(
-        [_mounted(db, c)], query="topic 3"
+        [c["mounted_pack_id"]], query="topic 3"
     ),
 }
 
@@ -654,6 +649,13 @@ def small_db(tmp_path):
     ctx["session"] = store.session_start("default", "a session to end")
     ctx["ops"] = store.extract_ops_since(limit=5)
     ctx["pubkey"] = YantrikDB.generate_pack_keypair()[1]
+    # Packs, ready before any witness runs (see RELEASES): one to mount or
+    # install, and a differently named one already mounted for recall.
+    ctx["pack"] = _fresh_pack_path(ctx)
+    store.seal_pack(ctx["pack"], "witness", "1.0", "witness")
+    mounted = _fresh_pack_path(ctx)
+    store.seal_pack(mounted, "witness-mounted", "1.0", "witness")
+    ctx["mounted_pack_id"] = store.mount_pack(mounted, allow_unverified_embedder=True)
     yield store, ctx
     store.close()
 
@@ -753,6 +755,7 @@ def test_recall_text_with_explain_releases_the_gil(small_db):
 
 
 ENGINE_EMBEDDER_RELEASES = {
+    "adopt_embedder_identity": lambda db: db.adopt_embedder_identity(),
     "record_text": lambda db: db.record_text("witness record_text, engine embedder"),
     "record_batch": lambda db: db.record_batch([{"text": "witness batch, engine embedder"}]),
     "query": lambda db: db.query(query="engine embedder query"),
@@ -778,3 +781,20 @@ def engine_embedder_db(tmp_path):
 def test_engine_embedder_paths_release_the_gil(engine_embedder_db, name):
     call = ENGINE_EMBEDDER_RELEASES[name]
     assert _seen_during(lambda: call(engine_embedder_db)) >= 1, f"{name}() held the GIL"
+
+
+# The pack witnesses' lambdas, with the binding swapped for has_embedder(),
+# which holds the GIL: anything else in the lambda that released it would be
+# seen here. (The old first-use helpers sealed a pack inside the window.)
+PACK_WITNESS_SHAPES = {
+    "mount_pack": lambda db, c: (c["pack"], db.has_embedder()),
+    "install_pack": lambda db, c: (c["pack"], db.has_embedder()),
+    "recall_from_packs_for": lambda db, c: ([c["mounted_pack_id"]], db.has_embedder()),
+}
+
+
+@pytest.mark.parametrize("name", sorted(PACK_WITNESS_SHAPES))
+def test_pack_witness_lambdas_release_nothing_themselves(small_db, name):
+    db, ctx = small_db
+    shape = PACK_WITNESS_SHAPES[name]
+    assert _seen_during(lambda: shape(db, ctx), attempts=200) == 0
