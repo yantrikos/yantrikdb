@@ -810,3 +810,22 @@ def test_close_during_a_pending_swap_leaves_the_still_shared_engine_its_workers(
         assert db._workers_running, "the still-shared engine lost its workers"
     finally:
         del proxy
+
+
+@_needs_potion
+def test_a_panic_inside_the_swap_leaves_the_workers_running(tmp_path):
+    # The swap holds no reference to the engine while it installs the new
+    # embedder (a Weak would block Arc::get_mut), and its workers are
+    # stopped then. A panic there unwound with nothing to restart them
+    # from, and writes past the 256th failed (#302 review 4). The restart
+    # now reaches the engine through the wrapper.
+    db = YantrikDB(os.path.join(str(tmp_path), "panic.db"), 256)
+    try:
+        db._inject_swap_panic()
+        with pytest.raises(BaseException, match="injected"):
+            db.set_embedder_named("potion-base-8M")
+        assert db._workers_running
+        for i in range(700):
+            db.record(f"after the panic {i}", embedding=[0.05] * 256)
+    finally:
+        db.close()

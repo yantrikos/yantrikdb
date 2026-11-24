@@ -44,6 +44,9 @@ pub struct PyYantrikDB {
     /// shared forever; in-flight calls finish normally. See
     /// [`PyYantrikDB::snapshot_borrow`].
     pub(crate) swap_pending: Arc<std::sync::atomic::AtomicBool>,
+    /// Tests only (`_inject_swap_panic`): the next swap panics just before
+    /// it installs the new embedder, where the workers are stopped.
+    inject_swap_panic: bool,
 }
 
 /// The wrapper's background worker pool (materializers + compactor), with
@@ -109,6 +112,7 @@ impl PyYantrikDB {
             embedder,
             workers,
             swap_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            inject_swap_panic: false,
         }
     }
 
@@ -794,20 +798,35 @@ impl PyYantrikDB {
             }
         }
         /// Restarts stopped workers when dropped, unless the engine is gone.
-        /// `engine` is also how the wait sees the engine's strong count; it
-        /// is `None` only while `get_mut` is tried, which no `?` interrupts.
-        struct Restart {
+        /// `engine` is also how the wait sees the engine's strong count. It
+        /// is `None` while `get_mut` is tried and the embedder installed, so
+        /// then the workers are restarted from the wrapper's current engine:
+        /// a panic there used to unwind with nothing to restart from, leaving
+        /// the pool stopped (#302 review 4).
+        struct Restart<'a, 'py> {
+            slf: &'a Bound<'py, PyYantrikDB>,
             pool: Arc<WorkerPool>,
             engine: Option<std::sync::Weak<YantrikDB>>,
         }
-        impl Restart {
+        impl Restart<'_, '_> {
             fn now(&self) {
-                if let Some(engine) = self.engine.as_ref().and_then(std::sync::Weak::upgrade) {
+                let engine = self
+                    .engine
+                    .as_ref()
+                    .and_then(std::sync::Weak::upgrade)
+                    .or_else(|| {
+                        retry_until(self.slf.py(), std::time::Duration::from_secs(1), || {
+                            self.slf.try_borrow()
+                        })
+                        .ok()
+                        .and_then(|this| this.inner.clone())
+                    });
+                if let Some(engine) = engine {
                     self.pool.ensure_running(&engine);
                 }
             }
         }
-        impl Drop for Restart {
+        impl Drop for Restart<'_, '_> {
             fn drop(&mut self) {
                 self.now();
             }
@@ -822,6 +841,7 @@ impl PyYantrikDB {
             (
                 LowerGate(this.swap_pending.clone()),
                 Restart {
+                    slf,
                     pool: this.workers.clone(),
                     engine: Some(Arc::downgrade(arc)),
                 },
@@ -858,10 +878,14 @@ impl PyYantrikDB {
                     Ok(mut this) => {
                         // Our Weak would block get_mut too.
                         drop(restart.engine.take());
+                        let inject_panic = std::mem::take(&mut this.inject_swap_panic);
                         let Some(arc) = this.inner.as_mut() else {
                             break Err(PyRuntimeError::new_err("YantrikDB is closed"));
                         };
                         if let Some(engine) = Arc::get_mut(arc) {
+                            if inject_panic {
+                                panic!("injected by _inject_swap_panic (tests only)");
+                            }
                             let swapped = engine
                                 .set_downloaded_embedder(downloaded.take().expect("swapped once"))
                                 .map_err(map_err);
@@ -935,6 +959,12 @@ impl PyYantrikDB {
             "reembed requires the 'embedder-download' Cargo feature, \
              which is on by default. This wheel was built --no-default-features.",
         ))
+    }
+
+    /// Make the next `set_embedder_named` panic just before it installs
+    /// the new embedder, where the workers are stopped (tests only).
+    fn _inject_swap_panic(&mut self) {
+        self.inject_swap_panic = true;
     }
 
     /// Whether this wrapper's worker pool is running (tests only).
