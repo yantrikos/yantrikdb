@@ -586,6 +586,10 @@ impl YantrikDB {
         let meta = draft_metadata();
         let mut rids = Vec::with_capacity(drafts.len());
         for (fact, embedding) in drafts {
+            // The engine path counts a fact its embedder truncated (in
+            // record_text); a caller-made vector goes through record(),
+            // which cannot know, so count it here against the known window.
+            self.note_possible_truncation(fact.len());
             let rid = self.record(
                 fact,
                 DRAFT_MEMORY_TYPE,

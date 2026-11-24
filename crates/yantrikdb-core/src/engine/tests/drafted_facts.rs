@@ -164,3 +164,24 @@ fn record_drafted_facts_matches_draft_memories_from_summary() {
         assert_eq!(draft_meta(&engine, a), draft_meta(&caller, b));
     }
 }
+
+/// A drafted fact longer than the known embedder window is counted as a
+/// truncated write, as the engine path counts it, so
+/// stats().embedder_truncated_writes sees Python-embedded drafts too.
+#[test]
+fn record_drafted_facts_counts_a_fact_past_the_window_as_truncated() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    db.embedder_window_chars
+        .store(40, std::sync::atomic::Ordering::Relaxed);
+    let before = db.stats(None).unwrap().embedder_truncated_writes;
+    let long = "the migration plan has many steps and each one needs an owner".to_string();
+    let short = "short fact".to_string();
+    db.record_drafted_facts(
+        &[(long, vec_seed(1.0, 8)), (short, vec_seed(2.0, 8))],
+        "session",
+        "work",
+    )
+    .unwrap();
+    let after = db.stats(None).unwrap().embedder_truncated_writes;
+    assert_eq!(after - before, 1, "only the fact past the window counts");
+}
