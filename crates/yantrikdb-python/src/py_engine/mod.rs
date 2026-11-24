@@ -49,7 +49,9 @@ pub struct PyYantrikDB {
     /// [`PyYantrikDB::snapshot_borrow`].
     pub(crate) swap_pending: Arc<std::sync::atomic::AtomicBool>,
     /// Held by the one `set_embedder_named` running on this wrapper: swaps
-    /// take turns (#302 review 4).
+    /// take turns (#302 review 4). Only that method uses it, so the slim
+    /// build (`--no-default-features`) has none.
+    #[cfg(feature = "embedder-download")]
     swap_turn: Arc<std::sync::atomic::AtomicBool>,
     /// Tests only (`_inject_swap_panic`): the next swap panics just before
     /// it installs the new embedder, where the workers are stopped.
@@ -120,6 +122,7 @@ impl PyYantrikDB {
             embedder_epoch: 0,
             workers,
             swap_pending: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            #[cfg(feature = "embedder-download")]
             swap_turn: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             inject_swap_panic: false,
         }
