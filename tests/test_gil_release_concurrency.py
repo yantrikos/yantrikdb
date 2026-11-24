@@ -419,6 +419,11 @@ def _turn_in_a_thread(db):
 
 
 def test_close_while_a_write_waits_on_the_lock_lets_the_write_land(tmp_path):
+    # A pin, not a regression test: it also passes on 0.23.6, where the
+    # waiting write held the GIL, so close() ran only after it, and close()
+    # returned False anyway (the idle compactor held the engine). It keeps
+    # the detached behaviour honest: close() mid-write reports False, and
+    # the write that was waiting still lands.
     path = os.path.join(str(tmp_path), "lockwait.db")
     db = YantrikDB(path, DIM)
     db.record_turn("default", "user", "before")
@@ -562,3 +567,42 @@ def test_set_embedder_named_succeeds_under_steady_traffic(tmp_path, traffic):
         assert after > before, "traffic resumed after the swap"
     finally:
         db.close()
+
+
+class _YieldingEmb(Emb):
+    # Gives the GIL up inside encode(), as a real model does.
+    def encode(self, text):
+        time.sleep(0.001)
+        return super().encode(text)
+
+
+def test_close_beside_a_python_embedded_write_is_not_refused(tmp_path):
+    # record() keeps its shared borrow of the wrapper while the Python
+    # embedder runs, and a yielding encode() lets the main thread in
+    # meanwhile. close() takes the mutable borrow and was refused with
+    # "Already borrowed" whenever it landed inside a record(); it now retries
+    # briefly, with the GIL released, and gets in between two calls.
+    for attempt in range(5):
+        db = YantrikDB(os.path.join(str(tmp_path), f"yield{attempt}.db"), DIM)
+        db.set_embedder(_YieldingEmb(), allow_unverified_embedder=True)
+        stop = threading.Event()
+        errors = []
+
+        def writer():
+            while not stop.is_set():
+                try:
+                    db.record("a write the embedder takes its time over")
+                except Exception as e:  # noqa: BLE001
+                    if "closed" not in str(e):
+                        errors.append(repr(e))
+                    return
+
+        t = threading.Thread(target=writer)
+        t.start()
+        time.sleep(0.05)
+        try:
+            db.close()
+        finally:
+            stop.set()
+            t.join(30)
+        assert not errors, errors[:2]
