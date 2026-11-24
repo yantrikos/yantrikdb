@@ -127,21 +127,16 @@ impl PyYantrikDB {
     /// Unmount a pack. Returns `False` if no pack with that id was
     /// mounted. The host database is not modified — not one row, not one
     /// calibration counter.
-    fn unmount_pack(&self, pack_id: &str) -> PyResult<bool> {
-        let db = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
-        db.unmount_pack(pack_id).map_err(map_err)
+    fn unmount_pack(slf: &Bound<'_, Self>, pack_id: &str) -> PyResult<bool> {
+        // Dropping the last reference to a pack closes its SQLite
+        // connection, so the GIL is released for it (#271).
+        Self::detached(slf, |db| db.unmount_pack(pack_id))
     }
 
     /// Unmount every pack. Returns how many were unmounted.
-    fn unmount_all_packs(&self) -> PyResult<usize> {
-        let db = self
-            .inner
-            .as_ref()
-            .ok_or_else(|| PyRuntimeError::new_err("YantrikDB is closed"))?;
-        Ok(db.unmount_all_packs())
+    fn unmount_all_packs(slf: &Bound<'_, Self>) -> PyResult<usize> {
+        // As unmount_pack: closing the packs' connections runs detached.
+        Self::detached(slf, |db| Ok(db.unmount_all_packs()))
     }
 
     /// Currently mounted packs, in mount order.
@@ -249,7 +244,11 @@ impl PyYantrikDB {
     /// Read a pack file's manifest without mounting it.
     #[staticmethod]
     fn read_pack_manifest(py: Python<'_>, path: &str) -> PyResult<PyObject> {
-        let m = yantrikdb_core::YantrikDB::read_manifest(path).map_err(map_err)?;
+        // Opens and reads the pack's SQLite file: with the GIL released,
+        // like the store-touching methods (#271).
+        let m = py
+            .detach(|| yantrikdb_core::YantrikDB::read_manifest(path))
+            .map_err(map_err)?;
         manifest_to_dict(py, &m, path)
     }
 
@@ -327,8 +326,10 @@ impl PyYantrikDB {
     /// embedder identity, constitution and coverage — everything except
     /// the cosmetic description.
     #[staticmethod]
-    fn sign_pack(path: &str, secret_key_hex: &str) -> PyResult<String> {
-        yantrikdb_core::YantrikDB::sign_pack(path, secret_key_hex).map_err(map_err)
+    fn sign_pack(py: Python<'_>, path: &str, secret_key_hex: &str) -> PyResult<String> {
+        // Writes the signature into the pack's SQLite file: detached (#271).
+        py.detach(|| yantrikdb_core::YantrikDB::sign_pack(path, secret_key_hex))
+            .map_err(map_err)
     }
 
     /// Sign arbitrary bytes with a secret key (evaluation certificates

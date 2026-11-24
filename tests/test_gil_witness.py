@@ -550,6 +550,9 @@ RELEASES = {
     "uninstall_pack": lambda db, c: db.uninstall_pack("no-such-pack@0"),
     "installed_packs": lambda db, c: db.installed_packs(),
     "remount_installed": lambda db, c: db.remount_installed(),
+    # Static, but they open (and sign_pack writes) a pack's SQLite file.
+    "read_pack_manifest": lambda db, c: YantrikDB.read_pack_manifest(c["pack"]),
+    "sign_pack": lambda db, c: YantrikDB.sign_pack(c["pack"], c["secret"]),
     "trust_publisher": lambda db, c: db.trust_publisher(c["pubkey"], "witness"),
     "untrust_publisher": lambda db, c: db.untrust_publisher(c["pubkey"]),
     # Needs an engine-side embedder to reach the store; witnessed on the
@@ -563,6 +566,13 @@ RELEASES = {
 
 # Detached, but not witnessable offline: see the module docstring's limit.
 UNWITNESSED = {
+    "unmount_pack": (
+        "detached because dropping a pack closes its SQLite connection, but "
+        "only the first call has a pack to drop, and closing a read-only "
+        "connection takes microseconds; mounting one again inside the window "
+        "would be a detached call that fakes the sighting"
+    ),
+    "unmount_all_packs": "the same as unmount_pack",
     "set_embedder_named": (
         "the fetch (download on first use, load from the cache after) runs "
         "detached, but offline an unknown name fails within a microsecond or "
@@ -589,9 +599,7 @@ HOLDS = {
     "with_default": "constructor",
     "generate_pack_keypair": "static helper: no store",
     "pubkey_of": "static helper: no store",
-    "read_pack_manifest": "static helper: no store",
     "sign_bytes": "static helper: no store",
-    "sign_pack": "static helper: no store",
     "verify_bytes": "static helper: no store",
     # calls Python before it reaches the store, so the GIL stays held
     "set_embedder": (
@@ -614,8 +622,6 @@ HOLDS = {
     "mounted_packs": "in-memory mounted-pack list, brief lock, no store",
     "pack_context": "in-memory mounted-pack list, brief lock, no store",
     "pack_context_for": "in-memory mounted-pack list, brief lock, no store",
-    "unmount_pack": "in-memory mounted-pack list, brief lock, no store",
-    "unmount_all_packs": "in-memory mounted-pack list, brief lock, no store",
 }
 
 
@@ -648,7 +654,7 @@ def small_db(tmp_path):
     ctx["task"] = store.task_add("default", "a task to update")
     ctx["session"] = store.session_start("default", "a session to end")
     ctx["ops"] = store.extract_ops_since(limit=5)
-    ctx["pubkey"] = YantrikDB.generate_pack_keypair()[1]
+    ctx["secret"], ctx["pubkey"] = YantrikDB.generate_pack_keypair()
     # Packs, ready before any witness runs (see RELEASES): one to mount or
     # install, and a differently named one already mounted for recall.
     ctx["pack"] = _fresh_pack_path(ctx)
