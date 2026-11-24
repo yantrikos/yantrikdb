@@ -1025,6 +1025,32 @@ impl DeltaIndex {
         let result = self.compactor_wake_cv.wait_for(&mut guard, timeout);
         !result.timed_out()
     }
+
+    /// [`wait_for_compaction_signal`](Self::wait_for_compaction_signal),
+    /// but returns at once if `stop` is set. `stop` is read under the wait
+    /// mutex, and [`wake_compactor`](Self::wake_compactor) notifies under
+    /// it, so a stop set before the wake cannot be missed: the waiter either
+    /// sees the flag before it sleeps or is asleep when the notify lands.
+    pub fn wait_for_compaction_signal_unless(
+        &self,
+        timeout: std::time::Duration,
+        stop: &std::sync::atomic::AtomicBool,
+    ) -> bool {
+        let mut guard = self.compactor_wake_mu.lock();
+        if stop.load(std::sync::atomic::Ordering::SeqCst) {
+            return true;
+        }
+        let result = self.compactor_wake_cv.wait_for(&mut guard, timeout);
+        !result.timed_out()
+    }
+
+    /// Wake a compactor blocked in
+    /// [`wait_for_compaction_signal_unless`](Self::wait_for_compaction_signal_unless)
+    /// (used on shutdown, after setting its stop flag).
+    pub fn wake_compactor(&self) {
+        let _guard = self.compactor_wake_mu.lock();
+        self.compactor_wake_cv.notify_all();
+    }
 }
 
 // ── Helpers ──
