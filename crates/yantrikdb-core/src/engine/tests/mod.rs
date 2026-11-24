@@ -35,6 +35,7 @@ mod event_time_recall;
 #[cfg(feature = "bundled-embedder")]
 mod explain;
 mod idempotency;
+mod index_rebuild;
 mod inspect;
 mod interactive_recall;
 #[cfg(feature = "bundled-embedder")]

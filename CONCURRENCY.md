@@ -6,7 +6,7 @@ the code resolve to this file. Violating any of these silently
 regresses the wedge fix or correctness; review carefully before
 changing the affected code paths.
 
-Last updated: 2026-05-08 (saga epic 5 task 15).
+Last updated: 2026-11-24 (#308: compaction gate).
 
 ---
 
@@ -37,6 +37,11 @@ Always acquire engine locks in this order to prevent deadlocks:
 ```
 conn → hlc → scoring_cache → vec_index (delta tier) → graph_index → active_sessions
 ```
+
+One lock sits before `conn`: the vector index's compaction gate
+(`DeltaIndex::pause_compaction`, Rule 3). An index rebuild takes it before
+`conn`; compaction takes it and never takes `conn`. Nothing may take the
+gate while holding `conn`.
 
 Cross-references: `crates/yantrikdb-core/src/engine/mod.rs` doc on
 `struct YantrikDB`. Any new field added to `YantrikDB` must declare
@@ -78,23 +83,54 @@ If you add a new write primitive, mirror the pattern in
 ## Rule 3 — Background compaction must NOT share lock primitives with the foreground
 
 `DeltaIndex::compact` does the expensive HNSW work: clone-rebuild cold
-from the prior cold + sealed delta entries. It holds the `delta`
-RwLock only for the *seal* (briefly, at the start, to swap out the
-pending entries) and at the *install* (briefly, at the end, to ArcSwap
-the new cold tier in). Between those two points it does NOT hold any
-lock that foreground writes acquire.
+from the prior cold + a snapshot of the published delta entries. It
+holds the `delta` RwLock only briefly at the start, to snapshot those
+entries, and briefly at the end, to retire them once the new cold tier
+is installed. Between those two points it does NOT hold any lock that
+foreground writes acquire.
 
 **Invariant.** The compactor must:
 
-1. Call `seal_delta_for_compaction()` to atomically swap the delta for
-   an empty new one. Foreground writes proceed against the new delta
-   immediately. The sealed delta is owned by the compactor.
+1. Snapshot the published delta entries
+   (`snapshot_published_for_compaction()`). They stay in the live delta,
+   visible to every read, until the merged tier is installed, and they
+   stop counting toward `delta_max` meanwhile, so writers stay admitted.
 2. Clone-rebuild a new cold `HnswIndex` *off the live ArcSwap*
    (`(*self.cold.load_full()).clone()`). Readers continue against the
    prior epoch.
-3. ArcSwap-store the new cold tier when done. The store is the
-   visible-epoch boundary for new readers; old readers finish on the
-   prior `Arc<HnswIndex>`.
+3. Install the new cold tier with a compare-and-swap against the tier
+   it cloned, then retire exactly the merged `(rid, seq)` entries. If the
+   cold tier was replaced meanwhile, abandon the merge: the entries
+   never left the delta, so the next compaction merges them into the
+   new tier.
+
+**The compaction gate.** `DeltaIndex` has one lock that compaction
+holds for its whole build and install. Its only other holder is
+`rebuild_vec_index()`, which takes it (`pause_compaction()`) from
+before its SQL read until it installs the rebuilt tier. Without it the
+two overwrote each other:
+- A compaction started before a rebuild installed its merge over the
+  rebuilt tier.
+- A compaction finishing during a rebuild retired delta entries the
+  rebuild's earlier SQL read did not contain, so those writes left the
+  index until the next rebuild.
+
+Foreground writes never take the gate. A rebuild also holds `conn` for
+its SQL read and build, so writers wait on `conn` while it reads, exactly
+as without the gate; what the gate adds is that no compaction installs
+or retires anything until the rebuild has installed. SQL is
+authoritative: the rebuilt tier is what SQL holds as of the read, so the
+rebuild retires the delta entries published before the read, and a stale
+one cannot shadow the rebuilt vector. Every engine write path commits SQL
+before it publishes, so this loses nothing SQL has; a vector that
+reaches the index without SQL agreeing (`record_with_rid` onto an
+existing row whose SQL holds another vector or is cold, `insert_vector`
+for a rid with no row) is dropped by a rebuild, as by a reopen. The compare-and-swap in step 3 is
+a second line against a cold tier replaced mid-merge; it does not stop
+an installer that skips the gate from losing writes, which is why the
+only installer besides compaction is the rebuild (`install_rebuilt`),
+and it takes the gate. Lock order:
+the gate, then `conn`; compaction never takes `conn`.
 
 Adding a "scheduler with priorities" that introduces a shared lock
 primitive between foreground (P1) and compaction (P3) silently breaks

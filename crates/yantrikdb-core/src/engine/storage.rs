@@ -100,11 +100,11 @@ impl YantrikDB {
         // a NULL as NULL, and the reembed swap is guarded on
         // `embedding_new IS NOT NULL`), and nothing indexes a row without
         // giving SQL its vector (`record_with_rid` on an existing row and
-        // `insert_vector` fill a row's missing one). A tombstone for
-        // it would outlive the row's return to the hot tier and hide the
-        // vector a later
-        // `refresh_embeddings` gives it, because the index rebuild that
-        // follows a refresh does not touch the delta.
+        // `insert_vector` fill a row's missing one). So a tombstone for it
+        // would hide nothing; before index rebuilds retired the delta
+        // entries their SQL read subsumes, it also outlived the row's
+        // return to the hot tier and hid the vector a later
+        // `refresh_embeddings` gave it.
         if had_vector {
             self.search_state.load().vec_index.tombstone(rid, seq);
         }
