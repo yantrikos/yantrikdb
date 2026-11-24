@@ -1646,3 +1646,36 @@ fn install_sweeps_stale_temp_copies_only() {
     assert!(!stale.exists(), "the stale temp copy must be swept");
     assert!(fresh.exists(), "a fresh temp copy may be a live install's");
 }
+
+/// Two seals to one destination: one writes the pack, the other gets the
+/// PackDestinationExists a sequential second seal gets. The loser's
+/// VACUUM INTO found the winner's file and surfaced SQLite's "output file
+/// already exists" as a bare database error.
+#[test]
+fn concurrent_seals_to_one_destination_refuse_the_loser_cleanly() {
+    let dir = tmpdir("concurrent-seal");
+    let db = host(&dir, "E0");
+    record(&db, "gluons bind quarks", &vec_on(3, 0.05), "physics");
+    for trial in 0..10 {
+        let dest = dir.join(format!("sealed-{trial}.ydbpack"));
+        let dest = dest.to_str().unwrap().to_string();
+        let barrier = std::sync::Barrier::new(2);
+        let results: Vec<_> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..2)
+                .map(|_| {
+                    s.spawn(|| {
+                        barrier.wait();
+                        db.seal_pack(&dest, &manifest(Some("E0")), Some("physics"))
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        let ok = results.iter().filter(|r| r.is_ok()).count();
+        let exists = results
+            .iter()
+            .filter(|r| matches!(r, Err(YantrikDbError::PackDestinationExists { .. })))
+            .count();
+        assert_eq!((ok, exists), (1, 1), "trial {trial}: {results:?}");
+    }
+}

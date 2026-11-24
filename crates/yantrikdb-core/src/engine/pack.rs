@@ -900,7 +900,18 @@ impl YantrikDB {
         // long write transaction on the host.
         {
             let conn = self.conn.lock();
-            conn.execute("VACUUM INTO ?1", rusqlite::params![dest_path])?;
+            // Two seals to one destination (now possible from two threads,
+            // #271): both pass the existence check above, and the loser's
+            // VACUUM INTO refuses the winner's file. Report that as the
+            // PackDestinationExists a sequential second seal gets.
+            if let Err(e) = conn.execute("VACUUM INTO ?1", rusqlite::params![dest_path]) {
+                if e.to_string().contains("output file already exists") {
+                    return Err(YantrikDbError::PackDestinationExists {
+                        path: dest_path.to_string(),
+                    });
+                }
+                return Err(e.into());
+            }
         }
 
         let mut out = Connection::open(dest_path).map_err(|e| YantrikDbError::PackUnreadable {
