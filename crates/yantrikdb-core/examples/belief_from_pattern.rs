@@ -42,6 +42,7 @@ fn main() {
             domain: "general".to_string(),
             evidence_trail: Vec::new(),
             user_confirmed: false,
+            undecayed_log_odds: None,
         }),
     );
     db.persist_cognitive_node(&node).expect("persist");

@@ -413,6 +413,7 @@ pub fn build_aisha() -> Result<PersonaScenario> {
                 },
             ],
             user_confirmed: true,
+            undecayed_log_odds: None,
         }),
     ));
 
@@ -443,6 +444,7 @@ pub fn build_aisha() -> Result<PersonaScenario> {
                 },
             ],
             user_confirmed: false,
+            undecayed_log_odds: None,
         }),
     ));
 
@@ -853,6 +855,7 @@ pub fn build_priya() -> Result<PersonaScenario> {
                 paths: Vec::new(),
             }],
             user_confirmed: false,
+            undecayed_log_odds: None,
         }),
     ));
 
@@ -883,6 +886,7 @@ pub fn build_priya() -> Result<PersonaScenario> {
                 },
             ],
             user_confirmed: true,
+            undecayed_log_odds: None,
         }),
     ));
 
@@ -1588,6 +1592,7 @@ fn run_belief_revision_tests(run: &mut BenchRun) {
         domain: "test".into(),
         evidence_trail: vec![],
         user_confirmed: false,
+        undecayed_log_odds: None,
     };
 
     for i in 0..20 {
@@ -1617,6 +1622,7 @@ fn run_belief_revision_tests(run: &mut BenchRun) {
         domain: "test".into(),
         evidence_trail: vec![],
         user_confirmed: false,
+        undecayed_log_odds: None,
     };
     for i in 0..10 {
         let weight = if i % 2 == 0 { 0.5 } else { -0.5 };
@@ -1642,6 +1648,7 @@ fn run_belief_revision_tests(run: &mut BenchRun) {
         domain: "test".into(),
         evidence_trail: vec![],
         user_confirmed: false,
+        undecayed_log_odds: None,
     };
     let mut low_rel = BeliefPayload {
         proposition: "B".into(),
@@ -1649,6 +1656,7 @@ fn run_belief_revision_tests(run: &mut BenchRun) {
         domain: "test".into(),
         evidence_trail: vec![],
         user_confirmed: false,
+        undecayed_log_odds: None,
     };
     high_rel.update(1.0, 0.95, "reliable", 100.0);
     low_rel.update(1.0, 0.3, "unreliable", 100.0);

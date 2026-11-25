@@ -396,12 +396,23 @@ pub fn propagate_evidence_from(
 /// regress toward uncertainty (log_odds → 0). This prevents ancient
 /// beliefs from dominating when they may no longer be valid.
 ///
+/// The value is recomputed from the undecayed base, never from the value
+/// the previous pass wrote:
+/// * **time-based** — the amount depends on how much time has passed since the
+///   newest evidence, not on how often the revision loop ran;
+/// * **idempotent** — a second pass at the same instant is a no-op;
+/// * **persistence-weighted** — a node's `attrs.persistence` resists TIME
+///   decay (1.0 = never decays). It does not shield against contradicting
+///   evidence: that is assertion, not revision.
+///
 /// Returns the amount of log-odds decayed (positive = moved toward 0).
 pub fn apply_staleness_decay(
     node: &mut CognitiveNode,
     now_secs: f64,
     config: &BeliefRevisionConfig,
 ) -> f64 {
+    let persistence = node.attrs.persistence.clamp(0.0, 1.0);
+
     let belief = match &mut node.payload {
         NodePayload::Belief(b) => b,
         _ => return 0.0,
@@ -425,10 +436,22 @@ pub fn apply_staleness_decay(
     }
 
     let effective_days = days_since_evidence - config.staleness_grace_period_days;
-    let decay_factor = 1.0 - (config.staleness_rate_per_day * effective_days).min(0.95);
+    // Persistence is resistance to time: 1.0 never decays, 0.0 decays at the
+    // full configured rate.
+    let rate = config.staleness_rate_per_day * (1.0 - persistence);
+    if rate <= 0.0 {
+        return 0.0;
+    }
+    let decay_factor = 1.0 - (rate * effective_days).min(0.95);
 
+    // The base is what the evidence (and the prior) support; the stored value
+    // may already be a decayed one. Keeping the base makes the result a
+    // function of (evidence, elapsed time, persistence) only.
+    let base = belief.undecayed_log_odds.unwrap_or(belief.log_odds);
     let old_log_odds = belief.log_odds;
-    belief.log_odds *= decay_factor;
+    belief.undecayed_log_odds = Some(base);
+    belief.log_odds = (base * decay_factor)
+        .clamp(-config.max_abs_log_odds, config.max_abs_log_odds);
 
     // Enforce ceiling after decay too
     enforce_confidence_ceiling(belief, &node.attrs, config);
@@ -533,6 +556,7 @@ mod tests {
                 domain: "test".to_string(),
                 evidence_trail: vec![],
                 user_confirmed: false,
+                undecayed_log_odds: None,
             }),
         );
         node.attrs.confidence = sigmoid(log_odds);
@@ -887,6 +911,7 @@ mod tests {
                 domain: "test".to_string(),
                 evidence_trail: vec![],
                 user_confirmed: false,
+                undecayed_log_odds: None,
             }),
         );
         node.attrs.confidence = sigmoid(log_odds);

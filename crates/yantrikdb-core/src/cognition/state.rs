@@ -593,9 +593,36 @@ pub struct BeliefPayload {
     pub evidence_trail: Vec<EvidenceEntry>,
     /// Whether this belief has been directly confirmed by the user.
     pub user_confirmed: bool,
+    /// Log-odds as supported by the evidence trail and the prior — i.e. the
+    /// value BEFORE any staleness decay was written into `log_odds`.
+    ///
+    /// Maintained wherever `log_odds` moves (`shift_log_odds`/`set_log_odds`),
+    /// so a decay pass recomputes the stored value from this base instead of
+    /// multiplying the running value again: a second revision at the same
+    /// instant is a no-op, and the result depends on elapsed time only, never
+    /// on how often `revise_beliefs` ran. `None` only on rows written before
+    /// this field existed.
+    #[serde(default)]
+    pub undecayed_log_odds: Option<f64>,
 }
 
 impl BeliefPayload {
+    /// Move `log_odds` by `delta` and keep the undecayed base in step.
+    ///
+    /// The base is what the evidence supports; it moves by the same amount, so
+    /// a later decay pass never mistakes an already-decayed value for an
+    /// undecayed one — which would charge the same elapsed time twice.
+    pub fn shift_log_odds(&mut self, delta: f64) {
+        let base = self.undecayed_log_odds.unwrap_or(self.log_odds);
+        self.log_odds += delta;
+        self.undecayed_log_odds = Some(base + delta);
+    }
+
+    /// Set `log_odds` outright (a direct statement) and reset the base to it.
+    pub fn set_log_odds(&mut self, value: f64) {
+        self.log_odds = value;
+        self.undecayed_log_odds = Some(value);
+    }
     /// Convert log-odds to probability.
     pub fn probability(&self) -> f64 {
         sigmoid(self.log_odds)
@@ -634,13 +661,14 @@ impl BeliefPayload {
                 .find(|e| e.observation_id.as_deref() == Some(oid))
             {
                 entry.history.push((entry.weight, entry.timestamp));
-                self.log_odds += effective_weight - entry.weight;
+                let delta = effective_weight - entry.weight;
                 entry.weight = effective_weight;
                 entry.source = source.to_string();
+                self.shift_log_odds(delta);
                 return;
             }
         }
-        self.log_odds += effective_weight;
+        self.shift_log_odds(effective_weight);
         self.evidence_trail.push(EvidenceEntry {
             source: source.to_string(),
             weight: effective_weight,
@@ -702,7 +730,7 @@ impl BeliefPayload {
             if weight == 0.0 {
                 return;
             }
-            self.log_odds += weight;
+            self.shift_log_odds(weight);
             self.evidence_trail.push(EvidenceEntry {
                 source: source.to_string(),
                 weight,
@@ -733,9 +761,10 @@ impl BeliefPayload {
             return;
         }
         entry.history.push((entry.weight, entry.timestamp));
-        self.log_odds += aggregate - entry.weight;
+        let delta = aggregate - entry.weight;
         entry.weight = aggregate;
         entry.source = source.to_string();
+        self.shift_log_odds(delta);
     }
 
     /// How much evidence supports this belief (sum of positive weights).
@@ -1831,6 +1860,7 @@ mod tests {
             domain: "preferences".to_string(),
             evidence_trail: vec![],
             user_confirmed: false,
+            undecayed_log_odds: None,
         };
 
         assert!((belief.probability() - 0.5).abs() < 1e-10);
@@ -2016,6 +2046,7 @@ mod tests {
                 domain: "preferences".to_string(),
                 evidence_trail: vec![],
                 user_confirmed: false,
+                undecayed_log_odds: None,
             }),
         );
 
@@ -2157,6 +2188,7 @@ mod tests {
                 domain: "test".into(),
                 evidence_trail: vec![],
                 user_confirmed: false,
+                undecayed_log_odds: None,
             }),
             NodePayload::Goal(GoalPayload {
                 description: "test".into(),
@@ -2190,6 +2222,7 @@ mod tests {
                 paths: Vec::new(),
             }],
             user_confirmed: true,
+            undecayed_log_odds: None,
         });
 
         let json = serialize_payload(&original);

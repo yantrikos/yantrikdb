@@ -266,7 +266,7 @@ impl YantrikDB {
             node.attrs.provenance = crate::state::Provenance::Told;
             // Boost confidence for confirmed beliefs
             let boost = 1.0; // +1.0 log-odds ≈ +0.27 probability at P=0.5
-            belief.log_odds += boost;
+            belief.shift_log_odds(boost);
             node.attrs.confidence = crate::state::sigmoid(belief.log_odds);
             self.persist_cognitive_node(&node)?;
             Ok(true)
@@ -287,7 +287,7 @@ impl YantrikDB {
 
         if let NodePayload::Belief(ref mut belief) = node.payload {
             belief.user_confirmed = true; // Confirmed as FALSE
-            belief.log_odds = -4.0; // Strong disbelief
+            belief.set_log_odds(-4.0); // Strong disbelief
             node.attrs.confidence = crate::state::sigmoid(belief.log_odds);
             node.attrs.provenance = crate::state::Provenance::Told;
             self.persist_cognitive_node(&node)?;
@@ -323,6 +323,7 @@ mod tests {
                 domain: "test".to_string(),
                 evidence_trail: vec![],
                 user_confirmed: false,
+                undecayed_log_odds: None,
             }),
         );
         node.attrs.confidence = crate::state::sigmoid(log_odds);

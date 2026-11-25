@@ -994,6 +994,7 @@ mod tests {
                 domain: "test".to_string(),
                 evidence_trail: Vec::new(),
                 user_confirmed: false,
+                undecayed_log_odds: None,
             }),
             label: label.to_string(),
             metadata: Default::default(),
