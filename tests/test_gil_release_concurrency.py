@@ -1331,12 +1331,14 @@ def test_set_embedder_while_record_runs_in_another_thread(db):
         t.join()
 
     # The test only means something if both threads really ran concurrently.
-    # The precondition counts attempts, as the sibling tests do: a record()
-    # refused with "Already mutably borrowed" (set_embedder() holding its
-    # borrow across the encode() probe, #282) lands in record_errors before
-    # the success append, so a success-only count measures the refusal rate
-    # on a slow runner, not whether the worker ran. Successes stay counted
-    # separately and both numbers ride in the message.
+    # The precondition counts attempts, as the sibling tests do: since #295
+    # set_embedder() probes with no borrow and takes the mutable borrow only
+    # to store one field, and record()'s snapshot borrow retries a refusal
+    # for 10 ms, which covers that store, so a refusal here should now be
+    # rare; if one does land it is in record_errors before the success
+    # append, so a success-only count measures the refusal rate on a slow
+    # runner, not whether the worker ran. Successes stay counted separately
+    # and both numbers ride in the message.
     assert len(record_attempts) > 5, (
         "the record worker barely ran; nothing was contended "
         f"(attempts={len(record_attempts)}, successes={len(record_calls)})"
@@ -1346,10 +1348,12 @@ def test_set_embedder_while_record_runs_in_another_thread(db):
         f"{len(errors)}/{calls} set_embedder() calls failed while "
         f"record() was detached: {errors[:1]}"
     )
-    # Same pre-existing contract as recall(): set_embedder() keeps its
-    # mutable borrow while it calls the Python embedder's encode(), so a
-    # record() arriving mid-call is refused with "Already mutably
-    # borrowed". That must stay an ordinary RuntimeError, never a panic.
+    # Same pre-existing contract as recall(): set_embedder() takes its
+    # mutable borrow only to store the new embedder (the encode() probe
+    # runs borrow-free since #295), so a record() snapshot can still
+    # collide with that brief store window and be refused with "Already
+    # mutably borrowed". That must stay an ordinary RuntimeError, never
+    # a panic.
     unexpected = [e for e in record_errors if "Already mutably borrowed" not in e]
     assert not unexpected, unexpected[:2]
     assert not any("PanicException" in e for e in record_errors)

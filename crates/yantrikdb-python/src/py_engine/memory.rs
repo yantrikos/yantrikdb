@@ -123,13 +123,13 @@ impl PyYantrikDB {
         };
 
         // 4a.6d: routing decides the digest variant. An EXPLICIT embedding is
-        // part of the payload (record()'s API-byte identity \u2014 different vectors
+        // part of the payload (record()'s API-byte identity — different vectors
         // are different writes). No embedding + an ENGINE embedder routes
         // through record_text_with_idempotency, whose digest EXCLUDES the
-        // generated vector \u2014 embedder drift across retries can never fake a
+        // generated vector — embedder drift across retries can never fake a
         // conflict. This lifts the 4a.6c interim guard. The one remaining
         // refusal: a key with a PYTHON-object fallback embedder (wrapper-side
-        // vector generation the engine cannot reproduce \u2014 same drift hazard the
+        // vector generation the engine cannot reproduce — same drift hazard the
         // guard existed for, still real on that path only).
         enum Prepared {
             With { emb: Vec<f32>, key: Option<String> },
@@ -145,7 +145,7 @@ impl PyYantrikDB {
                 });
             }
             // Only let the engine embed when the caller attached nothing of
-            // their own \u2014 an explicit Python embedder outranks a default the
+            // their own — an explicit Python embedder outranks a default the
             // engine resolved for this dimension (#84).
             if snapshot.embedder.is_none() && snapshot.native {
                 return Ok(Prepared::Text {
