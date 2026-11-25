@@ -796,8 +796,10 @@ impl PyYantrikDB {
         // the GIL released and the workers running, until only the wrapper
         // holds the engine. Then it stops the workers, takes the wrapper's
         // mutable borrow and swaps. If the engine was taken again in between,
-        // or another thread holds the wrapper's borrow (a call inside a
-        // Python embedder's encode()), it restarts the workers and waits on,
+        // or another thread holds the wrapper's borrow (once a record() or
+        // correct() inside a Python embedder's encode(); since #297 and #296
+        // only a brief read or store, or the `_hold_borrow_while` test hook),
+        // it restarts the workers and waits on,
         // trying again at most every 50 ms. Past the deadline the holder is
         // most likely a `_conn` proxy or a cloned reference, which no wait
         // releases.
@@ -944,8 +946,7 @@ impl PyYantrikDB {
                 break Err(PyRuntimeError::new_err(format!(
                     "set_embedder_named needs exclusive access to the engine and did not \
                      get it within {}s: the engine was free, but another thread held a \
-                     borrow of this YantrikDB each time (a record() inside its Python \
-                     embedder's encode(), for example). Retry once that call is done.",
+                     borrow of this YantrikDB each time. Retry once that call is done.",
                     WAIT.as_secs()
                 )));
             }

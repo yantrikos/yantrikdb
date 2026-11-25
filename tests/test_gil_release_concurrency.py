@@ -621,43 +621,26 @@ _needs_potion = pytest.mark.skipif(
 )
 
 
-def _hold_the_borrow(db, seconds):
-    # Hold the wrapper's shared borrow for `seconds` from another thread,
-    # with the GIL given up, through the `_hold_borrow_while` test hook.
-    # These tests used a record() inside a slow Python embedder's encode(),
-    # but record() (#297) and correct() (#296) no longer hold the borrow
-    # across encode(), and since #295 no public method is meant to hold it
-    # for long; the hook stages what the code below still has to cope with.
-    # The caller enables the hook (YANTRIKDB_TEST_HOOKS=1).
+def _hold_the_borrow(db, seconds, until=None):
+    # Hold the wrapper's shared borrow from another thread, with the GIL
+    # given up, through the `_hold_borrow_while` test hook: for `seconds`,
+    # or until `until` is set if that comes first. These tests used a
+    # record() inside a slow Python embedder's encode(), but #297 and #296
+    # take record() and correct() off the borrow across encode(), and since
+    # #295 no other public method is meant to hold it for long; the hook
+    # stages what the code below still has to cope with. The caller enables
+    # the hook (YANTRIKDB_TEST_HOOKS=1).
     entered = threading.Event()
+    until = until or threading.Event()
 
     def hold():
         entered.set()
-        time.sleep(seconds)
+        until.wait(seconds)
 
     t = threading.Thread(target=lambda: db._hold_borrow_while(hold))
     t.start()
     assert entered.wait(10), "the hook never ran"
     return t
-
-
-def test_the_test_hooks_are_off_by_default(tmp_path, monkeypatch):
-    # Both hooks ship in every wheel; without YANTRIKDB_TEST_HOOKS=1 they
-    # raise and do nothing. Their messages once carried a broken line
-    # continuation (a run of spaces mid-sentence).
-    monkeypatch.delenv("YANTRIKDB_TEST_HOOKS", raising=False)
-    db = YantrikDB(os.path.join(str(tmp_path), "hook-off.db"), DIM)
-    try:
-        ran = []
-        with pytest.raises(RuntimeError, match="YANTRIKDB_TEST_HOOKS=1") as held:
-            db._hold_borrow_while(lambda: ran.append(1))
-        assert not ran
-        with pytest.raises(RuntimeError, match="YANTRIKDB_TEST_HOOKS=1") as panic:
-            db._inject_swap_panic()
-        for e in (held, panic):
-            assert "  " not in str(e.value), f"broken line continuations: {e.value!r}"
-    finally:
-        db.close()
 
 
 @_needs_potion
@@ -878,7 +861,7 @@ def test_two_swaps_pending_at_once_both_go_through(tmp_path):
 @_needs_potion
 def test_a_swap_kept_out_by_a_held_borrow_says_so(tmp_path, monkeypatch):
     # The engine is free, but another thread holds the wrapper's borrow for
-    # the whole wait (here the test hook, for 11 s). The swap's timeout
+    # the whole wait (here the test hook, until the swap gives up). The swap's timeout
     # message blamed another call or a proxy (#302 review 4).
     monkeypatch.setenv("YANTRIKDB_TEST_HOOKS", "1")  # the hook is off by default
     db = YantrikDB(os.path.join(str(tmp_path), "held-msg.db"), 256)
@@ -886,16 +869,22 @@ def test_a_swap_kept_out_by_a_held_borrow_says_so(tmp_path, monkeypatch):
         proxy = db._conn  # the swap is waiting when the borrow is taken
         out = {}
 
+        swap_done = threading.Event()
+
         def swapper():
             try:
                 db.set_embedder_named("potion-base-8M")
             except Exception as e:  # noqa: BLE001
                 out["error"] = str(e)
+            finally:
+                swap_done.set()
 
         sw = threading.Thread(target=swapper)
         sw.start()
         time.sleep(0.5)
-        holder = _hold_the_borrow(db, 11.0)
+        # Held until the swap gives up, not for a fixed time: the swap's
+        # deadline starts after its model load, so a fixed hold raced it.
+        holder = _hold_the_borrow(db, 60.0, until=swap_done)
         del proxy
         sw.join(60)
         holder.join(60)
@@ -1086,17 +1075,25 @@ def test_set_embedder_on_a_closed_store_raises(tmp_path):
         db.set_embedder(Emb(), allow_unverified_embedder=True)
 
 
-def test_the_swap_panic_hook_refuses_without_the_test_hooks_switch(tmp_path, monkeypatch):
-    # _inject_swap_panic ships in the wheel; without YANTRIKDB_TEST_HOOKS=1
-    # it raises instead of arming a panic, and nothing is armed.
-    monkeypatch.delenv("YANTRIKDB_TEST_HOOKS", raising=False)
+@pytest.mark.parametrize("switch", [None, "0"], ids=["unset", "zero"])
+@pytest.mark.parametrize("hook", ["_inject_swap_panic", "_hold_borrow_while"])
+def test_the_test_hooks_refuse_without_the_switch(tmp_path, monkeypatch, hook, switch):
+    # Both hooks ship in the wheel; without YANTRIKDB_TEST_HOOKS=1 they
+    # raise and do nothing: no panic is armed, no callback runs. Their
+    # messages once carried a broken line continuation (a run of spaces
+    # mid-sentence).
+    if switch is None:
+        monkeypatch.delenv("YANTRIKDB_TEST_HOOKS", raising=False)
+    else:
+        monkeypatch.setenv("YANTRIKDB_TEST_HOOKS", switch)
     db = YantrikDB(os.path.join(str(tmp_path), "hook-off.db"), DIM)
     try:
-        with pytest.raises(RuntimeError, match="YANTRIKDB_TEST_HOOKS"):
-            db._inject_swap_panic()
-        monkeypatch.setenv("YANTRIKDB_TEST_HOOKS", "0")
-        with pytest.raises(RuntimeError, match="YANTRIKDB_TEST_HOOKS"):
-            db._inject_swap_panic()
+        ran = []
+        args = (lambda: ran.append(1),) if hook == "_hold_borrow_while" else ()
+        with pytest.raises(RuntimeError, match="YANTRIKDB_TEST_HOOKS=1") as e:
+            getattr(db, hook)(*args)
+        assert not ran
+        assert "  " not in str(e.value), f"broken line continuations: {e.value!r}"
     finally:
         db.close()
 
