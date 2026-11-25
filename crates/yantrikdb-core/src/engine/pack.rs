@@ -900,7 +900,18 @@ impl YantrikDB {
         // long write transaction on the host.
         {
             let conn = self.conn.lock();
-            conn.execute("VACUUM INTO ?1", rusqlite::params![dest_path])?;
+            // Two seals to one destination (now possible from two threads,
+            // #271): both pass the existence check above, and the loser's
+            // VACUUM INTO refuses the winner's file. Report that as the
+            // PackDestinationExists a sequential second seal gets.
+            if let Err(e) = conn.execute("VACUUM INTO ?1", rusqlite::params![dest_path]) {
+                if e.to_string().contains("output file already exists") {
+                    return Err(YantrikDbError::PackDestinationExists {
+                        path: dest_path.to_string(),
+                    });
+                }
+                return Err(e.into());
+            }
         }
 
         let mut out = Connection::open(dest_path).map_err(|e| YantrikDbError::PackUnreadable {
@@ -1094,7 +1105,18 @@ impl YantrikDB {
         let index = Self::build_vec_index_with_enc(&conn, manifest.embedder.dim, None)?;
         let scoring = Self::load_scoring_cache(&conn)?;
 
-        self.packs.write().push(Arc::new(MountedPack {
+        // Check again under the write lock: the check above ran under a
+        // read lock that was released for the slow work since, and two
+        // mounts of one pack (two threads, now that the Python binding
+        // releases the GIL, #271) both passed it.
+        let mut packs = self.packs.write();
+        if packs.iter().any(|p| p.pack_id() == pack_id) {
+            return Err(YantrikDbError::PackAlreadyMounted {
+                pack_id,
+                path: path.to_string(),
+            });
+        }
+        packs.push(Arc::new(MountedPack {
             manifest,
             path: path.to_string(),
             trust,
@@ -1438,18 +1460,25 @@ impl YantrikDB {
     /// calibration counter — which is the property that makes mounting
     /// reversible in a way importing is not.
     pub fn unmount_pack(&self, pack_id: &str) -> Result<bool> {
-        let mut packs = self.packs.write();
-        let before = packs.len();
-        packs.retain(|p| p.pack_id() != pack_id);
-        Ok(packs.len() != before)
+        // Take the removed packs out under the write lock and drop them
+        // after it: the last Arc closes the pack's SQLite connection, which
+        // must not happen while every mount and recall waits on the lock.
+        let removed: Vec<Arc<MountedPack>> = {
+            let mut packs = self.packs.write();
+            let (removed, kept) = std::mem::take(&mut *packs)
+                .into_iter()
+                .partition(|p| p.pack_id() == pack_id);
+            *packs = kept;
+            removed
+        };
+        Ok(!removed.is_empty())
     }
 
     /// Unmount every mounted pack. Returns how many were unmounted.
     pub fn unmount_all_packs(&self) -> usize {
-        let mut packs = self.packs.write();
-        let n = packs.len();
-        packs.clear();
-        n
+        // Dropped after the lock is released, as in unmount_pack.
+        let removed = std::mem::take(&mut *self.packs.write());
+        removed.len()
     }
 
     /// Currently mounted packs, in mount order.
@@ -2032,6 +2061,11 @@ impl YantrikDB {
     }
 
     pub fn install_pack(&self, path: &str) -> Result<String> {
+        // One install at a time (#271 review): an install unmounts, writes
+        // and remounts one file, and two installs of the same pack
+        // interleaving those steps double-mounted it, failed on a file the
+        // other was copying, or mounted a half-written copy.
+        let _serial = self.pack_install_lock.lock();
         let dir = self.pack_dir().ok_or_else(|| {
             YantrikDbError::InvalidInput(
                 "an in-memory database cannot install packs (there is no directory to \
@@ -2080,67 +2114,216 @@ impl YantrikDB {
             .zip(dest.canonicalize().ok())
             .map(|(a, b)| a == b)
             .unwrap_or(false);
-        if !same {
-            // A pack published in a different embedding space is converted
-            // into this host's space rather than refused. Done HERE and not
-            // in `mount_pack` on purpose: install is the durable, one-time,
-            // explicit step, so the re-embedding cost is paid once and the
-            // converted file is what gets remounted on every subsequent
-            // open. `mount_pack` stays a read-only attach that writes
-            // nothing.
-            //
-            // Only possible when this host's embedder is a registry model,
-            // since conversion has to name the space it is converting INTO.
-            // A host on an external embedder (a sentence-transformers
-            // MiniLM, say) falls through to the plain copy and gets the
-            // usual dimension refusal at mount, which is honest: the engine
-            // cannot reproduce an embedder it does not own.
-            let converted = self.convert_pack_into_host_space(path, &dest, &manifest)?;
-            if !converted {
-                std::fs::copy(src, &dest).map_err(|e| YantrikDbError::PackUnreadable {
-                    path: path.to_string(),
-                    reason: format!("could not copy into {}: {e}", dir.display()),
-                })?;
+        // Stale temp copies from installs that died mid-write. Under the
+        // install lock no install of this engine is writing one, and an
+        // age bound keeps any other process's live copy safe. Then the
+        // aside copies an install that died between its two renames left.
+        sweep_stale_install_temps(&dir);
+        recover_install_asides(&dir);
+
+        // 1. Write the new copy (or converted copy) beside the destination
+        //    BEFORE touching the current mount: that is the slow step, and
+        //    the pack stays mounted and served while it runs.
+        let tmp = (!same).then(|| {
+            dir.join(format!(
+                ".{file_name}.tmp.{}.{}",
+                std::process::id(),
+                next_install_tmp()
+            ))
+        });
+        if let Some(tmp) = tmp.as_ref() {
+            if let Err(e) = self.write_install_copy(path, tmp, &manifest, &dir) {
+                let _ = std::fs::remove_file(tmp);
+                return Err(e);
             }
         }
 
-        // Mount before recording: a pack that cannot be mounted must not
-        // be left in the table for open() to trip over every time.
-        let dest_str = dest.to_string_lossy().to_string();
-        if self.packs.read().iter().any(|p| p.pack_id() == pack_id) {
+        // 2. Unmount the current mount, then move the new copy into place.
+        //    A mounted pack holds its file open, and on Windows SQLite opens
+        //    without FILE_SHARE_DELETE, so the file cannot be replaced under
+        //    it. A recall still holding the old mount keeps it open too; the
+        //    rename then fails, and the old mount is put back so a failed
+        //    re-install leaves the pack exactly as it was.
+        let previous: Option<(String, PackTrust)> = self
+            .packs
+            .read()
+            .iter()
+            .find(|p| p.pack_id() == pack_id)
+            .map(|p| (p.path.clone(), p.trust));
+        if previous.is_some() {
             self.unmount_pack(&pack_id)?;
         }
+        let restore_previous = || {
+            if let Some((old_path, trust)) = previous.as_ref() {
+                let opts = MountOptions {
+                    allow_unverified_embedder: *trust == PackTrust::Unverified,
+                    ..MountOptions::default()
+                };
+                if let Err(e) = self.mount_pack_opts(old_path, &opts) {
+                    tracing::warn!(
+                        pack = %pack_id,
+                        error = %e,
+                        "could not put the previous mount back after a failed re-install"
+                    );
+                }
+            }
+        };
+        // Keep the installed file aside until the new copy has mounted: a
+        // copy that turns out unmountable (say, modified after sealing) must
+        // not cost the working install. Not named like a temp copy, so the
+        // stale-temp sweep never takes it; `recover_install_asides` puts
+        // back or removes one an install that died here left.
+        let mut aside: Option<std::path::PathBuf> = None;
+        // Registered as in flight until this install returns, on every path:
+        // another engine of this process sharing the pack directory must not
+        // take it for a dead install's (see `recover_install_asides`).
+        let mut _in_flight: Option<AsideInFlight> = None;
+        if let Some(tmp) = tmp.as_ref() {
+            if dest.exists() {
+                let kept_name = format!(
+                    ".{file_name}.prev.{}.{}",
+                    std::process::id(),
+                    next_install_tmp()
+                );
+                _in_flight = Some(AsideInFlight::new(&kept_name));
+                let kept = dir.join(&kept_name);
+                if let Err(e) = rename_retrying(&dest, &kept) {
+                    let _ = std::fs::remove_file(tmp);
+                    restore_previous();
+                    return Err(YantrikDbError::PackUnreadable {
+                        path: dest.display().to_string(),
+                        reason: format!("could not move the installed copy aside: {e}"),
+                    });
+                }
+                aside = Some(kept);
+            }
+            if let Err(e) = std::fs::rename(tmp, &dest) {
+                let _ = std::fs::remove_file(tmp);
+                if let Some(kept) = aside.as_ref() {
+                    let _ = rename_retrying(kept, &dest);
+                }
+                restore_previous();
+                return Err(YantrikDbError::PackUnreadable {
+                    path: dest.display().to_string(),
+                    reason: format!("could not move the new copy into place: {e}"),
+                });
+            }
+        }
+        let drop_aside = |aside: &Option<std::path::PathBuf>| {
+            if let Some(kept) = aside {
+                let _ = std::fs::remove_file(kept);
+            }
+        };
+
+        // 3. Mount, then record. A pack that cannot be mounted must not be
+        //    left in the table for open() to trip over every time.
+        let dest_str = dest.to_string_lossy().to_string();
+        let record = |id: &str| -> Result<()> {
+            let conn = self.conn.lock();
+            conn.execute(
+                "INSERT OR REPLACE INTO pack_mounts \
+                 (pack_id, file_name, name, version, content_digest, installed_at) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                rusqlite::params![
+                    id,
+                    &file_name,
+                    &manifest.name,
+                    &manifest.version,
+                    manifest.content_digest.as_deref(),
+                    super::now(),
+                ],
+            )?;
+            Ok(())
+        };
         match self.mount_pack(&dest_str) {
             Ok(id) => {
-                let conn = self.conn.lock();
-                conn.execute(
-                    "INSERT OR REPLACE INTO pack_mounts \
-                     (pack_id, file_name, name, version, content_digest, installed_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                    rusqlite::params![
-                        &id,
-                        &file_name,
-                        &manifest.name,
-                        &manifest.version,
-                        manifest.content_digest.as_deref(),
-                        super::now(),
-                    ],
-                )?;
+                drop_aside(&aside);
+                record(&id)?;
                 Ok(id)
             }
+            // A concurrent mount_pack of the same pack (mounts do not take
+            // the install lock) landed between the unmount and this mount.
+            // The pack is mounted and the installed copy is in place: record
+            // it, so the next open remounts the installed copy, and succeed
+            // as a sequential re-install would. Deleting the copy here lost
+            // the pack at the next open while its row stayed.
+            Err(YantrikDbError::PackAlreadyMounted { .. }) => {
+                drop_aside(&aside);
+                record(&pack_id)?;
+                Ok(pack_id)
+            }
             Err(e) => {
+                // The new copy cannot be mounted. Put the working install's
+                // file back and remount it; with no earlier copy, remove the
+                // new one unless an install of this pack is on record (a
+                // recorded install's copy is what the next open remounts).
                 if !same {
-                    let _ = std::fs::remove_file(&dest);
+                    match aside.as_ref() {
+                        Some(kept) => {
+                            let _ = std::fs::remove_file(&dest);
+                            let _ = rename_retrying(kept, &dest);
+                        }
+                        None => {
+                            if !self.pack_is_installed(&pack_id)? {
+                                let _ = std::fs::remove_file(&dest);
+                            }
+                        }
+                    }
                 }
+                restore_previous();
                 Err(e)
             }
         }
+    }
+
+    /// Whether `pack_id` has a row in `pack_mounts`.
+    fn pack_is_installed(&self, pack_id: &str) -> Result<bool> {
+        let conn = self.conn.lock();
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pack_mounts WHERE pack_id = ?1)",
+            rusqlite::params![pack_id],
+            |r| r.get(0),
+        )?)
+    }
+
+    /// Write the copy an install mounts, at `tmp`; the caller renames it
+    /// into place.
+    ///
+    /// A pack published in a different embedding space is converted into
+    /// this host's space rather than refused. Done at install and not in
+    /// `mount_pack` on purpose: install is the durable, one-time, explicit
+    /// step, so the re-embedding cost is paid once and the converted file
+    /// is what gets remounted on every subsequent open. `mount_pack` stays
+    /// a read-only attach that writes nothing.
+    ///
+    /// Only possible when this host's embedder is a registry model, since
+    /// conversion has to name the space it is converting INTO. A host on an
+    /// external embedder (a sentence-transformers MiniLM, say) falls
+    /// through to the plain copy and gets the usual dimension refusal at
+    /// mount, which is honest: the engine cannot reproduce an embedder it
+    /// does not own.
+    fn write_install_copy(
+        &self,
+        path: &str,
+        tmp: &std::path::Path,
+        manifest: &PackManifest,
+        dir: &std::path::Path,
+    ) -> Result<()> {
+        let converted = self.convert_pack_into_host_space(path, tmp, manifest)?;
+        if !converted {
+            std::fs::copy(path, tmp).map_err(|e| YantrikDbError::PackUnreadable {
+                path: path.to_string(),
+                reason: format!("could not copy into {}: {e}", dir.display()),
+            })?;
+        }
+        Ok(())
     }
 
     /// Uninstall a pack: unmount it, drop its record, and delete the
     /// copy in the pack directory. Returns `false` if it was not
     /// installed.
     pub fn uninstall_pack(&self, pack_id: &str) -> Result<bool> {
+        let _serial = self.pack_install_lock.lock();
         let file_name: Option<String> = {
             let conn = self.conn.lock();
             conn.query_row(
@@ -2201,6 +2384,11 @@ impl YantrikDB {
         let Some(dir) = self.pack_dir() else {
             return Vec::new();
         };
+        // Not while an install or uninstall is replacing a file (#271
+        // review): the install lock orders them.
+        let _serial = self.pack_install_lock.lock();
+        sweep_stale_install_temps(&dir);
+        recover_install_asides(&dir);
         let installed = match self.installed_packs() {
             Ok(v) => v,
             Err(e) => {
@@ -2570,5 +2758,202 @@ impl YantrikDB {
             }
         }
         Ok(out)
+    }
+}
+
+/// Remove install temp copies (`.<file>.tmp.<pid>.<n>`) left by installs
+/// that died mid-write. Only copies untouched for an hour go: a live
+/// install keeps writing its copy (and any install of this engine is
+/// excluded by the install lock the callers hold), so an hour-old copy is
+/// no install's work in progress. Best-effort; errors are ignored.
+fn sweep_stale_install_temps(dir: &std::path::Path) {
+    const STALE: std::time::Duration = std::time::Duration::from_secs(3600);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !(name.starts_with('.') && name.contains(".ydbpack.tmp.")) {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .ok()
+            .and_then(|t| t.elapsed().ok())
+            .is_some_and(|age| age >= STALE);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+}
+
+/// `std::fs::rename`, retried for about 100 ms. On Windows a recall still
+/// reading a pack holds its file open (SQLite opens without
+/// FILE_SHARE_DELETE), and moving that file fails with a sharing
+/// violation (os error 32) until the read finishes, usually within a few
+/// milliseconds: 19-24 of 60 re-installs beside recall traffic failed
+/// that way, and each succeeded within three tries 2 ms apart (#304
+/// review 4). Any error is retried; past the last try it is returned.
+fn rename_retrying(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
+    const BACKOFF_MS: [u64; 6] = [2, 4, 8, 16, 32, 38];
+    let mut result = std::fs::rename(from, to);
+    for ms in BACKOFF_MS {
+        if result.is_ok() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(ms));
+        result = std::fs::rename(from, to);
+    }
+    result
+}
+
+/// Put back or remove the aside copies (`.<file>.prev.<pid>.<n>`) of
+/// installs that died between moving the installed copy aside and
+/// finishing (#304 review 4). Died before the new copy was renamed in:
+/// the installed path is empty and the aside copy is the working install,
+/// so it is renamed back. Died after: the installed path holds the new
+/// copy and the aside one is left over, so it is removed.
+///
+/// An aside copy named with this process's id belongs to a dead install
+/// unless an install of this process still holds it (`AsideInFlight`).
+/// The callers' install lock is per engine, and two engines on one store
+/// in one process (TenantManager.get opens one per call) share a pack
+/// directory, so the lock alone does not say no install of this process is
+/// between its renames. Another process's install holds one only for its
+/// two renames and a mount, so its copies are touched only once a minute
+/// old. Best-effort; errors are ignored.
+fn recover_install_asides(dir: &std::path::Path) {
+    const OTHERS_AFTER: std::time::Duration = std::time::Duration::from_secs(60);
+    const MARK: &str = ".ydbpack.prev.";
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let own_pid = std::process::id().to_string();
+    // Per installed file name, the aside copies that may be acted on.
+    let mut asides: std::collections::BTreeMap<
+        String,
+        Vec<(std::path::PathBuf, std::time::SystemTime)>,
+    > = std::collections::BTreeMap::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        let Some(at) = name.find(MARK) else {
+            continue;
+        };
+        if !name.starts_with('.') {
+            continue;
+        }
+        let installed = name[1..at + ".ydbpack".len()].to_string();
+        let pid = name[at + MARK.len()..].split('.').next().unwrap_or("");
+        let modified = entry
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+        let ours = pid == own_pid && !AsideInFlight::holds(&name);
+        let old = modified.elapsed().is_ok_and(|age| age >= OTHERS_AFTER);
+        if ours || old {
+            asides
+                .entry(installed)
+                .or_default()
+                .push((entry.path(), modified));
+        }
+    }
+    for (installed, mut copies) in asides {
+        let dest = dir.join(&installed);
+        if !dest.exists() {
+            // The newest copy is the last working install.
+            copies.sort_by_key(|(_, modified)| *modified);
+            if let Some((newest, _)) = copies.pop() {
+                if let Err(e) = rename_retrying(&newest, &dest) {
+                    tracing::warn!(
+                        file = %installed,
+                        error = %e,
+                        "could not put back a pack copy a failed install left aside"
+                    );
+                    continue;
+                }
+                tracing::info!(
+                    file = %installed,
+                    "put back a pack copy an interrupted install left aside"
+                );
+            }
+        }
+        for (path, _) in copies {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// The aside copies (by file name) that installs in this process are
+/// holding right now. File names are unique within a process (pid and a
+/// per-process counter), so the name is enough, however two engines spell
+/// the pack directory.
+fn asides_in_flight() -> std::sync::MutexGuard<'static, std::collections::HashSet<String>> {
+    static IN_FLIGHT: std::sync::OnceLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    IN_FLIGHT
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// Registers an install's aside copy as in flight, from before it is moved
+/// aside until the install returns (#304 review 5).
+struct AsideInFlight(String);
+
+impl AsideInFlight {
+    fn new(name: &str) -> Self {
+        asides_in_flight().insert(name.to_string());
+        Self(name.to_string())
+    }
+
+    fn holds(name: &str) -> bool {
+        asides_in_flight().contains(name)
+    }
+}
+
+impl Drop for AsideInFlight {
+    fn drop(&mut self) {
+        asides_in_flight().remove(&self.0);
+    }
+}
+
+/// A per-process counter for install temp files, so two installs never
+/// write the same temp path (installs are also serialised; this keeps the
+/// name unique even if that ever changes).
+fn next_install_tmp() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(test)]
+mod aside_tests {
+    use super::*;
+
+    /// Two engines of one process share a pack directory, and each holds
+    /// only its own install lock. An aside copy named with this process's
+    /// id was taken for a dead install's by the other engine's recovery,
+    /// even while its install was between its renames (#304 review 5).
+    #[test]
+    fn an_aside_copy_held_by_an_install_in_this_process_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let installed = dir.path().join("physics-1.0.0.ydbpack");
+        let name = format!(".physics-1.0.0.ydbpack.prev.{}.4242", std::process::id());
+        let aside = dir.path().join(&name);
+        // Between the two renames: the installed path is empty, and the
+        // working copy is aside.
+        std::fs::write(&aside, b"the working copy").unwrap();
+        {
+            let _held = AsideInFlight::new(&name);
+            recover_install_asides(dir.path());
+            assert!(aside.exists(), "an aside copy in flight was taken");
+            assert!(!installed.exists());
+        }
+        // The install died there: once nothing holds it, it is put back.
+        recover_install_asides(dir.path());
+        assert!(!aside.exists());
+        assert_eq!(std::fs::read(&installed).unwrap(), b"the working copy");
     }
 }

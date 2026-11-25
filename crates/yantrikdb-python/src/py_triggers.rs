@@ -51,19 +51,24 @@ impl From<yantrikdb_core::Trigger> for PyTrigger {
 #[pyfunction]
 #[pyo3(signature = (db, importance_threshold=0.5, decay_threshold=0.1, max_triggers=10))]
 pub fn check_decay_triggers(
-    db: &PyYantrikDB,
+    db: Bound<'_, PyYantrikDB>,
     importance_threshold: f64,
     decay_threshold: f64,
     max_triggers: usize,
 ) -> PyResult<Vec<PyTrigger>> {
-    let inner = db.get_inner()?;
-    let triggers = yantrikdb_core::check_decay_triggers(
-        inner,
-        importance_threshold,
-        decay_threshold,
-        max_triggers,
-    )
-    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    // Reaches SQLite: with the GIL released and no borrow of `db` held (#271).
+    let inner = PyYantrikDB::engine_handle(&db)?;
+    let triggers = db
+        .py()
+        .detach(|| {
+            yantrikdb_core::check_decay_triggers(
+                &inner,
+                importance_threshold,
+                decay_threshold,
+                max_triggers,
+            )
+        })
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     Ok(triggers.into_iter().map(PyTrigger::from).collect())
 }
@@ -71,11 +76,14 @@ pub fn check_decay_triggers(
 #[pyfunction]
 #[pyo3(signature = (db, min_active_memories=10))]
 pub fn check_consolidation_triggers(
-    db: &PyYantrikDB,
+    db: Bound<'_, PyYantrikDB>,
     min_active_memories: i64,
 ) -> PyResult<Vec<PyTrigger>> {
-    let inner = db.get_inner()?;
-    let triggers = yantrikdb_core::check_consolidation_triggers(inner, min_active_memories)
+    // Reaches SQLite: with the GIL released and no borrow of `db` held (#271).
+    let inner = PyYantrikDB::engine_handle(&db)?;
+    let triggers = db
+        .py()
+        .detach(|| yantrikdb_core::check_consolidation_triggers(&inner, min_active_memories))
         .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     Ok(triggers.into_iter().map(PyTrigger::from).collect())
@@ -84,19 +92,24 @@ pub fn check_consolidation_triggers(
 #[pyfunction]
 #[pyo3(signature = (db, importance_threshold=0.5, decay_threshold=0.1, max_triggers=10))]
 pub fn check_all_triggers(
-    db: &PyYantrikDB,
+    db: Bound<'_, PyYantrikDB>,
     importance_threshold: f64,
     decay_threshold: f64,
     max_triggers: usize,
 ) -> PyResult<Vec<PyTrigger>> {
-    let inner = db.get_inner()?;
-    let triggers = yantrikdb_core::check_all_triggers(
-        inner,
-        importance_threshold,
-        decay_threshold,
-        max_triggers,
-    )
-    .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
+    // Reaches SQLite: with the GIL released and no borrow of `db` held (#271).
+    let inner = PyYantrikDB::engine_handle(&db)?;
+    let triggers = db
+        .py()
+        .detach(|| {
+            yantrikdb_core::check_all_triggers(
+                &inner,
+                importance_threshold,
+                decay_threshold,
+                max_triggers,
+            )
+        })
+        .map_err(|e| pyo3::exceptions::PyRuntimeError::new_err(e.to_string()))?;
 
     Ok(triggers.into_iter().map(PyTrigger::from).collect())
 }

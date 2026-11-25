@@ -334,8 +334,8 @@ fn check_redundancy_in_namespace(
 
     for i in 0..rows.len() {
         for j in (i + 1)..rows.len() {
-            let emb_a = crate::serde_helpers::deserialize_f32(&rows[i].2);
-            let emb_b = crate::serde_helpers::deserialize_f32(&rows[j].2);
+            let emb_a = crate::compression::decode_embedding_blob(&rows[i].2);
+            let emb_b = crate::compression::decode_embedding_blob(&rows[j].2);
             let sim = crate::consolidate::cosine_similarity(&emb_a, &emb_b);
 
             if sim > threshold {
@@ -401,7 +401,7 @@ fn check_redundancy_in_namespace(
                     });
                 } else if let Some((cat_name, token_a, token_b)) = {
                     // CRITICAL: bind the conn guard inside this block so it
-                    // is dropped before conflict_exists() below tries to take
+                    // is dropped before create_conflict_if_absent() below takes
                     // the same connection mutex. Without this scoping, the
                     // if-let scrutinee's temporary MutexGuard lives through
                     // the body and self-deadlocks the calling thread (the
@@ -420,11 +420,12 @@ fn check_redundancy_in_namespace(
                         rows[i].0,
                         rows[j].0
                     );
-                    if !crate::conflict::conflict_exists(db, &rows[i].0, &rows[j].0).unwrap_or(true)
                     {
+                        // One statement checks and inserts, so concurrent
+                        // checks (detached since #271) record it once.
                         let conflict_type =
                             crate::distributed::conflict::category_to_conflict_type(&cat_name);
-                        let _ = crate::conflict::create_conflict(
+                        let _ = crate::conflict::create_conflict_if_absent(
                             db,
                             &conflict_type,
                             &rows[i].0,
@@ -473,14 +474,14 @@ fn check_redundancy_in_namespace(
     let cat_threshold = 0.65;
     for i in 0..rows.len() {
         for j in (i + 1)..rows.len() {
-            let emb_a = crate::serde_helpers::deserialize_f32(&rows[i].2);
-            let emb_b = crate::serde_helpers::deserialize_f32(&rows[j].2);
+            let emb_a = crate::compression::decode_embedding_blob(&rows[i].2);
+            let emb_b = crate::compression::decode_embedding_blob(&rows[j].2);
             let sim = crate::consolidate::cosine_similarity(&emb_a, &emb_b);
 
             if sim > cat_threshold && sim <= threshold {
                 // Same self-deadlock fix as the first pass above: bind the
                 // conn guard inside a scrutinee block so it drops before
-                // conflict_exists() reacquires the connection mutex.
+                // create_conflict_if_absent() reacquires the connection mutex.
                 if let Some((cat_name, token_a, token_b)) = {
                     let conn = db.conn();
                     check_substitution_category_pair(&*conn, &rows[i].1, &rows[j].1)
@@ -494,11 +495,12 @@ fn check_redundancy_in_namespace(
                         rows[i].0,
                         rows[j].0
                     );
-                    if !crate::conflict::conflict_exists(db, &rows[i].0, &rows[j].0).unwrap_or(true)
                     {
+                        // One statement checks and inserts, so concurrent
+                        // checks (detached since #271) record it once.
                         let conflict_type =
                             crate::distributed::conflict::category_to_conflict_type(&cat_name);
-                        let _ = crate::conflict::create_conflict(
+                        let _ = crate::conflict::create_conflict_if_absent(
                             db,
                             &conflict_type,
                             &rows[i].0,
@@ -759,29 +761,34 @@ pub fn persist_trigger(db: &YantrikDB, trigger: &Trigger, ts: f64) -> Result<Opt
     let cooldown_key = build_cooldown_key(trigger);
     let cooldown_secs = trigger_type.default_cooldown_secs();
 
-    let active_exists: bool = db.conn().query_row(
-        "SELECT COUNT(*) > 0 FROM trigger_log \
-         WHERE cooldown_key = ?1 \
-         AND status IN ('pending', 'delivered') \
-         AND created_at > ?2",
-        params![cooldown_key, ts - cooldown_secs],
-        |row| row.get(0),
-    )?;
-
-    if active_exists {
-        return Ok(None);
-    }
-
     let trigger_id = crate::id::new_id();
-    let hlc_ts = db.tick_hlc();
-    let hlc_bytes = hlc_ts.to_bytes().to_vec();
     let actor_id = db.actor_id().to_string();
     let expires_at = ts + trigger_type.default_expiry_secs();
     let source_rids_json = serde_json::to_string(&trigger.source_rids)?;
     let context_json = serde_json::to_string(&trigger.context)?;
 
     {
+        // The cooldown check and the insert share ONE connection guard, so
+        // two concurrent persists of one trigger (think() and the trigger
+        // checks run with the GIL released, #271) cannot both pass the
+        // check. Nothing slow happens under the guard.
         let conn = db.conn();
+        let active_exists: bool = conn.query_row(
+            "SELECT COUNT(*) > 0 FROM trigger_log \
+             WHERE cooldown_key = ?1 \
+             AND status IN ('pending', 'delivered') \
+             AND created_at > ?2",
+            params![cooldown_key, ts - cooldown_secs],
+            |row| row.get(0),
+        )?;
+
+        if active_exists {
+            return Ok(None);
+        }
+        // Tick only for a trigger that is actually written: a suppressed
+        // one must not advance the HLC. Under the guard, per the documented
+        // lock order (conn -> hlc, CONCURRENCY.md Rule 1).
+        let hlc_bytes = db.tick_hlc().to_bytes().to_vec();
         conn.execute(
             "INSERT INTO trigger_log \
              (trigger_id, trigger_type, urgency, status, reason, suggested_action, \
@@ -1441,6 +1448,63 @@ mod tests {
         assert!(second.is_none());
     }
 
+    /// The cooldown must hold for concurrent callers too: think() and the
+    /// trigger checks run with the GIL released (#271), and the check and
+    /// the insert took the connection lock separately, so two persists of
+    /// one trigger could both pass the check.
+    #[test]
+    fn concurrent_persists_of_one_trigger_fire_it_once() {
+        for trial in 0..50 {
+            let db = YantrikDB::new(":memory:", 8).unwrap();
+            let trigger = Trigger {
+                trigger_type: "decay_review".to_string(),
+                reason: "test".to_string(),
+                urgency: 0.8,
+                source_rids: vec!["rid-1".to_string()],
+                suggested_action: "test".to_string(),
+                context: HashMap::new(),
+            };
+            let ts = now();
+            let barrier = std::sync::Barrier::new(4);
+            let fired: usize = std::thread::scope(|s| {
+                let handles: Vec<_> = (0..4)
+                    .map(|_| {
+                        s.spawn(|| {
+                            barrier.wait();
+                            persist_trigger(&db, &trigger, ts).unwrap().is_some() as usize
+                        })
+                    })
+                    .collect();
+                handles.into_iter().map(|h| h.join().unwrap()).sum()
+            });
+            let rows: i64 = db
+                .conn()
+                .query_row("SELECT COUNT(*) FROM trigger_log", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!((fired, rows), (1, 1), "trial {trial}");
+        }
+    }
+
+    /// A trigger its cooldown suppresses writes nothing, so it must not
+    /// advance the HLC either.
+    #[test]
+    fn a_suppressed_trigger_leaves_the_hlc_alone() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let trigger = Trigger {
+            trigger_type: "decay_review".to_string(),
+            reason: "test".to_string(),
+            urgency: 0.8,
+            source_rids: vec!["rid-1".to_string()],
+            suggested_action: "test".to_string(),
+            context: HashMap::new(),
+        };
+        let ts = now();
+        assert!(persist_trigger(&db, &trigger, ts).unwrap().is_some());
+        let before = db.hlc.lock().latest();
+        assert!(persist_trigger(&db, &trigger, ts).unwrap().is_none());
+        assert_eq!(db.hlc.lock().latest(), before);
+    }
+
     #[test]
     fn test_expiry_clears_old_triggers() {
         let db = YantrikDB::new(":memory:", 8).unwrap();
@@ -1543,6 +1607,82 @@ mod tests {
     /// inappropriate here because this is a pure sync core test. If the
     /// bug regresses, the entire test binary will hang and CI will catch
     /// it via the 60-second default cargo test timeout.
+    /// Concurrent redundancy checks record each substitution conflict once.
+    /// check_redundancy checked conflict_exists() and then created the
+    /// conflict under separate connection guards, and the trigger checks run
+    /// with the GIL released (#271), so two checks at once both wrote it.
+    #[test]
+    fn concurrent_redundancy_checks_record_each_substitution_conflict_once() {
+        use rusqlite::params;
+
+        const PAIRS: usize = 8;
+        for trial in 0..20 {
+            let db = YantrikDB::new(":memory:", 8).unwrap();
+            let ts = now();
+            let hlc_bytes = db.tick_hlc().to_bytes().to_vec();
+            db.conn()
+                .execute(
+                    "INSERT INTO substitution_categories
+                     (id, name, conflict_mode, status, created_at, updated_at, hlc, origin_actor)
+                     VALUES ('cat-race', 'race_category', 'exclusive', 'active', ?1, ?1, ?2, 'test')",
+                    params![ts, hlc_bytes],
+                )
+                .unwrap();
+            for p in 0..PAIRS {
+                for side in ["a", "b"] {
+                    let tok = format!("qzrace{p}{side}");
+                    let hlc_bytes = db.tick_hlc().to_bytes().to_vec();
+                    db.conn()
+                        .execute(
+                            "INSERT INTO substitution_members
+                             (id, category_id, token_normalized, token_display,
+                              confidence, source, status, created_at, updated_at,
+                              hlc, origin_actor)
+                             VALUES (?1, 'cat-race', ?2, ?2, 0.9, 'test', 'active',
+                                     ?3, ?3, ?4, 'test')",
+                            params![format!("m-{p}-{side}"), tok, ts, hlc_bytes],
+                        )
+                        .unwrap();
+                    db.record(
+                        &format!("project {p} keeps its user profiles in {tok} for auth"),
+                        "semantic",
+                        0.8,
+                        0.0,
+                        604800.0,
+                        &serde_json::json!({}),
+                        &vec_seed(1.0 + p as f32 * 3.0, 8),
+                        &format!("ns{p}"),
+                        0.9,
+                        "general",
+                        "user",
+                        None,
+                    )
+                    .unwrap();
+                }
+            }
+            let barrier = std::sync::Barrier::new(3);
+            std::thread::scope(|s| {
+                for _ in 0..3 {
+                    s.spawn(|| {
+                        barrier.wait();
+                        check_redundancy(&db, 0.85).unwrap();
+                    });
+                }
+            });
+            let (rows, pairs): (i64, i64) = db
+                .conn()
+                .query_row(
+                    "SELECT COUNT(*), COUNT(DISTINCT min(memory_a, memory_b) || '|' || \
+                     max(memory_a, memory_b)) FROM conflicts",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert!(pairs > 0, "trial {trial}: the seed produced no conflicts");
+            assert_eq!(rows, pairs, "trial {trial}: duplicate conflict rows");
+        }
+    }
+
     #[test]
     fn test_check_redundancy_no_self_deadlock_on_substitution_category() {
         use rusqlite::params;

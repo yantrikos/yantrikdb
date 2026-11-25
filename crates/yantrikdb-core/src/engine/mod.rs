@@ -371,12 +371,43 @@ pub struct YantrikDB {
     /// request, so mounting or unmounting never blocks a recall in
     /// flight.
     pub(crate) packs: parking_lot::RwLock<Vec<std::sync::Arc<crate::engine::pack::MountedPack>>>,
+    /// Serialises `distributed::replication::apply_ops` (#271 review). Each
+    /// op is checked against the oplog, materialized, then inserted, under
+    /// separate connection locks (materialization takes the lock itself), so
+    /// two callers applying the same batch both applied, and both counted,
+    /// the ops they raced on. The GIL used to serialise the Python callers.
+    ///
+    /// Lock order (Rule 1): taken before `conn`; held across the whole
+    /// batch, which takes `conn` and later locks itself.
+    pub(crate) apply_ops_lock: Mutex<()>,
+    /// Serialises pack installs (#271 review): an install unmounts, copies
+    /// (or converts) and remounts one file, and two installs of the same
+    /// pack interleaving those steps double-mounted it or read a
+    /// half-copied file.
+    ///
+    /// Lock order (Rule 1): taken before `conn` and the `packs` registry;
+    /// held across the whole install, uninstall or remount.
+    pub(crate) pack_install_lock: Mutex<()>,
+    /// Serialises chunk backfills (`rechunk_long_records*`): two runs at
+    /// once both embedded and wrote every window. Ending consistent, at
+    /// twice the cost; the second now finds nothing left to do.
+    ///
+    /// Lock order (Rule 1): taken before `conn`; held across the whole
+    /// backfill. The Python binding's embed callback re-takes the GIL
+    /// while it is held, so it must never be taken with the GIL held: the
+    /// binding releases the GIL before calling into the backfill.
+    pub(crate) rechunk_lock: Mutex<()>,
 
     /// Whether this database's embedder identity is already on disk.
     /// Keeps `stamp_embedder_identity_once` to a relaxed atomic load on
     /// the `record_text` hot path after the first write.
     pub(crate) embedder_identity_stamped: std::sync::atomic::AtomicBool,
 }
+
+/// An embedder the engine does not hold, called on a write's text: the
+/// Python binding's caller-attached one (see
+/// `record_text_embedded_by_sync_only`).
+pub(crate) type TextEmbedder<'a> = dyn Fn(&str) -> Result<Vec<f32>> + Sync + 'a;
 
 impl YantrikDB {
     /// Acquire a read connection from the pool. Round-robin across pool
@@ -586,14 +617,19 @@ impl YantrikDB {
         )
         .ok()?;
 
+        // Prefer a hot row, and decode a compressed (cold-tier) blob before
+        // measuring: its byte length says nothing about the dimension, and
+        // a store whose first row was archived failed to reopen with
+        // "embedding dimension mismatch".
         let measured = conn
             .query_row(
-                "SELECT length(embedding) FROM memories WHERE embedding IS NOT NULL LIMIT 1",
+                "SELECT embedding FROM memories WHERE embedding IS NOT NULL \
+                 ORDER BY (storage_tier = 'cold') LIMIT 1",
                 [],
-                |r| r.get::<_, i64>(0),
+                |r| r.get::<_, Vec<u8>>(0),
             )
             .ok()
-            .map(|bytes| bytes as usize / std::mem::size_of::<f32>())
+            .map(|blob| crate::compression::decode_embedding_blob(&blob).len())
             .filter(|d| *d > 0);
         let claimed = match Self::read_embedder_identity(&conn) {
             Ok(Some((_, _, dim))) if dim > 0 => Some(dim),
@@ -648,9 +684,22 @@ impl YantrikDB {
     /// error — `set_embedder_named` is atomic.
     #[cfg(feature = "embedder-download")]
     pub fn set_embedder_named(&mut self, name: &str) -> Result<()> {
-        use crate::embedder::DownloadedEmbedder;
-        let downloaded = DownloadedEmbedder::fetch(name)?;
+        let downloaded = crate::embedder::DownloadedEmbedder::fetch(name)?;
+        self.set_downloaded_embedder(downloaded)
+    }
+
+    /// The second half of [`Self::set_embedder_named`]: install a model
+    /// already fetched with `DownloadedEmbedder::fetch(name)`, under the same
+    /// dimension contract. A host that cannot block while it holds exclusive
+    /// access (the Python binding, #271) fetches first (network, SHA-256
+    /// verification, load) and takes `&mut self` only for this swap.
+    #[cfg(feature = "embedder-download")]
+    pub fn set_downloaded_embedder(
+        &mut self,
+        downloaded: crate::embedder::DownloadedEmbedder,
+    ) -> Result<()> {
         if downloaded.dim() != self.embedding_dim() {
+            let name = crate::Embedder::name(&downloaded).unwrap_or_default();
             return Err(crate::error::YantrikDbError::InvalidInput(format!(
                 "embedder {name:?} dim={} but engine was opened with dim={}; \
                  either reopen with `YantrikDB::new(path, {})` or pick a \
@@ -804,7 +853,18 @@ impl YantrikDB {
             })
         }
 
-        let conn = at("open", Connection::open(db_path))?;
+        let mut conn = at("open", Connection::open(db_path))?;
+
+        // Every transaction on the write connection starts with the write
+        // lock (BEGIN IMMEDIATE), not DEFERRED (#298). A deferred transaction
+        // that reads before it writes has to upgrade a read lock to a write
+        // lock, and SQLite never runs the busy handler for that upgrade:
+        // sqlite3BtreeBeginTrans retries only while the connection holds no
+        // transaction at all. So while another process held the write lock,
+        // record() failed at once with "database is locked" instead of waiting
+        // busy_timeout. Taking the lock up front makes the wait apply. The
+        // savepoint guard does the same for an outermost savepoint.
+        conn.set_transaction_behavior(rusqlite::TransactionBehavior::Immediate);
 
         // Enforce SQLite pragmas for durability + performance.
         // See CONCURRENCY.md and ops/runbooks/disk-full.md.
@@ -1772,6 +1832,9 @@ impl YantrikDB {
             })),
             index_write_lock: parking_lot::Mutex::new(()),
             packs: parking_lot::RwLock::new(Vec::new()),
+            apply_ops_lock: Mutex::new(()),
+            pack_install_lock: Mutex::new(()),
+            rechunk_lock: Mutex::new(()),
             embedder_identity_stamped: std::sync::atomic::AtomicBool::new(
                 persisted_embedder_present,
             ),
@@ -2967,6 +3030,7 @@ impl YantrikDB {
             created_at,
             true,
             None,
+            None,
         )
     }
 
@@ -3006,6 +3070,54 @@ impl YantrikDB {
             created_at,
             false,
             synthesis,
+            None,
+        )
+    }
+
+    /// [`Self::record_text_with_idempotency_sync_only`] with the text
+    /// embedded by `text_embedder` instead of the engine's own embedder:
+    /// for an embedder the engine cannot hold (the Python binding's
+    /// caller-attached one). Everything else is the engine path's: the
+    /// RecordText digest (the vector is not part of the payload, so a retry
+    /// is judged on what the caller supplied), the pre-admission probe (an
+    /// idempotent retry returns before `text_embedder` is ever called), the
+    /// chunk plan, and the reembed revalidation.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn record_text_embedded_by_sync_only(
+        &self,
+        text: &str,
+        memory_type: &str,
+        importance: f64,
+        valence: f64,
+        half_life: f64,
+        metadata: &serde_json::Value,
+        namespace: &str,
+        certainty: f64,
+        domain: &str,
+        source: &str,
+        emotional_state: Option<&str>,
+        idempotency_key: Option<&str>,
+        created_at: Option<f64>,
+        synthesis: Option<&SynthesisAdmission>,
+        text_embedder: &TextEmbedder<'_>,
+    ) -> Result<String> {
+        self.record_text_with_idempotency_routed(
+            text,
+            memory_type,
+            importance,
+            valence,
+            half_life,
+            metadata,
+            namespace,
+            certainty,
+            domain,
+            source,
+            emotional_state,
+            idempotency_key,
+            created_at,
+            false,
+            synthesis,
+            Some(text_embedder),
         )
     }
 
@@ -3027,6 +3139,9 @@ impl YantrikDB {
         created_at: Option<f64>,
         allow_queued_route: bool,
         synthesis: Option<&SynthesisAdmission>,
+        // An embedder the engine does not hold, used in place of the
+        // runtime one (see `record_text_embedded_by_sync_only`).
+        text_embedder: Option<&TextEmbedder<'_>>,
     ) -> Result<String> {
         self.foreign_commit_precheck()?;
         // v0.9.3 contract gate: scalars validated BEFORE calibration mutates
@@ -3056,7 +3171,10 @@ impl YantrikDB {
         // after acquiring and revalidating the sync guard: a queue-mode
         // deferral must not mutate durable metadata while claiming that no
         // durable state changed.
-        if allow_queued_route {
+        // A vector the caller's embedder made is not the engine embedder's:
+        // stamping the engine's identity would label the store with a model
+        // that did not build its vectors (#304 review 3).
+        if allow_queued_route && text_embedder.is_none() {
             self.stamp_embedder_identity_once();
         }
         // Task 29 (Ingest Integrity): strip any leaked tool-call
@@ -3146,11 +3264,27 @@ impl YantrikDB {
             let state_for_embed = self.search_state.load_full();
             let gen_pre = state_for_embed.generation;
             let digest_pre = state_for_embed.runtime_embedder_digest.clone();
-            let embedder = state_for_embed
-                .embedder
-                .as_ref()
-                .ok_or(YantrikDbError::NoEmbedder)?
-                .clone();
+            // The caller's embedder when given, else the runtime one; the
+            // caller's needs no engine embedder at all.
+            let engine_embedder = match text_embedder {
+                Some(_) => None,
+                None => Some(
+                    state_for_embed
+                        .embedder
+                        .as_ref()
+                        .ok_or(YantrikDbError::NoEmbedder)?
+                        .clone(),
+                ),
+            };
+            let embed_one = |t: &str| -> Result<Vec<f32>> {
+                match (text_embedder, engine_embedder.as_ref()) {
+                    (Some(f), _) => f(t),
+                    (None, Some(e)) => e
+                        .embed(t)
+                        .map_err(|err| YantrikDbError::Inference(err.to_string())),
+                    (None, None) => Err(YantrikDbError::NoEmbedder),
+                }
+            };
             // v0.9.3: capture the snapshot's dim for output validation below
             // (authoritative for THIS generation; the step-5 revalidation
             // retries if a swap lands mid-embed).
@@ -3162,9 +3296,7 @@ impl YantrikDB {
             drop(state_for_embed);
 
             // Step 2: embed OUTSIDE any guard. Slow step.
-            let embedding = embedder
-                .embed(text)
-                .map_err(|e| YantrikDbError::Inference(e.to_string()))?;
+            let embedding = embed_one(text)?;
             // v0.9.3 contract gate: validate the embedder's output before
             // committing (this loop bypasses `self.embed()`, so it needs
             // its own gate — an external embedder can emit NaN, issue #60).
@@ -3180,9 +3312,7 @@ impl YantrikDB {
                 Some(ranges) => {
                     let mut cv = Vec::with_capacity(ranges.len());
                     for (i, (a, b)) in ranges.iter().enumerate() {
-                        let v = embedder
-                            .embed(&text[*a..*b])
-                            .map_err(|e| YantrikDbError::Inference(e.to_string()))?;
+                        let v = embed_one(&text[*a..*b])?;
                         crate::validate::validate_embedding("record_text#chunk", &v, dim_pre)?;
                         cv.push((i + 1, v));
                     }
@@ -3259,7 +3389,7 @@ impl YantrikDB {
                 continue;
             }
 
-            if !allow_queued_route {
+            if !allow_queued_route && text_embedder.is_none() {
                 self.stamp_embedder_identity_once();
             }
 

@@ -1548,7 +1548,7 @@ impl YantrikDB {
 
             // #91: RAII, not manual unwinding. EVERY fallible statement below
             // — serde, the encrypt wrappers, each INSERT, the stats advances —
-            // may `?`-return and the guard's Drop runs `ROLLBACK TO; RELEASE`.
+            // may `?`-return and the guard's Drop rolls the batch back.
             // The old error arm rolled back WITHOUT releasing (and the paths
             // before the INSERT returned without even the rollback), leaving
             // the savepoint open on the engine's single shared connection so
@@ -2263,6 +2263,30 @@ impl YantrikDB {
         )?;
         crate::engine::thread::marker_restore(&conn, &marker_prior)?;
         let was_new_row = inserted_row == 1;
+        if !was_new_row {
+            // An existing row with no vector (a replicated row: the follower
+            // insert omits it, see refresh_embeddings) gets the one being
+            // indexed, so a row in the index always has its vector in SQL;
+            // archive() relies on that to decide whether to tombstone. A
+            // cold row gets it compressed, the cold-tier format. Not gated
+            // on `inserted`: a replay carries the same vector, so it may
+            // heal a row an earlier delivery left bare.
+            let stored_cold =
+                self.encrypt_embedding(&crate::compression::compress_embedding(embedding))?;
+            conn.execute(
+                "UPDATE memories SET embedding = CASE storage_tier \
+                     WHEN 'cold' THEN ?2 ELSE ?1 END, \
+                 embedding_model = ?3, embedding_generation = ?4 \
+                 WHERE rid = ?5 AND embedding IS NULL",
+                params![
+                    stored_emb,
+                    stored_cold,
+                    embedding_model,
+                    embedding_generation,
+                    rid
+                ],
+            )?;
+        }
         debug_assert!(
             inserted || !was_new_row,
             "row {rid} is NEW but its (rid, seq {seq}) vector entry pre-exists — \

@@ -38,6 +38,9 @@ pub(crate) const META_WINDOW_DIGEST: &str = "embedder_window_digest";
 /// protocol: `(chunk_idx, embedding)`, idx 1-based.
 pub(crate) type ChunkVectors = Vec<(usize, Vec<f32>)>;
 
+/// A record's window byte ranges, as `chunk::chunk_ranges` returns them.
+type ChunkRanges = Vec<(usize, usize)>;
+
 impl YantrikDB {
     /// Persist the probed window so a restart does not silently
     /// deactivate chunking. Best-effort: the window is an optimization
@@ -219,10 +222,15 @@ impl YantrikDB {
         let generation = state.generation;
         let dim = state.dim();
         drop(state);
-        self.rechunk_with(window, dim, generation, |text| {
-            embedder
-                .embed(text)
-                .map_err(|e| crate::error::YantrikDbError::Inference(e.to_string()))
+        self.rechunk_with(window, dim, generation, |texts: &[&str]| {
+            texts
+                .iter()
+                .map(|text| {
+                    embedder
+                        .embed(text)
+                        .map_err(|e| crate::error::YantrikDbError::Inference(e.to_string()))
+                })
+                .collect()
         })
     }
 
@@ -234,6 +242,19 @@ impl YantrikDB {
     pub fn rechunk_long_records_with<F>(&self, embed: F) -> Result<(usize, usize)>
     where
         F: Fn(&str) -> Result<Vec<f32>>,
+    {
+        self.rechunk_long_records_with_batch(|texts: &[&str]| {
+            texts.iter().map(|text| embed(text)).collect()
+        })
+    }
+
+    /// Same backfill, embedding each record's windows in ONE call: `embed`
+    /// gets them all and returns one vector per window, in order. For an
+    /// embedder that is costly to reach per call: the Python binding takes
+    /// the GIL back once per record instead of once per window (#271).
+    pub fn rechunk_long_records_with_batch<F>(&self, embed: F) -> Result<(usize, usize)>
+    where
+        F: Fn(&[&str]) -> Result<Vec<Vec<f32>>>,
     {
         let Some(window) = self.known_window() else {
             return Ok((0, 0));
@@ -261,8 +282,11 @@ impl YantrikDB {
         embed: F,
     ) -> Result<(usize, usize)>
     where
-        F: Fn(&str) -> Result<Vec<f32>>,
+        F: Fn(&[&str]) -> Result<Vec<Vec<f32>>>,
     {
+        // One backfill at a time (see `rechunk_lock`): a second caller waits,
+        // then finds the records the first one chunked already done.
+        let _serial = self.rechunk_lock.lock();
         // Candidates: active + hot + vectored, no chunk rows yet. Text
         // length cannot be filtered in SQL (it may be encrypted), so
         // every candidate is read and measured client-side.
@@ -282,57 +306,90 @@ impl YantrikDB {
             rows.collect::<std::result::Result<_, _>>()?
         };
 
+        // Records are embedded in groups of up to BATCH_WINDOWS windows, one
+        // `embed` call per group: an embedder that is costly to reach per
+        // call (the Python binding re-takes the GIL for each one, #271) pays
+        // that cost per group, not per window or per record.
+        const BATCH_WINDOWS: usize = 256;
         let mut records = 0usize;
         let mut vectors = 0usize;
-        for (rid, stored_text) in candidates {
+        // (rid, plaintext, window byte ranges) of the records in this group.
+        let mut group: Vec<(String, String, ChunkRanges)> = Vec::new();
+        let mut group_windows = 0usize;
+        let mut candidates = candidates.into_iter().peekable();
+        while let Some((rid, stored_text)) = candidates.next() {
             let text = self.decrypt_text(&stored_text)?;
             let ranges = chunk::chunk_ranges(&text, window);
-            if ranges.is_empty() {
+            if !ranges.is_empty() {
+                group_windows += ranges.len();
+                group.push((rid, text, ranges));
+            }
+            if group.is_empty() || (group_windows < BATCH_WINDOWS && candidates.peek().is_some()) {
                 continue;
             }
             // Embed OUTSIDE the conn lock — the slow step. If a reembed
-            // swap lands mid-run the generation check below stops the
-            // backfill: the new embedder has a different (unprobed)
-            // window and these vectors belong to the old space.
+            // swap lands mid-run the generation check stops the backfill:
+            // the new embedder has a different (unprobed) window and these
+            // vectors belong to the old space.
             if self.search_state.load().generation != generation {
                 break;
             }
-            let mut chunk_vecs: ChunkVectors = Vec::with_capacity(ranges.len());
-            for (i, (a, b)) in ranges.iter().enumerate() {
-                let v = embed(&text[*a..*b])
-                    .map_err(|e| crate::error::YantrikDbError::Inference(e.to_string()))?;
-                crate::validate::validate_embedding("rechunk", &v, dim)?;
-                chunk_vecs.push((i + 1, v));
+            let windows: Vec<&str> = group
+                .iter()
+                .flat_map(|(_, text, ranges)| ranges.iter().map(move |(a, b)| &text[*a..*b]))
+                .collect();
+            let embedded = embed(&windows)
+                .map_err(|e| crate::error::YantrikDbError::Inference(e.to_string()))?;
+            if embedded.len() != windows.len() {
+                return Err(crate::error::YantrikDbError::Inference(format!(
+                    "rechunk: the embedder returned {} vectors for {} windows",
+                    embedded.len(),
+                    windows.len()
+                )));
             }
-            // Commit this record's rows, guarded on the text we embedded
-            // still being the text on disk (a concurrent correction wins).
-            let conn = self.conn.lock();
-            let tx = conn.unchecked_transaction()?;
-            let current: Option<String> = tx
-                .query_row(
-                    "SELECT text FROM memories WHERE rid = ?1 \
-                     AND consolidation_status = 'active' AND storage_tier = 'hot'",
-                    params![rid],
-                    |row| row.get(0),
-                )
-                .ok();
-            let unchanged = match current {
-                Some(ref stored) => self.decrypt_text(stored)? == text,
-                None => false,
-            };
-            if unchanged {
-                for (idx, v) in &chunk_vecs {
-                    let blob = self.encrypt_embedding(&crate::serde_helpers::serialize_f32(v))?;
-                    tx.execute(
-                        "INSERT OR REPLACE INTO memory_chunks (rid, chunk_idx, embedding) \
-                         VALUES (?1, ?2, ?3)",
-                        params![rid, *idx as i64, blob],
-                    )?;
-                    vectors += 1;
+            drop(windows);
+            let mut embedded = embedded.into_iter();
+            for (rid, text, ranges) in std::mem::take(&mut group) {
+                let mut chunk_vecs: ChunkVectors = Vec::with_capacity(ranges.len());
+                for i in 0..ranges.len() {
+                    let v = embedded
+                        .next()
+                        .expect("one vector per window, checked above");
+                    crate::validate::validate_embedding("rechunk", &v, dim)?;
+                    chunk_vecs.push((i + 1, v));
                 }
-                tx.commit()?;
-                records += 1;
+                // Commit this record's rows, guarded on the text we embedded
+                // still being the text on disk (a concurrent correction wins).
+                let conn = self.conn.lock();
+                let tx = conn.unchecked_transaction()?;
+                let current: Option<String> = tx
+                    .query_row(
+                        "SELECT text FROM memories WHERE rid = ?1 \
+                         AND consolidation_status = 'active' AND storage_tier = 'hot'",
+                        params![rid],
+                        |row| row.get(0),
+                    )
+                    .ok();
+                let unchanged = match current {
+                    Some(ref stored) => self.decrypt_text(stored)? == text,
+                    None => false,
+                };
+                if unchanged {
+                    for (idx, v) in &chunk_vecs {
+                        let blob =
+                            self.encrypt_embedding(&crate::serde_helpers::serialize_f32(v))?;
+                        tx.execute(
+                            "INSERT OR REPLACE INTO memory_chunks (rid, chunk_idx, embedding) \
+                             VALUES (?1, ?2, ?3)",
+                            params![rid, *idx as i64, blob],
+                        )?;
+                        vectors += 1;
+                    }
+                    tx.commit()?;
+                    records += 1;
+                }
             }
+            group_windows = 0;
         }
 
         if records > 0 {
