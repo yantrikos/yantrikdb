@@ -596,6 +596,7 @@ mod tests {
                     timestamp: 1000.0 + i as f64,
                     observation_id: None,
                     history: Vec::new(),
+                    paths: Vec::new(),
                 });
             }
         }

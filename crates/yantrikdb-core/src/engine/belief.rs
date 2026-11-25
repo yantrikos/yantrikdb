@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 
 use crate::belief::{
-    self, apply_staleness_decay, assert_evidence, propagate_evidence, BeliefRevisionConfig,
-    Evidence, EvidenceResult, RevisionSummary,
+    self, apply_staleness_decay, assert_evidence, propagate_evidence, propagate_evidence_from,
+    BeliefRevisionConfig, Evidence, EvidenceResult, RevisionSummary,
 };
 use crate::belief_query::{self, BeliefExplanation, BeliefInventory, BeliefPattern};
 use crate::contradiction::{self, ContradictionConfig, ContradictionScanResult};
@@ -70,8 +70,11 @@ impl YantrikDB {
                     }
                 }
 
-                // Propagate
-                let effects = propagate_evidence(
+                // Propagate. The origin travels with the evidence so the same
+                // observation cannot vote twice downstream — neither across
+                // repeated runs nor across several graph paths.
+                let effects = propagate_evidence_from(
+                    evidence.observation_id.as_deref(),
                     evidence.target_belief,
                     result.effective_weight,
                     &epistemic_edges,

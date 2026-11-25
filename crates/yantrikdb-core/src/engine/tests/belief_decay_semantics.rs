@@ -33,7 +33,7 @@ fn lo(n: &CognitiveNode) -> f64 {
 fn repeated_revision_at_same_time_is_idempotent() {
     let cfg = BeliefRevisionConfig::default();
     let now = 1_800_000_000.0_f64;
-    let trail = vec![EvidenceEntry { source: "alt".into(), weight: 2.0, timestamp: now - 60.0 * 86400.0, observation_id: None, history: Vec::new() }];
+    let trail = vec![EvidenceEntry { source: "alt".into(), weight: 2.0, timestamp: now - 60.0 * 86400.0, observation_id: None, history: Vec::new(), paths: Vec::new(),}];
     let mut a = belief(21, trail.clone(), 2.0);
     let mut b = belief(22, trail, 2.0);
 
@@ -58,7 +58,7 @@ fn repeated_revision_at_same_time_is_idempotent() {
 fn decay_follows_elapsed_time_not_call_count() {
     let cfg = BeliefRevisionConfig::default();
     let t0 = 1_800_000_000.0_f64;
-    let mk = |seq| belief(seq, vec![EvidenceEntry { source: "alt".into(), weight: 2.0, timestamp: t0 - 60.0 * 86400.0, observation_id: None, history: Vec::new() }], 2.0);
+    let mk = |seq| belief(seq, vec![EvidenceEntry { source: "alt".into(), weight: 2.0, timestamp: t0 - 60.0 * 86400.0, observation_id: None, history: Vec::new(), paths: Vec::new(),}], 2.0);
 
     // A: ein Aufruf, 30 Tage nach t0
     let mut a = mk(23);

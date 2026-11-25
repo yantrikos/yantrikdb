@@ -105,7 +105,7 @@ fn revise_beliefs_decays_stale_evidence() {
     let mut b = belief(
         17,
         "Nur alte Belege.",
-        vec![EvidenceEntry { source: "alt".into(), weight: 2.0, timestamp: old, observation_id: None, history: Vec::new() }],
+        vec![EvidenceEntry { source: "alt".into(), weight: 2.0, timestamp: old, observation_id: None, history: Vec::new(), paths: Vec::new(),}],
     );
     if let NodePayload::Belief(p) = &mut b.payload {
         p.log_odds = 2.0;

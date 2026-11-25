@@ -285,6 +285,25 @@ pub fn propagate_evidence(
     config: &BeliefRevisionConfig,
     hop: u32,
 ) -> Vec<PropagationEffect> {
+    propagate_evidence_from(None, source_id, effective_weight, edges, downstream_nodes, config, hop)
+}
+
+/// [`propagate_evidence`] with the originating observation named.
+///
+/// `origin` is the `observation_id` of the evidence that started the
+/// propagation. With it the downstream belief records the contribution under
+/// that origin, so the same observation cannot vote twice — neither across
+/// repeated runs nor across several graph paths (diamond). Without it the old
+/// additive behaviour is kept.
+pub fn propagate_evidence_from(
+    origin: Option<&str>,
+    source_id: NodeId,
+    effective_weight: f64,
+    edges: &[CognitiveEdge],
+    downstream_nodes: &mut HashMap<NodeId, CognitiveNode>,
+    config: &BeliefRevisionConfig,
+    hop: u32,
+) -> Vec<PropagationEffect> {
     if hop >= config.max_propagation_hops {
         return vec![];
     }
@@ -310,33 +329,62 @@ pub fn propagate_evidence(
             * edge.confidence
             * config.propagation_decay;
 
-        if propagated_weight.abs() < config.min_propagation_weight {
+        let Some(downstream) = downstream_nodes.get_mut(&edge.dst) else {
             continue;
-        }
+        };
+        let NodePayload::Belief(belief) = &mut downstream.payload else {
+            continue;
+        };
 
-        // Apply to downstream node
-        if let Some(downstream) = downstream_nodes.get_mut(&edge.dst) {
-            if let NodePayload::Belief(belief) = &mut downstream.payload {
-                let old_lo = belief.log_odds;
+        // With an origin, the contribution is tracked PER PATH: an existing
+        // path may be weakened or withdrawn, so the minimum-weight guard only
+        // gates NEW propagation — never the correction of one already recorded.
+        // Without an origin the old additive behaviour is kept, min-weight
+        // guard included.
+        match origin {
+            None => {
+                if propagated_weight.abs() < config.min_propagation_weight {
+                    continue;
+                }
                 belief.log_odds += propagated_weight;
-                belief.log_odds = belief
-                    .log_odds
-                    .clamp(-config.max_abs_log_odds, config.max_abs_log_odds);
-
-                downstream.attrs.confidence = crate::state::sigmoid(belief.log_odds);
-
-                effects.push(PropagationEffect {
-                    belief_id: edge.dst,
-                    edge_kind: edge.kind,
-                    propagated_weight,
-                    new_log_odds: belief.log_odds,
+            }
+            Some(o) => {
+                // A path that carries nothing either way is a withdrawal. It
+                // must reach the target so it can remove what it propagated
+                // earlier; the minimum-weight guard would swallow it.
+                let key = format!("prop|{o}");
+                let known_path = belief.evidence_trail.iter().any(|e| {
+                    e.observation_id.as_deref() == Some(key.as_str())
+                        && e.paths.iter().any(|(id, _)| *id == source_id)
                 });
-
-                // Don't record in evidence_trail for propagated evidence
-                // (it's derived, not primary). But do log the change.
-                let _ = old_lo; // suppress unused warning — change is tracked in effects
+                if !known_path
+                    && ((propagated_weight == 0.0 && effective_weight == 0.0)
+                        || (propagated_weight != 0.0
+                            && propagated_weight.abs() < config.min_propagation_weight))
+                {
+                    continue;
+                }
+                belief.update_propagated(
+                    propagated_weight,
+                    &format!("{:?}", source_id),
+                    edge.last_confirmed_ms as f64 / 1000.0,
+                    o,
+                    source_id,
+                );
             }
         }
+        belief.log_odds = belief
+            .log_odds
+            .clamp(-config.max_abs_log_odds, config.max_abs_log_odds);
+
+        downstream.attrs.confidence = crate::state::sigmoid(belief.log_odds);
+
+        effects.push(PropagationEffect {
+            belief_id: edge.dst,
+            edge_kind: edge.kind,
+            propagated_weight,
+            new_log_odds: belief.log_odds,
+        });
     }
 
     effects
@@ -606,6 +654,7 @@ mod tests {
                 timestamp: 1000.0 - 3.0 * 86400.0,
                 observation_id: None,
                 history: Vec::new(),
+                paths: Vec::new(),
             });
         }
 
@@ -628,6 +677,7 @@ mod tests {
                 timestamp: 1000.0 - 30.0 * 86400.0,
                 observation_id: None,
                 history: Vec::new(),
+                paths: Vec::new(),
             });
         }
 
@@ -659,6 +709,7 @@ mod tests {
                         timestamp: 1000.0 - 60.0 * 86400.0, // 60 days ago
                         observation_id: None,
                         history: Vec::new(),
+                        paths: Vec::new(),
                     });
                 }
                 n

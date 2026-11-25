@@ -482,6 +482,7 @@ mod tests {
                 timestamp: 500.0,
                 observation_id: None,
                 history: Vec::new(),
+                paths: Vec::new(),
             });
             b.evidence_trail.push(EvidenceEntry {
                 source: "afternoon crash".to_string(),
@@ -489,6 +490,7 @@ mod tests {
                 timestamp: 700.0,
                 observation_id: None,
                 history: Vec::new(),
+                paths: Vec::new(),
             });
             b.evidence_trail.push(EvidenceEntry {
                 source: "productivity data".to_string(),
@@ -496,6 +498,7 @@ mod tests {
                 timestamp: 900.0,
                 observation_id: None,
                 history: Vec::new(),
+                paths: Vec::new(),
             });
         }
 
@@ -537,6 +540,7 @@ mod tests {
                 timestamp: 100.0,
                 observation_id: None,
                 history: Vec::new(),
+                paths: Vec::new(),
             },
             EvidenceEntry {
                 source: "old2".into(),
@@ -544,6 +548,7 @@ mod tests {
                 timestamp: 200.0,
                 observation_id: None,
                 history: Vec::new(),
+                paths: Vec::new(),
             },
             EvidenceEntry {
                 source: "new".into(),
@@ -551,6 +556,7 @@ mod tests {
                 timestamp: 800.0,
                 observation_id: None,
                 history: Vec::new(),
+                paths: Vec::new(),
             },
             EvidenceEntry {
                 source: "new2".into(),
@@ -558,6 +564,7 @@ mod tests {
                 timestamp: 900.0,
                 observation_id: None,
                 history: Vec::new(),
+                paths: Vec::new(),
             },
         ];
 

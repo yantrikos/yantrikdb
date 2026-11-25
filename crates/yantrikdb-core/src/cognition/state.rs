@@ -647,7 +647,95 @@ impl BeliefPayload {
             timestamp,
             observation_id: observation_id.map(|s| s.to_string()),
             history: Vec::new(),
+            paths: Vec::new(),
         });
+    }
+
+    /// Apply a PROPAGATED contribution that is derived from one originating
+    /// observation, arriving over ONE graph path (`via` = the belief the path
+    /// came from).
+    ///
+    /// Four properties, each the answer to a measured defect:
+    /// * **idempotent** — the same origin over the same path does not add a
+    ///   second vote, however often the run repeats;
+    /// * **one voice per observation** — several paths carrying the same
+    ///   observation contribute ONE aggregate: the strongest live path. A
+    ///   second, weaker path adds nothing, and the result does not depend on
+    ///   the order in which paths are walked;
+    /// * **per-path withdrawal** — withdrawing the strongest path demotes the
+    ///   aggregate to the next live path instead of erasing the effect; a
+    ///   path withdrawn with weight 0.0 leaves the others standing;
+    /// * **weakening is a re-assessment** — the same path arriving with a
+    ///   smaller magnitude lowers the aggregate (the origin evidence was
+    ///   re-evaluated, not retracted).
+    ///
+    /// A direct assertion of the same observation already speaks for this
+    /// belief (it is about the belief itself, propagation is derived from it),
+    /// so propagation of an origin that is present as direct evidence adds
+    /// nothing here.
+    ///
+    /// The entry keeps the origin in `observation_id` (`prop|<origin>|…`), so
+    /// the propagated effect stays distinguishable from direct evidence.
+    pub fn update_propagated(
+        &mut self,
+        weight: f64,
+        source: &str,
+        timestamp: f64,
+        origin: &str,
+        via: NodeId,
+    ) {
+        let entry_key = format!("prop|{origin}");
+        // The direct assertion of this observation is primary; propagation is
+        // derived from it and must not vote a second time.
+        let already_direct = self
+            .evidence_trail
+            .iter()
+            .any(|e| e.observation_id.as_deref() == Some(origin));
+        let weight = if already_direct { 0.0 } else { weight };
+
+        let Some(idx) = self
+            .evidence_trail
+            .iter()
+            .position(|e| e.observation_id.as_deref() == Some(entry_key.as_str()))
+        else {
+            // No entry yet: a retraction has nothing to withdraw.
+            if weight == 0.0 {
+                return;
+            }
+            self.log_odds += weight;
+            self.evidence_trail.push(EvidenceEntry {
+                source: source.to_string(),
+                weight,
+                timestamp,
+                observation_id: Some(entry_key),
+                history: Vec::new(),
+                paths: vec![(via, weight)],
+            });
+            return;
+        };
+
+        let entry = &mut self.evidence_trail[idx];
+        // Upsert this path. A path withdrawn with weight 0.0 disappears, so it
+        // can no longer hold the aggregate up.
+        if let Some(p) = entry.paths.iter_mut().find(|(id, _)| *id == via) {
+            if weight == 0.0 {
+                entry.paths.retain(|(id, _)| *id != via);
+            } else {
+                p.1 = weight;
+            }
+        } else if weight != 0.0 {
+            entry.paths.push((via, weight));
+        }
+
+        let aggregate = strongest_path(&entry.paths);
+        if aggregate == entry.weight {
+            entry.source = source.to_string();
+            return;
+        }
+        entry.history.push((entry.weight, entry.timestamp));
+        self.log_odds += aggregate - entry.weight;
+        entry.weight = aggregate;
+        entry.source = source.to_string();
     }
 
     /// How much evidence supports this belief (sum of positive weights).
@@ -667,6 +755,23 @@ impl BeliefPayload {
             .map(|e| e.weight.abs())
             .sum()
     }
+}
+
+/// The aggregate a set of paths contributes: the one with the largest
+/// magnitude. Ties are broken by the source belief's id, so the result never
+/// depends on the order the graph was walked in.
+fn strongest_path(paths: &[(NodeId, f64)]) -> f64 {
+    let mut best: Option<(NodeId, f64)> = None;
+    for &(via, w) in paths {
+        best = match best {
+            None => Some((via, w)),
+            Some((bvia, bw)) => {
+                let strengthens = w.abs() > bw.abs() || (w.abs() == bw.abs() && via.to_raw() < bvia.to_raw());
+                if strengthens { Some((via, w)) } else { Some((bvia, bw)) }
+            }
+        };
+    }
+    best.map(|(_, w)| w).unwrap_or(0.0)
 }
 
 /// A single piece of evidence for or against a belief.
@@ -691,6 +796,13 @@ pub struct EvidenceEntry {
     /// here, so the current state and its development stay distinguishable.
     #[serde(default)]
     pub history: Vec<(f64, f64)>,
+    /// For a PROPAGATED entry: the individual graph paths that carried this
+    /// observation here, as `(source belief, weight)`. `weight` above is the
+    /// aggregate the belief actually uses — the strongest live path — so
+    /// withdrawing one path promotes the next one instead of erasing the
+    /// whole effect. Empty for directly asserted evidence.
+    #[serde(default)]
+    pub paths: Vec<(NodeId, f64)>,
 }
 
 /// Goal: a desired future state.
@@ -2075,6 +2187,7 @@ mod tests {
                 timestamp: 1000.0,
                 observation_id: None,
                 history: Vec::new(),
+                paths: Vec::new(),
             }],
             user_confirmed: true,
         });
