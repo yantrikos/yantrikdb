@@ -621,40 +621,42 @@ _needs_potion = pytest.mark.skipif(
 )
 
 
-class _SlowEncodeEmb(Emb):
-    # Once armed, its next encode() takes `hold` seconds with the GIL given
-    # up. Since #295 set_embedder() holds no borrow across its own probe,
-    # and since #297 record() runs encode() with nothing held either; the
-    # borrow-blocking user left is recall's pre-snapshot path in the
-    # witness tests.
-    def __init__(self, hold, dim=DIM):
-        self.hold = hold
-        self.dim = dim
-        self.armed = False
-        self.entered = threading.Event()
+def _hold_the_borrow(db, seconds, until=None):
+    # Hold the wrapper's shared borrow from another thread, with the GIL
+    # given up, through the `_hold_borrow_while` test hook: for `seconds`,
+    # or until `until` is set if that comes first. These tests used a
+    # record() inside a slow Python embedder's encode(), but #297 and #296
+    # take record() and correct() off the borrow across encode(), and since
+    # #295 no other public method is meant to hold it for long; the hook
+    # stages what the code below still has to cope with. The caller enables
+    # the hook (YANTRIKDB_TEST_HOOKS=1).
+    entered = threading.Event()
+    until = until or threading.Event()
 
-    def encode(self, text):
-        if self.armed:
-            self.armed = False
-            self.entered.set()
-            time.sleep(self.hold)
-        r = random.Random(hash(text) & 0xFFFFFFFF)
-        v = [r.random() for _ in range(self.dim)]
-        n = sum(x * x for x in v) ** 0.5
-        return [x / n for x in v]
+    def hold():
+        entered.set()
+        until.wait(seconds)
+
+    t = threading.Thread(target=lambda: db._hold_borrow_while(hold))
+    t.start()
+    assert entered.wait(10), "the hook never ran"
+    return t
 
 
 @_needs_potion
-def test_set_embedder_named_beside_a_held_borrow_leaves_the_workers_running(tmp_path):
+def test_set_embedder_named_beside_a_held_borrow_leaves_the_workers_running(
+    tmp_path, monkeypatch
+):
     # The swap stops the workers once the engine looks free, then takes the
-    # wrapper's mutable borrow. Another thread can hold the borrow then: a
-    # record() inside its Python embedder's encode(), as here. The swap took
-    # the borrow with `?` after
+    # wrapper's mutable borrow. Another thread can hold the borrow then (a
+    # record() inside its Python embedder's encode() did, before #297; here
+    # the test hook does). The swap took the borrow with `?` after
     # stopping the workers, and a refusal skipped the respawn: the store
     # was left without workers, and writes past the 256th failed with
     # Backpressure ("ingest queue full"). Now the workers are restarted, the
     # swap tries again at most every 50 ms, and it goes through once the
     # borrow is free.
+    monkeypatch.setenv("YANTRIKDB_TEST_HOOKS", "1")  # the hook is off by default
     db = YantrikDB(os.path.join(str(tmp_path), "held.db"), 256)
     try:
         proxy = db._conn  # holds the engine: the swap is waiting when the borrow is taken
@@ -673,12 +675,7 @@ def test_set_embedder_named_beside_a_held_borrow_leaves_the_workers_running(tmp_
         sw.start()
         time.sleep(0.5)
         # Held for longer than the old borrow retry (1.3-2.4 s measured).
-        emb = _SlowEncodeEmb(3.5, dim=256)
-        db.set_embedder(emb, allow_unverified_embedder=True)
-        emb.armed = True
-        holder = threading.Thread(target=lambda: db.record("a write held across encode()"))
-        holder.start()
-        assert emb.entered.wait(10)
+        holder = _hold_the_borrow(db, 3.5)
         del proxy  # the engine is free; only the held borrow stands in the way
         holder.join(30)
         sw.join(30)
@@ -698,37 +695,24 @@ def test_set_embedder_named_beside_a_held_borrow_leaves_the_workers_running(tmp_
         db.close()
 
 
-def test_close_beside_a_record_inside_encode_is_not_refused(tmp_path):
-    # Before #297 record() held the wrapper's shared borrow across its
-    # Python embedder's encode(), so a close() landing then was refused
-    # with "Already borrowed" after about a second of retries; the old
-    # form of this test asserted exactly that refusal and its timing.
-    # record() now plans from a snapshot and runs encode() with nothing
-    # held, the same shape as recall(): close() succeeds at once, and
-    # the in-flight record reports the store closed.
+def test_a_refused_close_gives_up_after_about_a_second(tmp_path, monkeypatch):
+    # The mutable borrow is retried for a second, by the clock. It was 1000
+    # one-millisecond sleeps, which ran 1.3-2.4 s on Windows. The refused
+    # close() leaves the store as it was. The borrow is held by the test
+    # hook (before #297, by a record() inside its Python embedder's encode()).
+    monkeypatch.setenv("YANTRIKDB_TEST_HOOKS", "1")  # the hook is off by default
     db = YantrikDB(os.path.join(str(tmp_path), "refused.db"), DIM)
-    emb = _SlowEncodeEmb(3.0)
-    db.set_embedder(emb, allow_unverified_embedder=True)
-    emb.armed = True
-    outcome = []
-
-    def write():
-        try:
-            db.record("a write held across encode()")
-        except Exception as e:  # noqa: BLE001
-            outcome.append(repr(e))
-
-    t = threading.Thread(target=write)
-    t.start()
+    t = _hold_the_borrow(db, 3.0)
     try:
-        assert emb.entered.wait(10)
         started = time.perf_counter()
-        assert db.close() is True
+        with pytest.raises(RuntimeError, match="Already borrowed"):
+            db.close()
         took = time.perf_counter() - started
     finally:
         t.join(30)
-    assert took < 1.0, f"close() beside encode() took {took:.2f} s"
-    assert outcome and "closed" in outcome[0], outcome
+    assert 0.9 <= took < 1.25, f"the refused close() took {took:.2f} s"
+    db.record("still open", embedding=[0.1] * DIM)
+    assert db.close() is True
 
 
 @_needs_potion
@@ -875,33 +859,35 @@ def test_two_swaps_pending_at_once_both_go_through(tmp_path):
 
 
 @_needs_potion
-def test_a_swap_kept_out_by_a_held_borrow_says_so(tmp_path):
+def test_a_swap_kept_out_by_a_held_borrow_says_so(tmp_path, monkeypatch):
     # The engine is free, but another thread holds the wrapper's borrow for
-    # the whole wait (here a record() inside an 11 s encode()). The swap's
-    # timeout message blamed another call or a proxy (#302 review 4).
+    # the whole wait (here the test hook, until the swap gives up). The swap's timeout
+    # message blamed another call or a proxy (#302 review 4).
+    monkeypatch.setenv("YANTRIKDB_TEST_HOOKS", "1")  # the hook is off by default
     db = YantrikDB(os.path.join(str(tmp_path), "held-msg.db"), 256)
     try:
         proxy = db._conn  # the swap is waiting when the borrow is taken
         out = {}
+
+        swap_done = threading.Event()
 
         def swapper():
             try:
                 db.set_embedder_named("potion-base-8M")
             except Exception as e:  # noqa: BLE001
                 out["error"] = str(e)
+            finally:
+                swap_done.set()
 
         sw = threading.Thread(target=swapper)
         sw.start()
         time.sleep(0.5)
-        emb = _SlowEncodeEmb(11.0, dim=256)
-        db.set_embedder(emb, allow_unverified_embedder=True)
-        emb.armed = True
-        setter = threading.Thread(target=lambda: db.record("a write held across encode()"))
-        setter.start()
-        assert emb.entered.wait(10)
+        # Held until the swap gives up, not for a fixed time: the swap's
+        # deadline starts after its model load, so a fixed hold raced it.
+        holder = _hold_the_borrow(db, 60.0, until=swap_done)
         del proxy
         sw.join(60)
-        setter.join(60)
+        holder.join(60)
         msg = out.get("error", "")
         assert "held a borrow" in msg and "ConnectionProxy" not in msg, msg
         assert "  " not in msg, f"broken line continuations: {msg!r}"
@@ -1089,17 +1075,25 @@ def test_set_embedder_on_a_closed_store_raises(tmp_path):
         db.set_embedder(Emb(), allow_unverified_embedder=True)
 
 
-def test_the_swap_panic_hook_refuses_without_the_test_hooks_switch(tmp_path, monkeypatch):
-    # _inject_swap_panic ships in the wheel; without YANTRIKDB_TEST_HOOKS=1
-    # it raises instead of arming a panic, and nothing is armed.
-    monkeypatch.delenv("YANTRIKDB_TEST_HOOKS", raising=False)
+@pytest.mark.parametrize("switch", [None, "0"], ids=["unset", "zero"])
+@pytest.mark.parametrize("hook", ["_inject_swap_panic", "_hold_borrow_while"])
+def test_the_test_hooks_refuse_without_the_switch(tmp_path, monkeypatch, hook, switch):
+    # Both hooks ship in the wheel; without YANTRIKDB_TEST_HOOKS=1 they
+    # raise and do nothing: no panic is armed, no callback runs. Their
+    # messages once carried a broken line continuation (a run of spaces
+    # mid-sentence).
+    if switch is None:
+        monkeypatch.delenv("YANTRIKDB_TEST_HOOKS", raising=False)
+    else:
+        monkeypatch.setenv("YANTRIKDB_TEST_HOOKS", switch)
     db = YantrikDB(os.path.join(str(tmp_path), "hook-off.db"), DIM)
     try:
-        with pytest.raises(RuntimeError, match="YANTRIKDB_TEST_HOOKS"):
-            db._inject_swap_panic()
-        monkeypatch.setenv("YANTRIKDB_TEST_HOOKS", "0")
-        with pytest.raises(RuntimeError, match="YANTRIKDB_TEST_HOOKS"):
-            db._inject_swap_panic()
+        ran = []
+        args = (lambda: ran.append(1),) if hook == "_hold_borrow_while" else ()
+        with pytest.raises(RuntimeError, match="YANTRIKDB_TEST_HOOKS=1") as e:
+            getattr(db, hook)(*args)
+        assert not ran
+        assert "  " not in str(e.value), f"broken line continuations: {e.value!r}"
     finally:
         db.close()
 
@@ -1291,7 +1285,14 @@ def test_a_relayed_call_back_from_a_draft_encode_does_not_hold_up_a_swap(tmp_pat
         db.close()
 
 
-def test_set_embedder_while_record_runs_in_another_thread(db):
+def test_set_embedder_while_record_runs_in_another_thread(tmp_path):
+    # A small store of its own rather than the `db` fixture: the fixture's
+    # 1,500 records cost about 8.5 s of setup, and this test contends over
+    # records its own worker writes, so a handful of seeds is enough.
+    db = YantrikDB(os.path.join(str(tmp_path), "racing.db"), DIM)
+    db.set_embedder(Emb(), allow_unverified_embedder=True)
+    for i in range(5):
+        db.record(f"seed record {i}")
     stop = threading.Event()
     record_attempts = []
     record_calls = []
