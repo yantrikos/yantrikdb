@@ -2872,6 +2872,16 @@ impl YantrikDB {
         Ok(n.max(0) as u64)
     }
 
+    /// Window ranges for `text` under the probed embedder window — the geometry
+    /// a caller that embeds **outside** the engine needs in order to supply
+    /// window vectors to `record_with_idempotency_and_chunks`.
+    ///
+    /// Empty when no window is known, or when the text fits in a single window
+    /// (in which case chunk 0 is the whole record and there is nothing to add).
+    pub fn chunk_ranges(&self, text: &str) -> Vec<(usize, usize)> {
+        self.chunk_plan(text).unwrap_or_default()
+    }
+
     /// Whether a runtime embedder is configured. Derives from
     /// SearchState — single source of truth after #41 layer 2.
     pub fn has_embedder(&self) -> bool {

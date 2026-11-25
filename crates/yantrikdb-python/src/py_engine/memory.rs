@@ -167,10 +167,24 @@ impl PyYantrikDB {
                     ));
                 }
                 let emb = self.embed_text(py, text)?;
+                // Windows: a Python-side embedder has no engine identity, so the
+                // engine can never probe it and never chunks this path itself.
+                // The GEOMETRY still comes from the engine (`chunk_ranges`), so a
+                // write here and a later backfill mint the same windows — only
+                // the vectors are ours. Without this the tail of a long record is
+                // stored in no vector at all until someone runs the backfill:
+                // `chunks: &[]` was the documented behaviour, and a 272k record
+                // covered 36% of itself.
+                let ranges = db.chunk_ranges(text);
+                let mut chunks: Vec<(usize, Vec<f32>)> = Vec::with_capacity(ranges.len());
+                for (i, (a, b)) in ranges.iter().enumerate() {
+                    let v = self.embed_text(py, &text[*a..*b])?;
+                    chunks.push((i + 1, v));
+                }
                 // Unkeyed, so the idempotency variant is byte-for-byte
                 // record() — used here only because it is the surface that
                 // carries `created_at`.
-                db.record_with_idempotency(
+                db.record_with_idempotency_and_chunks(
                     text,
                     memory_type,
                     importance,
@@ -185,6 +199,7 @@ impl PyYantrikDB {
                     emotional_state,
                     None,
                     created_at,
+                    &chunks,
                 )
                 .map_err(map_err)
             }
