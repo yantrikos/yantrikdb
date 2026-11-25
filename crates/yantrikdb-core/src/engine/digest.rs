@@ -488,16 +488,39 @@ impl YantrikDB {
         drop(tr_stmt);
         drop(conn);
 
+        // Chain status for the records we are about to report. A record that
+        // was created after `since` and superseded later necessarily has its
+        // supersedes edge committed after its own creation, hence after
+        // `since` — so the transition scan above already covers it and this
+        // map is complete for `new_records` without a second query. Keyed by
+        // the superseded rid; the query keeps one selected successor per
+        // target, so the map holds exactly one.
+        let mut successor_of: std::collections::HashMap<String, String> =
+            std::collections::HashMap::with_capacity(tr_rows.len());
+        for (target, source, _at) in &tr_rows {
+            successor_of.insert(target.clone(), source.clone());
+        }
+
         for (rid, enc_text, importance, created_at, ns) in rec_rows {
             let text = self.decrypt_text(&enc_text).unwrap_or(enc_text);
+            // `DigestEntry::current_status` is documented as chain-derived:
+            // reporting the lifecycle column here would label a superseded
+            // record Active, contradicting the `status_transitions` of the
+            // very same answer.
+            let superseded_by = successor_of.get(&rid).cloned();
+            let current_status = if superseded_by.is_some() {
+                crate::types::RecordStatus::Superseded
+            } else {
+                crate::types::RecordStatus::Active
+            };
             changes.new_records.push(DigestEntry {
                 snippet: snip(&text, snippet_chars),
                 rid,
                 importance,
                 created_at,
                 namespace: ns,
-                current_status: Default::default(),
-                superseded_by: None,
+                current_status,
+                superseded_by,
                 disputed: false,
             });
         }
