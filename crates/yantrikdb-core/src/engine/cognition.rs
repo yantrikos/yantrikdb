@@ -149,10 +149,20 @@ impl YantrikDB {
         )?);
         all_triggers.extend(crate::triggers::check_conflict_escalation(self)?);
         all_triggers.extend(crate::triggers::check_temporal_drift(self)?);
-        all_triggers.extend(crate::triggers::check_redundancy(
-            self,
-            config.redundancy_sim_threshold,
-        )?);
+        // `check_redundancy` compares every active memory against every other
+        // one (O(n^2) cosine) AND persists substitution conflicts, so it belongs
+        // to the conflict scan it feeds. It used to run unconditionally: with
+        // `run_conflict_scan: false` the cycle still paid the full pairwise
+        // scan — measured on 24k records, it alone exceeded 20 min while every
+        // other check in this block stayed below 0.5 s, and gating it took
+        // `think()` with all phases off from >14 min to 0.8 s
+        // (examples/think_phases.rs).
+        if config.run_conflict_scan {
+            all_triggers.extend(crate::triggers::check_redundancy(
+                self,
+                config.redundancy_sim_threshold,
+            )?);
+        }
         all_triggers.extend(crate::triggers::check_relationship_insight(self)?);
         all_triggers.extend(crate::triggers::check_valence_trend(self)?);
         all_triggers.extend(crate::triggers::check_entity_anomaly(self)?);

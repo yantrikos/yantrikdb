@@ -51,6 +51,7 @@ mod moves;
 mod null_embedding;
 mod recall_confidence;
 mod recall_graph;
+mod redundancy_gate;
 mod reembed_router;
 #[cfg(feature = "bundled-embedder")]
 mod reextract_claims;
