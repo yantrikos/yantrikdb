@@ -1025,11 +1025,36 @@ impl PyYantrikDB {
     fn _inject_swap_panic(&mut self) -> PyResult<()> {
         if std::env::var("YANTRIKDB_TEST_HOOKS").as_deref() != Ok("1") {
             return Err(PyRuntimeError::new_err(
-                "_inject_swap_panic is a test hook that makes the next set_embedder_named                  panic; it is enabled only when YANTRIKDB_TEST_HOOKS=1",
+                "_inject_swap_panic is a test hook that makes the next set_embedder_named \
+                 panic; it is enabled only when YANTRIKDB_TEST_HOOKS=1",
             ));
         }
         self.inject_swap_panic = true;
         Ok(())
+    }
+
+    /// Call `hold()` while this call holds the wrapper's shared borrow, and
+    /// return what it returns (tests only).
+    ///
+    /// Since #295 no public method is meant to hold the borrow for longer
+    /// than a brief read or store; the last two that held it across a
+    /// Python embedder's `encode()`, `record()` and `correct()`, move to
+    /// the planned snapshot in #297 and #296. So the code that copes with
+    /// a held one (the swap's retry and worker restart, `close()`'s
+    /// one-second retry, the swap's "held a borrow" message) has nothing
+    /// else to stage it with. `hold()` should give the GIL up while it
+    /// waits (`time.sleep`, `Event.wait`), as a slow Python embedder would.
+    ///
+    /// Like `_inject_swap_panic`, it refuses unless `YANTRIKDB_TEST_HOOKS`
+    /// is `1`.
+    fn _hold_borrow_while(&self, py: Python<'_>, hold: PyObject) -> PyResult<PyObject> {
+        if std::env::var("YANTRIKDB_TEST_HOOKS").as_deref() != Ok("1") {
+            return Err(PyRuntimeError::new_err(
+                "_hold_borrow_while is a test hook that holds the store's borrow \
+                 while a callback runs; it is enabled only when YANTRIKDB_TEST_HOOKS=1",
+            ));
+        }
+        hold.call0(py)
     }
 
     /// Whether this wrapper's worker pool is running (tests only).

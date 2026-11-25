@@ -122,5 +122,35 @@ jobs:
       - name: Install Python package
         run: pip install -e ".[all,dev]"
 
+      # The swap tests (`@_needs_potion` in test_gil_release_concurrency.py)
+      # skip unless potion-base-8M is in the engine's model cache, and they
+      # never download it themselves. Without this they skipped on every
+      # runner, and two of them went broken unseen (#297 review). The model
+      # comes from our own yantrikdb-models release; the cache keeps the
+      # fetch to one per runner OS. The paths are dirs::cache_dir() on
+      # Linux, macOS and Windows.
+      - name: Cache embedder models
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/yantrikdb/models/potion-base-8M-v0.1.0
+            ~/Library/Caches/yantrikdb/models/potion-base-8M-v0.1.0
+            ~/AppData/Local/yantrikdb/models/potion-base-8M-v0.1.0
+          key: yantrikdb-models-${{ runner.os }}-potion-base-8M-v0.1.0
+
+      - name: Fetch potion-base-8M (for the swap tests)
+        shell: python
+        run: |
+          import os, tempfile
+          from yantrikdb import YantrikDB
+          d = tempfile.mkdtemp()
+          db = YantrikDB(os.path.join(d, "fetch.db"), 256)
+          db.set_embedder_named("potion-base-8M")
+          db.close()
+          import sys
+          sys.path.insert(0, "tests")
+          from test_gil_release_concurrency import _model_is_cached
+          assert _model_is_cached("potion-base-8M", "v0.1.0"), "the swap tests would skip"
+
       - name: Run Python Tests
         run: pytest tests/ -v
