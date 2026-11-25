@@ -605,12 +605,48 @@ impl BeliefPayload {
     /// `weight` is the log-likelihood ratio: positive supports, negative contradicts.
     /// `reliability` scales the update (0.0 = ignore, 1.0 = full weight).
     pub fn update(&mut self, weight: f64, reliability: f64, source: &str, timestamp: f64) {
+        self.update_with_id(weight, reliability, source, timestamp, None);
+    }
+
+    /// [`update`] with a caller-supplied observation identity.
+    ///
+    /// * Same id already in the trail → REPLACE its weight and correct
+    ///   `log_odds` by the delta. The observation is re-evaluated, not
+    ///   re-counted; the original timestamp stays (an observation does not
+    ///   become a different one because it was re-assessed later).
+    /// * Unknown or absent id → append, exactly as before.
+    ///
+    /// Measured before this existed: asserting the same evidence twice doubled
+    /// the log-odds (0.90 → 1.80) and no repeat could be recognised.
+    pub fn update_with_id(
+        &mut self,
+        weight: f64,
+        reliability: f64,
+        source: &str,
+        timestamp: f64,
+        observation_id: Option<&str>,
+    ) {
         let effective_weight = weight * reliability;
+        if let Some(oid) = observation_id {
+            if let Some(entry) = self
+                .evidence_trail
+                .iter_mut()
+                .find(|e| e.observation_id.as_deref() == Some(oid))
+            {
+                entry.history.push((entry.weight, entry.timestamp));
+                self.log_odds += effective_weight - entry.weight;
+                entry.weight = effective_weight;
+                entry.source = source.to_string();
+                return;
+            }
+        }
         self.log_odds += effective_weight;
         self.evidence_trail.push(EvidenceEntry {
             source: source.to_string(),
             weight: effective_weight,
             timestamp,
+            observation_id: observation_id.map(|s| s.to_string()),
+            history: Vec::new(),
         });
     }
 
@@ -642,6 +678,19 @@ pub struct EvidenceEntry {
     pub weight: f64,
     /// When this evidence was recorded.
     pub timestamp: f64,
+    /// Stable identity of the OBSERVATION this entry came from, when the caller
+    /// can name one (belief + original source + provenance kind). Two assertions
+    /// with the same id are the same observation: the second one revises the
+    /// first instead of adding a second vote. Re-imports, consolidations and
+    /// corrected timestamps do not change the id — the timestamp is not part of
+    /// it on purpose.
+    #[serde(default)]
+    pub observation_id: Option<String>,
+    /// Earlier assessments of the SAME observation: (weight, timestamp), oldest
+    /// first. A re-evaluation replaces `weight` and moves the previous value
+    /// here, so the current state and its development stay distinguishable.
+    #[serde(default)]
+    pub history: Vec<(f64, f64)>,
 }
 
 /// Goal: a desired future state.
@@ -2024,6 +2073,8 @@ mod tests {
                 source: "observation".to_string(),
                 weight: 2.0,
                 timestamp: 1000.0,
+                observation_id: None,
+                history: Vec::new(),
             }],
             user_confirmed: true,
         });

@@ -341,6 +341,7 @@ mod tests {
             provenance: Provenance::Observed,
             propagate: false,
             timestamp: 1000.0,
+            observation_id: None,
         };
 
         let config = BeliefRevisionConfig::default();
@@ -383,6 +384,7 @@ mod tests {
             provenance: Provenance::Extracted,
             propagate: true,
             timestamp: 1000.0,
+            observation_id: None,
         };
 
         let config = BeliefRevisionConfig::default();
@@ -423,6 +425,7 @@ mod tests {
                 provenance: Provenance::Observed,
                 propagate: false,
                 timestamp: 1000.0,
+                observation_id: None,
             },
             Evidence {
                 target_belief: n2.id,
@@ -431,6 +434,7 @@ mod tests {
                 provenance: Provenance::Inferred,
                 propagate: false,
                 timestamp: 1000.0,
+                observation_id: None,
             },
         ];
 
@@ -500,6 +504,7 @@ mod tests {
             provenance: Provenance::Observed,
             propagate: false,
             timestamp: 1000.0,
+            observation_id: None,
         };
 
         let config = BeliefRevisionConfig::default();

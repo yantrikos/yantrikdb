@@ -480,16 +480,22 @@ mod tests {
                 source: "morning observation".to_string(),
                 weight: 1.5,
                 timestamp: 500.0,
+                observation_id: None,
+                history: Vec::new(),
             });
             b.evidence_trail.push(EvidenceEntry {
                 source: "afternoon crash".to_string(),
                 weight: -0.3,
                 timestamp: 700.0,
+                observation_id: None,
+                history: Vec::new(),
             });
             b.evidence_trail.push(EvidenceEntry {
                 source: "productivity data".to_string(),
                 weight: 0.8,
                 timestamp: 900.0,
+                observation_id: None,
+                history: Vec::new(),
             });
         }
 
@@ -529,21 +535,29 @@ mod tests {
                 source: "old".into(),
                 weight: -0.5,
                 timestamp: 100.0,
+                observation_id: None,
+                history: Vec::new(),
             },
             EvidenceEntry {
                 source: "old2".into(),
                 weight: -0.3,
                 timestamp: 200.0,
+                observation_id: None,
+                history: Vec::new(),
             },
             EvidenceEntry {
                 source: "new".into(),
                 weight: 1.0,
                 timestamp: 800.0,
+                observation_id: None,
+                history: Vec::new(),
             },
             EvidenceEntry {
                 source: "new2".into(),
                 weight: 0.8,
                 timestamp: 900.0,
+                observation_id: None,
+                history: Vec::new(),
             },
         ];
 

@@ -44,6 +44,10 @@ pub struct Evidence {
     pub propagate: bool,
     /// When this evidence was observed (unix timestamp seconds).
     pub timestamp: f64,
+    /// Stable identity of the observation, when the caller can name one
+    /// (belief + original source + provenance). Same id = same observation:
+    /// it revises the previous effect instead of voting twice.
+    pub observation_id: Option<String>,
 }
 
 /// Result of asserting a piece of evidence.
@@ -176,6 +180,27 @@ impl Default for BeliefRevisionConfig {
 /// * `config` - Revision configuration
 /// * `epistemic_edges` - Edges from this belief to other beliefs (for propagation)
 /// * `downstream_nodes` - Mutable map of downstream belief nodes (for propagation writes)
+/// Compose the stable identity of ONE observation.
+///
+/// Three rules, all deliberate:
+/// * **without the provenance kind** — the same observation does not become a
+///   new one because it was re-classified (observed vs extracted vs told);
+/// * **without the timestamp** — a re-import, a consolidation or a corrected
+///   clock must not turn one observation into two;
+/// * **with a local key** — one source can carry several independent
+///   observations, so the caller names the one it means (sentence, claim id,
+///   span). Without a local key the whole source counts as one observation.
+///
+/// Callers that resolve a consolidated record back to its originals
+/// (`consolidation_members`) pass the ORIGINAL source rid, so a synthesis is
+/// not a second experience.
+pub fn observation_key(belief: NodeId, source_rid: &str, local: Option<&str>) -> String {
+    match local {
+        Some(l) => format!("b{belief:?}|{source_rid}|{l}"),
+        None => format!("b{belief:?}|{source_rid}"),
+    }
+}
+
 pub fn assert_evidence(
     node: &mut CognitiveNode,
     evidence: &Evidence,
@@ -194,11 +219,12 @@ pub fn assert_evidence(
     let effective_weight = evidence.weight * reliability;
 
     // Apply the Bayesian update
-    belief.update(
+    belief.update_with_id(
         evidence.weight,
         reliability,
         &evidence.source,
         evidence.timestamp,
+        evidence.observation_id.as_deref(),
     );
 
     // Enforce confidence ceiling for volatile beliefs
@@ -473,6 +499,7 @@ mod tests {
             provenance: Provenance::Observed,
             propagate: false,
             timestamp: 1000.0,
+            observation_id: None,
         }
     }
 
@@ -557,6 +584,7 @@ mod tests {
             provenance: Provenance::Told, // highest reliability = 0.95
             propagate: false,
             timestamp: 1000.0,
+            observation_id: None,
         };
 
         let result = assert_evidence(&mut node, &evidence, &config).unwrap();
@@ -576,6 +604,8 @@ mod tests {
                 source: "test".to_string(),
                 weight: 2.0,
                 timestamp: 1000.0 - 3.0 * 86400.0,
+                observation_id: None,
+                history: Vec::new(),
             });
         }
 
@@ -596,6 +626,8 @@ mod tests {
                 source: "test".to_string(),
                 weight: 2.0,
                 timestamp: 1000.0 - 30.0 * 86400.0,
+                observation_id: None,
+                history: Vec::new(),
             });
         }
 
@@ -625,6 +657,8 @@ mod tests {
                         source: "old".to_string(),
                         weight: 1.5,
                         timestamp: 1000.0 - 60.0 * 86400.0, // 60 days ago
+                        observation_id: None,
+                        history: Vec::new(),
                     });
                 }
                 n
@@ -656,6 +690,7 @@ mod tests {
             provenance: Provenance::Told,
             propagate: false,
             timestamp: 1000.0,
+            observation_id: None,
         };
 
         let ev_inferred = Evidence {
@@ -665,6 +700,7 @@ mod tests {
             provenance: Provenance::Inferred,
             propagate: false,
             timestamp: 1000.0,
+            observation_id: None,
         };
 
         let r_told = assert_evidence(&mut node_told, &ev_told, &config).unwrap();
@@ -726,6 +762,7 @@ mod tests {
             provenance: Provenance::Told,
             propagate: false,
             timestamp: 1000.0,
+            observation_id: None,
         };
 
         let result = assert_evidence(&mut node, &evidence, &config).unwrap();
@@ -782,6 +819,7 @@ mod tests {
             provenance: Provenance::Observed,
             propagate: false,
             timestamp: 1000.0,
+            observation_id: None,
         };
 
         assert!(assert_evidence(&mut node, &evidence, &config).is_none());

@@ -594,6 +594,8 @@ mod tests {
                     source: format!("source_{i}"),
                     weight: 0.5,
                     timestamp: 1000.0 + i as f64,
+                    observation_id: None,
+                    history: Vec::new(),
                 });
             }
         }

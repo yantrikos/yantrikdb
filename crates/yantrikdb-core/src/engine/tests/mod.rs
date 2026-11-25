@@ -51,6 +51,10 @@ mod moves;
 mod null_embedding;
 mod recall_confidence;
 mod recall_graph;
+mod belief_lifecycle;
+mod belief_propagation;
+mod belief_decay_semantics;
+mod evidence_identity_semantics;
 mod reembed_router;
 #[cfg(feature = "bundled-embedder")]
 mod reextract_claims;
