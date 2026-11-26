@@ -24,7 +24,9 @@ fn rss_kb() -> u64 {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: think_phases <db-path>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: think_phases <db-path>");
     let t0 = Instant::now();
     let db = YantrikDB::new(&path, 1024).expect("open corpus copy");
     println!("PERF_OPEN seconds={:.3}", t0.elapsed().as_secs_f64());

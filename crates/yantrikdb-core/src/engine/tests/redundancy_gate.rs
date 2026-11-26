@@ -34,8 +34,18 @@ fn seed_pair(db: &YantrikDB) {
         "The provider for the summary model is google and it runs locally.",
     ] {
         db.record(
-            text, "episodic", 0.9, 0.0, 604800.0, &empty_meta(), &emb, "default", 0.8,
-            "general", "user", None,
+            text,
+            "episodic",
+            0.9,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &emb,
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
         )
         .unwrap();
     }
@@ -66,7 +76,11 @@ fn conflict_scan_off_persists_no_redundancy_conflict() {
         })
         .unwrap();
 
-    assert_eq!(conflict_count(&db), before, "conflicts were persisted with the scan off");
+    assert_eq!(
+        conflict_count(&db),
+        before,
+        "conflicts were persisted with the scan off"
+    );
     assert_eq!(report.conflicts_found, 0);
 }
 
