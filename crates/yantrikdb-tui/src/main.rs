@@ -1246,6 +1246,8 @@ mod tests {
                 dst: "Data Platform team".into(),
                 polarity: 1,
                 modality: None,
+                span_start: None,
+                span_end: None,
                 valid_from: None,
                 valid_to: None,
             }],

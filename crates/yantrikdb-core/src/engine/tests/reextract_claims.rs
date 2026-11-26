@@ -69,6 +69,8 @@ fn heal_replaces_extractor_claims_and_preserves_assertions() {
             dst: "Fennwick Labs".into(),
             polarity: 1,
             modality: None,
+            span_start: None,
+            span_end: None,
             valid_from: None,
             valid_to: None,
         }],

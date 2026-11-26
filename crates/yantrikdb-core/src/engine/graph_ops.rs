@@ -1230,6 +1230,15 @@ pub struct StatedClaim {
     /// every hypothesis was stored as a plain assertion.
     #[serde(default)]
     pub modality: Option<String>,
+    /// Byte range of the statement inside the source memory's text. This is the
+    /// *local* part of the observation identity: one memory can state the same
+    /// proposition twice (two paragraphs, two sentences), and without a span
+    /// those statements collapse into one observation. `None` means the writer
+    /// did not say where — not that the statement occurs only once.
+    #[serde(default)]
+    pub span_start: Option<i32>,
+    #[serde(default)]
+    pub span_end: Option<i32>,
     /// World-validity start (unix seconds): when the stated fact became
     /// true, not when it was written. Absent, the memory's own event time
     /// (`event_time_min`, the temporal tag on the record) is used; absent
@@ -1257,6 +1266,8 @@ impl Default for StatedClaim {
             dst: String::new(),
             polarity: 1,
             modality: None,
+            span_start: None,
+            span_end: None,
             valid_from: None,
             valid_to: None,
         }
@@ -1625,8 +1636,8 @@ impl super::YantrikDB {
                 Some("1.0"),
                 "high",
                 Some(memory_rid),
-                None,
-                None,
+                claim.span_start,
+                claim.span_end,
                 1.0,
             )?;
             // The memory now carries its endpoints as entities SYNCHRONOUSLY —

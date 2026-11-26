@@ -52,6 +52,12 @@ impl PyYantrikDB {
                     .map(|v| v.extract::<f64>())
                     .transpose()
             };
+            let int_field = |d: &Bound<'_, PyDict>, k: &str| -> PyResult<Option<i32>> {
+                d.get_item(k)?
+                    .filter(|v| !v.is_none())
+                    .map(|v| v.extract::<i32>())
+                    .transpose()
+            };
             stated.push(yantrikdb_core::StatedClaim {
                 src,
                 rel_type,
@@ -62,6 +68,11 @@ impl PyYantrikDB {
                 // binding must not invent "asserted" here, which is what made
                 // every quotation and hypothesis look like a plain assertion.
                 modality: pick(&["modality", "modality_kind"])?,
+                // Where in the text the statement sits. One memory can state
+                // the same proposition twice; the span is what keeps those two
+                // observations apart.
+                span_start: int_field(&d, "span_start")?,
+                span_end: int_field(&d, "span_end")?,
                 valid_from: window("valid_from")?,
                 valid_to: window("valid_to")?,
             });

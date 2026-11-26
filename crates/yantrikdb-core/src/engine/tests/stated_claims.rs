@@ -29,6 +29,8 @@ fn claim(src: &str, rel: &str, dst: &str) -> StatedClaim {
         dst: dst.into(),
         polarity: 1,
         modality: None,
+        span_start: None,
+        span_end: None,
         valid_from: None,
         valid_to: None,
     }
@@ -320,6 +322,45 @@ fn unknown_modality_is_rejected() {
         "got {:?}",
         report.rejected[0].reason
     );
+}
+
+#[test]
+fn span_is_stored_as_the_local_part_of_the_observation() {
+    // One memory can state the same proposition twice. The span is what keeps
+    // those two statements apart; without it they collapse into one
+    // observation and the second is lost.
+    let (db, rid) =
+        db_with("Hugo leitet das UNIT Team. Spaeter sagt Vela, Hugo leitet das UNIT Team.");
+    let mut c = claim("Hugo", "leads", "UNIT Team");
+    c.span_start = Some(0);
+    c.span_end = Some(24);
+    db.attach_claims(&rid, &[c]).unwrap();
+
+    let (s, e): (Option<i32>, Option<i32>) = db
+        .conn()
+        .query_row(
+            "SELECT span_start, span_end FROM claims WHERE source_memory_rid = ?1",
+            rusqlite::params![rid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((s, e), (Some(0), Some(24)));
+}
+
+#[test]
+fn missing_span_stays_null_and_does_not_invent_a_location() {
+    let (db, rid) = db_with("Hugo leitet das UNIT Team.");
+    db.attach_claims(&rid, &[claim("Hugo", "leads", "UNIT Team")])
+        .unwrap();
+    let (s, e): (Option<i32>, Option<i32>) = db
+        .conn()
+        .query_row(
+            "SELECT span_start, span_end FROM claims WHERE source_memory_rid = ?1",
+            rusqlite::params![rid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((s, e), (None, None), "unknown locality must stay unknown");
 }
 
 #[test]
