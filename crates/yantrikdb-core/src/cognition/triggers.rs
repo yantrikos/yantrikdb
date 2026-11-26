@@ -1212,7 +1212,54 @@ fn load_substitution_index(conn: &rusqlite::Connection) -> SubstitutionIndex {
     index
 }
 
-fn normalize_tokens(text: &str) -> std::collections::HashSet<String> {
+/// How many content words around the two substituted tokens must agree before a
+/// category pair counts as a contradiction.
+///
+/// Category membership alone says the two values are *alternatives*; it says
+/// nothing about whether the two documents assert the same thing. Measured on
+/// the live store: without this gate every one of 45 open conflicts is a false
+/// alarm (ADR-0057 "google" vs ADR-0125 "deepseek"), with it none of them pass
+/// and the three positive controls do.
+const MIN_SHARED_CONTEXT: usize = 2;
+
+/// Tokens examined on each side of the substituted term.
+const CONTEXT_WINDOW: usize = 10;
+
+/// Minimum Jaccard overlap of the two frames once the substituted values are
+/// removed: same subject and same predicate, different value.
+const MIN_FRAME_SIMILARITY: f64 = 0.7;
+
+/// Remove fenced blocks and inline code spans. A token that only appears inside
+/// code is a value of the implementation, not a statement about the subject:
+/// `--data` is not a claim about a data layer, and `[data-provider=basic]` is
+/// not a preference.
+fn strip_code_context(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_fence = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            out.push('\n');
+            continue;
+        }
+        if in_fence {
+            out.push('\n');
+            continue;
+        }
+        let mut in_inline = false;
+        for ch in line.chars() {
+            match ch {
+                '`' => in_inline = !in_inline,
+                _ if !in_inline => out.push(ch),
+                _ => {}
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn tokenize_words(text: &str) -> std::collections::HashSet<String> {
     text.split_whitespace()
         .map(|w| {
             w.trim_matches(|c: char| !c.is_alphanumeric())
@@ -1222,11 +1269,84 @@ fn normalize_tokens(text: &str) -> std::collections::HashSet<String> {
         .collect()
 }
 
+/// How much the two sentences agree once the substituted values are removed.
+///
+/// Order-independent, so a reordered clause ("X runs on postgresql" / "on mysql
+/// runs X") still scores 1.0, while the hard negative ("postgresql as the index"
+/// / "mysql for the tests") shares subject and verb but differs in the object
+/// and falls under the threshold.
+fn frame_similarity(text_a: &str, token_a: &str, text_b: &str, token_b: &str) -> f64 {
+    fn content(text: &str, token: &str) -> std::collections::HashSet<String> {
+        text.split_whitespace()
+            .map(|w| {
+                w.trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase()
+            })
+            .filter(|w| w.len() >= 4 && w != token)
+            .collect()
+    }
+    let a = content(text_a, token_a);
+    let b = content(text_b, token_b);
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let inter = a.intersection(&b).count() as f64;
+    let union = a.union(&b).count() as f64;
+    inter / union
+}
+
+/// Count content words shared by the two token neighbourhoods.
+fn shared_context_terms(text_a: &str, token_a: &str, text_b: &str, token_b: &str) -> usize {
+    let ctx = |text: &str, token: &str| -> std::collections::HashSet<String> {
+        let words: Vec<String> = text
+            .split_whitespace()
+            .map(|w| {
+                w.trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase()
+            })
+            .collect();
+        let mut out = std::collections::HashSet::new();
+        for (i, w) in words.iter().enumerate() {
+            if w != token {
+                continue;
+            }
+            let lo = i.saturating_sub(CONTEXT_WINDOW);
+            let hi = (i + 1 + CONTEXT_WINDOW).min(words.len());
+            for w2 in &words[lo..hi] {
+                if w2.len() >= 4 && w2 != token {
+                    out.insert(w2.clone());
+                }
+            }
+        }
+        out
+    };
+    ctx(text_a, token_a)
+        .intersection(&ctx(text_b, token_b))
+        .count()
+}
+
+/// The subject/frame gate: do the two documents assert the same thing about the
+/// same subject? Fail closed — an unchecked frame is not evidence of a
+/// contradiction, and a silence is not a conflict either.
+fn substitution_is_same_claim(prose_a: &str, ta: &str, prose_b: &str, tb: &str) -> bool {
+    shared_context_terms(prose_a, ta, prose_b, tb) >= MIN_SHARED_CONTEXT
+        && frame_similarity(prose_a, ta, prose_b, tb) >= MIN_FRAME_SIMILARITY
+}
+
 /// Same predicate as [`check_substitution_category_pair`], answered in memory.
 ///
-/// Both tokens must be active members of the same exclusive category; the
-/// first shared category found wins, exactly like the SQL `LIMIT 1` over the
-/// same pair iteration order.
+/// Two layers, and the second one is the point:
+///
+/// 1. **Category membership** — cheap, from the pre-loaded index: are the two
+///    differing tokens alternatives in one exclusive category?
+/// 2. **Same claim** — on the prose of the full texts: do they share the
+///    surrounding subject and predicate? Without layer 2 the index answers a
+///    question nobody asked ("do these two documents each mention a provider?")
+///    and every pair of ADRs becomes a contradiction.
+///
+/// Both call sites in `check_redundancy_in_namespace` go through this function,
+/// so the gate covers the high-similarity pass and the 0.65–0.85 substitution
+/// pass alike.
 fn check_substitution_pair_in_index(
     index: &SubstitutionIndex,
     text_a: &str,
@@ -1235,8 +1355,10 @@ fn check_substitution_pair_in_index(
     if index.is_empty() {
         return None;
     }
-    let words_a = normalize_tokens(text_a);
-    let words_b = normalize_tokens(text_b);
+    let prose_a = strip_code_context(text_a);
+    let prose_b = strip_code_context(text_b);
+    let words_a = tokenize_words(&prose_a);
+    let words_b = tokenize_words(&prose_b);
     let diff_a: Vec<&String> = words_a.difference(&words_b).collect();
     let diff_b: Vec<&String> = words_b.difference(&words_a).collect();
 
@@ -1255,6 +1377,11 @@ fn check_substitution_pair_in_index(
                 .iter()
                 .find(|(id_a, _)| cats_b.iter().any(|(id_b, _)| id_b == id_a))
             {
+                // Layer 2: a category alternative is only a contradiction when
+                // both documents make the same claim about the same subject.
+                if !substitution_is_same_claim(&prose_a, ta, &prose_b, tb) {
+                    continue;
+                }
                 return Some((name.clone(), (*ta).clone(), (*tb).clone()));
             }
         }
@@ -1271,22 +1398,10 @@ fn check_substitution_category_pair(
     text_a: &str,
     text_b: &str,
 ) -> Option<(String, String, String)> {
-    let words_a: std::collections::HashSet<String> = text_a
-        .split_whitespace()
-        .map(|w| {
-            w.trim_matches(|c: char| !c.is_alphanumeric())
-                .to_lowercase()
-        })
-        .filter(|w| !w.is_empty())
-        .collect();
-    let words_b: std::collections::HashSet<String> = text_b
-        .split_whitespace()
-        .map(|w| {
-            w.trim_matches(|c: char| !c.is_alphanumeric())
-                .to_lowercase()
-        })
-        .filter(|w| !w.is_empty())
-        .collect();
+    let prose_a = strip_code_context(text_a);
+    let prose_b = strip_code_context(text_b);
+    let words_a = tokenize_words(&prose_a);
+    let words_b = tokenize_words(&prose_b);
 
     let diff_a: Vec<&String> = words_a.difference(&words_b).collect();
     let diff_b: Vec<&String> = words_b.difference(&words_a).collect();
@@ -1307,7 +1422,9 @@ fn check_substitution_category_pair(
                 |row| Ok((row.get::<_, String>(0)?,)),
             );
             if let Ok((cat_name,)) = result {
-                return Some((cat_name, ta.to_string(), tb.to_string()));
+                if substitution_is_same_claim(&prose_a, ta, &prose_b, tb) {
+                    return Some((cat_name, ta.to_string(), tb.to_string()));
+                }
             }
         }
     }
@@ -2518,5 +2635,235 @@ mod tests {
         let (sql, mem) = both(&*conn, &index, a, b);
         assert!(sql.is_none());
         assert!(mem.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // Subject/frame gate — the composition of 0001 (#312) and 0010 (#315).
+    //
+    // These five cases are the acceptance criteria for the composed branch:
+    // the predicate must hold in the *index* path, in both passes, and must
+    // not turn every shared category into a contradiction.
+    // ------------------------------------------------------------------
+
+    /// A substitution index with the given (category, members) pairs. Category
+    /// id and name are the same string here; only membership matters.
+    fn test_index(cats: &[(&str, &[&str])]) -> SubstitutionIndex {
+        let mut index: SubstitutionIndex = std::collections::HashMap::new();
+        for (category, members) in cats {
+            for token in *members {
+                index
+                    .entry((*token).to_string())
+                    .or_default()
+                    .push(((*category).to_string(), (*category).to_string()));
+            }
+        }
+        index
+    }
+
+    fn provider_index() -> SubstitutionIndex {
+        test_index(&[("llm_providers", &["google", "deepseek", "openai"])])
+    }
+
+    /// Case 1 — same category, different subject. This is the live false
+    /// alarm: ADR-0057 (provenance) vs ADR-0125 (tooling standard). Both
+    /// mention a provider; neither talks about the other's subject.
+    #[test]
+    fn same_category_different_subject_is_not_a_conflict() {
+        let a = "ADR-0057 behandelt die Provenienz der Provider google und die Herkunft der Migrationen";
+        let b = "ADR-0125 behandelt den Werkzeug-Basisstandard der Agenten und nennt deepseek als Modell";
+        assert!(
+            check_substitution_pair_in_index(&provider_index(), a, b).is_none(),
+            "documents about different subjects must not be a contradiction"
+        );
+    }
+
+    /// Case 2 — same category, different situational context. Shared
+    /// vocabulary, but a test run and production are not in conflict about
+    /// which provider is right.
+    #[test]
+    fn same_category_different_situational_context_is_not_a_conflict() {
+        let a = "Im Testlauf nutzen wir google als Provider fuer die Evaluierung";
+        let b = "Im Produktivbetrieb nutzen wir deepseek als Provider fuer die Auslieferung";
+        assert!(
+            check_substitution_pair_in_index(&provider_index(), a, b).is_none(),
+            "different situational context must not be a contradiction"
+        );
+    }
+
+    /// Case 3 — the real contradiction: same subject, same predicate,
+    /// different value. This is what the rule exists for.
+    #[test]
+    fn actual_contradiction_with_same_subject_is_a_conflict() {
+        let a = "Wir setzen google als Provider fuer die Bildgenerierung ein";
+        let b = "Wir setzen deepseek als Provider fuer die Bildgenerierung ein";
+        let hit = check_substitution_pair_in_index(&provider_index(), a, b);
+        assert!(
+            hit.is_some(),
+            "same subject and frame, different value must be a conflict"
+        );
+        let (cat, ta, tb) = hit.unwrap();
+        assert_eq!(cat, "llm_providers");
+        assert!(
+            matches!(
+                (ta.as_str(), tb.as_str()),
+                ("google", "deepseek") | ("deepseek", "google")
+            ),
+            "returned tokens must be the pair that was substituted, got {ta}/{tb}"
+        );
+    }
+
+    /// Case 4 — several categories match on the same pair of texts. The
+    /// function must return a pair whose tokens really are alternatives in
+    /// the category it names, not a category from one pair and tokens from
+    /// another.
+    #[test]
+    fn multiple_matching_categories_return_consistent_tokens() {
+        let index = test_index(&[
+            ("roles", &["backend", "data"]),
+            ("llm_providers", &["google", "deepseek"]),
+        ]);
+        let a = "Wir setzen google fuer die Bildgenerierung ein und backend dauerhaft fuer die Auslieferung der Berichte";
+        let b = "Wir setzen deepseek fuer die Bildgenerierung ein und data dauerhaft fuer die Auslieferung der Berichte";
+        let hit = check_substitution_pair_in_index(&index, a, b);
+        assert!(
+            hit.is_some(),
+            "at least one clean contradiction exists here"
+        );
+        let (cat, ta, tb) = hit.unwrap();
+        let members: &[&str] = match cat.as_str() {
+            "roles" => &["backend", "data"],
+            "llm_providers" => &["google", "deepseek"],
+            other => panic!("unexpected category {other}"),
+        };
+        assert!(
+            members.contains(&ta.as_str()) && members.contains(&tb.as_str()),
+            "tokens {ta}/{tb} do not belong to category {cat}"
+        );
+    }
+
+    /// Case 5 — both passes of the substitution check. Pass 1 runs above the
+    /// redundancy threshold, pass 2 in the 0.65–0.85 band. A gate that lives
+    /// in only one of them shows up as a difference between the two arms.
+    #[test]
+    fn both_redundancy_passes_apply_the_subject_gate() {
+        fn seed_category(db: &YantrikDB) {
+            let hlc = db.tick_hlc().to_bytes().to_vec();
+            let ts = now();
+            db.conn()
+                .execute(
+                    "INSERT INTO substitution_categories
+                     (id, name, conflict_mode, status, created_at, updated_at, hlc, origin_actor)
+                     VALUES ('cat-llm-gate', 'llm_gate_test', 'exclusive', 'active',
+                             ?1, ?1, ?2, 'test')",
+                    rusqlite::params![ts, hlc],
+                )
+                .unwrap();
+            for (id, token) in [("m-google", "google"), ("m-deepseek", "deepseek")] {
+                let hlc = db.tick_hlc().to_bytes().to_vec();
+                db.conn()
+                    .execute(
+                        "INSERT INTO substitution_members
+                         (id, category_id, token_normalized, token_display, confidence,
+                          source, status, created_at, updated_at, hlc, origin_actor)
+                         VALUES (?1, 'cat-llm-gate', ?2, ?2, 0.9, 'test', 'active',
+                                 ?3, ?3, ?4, 'test')",
+                        rusqlite::params![id, token, ts, hlc],
+                    )
+                    .unwrap();
+            }
+        }
+
+        /// Two unit vectors with the requested cosine.
+        fn pair_with_cosine(cos: f32) -> (Vec<f32>, Vec<f32>) {
+            let dim = 8;
+            let mut a = vec![0.0f32; dim];
+            let mut b = vec![0.0f32; dim];
+            a[0] = 1.0;
+            b[0] = cos;
+            b[1] = (1.0 - cos * cos).max(0.0).sqrt();
+            (a, b)
+        }
+
+        fn record_pair(db: &YantrikDB, text_a: &str, text_b: &str, cos: f32) -> (String, String) {
+            let (ea, eb) = pair_with_cosine(cos);
+            let ra = db
+                .record(
+                    text_a,
+                    "semantic",
+                    0.8,
+                    0.0,
+                    604800.0,
+                    &serde_json::json!({}),
+                    &ea,
+                    "default",
+                    0.9,
+                    "general",
+                    "user",
+                    None,
+                )
+                .unwrap();
+            let rb = db
+                .record(
+                    text_b,
+                    "semantic",
+                    0.8,
+                    0.0,
+                    604800.0,
+                    &serde_json::json!({}),
+                    &eb,
+                    "default",
+                    0.9,
+                    "general",
+                    "user",
+                    None,
+                )
+                .unwrap();
+            (ra, rb)
+        }
+
+        fn conflict_count(db: &YantrikDB, a: &str, b: &str) -> i64 {
+            db.conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM conflicts
+                     WHERE (memory_a = ?1 AND memory_b = ?2)
+                        OR (memory_a = ?2 AND memory_b = ?1)",
+                    rusqlite::params![a, b],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        }
+
+        // 1.0 = high-similarity pass, 0.766 = substitution pass (cos 40°).
+        for (cos, pass) in [(1.0f32, "high-similarity"), (0.766f32, "substitution")] {
+            let db = YantrikDB::new(":memory:", 8).unwrap();
+            seed_category(&db);
+            let (ra, rb) = record_pair(
+                &db,
+                "Wir setzen google als Provider fuer die Bildgenerierung ein",
+                "Wir setzen deepseek als Provider fuer die Bildgenerierung ein",
+                cos,
+            );
+            let _ = check_redundancy(&db, 0.85).unwrap();
+            assert_eq!(
+                conflict_count(&db, &ra, &rb),
+                1,
+                "{pass} pass: a real contradiction must be recorded"
+            );
+
+            let db = YantrikDB::new(":memory:", 8).unwrap();
+            seed_category(&db);
+            let (ra, rb) = record_pair(
+                &db,
+                "ADR-0057 behandelt die Provenienz der Provider google und die Herkunft der Migrationen",
+                "ADR-0125 behandelt den Werkzeug-Basisstandard der Agenten und nennt deepseek als Modell",
+                cos,
+            );
+            let _ = check_redundancy(&db, 0.85).unwrap();
+            assert_eq!(
+                conflict_count(&db, &ra, &rb),
+                0,
+                "{pass} pass: different subjects must not be recorded as a conflict"
+            );
+        }
     }
 }
