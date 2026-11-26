@@ -130,7 +130,14 @@ fn near_identical_text_in_one_namespace_still_raises_redundancy() {
         &vec_on(1),
     );
 
-    let result = db.think(&trigger_only_config()).unwrap();
+    // Contract change: the pairwise redundancy scan now runs *inside* the
+    // conflict scan, so `run_conflict_scan: false` no longer produces
+    // redundancy triggers. The invariant this test pins — near-duplicates in
+    // the same namespace must still fire — is unchanged, so the scan is on
+    // here while the two isolation tests above keep it off.
+    let mut config = trigger_only_config();
+    config.run_conflict_scan = true;
+    let result = db.think(&config).unwrap();
 
     let redundancy: Vec<_> = result
         .triggers
