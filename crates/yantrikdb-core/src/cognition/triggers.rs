@@ -1258,46 +1258,48 @@ fn load_substitution_index_status(
         // index does that correctly. But "tables absent" has two very different
         // causes and they must not look alike (review 8, finding 4):
         //
-        //   * a pre-V14 store that was never migrated — supported, benign;
-        //   * a store opened by this engine (so the migration ran) that is
-        //     still missing the tables — an incomplete or rolled-back
-        //     migration, i.e. damage.
+        //   * a store that never ran V13->V14 — supported, benign;
+        //   * a store that did run it and is still missing the tables — an
+        //     incomplete or rolled-back migration, i.e. damage.
         //
-        // `claims` is created by the same V13->V14 step, so its presence
-        // separates the two cases deterministically and cheaply.
+        // `entity_aliases` is created by the *same* V13->V14 script as the
+        // substitution tables (`schema.rs` MIGRATE_V13_TO_V14), so it separates
+        // the two cases. `claims` does NOT: it comes from an earlier migration
+        // (review 9, E3 — the first version of this check used `claims` and the
+        // premise was wrong).
         Err(rusqlite::Error::SqliteFailure(_, Some(ref msg))) if msg.contains("no such table") => {
             let migrated: i64 = conn
                 .query_row(
                     "SELECT COUNT(*) FROM sqlite_master \
-                     WHERE type = 'table' AND name = 'claims'",
+                     WHERE type = 'table' AND name = 'entity_aliases'",
                     [],
                     |r| r.get(0),
                 )
                 .unwrap_or(0);
             if migrated > 0 {
                 tracing::error!(
-                    "substitution tables are missing although the store is V14 \
-                     (claims exists) — the V13->V14 migration did not complete; \
+                    "substitution tables are missing although V13->V14 ran \
+                     (entity_aliases exists) — the migration did not complete; \
                      substitution conflicts are disabled for this store"
                 );
                 return Ok((
                     index,
                     Some(
-                        "substitution tables are missing although the store is V14 — \
-                         the V13->V14 migration did not complete"
+                        "substitution tables are missing although V13->V14 ran — \
+                         the migration did not complete"
                             .to_string(),
                     ),
                 ));
             } else {
                 tracing::warn!(
-                    "pre-V14 store without substitution tables — no substitution \
-                     conflicts, which is expected for this schema"
+                    "store without V13->V14 — no substitution tables, which is \
+                     expected for this schema"
                 );
                 return Ok((
                     index,
-                    Some("pre-V14 store without substitution tables".to_string()),
+                    Some("store without the V13->V14 migration".to_string()),
                 ));
-            };
+            }
         }
         // Every other failure is real. Returning an empty index here would
         // silently disable substitution conflicts for the WHOLE namespace —
@@ -3090,6 +3092,13 @@ mod tests {
         assert!(
             marked[0].reason.contains("was not fully checked"),
             "the reason must say what was skipped: {:?}",
+            marked[0].reason
+        );
+        // The store ran V13->V14 (it has the schema), so the missing tables are
+        // damage, not an old store — the reason must say that (review 9, E3).
+        assert!(
+            marked[0].reason.contains("migration did not complete"),
+            "the damage case must be named: {:?}",
             marked[0].reason
         );
     }
