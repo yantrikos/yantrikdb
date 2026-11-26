@@ -33,6 +33,11 @@ mod event_time_recall;
 // The explain suite drives the full text path (record_text/
 // recall_text_explained), which needs the bundled embedder — slim
 // builds (--no-default-features) have no `with_default`.
+mod belief_decay_semantics;
+mod belief_lifecycle;
+mod belief_propagation;
+mod belief_propagation_identity;
+mod evidence_identity_semantics;
 #[cfg(feature = "bundled-embedder")]
 mod explain;
 mod idempotency;
@@ -51,11 +56,6 @@ mod moves;
 mod null_embedding;
 mod recall_confidence;
 mod recall_graph;
-mod belief_lifecycle;
-mod belief_propagation;
-mod belief_decay_semantics;
-mod evidence_identity_semantics;
-mod belief_propagation_identity;
 mod reembed_router;
 #[cfg(feature = "bundled-embedder")]
 mod reextract_claims;

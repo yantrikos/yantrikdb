@@ -795,8 +795,13 @@ fn strongest_path(paths: &[(NodeId, f64)]) -> f64 {
         best = match best {
             None => Some((via, w)),
             Some((bvia, bw)) => {
-                let strengthens = w.abs() > bw.abs() || (w.abs() == bw.abs() && via.to_raw() < bvia.to_raw());
-                if strengthens { Some((via, w)) } else { Some((bvia, bw)) }
+                let strengthens =
+                    w.abs() > bw.abs() || (w.abs() == bw.abs() && via.to_raw() < bvia.to_raw());
+                if strengthens {
+                    Some((via, w))
+                } else {
+                    Some((bvia, bw))
+                }
             }
         };
     }

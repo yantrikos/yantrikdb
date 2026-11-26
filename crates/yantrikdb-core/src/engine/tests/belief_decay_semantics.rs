@@ -1,5 +1,7 @@
 use super::*;
-use crate::belief::{assert_evidence, propagate_evidence, revise_beliefs, BeliefRevisionConfig, Evidence};
+use crate::belief::{
+    assert_evidence, propagate_evidence, revise_beliefs, BeliefRevisionConfig, Evidence,
+};
 use crate::state::{BeliefPayload, CognitiveEdge, CognitiveEdgeKind, EvidenceEntry, Provenance};
 use crate::{CognitiveNode, NodeId, NodeKind, NodePayload};
 use std::collections::HashMap;
@@ -21,7 +23,10 @@ fn belief(seq: u32, trail: Vec<EvidenceEntry>, log_odds: f64) -> CognitiveNode {
 }
 
 fn lo(n: &CognitiveNode) -> f64 {
-    match &n.payload { NodePayload::Belief(b) => b.log_odds, _ => panic!() }
+    match &n.payload {
+        NodePayload::Belief(b) => b.log_odds,
+        _ => panic!(),
+    }
 }
 
 /// Ein zweiter Lauf zur SELBEN Zeit darf nicht erneut denselben Zeitraum verfallen lassen.
@@ -34,7 +39,14 @@ fn lo(n: &CognitiveNode) -> f64 {
 fn repeated_revision_at_same_time_is_idempotent() {
     let cfg = BeliefRevisionConfig::default();
     let now = 1_800_000_000.0_f64;
-    let trail = vec![EvidenceEntry { source: "alt".into(), weight: 2.0, timestamp: now - 60.0 * 86400.0, observation_id: None, history: Vec::new(), paths: Vec::new() }];
+    let trail = vec![EvidenceEntry {
+        source: "alt".into(),
+        weight: 2.0,
+        timestamp: now - 60.0 * 86400.0,
+        observation_id: None,
+        history: Vec::new(),
+        paths: Vec::new(),
+    }];
     let mut a = belief(21, trail.clone(), 2.0);
     let mut b = belief(22, trail, 2.0);
 
@@ -45,9 +57,14 @@ fn repeated_revision_at_same_time_is_idempotent() {
     let twice = lo(&a);
 
     revise_beliefs(&mut [&mut b], now, &cfg);
-    println!("SELBE ZEIT: einmal={once:.4} zweimal={twice:.4} (Referenz {:.4})", lo(&b));
-    assert!((twice - once).abs() < 1e-9,
-            "second revision at the same instant decayed again: {once} -> {twice}");
+    println!(
+        "SELBE ZEIT: einmal={once:.4} zweimal={twice:.4} (Referenz {:.4})",
+        lo(&b)
+    );
+    assert!(
+        (twice - once).abs() < 1e-9,
+        "second revision at the same instant decayed again: {once} -> {twice}"
+    );
 }
 
 /// Der Verfall muss von der verstrichenen Zeit abhängen, nicht von der Zahl der Aufrufe.
@@ -60,7 +77,20 @@ fn repeated_revision_at_same_time_is_idempotent() {
 fn decay_follows_elapsed_time_not_call_count() {
     let cfg = BeliefRevisionConfig::default();
     let t0 = 1_800_000_000.0_f64;
-    let mk = |seq| belief(seq, vec![EvidenceEntry { source: "alt".into(), weight: 2.0, timestamp: t0 - 60.0 * 86400.0, observation_id: None, history: Vec::new(), paths: Vec::new() }], 2.0);
+    let mk = |seq| {
+        belief(
+            seq,
+            vec![EvidenceEntry {
+                source: "alt".into(),
+                weight: 2.0,
+                timestamp: t0 - 60.0 * 86400.0,
+                observation_id: None,
+                history: Vec::new(),
+                paths: Vec::new(),
+            }],
+            2.0,
+        )
+    };
 
     // A: ein Aufruf, 30 Tage nach t0
     let mut a = mk(23);
@@ -74,16 +104,25 @@ fn decay_follows_elapsed_time_not_call_count() {
     }
     let thirty_calls = lo(&b);
 
-    println!("AUFRUFABHÄNGIGKEIT: 1 Aufruf nach 30 d = {one_call:.4} · 30 Aufrufe = {thirty_calls:.4}");
-    assert!((one_call - thirty_calls).abs() < 1e-6,
-            "decay depends on how often revise_beliefs runs: {one_call} vs {thirty_calls}");
+    println!(
+        "AUFRUFABHÄNGIGKEIT: 1 Aufruf nach 30 d = {one_call:.4} · 30 Aufrufe = {thirty_calls:.4}"
+    );
+    assert!(
+        (one_call - thirty_calls).abs() < 1e-6,
+        "decay depends on how often revise_beliefs runs: {one_call} vs {thirty_calls}"
+    );
 }
 
 fn edge(src: NodeId, dst: NodeId) -> CognitiveEdge {
     CognitiveEdge {
-        src, dst, kind: CognitiveEdgeKind::Supports, weight: 1.0,
-        created_at_ms: 1_800_000_000_000, last_confirmed_ms: 1_800_000_000_000,
-        observation_count: 1, confidence: 1.0,
+        src,
+        dst,
+        kind: CognitiveEdgeKind::Supports,
+        weight: 1.0,
+        created_at_ms: 1_800_000_000_000,
+        last_confirmed_ms: 1_800_000_000_000,
+        observation_count: 1,
+        confidence: 1.0,
     }
 }
 
@@ -104,8 +143,12 @@ fn repeated_propagation_of_one_edge() {
     let _ = propagate_evidence(ai, 1.0, &[edge(ai, bi)], &mut twice, &cfg, 0);
     let _ = propagate_evidence(ai, 1.0, &[edge(ai, bi)], &mut twice, &cfg, 0);
 
-    let o = lo(&once[&bi]); let t = lo(&twice[&bi]);
-    println!("PROPAGATION: einmal={o:.4} zweimal={t:.4} doppelt={}", (t - 2.0 * o).abs() < 1e-9);
+    let o = lo(&once[&bi]);
+    let t = lo(&twice[&bi]);
+    println!(
+        "PROPAGATION: einmal={o:.4} zweimal={t:.4} doppelt={}",
+        (t - 2.0 * o).abs() < 1e-9
+    );
     assert!(t >= o);
 }
 
@@ -143,7 +186,10 @@ fn persistence_weights_the_time_decay() {
         "PERSISTENZ-GEWICHT: p=0,2 -> {:.4} (erwartet {expect_low:.4}) · p=0,9 -> {:.4} (erwartet {expect_high:.4})",
         lo(&low), lo(&high)
     );
-    assert!((lo(&low) - expect_low).abs() < 1e-9, "decay must use rate * (1 - persistence)");
+    assert!(
+        (lo(&low) - expect_low).abs() < 1e-9,
+        "decay must use rate * (1 - persistence)"
+    );
     assert!((lo(&high) - expect_high).abs() < 1e-9);
     assert!(lo(&high) > lo(&low), "higher persistence must decay less");
 }
@@ -158,7 +204,10 @@ fn persistence_one_survives_time_but_not_contradiction() {
     let id = node.id;
 
     revise_beliefs(&mut [&mut node], now + 3650.0 * 86400.0, &cfg);
-    assert!((lo(&node) - 2.0).abs() < 1e-12, "persistence 1.0 must not decay with time");
+    assert!(
+        (lo(&node) - 2.0).abs() < 1e-12,
+        "persistence 1.0 must not decay with time"
+    );
 
     let counter = Evidence {
         target_belief: id,
@@ -170,8 +219,14 @@ fn persistence_one_survives_time_but_not_contradiction() {
         observation_id: None,
     };
     let r = assert_evidence(&mut node, &counter, &cfg).unwrap();
-    println!("PERSISTENZ 1,0: nach 10 Jahren {:.4} · nach Widerspruch {:.4}", 2.0, r.posterior_log_odds);
-    assert!(r.posterior_log_odds < 2.0 - 1.0, "contradicting evidence must still revise it");
+    println!(
+        "PERSISTENZ 1,0: nach 10 Jahren {:.4} · nach Widerspruch {:.4}",
+        2.0, r.posterior_log_odds
+    );
+    assert!(
+        r.posterior_log_odds < 2.0 - 1.0,
+        "contradicting evidence must still revise it"
+    );
 }
 
 /// Eine erneute Assertion derselben Beobachtung darf den bereits verfallenen
@@ -217,7 +272,10 @@ fn reassertion_after_decay_does_not_charge_the_same_time_twice() {
     println!(
         "ERNEUTE ASSERTION: verfällt {decayed:.4} · nach Assertion {after_assert:.4} · nach Revision {after_revision:.4}"
     );
-    assert!((after_assert - decayed).abs() < 1e-12, "an unchanged re-assertion must not move the value");
+    assert!(
+        (after_assert - decayed).abs() < 1e-12,
+        "an unchanged re-assertion must not move the value"
+    );
     assert!(
         (after_revision - decayed).abs() < 1e-12,
         "the elapsed time must not be charged twice after a re-assertion"
@@ -239,8 +297,14 @@ fn decay_state_survives_persistence() {
     db.persist_cognitive_node(&node).unwrap();
 
     let mut loaded = db.load_cognitive_node(node.id).unwrap().unwrap();
-    println!("PERSISTENZ-SPALTE: gespeichert 0,9 · geladen {:.4}", loaded.attrs.persistence);
-    assert!((loaded.attrs.persistence - 0.9).abs() < 1e-12, "persistence must round-trip");
+    println!(
+        "PERSISTENZ-SPALTE: gespeichert 0,9 · geladen {:.4}",
+        loaded.attrs.persistence
+    );
+    assert!(
+        (loaded.attrs.persistence - 0.9).abs() < 1e-12,
+        "persistence must round-trip"
+    );
 
     revise_beliefs(&mut [&mut loaded], now, &cfg);
     let first = lo(&loaded);

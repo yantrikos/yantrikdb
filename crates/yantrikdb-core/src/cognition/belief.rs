@@ -285,7 +285,15 @@ pub fn propagate_evidence(
     config: &BeliefRevisionConfig,
     hop: u32,
 ) -> Vec<PropagationEffect> {
-    propagate_evidence_from(None, source_id, effective_weight, edges, downstream_nodes, config, hop)
+    propagate_evidence_from(
+        None,
+        source_id,
+        effective_weight,
+        edges,
+        downstream_nodes,
+        config,
+        hop,
+    )
 }
 
 /// [`propagate_evidence`] with the originating observation named.
@@ -450,8 +458,8 @@ pub fn apply_staleness_decay(
     let base = belief.undecayed_log_odds.unwrap_or(belief.log_odds);
     let old_log_odds = belief.log_odds;
     belief.undecayed_log_odds = Some(base);
-    belief.log_odds = (base * decay_factor)
-        .clamp(-config.max_abs_log_odds, config.max_abs_log_odds);
+    belief.log_odds =
+        (base * decay_factor).clamp(-config.max_abs_log_odds, config.max_abs_log_odds);
 
     // Enforce ceiling after decay too
     enforce_confidence_ceiling(belief, &node.attrs, config);

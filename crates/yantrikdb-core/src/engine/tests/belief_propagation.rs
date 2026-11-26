@@ -49,7 +49,14 @@ fn supports_edge_raises_target() {
     let mut down: HashMap<NodeId, CognitiveNode> = HashMap::new();
     down.insert(b.id, b);
 
-    let effects = propagate_evidence(a.id, 1.0, &[e], &mut down, &BeliefRevisionConfig::default(), 0);
+    let effects = propagate_evidence(
+        a.id,
+        1.0,
+        &[e],
+        &mut down,
+        &BeliefRevisionConfig::default(),
+        0,
+    );
     assert!(!effects.is_empty(), "supports edge must produce an effect");
     assert!(lo(&down[&NodeId::new(NodeKind::Belief, 12)]) > 0.0);
 }
@@ -63,7 +70,14 @@ fn contradicts_edge_lowers_target() {
     let mut down: HashMap<NodeId, CognitiveNode> = HashMap::new();
     down.insert(b.id, b);
 
-    let effects = propagate_evidence(a.id, 1.0, &[e], &mut down, &BeliefRevisionConfig::default(), 0);
+    let effects = propagate_evidence(
+        a.id,
+        1.0,
+        &[e],
+        &mut down,
+        &BeliefRevisionConfig::default(),
+        0,
+    );
     assert!(!effects.is_empty());
     assert!(lo(&down[&NodeId::new(NodeKind::Belief, 14)]) < 0.0);
 }
@@ -89,7 +103,10 @@ fn support_cycle_stays_bounded() {
         let _ = propagate_evidence(src, 1.0, &edges, &mut down, &cfg, hop);
     }
     let max_seen = lo(&down[&ai]).abs().max(lo(&down[&bi]).abs());
-    println!("ZYKLUS max_abs_log_odds nach 6 Hops = {max_seen:.4} (Deckel {:.1})", cfg.max_abs_log_odds);
+    println!(
+        "ZYKLUS max_abs_log_odds nach 6 Hops = {max_seen:.4} (Deckel {:.1})",
+        cfg.max_abs_log_odds
+    );
     assert!(
         max_seen <= cfg.max_abs_log_odds + 1e-9,
         "cycle amplification exceeded the configured ceiling: {max_seen}"
@@ -106,7 +123,14 @@ fn revise_beliefs_decays_stale_evidence() {
     let mut b = belief(
         17,
         "Nur alte Belege.",
-        vec![EvidenceEntry { source: "alt".into(), weight: 2.0, timestamp: old, observation_id: None, history: Vec::new(), paths: Vec::new() }],
+        vec![EvidenceEntry {
+            source: "alt".into(),
+            weight: 2.0,
+            timestamp: old,
+            observation_id: None,
+            history: Vec::new(),
+            paths: Vec::new(),
+        }],
     );
     if let NodePayload::Belief(p) = &mut b.payload {
         p.log_odds = 2.0;
@@ -114,8 +138,10 @@ fn revise_beliefs_decays_stale_evidence() {
     let before = lo(&b);
     let summary = revise_beliefs(&mut [&mut b], now, &cfg);
     let after = lo(&b);
-    println!("REVISION vorher={before:.4} nachher={after:.4} decays={} revised={}",
-             summary.staleness_decays, summary.beliefs_revised);
+    println!(
+        "REVISION vorher={before:.4} nachher={after:.4} decays={} revised={}",
+        summary.staleness_decays, summary.beliefs_revised
+    );
     assert!(after < before, "stale belief must lose confidence");
     assert!(summary.staleness_decays >= 1);
 }

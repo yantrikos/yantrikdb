@@ -19,7 +19,10 @@ const PROPOSITION: &str =
      bevor Nachrichten fliessen.";
 
 fn now() -> f64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_f64()
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs_f64()
 }
 
 fn sigmoid(l: f64) -> f64 {
@@ -27,7 +30,9 @@ fn sigmoid(l: f64) -> f64 {
 }
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: belief_lifecycle <db> create|reopen");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: belief_lifecycle <db> create|reopen");
     let mode = std::env::args().nth(2).unwrap_or_else(|| "create".into());
 
     let db = YantrikDB::new(&path, 1024).expect("open scratch copy");
@@ -35,16 +40,33 @@ fn main() {
 
     match mode.as_str() {
         "reopen" => {
-            let node = db.load_cognitive_node(id).expect("load").expect("node present");
+            let node = db
+                .load_cognitive_node(id)
+                .expect("load")
+                .expect("node present");
             let p = match &node.payload {
                 NodePayload::Belief(b) => b,
                 _ => panic!("not a belief"),
             };
-            println!("REOPEN present=true proposition={:?}", &p.proposition[..40.min(p.proposition.len())]);
-            println!("REOPEN log_odds={:.4} p_true={:.4} evidence_trail={}", p.log_odds, sigmoid(p.log_odds), p.evidence_trail.len());
-            println!("REOPEN count_beliefs={:?}", db.count_cognitive_nodes(Some(NodeKind::Belief)).unwrap());
+            println!(
+                "REOPEN present=true proposition={:?}",
+                &p.proposition[..40.min(p.proposition.len())]
+            );
+            println!(
+                "REOPEN log_odds={:.4} p_true={:.4} evidence_trail={}",
+                p.log_odds,
+                sigmoid(p.log_odds),
+                p.evidence_trail.len()
+            );
+            println!(
+                "REOPEN count_beliefs={:?}",
+                db.count_cognitive_nodes(Some(NodeKind::Belief)).unwrap()
+            );
             if let Ok(Some(exp)) = db.explain_belief(id) {
-                println!("REOPEN explain={:?}", format!("{exp:?}").chars().take(220).collect::<String>());
+                println!(
+                    "REOPEN explain={:?}",
+                    format!("{exp:?}").chars().take(220).collect::<String>()
+                );
             } else {
                 println!("REOPEN explain=<none>");
             }
@@ -66,9 +88,11 @@ fn main() {
             println!("CREATE persisted log_odds=0.0000 p_true=0.5000");
 
             let cfg = BeliefRevisionConfig::default();
-            for (weight, source) in [(1.4_f64, "20 Topic-Cluster-Mitglieder, 25 Tage"),
-                                     (1.1, "zweiter Lauf, unveraenderte Evidenz"),
-                                     (-1.3, "widersprechender Record: A2A abgeschaltet")] {
+            for (weight, source) in [
+                (1.4_f64, "20 Topic-Cluster-Mitglieder, 25 Tage"),
+                (1.1, "zweiter Lauf, unveraenderte Evidenz"),
+                (-1.3, "widersprechender Record: A2A abgeschaltet"),
+            ] {
                 let ev = Evidence {
                     target_belief: id,
                     weight,
