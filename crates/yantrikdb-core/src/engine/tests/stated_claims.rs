@@ -326,9 +326,12 @@ fn unknown_modality_is_rejected() {
 
 #[test]
 fn span_is_stored_as_the_local_part_of_the_observation() {
-    // One memory can state the same proposition twice. The span is what keeps
-    // those two statements apart; without it they collapse into one
-    // observation and the second is lost.
+    // The span records WHERE in the text a statement sits, so a reader can
+    // locate it. It does NOT let two statements coexist: the stored identity
+    // key has no span, so a second claim with a different span is refused
+    // rather than merged (see `two_statements_differing_only_by_span_...`).
+    // REVIEW5 F1: the earlier comment here claimed the span kept the two
+    // statements apart, which the code never did.
     let (db, rid) =
         db_with("Hugo leitet das UNIT Team. Spaeter sagt Vela, Hugo leitet das UNIT Team.");
     let mut c = claim("Hugo", "leads", "UNIT Team");
@@ -566,4 +569,93 @@ fn an_alias_folded_endpoint_is_detected_as_the_same_identity() {
         )
         .unwrap();
     assert_eq!(alias_rows, 0, "the claim row stores resolved endpoints");
+}
+
+#[test]
+fn two_statements_differing_only_by_span_do_not_silently_merge() {
+    // REVIEW5 F1. The comment on `span_is_stored_as_the_local_part_of_the_
+    // observation` says the span keeps two statements in one memory apart. It
+    // does not: the identity key has no span, so they cannot coexist. Until the
+    // identity migration (§31.1) lands, the honest behaviour is to REFUSE the
+    // second observation instead of accepting it as a "refinement" and
+    // replacing the first one's span.
+    let (db, rid) =
+        db_with("Hugo leitet das UNIT Team. Spaeter sagt Vela, Hugo leitet das UNIT Team.");
+    let mut first = claim("Hugo", "leads", "UNIT Team");
+    first.span_start = Some(0);
+    first.span_end = Some(24);
+    let r1 = db.attach_claims(&rid, &[first]).unwrap();
+    assert_eq!(r1.accepted.len(), 1, "{r1:?}");
+
+    let mut second = claim("Hugo", "leads", "UNIT Team");
+    second.span_start = Some(33);
+    second.span_end = Some(57);
+    let r2 = db.attach_claims(&rid, &[second]).unwrap();
+
+    assert_eq!(r2.accepted.len(), 0, "{r2:?}");
+    assert_eq!(r2.rejected.len(), 1, "{r2:?}");
+    assert!(
+        r2.rejected[0].reason.contains("identity collision"),
+        "a second observation must be refused, not merged: {:?}",
+        r2.rejected[0].reason
+    );
+    let (s, e): (Option<i32>, Option<i32>) = db
+        .conn()
+        .query_row(
+            "SELECT span_start, span_end FROM claims WHERE src = 'Hugo' AND dst = 'UNIT Team'",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap();
+    assert_eq!((s, e), (Some(0), Some(24)), "the first span must survive");
+}
+
+#[test]
+fn a_stored_null_window_collides_with_an_inherited_one() {
+    // REVIEW5 F4.1. A row written without a window and a statement whose
+    // record carries an event time describe the same statement to a reader,
+    // but `None != Some(t)`, so the second is refused. That is fail-closed on
+    // purpose — the identity has no notion of "unknown vs inherited" yet. This
+    // test pins the behaviour so a future change to that notion is visible.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let plain = record(&db, "Hugo leitet das UNIT Team.");
+    let timed = record_at(&db, "Hugo leitet das UNIT Team.", 1_704_067_200.0);
+
+    db.attach_claims(&plain, &[claim("Hugo", "leads", "UNIT Team")])
+        .unwrap();
+    let report = db
+        .attach_claims(&timed, &[claim("Hugo", "leads", "UNIT Team")])
+        .unwrap();
+
+    assert_eq!(report.accepted.len(), 0, "{report:?}");
+    assert_eq!(report.rejected.len(), 1, "{report:?}");
+    assert!(
+        report.rejected[0].reason.contains("identity collision"),
+        "unknown and inherited are two states: {:?}",
+        report.rejected[0].reason
+    );
+}
+
+#[test]
+fn two_spans_in_one_batch_reach_the_guard() {
+    // Same finding, batch path: the second statement must not be discarded as
+    // an in-batch duplicate before the guard can refuse it.
+    let (db, rid) =
+        db_with("Hugo leitet das UNIT Team. Spaeter sagt Vela, Hugo leitet das UNIT Team.");
+    let mut first = claim("Hugo", "leads", "UNIT Team");
+    first.span_start = Some(0);
+    first.span_end = Some(24);
+    let mut second = claim("Hugo", "leads", "UNIT Team");
+    second.span_start = Some(33);
+    second.span_end = Some(57);
+
+    let report = db.attach_claims(&rid, &[first, second]).unwrap();
+
+    assert_eq!(report.accepted.len(), 1, "{report:?}");
+    assert_eq!(report.rejected.len(), 1, "{report:?}");
+    assert!(
+        report.rejected[0].reason.contains("identity collision"),
+        "the second span must reach the guard: {:?}",
+        report.rejected[0].reason
+    );
 }

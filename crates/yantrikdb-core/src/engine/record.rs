@@ -2002,7 +2002,12 @@ impl YantrikDB {
                     span_end,
                     1.0,
                     crate::engine::claims_lane::GROUNDING_EXTRACTOR_BOUND,
-                    crate::engine::graph_ops::QualifierCollision::Overwrite,
+                    // Review 5 (F2): this path writes `None`/`None` for the
+                    // validity window under the SAME extractor (`heuristic_v1`)
+                    // that `stats.rs` uses WITH a window. Under `Overwrite` the
+                    // UPSERT would null a real window on contact. Refuse makes
+                    // that visible in the log instead of silent in the row.
+                    crate::engine::graph_ops::QualifierCollision::Refuse,
                 ) {
                     tracing::warn!(
                         rid = %rid,
