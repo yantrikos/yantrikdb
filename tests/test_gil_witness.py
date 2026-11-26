@@ -206,6 +206,30 @@ def test_recall_with_the_engine_embedder_releases_the_gil(tmp_path):
 
 
 @needs_a_second_cpu
+def test_record_with_an_embedding_releases_the_gil(db):
+    emb = Emb().encode("witness record")
+    assert _seen_during(lambda: db.record("witness record", embedding=emb)) >= 1
+
+
+@needs_a_second_cpu
+def test_record_with_a_python_embedder_releases_the_gil(db):
+    # encode() runs with the GIL held (it is Python); the write after it must not.
+    assert _seen_during(lambda: db.record("witness record about topic 3")) >= 1
+
+
+@needs_a_second_cpu
+def test_record_with_the_engine_embedder_releases_the_gil(tmp_path):
+    # 64 dims: the bundled engine-native embedder is attached, no Python one.
+    store = YantrikDB(os.path.join(str(tmp_path), "native.db"), 64)
+    try:
+        if not store.has_embedder():
+            pytest.skip("this build has no bundled engine embedder")
+        assert _seen_during(lambda: store.record("native witness record")) >= 1
+    finally:
+        store.close()
+
+
+@needs_a_second_cpu
 def test_stats_releases_the_gil(db):
     assert _seen_during(lambda: db.stats()) >= 1
 
@@ -276,6 +300,59 @@ def test_close_while_recall_is_inside_encode(db):
     # had come first. Before, the recall held the engine through encode():
     # close() returned False and the recall finished on that reference.
     emb, t, out = _recall_in_a_thread_blocked_in_encode(db)
+    try:
+        assert db.close() is True
+    finally:
+        emb.release.set()
+        t.join(30)
+    assert not t.is_alive()
+    assert "closed" in out.get("error", ""), out
+
+
+def _record_in_a_thread_blocked_in_encode(db):
+    emb = BlockingEmb()
+    db.set_embedder(emb, allow_unverified_embedder=True)
+    emb.armed = True
+    out = {}
+
+    def worker():
+        try:
+            out["rid"] = db.record("record blocked in encode about topic 3")
+        except Exception as e:  # noqa: BLE001 - every failure is the finding
+            out["error"] = repr(e)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    assert emb.entered.wait(10), "record() never reached the embedder"
+    return emb, t, out
+
+
+def test_set_embedder_while_record_is_inside_encode(db):
+    # Before #297, record() held the wrapper's borrow for the whole call,
+    # encode() included, so this set_embedder() was refused with
+    # "Already borrowed" for as long as encode() took. With the snapshot,
+    # record() holds nothing of the store
+    # across encode(); the swap lands, the plan is remade with the new
+    # embedder, and the write completes.
+    emb, t, out = _record_in_a_thread_blocked_in_encode(db)
+    try:
+        db.set_embedder(Emb(), allow_unverified_embedder=True)
+    finally:
+        emb.release.set()
+        t.join(30)
+    assert not t.is_alive()
+    assert "error" not in out, out.get("error")
+    assert out["rid"]
+
+
+def test_close_while_record_is_inside_encode(db):
+    # record() runs the Python embedder's encode() before it takes the
+    # engine (the planned snapshot), so a close() landing then is the
+    # exclusive close (True), and the record reports the store closed, as
+    # if close() had come first. Before, record() held the wrapper's
+    # borrow across encode(), so close() was refused with
+    # "Already borrowed" and the record finished.
+    emb, t, out = _record_in_a_thread_blocked_in_encode(db)
     try:
         assert db.close() is True
     finally:
@@ -357,6 +434,7 @@ def _swallow(fn, *args, **kwargs):
 RELEASES = {
     # detached before this sweep (their own tests are above)
     "recall": None,
+    "record": None,
     "think": None,
     "stats": None,
     "scan_conflicts": None,
@@ -607,7 +685,6 @@ HOLDS = {
     ),
     # in flight in their own PRs
     "correct": "#296",
-    "record": "#297",
     # pure in-memory reads: an atomic, a field or the mounted-pack list,
     # whose lock is never held across I/O. Detaching would add a GIL handoff
     # (milliseconds when another thread is CPU-bound) to a call that costs
@@ -769,13 +846,12 @@ def test_a_closed_store_is_reported_before_a_bad_argument(tmp_path, name):
 
 # ── HOLDS entries that open PRs will change ──────────────────────────────
 #
-# correct and record are being detached in their own PRs. Until
-# those merge they must still hold the GIL; once one does, this fails, and the
-# method moves from HOLDS to RELEASES with a witness entry.
+# correct is being detached in its own PR. Until it merges it must still
+# hold the GIL; once it does, this fails, and the method moves from HOLDS
+# to RELEASES with a witness entry.
 
 OWNED_BY_OPEN_PRS = {
     "correct": ("#296", lambda db, c: db.correct(c["rid"], "witness", new_importance=0.7)),
-    "record": ("#297", lambda db, c: db.record("witness record")),
 }
 
 

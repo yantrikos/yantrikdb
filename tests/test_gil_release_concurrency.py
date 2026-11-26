@@ -584,9 +584,9 @@ def test_close_beside_recalls_with_a_python_embedder_is_not_refused(tmp_path):
     # 0.23.6 recall() kept its borrow through encode(), and a close() that
     # landed then was refused with "Already borrowed".
     #
-    # record() still holds its borrow across encode() until #297 lands, and
-    # a tight record() loop leaves no gap with the GIL free, so close()
-    # beside one can still be refused; that is #297's to fix.
+    # record() used to hold its borrow across encode() as well, so a
+    # tight record() loop could still get a close() refused; #297 put
+    # record() on the same snapshot shape, so that refusal is gone too.
     for attempt in range(5):
         db = YantrikDB(os.path.join(str(tmp_path), f"yield{attempt}.db"), DIM)
         db.set_embedder(_YieldingEmb(), allow_unverified_embedder=True)
@@ -1283,3 +1283,78 @@ def test_a_relayed_call_back_from_a_draft_encode_does_not_hold_up_a_swap(tmp_pat
     finally:
         helper.shutdown()
         db.close()
+
+
+def test_set_embedder_while_record_runs_in_another_thread(tmp_path):
+    # A small store of its own rather than the `db` fixture: the fixture's
+    # 1,500 records cost about 8.5 s of setup, and this test contends over
+    # records its own worker writes, so a handful of seeds is enough.
+    db = YantrikDB(os.path.join(str(tmp_path), "racing.db"), DIM)
+    db.set_embedder(Emb(), allow_unverified_embedder=True)
+    for i in range(5):
+        db.record(f"seed record {i}")
+    stop = threading.Event()
+    record_attempts = []
+    record_calls = []
+    record_errors = []
+
+    def worker():
+        n = 0
+        while not stop.is_set():
+            n += 1
+            record_attempts.append(1)
+            try:
+                # Explicit embedding: the pure engine-write path. Retry
+                # on ingest backpressure, as a real caller must — it is
+                # queue flow control, not a borrow failure.
+                db.record(f"record under load {n}", embedding=Emb().encode(f"load {n}"))
+                record_calls.append(1)
+            except Exception as e:  # noqa: BLE001 - every failure is the finding
+                if "Backpressure" in type(e).__name__ or "queue full" in repr(e):
+                    time.sleep(0.05)
+                    continue
+                record_errors.append(repr(e))
+
+    t = threading.Thread(target=worker)
+    t.start()
+    errors = []
+    calls = 0
+    deadline = time.time() + 2.0
+    try:
+        while time.time() < deadline:
+            try:
+                db.set_embedder(Emb(), allow_unverified_embedder=True)
+            except Exception as e:  # noqa: BLE001
+                errors.append(repr(e))
+            calls += 1
+    finally:
+        stop.set()
+        t.join()
+
+    # The test only means something if both threads really ran concurrently.
+    # The precondition counts attempts, as the sibling tests do: since #295
+    # set_embedder() probes with no borrow and takes the mutable borrow only
+    # to store one field, and record()'s snapshot borrow retries a refusal
+    # for 10 ms, which covers that store, so a refusal here should now be
+    # rare; if one does land it is in record_errors before the success
+    # append, so a success-only count measures the refusal rate on a slow
+    # runner, not whether the worker ran. Successes stay counted separately
+    # and both numbers ride in the message.
+    assert len(record_attempts) > 5, (
+        "the record worker barely ran; nothing was contended "
+        f"(attempts={len(record_attempts)}, successes={len(record_calls)})"
+    )
+    assert calls > 5
+    assert not _borrow_errors(errors), (
+        f"{len(errors)}/{calls} set_embedder() calls failed while "
+        f"record() was detached: {errors[:1]}"
+    )
+    # Same pre-existing contract as recall(): set_embedder() takes its
+    # mutable borrow only to store the new embedder (the encode() probe
+    # runs borrow-free since #295), so a record() snapshot can still
+    # collide with that brief store window and be refused with "Already
+    # mutably borrowed". That must stay an ordinary RuntimeError, never
+    # a panic.
+    unexpected = [e for e in record_errors if "Already mutably borrowed" not in e]
+    assert not unexpected, unexpected[:2]
+    assert not any("PanicException" in e for e in record_errors)
