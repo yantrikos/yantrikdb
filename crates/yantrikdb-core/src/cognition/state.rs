@@ -604,6 +604,15 @@ pub struct BeliefPayload {
     /// this field existed.
     #[serde(default)]
     pub undecayed_log_odds: Option<f64>,
+    /// When the stored (`decayed`) value was last recomputed from the anchor.
+    ///
+    /// Without it the decay was only idempotent while `now` did not move: the
+    /// base is the evidence sum, so a second pass later would charge the same
+    /// elapsed time again. With it, decay measures time since the last
+    /// recomputation, and `log_odds` is always a pure function of
+    /// (anchor, elapsed, config).
+    #[serde(default)]
+    pub decayed_at: f64,
 }
 
 impl BeliefPayload {
@@ -613,9 +622,13 @@ impl BeliefPayload {
     /// a later decay pass never mistakes an already-decayed value for an
     /// undecayed one — which would charge the same elapsed time twice.
     pub fn shift_log_odds(&mut self, delta: f64) {
-        let base = self.undecayed_log_odds.unwrap_or(self.log_odds);
+        // The anchor follows the VALUE, not the previous anchor. Anything else
+        // lets already-decayed evidence come back: after a year at 0.135 with
+        // an anchor of 2.7, adding +0.45 gave 0.585 and the next decay rebuilt
+        // 3.15 from the old anchor (3.087). With the value as the base, the
+        // aged evidence stays aged.
         self.log_odds += delta;
-        self.undecayed_log_odds = Some(base + delta);
+        self.undecayed_log_odds = Some(self.log_odds);
     }
 
     /// Set `log_odds` outright (a direct statement) and reset the base to it.
@@ -660,15 +673,28 @@ impl BeliefPayload {
                 .iter_mut()
                 .find(|e| e.observation_id.as_deref() == Some(oid))
             {
-                entry.history.push((entry.weight, entry.timestamp));
                 let delta = effective_weight - entry.weight;
+                let previous = (entry.weight, entry.timestamp);
                 entry.weight = effective_weight;
                 entry.source = source.to_string();
-                self.shift_log_odds(delta);
+                // An unchanged re-assessment is not new evidence: moving the
+                // anchor (or restarting the staleness clock) for it would let
+                // the same elapsed time be charged again, and pushing a
+                // history row per replay grows without bound (1,000 replays
+                // produced one entry with a history of 999).
+                if delta != 0.0 {
+                    entry.history.push(previous);
+                    self.shift_log_odds(delta);
+                    // The anchor is valid as of this observation. The decay
+                    // measures from here, so a daily pass and one pass after
+                    // the same span agree.
+                    self.decayed_at = timestamp;
+                }
                 return;
             }
         }
         self.shift_log_odds(effective_weight);
+        self.decayed_at = timestamp;
         self.evidence_trail.push(EvidenceEntry {
             source: source.to_string(),
             weight: effective_weight,
@@ -731,6 +757,7 @@ impl BeliefPayload {
                 return;
             }
             self.shift_log_odds(weight);
+            self.decayed_at = timestamp;
             self.evidence_trail.push(EvidenceEntry {
                 source: source.to_string(),
                 weight,
@@ -765,6 +792,7 @@ impl BeliefPayload {
         entry.weight = aggregate;
         entry.source = source.to_string();
         self.shift_log_odds(delta);
+        self.decayed_at = timestamp;
     }
 
     /// How much evidence supports this belief (sum of positive weights).
@@ -1866,6 +1894,7 @@ mod tests {
             evidence_trail: vec![],
             user_confirmed: false,
             undecayed_log_odds: None,
+            decayed_at: 0.0,
         };
 
         assert!((belief.probability() - 0.5).abs() < 1e-10);
@@ -2052,6 +2081,7 @@ mod tests {
                 evidence_trail: vec![],
                 user_confirmed: false,
                 undecayed_log_odds: None,
+                decayed_at: 0.0,
             }),
         );
 
@@ -2194,6 +2224,7 @@ mod tests {
                 evidence_trail: vec![],
                 user_confirmed: false,
                 undecayed_log_odds: None,
+                decayed_at: 0.0,
             }),
             NodePayload::Goal(GoalPayload {
                 description: "test".into(),
@@ -2228,6 +2259,7 @@ mod tests {
             }],
             user_confirmed: true,
             undecayed_log_odds: None,
+            decayed_at: 0.0,
         });
 
         let json = serialize_payload(&original);

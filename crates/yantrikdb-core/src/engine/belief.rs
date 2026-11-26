@@ -324,6 +324,7 @@ mod tests {
                 evidence_trail: vec![],
                 user_confirmed: false,
                 undecayed_log_odds: None,
+                decayed_at: 0.0,
             }),
         );
         node.attrs.confidence = crate::state::sigmoid(log_odds);

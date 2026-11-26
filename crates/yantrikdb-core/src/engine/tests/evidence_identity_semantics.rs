@@ -15,6 +15,7 @@ fn belief(seq: u32, prior: f64) -> CognitiveNode {
             evidence_trail: Vec::new(),
             user_confirmed: false,
             undecayed_log_odds: None,
+            decayed_at: 0.0,
         }),
     )
 }

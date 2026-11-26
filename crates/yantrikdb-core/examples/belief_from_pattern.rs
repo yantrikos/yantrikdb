@@ -55,6 +55,7 @@ fn main() {
             evidence_trail: Vec::new(),
             user_confirmed: false,
             undecayed_log_odds: None,
+            decayed_at: 0.0,
         }),
     );
     db.persist_cognitive_node(&node).expect("persist");

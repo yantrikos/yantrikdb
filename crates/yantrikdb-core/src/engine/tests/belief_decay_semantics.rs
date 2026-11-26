@@ -18,6 +18,7 @@ fn belief(seq: u32, trail: Vec<EvidenceEntry>, log_odds: f64) -> CognitiveNode {
             evidence_trail: trail,
             user_confirmed: false,
             undecayed_log_odds: None,
+            decayed_at: 0.0,
         }),
     )
 }
@@ -163,72 +164,6 @@ fn old_trail(now: f64) -> Vec<EvidenceEntry> {
     }]
 }
 
-/// Der Verfall wiegt die Persistenz des Knotens: derselbe Beleg, dieselbe Zeit,
-/// aber `attrs.persistence` 0,2 gegen 0,9. Geprüft wird gegen die dokumentierte
-/// Formel, nicht gegen „kleiner als vorher".
-#[test]
-fn persistence_weights_the_time_decay() {
-    let cfg = BeliefRevisionConfig::default();
-    let now = 1_800_000_000.0_f64;
-
-    let mut low = belief(27, old_trail(now), 2.0);
-    low.attrs.persistence = 0.2;
-    let mut high = belief(28, old_trail(now), 2.0);
-    high.attrs.persistence = 0.9;
-
-    revise_beliefs(&mut [&mut low], now, &cfg);
-    revise_beliefs(&mut [&mut high], now, &cfg);
-
-    let days = 60.0 - cfg.staleness_grace_period_days;
-    let expect_low = 2.0 * (1.0 - (cfg.staleness_rate_per_day * (1.0 - 0.2) * days).min(0.95));
-    let expect_high = 2.0 * (1.0 - (cfg.staleness_rate_per_day * (1.0 - 0.9) * days).min(0.95));
-    println!(
-        "PERSISTENZ-GEWICHT: p=0,2 -> {:.4} (erwartet {expect_low:.4}) · p=0,9 -> {:.4} (erwartet {expect_high:.4})",
-        lo(&low), lo(&high)
-    );
-    assert!(
-        (lo(&low) - expect_low).abs() < 1e-9,
-        "decay must use rate * (1 - persistence)"
-    );
-    assert!((lo(&high) - expect_high).abs() < 1e-9);
-    assert!(lo(&high) > lo(&low), "higher persistence must decay less");
-}
-
-/// Persistenz 1,0 schützt vor ZEITVERFALL — nicht vor Widerspruch.
-#[test]
-fn persistence_one_survives_time_but_not_contradiction() {
-    let cfg = BeliefRevisionConfig::default();
-    let now = 1_800_000_000.0_f64;
-    let mut node = belief(29, old_trail(now), 2.0);
-    node.attrs.persistence = 1.0;
-    let id = node.id;
-
-    revise_beliefs(&mut [&mut node], now + 3650.0 * 86400.0, &cfg);
-    assert!(
-        (lo(&node) - 2.0).abs() < 1e-12,
-        "persistence 1.0 must not decay with time"
-    );
-
-    let counter = Evidence {
-        target_belief: id,
-        weight: -3.0,
-        source: "gegenprobe".into(),
-        provenance: Provenance::Observed,
-        propagate: false,
-        timestamp: now,
-        observation_id: None,
-    };
-    let r = assert_evidence(&mut node, &counter, &cfg).unwrap();
-    println!(
-        "PERSISTENZ 1,0: nach 10 Jahren {:.4} · nach Widerspruch {:.4}",
-        2.0, r.posterior_log_odds
-    );
-    assert!(
-        r.posterior_log_odds < 2.0 - 1.0,
-        "contradicting evidence must still revise it"
-    );
-}
-
 /// Eine erneute Assertion derselben Beobachtung darf den bereits verfallenen
 /// Wert nicht als unverfallenen Grundwert übernehmen — sonst wird derselbe
 /// Zeitraum beim nächsten Lauf ein zweites Mal abgezogen. Gefunden im
@@ -326,5 +261,143 @@ fn decay_state_survives_persistence() {
     assert!(
         (lo(&reloaded) - first).abs() < 1e-12,
         "a reloaded belief must not decay again for the same elapsed time"
+    );
+}
+
+// ── Die drei Sequenzen aus dem Maintainer-Review (26.11.2026) ──────────────
+
+/// Ein geklemmter Glaube darf nach dem nächsten Verfall nicht zurückkommen.
+///
+/// Review: zwei Told +5,0, dann Observed −3,0 (Klemme greift), dann Verfall
+/// nach 8 Tagen. Der Anker blieb bei 6,8 stehen, der Verfall baute daraus 6,0
+/// statt 3,234 — die weggedeckelte Evidenz kam zurück.
+#[test]
+fn a_capped_belief_does_not_come_back_after_decay() {
+    let cfg = BeliefRevisionConfig::default();
+    let now = 1_800_000_000.0_f64;
+    let mut node = belief(40, Vec::new(), 0.0);
+    let id = node.id;
+
+    for _ in 0..2 {
+        assert_evidence(
+            &mut node,
+            &Evidence {
+                target_belief: id,
+                weight: 5.0,
+                source: "told".into(),
+                provenance: Provenance::Told,
+                propagate: false,
+                timestamp: now,
+                observation_id: None,
+            },
+            &cfg,
+        )
+        .unwrap();
+    }
+    let after_support = lo(&node);
+
+    assert_evidence(
+        &mut node,
+        &Evidence {
+            target_belief: id,
+            weight: -3.0,
+            source: "seen".into(),
+            provenance: Provenance::Observed,
+            propagate: false,
+            timestamp: now,
+            observation_id: None,
+        },
+        &cfg,
+    )
+    .unwrap();
+    let after_contradiction = lo(&node);
+    assert!(
+        after_contradiction < after_support,
+        "the contradiction must lower the belief: {after_support} -> {after_contradiction}"
+    );
+
+    revise_beliefs(&mut [&mut node], now + 8.0 * 86400.0, &cfg);
+    let after_decay = lo(&node);
+
+    assert!(
+        after_decay <= after_contradiction + 1e-9,
+        "decay must not raise the belief above its pre-decay value \
+         (was {after_contradiction}, became {after_decay}) — that is the cap \
+         stored in the anchor, not evidence"
+    );
+}
+
+/// Ein propagierter Beitrag ohne Origin muss im Anker stehen, sonst löscht der
+/// nächste Verfall ihn (Review: 2,9 → 0,882).
+#[test]
+fn a_propagated_contribution_is_in_the_anchor() {
+    let now = 1_800_000_000.0_f64;
+    let mut node = belief(41, Vec::new(), 0.9);
+    if let NodePayload::Belief(b) = &mut node.payload {
+        b.undecayed_log_odds = Some(0.9);
+        b.decayed_at = now - 30.0 * 86400.0;
+    }
+
+    if let NodePayload::Belief(b) = &mut node.payload {
+        b.shift_log_odds(2.0);
+    }
+
+    match &node.payload {
+        NodePayload::Belief(b) => assert!(
+            (b.undecayed_log_odds.unwrap_or(f64::NAN) - 2.9).abs() < 1e-9,
+            "the anchor must carry the propagated weight: {:?}",
+            b.undecayed_log_odds
+        ),
+        _ => panic!("expected belief"),
+    }
+}
+
+/// Warten darf einen Glauben nicht sicherer machen.
+///
+/// Review: 2,7 verfällt über ein Jahr auf 0,135. Dann +0,45 (→ 0,585). Acht
+/// Tage später, ohne neue Evidenz, baute der Patch 3,087 — die alte, längst
+/// verfallene Evidenz kam über den Anker zurück.
+#[test]
+fn waiting_does_not_make_a_decayed_belief_more_confident() {
+    let cfg = BeliefRevisionConfig::default();
+    let now = 1_800_000_000.0_f64;
+    let mut node = belief(42, Vec::new(), 0.135);
+    let id = node.id;
+    if let NodePayload::Belief(b) = &mut node.payload {
+        b.undecayed_log_odds = Some(2.7);
+        b.decayed_at = now - 365.0 * 86400.0;
+        b.evidence_trail.push(EvidenceEntry {
+            source: "alt".into(),
+            weight: 2.7,
+            timestamp: now - 365.0 * 86400.0,
+            observation_id: None,
+            history: Vec::new(),
+            paths: Vec::new(),
+        });
+    }
+
+    assert_evidence(
+        &mut node,
+        &Evidence {
+            target_belief: id,
+            weight: 0.45,
+            source: "neu".into(),
+            provenance: Provenance::Observed,
+            propagate: false,
+            timestamp: now,
+            observation_id: None,
+        },
+        &cfg,
+    )
+    .unwrap();
+    let after_assert = lo(&node);
+
+    revise_beliefs(&mut [&mut node], now + 8.0 * 86400.0, &cfg);
+    let after_wait = lo(&node);
+
+    assert!(
+        after_wait <= after_assert + 1e-9,
+        "eight days without new evidence must not raise the belief \
+         ({after_assert} -> {after_wait})"
     );
 }

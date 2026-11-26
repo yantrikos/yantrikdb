@@ -230,10 +230,15 @@ pub fn assert_evidence(
     // Enforce confidence ceiling for volatile beliefs
     enforce_confidence_ceiling(belief, &node.attrs, config);
 
-    // Enforce absolute log-odds cap
-    belief.log_odds = belief
+    // Enforce absolute log-odds cap. The cap limits the BELIEF, so the anchor
+    // moves with it: leaving 6.8 in the anchor while storing 3.3 let the next
+    // decay rebuild 6.0 from evidence that had already been capped away.
+    let capped = belief
         .log_odds
         .clamp(-config.max_abs_log_odds, config.max_abs_log_odds);
+    if capped != belief.log_odds {
+        belief.set_log_odds(capped);
+    }
 
     let posterior_log_odds = belief.log_odds;
     let posterior_probability = crate::state::sigmoid(posterior_log_odds);
@@ -354,7 +359,10 @@ pub fn propagate_evidence_from(
                 if propagated_weight.abs() < config.min_propagation_weight {
                     continue;
                 }
-                belief.log_odds += propagated_weight;
+                // shift, not `+=`: without an origin there is no trail entry,
+                // so the anchor has to move here or the next decay erases the
+                // contribution (measured: 2.9 -> 0.882).
+                belief.shift_log_odds(propagated_weight);
             }
             Some(o) => {
                 // A path that carries nothing either way is a withdrawal. It
@@ -381,9 +389,12 @@ pub fn propagate_evidence_from(
                 );
             }
         }
-        belief.log_odds = belief
+        let capped = belief
             .log_odds
             .clamp(-config.max_abs_log_odds, config.max_abs_log_odds);
+        if capped != belief.log_odds {
+            belief.set_log_odds(capped);
+        }
 
         downstream.attrs.confidence = crate::state::sigmoid(belief.log_odds);
 
@@ -419,8 +430,6 @@ pub fn apply_staleness_decay(
     now_secs: f64,
     config: &BeliefRevisionConfig,
 ) -> f64 {
-    let persistence = node.attrs.persistence.clamp(0.0, 1.0);
-
     let belief = match &mut node.payload {
         NodePayload::Belief(b) => b,
         _ => return 0.0,
@@ -437,29 +446,50 @@ pub fn apply_staleness_decay(
         return 0.0; // No evidence at all — nothing to decay
     }
 
-    let days_since_evidence = (now_secs - last_evidence_time) / 86400.0;
+    // Time runs from the LATER of the newest observation and the last
+    // recomputation: a value that was already decayed must not be charged for
+    // the same elapsed time again. `decayed_at == 0.0` means "never decayed",
+    // and must not act as a clock start — rows written before this field
+    // existed carry exactly that value.
+    let clock_start = if belief.decayed_at > 0.0 {
+        last_evidence_time.max(belief.decayed_at)
+    } else {
+        last_evidence_time
+    };
+    let days_since_evidence = (now_secs - clock_start) / 86400.0;
+    if !days_since_evidence.is_finite() || days_since_evidence <= 0.0 {
+        return 0.0;
+    }
 
     if days_since_evidence < config.staleness_grace_period_days {
         return 0.0; // Within grace period
     }
 
     let effective_days = days_since_evidence - config.staleness_grace_period_days;
-    // Persistence is resistance to time: 1.0 never decays, 0.0 decays at the
-    // full configured rate.
-    let rate = config.staleness_rate_per_day * (1.0 - persistence);
-    if rate <= 0.0 {
+    // Public behaviour preserved: the rate does not depend on `persistence`.
+    // Scaling it by (1 - persistence) slowed every default belief fivefold and
+    // made persistence 1.0 immortal — a behaviour change for the maintainer to
+    // decide, not one to slip in with a bug fix.
+    let rate = config.staleness_rate_per_day;
+    if !rate.is_finite() || rate <= 0.0 {
         return 0.0;
     }
     let decay_factor = 1.0 - (rate * effective_days).min(0.95);
 
-    // The base is what the evidence (and the prior) support; the stored value
-    // may already be a decayed one. Keeping the base makes the result a
-    // function of (evidence, elapsed time, persistence) only.
+    // The base is what the evidence (and the prior) support at the last
+    // change; the stored value may already be a decayed one.
     let base = belief.undecayed_log_odds.unwrap_or(belief.log_odds);
     let old_log_odds = belief.log_odds;
+    /* Establish the anchor: rows written before the field existed have None,
+    and without it every later pass would take the already-decayed value as
+    the base and charge the same time again. */
     belief.undecayed_log_odds = Some(base);
     belief.log_odds =
         (base * decay_factor).clamp(-config.max_abs_log_odds, config.max_abs_log_odds);
+    // `decayed_at` is NOT moved: it marks when the anchor was valid, and the
+    // factor is a pure function of `now - decayed_at`. Moving it here would
+    // make thirty daily passes decay only three times while one pass after
+    // thirty days decays once — the call-count dependence this PR removed.
 
     // Enforce ceiling after decay too
     enforce_confidence_ceiling(belief, &node.attrs, config);
@@ -565,6 +595,7 @@ mod tests {
                 evidence_trail: vec![],
                 user_confirmed: false,
                 undecayed_log_odds: None,
+                decayed_at: 0.0,
             }),
         );
         node.attrs.confidence = sigmoid(log_odds);
@@ -920,6 +951,7 @@ mod tests {
                 evidence_trail: vec![],
                 user_confirmed: false,
                 undecayed_log_odds: None,
+                decayed_at: 0.0,
             }),
         );
         node.attrs.confidence = sigmoid(log_odds);
