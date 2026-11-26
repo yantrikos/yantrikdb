@@ -1,11 +1,11 @@
-//! Erkenntniskreislauf: Cluster-Mitglieder -> Belief -> Bestätigung -> Widerspruch.
+//! Knowledge loop: cluster members -> belief -> confirmation -> contradiction.
 //!
 //! cargo run --release --example belief_from_pattern -- <db-path> <spec.json>
 //!
 //! spec.json: {"proposition": "...", "rids": ["...", ...], "contradiction": "..."}
 //!
-//! Die Mitglieder sind die Evidenz (ein Eintrag je Record), die Proposition ist
-//! aus dem Cluster abgeleitet. Danach eine widersprechende Beobachtung.
+//! The members are the evidence (one entry per record); the proposition is
+//! derived from the cluster. A contradicting observation follows.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -48,15 +48,7 @@ fn main() {
     let mut node = CognitiveNode::new(
         id,
         "pattern-derived".to_string(),
-        NodePayload::Belief(BeliefPayload {
-            proposition: proposition.clone(),
-            log_odds: 0.0,
-            domain: "general".to_string(),
-            evidence_trail: Vec::new(),
-            user_confirmed: false,
-            undecayed_log_odds: None,
-            decayed_at: 0.0,
-        }),
+        NodePayload::Belief(BeliefPayload::new(proposition.clone(), "general", 0.0)),
     );
     db.persist_cognitive_node(&node).expect("persist");
     println!(
@@ -67,18 +59,16 @@ fn main() {
 
     let cfg = BeliefRevisionConfig::default();
 
-    // Ein Evidenzeintrag je Cluster-Mitglied: die Beobachtung ist die Quelle, nicht eine Zahl.
-    let per_member = 0.35; // festes Gewicht JE unabhaengigem Beleg
+    // One entry per cluster member: the observation is the source, not a number.
+    let per_member = 0.35; // fixed weight per independent piece of evidence
     for r in &rids {
-        let ev = Evidence {
-            target_belief: id,
-            weight: per_member,
-            source: format!("cluster member {r}"),
-            provenance: Provenance::Observed,
-            propagate: false,
-            timestamp: now(),
-            observation_id: None,
-        };
+        let ev = Evidence::new(
+            id,
+            per_member,
+            format!("cluster member {r}"),
+            Provenance::Observed,
+            now(),
+        );
         let _ = assert_evidence(&mut node, &ev, &cfg);
     }
     let after_support = match &node.payload {
@@ -87,7 +77,7 @@ fn main() {
     };
     db.persist_cognitive_node(&node).expect("persist support");
     println!(
-        "SUPPORT n={} je {:+.3} -> log_odds {:.4} p_true={:.4}",
+        "SUPPORT n={} each {:+.3} -> log_odds {:.4} p_true={:.4}",
         rids.len(),
         per_member,
         after_support,
@@ -95,15 +85,7 @@ fn main() {
     );
 
     if !contradiction.is_empty() {
-        let ev = Evidence {
-            target_belief: id,
-            weight: -1.5,
-            source: contradiction.clone(),
-            provenance: Provenance::Observed,
-            propagate: false,
-            timestamp: now(),
-            observation_id: None,
-        };
+        let ev = Evidence::new(id, -1.5, contradiction.clone(), Provenance::Observed, now());
         let _ = assert_evidence(&mut node, &ev, &cfg);
         let after_contra = match &node.payload {
             NodePayload::Belief(b) => b.log_odds,
@@ -131,6 +113,8 @@ fn main() {
         p.evidence_trail.len(),
         db.count_cognitive_nodes(Some(NodeKind::Belief)).unwrap()
     );
+    // Propagated evidence is a separate channel and is not part of the trail.
+    println!("FINAL propagated entries={}", p.propagated.len());
     if let Ok(Some(exp)) = db.explain_belief(id) {
         println!(
             "EXPLAIN {:?}",

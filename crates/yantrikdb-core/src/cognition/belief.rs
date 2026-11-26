@@ -22,14 +22,20 @@
 use std::collections::HashMap;
 
 use crate::state::{
-    BeliefPayload, CognitiveAttrs, CognitiveEdge, CognitiveEdgeKind, CognitiveNode, NodeId, NodeKind,
-    NodePayload, Provenance,
+    BeliefPayload, CognitiveAttrs, CognitiveEdge, CognitiveEdgeKind, CognitiveNode, NodeId,
+    NodeKind, NodePayload, Provenance,
 };
 
 // ── Evidence Types ──
 
 /// A piece of evidence to be asserted into the belief system.
+///
+/// Built through [`Evidence::new`] plus the two builders, never through a
+/// struct literal: the type is `#[non_exhaustive]` so the next field does not
+/// break callers again, and a forgotten `timestamp` cannot silently become
+/// `0.0` (there is no `Default`).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Evidence {
     /// Which belief this evidence applies to.
     pub target_belief: NodeId,
@@ -44,10 +50,45 @@ pub struct Evidence {
     pub propagate: bool,
     /// When this evidence was observed (unix timestamp seconds).
     pub timestamp: f64,
-    /// Stable identity of the observation, when the caller can name one
-    /// (belief + original source + provenance). Same id = same observation:
-    /// it revises the previous effect instead of voting twice.
+    /// Stable identity of the observation, when the caller can name one.
+    /// Same id = same observation: it revises the previous effect instead of
+    /// voting twice. The engine never derives it; `observation_key` composes
+    /// one from belief + source + optional local key, without the provenance
+    /// kind and without the timestamp.
     pub observation_id: Option<String>,
+}
+
+impl Evidence {
+    /// Direct evidence for `target_belief`, not propagated.
+    pub fn new(
+        target_belief: NodeId,
+        weight: f64,
+        source: impl Into<String>,
+        provenance: Provenance,
+        timestamp: f64,
+    ) -> Self {
+        Self {
+            target_belief,
+            weight,
+            source: source.into(),
+            provenance,
+            propagate: false,
+            timestamp,
+            observation_id: None,
+        }
+    }
+
+    /// Name the observation this evidence belongs to (dedup is opt-in).
+    pub fn with_observation_id(mut self, id: impl Into<String>) -> Self {
+        self.observation_id = Some(id.into());
+        self
+    }
+
+    /// Also propagate this evidence through epistemic edges.
+    pub fn with_propagation(mut self) -> Self {
+        self.propagate = true;
+        self
+    }
 }
 
 /// Result of asserting a piece of evidence.
@@ -368,11 +409,10 @@ pub fn propagate_evidence_from(
                 // A path that carries nothing either way is a withdrawal. It
                 // must reach the target so it can remove what it propagated
                 // earlier; the minimum-weight guard would swallow it.
-                let key = format!("prop|{o}");
-                let known_path = belief.evidence_trail.iter().any(|e| {
-                    e.observation_id.as_deref() == Some(key.as_str())
-                        && e.paths.iter().any(|(id, _)| *id == source_id)
-                });
+                let known_path = belief
+                    .propagated
+                    .iter()
+                    .any(|p| p.origin == o && p.paths.iter().any(|(id, _)| *id == source_id));
                 if !known_path
                     && ((propagated_weight == 0.0 && effective_weight == 0.0)
                         || (propagated_weight != 0.0
@@ -380,13 +420,16 @@ pub fn propagate_evidence_from(
                 {
                     continue;
                 }
-                belief.update_propagated(
+                if !belief.update_propagated(
                     propagated_weight,
-                    &format!("{:?}", source_id),
                     edge.last_confirmed_ms as f64 / 1000.0,
                     o,
                     source_id,
-                );
+                ) {
+                    // Nothing changed. A skipped propagation must not be
+                    // reported as an effect carrying the full weight.
+                    continue;
+                }
             }
         }
         let capped = belief
@@ -419,10 +462,10 @@ pub fn propagate_evidence_from(
 /// the previous pass wrote:
 /// * **time-based** — the amount depends on how much time has passed since the
 ///   newest evidence, not on how often the revision loop ran;
-/// * **idempotent** — a second pass at the same instant is a no-op;
-/// * **persistence-weighted** — a node's `attrs.persistence` resists TIME
-///   decay (1.0 = never decays). It does not shield against contradicting
-///   evidence: that is assertion, not revision.
+/// * **idempotent** — a second pass at the same instant is a no-op.
+///
+/// The rate does NOT depend on `attrs.persistence`: scaling it was removed
+/// again in this series.
 ///
 /// Returns the amount of log-odds decayed (positive = moved toward 0).
 pub fn apply_staleness_decay(
@@ -541,16 +584,24 @@ pub fn revise_beliefs(
 // ── Internal Helpers ──
 
 /// Enforce confidence ceiling for volatile beliefs.
+///
+/// The clamp goes through [`BeliefPayload::set_log_odds`], like every other
+/// change to the value: writing `log_odds` alone left an anchor of 8.75 behind
+/// a stored 4.0, and the next decay rebuilt 3.5 from evidence the ceiling had
+/// already removed (main's formula gives 1.6).
 fn enforce_confidence_ceiling(
     belief: &mut BeliefPayload,
     attrs: &CognitiveAttrs,
     config: &BeliefRevisionConfig,
 ) {
     if attrs.volatility > config.volatility_threshold {
-        belief.log_odds = belief.log_odds.clamp(
+        let clamped = belief.log_odds.clamp(
             -config.volatile_ceiling_log_odds,
             config.volatile_ceiling_log_odds,
         );
+        if clamped != belief.log_odds {
+            belief.set_log_odds(clamped);
+        }
     }
 }
 
@@ -581,7 +632,7 @@ fn detect_threshold_crossing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{sigmoid, NodeIdAllocator};
+    use crate::state::{sigmoid, EvidenceEntry, NodeIdAllocator};
 
     fn make_belief_node(alloc: &mut NodeIdAllocator, prop: &str, log_odds: f64) -> CognitiveNode {
         let id = alloc.alloc(NodeKind::Belief);
@@ -596,6 +647,7 @@ mod tests {
                 user_confirmed: false,
                 undecayed_log_odds: None,
                 decayed_at: 0.0,
+                propagated: Vec::new(),
             }),
         );
         node.attrs.confidence = sigmoid(log_odds);
@@ -717,7 +769,6 @@ mod tests {
                 timestamp: 1000.0 - 3.0 * 86400.0,
                 observation_id: None,
                 history: Vec::new(),
-                paths: Vec::new(),
             });
         }
 
@@ -740,7 +791,6 @@ mod tests {
                 timestamp: 1000.0 - 30.0 * 86400.0,
                 observation_id: None,
                 history: Vec::new(),
-                paths: Vec::new(),
             });
         }
 
@@ -772,7 +822,6 @@ mod tests {
                         timestamp: 1000.0 - 60.0 * 86400.0, // 60 days ago
                         observation_id: None,
                         history: Vec::new(),
-                        paths: Vec::new(),
                     });
                 }
                 n
@@ -952,6 +1001,7 @@ mod tests {
                 user_confirmed: false,
                 undecayed_log_odds: None,
                 decayed_at: 0.0,
+                propagated: Vec::new(),
             }),
         );
         node.attrs.confidence = sigmoid(log_odds);

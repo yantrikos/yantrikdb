@@ -2,10 +2,10 @@
 //!
 //! cargo run --release --example belief_lifecycle -- <db-path> create|reopen
 //!
-//! create: erzeugt den Knoten, ordnet bestätigende und widersprechende Evidenz
-//!         zu, persistiert nach jedem Schritt und gibt die Log-Odds aus.
-//! reopen: liest den Knoten in einem NEUEN Prozess aus derselben Datei,
-//!         fragt ihn ab und lässt ihn erklären — der Persistenzbeweis.
+//! create: builds the node, adds confirming and contradicting evidence,
+//!         persists after every step and prints the log-odds.
+//! reopen: reads the node in a NEW process from the same file, queries it and
+//!         asks it to explain itself — the persistence proof.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -15,8 +15,8 @@ use yantrikdb::state::Provenance;
 use yantrikdb::{CognitiveNode, NodeId, NodeKind, NodePayload, YantrikDB};
 
 const PROPOSITION: &str =
-    "A2A-Zustimmung ist ein wiederkehrendes Thema: Agenten stimmen Ablauf und Zustimmung ab, \
-     bevor Nachrichten fliessen.";
+    "A2A agreement is a recurring theme: agents coordinate procedure and consent \
+     before messages flow.";
 
 fn now() -> f64 {
     SystemTime::now()
@@ -53,10 +53,11 @@ fn main() {
                 &p.proposition[..40.min(p.proposition.len())]
             );
             println!(
-                "REOPEN log_odds={:.4} p_true={:.4} evidence_trail={}",
+                "REOPEN log_odds={:.4} p_true={:.4} evidence_trail={} propagated={}",
                 p.log_odds,
                 sigmoid(p.log_odds),
-                p.evidence_trail.len()
+                p.evidence_trail.len(),
+                p.propagated.len()
             );
             println!(
                 "REOPEN count_beliefs={:?}",
@@ -74,35 +75,19 @@ fn main() {
         _ => {
             let mut node = CognitiveNode::new(
                 id,
-                "a2a-zustimmung".to_string(),
-                NodePayload::Belief(BeliefPayload {
-                    proposition: PROPOSITION.to_string(),
-                    log_odds: 0.0,
-                    domain: "general".to_string(),
-                    evidence_trail: Vec::new(),
-                    user_confirmed: false,
-                    undecayed_log_odds: None,
-                    decayed_at: 0.0,
-                }),
+                "a2a-agreement".to_string(),
+                NodePayload::Belief(BeliefPayload::new(PROPOSITION, "general", 0.0)),
             );
             db.persist_cognitive_node(&node).expect("persist creation");
             println!("CREATE persisted log_odds=0.0000 p_true=0.5000");
 
             let cfg = BeliefRevisionConfig::default();
             for (weight, source) in [
-                (1.4_f64, "20 Topic-Cluster-Mitglieder, 25 Tage"),
-                (1.1, "zweiter Lauf, unveraenderte Evidenz"),
-                (-1.3, "widersprechender Record: A2A abgeschaltet"),
+                (1.4_f64, "20 topic-cluster members, 25 days"),
+                (1.1, "second run, unchanged evidence"),
+                (-1.3, "contradicting record: A2A switched off"),
             ] {
-                let ev = Evidence {
-                    target_belief: id,
-                    weight,
-                    source: source.to_string(),
-                    provenance: Provenance::Inferred,
-                    propagate: false,
-                    timestamp: now(),
-                    observation_id: None,
-                };
+                let ev = Evidence::new(id, weight, source, Provenance::Inferred, now());
                 let before = match &node.payload {
                     NodePayload::Belief(b) => b.log_odds,
                     _ => 0.0,

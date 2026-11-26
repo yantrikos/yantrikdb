@@ -17,6 +17,7 @@ fn belief(seq: u32, prop: &str, trail: Vec<EvidenceEntry>) -> CognitiveNode {
             user_confirmed: false,
             undecayed_log_odds: None,
             decayed_at: 0.0,
+            propagated: Vec::new(),
         }),
     )
 }
@@ -41,11 +42,11 @@ fn edge(src: NodeId, dst: NodeId, kind: CognitiveEdgeKind, weight: f64) -> Cogni
     }
 }
 
-/// Eine Supports-Kante trägt Evidenz auf den Zielknoten.
+/// A Supports edge carries evidence onto the target node.
 #[test]
 fn supports_edge_raises_target() {
-    let a = belief(11, "Quelle.", vec![]);
-    let b = belief(12, "Ziel.", vec![]);
+    let a = belief(11, "Source.", vec![]);
+    let b = belief(12, "Target.", vec![]);
     let e = edge(a.id, b.id, CognitiveEdgeKind::Supports, 1.0);
     let mut down: HashMap<NodeId, CognitiveNode> = HashMap::new();
     down.insert(b.id, b);
@@ -62,11 +63,11 @@ fn supports_edge_raises_target() {
     assert!(lo(&down[&NodeId::new(NodeKind::Belief, 12)]) > 0.0);
 }
 
-/// Eine Contradicts-Kante senkt den Zielknoten.
+/// A Contradicts edge lowers the target node.
 #[test]
 fn contradicts_edge_lowers_target() {
-    let a = belief(13, "Quelle.", vec![]);
-    let b = belief(14, "Ziel.", vec![]);
+    let a = belief(13, "Source.", vec![]);
+    let b = belief(14, "Target.", vec![]);
     let e = edge(a.id, b.id, CognitiveEdgeKind::Contradicts, 1.0);
     let mut down: HashMap<NodeId, CognitiveNode> = HashMap::new();
     down.insert(b.id, b);
@@ -83,8 +84,8 @@ fn contradicts_edge_lowers_target() {
     assert!(lo(&down[&NodeId::new(NodeKind::Belief, 14)]) < 0.0);
 }
 
-/// Ein Zyklus (A stützt B, B stützt A) darf die Konfidenz nicht aufschaukeln:
-/// nach mehreren Hops bleibt der Betrag unter dem Deckel der Konfiguration.
+/// A cycle (A supports B, B supports A) must not pump up the confidence:
+/// after several hops the magnitude stays under the configured cap.
 #[test]
 fn support_cycle_stays_bounded() {
     let cfg = BeliefRevisionConfig::default();
@@ -114,13 +115,13 @@ fn support_cycle_stays_bounded() {
     );
 }
 
-/// Veraltung: ein Belief ohne neue Evidenz über die Karenzzeit hinaus verliert Konfidenz,
-/// und `revise_beliefs` meldet die Revision.
+/// Staleness: a belief without new evidence past the grace period loses
+/// confidence, and `revise_beliefs` reports the revision.
 #[test]
 fn revise_beliefs_decays_stale_evidence() {
     let cfg = BeliefRevisionConfig::default();
     let now = 1_800_000_000.0_f64;
-    let old = now - 60.0 * 86400.0; // 60 Tage alt, Karenz ist 7
+    let old = now - 60.0 * 86400.0; // 60 days old, the grace period is 7
     let mut b = belief(
         17,
         "Nur alte Belege.",
@@ -130,7 +131,6 @@ fn revise_beliefs_decays_stale_evidence() {
             timestamp: old,
             observation_id: None,
             history: Vec::new(),
-            paths: Vec::new(),
         }],
     );
     if let NodePayload::Belief(p) = &mut b.payload {

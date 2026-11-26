@@ -1031,6 +1031,7 @@ mod tests {
                 user_confirmed: false,
                 undecayed_log_odds: None,
                 decayed_at: 0.0,
+                propagated: Vec::new(),
             }),
         )
     }

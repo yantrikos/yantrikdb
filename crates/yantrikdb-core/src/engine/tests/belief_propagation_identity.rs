@@ -17,6 +17,7 @@ fn belief(seq: u32) -> CognitiveNode {
             user_confirmed: false,
             undecayed_log_odds: None,
             decayed_at: 0.0,
+            propagated: Vec::new(),
         }),
     )
 }
@@ -28,9 +29,9 @@ fn lo(n: &CognitiveNode) -> f64 {
     }
 }
 
-fn entries(n: &CognitiveNode) -> usize {
+fn propagated(n: &CognitiveNode) -> usize {
     match &n.payload {
-        NodePayload::Belief(b) => b.evidence_trail.len(),
+        NodePayload::Belief(b) => b.propagated.len(),
         _ => 0,
     }
 }
@@ -48,7 +49,7 @@ fn edge(src: NodeId, dst: NodeId) -> CognitiveEdge {
     }
 }
 
-/// Wiederholte Propagation derselben Ursprungsbeobachtung zählt einmal.
+/// Repeated propagation of the same originating observation counts once.
 #[test]
 fn repeated_propagation_with_origin_is_idempotent() {
     let cfg = BeliefRevisionConfig::default();
@@ -64,17 +65,17 @@ fn repeated_propagation_with_origin_is_idempotent() {
     let twice = lo(&down[&di]);
     println!(
         "WIEDERHOLT: einmal={once:.4} zweimal={twice:.4} trail={}",
-        entries(&down[&di])
+        propagated(&down[&di])
     );
     assert!(
         (once - twice).abs() < 1e-12,
         "same origin must not vote twice"
     );
-    assert_eq!(entries(&down[&di]), 1);
+    assert_eq!(propagated(&down[&di]), 1);
 }
 
-/// Diamond: dieselbe Ursprungsbeobachtung erreicht das Ziel über zwei Beliefs.
-/// Sie darf dort EINE Erfahrung bleiben, und der stärkere Pfad gewinnt.
+/// Diamond: the same originating observation reaches the target over two
+/// beliefs. It stays ONE experience there, and the stronger path wins.
 #[test]
 fn diamond_counts_the_origin_once_and_keeps_the_stronger_path() {
     let cfg = BeliefRevisionConfig::default();
@@ -84,7 +85,7 @@ fn diamond_counts_the_origin_once_and_keeps_the_stronger_path() {
     let d = belief(46);
     let (ai, bi, ci, di) = (a.id, b.id, c.id, d.id);
 
-    // Hop 1: A -> B (stark), A -> C (schwach)
+    // Hop 1: A -> B (strong), A -> C (weak)
     let mut hop1: HashMap<NodeId, CognitiveNode> = HashMap::new();
     hop1.insert(bi, b.clone());
     hop1.insert(ci, c);
@@ -100,7 +101,7 @@ fn diamond_counts_the_origin_once_and_keeps_the_stronger_path() {
     let w_b = lo(&hop1[&bi]);
     let w_c = lo(&hop1[&ci]);
 
-    // Hop 2: B -> D, C -> D, beide mit demselben Ursprung
+    // Hop 2: B -> D, C -> D, both with the same origin
     let mut hop2: HashMap<NodeId, CognitiveNode> = HashMap::new();
     hop2.insert(di, d);
     let _ = propagate_evidence_from(
@@ -113,16 +114,16 @@ fn diamond_counts_the_origin_once_and_keeps_the_stronger_path() {
         1,
     );
     let after_first_path = lo(&hop2[&di]);
-    // zweiter Pfad bewusst schwächer: halbes Kantengewicht
+    // deliberately weaker second path: half the edge weight
     let mut weak = edge(ci, di);
     weak.weight = 0.5;
     let _ = propagate_evidence_from(Some("obs-diamond"), ci, w_c, &[weak], &mut hop2, &cfg, 1);
     let after_second_path = lo(&hop2[&di]);
 
     println!("DIAMOND: Pfad B={w_b:.4} Pfad C={w_c:.4} · nach 1. Pfad {after_first_path:.4} · nach 2. Pfad {after_second_path:.4} · trail={}",
-             entries(&hop2[&di]));
+             propagated(&hop2[&di]));
     assert_eq!(
-        entries(&hop2[&di]),
+        propagated(&hop2[&di]),
         1,
         "the diamond must hold one observation, not two"
     );
@@ -132,7 +133,8 @@ fn diamond_counts_the_origin_once_and_keeps_the_stronger_path() {
     );
 }
 
-/// Rücknahme: die Ursprungsbeobachtung auf 0 zurücknehmen korrigiert die propagierte Wirkung.
+/// Retraction: taking the originating observation back to 0 corrects the
+/// propagated effect.
 #[test]
 fn retracting_the_origin_corrects_the_propagated_effect() {
     let cfg = BeliefRevisionConfig::default();
@@ -164,20 +166,20 @@ fn retracting_the_origin_corrects_the_propagated_effect() {
     let after_retraction = lo(&down[&di]);
     println!(
         "RÜCKNAHME: {with_evidence:.4} -> {after_retraction:.4} trail={}",
-        entries(&down[&di])
+        propagated(&down[&di])
     );
     assert!(
         after_retraction.abs() < 1e-12,
         "retraction must remove the propagated contribution"
     );
     assert_eq!(
-        entries(&down[&di]),
+        propagated(&down[&di]),
         1,
         "the entry stays, its weight becomes 0"
     );
 }
 
-/// Ohne Ursprung bleibt das alte Verhalten (additiv) — Rückwärtskompatibilität.
+/// Without an origin the old additive behaviour is kept, for compatibility.
 #[test]
 fn without_origin_propagation_stays_additive() {
     let cfg = BeliefRevisionConfig::default();
@@ -207,10 +209,10 @@ fn contradicting(src: NodeId, dst: NodeId, weight: f64) -> CognitiveEdge {
     e
 }
 
-/// Der stärkste Pfad wird zurückgenommen — der schwächere gültige bleibt stehen.
+/// The strongest path is withdrawn — the weaker valid one stays standing.
 ///
-/// Vor dem Fix lag pro Ursprung EIN Beitrag im Trail: die Rücknahme des starken
-/// Pfades löschte auch den schwachen, obwohl der weiter gültig war.
+/// Before the fix one contribution per origin sat in the trail: withdrawing the
+/// strong path also erased the weak one, although it was still valid.
 #[test]
 fn withdrawing_the_strongest_path_promotes_the_weaker_one() {
     let cfg = BeliefRevisionConfig::default();
@@ -221,7 +223,7 @@ fn withdrawing_the_strongest_path_promotes_the_weaker_one() {
     let mut down: HashMap<NodeId, CognitiveNode> = HashMap::new();
     down.insert(di, d);
 
-    // zwei Pfade, eine Ursprungsbeobachtung: B trägt 0,5 · C trägt 0,2
+    // two paths, one originating observation: B carries 0.5, C carries 0.2
     let _ = propagate_evidence_from(
         Some("obs-zwei-pfade"),
         bi,
@@ -242,7 +244,7 @@ fn withdrawing_the_strongest_path_promotes_the_weaker_one() {
     );
     let both = lo(&down[&di]);
 
-    // stärksten Pfad zurücknehmen
+    // withdraw the strongest path
     let _ = propagate_evidence_from(
         Some("obs-zwei-pfade"),
         bi,
@@ -255,8 +257,8 @@ fn withdrawing_the_strongest_path_promotes_the_weaker_one() {
     let after = lo(&down[&di]);
 
     println!(
-        "RÜCKNAHME STARKER PFAD: beide={both:.4} · nach Rücknahme={after:.4} trail={}",
-        entries(&down[&di])
+        "WITHDRAW STRONG PATH: both={both:.4} · after withdrawal={after:.4} trail={}",
+        propagated(&down[&di])
     );
     assert!(
         (both - 0.5).abs() < 1e-12,
@@ -266,10 +268,10 @@ fn withdrawing_the_strongest_path_promotes_the_weaker_one() {
         (after - 0.2).abs() < 1e-12,
         "the weaker valid path must remain"
     );
-    assert_eq!(entries(&down[&di]), 1, "still one observation, not two");
+    assert_eq!(propagated(&down[&di]), 1, "still one observation, not two");
 }
 
-/// Die Ursprungsbeobachtung wird schwächer bewertet, ohne zurückgenommen zu werden.
+/// The originating observation is re-assessed weaker without being retracted.
 #[test]
 fn weakening_the_origin_lowers_the_propagated_effect() {
     let cfg = BeliefRevisionConfig::default();
@@ -302,63 +304,118 @@ fn weakening_the_origin_lowers_the_propagated_effect() {
 
     println!(
         "ABSCHWÄCHUNG: {strong:.4} -> {weakened:.4} trail={}",
-        entries(&down[&di])
+        propagated(&down[&di])
     );
     assert!((strong - 0.5).abs() < 1e-12);
     assert!(
         (weakened - 0.2).abs() < 1e-12,
         "a re-assessed origin must lower the contribution, not keep or erase it"
     );
-    assert_eq!(entries(&down[&di]), 1);
+    assert_eq!(propagated(&down[&di]), 1);
 }
 
-/// Dieselbe Beobachtung erreicht einen Belief direkt UND über Propagation.
+/// Direct and propagated evidence from the same origin are two channels.
+///
+/// `observation_key` scopes ids per belief, so an id used as documented can
+/// never match across beliefs — the old "direct outranks its own propagation"
+/// rule could therefore not fire. With propagation in its own channel, each
+/// side is deduplicated within itself and the arrival order does not matter:
+/// both orders give main's 1.9 (0.9 direct + 1.0 propagated).
 #[test]
-fn direct_evidence_outranks_its_own_propagation() {
+fn direct_and_propagated_from_one_origin_are_separate_channels() {
     let cfg = BeliefRevisionConfig::default();
-    let a = belief(56);
-    let mut d = belief(57);
+
+    let run = |direct_first: bool| -> f64 {
+        let a = belief(56);
+        let mut d = belief(57);
+        let (ai, di) = (a.id, d.id);
+
+        let apply_direct = |node: &mut CognitiveNode| {
+            if let NodePayload::Belief(p) = &mut node.payload {
+                p.update_with_id(1.0, 0.9, "source", 1_800_000_000.0, Some("obs-same"));
+            }
+        };
+        let apply_propagation = |node: &mut CognitiveNode| {
+            let mut down: HashMap<NodeId, CognitiveNode> = HashMap::new();
+            down.insert(di, node.clone());
+            let _ = propagate_evidence_from(
+                Some("obs-same"),
+                ai,
+                2.0,
+                &[edge(ai, di)],
+                &mut down,
+                &cfg,
+                0,
+            );
+            *node = down.remove(&di).expect("downstream belief");
+        };
+
+        if direct_first {
+            apply_direct(&mut d);
+            apply_propagation(&mut d);
+        } else {
+            apply_propagation(&mut d);
+            apply_direct(&mut d);
+        }
+        lo(&d)
+    };
+
+    let direct_first = run(true);
+    let propagation_first = run(false);
+    println!("ORDER: direct-first={direct_first:.4} propagation-first={propagation_first:.4}");
+    assert!(
+        (direct_first - 1.9).abs() < 1e-12,
+        "direct 0.9 + propagated 1.0 must be 1.9, got {direct_first}"
+    );
+    assert!(
+        (propagation_first - 1.9).abs() < 1e-12,
+        "the arrival order must not change the result, got {propagation_first}"
+    );
+}
+
+/// A caller id shaped like the internal propagation key must not collide.
+///
+/// Review (26.11.): a direct id `prop|o1` was overwritten by a propagation from
+/// origin `o1` (0.9 -> 0.2). Propagation no longer shares the trail's key
+/// space, so both channels count and neither overwrites the other.
+#[test]
+fn a_caller_id_shaped_like_a_propagation_key_does_not_collide() {
+    let cfg = BeliefRevisionConfig::default();
+    let a = belief(70);
+    let mut d = belief(71);
     let (ai, di) = (a.id, d.id);
 
-    // direkt: dieselbe Beobachtungsidentität liegt schon am Ziel
     if let NodePayload::Belief(p) = &mut d.payload {
-        p.update_with_id(
-            0.3,
-            1.0,
-            "direkt",
-            1_800_000_000.0,
-            Some("obs-direkt-und-pfad"),
-        );
+        p.update_with_id(1.0, 0.9, "caller", 1_800_000_000.0, Some("prop|o1"));
     }
-    let direct = lo(&d);
+    let direct_only = lo(&d);
 
     let mut down: HashMap<NodeId, CognitiveNode> = HashMap::new();
     down.insert(di, d);
-    let _ = propagate_evidence_from(
-        Some("obs-direkt-und-pfad"),
-        ai,
-        1.0,
-        &[edge(ai, di)],
-        &mut down,
-        &cfg,
-        0,
-    );
-    let after = lo(&down[&di]);
+    let effects = propagate_evidence_from(Some("o1"), ai, 2.0, &[edge(ai, di)], &mut down, &cfg, 0);
+    let both = lo(&down[&di]);
 
-    println!(
-        "DIREKT + PROPAGIERT: direkt={direct:.4} danach={after:.4} trail={}",
-        entries(&down[&di])
-    );
+    println!("COLLISION PROBE: direct-only {direct_only:.4} · both {both:.4}");
+    assert_eq!(effects.len(), 1, "the propagation must be applied");
+    assert!((direct_only - 0.9).abs() < 1e-12);
     assert!(
-        (after - direct).abs() < 1e-12,
-        "the same observation must not vote twice"
+        (both - 1.9).abs() < 1e-12,
+        "both channels count, neither overwrites the other: {both}"
     );
-    assert_eq!(entries(&down[&di]), 1, "only the direct entry speaks");
+    match &down[&di].payload {
+        NodePayload::Belief(b) => {
+            assert_eq!(b.evidence_trail.len(), 1, "the caller's entry survives");
+            assert_eq!(b.evidence_trail[0].weight, 0.9);
+            assert_eq!(b.propagated.len(), 1);
+            assert_eq!(b.propagated[0].origin, "o1");
+        }
+        _ => panic!("expected belief"),
+    }
 }
 
-/// Zwei Pfade tragen dieselbe Beobachtung mit ENTGEGENGESETZTER Polarität.
-/// Eine Beobachtung hat eine Stimme — die stärkere Aussage — und die Reihenfolge
-/// der Pfade darf das Ergebnis nicht ändern.
+/// Two paths carry the same observation with OPPOSITE polarity. One observation
+/// has one voice — the stronger statement — and the order of the paths must not
+/// change the result.
 #[test]
 fn opposite_polarity_paths_speak_with_one_voice() {
     let cfg = BeliefRevisionConfig::default();
@@ -385,13 +442,13 @@ fn opposite_polarity_paths_speak_with_one_voice() {
             "POLARITÄT (support_first={support_first}): {:.4}",
             lo(&down[&di])
         );
-        entries(&down[&di]);
+        propagated(&down[&di]);
         lo(&down[&di])
     };
 
     let a = run(true);
     let b = run(false);
-    println!("POLARITÄT: erst stützend={a:.4} · erst widersprechend={b:.4}");
+    println!("POLARITY: support first={a:.4} · contradict first={b:.4}");
     assert!(
         (a - b).abs() < 1e-12,
         "the order of the paths must not matter"

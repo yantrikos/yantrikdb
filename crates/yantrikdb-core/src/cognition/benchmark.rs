@@ -401,7 +401,6 @@ pub fn build_aisha() -> Result<PersonaScenario> {
                     timestamp: 1000.0,
                     observation_id: None,
                     history: Vec::new(),
-                    paths: Vec::new(),
                 },
                 EvidenceEntry {
                     source: "attending feedback".into(),
@@ -409,12 +408,12 @@ pub fn build_aisha() -> Result<PersonaScenario> {
                     timestamp: 2000.0,
                     observation_id: None,
                     history: Vec::new(),
-                    paths: Vec::new(),
                 },
             ],
             user_confirmed: true,
             undecayed_log_odds: None,
             decayed_at: 0.0,
+            propagated: Vec::new(),
         }),
     ));
 
@@ -433,7 +432,6 @@ pub fn build_aisha() -> Result<PersonaScenario> {
                     timestamp: 1000.0,
                     observation_id: None,
                     history: Vec::new(),
-                    paths: Vec::new(),
                 },
                 EvidenceEntry {
                     source: "complained about missed dinner".into(),
@@ -441,12 +439,12 @@ pub fn build_aisha() -> Result<PersonaScenario> {
                     timestamp: 3000.0,
                     observation_id: None,
                     history: Vec::new(),
-                    paths: Vec::new(),
                 },
             ],
             user_confirmed: false,
             undecayed_log_odds: None,
             decayed_at: 0.0,
+            propagated: Vec::new(),
         }),
     ));
 
@@ -854,11 +852,11 @@ pub fn build_priya() -> Result<PersonaScenario> {
                 timestamp: 1000.0,
                 observation_id: None,
                 history: Vec::new(),
-                paths: Vec::new(),
             }],
             user_confirmed: false,
             undecayed_log_odds: None,
             decayed_at: 0.0,
+            propagated: Vec::new(),
         }),
     ));
 
@@ -877,7 +875,6 @@ pub fn build_priya() -> Result<PersonaScenario> {
                     timestamp: 1000.0,
                     observation_id: None,
                     history: Vec::new(),
-                    paths: Vec::new(),
                 },
                 EvidenceEntry {
                     source: "team productivity".into(),
@@ -885,12 +882,12 @@ pub fn build_priya() -> Result<PersonaScenario> {
                     timestamp: 2000.0,
                     observation_id: None,
                     history: Vec::new(),
-                    paths: Vec::new(),
                 },
             ],
             user_confirmed: true,
             undecayed_log_odds: None,
             decayed_at: 0.0,
+            propagated: Vec::new(),
         }),
     ));
 
@@ -1598,6 +1595,7 @@ fn run_belief_revision_tests(run: &mut BenchRun) {
         user_confirmed: false,
         undecayed_log_odds: None,
         decayed_at: 0.0,
+        propagated: Vec::new(),
     };
 
     for i in 0..20 {
@@ -1629,6 +1627,7 @@ fn run_belief_revision_tests(run: &mut BenchRun) {
         user_confirmed: false,
         undecayed_log_odds: None,
         decayed_at: 0.0,
+        propagated: Vec::new(),
     };
     for i in 0..10 {
         let weight = if i % 2 == 0 { 0.5 } else { -0.5 };
@@ -1656,6 +1655,7 @@ fn run_belief_revision_tests(run: &mut BenchRun) {
         user_confirmed: false,
         undecayed_log_odds: None,
         decayed_at: 0.0,
+        propagated: Vec::new(),
     };
     let mut low_rel = BeliefPayload {
         proposition: "B".into(),
@@ -1665,6 +1665,7 @@ fn run_belief_revision_tests(run: &mut BenchRun) {
         user_confirmed: false,
         undecayed_log_odds: None,
         decayed_at: 0.0,
+        propagated: Vec::new(),
     };
     high_rel.update(1.0, 0.95, "reliable", 100.0);
     low_rel.update(1.0, 0.3, "unreliable", 100.0);

@@ -16,6 +16,7 @@ fn belief(seq: u32, prior: f64) -> CognitiveNode {
             user_confirmed: false,
             undecayed_log_odds: None,
             decayed_at: 0.0,
+            propagated: Vec::new(),
         }),
     )
 }
@@ -46,7 +47,7 @@ fn ev(id: NodeId, weight: f64, provenance: Provenance, oid: Option<String>) -> E
     }
 }
 
-/// Regel 1a: EINE Quelle kann mehrere unabhängige Beobachtungen tragen.
+/// Rule 1a: ONE source can carry several independent observations.
 #[test]
 fn one_source_can_carry_several_observations() {
     let cfg = BeliefRevisionConfig::default();
@@ -73,7 +74,8 @@ fn one_source_can_carry_several_observations() {
     );
 }
 
-/// Regel 1b: dieselbe Beobachtung erhält durch eine andere Provenienzart KEINE neue Identität.
+/// Rule 1b: a different provenance kind does NOT give the same observation a
+/// new identity.
 #[test]
 fn provenance_kind_does_not_change_the_identity() {
     let cfg = BeliefRevisionConfig::default();
@@ -100,9 +102,9 @@ fn provenance_kind_does_not_change_the_identity() {
         1,
         "re-classifying must not create a second observation"
     );
-    // Die Identität bleibt, der WERT darf sich ändern: eine andere Provenienzart
-    // skaliert die Zuverlässigkeit (Observed 0,9 · Extracted 0,75), die
-    // Neubewertung ersetzt also das Gewicht, statt zu addieren.
+    // The identity stays, the VALUE may change: another provenance kind scales
+    // the reliability (Observed 0.9, Extracted 0.75), so the re-assessment
+    // replaces the weight instead of adding one.
     let sum: f64 = trail(&node).iter().map(|e| e.weight).sum();
     assert!((lo(&node) - sum).abs() < 1e-12);
     assert!(
@@ -111,7 +113,7 @@ fn provenance_kind_does_not_change_the_identity() {
     );
 }
 
-/// Regel 2: die vorherige Bewertung bleibt rekonstruierbar.
+/// Rule 2: the previous assessment stays reconstructable.
 #[test]
 fn re_evaluation_keeps_the_previous_assessment() {
     let cfg = BeliefRevisionConfig::default();
@@ -147,7 +149,7 @@ fn re_evaluation_keeps_the_previous_assessment() {
     assert!((t[0].weight + 0.4 * 0.9).abs() < 1e-9 || t[0].weight < 0.0);
 }
 
-/// Regel 3: die Invariante gilt OHNE Prior, Deckel und Verfall.
+/// Rule 3: the invariant holds WITHOUT prior, ceiling or decay.
 #[test]
 fn invariant_holds_without_prior_ceiling_or_decay() {
     let cfg = BeliefRevisionConfig::default();
@@ -164,14 +166,14 @@ fn invariant_holds_without_prior_ceiling_or_decay() {
     }
     let sum: f64 = trail(&node).iter().map(|e| e.weight).sum();
     println!(
-        "INVARIANTE ohne Störgrößen: log_odds={:.4} Summe={:.4}",
+        "INVARIANT without confounders: log_odds={:.4} sum={:.4}",
         lo(&node),
         sum
     );
     assert!((lo(&node) - sum).abs() < 1e-12);
 }
 
-/// Regel 3 (Gegenprobe): mit PRIOR gilt `log_odds == prior + Summe`.
+/// Rule 3 (counter-check): with a PRIOR, `log_odds == prior + sum`.
 #[test]
 fn invariant_becomes_prior_plus_sum_with_a_prior() {
     let cfg = BeliefRevisionConfig::default();
@@ -195,13 +197,14 @@ fn invariant_becomes_prior_plus_sum_with_a_prior() {
     assert!((lo(&node) - (0.8 + sum)).abs() < 1e-12);
 }
 
-/// Regel 3 (Gegenprobe): der Konfidenzdeckel bricht die Summeninvariante — bewusst.
+/// Rule 3 (counter-check): the confidence ceiling breaks the sum invariant —
+/// deliberately.
 #[test]
 fn confidence_ceiling_breaks_the_sum_invariant() {
     let cfg = BeliefRevisionConfig::default();
     let mut node = belief(36, 0.0);
     let id = node.id;
-    // deutlich über max_abs_log_odds (Default 6.0) aufsummieren
+    // sum clearly above max_abs_log_odds (default 6.0)
     for i in 0..20 {
         let e = ev(
             id,

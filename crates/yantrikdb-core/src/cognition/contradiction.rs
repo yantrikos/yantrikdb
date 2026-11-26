@@ -431,6 +431,7 @@ mod tests {
                 user_confirmed: false,
                 undecayed_log_odds: None,
                 decayed_at: 0.0,
+                propagated: Vec::new(),
             }),
         );
         node.attrs.confidence = crate::state::sigmoid(log_odds);
@@ -598,7 +599,6 @@ mod tests {
                     timestamp: 1000.0 + i as f64,
                     observation_id: None,
                     history: Vec::new(),
-                    paths: Vec::new(),
                 });
             }
         }
