@@ -101,13 +101,13 @@ impl PyYantrikDB {
         // `PyYantrikDB::planned`): the snapshot is taken under a short
         // borrow, `encode()` runs with nothing of the store held, and the
         // plan is remade if `set_embedder()` replaced the Python embedder
-        // while it ran. The previous shape decided the route under one
-        // borrow (`caller_attached`) and embedded under a second
-        // (`embed_text`), which held the wrapper across `encode()`: a
-        // `set_embedder()` or `close()` from another thread was refused
-        // with "Already borrowed" for as long as `encode()` took, and a
-        // swap landing between the borrows could split the routing
-        // decision from the embedder that ran (#271 review).
+        // while it ran. Before, record() took `&self`, so it held the
+        // wrapper's borrow, and the GIL, for the whole call: across
+        // `encode()`, where a `set_embedder()` or `close()` from another
+        // thread was refused with "Already borrowed" for as long as
+        // `encode()` took, and across the engine write, where since #303
+        // it could wait out another connection's write lock with every
+        // other Python thread stalled.
         let py = slf.py();
         let text = text.to_owned();
         let memory_type = memory_type.to_owned();
