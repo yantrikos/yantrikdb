@@ -1003,9 +1003,15 @@ impl YantrikDB {
                     // memories' spans are never comparable. Comparing them
                     // turned ordinary corroboration — the same fact stated
                     // again in a second memory — into a rejection, while the
-                    // same restatement without spans was accepted. Only the
-                    // same source memory can collide on a span.
-                    let same_memory = stored_memory.as_deref() == source_memory_rid;
+                    // same restatement without spans was accepted.
+                    //
+                    // Both sides must *have* a source memory for a comparison
+                    // to mean anything: `None == None` would make two
+                    // source-less claims look like one memory and restore the
+                    // rejection for exactly the rows that carry no provenance.
+                    let same_memory = stored_memory.is_some()
+                        && source_memory_rid.is_some()
+                        && stored_memory.as_deref() == source_memory_rid;
                     let span_differs =
                         same_memory && (stored_span_s != span_start || stored_span_e != span_end);
 

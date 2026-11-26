@@ -635,6 +635,23 @@ fn a_restatement_in_a_second_memory_is_accepted() {
         r2.rejected.is_empty(),
         "a restatement from another memory is corroboration, not a collision: {r2:?}"
     );
+
+    // The accepted restatement re-grounds on the newer memory: that is the
+    // behaviour on main, and it must stay that way (the row is one claim, whose
+    // provenance moves to the memory that last asserted it).
+    let stored_source: Option<String> = db
+        .conn()
+        .query_row(
+            "SELECT source_memory_rid FROM claims WHERE src = 'Hugo' AND dst = 'UNIT Team'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        stored_source.as_deref(),
+        Some(m2.as_str()),
+        "an accepted restatement re-grounds on the memory that stated it"
+    );
 }
 
 /// The heuristic extractor in `knowledge/graph.rs` emits a modality of its own,
@@ -644,9 +661,9 @@ fn a_restatement_in_a_second_memory_is_accepted() {
 /// it to a comment.
 #[test]
 fn every_modality_the_extractor_emits_is_accepted() {
-    // The extractor's full set today: `asserted` and `reported`
-    // (`knowledge/graph.rs`, the two literals in the cue branch).
-    for modality in ["asserted", "reported"] {
+    // Iterates the extractor's own constant, not a copy of its vocabulary: a
+    // third value there fails this test instead of being refused at write time.
+    for modality in crate::knowledge::graph::EXTRACTOR_MODALITIES {
         assert!(
             crate::engine::graph_ops::STATED_MODALITIES.contains(&modality),
             "the extractor emits {modality:?}, which the cooperative writer must accept"
