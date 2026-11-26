@@ -28,9 +28,34 @@ fn claim(src: &str, rel: &str, dst: &str) -> StatedClaim {
         rel_type: rel.into(),
         dst: dst.into(),
         polarity: 1,
+        modality: None,
         valid_from: None,
         valid_to: None,
     }
+}
+
+fn claim_modal(src: &str, rel: &str, dst: &str, modality: &str) -> StatedClaim {
+    StatedClaim {
+        modality: Some(modality.into()),
+        ..claim(src, rel, dst)
+    }
+}
+
+fn record(db: &YantrikDB, text: &str) -> String {
+    db.record_text(
+        text,
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &serde_json::json!({}),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -252,4 +277,87 @@ fn claims_inherit_the_records_event_time_unless_the_writer_gives_a_window() {
     db.apply_pending_ops_once(100).unwrap();
     let _ = rid2;
     assert_eq!(window("Bob Lin", "works_at", "Globex"), (None, None));
+}
+
+// ---------------------------------------------------------------------------
+// Modality — the qualifier the cooperative path used to discard.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn quoted_claim_keeps_its_modality() {
+    let (db, rid) = db_with("Vela said that Hugo leads the UNIT team.");
+    let report = db
+        .attach_claims(&rid, &[claim_modal("Hugo", "leads", "UNIT team", "quoted")])
+        .unwrap();
+    assert_eq!(report.accepted.len(), 1, "grounded quote must be accepted");
+
+    let stored: String = db
+        .conn()
+        .query_row(
+            "SELECT modality FROM claims WHERE source_memory_rid = ?1",
+            rusqlite::params![rid],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, "quoted", "the writer's modality must survive");
+}
+
+#[test]
+fn unknown_modality_is_rejected() {
+    let (db, rid) = db_with("Hugo leitet das UNIT Team.");
+    let report = db
+        .attach_claims(
+            &rid,
+            &[claim_modal("Hugo", "leads", "UNIT Team", "probably")],
+        )
+        .unwrap();
+    assert!(report.accepted.is_empty());
+    assert_eq!(report.rejected.len(), 1);
+    assert!(
+        report.rejected[0]
+            .reason
+            .contains("modality must be one of"),
+        "got {:?}",
+        report.rejected[0].reason
+    );
+}
+
+#[test]
+fn differing_modality_on_the_same_triple_is_refused_not_overwritten() {
+    // The stored identity key is (src, dst, rel_type, extractor, polarity,
+    // namespace) — it cannot hold both statements. Before this guard the
+    // second attach silently replaced the first, qualifiers and all.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let asserted = record(&db, "Hugo leitet das UNIT Team.");
+    let quoted = record(&db, "Vela sagte, Hugo leitet das UNIT Team.");
+
+    db.attach_claims(&asserted, &[claim("Hugo", "leads", "UNIT Team")])
+        .unwrap();
+    let report = db
+        .attach_claims(
+            &quoted,
+            &[claim_modal("Hugo", "leads", "UNIT Team", "quoted")],
+        )
+        .unwrap();
+
+    assert!(
+        report.accepted.is_empty(),
+        "a quoted statement must not replace an asserted one"
+    );
+    assert_eq!(report.rejected.len(), 1);
+    assert!(
+        report.rejected[0].reason.contains("identity collision"),
+        "got {:?}",
+        report.rejected[0].reason
+    );
+
+    let stored: String = db
+        .conn()
+        .query_row(
+            "SELECT modality FROM claims WHERE src = 'Hugo' AND dst = 'UNIT Team'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, "asserted", "the first qualifier must be intact");
 }

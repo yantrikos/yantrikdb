@@ -1,4 +1,4 @@
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::Result;
 use crate::types::{Edge, Entity};
@@ -1224,6 +1224,12 @@ pub struct StatedClaim {
     /// `1` asserted (default), `-1` denied.
     #[serde(default = "default_polarity")]
     pub polarity: i32,
+    /// How the writer is asserting it: `asserted` (default), `reported`,
+    /// `hypothetical`, `denied`, `quoted`. The schema has carried this column
+    /// since RFC 006; the cooperative path dropped it, so every quotation and
+    /// every hypothesis was stored as a plain assertion.
+    #[serde(default)]
+    pub modality: Option<String>,
     /// World-validity start (unix seconds): when the stated fact became
     /// true, not when it was written. Absent, the memory's own event time
     /// (`event_time_min`, the temporal tag on the record) is used; absent
@@ -1238,6 +1244,11 @@ pub struct StatedClaim {
     pub valid_to: Option<f64>,
 }
 
+/// The five modalities `claims.modality` documents. A comment in the DDL, not a
+/// CHECK — so the cooperative path validates it here instead.
+pub const STATED_MODALITIES: [&str; 5] =
+    ["asserted", "reported", "hypothetical", "denied", "quoted"];
+
 impl Default for StatedClaim {
     fn default() -> Self {
         Self {
@@ -1245,6 +1256,7 @@ impl Default for StatedClaim {
             rel_type: String::new(),
             dst: String::new(),
             polarity: 1,
+            modality: None,
             valid_from: None,
             valid_to: None,
         }
@@ -1487,6 +1499,17 @@ impl super::YantrikDB {
                 );
                 continue;
             }
+            // Modality is a documented vocabulary, not a CHECK constraint, so
+            // it is validated here. An unknown value would be stored verbatim
+            // and silently mean nothing to every reader.
+            let modality = claim.modality.as_deref().unwrap_or("asserted");
+            if !STATED_MODALITIES.contains(&modality) {
+                reject(
+                    format!("modality must be one of {STATED_MODALITIES:?}, got {modality:?}"),
+                    &mut report,
+                );
+                continue;
+            }
             if src.is_empty() || dst.is_empty() {
                 reject("subject and object must be non-empty".into(), &mut report);
                 continue;
@@ -1544,14 +1567,59 @@ impl super::YantrikDB {
                 );
                 continue;
             }
+            let valid_from = claim.valid_from.or(event_min);
+            // Identity guard. The stored uniqueness key is
+            // (src, dst, rel_type, extractor, polarity, namespace) — narrower
+            // than the qualifiers this API accepts. Rewriting a row whose
+            // modality or window differs would silently replace one statement
+            // with a different one, so the collision is refused instead of
+            // applied. Widening the key is a schema migration and is
+            // deliberately not part of this fix.
+            {
+                let clash: Option<(String, Option<f64>, Option<f64>)> = {
+                    let conn = self.conn();
+                    conn.query_row(
+                        "SELECT modality, valid_from, valid_to FROM claims \
+                         WHERE src = ?1 AND dst = ?2 AND rel_type = ?3 AND extractor = ?4 \
+                           AND polarity = ?5 AND namespace = ?6 AND tombstoned = 0",
+                        params![
+                            src,
+                            dst,
+                            rel,
+                            STATED_CLAIM_EXTRACTOR,
+                            claim.polarity,
+                            memory.namespace
+                        ],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()?
+                };
+                if let Some((stored_mod, stored_from, stored_to)) = clash {
+                    if stored_mod != modality
+                        || stored_from != valid_from
+                        || stored_to != claim.valid_to
+                    {
+                        reject(
+                            format!(
+                                "identity collision: ({src}, {rel}, {dst}) already exists with \
+                                 modality={stored_mod:?} window=({stored_from:?}, {stored_to:?}); \
+                                 refusing to overwrite it with modality={modality:?} window=({valid_from:?}, {:?})",
+                                claim.valid_to
+                            ),
+                            &mut report,
+                        );
+                        continue;
+                    }
+                }
+            }
             let claim_id = self.ingest_claim(
                 src,
                 &rel,
                 dst,
                 &memory.namespace,
                 claim.polarity,
-                "asserted",
-                claim.valid_from.or(event_min),
+                modality,
+                valid_from,
                 claim.valid_to,
                 STATED_CLAIM_EXTRACTOR,
                 Some("1.0"),

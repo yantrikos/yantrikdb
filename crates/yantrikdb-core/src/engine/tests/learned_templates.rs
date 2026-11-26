@@ -28,6 +28,7 @@ fn state(db: &YantrikDB, rid: &str, src: &str, rel: &str, dst: &str) {
                 rel_type: rel.into(),
                 dst: dst.into(),
                 polarity: 1,
+                modality: None,
                 valid_from: None,
                 valid_to: None,
             }],

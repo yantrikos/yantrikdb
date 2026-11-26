@@ -57,6 +57,11 @@ impl PyYantrikDB {
                 rel_type,
                 dst,
                 polarity,
+                // The writer's modality, verbatim. Validating it is the
+                // engine's job (attach_claims rejects unknown values); the
+                // binding must not invent "asserted" here, which is what made
+                // every quotation and hypothesis look like a plain assertion.
+                modality: pick(&["modality", "modality_kind"])?,
                 valid_from: window("valid_from")?,
                 valid_to: window("valid_to")?,
             });

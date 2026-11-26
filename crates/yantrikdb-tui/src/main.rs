@@ -1245,6 +1245,7 @@ mod tests {
                 rel_type: "leads".into(),
                 dst: "Data Platform team".into(),
                 polarity: 1,
+                modality: None,
                 valid_from: None,
                 valid_to: None,
             }],

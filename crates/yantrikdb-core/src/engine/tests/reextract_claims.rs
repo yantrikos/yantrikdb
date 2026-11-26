@@ -68,6 +68,7 @@ fn heal_replaces_extractor_claims_and_preserves_assertions() {
             rel_type: "mentors".into(),
             dst: "Fennwick Labs".into(),
             polarity: 1,
+            modality: None,
             valid_from: None,
             valid_to: None,
         }],
