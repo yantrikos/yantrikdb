@@ -426,11 +426,25 @@ impl YantrikDB {
 
         // New records after T (active only; tombstoned/consolidated rows
         // are lifecycle, not content the resuming session must learn).
+        //
+        // Chain status and disputed-ness are looked up per reported rid rather
+        // than derived from the transition scan below. The successor of a
+        // record created after `since` does NOT necessarily have an edge after
+        // `since`: `record_with_idempotency` takes a caller-supplied
+        // `created_at`, so a future-dated record can be superseded by an edge
+        // that is already older than `since` when it is read.
         let (rec_sql, transitions_sql) = match namespace {
             Some(_) => (
-                "SELECT rid, text, importance, created_at, namespace FROM memories \
-                 WHERE created_at > ?1 AND consolidation_status = 'active' \
-                 AND namespace = ?2 ORDER BY created_at ASC",
+                "SELECT m.rid, m.text, m.importance, m.created_at, m.namespace, \
+                        EXISTS(SELECT 1 FROM conflicts c WHERE c.status = 'open' \
+                               AND (c.memory_a = m.rid OR c.memory_b = m.rid)), \
+                        (SELECT l.source_rid FROM record_links l \
+                          WHERE l.target_rid = m.rid AND l.link_type = 'supersedes' \
+                            AND l.status = 'active' AND l.selection_state = 'selected' \
+                          ORDER BY l.created_at DESC LIMIT 1) \
+                   FROM memories m \
+                  WHERE m.created_at > ?1 AND m.consolidation_status = 'active' \
+                    AND m.namespace = ?2 ORDER BY m.created_at ASC",
                 "SELECT l.target_rid, l.source_rid, l.created_at \
                  FROM record_links l JOIN memories m ON m.rid = l.target_rid \
                  WHERE l.link_type = 'supersedes' AND l.status = 'active' \
@@ -438,9 +452,16 @@ impl YantrikDB {
                  AND m.namespace = ?2 ORDER BY l.created_at ASC",
             ),
             None => (
-                "SELECT rid, text, importance, created_at, namespace FROM memories \
-                 WHERE created_at > ?1 AND consolidation_status = 'active' \
-                 ORDER BY created_at ASC",
+                "SELECT m.rid, m.text, m.importance, m.created_at, m.namespace, \
+                        EXISTS(SELECT 1 FROM conflicts c WHERE c.status = 'open' \
+                               AND (c.memory_a = m.rid OR c.memory_b = m.rid)), \
+                        (SELECT l.source_rid FROM record_links l \
+                          WHERE l.target_rid = m.rid AND l.link_type = 'supersedes' \
+                            AND l.status = 'active' AND l.selection_state = 'selected' \
+                          ORDER BY l.created_at DESC LIMIT 1) \
+                   FROM memories m \
+                  WHERE m.created_at > ?1 AND m.consolidation_status = 'active' \
+                  ORDER BY m.created_at ASC",
                 "SELECT l.target_rid, l.source_rid, l.created_at \
                  FROM record_links l \
                  WHERE l.link_type = 'supersedes' AND l.status = 'active' \
@@ -457,6 +478,8 @@ impl YantrikDB {
                 r.get::<_, f64>(2)?,
                 r.get::<_, f64>(3)?,
                 r.get::<_, String>(4)?,
+                r.get::<_, bool>(5)?,
+                r.get::<_, Option<String>>(6)?,
             ))
         };
         let rec_rows = match namespace {
@@ -488,26 +511,12 @@ impl YantrikDB {
         drop(tr_stmt);
         drop(conn);
 
-        // Chain status for the records we are about to report. A record that
-        // was created after `since` and superseded later necessarily has its
-        // supersedes edge committed after its own creation, hence after
-        // `since` — so the transition scan above already covers it and this
-        // map is complete for `new_records` without a second query. Keyed by
-        // the superseded rid; the query keeps one selected successor per
-        // target, so the map holds exactly one.
-        let mut successor_of: std::collections::HashMap<String, String> =
-            std::collections::HashMap::with_capacity(tr_rows.len());
-        for (target, source, _at) in &tr_rows {
-            successor_of.insert(target.clone(), source.clone());
-        }
-
-        for (rid, enc_text, importance, created_at, ns) in rec_rows {
+        for (rid, enc_text, importance, created_at, ns, disputed, superseded_by) in rec_rows {
             let text = self.decrypt_text(&enc_text).unwrap_or(enc_text);
             // `DigestEntry::current_status` is documented as chain-derived:
             // reporting the lifecycle column here would label a superseded
             // record Active, contradicting the `status_transitions` of the
             // very same answer.
-            let superseded_by = successor_of.get(&rid).cloned();
             let current_status = if superseded_by.is_some() {
                 crate::types::RecordStatus::Superseded
             } else {
@@ -521,7 +530,7 @@ impl YantrikDB {
                 namespace: ns,
                 current_status,
                 superseded_by,
-                disputed: false,
+                disputed,
             });
         }
         for (target, source, at) in tr_rows {

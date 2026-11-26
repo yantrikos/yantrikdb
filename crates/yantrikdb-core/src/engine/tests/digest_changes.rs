@@ -313,3 +313,89 @@ fn imported_records_keep_event_time_and_still_report_later_supersession() {
     // answer different questions (what arrived / what moved).
     assert!(!after.new_records.iter().any(|e| e.rid == imported));
 }
+
+/// `created_at` is caller-supplied (imports), so it can lie in the future. The
+/// supersedes edge is then already older than `since` when the packet is built,
+/// and a successor map derived from the transition scan never sees it. The
+/// lookup has to be per reported rid.
+#[test]
+fn a_future_dated_record_reports_its_supersession() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let now = super::super::now();
+    let future = now + 3600.0;
+
+    let old = record(&db, "The endpoint is v1");
+    // `created_at` is caller-supplied on the import path; standing the row up
+    // normally and re-dating it produces the same state without needing an
+    // embedder for the idempotent write.
+    db.conn()
+        .execute(
+            "UPDATE memories SET created_at = ?1 WHERE rid = ?2",
+            rusqlite::params![future, old],
+        )
+        .unwrap();
+    let new = record(&db, "The endpoint is v2");
+    db.link(
+        &new,
+        &RecordLink {
+            target_rid: old.clone(),
+            link_type: LinkType::Supersedes,
+        },
+    )
+    .unwrap();
+
+    // Half-way between now and the record's own (future) creation time.
+    let changes = db.what_changed_since(now + 1800.0, None, 240).unwrap();
+    let entry = changes
+        .new_records
+        .iter()
+        .find(|e| e.rid == old)
+        .expect("a future-dated record is after `since`");
+
+    assert_eq!(
+        entry.current_status,
+        RecordStatus::Superseded,
+        "the successor is an edge, not a timestamp derivation"
+    );
+    assert_eq!(entry.superseded_by.as_deref(), Some(new.as_str()));
+}
+
+/// `disputed` was hard-coded to `false`: a record that already participates in
+/// an open conflict was reported undisputed, while `top_decisions` in the same
+/// file computed the flag properly.
+#[test]
+fn a_new_record_in_an_open_conflict_is_reported_disputed() {
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let since = super::super::now();
+    std::thread::sleep(std::time::Duration::from_millis(25));
+
+    let a = record(&db, "The deploy runs on Friday");
+    let b = record(&db, "The deploy runs on Monday");
+    db.conn()
+        .execute(
+            "INSERT INTO conflicts (conflict_id, conflict_type, priority, status, \
+             memory_a, memory_b, detected_at, detected_by, detection_reason, hlc, origin_actor) \
+             VALUES ('c-test-1', 'identity_fact', 'high', 'open', ?1, ?2, ?3, 'test', 'test', X'00', 'test')",
+            rusqlite::params![a, b, super::super::now()],
+        )
+        .unwrap();
+
+    let changes = db.what_changed_since(since, None, 240).unwrap();
+    let entry = changes
+        .new_records
+        .iter()
+        .find(|e| e.rid == a)
+        .expect("the record was created after `since`");
+    assert!(
+        entry.disputed,
+        "a record in an open conflict participates in it"
+    );
+
+    let clean = changes
+        .new_records
+        .iter()
+        .find(|e| e.rid != a && e.rid != b);
+    if let Some(clean) = clean {
+        assert!(!clean.disputed, "an unrelated record stays undisputed");
+    }
+}
