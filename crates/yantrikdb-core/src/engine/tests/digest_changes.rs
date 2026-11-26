@@ -166,15 +166,31 @@ fn a_second_successor_never_becomes_a_second_active_edge() {
     let old = record(&db, "The endpoint is v1");
     let n1 = record(&db, "The endpoint is v2");
     let n2 = record(&db, "The endpoint is v2 (second attempt)");
-    db.link(&n1, &RecordLink { target_rid: old.clone(), link_type: LinkType::Supersedes })
-        .unwrap();
+    db.link(
+        &n1,
+        &RecordLink {
+            target_rid: old.clone(),
+            link_type: LinkType::Supersedes,
+        },
+    )
+    .unwrap();
     // The second attempt may be refused outright; that is the point.
-    let _ = db.link(&n2, &RecordLink { target_rid: old.clone(), link_type: LinkType::Supersedes });
+    let _ = db.link(
+        &n2,
+        &RecordLink {
+            target_rid: old.clone(),
+            link_type: LinkType::Supersedes,
+        },
+    );
 
     let inbound = db
         .linked_records(&old, LinkDirection::Inbound, Some(&LinkType::Supersedes))
         .unwrap();
-    assert_eq!(inbound.len(), 1, "one selected successor, not two: {inbound:?}");
+    assert_eq!(
+        inbound.len(),
+        1,
+        "one selected successor, not two: {inbound:?}"
+    );
 }
 
 /// Legacy data (pre Phase-0) can violate that invariant. The change feed must
@@ -190,9 +206,21 @@ fn legacy_multiple_successors_resolve_deterministically() {
     let n1 = record(&db, "The endpoint is v2");
     std::thread::sleep(std::time::Duration::from_millis(25));
     let n2 = record(&db, "The endpoint is v2 (later)");
-    db.link(&n1, &RecordLink { target_rid: old.clone(), link_type: LinkType::Supersedes })
-        .unwrap();
-    let _ = db.link(&n2, &RecordLink { target_rid: old.clone(), link_type: LinkType::Supersedes });
+    db.link(
+        &n1,
+        &RecordLink {
+            target_rid: old.clone(),
+            link_type: LinkType::Supersedes,
+        },
+    )
+    .unwrap();
+    let _ = db.link(
+        &n2,
+        &RecordLink {
+            target_rid: old.clone(),
+            link_type: LinkType::Supersedes,
+        },
+    );
 
     // The gate refuses the second successor, so there is no row to re-select.
     // Recreate the legacy shape explicitly: a second selected inbound edge,
@@ -204,12 +232,7 @@ fn legacy_multiple_successors_resolve_deterministically() {
                  (link_id, source_rid, target_rid, link_type, status, selection_state,
                   created_at, hlc, origin_actor)
              VALUES (?1, ?2, ?3, 'supersedes', 'active', 'selected', ?4, x'00', 'legacy')",
-            rusqlite::params![
-                "legacy-edge-0002",
-                n2,
-                old,
-                super::super::now() + 1.0
-            ],
+            rusqlite::params!["legacy-edge-0002", n2, old, super::super::now() + 1.0],
         )
         .unwrap();
     }
@@ -222,7 +245,10 @@ fn legacy_multiple_successors_resolve_deterministically() {
             .find(|e| e.rid == old)
             .and_then(|e| e.superseded_by.clone())
     };
-    assert!(pick(&first).is_some(), "legacy row still reports a successor");
+    assert!(
+        pick(&first).is_some(),
+        "legacy row still reports a successor"
+    );
     assert_eq!(pick(&first), pick(&second), "two calls, same answer");
     assert_eq!(
         pick(&first).as_deref(),
@@ -266,8 +292,14 @@ fn imported_records_keep_event_time_and_still_report_later_supersession() {
         "a backdated import was not created in the last hour"
     );
 
-    db.link(&successor, &RecordLink { target_rid: imported.clone(), link_type: LinkType::Supersedes })
-        .unwrap();
+    db.link(
+        &successor,
+        &RecordLink {
+            target_rid: imported.clone(),
+            link_type: LinkType::Supersedes,
+        },
+    )
+    .unwrap();
     let after = db.what_changed_since(since, None, 240).unwrap();
     let tr = after
         .status_transitions

@@ -21,8 +21,8 @@ mod cognition_gates;
 mod consolidate_cluster;
 mod corrections;
 mod created_at;
-mod dimensions;
 mod digest_changes;
+mod dimensions;
 mod drafted_facts;
 mod encryption;
 // 0.13.2: 'encrypted means encrypted', verified against the raw file
