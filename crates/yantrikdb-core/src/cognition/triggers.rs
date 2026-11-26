@@ -1376,15 +1376,47 @@ fn tokenize_words(text: &str) -> std::collections::HashSet<String> {
         .collect()
 }
 
+/// Split prose into sentences without breaking on numbers or abbreviations.
+///
+/// A `.` ends a sentence only when whitespace follows it — `0.23.6`, `z.B.`
+/// and `ADR-0139 §R.` therefore stay inside their sentence (review 9, E1).
+/// `!`, `?` and a newline always end one.
+fn sentence_spans(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    for i in 0..bytes.len() {
+        let ends = match bytes[i] {
+            b'\n' | b'!' | b'?' => true,
+            b'.' => bytes
+                .get(i + 1)
+                .map(|b| b.is_ascii_whitespace())
+                .unwrap_or(true),
+            _ => false,
+        };
+        if ends {
+            out.push(&text[start..=i]);
+            start = i + 1;
+        }
+    }
+    if start < text.len() {
+        out.push(&text[start..]);
+    }
+    out
+}
+
 /// The content words of the sentence that contains `token` — the frame a
 /// statement sits in.
 ///
 /// Neither a ±N-token window nor the whole document. The window is blind to a
-/// clause that follows the value ("the decision was discarded"); the document
-/// scores two long notes as different frames merely because they are long
-/// (30 distinct words each, three shared → Jaccard 0.048). A sentence keeps
-/// subject, predicate and value together in both shapes. Review 7 (B2) and
-/// review 8 (findings 1 and 2) are the same defect seen from both sides.
+/// clause that follows the value; the document scores two long notes as
+/// different frames merely because they are long. A sentence keeps subject,
+/// predicate and value together in both shapes.
+///
+/// **What this cannot see:** a retraction in the *next* sentence ("the
+/// decision was discarded") is outside the frame. That is a semantic judgement,
+/// not a frame question — it belongs to the knowledge layer, which is why the
+/// scan produces candidates. Recorded, not hidden: review 9, headline 1.
 fn context_words(text: &str, token: &str) -> std::collections::HashSet<String> {
     let normalise = |s: &str| -> Vec<String> {
         s.split_whitespace()
@@ -1395,7 +1427,7 @@ fn context_words(text: &str, token: &str) -> std::collections::HashSet<String> {
             .filter(|w| !w.is_empty())
             .collect()
     };
-    for sentence in text.split_inclusive(['.', '!', '?', '\n']) {
+    for sentence in sentence_spans(text) {
         let words = normalise(sentence);
         if !words.iter().any(|w| w == token) {
             continue;
@@ -3059,6 +3091,27 @@ mod tests {
             marked[0].reason.contains("was not fully checked"),
             "the reason must say what was skipped: {:?}",
             marked[0].reason
+        );
+    }
+
+    /// Review 9 (E1): a `.` inside a version number must not end the sentence.
+    /// With the naive split, `0.23.6` broke the frame down to a single short
+    /// word and the gate refused a real contradiction.
+    #[test]
+    fn a_version_number_does_not_cut_the_frame_apart() {
+        let a = "version 0.23.6 postgresql aktiv";
+        let b = "version 0.23.6 mysql aktiv";
+        assert!(
+            substitution_is_same_claim(a, "postgresql", b, "mysql"),
+            "the version number must stay inside the sentence"
+        );
+
+        // Abbreviation with two dots, same shape.
+        let c = "z.B. version 0.23.6 postgresql aktiv";
+        let d = "z.B. version 0.23.6 mysql aktiv";
+        assert!(
+            substitution_is_same_claim(c, "postgresql", d, "mysql"),
+            "z.B. must not end the sentence either"
         );
     }
 }
