@@ -332,6 +332,20 @@ fn check_redundancy_in_namespace(
     let mut triggers = Vec::new();
     let threshold = sim_threshold;
 
+    // Load the exclusive substitution categories ONCE per namespace.
+    //
+    // The per-pair helper used to run a JOIN query for every differing token
+    // pair of every near-duplicate memory pair: on this store (10 namespaces,
+    // ≤30 rows each) that is ~8,700 memory pairs, and two texts of a few
+    // thousand characters differ in hundreds of tokens each — tens of
+    // thousands of SQL round trips per memory pair. The table holds 8
+    // categories and 80 members; reading it once and answering the same
+    // predicate in memory removes the cost without changing a single result.
+    let substitution_index = {
+        let conn = db.conn();
+        load_substitution_index(&conn)
+    };
+
     for i in 0..rows.len() {
         for j in (i + 1)..rows.len() {
             let emb_a = crate::compression::decode_embedding_blob(&rows[i].2);
@@ -399,17 +413,9 @@ fn check_redundancy_in_namespace(
                         suggested_action: "review_conflict".to_string(),
                         context,
                     });
-                } else if let Some((cat_name, token_a, token_b)) = {
-                    // CRITICAL: bind the conn guard inside this block so it
-                    // is dropped before create_conflict_if_absent() below takes
-                    // the same connection mutex. Without this scoping, the
-                    // if-let scrutinee's temporary MutexGuard lives through
-                    // the body and self-deadlocks the calling thread (the
-                    // engine's connection mutex is std::sync::Mutex, which
-                    // is non-reentrant).
-                    let conn = db.conn();
-                    check_substitution_category_pair(&*conn, &rows[i].1, &rows[j].1)
-                } {
+                } else if let Some((cat_name, token_a, token_b)) =
+                    check_substitution_pair_in_index(&substitution_index, &rows[i].1, &rows[j].1)
+                {
                     // Substitution category match -> create actual conflict record
                     let reason = format!(
                         "{} substitution: '{}' vs '{}' (similarity={:.0}%, rid_a={}, rid_b={})",
@@ -479,13 +485,12 @@ fn check_redundancy_in_namespace(
             let sim = crate::consolidate::cosine_similarity(&emb_a, &emb_b);
 
             if sim > cat_threshold && sim <= threshold {
-                // Same self-deadlock fix as the first pass above: bind the
-                // conn guard inside a scrutinee block so it drops before
-                // create_conflict_if_absent() reacquires the connection mutex.
-                if let Some((cat_name, token_a, token_b)) = {
-                    let conn = db.conn();
-                    check_substitution_category_pair(&*conn, &rows[i].1, &rows[j].1)
-                } {
+                // `substitution_index` is already loaded for this namespace;
+                // no per-pair SQL, so the self-deadlock hazard the previous
+                // scrutinee-scoped `db.conn()` guarded against is gone.
+                if let Some((cat_name, token_a, token_b)) =
+                    check_substitution_pair_in_index(&substitution_index, &rows[i].1, &rows[j].1)
+                {
                     let reason = format!(
                         "{} substitution: '{}' vs '{}' (similarity={:.0}%, rid_a={}, rid_b={})",
                         cat_name,
@@ -1173,6 +1178,94 @@ fn parse_persisted_trigger(row: &rusqlite::Row<'_>) -> rusqlite::Result<Persiste
 
 /// Check if two memory texts differ by tokens in the same substitution category.
 /// Returns (category_name, token_a, token_b) if a match is found.
+/// Token → (category_id, category name) for exclusive substitution categories.
+///
+/// Small by construction (this store: 8 categories, 80 members). Loaded once
+/// per `check_redundancy` pass instead of being queried per token pair.
+type SubstitutionIndex = std::collections::HashMap<String, Vec<(String, String)>>;
+
+fn load_substitution_index(conn: &rusqlite::Connection) -> SubstitutionIndex {
+    let mut index: SubstitutionIndex = std::collections::HashMap::new();
+    let mut stmt = match conn.prepare(
+        "SELECT m.token_normalized, m.category_id, c.name
+           FROM substitution_members m
+           JOIN substitution_categories c ON c.id = m.category_id
+          WHERE m.status = 'active' AND m.confidence >= 0.6
+            AND c.status = 'active' AND c.conflict_mode = 'exclusive'",
+    ) {
+        Ok(s) => s,
+        // A store without the tables (old schema) has no substitution
+        // categories; an empty index answers the same predicate: no match.
+        Err(_) => return index,
+    };
+    if let Ok(rows) = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    }) {
+        for (token, category_id, name) in rows.flatten() {
+            index.entry(token).or_default().push((category_id, name));
+        }
+    }
+    index
+}
+
+fn normalize_tokens(text: &str) -> std::collections::HashSet<String> {
+    text.split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// Same predicate as [`check_substitution_category_pair`], answered in memory.
+///
+/// Both tokens must be active members of the same exclusive category; the
+/// first shared category found wins, exactly like the SQL `LIMIT 1` over the
+/// same pair iteration order.
+fn check_substitution_pair_in_index(
+    index: &SubstitutionIndex,
+    text_a: &str,
+    text_b: &str,
+) -> Option<(String, String, String)> {
+    if index.is_empty() {
+        return None;
+    }
+    let words_a = normalize_tokens(text_a);
+    let words_b = normalize_tokens(text_b);
+    let diff_a: Vec<&String> = words_a.difference(&words_b).collect();
+    let diff_b: Vec<&String> = words_b.difference(&words_a).collect();
+
+    for ta in &diff_a {
+        let Some(cats_a) = index.get(ta.as_str()) else {
+            continue;
+        };
+        if cats_a.is_empty() {
+            continue;
+        }
+        for tb in &diff_b {
+            let Some(cats_b) = index.get(tb.as_str()) else {
+                continue;
+            };
+            if let Some((_, name)) = cats_a
+                .iter()
+                .find(|(id_a, _)| cats_b.iter().any(|(id_b, _)| id_b == id_a))
+            {
+                return Some((name.clone(), (*ta).clone(), (*tb).clone()));
+            }
+        }
+    }
+    None
+}
+
+/// Reference implementation, kept as the readable statement of the predicate.
+/// `check_redundancy` no longer calls it: one JOIN per token pair made a
+/// 30-row namespace cost minutes.
+#[allow(dead_code)]
 fn check_substitution_category_pair(
     conn: &rusqlite::Connection,
     text_a: &str,
@@ -2199,5 +2292,231 @@ mod tests {
             .remove("redundancy_sim_threshold");
         let cfg: crate::types::ThinkConfig = serde_json::from_value(old).unwrap();
         assert_eq!(cfg.redundancy_sim_threshold, 0.85);
+    }
+
+    // ---- Substitution index vs. SQL reference (0010) ----------------------
+    //
+    // The index answers the same predicate as `check_substitution_category_pair`
+    // but loads the table once instead of issuing a JOIN per token pair. These
+    // tests pin the equivalence where a rewrite could silently drift: several
+    // categories matching the same token pair, the order in which tokens are
+    // visited (a HashSet's iteration order is not stable), and rows the SQL
+    // predicate must reject (inactive member, low confidence, non-exclusive or
+    // inactive category).
+    //
+    // The schema ships DEFAULT categories, so every fixture here uses names and
+    // tokens that cannot collide with them.
+
+    fn seed_category(
+        conn: &rusqlite::Connection,
+        id: &str,
+        name: &str,
+        conflict_mode: &str,
+        status: &str,
+        members: &[(&str, f64, &str)],
+    ) {
+        conn.execute(
+            "INSERT INTO substitution_categories
+               (id, name, conflict_mode, status, created_at, updated_at, hlc, origin_actor)
+             VALUES (?1, ?2, ?3, ?4, 0.0, 0.0, x'00', 'test')",
+            rusqlite::params![id, name, conflict_mode, status],
+        )
+        .unwrap();
+        for (i, (token, confidence, member_status)) in members.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO substitution_members
+                   (id, category_id, token_normalized, token_display, confidence, source,
+                    status, created_at, updated_at, hlc, origin_actor)
+                 VALUES (?1, ?2, ?3, ?3, ?4, 'test', ?5, 0.0, 0.0, x'00', 'test')",
+                rusqlite::params![format!("{id}-m{i}"), id, token, confidence, member_status],
+            )
+            .unwrap();
+        }
+    }
+
+    fn both(
+        conn: &rusqlite::Connection,
+        index: &SubstitutionIndex,
+        a: &str,
+        b: &str,
+    ) -> (
+        Option<(String, String, String)>,
+        Option<(String, String, String)>,
+    ) {
+        (
+            check_substitution_category_pair(conn, a, b),
+            check_substitution_pair_in_index(index, a, b),
+        )
+    }
+
+    #[test]
+    fn index_matches_sql_for_a_single_matching_category() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let conn = db.conn();
+        seed_category(
+            &conn,
+            "t-c1",
+            "t_single",
+            "exclusive",
+            "active",
+            &[("toka", 0.9, "active"), ("tokb", 0.9, "active")],
+        );
+        let index = load_substitution_index(&conn);
+
+        let a = "wir setzen toka fuer den store ein";
+        let b = "wir setzen tokb fuer den store ein";
+        let (sql, mem) = both(&*conn, &index, a, b);
+        assert_eq!(sql.as_ref().map(|t| t.0.as_str()), Some("t_single"));
+        assert_eq!(mem.as_ref().map(|t| t.0.as_str()), Some("t_single"));
+        assert_eq!(
+            sql.as_ref().map(|t| t.1.as_str()),
+            mem.as_ref().map(|t| t.1.as_str()),
+            "same token_a"
+        );
+        assert_eq!(
+            sql.as_ref().map(|t| t.2.as_str()),
+            mem.as_ref().map(|t| t.2.as_str()),
+            "same token_b"
+        );
+    }
+
+    #[test]
+    fn index_matches_sql_when_several_categories_match() {
+        // Same token pair in TWO exclusive categories. The SQL `LIMIT 1` has no
+        // ORDER BY and the index walks a HashMap, so either may pick either.
+        // What must hold: both find a match, and both name a category that
+        // really contains the pair.
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let conn = db.conn();
+        seed_category(
+            &conn,
+            "t-c2a",
+            "t_multi_a",
+            "exclusive",
+            "active",
+            &[("tokm", 0.9, "active"), ("tokn", 0.9, "active")],
+        );
+        seed_category(
+            &conn,
+            "t-c2b",
+            "t_multi_b",
+            "exclusive",
+            "active",
+            &[("tokm", 0.8, "active"), ("tokn", 0.8, "active")],
+        );
+        let index = load_substitution_index(&conn);
+
+        let a = "tokm laeuft hier";
+        let b = "tokn laeuft hier";
+        let (sql, mem) = both(&*conn, &index, a, b);
+        let allowed = ["t_multi_a", "t_multi_b"];
+        let sql_name = sql.as_ref().map(|t| t.0.as_str()).expect("sql must match");
+        let mem_name = mem
+            .as_ref()
+            .map(|t| t.0.as_str())
+            .expect("index must match");
+        assert!(allowed.contains(&sql_name), "sql picked {sql_name}");
+        assert!(allowed.contains(&mem_name), "index picked {mem_name}");
+    }
+
+    #[test]
+    fn index_matches_sql_regardless_of_token_order() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let conn = db.conn();
+        seed_category(
+            &conn,
+            "t-c3",
+            "t_order",
+            "exclusive",
+            "active",
+            &[("tokx", 0.9, "active"), ("toky", 0.9, "active")],
+        );
+        let index = load_substitution_index(&conn);
+
+        // The differing token sits at the head, in the middle, and at the tail.
+        for (a, b) in [
+            ("tokx ist die wahl", "toky ist die wahl"),
+            ("wir nehmen tokx heute", "wir nehmen toky heute"),
+            ("die datenbank heisst tokx", "die datenbank heisst toky"),
+        ] {
+            let (sql, mem) = both(&*conn, &index, a, b);
+            assert_eq!(sql.is_some(), mem.is_some(), "{a} vs {b}");
+            assert_eq!(
+                sql.as_ref().map(|t| t.0.as_str()),
+                mem.as_ref().map(|t| t.0.as_str()),
+                "{a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn index_ignores_rows_the_sql_predicate_rejects() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let conn = db.conn();
+        // member status inactive
+        seed_category(
+            &conn,
+            "t-r1",
+            "t_inactive_member",
+            "exclusive",
+            "active",
+            &[("tokp", 0.9, "inactive"), ("tokq", 0.9, "active")],
+        );
+        // confidence below the 0.6 floor
+        seed_category(
+            &conn,
+            "t-r2",
+            "t_low_confidence",
+            "exclusive",
+            "active",
+            &[("tokr", 0.3, "active"), ("toks", 0.9, "active")],
+        );
+        // category not exclusive
+        seed_category(
+            &conn,
+            "t-r3",
+            "t_compatible",
+            "compatible",
+            "active",
+            &[("tokt", 0.9, "active"), ("toku", 0.9, "active")],
+        );
+        // category inactive
+        seed_category(
+            &conn,
+            "t-r4",
+            "t_dead",
+            "exclusive",
+            "inactive",
+            &[("tokv", 0.9, "active"), ("tokw", 0.9, "active")],
+        );
+        let index = load_substitution_index(&conn);
+
+        for (a, b) in [
+            ("tokp hier", "tokq hier"),
+            ("tokr hier", "toks hier"),
+            ("tokt hier", "toku hier"),
+            ("tokv hier", "tokw hier"),
+        ] {
+            let (sql, mem) = both(&*conn, &index, a, b);
+            assert!(sql.is_none(), "sql must reject {a} vs {b}");
+            assert!(mem.is_none(), "index must reject {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn index_returns_none_for_tokens_no_category_contains() {
+        // The schema seeds default categories, so the index is NOT empty here.
+        // What must hold: a pair outside every category is answered the same
+        // way by both implementations.
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let conn = db.conn();
+        let index = load_substitution_index(&conn);
+        assert!(!index.is_empty(), "schema seeds default categories");
+
+        let a = "zzznosuchtoken hier";
+        let b = "zzzandertoken hier";
+        let (sql, mem) = both(&*conn, &index, a, b);
+        assert!(sql.is_none());
+        assert!(mem.is_none());
     }
 }
