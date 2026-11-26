@@ -1,4 +1,3 @@
-use super::*;
 use crate::belief::{assert_evidence, observation_key, BeliefRevisionConfig, Evidence};
 use crate::state::{BeliefPayload, Provenance};
 use crate::{CognitiveNode, NodeId, NodeKind, NodePayload};
@@ -63,7 +62,7 @@ fn one_source_can_carry_several_observations() {
         let _ = assert_evidence(&mut node, &e, &cfg);
     }
     println!(
-        "EINE QUELLE, ZWEI BEOBACHTUNGEN: trail={} log_odds={:.4}",
+        "ONE SOURCE, TWO OBSERVATIONS: trail={} log_odds={:.4}",
         trail(&node).len(),
         lo(&node)
     );
@@ -133,7 +132,7 @@ fn re_evaluation_keeps_the_previous_assessment() {
     );
     let t = trail(&node);
     println!(
-        "NEUBEWERTUNG MIT HISTORIE: aktuell {:.4} · Historie {:?}",
+        "RE-ASSESSMENT WITH HISTORY: current {:.4} · history {:?}",
         t[0].weight, t[0].history
     );
     assert_eq!(t.len(), 1, "one observation, not two");
@@ -190,7 +189,7 @@ fn invariant_becomes_prior_plus_sum_with_a_prior() {
     }
     let sum: f64 = trail(&node).iter().map(|e| e.weight).sum();
     println!(
-        "INVARIANTE mit Prior: log_odds={:.4} prior+Summe={:.4}",
+        "INVARIANT with prior: log_odds={:.4} prior+sum={:.4}",
         lo(&node),
         0.8 + sum
     );

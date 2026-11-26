@@ -210,17 +210,6 @@ impl Default for BeliefRevisionConfig {
 
 // ── Core Belief Revision Functions ──
 
-/// Assert a single piece of evidence against a belief node.
-///
-/// Updates the belief's log-odds using Bayesian updating with source reliability priors.
-/// Returns the full result including threshold crossings and propagation effects.
-///
-/// # Arguments
-/// * `node` - The belief node to update (must be a Belief payload)
-/// * `evidence` - The evidence to assert
-/// * `config` - Revision configuration
-/// * `epistemic_edges` - Edges from this belief to other beliefs (for propagation)
-/// * `downstream_nodes` - Mutable map of downstream belief nodes (for propagation writes)
 /// Compose the stable identity of ONE observation.
 ///
 /// Three rules, all deliberate:
@@ -235,13 +224,66 @@ impl Default for BeliefRevisionConfig {
 /// Callers that resolve a consolidated record back to its originals
 /// (`consolidation_members`) pass the ORIGINAL source rid, so a synthesis is
 /// not a second experience.
+///
+/// The belief id is rendered through `to_raw()`, not through `Debug`: an id
+/// that is part of a persisted identity must not change because a derive
+/// changes its output. (This is a one-time change of the id strings; callers
+/// that persisted the old `bNodeId(Belief:7)|…` form should re-derive.)
 pub fn observation_key(belief: NodeId, source_rid: &str, local: Option<&str>) -> String {
+    let id = belief.to_raw();
     match local {
-        Some(l) => format!("b{belief:?}|{source_rid}|{l}"),
-        None => format!("b{belief:?}|{source_rid}"),
+        Some(l) => format!("b{id}|{source_rid}|{l}"),
+        None => format!("b{id}|{source_rid}"),
     }
 }
 
+/// How much of ONE entry's weight has survived decay at `now`.
+///
+/// The re-assessment path needs the share of the ENTRY, not of the belief:
+/// after fresh evidence arrives, `shift_log_odds` resets the belief-level
+/// anchor, so the belief's own `value / anchor` ratio says "nothing decayed" —
+/// and then retracting a 100-day-old observation would remove its full weight
+/// from a value that only ever received a twentieth of it (measured: 1.1 - 2.0
+/// = -0.9 for evidence that was worth 0.1).
+///
+/// Same formula as `apply_staleness_decay`, applied to the entry's own age:
+/// no decay inside the grace period, then the configured rate per day, clipped
+/// at 95 %.
+pub fn entry_decay_share(
+    belief: &BeliefPayload,
+    observation_id: &str,
+    now: f64,
+    config: &BeliefRevisionConfig,
+) -> f64 {
+    let full_share = 1.0;
+    let Some(entry) = belief
+        .evidence_trail
+        .iter()
+        .find(|e| e.observation_id.as_deref() == Some(observation_id))
+    else {
+        return full_share;
+    };
+    let days = (now - entry.timestamp) / 86_400.0;
+    if !days.is_finite() || days <= config.staleness_grace_period_days {
+        return full_share;
+    }
+    let rate = config.staleness_rate_per_day;
+    if !rate.is_finite() || rate <= 0.0 {
+        return full_share;
+    }
+    let effective_days = days - config.staleness_grace_period_days;
+    (1.0 - (rate * effective_days).min(0.95)).max(0.05)
+}
+
+/// Assert a single piece of evidence against a belief node.
+///
+/// Updates the belief's log-odds using Bayesian updating with source reliability priors.
+/// Returns the full result including threshold crossings and propagation effects.
+///
+/// # Arguments
+/// * `node` - The belief node to update (must be a Belief payload)
+/// * `evidence` - The evidence to assert
+/// * `config` - Revision configuration
 pub fn assert_evidence(
     node: &mut CognitiveNode,
     evidence: &Evidence,
@@ -259,13 +301,20 @@ pub fn assert_evidence(
     let reliability = evidence.provenance.reliability_prior();
     let effective_weight = evidence.weight * reliability;
 
-    // Apply the Bayesian update
+    // Apply the Bayesian update. A re-assessment moves the belief by the share
+    // THIS entry has survived — computed from its own age, because the belief's
+    // value/anchor ratio stops meaning anything once fresher evidence arrives.
+    let decay_share = match evidence.observation_id.as_deref() {
+        Some(oid) => entry_decay_share(belief, oid, evidence.timestamp, config),
+        None => 1.0,
+    };
     belief.update_with_id(
         evidence.weight,
         reliability,
         &evidence.source,
         evidence.timestamp,
         evidence.observation_id.as_deref(),
+        decay_share,
     );
 
     // Enforce confidence ceiling for volatile beliefs
@@ -462,7 +511,9 @@ pub fn propagate_evidence_from(
 /// the previous pass wrote:
 /// * **time-based** — the amount depends on how much time has passed since the
 ///   newest evidence, not on how often the revision loop ran;
-/// * **idempotent** — a second pass at the same instant is a no-op.
+/// * **idempotent** — a second pass at the same instant is a no-op, for
+///   evidence asserted in timestamp order (a back-dated assertion is anchored
+///   at the newest evidence and is documented under `decayed_at`).
 ///
 /// The rate does NOT depend on `attrs.persistence`: scaling it was removed
 /// again in this series.

@@ -151,7 +151,7 @@ fn same_observation_is_idempotent_with_an_identity() {
     let cfg = BeliefRevisionConfig::default();
 
     // (a) with observation_id: the same observation twice changes nothing
-    let mut node = belief_node(5, "Idempotenz mit Identitaet.");
+    let mut node = belief_node(5, "Idempotence with an identity.");
     let id = id_of(&node);
     let mut ev = evidence(id, 1.0, "dieselbe quelle, derselbe zeitpunkt");
     ev.observation_id = Some("belief:5|src:rid-a|observed".into());

@@ -59,7 +59,7 @@ fn repeated_revision_at_same_time_is_idempotent() {
 
     revise_beliefs(&mut [&mut b], now, &cfg);
     println!(
-        "SELBE ZEIT: einmal={once:.4} zweimal={twice:.4} (Referenz {:.4})",
+        "SAME INSTANT: once={once:.4} twice={twice:.4} (reference {:.4})",
         lo(&b)
     );
     assert!(
@@ -104,9 +104,7 @@ fn decay_follows_elapsed_time_not_call_count() {
     }
     let thirty_calls = lo(&b);
 
-    println!(
-        "AUFRUFABHÄNGIGKEIT: 1 Aufruf nach 30 d = {one_call:.4} · 30 Aufrufe = {thirty_calls:.4}"
-    );
+    println!("CALL DEPENDENCE: 1 call after 30 d = {one_call:.4} · 30 calls = {thirty_calls:.4}");
     assert!(
         (one_call - thirty_calls).abs() < 1e-6,
         "decay depends on how often revise_beliefs runs: {one_call} vs {thirty_calls}"
@@ -454,7 +452,7 @@ fn direct_and_propagated_evidence_are_order_independent() {
     // Order A: direct first, then the propagation of the same origin.
     let mut a = belief(60, Vec::new(), 0.0);
     if let NodePayload::Belief(b) = &mut a.payload {
-        b.update_with_id(1.0, 0.9, "obs", now, Some(origin));
+        b.update_with_id(1.0, 0.9, "obs", now, Some(origin), 1.0);
         b.update_propagated(1.0, now, origin, via);
     }
     let a_value = lo(&a);
@@ -463,7 +461,7 @@ fn direct_and_propagated_evidence_are_order_independent() {
     let mut b = belief(61, Vec::new(), 0.0);
     if let NodePayload::Belief(payload) = &mut b.payload {
         payload.update_propagated(1.0, now, origin, via);
-        payload.update_with_id(1.0, 0.9, "obs", now, Some(origin));
+        payload.update_with_id(1.0, 0.9, "obs", now, Some(origin), 1.0);
     }
     let b_value = lo(&b);
 
@@ -589,5 +587,86 @@ fn the_volatility_ceiling_goes_through_the_anchor() {
     assert!(
         (decayed - 1.6).abs() < 1e-6,
         "main's formula gives 1.6, got {decayed}"
+    );
+}
+
+/// Re-assessing aged evidence must remove only ITS surviving share.
+///
+/// Review (26.11.): `a` +2.0 at NOW-100d decays to 0.1; fresh `b` +1.0 at NOW
+/// gives 1.1. Retracting `a` then gave -0.9, although only `b` (worth 1.0) was
+/// still there; re-asserting `a` at 1.0 gave 0.1 instead of ~1.05. Cause: the
+/// belief-level `value / anchor` ratio is 1.0 once fresher evidence arrives, so
+/// `a`'s fully undecayed delta was applied. The share has to come from the
+/// entry's own age.
+///
+/// Numbers here use Observed reliability (0.9) instead of the review's 2.0/1.0
+/// so the fixture can be built from ordinary assertions: `b` is worth 0.9, and
+/// `a` re-asserted at 1.0 is worth 0.9 * 0.05 = 0.045.
+#[test]
+fn reassessment_after_fresh_evidence_uses_the_entrys_own_share() {
+    let cfg = BeliefRevisionConfig::default();
+    let now = 1_800_000_000.0_f64;
+
+    let aged = || {
+        let trail = vec![EvidenceEntry {
+            source: "a".into(),
+            weight: 2.0,
+            timestamp: now - 100.0 * 86400.0,
+            observation_id: Some("a".into()),
+            history: Vec::new(),
+        }];
+        let mut node = belief(65, trail, 2.0);
+        revise_beliefs(&mut [&mut node], now, &cfg);
+        node
+    };
+
+    // (1) retraction: only b's contribution may remain
+    let mut node = aged();
+    let id = node.id;
+    assert!(
+        (lo(&node) - 0.1).abs() < 1e-9,
+        "fixture decay: {}",
+        lo(&node)
+    );
+    assert_evidence(
+        &mut node,
+        &Evidence::new(id, 1.0, "b", Provenance::Observed, now).with_observation_id("b"),
+        &cfg,
+    )
+    .unwrap();
+    assert!((lo(&node) - 1.0).abs() < 1e-9, "after b: {}", lo(&node));
+    assert_evidence(
+        &mut node,
+        &Evidence::new(id, 0.0, "a", Provenance::Observed, now).with_observation_id("a"),
+        &cfg,
+    )
+    .unwrap();
+    let retracted = lo(&node);
+    println!("RETRACT AGED: {retracted:.4} (must equal b's 0.9)");
+    assert!(
+        (retracted - 0.9).abs() < 1e-9,
+        "retracting a must remove only its decayed share, got {retracted}"
+    );
+
+    // (2) re-assessment: b stays, a returns at its decayed share
+    let mut node = aged();
+    let id = node.id;
+    assert_evidence(
+        &mut node,
+        &Evidence::new(id, 1.0, "b", Provenance::Observed, now).with_observation_id("b"),
+        &cfg,
+    )
+    .unwrap();
+    assert_evidence(
+        &mut node,
+        &Evidence::new(id, 1.0, "a", Provenance::Observed, now).with_observation_id("a"),
+        &cfg,
+    )
+    .unwrap();
+    let reassessed = lo(&node);
+    println!("RE-ASSESS AGED: {reassessed:.4} (must equal 0.9 + 0.045)");
+    assert!(
+        (reassessed - 0.945).abs() < 1e-9,
+        "re-assessment must apply the entry's own share, got {reassessed}"
     );
 }

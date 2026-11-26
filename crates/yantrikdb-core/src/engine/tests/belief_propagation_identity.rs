@@ -1,4 +1,3 @@
-use super::*;
 use crate::belief::{propagate_evidence_from, BeliefRevisionConfig};
 use crate::state::{BeliefPayload, CognitiveEdge, CognitiveEdgeKind};
 use crate::{CognitiveNode, NodeId, NodeKind, NodePayload};
@@ -64,7 +63,7 @@ fn repeated_propagation_with_origin_is_idempotent() {
     let _ = propagate_evidence_from(Some("obs-1"), ai, 1.0, &[edge(ai, di)], &mut down, &cfg, 0);
     let twice = lo(&down[&di]);
     println!(
-        "WIEDERHOLT: einmal={once:.4} zweimal={twice:.4} trail={}",
+        "REPEATED: once={once:.4} twice={twice:.4} propagated={}",
         propagated(&down[&di])
     );
     assert!(
@@ -165,7 +164,7 @@ fn retracting_the_origin_corrects_the_propagated_effect() {
     );
     let after_retraction = lo(&down[&di]);
     println!(
-        "RÜCKNAHME: {with_evidence:.4} -> {after_retraction:.4} trail={}",
+        "RETRACTION: {with_evidence:.4} -> {after_retraction:.4} propagated={}",
         propagated(&down[&di])
     );
     assert!(
@@ -192,7 +191,7 @@ fn without_origin_propagation_stays_additive() {
     let once = lo(&down[&di]);
     let _ = propagate_evidence_from(None, ai, 1.0, &[edge(ai, di)], &mut down, &cfg, 0);
     let twice = lo(&down[&di]);
-    println!("OHNE URSPRUNG: einmal={once:.4} zweimal={twice:.4}");
+    println!("WITHOUT ORIGIN: once={once:.4} twice={twice:.4}");
     assert!((twice - 2.0 * once).abs() < 1e-12);
 }
 
@@ -332,7 +331,7 @@ fn direct_and_propagated_from_one_origin_are_separate_channels() {
 
         let apply_direct = |node: &mut CognitiveNode| {
             if let NodePayload::Belief(p) = &mut node.payload {
-                p.update_with_id(1.0, 0.9, "source", 1_800_000_000.0, Some("obs-same"));
+                p.update_with_id(1.0, 0.9, "source", 1_800_000_000.0, Some("obs-same"), 1.0);
             }
         };
         let apply_propagation = |node: &mut CognitiveNode| {
@@ -386,7 +385,7 @@ fn a_caller_id_shaped_like_a_propagation_key_does_not_collide() {
     let (ai, di) = (a.id, d.id);
 
     if let NodePayload::Belief(p) = &mut d.payload {
-        p.update_with_id(1.0, 0.9, "caller", 1_800_000_000.0, Some("prop|o1"));
+        p.update_with_id(1.0, 0.9, "caller", 1_800_000_000.0, Some("prop|o1"), 1.0);
     }
     let direct_only = lo(&d);
 

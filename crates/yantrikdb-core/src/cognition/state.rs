@@ -603,6 +603,14 @@ pub struct BeliefPayload {
     /// instant is a no-op, and the result depends on elapsed time only, never
     /// on how often `revise_beliefs` ran. `None` only on rows written before
     /// this field existed.
+    ///
+    /// **Scope of that guarantee:** evidence asserted in timestamp order. An
+    /// assertion whose timestamp lies before the last recomputation moves the
+    /// clock back to that earlier instant (monotonically clamped, never
+    /// backwards past an already-reached point) and is anchored at the newest
+    /// evidence; a later pass can then reach a different value than asserting
+    /// both and decaying once. That is the pre-change behaviour too — it is
+    /// documented, not promised away.
     #[serde(default)]
     pub undecayed_log_odds: Option<f64>,
     /// When the stored (`decayed`) value was last recomputed from the anchor.
@@ -611,7 +619,8 @@ pub struct BeliefPayload {
     /// base is the evidence sum, so a second pass later would charge the same
     /// elapsed time again. With it, decay measures time since the last
     /// recomputation, and `log_odds` is always a pure function of
-    /// (anchor, elapsed, config).
+    /// (anchor, elapsed, config) for evidence that arrives in timestamp
+    /// order.
     #[serde(default)]
     pub decayed_at: f64,
     /// Evidence that reached this belief over epistemic edges — derived, never
@@ -676,7 +685,7 @@ impl BeliefPayload {
     /// `weight` is the log-likelihood ratio: positive supports, negative contradicts.
     /// `reliability` scales the update (0.0 = ignore, 1.0 = full weight).
     pub fn update(&mut self, weight: f64, reliability: f64, source: &str, timestamp: f64) {
-        self.update_with_id(weight, reliability, source, timestamp, None);
+        self.update_with_id(weight, reliability, source, timestamp, None, 1.0);
     }
 
     /// [`update`] with a caller-supplied observation identity.
@@ -696,6 +705,7 @@ impl BeliefPayload {
         source: &str,
         timestamp: f64,
         observation_id: Option<&str>,
+        decay_share: f64,
     ) {
         let effective_weight = weight * reliability;
         if let Some(oid) = observation_id {
@@ -722,7 +732,7 @@ impl BeliefPayload {
                     // The delta is undecayed while the stored value may be
                     // decayed, so applying it directly crossed zero: 2.0
                     // decayed to 0.1, re-asserted at 1.0, became -0.9.
-                    self.reassess_log_odds(delta);
+                    self.reassess_log_odds(delta, decay_share);
                     // The clock is deliberately NOT restarted. This is the
                     // same observation, and it is exactly as old as it was;
                     // restarting the clock would make a repeat assertion of
@@ -732,7 +742,10 @@ impl BeliefPayload {
             }
         }
         self.shift_log_odds(effective_weight);
-        self.decayed_at = timestamp;
+        // Monotonic: a back-dated assertion must not move the decay clock
+        // backwards and make the belief look older than a pass already
+        // accounted for.
+        self.decayed_at = self.decayed_at.max(timestamp);
         let mut entry = EvidenceEntry::new(source, effective_weight, timestamp);
         entry.observation_id = observation_id.map(|s| s.to_string());
         self.evidence_trail.push(entry);
@@ -741,23 +754,17 @@ impl BeliefPayload {
     /// Move the belief by a re-assessed evidence delta without letting an
     /// already-decayed value cross zero.
     ///
-    /// The anchor is the undecayed value; `log_odds / anchor` is the share of
-    /// it that survived decay. A re-assessment changes the anchor by `delta`,
-    /// so the visible value changes by that same share — 2.0 decayed to 0.1
-    /// (share 0.05) re-asserted at 1.0 loses 0.05 and lands at 0.05, instead
-    /// of shifting the decayed 0.1 by the full -1.0 to -0.9.
-    pub fn reassess_log_odds(&mut self, delta: f64) {
+    /// `decay_share` is the share of THIS observation that survived decay — the
+    /// caller computes it from the entry's own age (`entry_decay_share`). It
+    /// must not be derived from `log_odds / anchor`: once fresher evidence
+    /// arrived, that ratio describes the whole belief (usually 1.0), and
+    /// retracting a 100-day-old observation would then remove its full weight
+    /// from a value that only ever held a twentieth of it.
+    pub fn reassess_log_odds(&mut self, delta: f64, decay_share: f64) {
         let anchor = self.undecayed_log_odds.unwrap_or(self.log_odds);
-        // `>= 0.0` includes the fully decayed value: with `log_odds == 0` the
-        // share is 0, so old evidence cannot regain a sign it lost. A belief
-        // with no anchor yet (anchor 0) keeps the plain additive behaviour.
-        let decay_share = if anchor.abs() > f64::EPSILON && self.log_odds * anchor >= 0.0 {
-            (self.log_odds / anchor).clamp(0.0, 1.0)
-        } else {
-            1.0
-        };
+        let share = decay_share.clamp(0.0, 1.0);
         self.undecayed_log_odds = Some(anchor + delta);
-        self.log_odds += delta * decay_share;
+        self.log_odds += delta * share;
     }
 
     /// Apply a PROPAGATED contribution that is derived from one originating
@@ -930,6 +937,7 @@ impl EvidenceEntry {
 /// Kept apart from [`EvidenceEntry`] on purpose — separate channel, separate
 /// deduplication, and no effect on the staleness clock.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct PropagatedEvidence {
     /// The originating observation id, as the origin belief knew it.
     pub origin: String,

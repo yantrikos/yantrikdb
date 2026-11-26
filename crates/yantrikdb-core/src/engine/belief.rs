@@ -7,8 +7,8 @@
 use std::collections::HashMap;
 
 use crate::belief::{
-    self, apply_staleness_decay, assert_evidence, propagate_evidence, propagate_evidence_from,
-    BeliefRevisionConfig, Evidence, EvidenceResult, RevisionSummary,
+    apply_staleness_decay, assert_evidence, propagate_evidence_from, BeliefRevisionConfig,
+    Evidence, EvidenceResult, RevisionSummary,
 };
 use crate::belief_query::{self, BeliefExplanation, BeliefInventory, BeliefPattern};
 use crate::contradiction::{self, ContradictionConfig, ContradictionScanResult};
