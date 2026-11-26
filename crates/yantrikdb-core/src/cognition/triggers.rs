@@ -290,6 +290,28 @@ pub fn check_redundancy(db: &YantrikDB, sim_threshold: f64) -> Result<Vec<Trigge
     Ok(triggers)
 }
 
+/// A maintenance run must say when a namespace was not fully checked.
+///
+/// "No conflicts found" and "conflicts could not be evaluated" are different
+/// answers, and only one of them is good news. The log alone is not enough:
+/// whoever reads the result has to see it.
+fn incomplete_namespace_trigger(namespace: &str, reason: &str) -> Trigger {
+    Trigger {
+        trigger_type: "maintenance_incomplete".to_string(),
+        reason: format!(
+            "namespace {namespace} was not fully checked: {reason}; \
+             substitution conflicts are missing for it"
+        ),
+        urgency: 0.9,
+        source_rids: vec![],
+        suggested_action:
+            "inspect the substitution tables; this namespace's substitution conflicts \
+             were not evaluated"
+                .to_string(),
+        context: std::collections::HashMap::new(),
+    }
+}
+
 fn check_redundancy_in_namespace(
     db: &YantrikDB,
     namespace: &str,
@@ -343,8 +365,14 @@ fn check_redundancy_in_namespace(
     // predicate in memory removes the cost without changing a single result.
     let substitution_index = {
         let conn = db.conn();
-        match load_substitution_index(&conn) {
-            Ok(index) => index,
+        match load_substitution_index_status(&conn) {
+            Ok((index, None)) => index,
+            // Loaded, but degraded (missing tables): the index is empty and
+            // still usable — the reason must reach the report.
+            Ok((index, Some(reason))) => {
+                triggers.push(incomplete_namespace_trigger(namespace, &reason));
+                index
+            }
             // Degrade, do not abort. Review 8 (finding 3): propagating took
             // down the remaining namespaces, both conflict scans, the
             // consolidation and three further trigger checks — and surfaced as
@@ -356,6 +384,7 @@ fn check_redundancy_in_namespace(
                     "substitution index unavailable for this namespace; \
                      substitution conflicts are skipped for it"
                 );
+                triggers.push(incomplete_namespace_trigger(namespace, &format!("{e}")));
                 SubstitutionIndex::new()
             }
         }
@@ -1200,6 +1229,17 @@ fn parse_persisted_trigger(row: &rusqlite::Row<'_>) -> rusqlite::Result<Persiste
 type SubstitutionIndex = std::collections::HashMap<String, Vec<(String, String)>>;
 
 fn load_substitution_index(conn: &rusqlite::Connection) -> crate::error::Result<SubstitutionIndex> {
+    load_substitution_index_status(conn).map(|(index, _)| index)
+}
+
+/// The loader, with the reason when the index could not be built.
+///
+/// `None` means "loaded". `Some(reason)` means "degraded": the caller must
+/// surface that in the maintenance RESULT, not only in the log — otherwise
+/// "no conflicts found" and "conflicts could not be evaluated" look alike.
+fn load_substitution_index_status(
+    conn: &rusqlite::Connection,
+) -> crate::error::Result<(SubstitutionIndex, Option<String>)> {
     let mut index: SubstitutionIndex = std::collections::HashMap::new();
     let mut stmt = match conn.prepare(
         // ORDER BY, not insertion order: when a token sits in two exclusive
@@ -1240,13 +1280,24 @@ fn load_substitution_index(conn: &rusqlite::Connection) -> crate::error::Result<
                      (claims exists) — the V13->V14 migration did not complete; \
                      substitution conflicts are disabled for this store"
                 );
+                return Ok((
+                    index,
+                    Some(
+                        "substitution tables are missing although the store is V14 — \
+                         the V13->V14 migration did not complete"
+                            .to_string(),
+                    ),
+                ));
             } else {
                 tracing::warn!(
                     "pre-V14 store without substitution tables — no substitution \
                      conflicts, which is expected for this schema"
                 );
-            }
-            return Ok(index);
+                return Ok((
+                    index,
+                    Some("pre-V14 store without substitution tables".to_string()),
+                ));
+            };
         }
         // Every other failure is real. Returning an empty index here would
         // silently disable substitution conflicts for the WHOLE namespace —
@@ -1265,7 +1316,7 @@ fn load_substitution_index(conn: &rusqlite::Connection) -> crate::error::Result<
         let (token, category_id, name) = row?;
         index.entry(token).or_default().push((category_id, name));
     }
-    Ok(index)
+    Ok((index, None))
 }
 
 /// How many content words around the two substituted tokens must agree before a
@@ -2965,6 +3016,49 @@ mod tests {
         assert!(
             !substitution_is_same_claim(c, "postgresql", d, "mysql"),
             "different subjects must still be refused"
+        );
+    }
+
+    /// A maintenance result must distinguish "no conflicts found" from
+    /// "conflicts could not be evaluated". Dropping the substitution table and
+    /// running the scan has to surface a trigger, not just a log line — the
+    /// report is what a reader trusts.
+    #[test]
+    fn a_missing_index_shows_up_in_the_result() {
+        let db = YantrikDB::with_default(":memory:").unwrap();
+        db.record_text(
+            "der zahlungsdienst verwendet postgresql als datenspeicher.",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+        // The store is V14 (`claims` exists), so this is the damage case.
+        db.conn()
+            .execute("DROP TABLE substitution_members", [])
+            .unwrap();
+
+        let triggers = check_redundancy(&db, 0.85).unwrap();
+        let marked: Vec<_> = triggers
+            .iter()
+            .filter(|t| t.trigger_type == "maintenance_incomplete")
+            .collect();
+        assert_eq!(
+            marked.len(),
+            1,
+            "the incomplete namespace must be reported: {triggers:?}"
+        );
+        assert!(
+            marked[0].reason.contains("was not fully checked"),
+            "the reason must say what was skipped: {:?}",
+            marked[0].reason
         );
     }
 }
