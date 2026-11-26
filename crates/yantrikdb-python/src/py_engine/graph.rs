@@ -68,9 +68,11 @@ impl PyYantrikDB {
                 // binding must not invent "asserted" here, which is what made
                 // every quotation and hypothesis look like a plain assertion.
                 modality: pick(&["modality", "modality_kind"])?,
-                // Where in the text the statement sits. One memory can state
-                // the same proposition twice; the span is what keeps those two
-                // observations apart.
+                // Where in the text the statement sits. Stored so a reader can
+                // locate it, and part of the statement's qualifiers: a second
+                // claim with a different span is refused by the engine's
+                // identity guard rather than replacing the first. It does not
+                // let two observations coexist — the stored key has no span.
                 span_start: int_field(&d, "span_start")?,
                 span_end: int_field(&d, "span_end")?,
                 valid_from: window("valid_from")?,

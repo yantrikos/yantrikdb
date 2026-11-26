@@ -938,17 +938,20 @@ impl YantrikDB {
             // so multiple sources can make conflicting claims about the same fact. Only an
             // identical resubmission (same extractor + same polarity + same namespace) is
             // treated as an update — typically a validity window refinement.
-            // The choke point: every writer of claims passes here, after alias
-            // resolution — the cooperative path, the bound extractor, cognition
-            // and stats. A row that exists under the same identity with
-            // different qualifiers cannot coexist with this one, and the
-            // UPSERT would silently replace it.
+            // The choke point for the SQL writers of claims, after alias
+            // resolution: the cooperative path, the `record.rs` batch
+            // extractor, cognition and stats all pass here. Replication does
+            // not — it writes claims by direct SQL and its UPSERT touches only
+            // weight/created_at/hlc, so it is outside this invariant.
             //
-            // `Refuse` reports instead of replacing; `Overwrite` is the
-            // declared policy of the callers that legitimately refine a row
-            // (cognition, stats, the public ingest wrapper). The invariant is
-            // therefore "the cooperative path and the bound extractor refuse",
-            // not "nothing ever overwrites" — REVIEW5 A6.
+            // A row that exists under the same identity with different
+            // qualifiers cannot coexist with this one, and the UPSERT would
+            // silently replace it. `Refuse` reports instead: the cooperative
+            // path and the `record.rs` call site refuse. `Overwrite` is the
+            // declared policy of the callers that legitimately refine a row in
+            // place — cognition, the two stats sites (which write real
+            // `event_min` windows) and the public `ingest_claim` wrapper.
+            // REVIEW5 A6 / REVIEW6 C3.
             if collision == QualifierCollision::Refuse {
                 // Kein `tombstoned = 0` (REVIEW5 F6): der UNIQUE-Schlüssel
                 // ignoriert Tombstones und der UPSERT setzt `tombstoned` nicht
@@ -1299,11 +1302,16 @@ pub struct StatedClaim {
     /// every hypothesis was stored as a plain assertion.
     #[serde(default)]
     pub modality: Option<String>,
-    /// Byte range of the statement inside the source memory's text. This is the
-    /// *local* part of the observation identity: one memory can state the same
-    /// proposition twice (two paragraphs, two sentences), and without a span
-    /// those statements collapse into one observation. `None` means the writer
-    /// did not say where — not that the statement occurs only once.
+    /// Byte range of the statement inside the source memory's text — WHERE the
+    /// writer said it, not whether it said it twice. It is stored so a reader
+    /// can locate the statement, and it is part of the statement's qualifiers,
+    /// so a second claim with a *different* span is refused by the identity
+    /// guard instead of overwriting the first (see `QualifierCollision`).
+    ///
+    /// It does **not** let two observations coexist: the stored uniqueness key
+    /// has no span. Making them coexist is the §31.1 identity migration.
+    /// `None` means the writer did not say where — not that the statement
+    /// occurs only once.
     #[serde(default)]
     pub span_start: Option<i32>,
     #[serde(default)]
@@ -1339,8 +1347,11 @@ pub const STATED_MODALITIES: [&str; 5] =
 /// The stored uniqueness key `(src, dst, rel_type, extractor, polarity,
 /// namespace)` cannot hold both statements, so "insert" always means "replace
 /// the row". `Refuse` turns that silent replacement into a typed error the
-/// caller can report; `Overwrite` keeps the historical behaviour for writers
-/// that have not been taught the difference yet.
+/// caller can report; `Overwrite` is the declared policy of the callers that
+/// legitimately refine a row in place (cognition, stats, the public
+/// `ingest_claim` wrapper — see the call sites). It is a choice, not a default:
+/// `ingest_claim_grounded` takes it as a required argument, so a new writer
+/// cannot inherit it by omission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QualifierCollision {
     Refuse,

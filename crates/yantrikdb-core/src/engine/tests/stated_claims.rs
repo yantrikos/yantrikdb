@@ -637,6 +637,32 @@ fn a_stored_null_window_collides_with_an_inherited_one() {
 }
 
 #[test]
+fn a_resubmission_that_drops_the_span_is_refused() {
+    // REVIEW6 C2/Q1. Under the one-observation rule a retry that omits the span
+    // is a *different* statement (`None != Some(0)`), so it is refused where
+    // the older code accepted it as a refinement. That is deliberate, but it is
+    // a behaviour change — pinned here because the retry test only covers
+    // None -> None, and a writer cannot see the difference until it is rejected.
+    let (db, rid) = db_with("Hugo leitet das UNIT Team.");
+    let mut first = claim("Hugo", "leads", "UNIT Team");
+    first.span_start = Some(0);
+    first.span_end = Some(24);
+    db.attach_claims(&rid, &[first]).unwrap();
+
+    let report = db
+        .attach_claims(&rid, &[claim("Hugo", "leads", "UNIT Team")])
+        .unwrap();
+
+    assert_eq!(report.accepted.len(), 0, "{report:?}");
+    assert_eq!(report.rejected.len(), 1, "{report:?}");
+    assert!(
+        report.rejected[0].reason.contains("identity collision"),
+        "a retry without the span is a different statement: {:?}",
+        report.rejected[0].reason
+    );
+}
+
+#[test]
 fn two_spans_in_one_batch_reach_the_guard() {
     // Same finding, batch path: the second statement must not be discarded as
     // an in-batch duplicate before the guard can refuse it.
