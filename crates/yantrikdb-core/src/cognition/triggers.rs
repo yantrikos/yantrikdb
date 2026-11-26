@@ -1276,7 +1276,10 @@ fn strip_code_context(text: &str) -> String {
 
 fn tokenize_words(text: &str) -> std::collections::HashSet<String> {
     text.split_whitespace()
-        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
         .filter(|w| !w.is_empty())
         .collect()
 }
@@ -1298,7 +1301,10 @@ fn tokenize_words(text: &str) -> std::collections::HashSet<String> {
 fn frame_similarity(text_a: &str, token_a: &str, text_b: &str, token_b: &str) -> f64 {
     fn content(text: &str, token: &str) -> std::collections::HashSet<String> {
         text.split_whitespace()
-            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+            .map(|w| {
+                w.trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase()
+            })
             .filter(|w| w.len() >= 4 && w != token)
             .collect()
     }
@@ -1317,7 +1323,10 @@ fn shared_context_terms(text_a: &str, token_a: &str, text_b: &str, token_b: &str
     let ctx = |text: &str, token: &str| -> std::collections::HashSet<String> {
         let words: Vec<String> = text
             .split_whitespace()
-            .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_lowercase())
+            .map(|w| {
+                w.trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase()
+            })
             .collect();
         let mut out = std::collections::HashSet::new();
         for (i, w) in words.iter().enumerate() {
@@ -1334,7 +1343,9 @@ fn shared_context_terms(text_a: &str, token_a: &str, text_b: &str, token_b: &str
         }
         out
     };
-    ctx(text_a, token_a).intersection(&ctx(text_b, token_b)).count()
+    ctx(text_a, token_a)
+        .intersection(&ctx(text_b, token_b))
+        .count()
 }
 
 #[cfg(test)]
@@ -2390,7 +2401,10 @@ mod tests {
                  auf demselben Host wie der Agent.";
         let conn = db.conn();
         let hit = check_substitution_category_pair(&*conn, a, b);
-        assert!(hit.is_some(), "same subject, different value must be a conflict");
+        assert!(
+            hit.is_some(),
+            "same subject, different value must be a conflict"
+        );
         let (cat, ta, tb) = hit.unwrap();
         // The category name is not the contract here: postgresql/mysql also live
         // in the seeded `databases` category, and the lookup returns whichever
@@ -2493,8 +2507,19 @@ mod substitution_rule_matrix {
             [],
         )
         .unwrap();
-        for (i, m) in ["postgresql", "mysql", "bge-m3", "e5-large", "python", "rust",
-                       "openai", "google"].iter().enumerate() {
+        for (i, m) in [
+            "postgresql",
+            "mysql",
+            "bge-m3",
+            "e5-large",
+            "python",
+            "rust",
+            "openai",
+            "google",
+        ]
+        .iter()
+        .enumerate()
+        {
             conn.execute(
                 "INSERT INTO substitution_members VALUES (?1,'c',?2,?2,1.0,'t','active',NULL,0,0,x'00','t')",
                 rusqlite::params![format!("m{i}"), m],
@@ -2508,27 +2533,54 @@ mod substitution_rule_matrix {
     fn cases() -> Vec<(&'static str, &'static str, bool)> {
         vec![
             // ---- positive: same frame, one value differs
-            ("Der Datenbank-Provider fuer den Index ist postgresql und laeuft lokal.",
-             "Der Datenbank-Provider fuer den Index ist mysql und laeuft lokal.", true),
-            ("Als Embedding-Modell nutzt der Agent bge-m3 mit 1024 Dimensionen.",
-             "Als Embedding-Modell nutzt der Agent e5-large mit 1024 Dimensionen.", true),
-            ("Die Engine ist in python geschrieben und wird als Wheel verteilt.",
-             "Die Engine ist in rust geschrieben und wird als Wheel verteilt.", true),
-            ("Als Fallback fuer das Summary-Modell ist openai konfiguriert worden.",
-             "Als Fallback fuer das Summary-Modell ist google konfiguriert worden.", true),
+            (
+                "Der Datenbank-Provider fuer den Index ist postgresql und laeuft lokal.",
+                "Der Datenbank-Provider fuer den Index ist mysql und laeuft lokal.",
+                true,
+            ),
+            (
+                "Als Embedding-Modell nutzt der Agent bge-m3 mit 1024 Dimensionen.",
+                "Als Embedding-Modell nutzt der Agent e5-large mit 1024 Dimensionen.",
+                true,
+            ),
+            (
+                "Die Engine ist in python geschrieben und wird als Wheel verteilt.",
+                "Die Engine ist in rust geschrieben und wird als Wheel verteilt.",
+                true,
+            ),
+            (
+                "Als Fallback fuer das Summary-Modell ist openai konfiguriert worden.",
+                "Als Fallback fuer das Summary-Modell ist google konfiguriert worden.",
+                true,
+            ),
             // ---- negative: different subjects, shared slot
-            ("Das Regelwerk zur Freigabe: die Pruefschicht sitzt vor jeder Agentenaktion.",
-             "Google liefert die Karten fuer den Routenplaner und wird dafuer angefragt.", false),
-            ("Ein Backend, mehrere KI-Clients: die Produktform ist ein MCP-Server.",
-             "Der vorbereitete Skill ruft `curl --data @payload.json` auf.", false),
-            ("Der Swap ist voll, obwohl die Prozesse wenig Speicher erklaeren.",
-             "Google raet allgemein zur Kombination aus Datei-Gedaechtnis und Plugin.", false),
+            (
+                "Das Regelwerk zur Freigabe: die Pruefschicht sitzt vor jeder Agentenaktion.",
+                "Google liefert die Karten fuer den Routenplaner und wird dafuer angefragt.",
+                false,
+            ),
+            (
+                "Ein Backend, mehrere KI-Clients: die Produktform ist ein MCP-Server.",
+                "Der vorbereitete Skill ruft `curl --data @payload.json` auf.",
+                false,
+            ),
+            (
+                "Der Swap ist voll, obwohl die Prozesse wenig Speicher erklaeren.",
+                "Google raet allgemein zur Kombination aus Datei-Gedaechtnis und Plugin.",
+                false,
+            ),
             // ---- negative: same subject, different predicate (the hard case)
-            ("Die Engine nutzt postgresql als Index und laeuft auf demselben Host.",
-             "Die Engine nutzt mysql fuer die Tests und laeuft auf einem anderen Host.", false),
+            (
+                "Die Engine nutzt postgresql als Index und laeuft auf demselben Host.",
+                "Die Engine nutzt mysql fuer die Tests und laeuft auf einem anderen Host.",
+                false,
+            ),
             // ---- negative: value only inside code
-            ("Der Bericht beschreibt das Vorgehen und die Messung im Detail.",
-             "Im Skript steht ```python\nimport rust_helper\n``` fuer den Aufruf.", false),
+            (
+                "Der Bericht beschreibt das Vorgehen und die Messung im Detail.",
+                "Im Skript steht ```python\nimport rust_helper\n``` fuer den Aufruf.",
+                false,
+            ),
         ]
     }
 
@@ -2541,13 +2593,21 @@ mod substitution_rule_matrix {
             let hit = check_substitution_category_pair(&conn, a, b).is_some();
             match (hit, expected) {
                 (true, true) => tp += 1,
-                (false, true) => { fneg += 1; misses.push(format!("MISS  (erwartet: Konflikt) {a}")); }
-                (true, false) => { fp += 1; misses.push(format!("FALSE (erwartet: keiner)  {a}")); }
+                (false, true) => {
+                    fneg += 1;
+                    misses.push(format!("MISS  (erwartet: Konflikt) {a}"));
+                }
+                (true, false) => {
+                    fp += 1;
+                    misses.push(format!("FALSE (erwartet: keiner)  {a}"));
+                }
                 (false, false) => tn += 1,
             }
         }
         println!("tp={tp} fp={fp} tn={tn} fn={fneg}");
-        for m in &misses { println!("{m}"); }
+        for m in &misses {
+            println!("{m}");
+        }
         // The rule must not lose the positives it exists for.
         assert_eq!(fneg, 0, "positiver Fall verworfen: {misses:?}");
         // And it must not reintroduce the false alarms.
