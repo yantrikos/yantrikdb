@@ -792,6 +792,18 @@ pub fn scan_claim_conflicts(db: &YantrikDB, max_conflicts: usize) -> Result<Vec<
 
     let candidates: Vec<ClaimPairCandidate> = {
         let conn = db.conn();
+        // Modalität ist hier ein Filter, kein Zierfeld: nur Aussagen ÜBER DIE
+        // WELT können einander widersprechen. `quoted`/`hypothetical`/`denied`
+        // beschreiben eine Aussage über eine Aussage und dürfen eine
+        // Identitätstatsache deshalb nicht bestreiten.
+        //
+        // Das ist Absicht, nicht Rest (REVIEW4 R4-3): seit der Schreiber seine
+        // Modalität ehrlich speichert, fallen diese Zeilen hier heraus — vorher
+        // wurden sie als "asserted" abgelegt und mitgescannt. Wer diesen Filter
+        // aufweicht, macht Zitate wieder zu Tatsachenbehauptungen. Der Preis
+        // ist benannt: `reason_codes::MODALITY_MISMATCH` wird von keinem Pfad
+        // emittiert, es gibt also kein kompensierendes Signal für den
+        // Ausschluss. Offener Punkt, nicht stillschweigend behoben.
         let sql = format!(
             "SELECT e1.src, e1.rel_type, e1.dst, e2.dst,
                     e1.valid_from, e1.valid_to, e2.valid_from, e2.valid_to,

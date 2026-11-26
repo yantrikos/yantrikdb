@@ -878,6 +878,7 @@ impl YantrikDB {
             span_end,
             weight,
             grounding,
+            QualifierCollision::Overwrite,
         )
     }
 
@@ -902,6 +903,7 @@ impl YantrikDB {
         span_end: Option<i32>,
         weight: f64,
         grounding: i64,
+        collision: QualifierCollision,
     ) -> Result<String> {
         self.foreign_sqlite_precheck()?;
         let claim_id = crate::id::new_id();
@@ -936,6 +938,40 @@ impl YantrikDB {
             // so multiple sources can make conflicting claims about the same fact. Only an
             // identical resubmission (same extractor + same polarity + same namespace) is
             // treated as an update — typically a validity window refinement.
+            // The choke point: every writer of claims passes here, after alias
+            // resolution. A row that exists under the same identity with
+            // different qualifiers cannot coexist with this one, and the
+            // UPSERT would silently replace it. `Refuse` reports instead.
+            if collision == QualifierCollision::Refuse {
+                let existing: Option<(String, Option<f64>, Option<f64>)> = conn
+                    .query_row(
+                        "SELECT modality, valid_from, valid_to FROM claims \
+                         WHERE src = ?1 AND dst = ?2 AND rel_type = ?3 AND extractor = ?4 \
+                           AND polarity = ?5 AND namespace = ?6 AND tombstoned = 0",
+                        params![
+                            src_resolved,
+                            dst_resolved,
+                            rel_type,
+                            extractor,
+                            polarity,
+                            namespace
+                        ],
+                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                    )
+                    .optional()?;
+                if let Some((stored_mod, stored_from, stored_to)) = existing {
+                    if stored_mod != modality || stored_from != valid_from || stored_to != valid_to
+                    {
+                        return Err(crate::error::YantrikDbError::InvalidInput(format!(
+                            "identity collision: ({src_resolved}, {rel_type}, {dst_resolved}) \
+                             already exists with modality={stored_mod:?} \
+                             window=({stored_from:?}, {stored_to:?}); refusing to overwrite it \
+                             with modality={modality:?} window=({valid_from:?}, {valid_to:?})"
+                        )));
+                    }
+                }
+            }
+
             conn.execute(
                 "INSERT INTO claims (claim_id, src, dst, rel_type, weight, created_at, \
                  polarity, modality, valid_from, valid_to, extractor, extractor_version, \
@@ -1253,10 +1289,30 @@ pub struct StatedClaim {
     pub valid_to: Option<f64>,
 }
 
-/// The five modalities `claims.modality` documents. A comment in the DDL, not a
-/// CHECK — so the cooperative path validates it here instead.
+/// The five modalities `claims.modality` documents — a comment in the DDL, not
+/// a CHECK, so the cooperative path validates it here instead.
+///
+/// REVIEW4 Q4: this is the fifth declaration of the same vocabulary in the
+/// tree (after the SQL comment, the literals in `distributed/conflict.rs` and
+/// `claims_lane.rs`). Authority is `schema.rs`; if the column ever grows, this
+/// list has to follow — and nothing enforces that, because none of those sites
+/// reads another.
 pub const STATED_MODALITIES: [&str; 5] =
     ["asserted", "reported", "hypothetical", "denied", "quoted"];
+
+/// What a writer wants when its claim lands on an identity that already exists
+/// with *different* qualifiers (modality or validity window).
+///
+/// The stored uniqueness key `(src, dst, rel_type, extractor, polarity,
+/// namespace)` cannot hold both statements, so "insert" always means "replace
+/// the row". `Refuse` turns that silent replacement into a typed error the
+/// caller can report; `Overwrite` keeps the historical behaviour for writers
+/// that have not been taught the difference yet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QualifierCollision {
+    Refuse,
+    Overwrite,
+}
 
 impl Default for StatedClaim {
     fn default() -> Self {
@@ -1482,8 +1538,18 @@ impl super::YantrikDB {
             accepted: Vec::new(),
             rejected: Vec::new(),
         };
-        let mut seen_in_batch: std::collections::HashSet<(String, String, String, i32)> =
-            std::collections::HashSet::new();
+        // Key includes every qualifier that decides whether two claims are the
+        // same statement: modality AND the validity window. f64 is not Hash,
+        // so a timestamp enters as its bit pattern.
+        let mut seen_in_batch: std::collections::HashSet<(
+            String,
+            String,
+            String,
+            i32,
+            String,
+            Option<u64>,
+            Option<u64>,
+        )> = std::collections::HashSet::new();
 
         for claim in claims {
             let src = claim.src.trim();
@@ -1566,11 +1632,21 @@ impl super::YantrikDB {
                 );
                 continue;
             }
+            let valid_from = claim.valid_from.or(event_min);
             if !seen_in_batch.insert((
                 src.to_lowercase(),
                 rel.clone(),
                 dst.to_lowercase(),
                 claim.polarity,
+                // Modality is part of the statement, not a duplicate marker:
+                // an asserted and a quoted claim for the same triple are two
+                // statements, and the second must reach the identity guard
+                // instead of being dropped here as a batch duplicate.
+                modality.to_string(),
+                // Same for the validity window: two statements about the same
+                // triple with different windows are two statements.
+                valid_from.map(f64::to_bits),
+                claim.valid_to.map(f64::to_bits),
             )) {
                 reject(
                     "duplicate of an earlier claim in this batch".into(),
@@ -1578,52 +1654,11 @@ impl super::YantrikDB {
                 );
                 continue;
             }
-            let valid_from = claim.valid_from.or(event_min);
-            // Identity guard. The stored uniqueness key is
-            // (src, dst, rel_type, extractor, polarity, namespace) — narrower
-            // than the qualifiers this API accepts. Rewriting a row whose
-            // modality or window differs would silently replace one statement
-            // with a different one, so the collision is refused instead of
-            // applied. Widening the key is a schema migration and is
-            // deliberately not part of this fix.
-            {
-                let clash: Option<(String, Option<f64>, Option<f64>)> = {
-                    let conn = self.conn();
-                    conn.query_row(
-                        "SELECT modality, valid_from, valid_to FROM claims \
-                         WHERE src = ?1 AND dst = ?2 AND rel_type = ?3 AND extractor = ?4 \
-                           AND polarity = ?5 AND namespace = ?6 AND tombstoned = 0",
-                        params![
-                            src,
-                            dst,
-                            rel,
-                            STATED_CLAIM_EXTRACTOR,
-                            claim.polarity,
-                            memory.namespace
-                        ],
-                        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                    )
-                    .optional()?
-                };
-                if let Some((stored_mod, stored_from, stored_to)) = clash {
-                    if stored_mod != modality
-                        || stored_from != valid_from
-                        || stored_to != claim.valid_to
-                    {
-                        reject(
-                            format!(
-                                "identity collision: ({src}, {rel}, {dst}) already exists with \
-                                 modality={stored_mod:?} window=({stored_from:?}, {stored_to:?}); \
-                                 refusing to overwrite it with modality={modality:?} window=({valid_from:?}, {:?})",
-                                claim.valid_to
-                            ),
-                            &mut report,
-                        );
-                        continue;
-                    }
-                }
-            }
-            let claim_id = self.ingest_claim(
+            // The collision policy is declared here and enforced at the choke
+            // point (`ingest_claim_grounded`), after alias resolution — so the
+            // check sees the same names the UPSERT will use, and every future
+            // writer has to choose a policy explicitly.
+            let claim_id = match self.ingest_claim_grounded(
                 src,
                 &rel,
                 dst,
@@ -1639,7 +1674,17 @@ impl super::YantrikDB {
                 claim.span_start,
                 claim.span_end,
                 1.0,
-            )?;
+                crate::engine::claims_lane::GROUNDING_COOPERATIVE,
+                QualifierCollision::Refuse,
+            ) {
+                Ok(id) => id,
+                // Refused at the choke point: the identity already exists with
+                // different qualifiers. Reported per claim, not replaced.
+                Err(e) => {
+                    reject(format!("{e}"), &mut report);
+                    continue;
+                }
+            };
             // The memory now carries its endpoints as entities SYNCHRONOUSLY —
             // a stated claim closes the materializer's read-your-writes gap
             // for exactly the entities the writer cared about.

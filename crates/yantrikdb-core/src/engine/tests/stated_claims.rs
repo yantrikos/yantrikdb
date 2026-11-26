@@ -402,3 +402,168 @@ fn differing_modality_on_the_same_triple_is_refused_not_overwritten() {
         .unwrap();
     assert_eq!(stored, "asserted", "the first qualifier must be intact");
 }
+
+#[test]
+fn batch_dedup_must_not_swallow_a_validity_collision() {
+    // REVIEW4 G4, remaining half. The in-batch dedup key gained `modality`,
+    // but not the validity window. Two statements about the same triple with
+    // the same modality and different windows are two statements — they must
+    // reach the identity guard and be refused as a collision there. Today the
+    // second is discarded as a batch duplicate first, so the reason reported
+    // to the writer is wrong and the guard never sees the case.
+    let (db, rid) = db_with("Hugo leitete 2024 das UNIT Team. Hugo leitet 2026 das UNIT Team.");
+    let mut first = claim("Hugo", "leads", "UNIT Team");
+    first.valid_from = Some(1_704_067_200.0); // 2024-01-01
+    let mut second = claim("Hugo", "leads", "UNIT Team");
+    second.valid_from = Some(1_767_225_600.0); // 2026-01-01
+
+    let report = db.attach_claims(&rid, &[first, second]).unwrap();
+
+    assert_eq!(report.accepted.len(), 1, "{report:?}");
+    assert_eq!(report.rejected.len(), 1, "{report:?}");
+    assert!(
+        report.rejected[0].reason.contains("identity collision"),
+        "the second window must be refused by the guard, not dropped as a batch duplicate: {:?}",
+        report.rejected[0].reason
+    );
+    let stored: Option<f64> = db
+        .conn()
+        .query_row(
+            "SELECT valid_from FROM claims WHERE src = 'Hugo' AND dst = 'UNIT Team'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        stored,
+        Some(1_704_067_200.0),
+        "the first window must survive"
+    );
+}
+
+fn record_at(db: &YantrikDB, text: &str, event_ts: f64) -> String {
+    db.record_text(
+        text,
+        "semantic",
+        0.5,
+        0.0,
+        604800.0,
+        &serde_json::json!({"event_time_min": event_ts, "event_time_max": event_ts}),
+        "default",
+        0.8,
+        "general",
+        "user",
+        None,
+    )
+    .unwrap()
+}
+
+#[test]
+fn a_different_validity_window_alone_is_a_collision() {
+    // REVIEW4 G1: the guard compares three qualifiers, but only the modality
+    // branch had a test. The window branch is the one most likely to fire in
+    // real data, because a stated claim inherits the record's event time.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let t_2024 = 1_704_067_200.0_f64;
+    let t_2026 = 1_767_225_600.0_f64;
+    let a = record_at(&db, "Hugo leitet das UNIT Team.", t_2024);
+    let b = record_at(&db, "Hugo leitet das UNIT Team.", t_2026);
+
+    db.attach_claims(&a, &[claim("Hugo", "leads", "UNIT Team")])
+        .unwrap();
+    let report = db
+        .attach_claims(&b, &[claim("Hugo", "leads", "UNIT Team")])
+        .unwrap();
+
+    assert_eq!(report.accepted.len(), 0, "{report:?}");
+    assert_eq!(report.rejected.len(), 1, "{report:?}");
+    assert!(
+        report.rejected[0].reason.contains("identity collision"),
+        "same modality, different window must still collide: {:?}",
+        report.rejected[0].reason
+    );
+    let stored: Option<f64> = db
+        .conn()
+        .query_row(
+            "SELECT valid_from FROM claims WHERE src = 'Hugo' AND dst = 'UNIT Team'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, Some(t_2024), "the first window must survive");
+}
+
+#[test]
+fn an_identical_resubmission_is_still_accepted() {
+    // The guard must not lock a writer out of its own row: the same statement
+    // resubmitted is a refinement, not a collision. Without this test the
+    // refusal could silently turn every retry into a rejection.
+    let (db, rid) = db_with("Hugo leitet das UNIT Team.");
+    db.attach_claims(&rid, &[claim("Hugo", "leads", "UNIT Team")])
+        .unwrap();
+    let report = db
+        .attach_claims(&rid, &[claim("Hugo", "leads", "UNIT Team")])
+        .unwrap();
+
+    assert_eq!(report.accepted.len(), 1, "{report:?}");
+    assert!(report.rejected.is_empty(), "{report:?}");
+    let rows: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM claims WHERE src = 'Hugo' AND dst = 'UNIT Team' AND tombstoned = 0",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(rows, 1, "an update must not create a second row");
+}
+
+#[test]
+fn an_alias_folded_endpoint_is_detected_as_the_same_identity() {
+    // REVIEW4 R4-2 / G2: the guard queries resolved names because it runs
+    // inside `ingest_claim_grounded`, after `resolve_alias`. A claim written
+    // under an alias must collide with the canonical row — otherwise the
+    // UPSERT overwrites the canonical qualifiers through the alias door.
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    db.add_entity_alias("Hugo Gundlach", "Hugo", "default", "test")
+        .unwrap();
+
+    let canonical = record(&db, "Hugo leitet das UNIT Team.");
+    db.attach_claims(&canonical, &[claim("Hugo", "leads", "UNIT Team")])
+        .unwrap();
+
+    let through_alias = record(&db, "Hugo Gundlach leitet das UNIT Team.");
+    let report = db
+        .attach_claims(
+            &through_alias,
+            &[claim_modal("Hugo Gundlach", "leads", "UNIT Team", "quoted")],
+        )
+        .unwrap();
+
+    assert_eq!(report.accepted.len(), 0, "{report:?}");
+    assert_eq!(report.rejected.len(), 1, "{report:?}");
+    assert!(
+        report.rejected[0].reason.contains("identity collision"),
+        "an alias endpoint must reach the same identity: {:?}",
+        report.rejected[0].reason
+    );
+    let stored: String = db
+        .conn()
+        .query_row(
+            "SELECT modality FROM claims WHERE src = 'Hugo' AND dst = 'UNIT Team'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(stored, "asserted", "the canonical qualifier must survive");
+
+    let alias_rows: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM claims WHERE src = 'Hugo Gundlach'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(alias_rows, 0, "the claim row stores resolved endpoints");
+}

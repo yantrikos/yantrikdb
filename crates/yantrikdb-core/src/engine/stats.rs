@@ -1638,6 +1638,7 @@ impl YantrikDB {
                     span_end,
                     1.0,
                     crate::engine::claims_lane::GROUNDING_EXTRACTOR_BOUND,
+                    crate::engine::graph_ops::QualifierCollision::Overwrite,
                 )
                 .is_ok(),
             );
@@ -1692,6 +1693,7 @@ impl YantrikDB {
                         span_end,
                         1.0,
                         crate::engine::claims_lane::GROUNDING_EXTRACTOR_BOUND,
+                        crate::engine::graph_ops::QualifierCollision::Overwrite,
                     )
                     .is_ok(),
                 );
