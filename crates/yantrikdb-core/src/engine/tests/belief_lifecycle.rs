@@ -49,7 +49,7 @@ fn belief_node_persists_and_reloads() {
         let mut node = belief_node(1, "A2A coordination follows an agreed procedure.");
         let cfg = BeliefRevisionConfig::default();
         let nid = id_of(&node);
-        let _ = assert_evidence(&mut node, &evidence(nid, 1.4, "quelle-a"), &cfg);
+        let _ = assert_evidence(&mut node, &evidence(nid, 1.4, "source-a"), &cfg);
         db.persist_cognitive_node(&node).unwrap();
         log_odds_of(&node)
     };
@@ -108,8 +108,8 @@ fn evidence_raises_and_lowers_log_odds() {
 #[test]
 fn support_scales_with_independent_evidence_not_with_cluster_size() {
     let cfg = BeliefRevisionConfig::default();
-    let mut few = belief_node(3, "Zwei unabhaengige Belege.");
-    let mut many = belief_node(4, "Zwanzig Cluster-Mitglieder.");
+    let mut few = belief_node(3, "Two independent pieces of evidence.");
+    let mut many = belief_node(4, "Twenty cluster members.");
     let (fid, mid) = (id_of(&few), id_of(&many));
     for i in 0..2 {
         let _ = assert_evidence(&mut few, &evidence(fid, 0.35, &format!("beleg-{i}")), &cfg);
@@ -153,7 +153,7 @@ fn same_observation_is_idempotent_with_an_identity() {
     // (a) with observation_id: the same observation twice changes nothing
     let mut node = belief_node(5, "Idempotence with an identity.");
     let id = id_of(&node);
-    let mut ev = evidence(id, 1.0, "dieselbe quelle, derselbe zeitpunkt");
+    let mut ev = evidence(id, 1.0, "same source, same instant");
     ev.observation_id = Some("belief:5|src:rid-a|observed".into());
     let _ = assert_evidence(&mut node, &ev, &cfg);
     let once = log_odds_of(&node);
@@ -163,7 +163,7 @@ fn same_observation_is_idempotent_with_an_identity() {
         NodePayload::Belief(b) => b.evidence_trail.len(),
         _ => 0,
     };
-    println!("MIT ID: einmal={once:.4} zweimal={twice:.4} trail={trail}");
+    println!("WITH ID: once={once:.4} twice={twice:.4} trail={trail}");
     assert!(
         (twice - once).abs() < 1e-12,
         "same observation counted twice: {once} -> {twice}"

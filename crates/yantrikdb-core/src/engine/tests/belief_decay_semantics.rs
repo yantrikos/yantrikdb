@@ -144,7 +144,7 @@ fn repeated_propagation_of_one_edge() {
     let o = lo(&once[&bi]);
     let t = lo(&twice[&bi]);
     println!(
-        "PROPAGATION: einmal={o:.4} zweimal={t:.4} doppelt={}",
+        "PROPAGATION: once={o:.4} twice={t:.4} doubled={}",
         (t - 2.0 * o).abs() < 1e-9
     );
     assert!(t >= o);
@@ -226,7 +226,7 @@ fn decay_state_survives_persistence() {
 
     let mut loaded = db.load_cognitive_node(node.id).unwrap().unwrap();
     println!(
-        "PERSISTENZ-SPALTE: gespeichert 0,9 · geladen {:.4}",
+        "PERSISTENCE COLUMN: stored 0.9 · loaded {:.4}",
         loaded.attrs.persistence
     );
     assert!(
@@ -248,7 +248,7 @@ fn decay_state_survives_persistence() {
     }
     revise_beliefs(&mut [&mut reloaded], now, &cfg);
     println!(
-        "PERSISTENZ-RUNDLAUF: erster Lauf {first:.4} · nach Neuladen {:.4}",
+        "PERSISTENCE ROUND-TRIP: first run {first:.4} · after reload {:.4}",
         lo(&reloaded)
     );
     assert!(

@@ -105,7 +105,7 @@ fn support_cycle_stays_bounded() {
     }
     let max_seen = lo(&down[&ai]).abs().max(lo(&down[&bi]).abs());
     println!(
-        "ZYKLUS max_abs_log_odds nach 6 Hops = {max_seen:.4} (Deckel {:.1})",
+        "CYCLE max_abs_log_odds after 6 hops = {max_seen:.4} (cap {:.1})",
         cfg.max_abs_log_odds
     );
     assert!(
@@ -123,7 +123,7 @@ fn revise_beliefs_decays_stale_evidence() {
     let old = now - 60.0 * 86400.0; // 60 days old, the grace period is 7
     let mut b = belief(
         17,
-        "Nur alte Belege.",
+        "Only old evidence.",
         vec![EvidenceEntry {
             source: "alt".into(),
             weight: 2.0,

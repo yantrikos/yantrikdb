@@ -38,7 +38,7 @@ fn ev(id: NodeId, weight: f64, provenance: Provenance, oid: Option<String>) -> E
     Evidence {
         target_belief: id,
         weight,
-        source: "quelle".into(),
+        source: "source".into(),
         provenance,
         propagate: false,
         timestamp: 1_800_000_000.0,
@@ -215,7 +215,7 @@ fn confidence_ceiling_breaks_the_sum_invariant() {
     }
     let sum: f64 = trail(&node).iter().map(|e| e.weight).sum();
     println!(
-        "DECKEL: log_odds={:.4} Summe={:.4} Deckel={:.1}",
+        "CAP: log_odds={:.4} sum={:.4} cap={:.1}",
         lo(&node),
         sum,
         cfg.max_abs_log_odds

@@ -119,7 +119,7 @@ fn diamond_counts_the_origin_once_and_keeps_the_stronger_path() {
     let _ = propagate_evidence_from(Some("obs-diamond"), ci, w_c, &[weak], &mut hop2, &cfg, 1);
     let after_second_path = lo(&hop2[&di]);
 
-    println!("DIAMOND: Pfad B={w_b:.4} Pfad C={w_c:.4} · nach 1. Pfad {after_first_path:.4} · nach 2. Pfad {after_second_path:.4} · trail={}",
+    println!("DIAMOND: path B={w_b:.4} path C={w_c:.4} · after 1st path {after_first_path:.4} · after 2nd path {after_second_path:.4} · trail={}",
              propagated(&hop2[&di]));
     assert_eq!(
         propagated(&hop2[&di]),
