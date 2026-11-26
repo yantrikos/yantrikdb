@@ -1419,7 +1419,7 @@ fn sentence_spans(text: &str) -> Vec<&str> {
 /// decision was discarded") is outside the frame. That is a semantic judgement,
 /// not a frame question — it belongs to the knowledge layer, which is why the
 /// scan produces candidates. Recorded, not hidden: review 9, headline 1.
-fn context_words(text: &str, token: &str) -> std::collections::HashSet<String> {
+fn context_frames(text: &str, token: &str) -> Vec<std::collections::HashSet<String>> {
     let normalise = |s: &str| -> Vec<String> {
         s.split_whitespace()
             .map(|w| {
@@ -1429,48 +1429,74 @@ fn context_words(text: &str, token: &str) -> std::collections::HashSet<String> {
             .filter(|w| !w.is_empty())
             .collect()
     };
+    // Every sentence that mentions the token, each kept as its own frame.
+    //
+    // The first mention alone loses real contradictions: prose that discusses
+    // the value earlier ("in adr-0139 we checked postgresql and rejected it …
+    // the service uses postgresql as its primary store") framed the
+    // *discussion*, while the other note framed the *statement*, so the two
+    // frames shared nothing. Merging all mentions into one set has the
+    // opposite defect — it dilutes the frame until a real match falls under
+    // the threshold. Keeping them apart and comparing every pair keeps both
+    // shapes. Capped at three mentions so a text that repeats the token
+    // everywhere cannot turn the frame into the whole document.
+    let mut out = Vec::new();
     for sentence in sentence_spans(text) {
         let words = normalise(sentence);
         if !words.iter().any(|w| w == token) {
             continue;
         }
-        return words
-            .into_iter()
-            .filter(|w| w.len() >= 4 && w != token)
-            .collect();
+        out.push(
+            words
+                .into_iter()
+                .filter(|w| w.len() >= 4 && w != token)
+                .collect::<std::collections::HashSet<String>>(),
+        );
+        if out.len() >= 3 {
+            break;
+        }
     }
-    // The token is not in any sentence (e.g. the caller passed an unnormalised
-    // form): an empty set makes the gate fail closed, which is the intent.
-    std::collections::HashSet::new()
+    // No sentence mentions the token (e.g. an unnormalised form): no frames,
+    // so the gate fails closed, which is the intent.
+    out
 }
 
-/// How much the two neighbourhoods agree once the substituted values are
-/// removed. Order-independent, so a reordered clause still scores 1.0, while a
-/// pair whose surroundings genuinely differ falls under the threshold.
-fn frame_similarity(text_a: &str, token_a: &str, text_b: &str, token_b: &str) -> f64 {
-    let a = context_words(text_a, token_a);
-    let b = context_words(text_b, token_b);
-    if a.is_empty() || b.is_empty() {
-        return 0.0;
+/// The best agreement over every pair of mentioning sentences.
+///
+/// One matching pair is the evidence that both texts say it about the same
+/// subject; the maximum is therefore the right summary, not the average.
+/// Returns `(shared_terms, jaccard)`.
+fn best_frame_agreement(text_a: &str, token_a: &str, text_b: &str, token_b: &str) -> (usize, f64) {
+    let frames_a = context_frames(text_a, token_a);
+    let frames_b = context_frames(text_b, token_b);
+    let mut best = (0usize, 0.0f64);
+    for a in &frames_a {
+        for b in &frames_b {
+            let shared = a.intersection(b).count();
+            let union = a.union(b).count().max(1);
+            let similarity = shared as f64 / union as f64;
+            // Rank by WHETHER the pair clears the shared-term floor, then by
+            // Jaccard, only then by the raw shared count. Maximising `shared`
+            // first was wrong: a pair with four shared words plus three extra
+            // ones (4/7) outranked a sentence-for-sentence identical pair
+            // (2/2), so the gate rejected on the weaker similarity of the
+            // wrong pair.
+            let key = (shared >= MIN_SHARED_CONTEXT, similarity, shared);
+            let best_key = (best.0 >= MIN_SHARED_CONTEXT, best.1, best.0);
+            if key > best_key {
+                best = (shared, similarity);
+            }
+        }
     }
-    let inter = a.intersection(&b).count() as f64;
-    let union = a.union(&b).count() as f64;
-    inter / union
-}
-
-/// Count content words shared by the two token neighbourhoods.
-fn shared_context_terms(text_a: &str, token_a: &str, text_b: &str, token_b: &str) -> usize {
-    context_words(text_a, token_a)
-        .intersection(&context_words(text_b, token_b))
-        .count()
+    best
 }
 
 /// The subject/frame gate: do the two documents assert the same thing about the
 /// same subject? Fail closed — an unchecked frame is not evidence of a
 /// contradiction, and a silence is not a conflict either.
 fn substitution_is_same_claim(prose_a: &str, ta: &str, prose_b: &str, tb: &str) -> bool {
-    shared_context_terms(prose_a, ta, prose_b, tb) >= MIN_SHARED_CONTEXT
-        && frame_similarity(prose_a, ta, prose_b, tb) >= MIN_FRAME_SIMILARITY
+    let (shared, similarity) = best_frame_agreement(prose_a, ta, prose_b, tb);
+    shared >= MIN_SHARED_CONTEXT && similarity >= MIN_FRAME_SIMILARITY
 }
 
 /// Same predicate as [`check_substitution_category_pair`], answered in memory.
@@ -3104,6 +3130,36 @@ mod tests {
             marked[0].reason.contains("migration did not complete"),
             "the damage case must be named: {:?}",
             marked[0].reason
+        );
+    }
+
+    /// A token mentioned earlier in the text must not hide the statement.
+    ///
+    /// First-mention-only framed the *discussion* sentence in note A and the
+    /// *statement* in note B, so the frames shared nothing and a real
+    /// contradiction was refused. Every mentioning sentence now contributes.
+    #[test]
+    fn an_earlier_mention_does_not_steal_the_frame() {
+        let a = "in adr-0139 haben wir postgresql geprueft und wegen der kosten \
+                 verworfen. der zahlungsdienst verwendet postgresql als primaeren \
+                 datenspeicher";
+        let b = "der zahlungsdienst verwendet mysql als primaeren datenspeicher";
+
+        assert!(
+            substitution_is_same_claim(a, "postgresql", b, "mysql"),
+            "the statement sentence must form the frame, not the earlier mention"
+        );
+    }
+
+    /// A sentence pair that matches exactly must not be outranked by a wider
+    /// pair that merely shares more words.
+    #[test]
+    fn a_better_matching_sentence_pair_is_not_outranked_by_a_wider_one() {
+        let a = "postgresql alpha beta gamma delta epsilon. postgresql omega sigma.";
+        let b = "mysql alpha beta gamma delta zeta. mysql omega sigma.";
+        assert!(
+            substitution_is_same_claim(a, "postgresql", b, "mysql"),
+            "the identical sentence pair must decide, not the wider one"
         );
     }
 
