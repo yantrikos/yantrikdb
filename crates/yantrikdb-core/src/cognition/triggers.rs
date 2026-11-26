@@ -343,7 +343,7 @@ fn check_redundancy_in_namespace(
     // predicate in memory removes the cost without changing a single result.
     let substitution_index = {
         let conn = db.conn();
-        load_substitution_index(&conn)
+        load_substitution_index(&conn)?
     };
 
     for i in 0..rows.len() {
@@ -1184,32 +1184,44 @@ fn parse_persisted_trigger(row: &rusqlite::Row<'_>) -> rusqlite::Result<Persiste
 /// per `check_redundancy` pass instead of being queried per token pair.
 type SubstitutionIndex = std::collections::HashMap<String, Vec<(String, String)>>;
 
-fn load_substitution_index(conn: &rusqlite::Connection) -> SubstitutionIndex {
+fn load_substitution_index(conn: &rusqlite::Connection) -> crate::error::Result<SubstitutionIndex> {
     let mut index: SubstitutionIndex = std::collections::HashMap::new();
     let mut stmt = match conn.prepare(
+        // ORDER BY, not insertion order: when a token sits in two exclusive
+        // categories, the first match decides the stored `conflict_type`
+        // (`cloud_providers` -> IdentityFact, everything else -> Preference).
+        // Without the order that verdict drifted between runs (review 7, B3).
         "SELECT m.token_normalized, m.category_id, c.name
            FROM substitution_members m
            JOIN substitution_categories c ON c.id = m.category_id
           WHERE m.status = 'active' AND m.confidence >= 0.6
-            AND c.status = 'active' AND c.conflict_mode = 'exclusive'",
+            AND c.status = 'active' AND c.conflict_mode = 'exclusive'
+          ORDER BY m.token_normalized, c.name",
     ) {
         Ok(s) => s,
         // A store without the tables (old schema) has no substitution
         // categories; an empty index answers the same predicate: no match.
-        Err(_) => return index,
+        Err(rusqlite::Error::SqliteFailure(_, Some(ref msg))) if msg.contains("no such table") => {
+            return Ok(index)
+        }
+        // Every other failure is real. Returning an empty index here would
+        // silently disable substitution conflicts for the WHOLE namespace —
+        // the per-pair skip the index replaced was the smaller silence
+        // (review 7, B6).
+        Err(e) => return Err(e.into()),
     };
-    if let Ok(rows) = stmt.query_map([], |r| {
+    let rows = stmt.query_map([], |r| {
         Ok((
             r.get::<_, String>(0)?,
             r.get::<_, String>(1)?,
             r.get::<_, String>(2)?,
         ))
-    }) {
-        for (token, category_id, name) in rows.flatten() {
-            index.entry(token).or_default().push((category_id, name));
-        }
+    })?;
+    for row in rows {
+        let (token, category_id, name) = row?;
+        index.entry(token).or_default().push((category_id, name));
     }
-    index
+    Ok(index)
 }
 
 /// How many content words around the two substituted tokens must agree before a
@@ -1269,24 +1281,44 @@ fn tokenize_words(text: &str) -> std::collections::HashSet<String> {
         .collect()
 }
 
-/// How much the two sentences agree once the substituted values are removed.
+/// The content words in the ±`CONTEXT_WINDOW` neighbourhood of `token`.
 ///
-/// Order-independent, so a reordered clause ("X runs on postgresql" / "on mysql
-/// runs X") still scores 1.0, while the hard negative ("postgresql as the index"
-/// / "mysql for the tests") shares subject and verb but differs in the object
-/// and falls under the threshold.
-fn frame_similarity(text_a: &str, token_a: &str, text_b: &str, token_b: &str) -> f64 {
-    fn content(text: &str, token: &str) -> std::collections::HashSet<String> {
-        text.split_whitespace()
-            .map(|w| {
-                w.trim_matches(|c: char| !c.is_alphanumeric())
-                    .to_lowercase()
-            })
-            .filter(|w| w.len() >= 4 && w != token)
-            .collect()
+/// This is the frame a statement sits in — **not** the whole document. A
+/// whole-document set scores two long notes as different frames just because
+/// they are long: with 30 distinct words each and three shared, the Jaccard is
+/// 3/(3+30+30) = 0.048, so a real contradiction between two realistic notes
+/// would be rejected. Review 7 (B2) found exactly that; the doc comment here
+/// promised "the two sentences" while the code used the full text.
+fn context_words(text: &str, token: &str) -> std::collections::HashSet<String> {
+    let words: Vec<String> = text
+        .split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .collect();
+    let mut out = std::collections::HashSet::new();
+    for (i, w) in words.iter().enumerate() {
+        if w != token {
+            continue;
+        }
+        let lo = i.saturating_sub(CONTEXT_WINDOW);
+        let hi = (i + 1 + CONTEXT_WINDOW).min(words.len());
+        for w2 in &words[lo..hi] {
+            if w2.len() >= 4 && w2 != token {
+                out.insert(w2.clone());
+            }
+        }
     }
-    let a = content(text_a, token_a);
-    let b = content(text_b, token_b);
+    out
+}
+
+/// How much the two neighbourhoods agree once the substituted values are
+/// removed. Order-independent, so a reordered clause still scores 1.0, while a
+/// pair whose surroundings genuinely differ falls under the threshold.
+fn frame_similarity(text_a: &str, token_a: &str, text_b: &str, token_b: &str) -> f64 {
+    let a = context_words(text_a, token_a);
+    let b = context_words(text_b, token_b);
     if a.is_empty() || b.is_empty() {
         return 0.0;
     }
@@ -1297,31 +1329,8 @@ fn frame_similarity(text_a: &str, token_a: &str, text_b: &str, token_b: &str) ->
 
 /// Count content words shared by the two token neighbourhoods.
 fn shared_context_terms(text_a: &str, token_a: &str, text_b: &str, token_b: &str) -> usize {
-    let ctx = |text: &str, token: &str| -> std::collections::HashSet<String> {
-        let words: Vec<String> = text
-            .split_whitespace()
-            .map(|w| {
-                w.trim_matches(|c: char| !c.is_alphanumeric())
-                    .to_lowercase()
-            })
-            .collect();
-        let mut out = std::collections::HashSet::new();
-        for (i, w) in words.iter().enumerate() {
-            if w != token {
-                continue;
-            }
-            let lo = i.saturating_sub(CONTEXT_WINDOW);
-            let hi = (i + 1 + CONTEXT_WINDOW).min(words.len());
-            for w2 in &words[lo..hi] {
-                if w2.len() >= 4 && w2 != token {
-                    out.insert(w2.clone());
-                }
-            }
-        }
-        out
-    };
-    ctx(text_a, token_a)
-        .intersection(&ctx(text_b, token_b))
+    context_words(text_a, token_a)
+        .intersection(&context_words(text_b, token_b))
         .count()
 }
 
@@ -2492,7 +2501,7 @@ mod tests {
             "active",
             &[("toka", 0.9, "active"), ("tokb", 0.9, "active")],
         );
-        let index = load_substitution_index(&conn);
+        let index = load_substitution_index(&conn).unwrap();
 
         let a = "wir setzen toka fuer den store ein";
         let b = "wir setzen tokb fuer den store ein";
@@ -2535,7 +2544,7 @@ mod tests {
             "active",
             &[("tokm", 0.8, "active"), ("tokn", 0.8, "active")],
         );
-        let index = load_substitution_index(&conn);
+        let index = load_substitution_index(&conn).unwrap();
 
         let a = "tokm laeuft hier";
         let b = "tokn laeuft hier";
@@ -2562,7 +2571,7 @@ mod tests {
             "active",
             &[("tokx", 0.9, "active"), ("toky", 0.9, "active")],
         );
-        let index = load_substitution_index(&conn);
+        let index = load_substitution_index(&conn).unwrap();
 
         // The differing token sits at the head, in the middle, and at the tail.
         for (a, b) in [
@@ -2620,7 +2629,7 @@ mod tests {
             "inactive",
             &[("tokv", 0.9, "active"), ("tokw", 0.9, "active")],
         );
-        let index = load_substitution_index(&conn);
+        let index = load_substitution_index(&conn).unwrap();
 
         for (a, b) in [
             ("tokp hier", "tokq hier"),
@@ -2641,7 +2650,7 @@ mod tests {
         // way by both implementations.
         let db = YantrikDB::new(":memory:", 8).unwrap();
         let conn = db.conn();
-        let index = load_substitution_index(&conn);
+        let index = load_substitution_index(&conn).unwrap();
         assert!(!index.is_empty(), "schema seeds default categories");
 
         let a = "zzznosuchtoken hier";
@@ -2879,5 +2888,41 @@ mod tests {
                 "{pass} pass: different subjects must not be recorded as a conflict"
             );
         }
+    }
+
+    /// Review 7 (B5): every positive control in this file is a one-line
+    /// sentence engineered to make the frame Jaccard 1.0. The production store
+    /// holds notes of a few thousand characters. Without this case the gate can
+    /// reject real contradictions in long notes and every test stays green.
+    #[test]
+    fn a_long_note_keeps_its_frame_when_the_neighbourhood_agrees() {
+        let lead = "der zahlungsdienst verwendet";
+        let tail_a = "als primaeren datenspeicher und schreibt jede buchung zuerst dorthin \
+                      bevor die taegliche abrechnung ueberhaupt startet";
+        let tail_b = "als primaeren datenspeicher und schreibt jede buchung zuerst dorthin \
+                      bevor die taegliche abrechnung ueberhaupt beginnt";
+        // 40 filler words on each side: the whole-document Jaccard drops below
+        // 0.1, the neighbourhood Jaccard stays at 1.0.
+        let filler: String = (0..40)
+            .map(|i| format!("kontextwort{i}"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let a = format!("{lead} postgresql {tail_a} {filler}");
+        let b = format!("{lead} mysql {tail_b} {filler}");
+
+        assert!(
+            substitution_is_same_claim(&a, "postgresql", &b, "mysql"),
+            "a long note with the same neighbourhood must stay a candidate"
+        );
+
+        // Control: same length, genuinely different surroundings — the gate
+        // must still refuse, otherwise the fix would have disabled it.
+        let c = format!("{lead} postgresql {tail_a} {filler}");
+        let d =
+            format!("die marketingseite verwendet mysql fuer das archiv der kampagnen {filler}");
+        assert!(
+            !substitution_is_same_claim(&c, "postgresql", &d, "mysql"),
+            "different subjects must still be refused"
+        );
     }
 }
