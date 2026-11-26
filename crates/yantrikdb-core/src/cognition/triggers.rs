@@ -343,7 +343,22 @@ fn check_redundancy_in_namespace(
     // predicate in memory removes the cost without changing a single result.
     let substitution_index = {
         let conn = db.conn();
-        load_substitution_index(&conn)?
+        match load_substitution_index(&conn) {
+            Ok(index) => index,
+            // Degrade, do not abort. Review 8 (finding 3): propagating took
+            // down the remaining namespaces, both conflict scans, the
+            // consolidation and three further trigger checks — and surfaced as
+            // an exception in the Python and WASM APIs where the caller used
+            // to get a normal result.
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "substitution index unavailable for this namespace; \
+                     substitution conflicts are skipped for it"
+                );
+                SubstitutionIndex::new()
+            }
+        }
     };
 
     for i in 0..rows.len() {
@@ -1199,10 +1214,39 @@ fn load_substitution_index(conn: &rusqlite::Connection) -> crate::error::Result<
           ORDER BY m.token_normalized, c.name",
     ) {
         Ok(s) => s,
-        // A store without the tables (old schema) has no substitution
-        // categories; an empty index answers the same predicate: no match.
+        // A store without the tables cannot answer the predicate; an empty
+        // index does that correctly. But "tables absent" has two very different
+        // causes and they must not look alike (review 8, finding 4):
+        //
+        //   * a pre-V14 store that was never migrated — supported, benign;
+        //   * a store opened by this engine (so the migration ran) that is
+        //     still missing the tables — an incomplete or rolled-back
+        //     migration, i.e. damage.
+        //
+        // `claims` is created by the same V13->V14 step, so its presence
+        // separates the two cases deterministically and cheaply.
         Err(rusqlite::Error::SqliteFailure(_, Some(ref msg))) if msg.contains("no such table") => {
-            return Ok(index)
+            let migrated: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master \
+                     WHERE type = 'table' AND name = 'claims'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            if migrated > 0 {
+                tracing::error!(
+                    "substitution tables are missing although the store is V14 \
+                     (claims exists) — the V13->V14 migration did not complete; \
+                     substitution conflicts are disabled for this store"
+                );
+            } else {
+                tracing::warn!(
+                    "pre-V14 store without substitution tables — no substitution \
+                     conflicts, which is expected for this schema"
+                );
+            }
+            return Ok(index);
         }
         // Every other failure is real. Returning an empty index here would
         // silently disable substitution conflicts for the WHOLE namespace —
@@ -1281,36 +1325,38 @@ fn tokenize_words(text: &str) -> std::collections::HashSet<String> {
         .collect()
 }
 
-/// The content words in the ±`CONTEXT_WINDOW` neighbourhood of `token`.
+/// The content words of the sentence that contains `token` — the frame a
+/// statement sits in.
 ///
-/// This is the frame a statement sits in — **not** the whole document. A
-/// whole-document set scores two long notes as different frames just because
-/// they are long: with 30 distinct words each and three shared, the Jaccard is
-/// 3/(3+30+30) = 0.048, so a real contradiction between two realistic notes
-/// would be rejected. Review 7 (B2) found exactly that; the doc comment here
-/// promised "the two sentences" while the code used the full text.
+/// Neither a ±N-token window nor the whole document. The window is blind to a
+/// clause that follows the value ("the decision was discarded"); the document
+/// scores two long notes as different frames merely because they are long
+/// (30 distinct words each, three shared → Jaccard 0.048). A sentence keeps
+/// subject, predicate and value together in both shapes. Review 7 (B2) and
+/// review 8 (findings 1 and 2) are the same defect seen from both sides.
 fn context_words(text: &str, token: &str) -> std::collections::HashSet<String> {
-    let words: Vec<String> = text
-        .split_whitespace()
-        .map(|w| {
-            w.trim_matches(|c: char| !c.is_alphanumeric())
-                .to_lowercase()
-        })
-        .collect();
-    let mut out = std::collections::HashSet::new();
-    for (i, w) in words.iter().enumerate() {
-        if w != token {
+    let normalise = |s: &str| -> Vec<String> {
+        s.split_whitespace()
+            .map(|w| {
+                w.trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase()
+            })
+            .filter(|w| !w.is_empty())
+            .collect()
+    };
+    for sentence in text.split_inclusive(['.', '!', '?', '\n']) {
+        let words = normalise(sentence);
+        if !words.iter().any(|w| w == token) {
             continue;
         }
-        let lo = i.saturating_sub(CONTEXT_WINDOW);
-        let hi = (i + 1 + CONTEXT_WINDOW).min(words.len());
-        for w2 in &words[lo..hi] {
-            if w2.len() >= 4 && w2 != token {
-                out.insert(w2.clone());
-            }
-        }
+        return words
+            .into_iter()
+            .filter(|w| w.len() >= 4 && w != token)
+            .collect();
     }
-    out
+    // The token is not in any sentence (e.g. the caller passed an unnormalised
+    // form): an empty set makes the gate fail closed, which is the intent.
+    std::collections::HashSet::new()
 }
 
 /// How much the two neighbourhoods agree once the substituted values are
@@ -2890,38 +2936,34 @@ mod tests {
         }
     }
 
-    /// Review 7 (B5): every positive control in this file is a one-line
-    /// sentence engineered to make the frame Jaccard 1.0. The production store
-    /// holds notes of a few thousand characters. Without this case the gate can
-    /// reject real contradictions in long notes and every test stays green.
+    /// Review 7 (B5) / review 8 (finding 2): the earlier version of this test
+    /// used the *same* filler in both arms, so the whole-document Jaccard was
+    /// 53/55 = 0.96 and the test would have been green on the old frame too —
+    /// it proved nothing. This one differs in the second sentence and in the
+    /// filler, so a document-wide frame scores ~0.5 and rejects, while the
+    /// sentence-level frame sees the same statement.
     #[test]
-    fn a_long_note_keeps_its_frame_when_the_neighbourhood_agrees() {
-        let lead = "der zahlungsdienst verwendet";
-        let tail_a = "als primaeren datenspeicher und schreibt jede buchung zuerst dorthin \
-                      bevor die taegliche abrechnung ueberhaupt startet";
-        let tail_b = "als primaeren datenspeicher und schreibt jede buchung zuerst dorthin \
-                      bevor die taegliche abrechnung ueberhaupt beginnt";
-        // 40 filler words on each side: the whole-document Jaccard drops below
-        // 0.1, the neighbourhood Jaccard stays at 1.0.
-        let filler: String = (0..40)
-            .map(|i| format!("kontextwort{i}"))
-            .collect::<Vec<_>>()
-            .join(" ");
-        let a = format!("{lead} postgresql {tail_a} {filler}");
-        let b = format!("{lead} mysql {tail_b} {filler}");
+    fn a_long_note_keeps_its_frame_when_the_sentence_agrees() {
+        let a = "der zahlungsdienst verwendet postgresql als primaeren datenspeicher \
+                 und schreibt jede buchung zuerst dorthin. die taegliche abrechnung \
+                 startet um zwei uhr nachts und wird vom controlling geprueft";
+        let b = "der zahlungsdienst verwendet mysql als primaeren datenspeicher \
+                 und schreibt jede buchung zuerst dorthin. die abrechnung laeuft \
+                 nachts um zwei uhr und wird von der revision kontrolliert";
 
         assert!(
-            substitution_is_same_claim(&a, "postgresql", &b, "mysql"),
-            "a long note with the same neighbourhood must stay a candidate"
+            substitution_is_same_claim(a, "postgresql", b, "mysql"),
+            "the same sentence around the value must stay a candidate"
         );
 
-        // Control: same length, genuinely different surroundings — the gate
-        // must still refuse, otherwise the fix would have disabled it.
-        let c = format!("{lead} postgresql {tail_a} {filler}");
-        let d =
-            format!("die marketingseite verwendet mysql fuer das archiv der kampagnen {filler}");
+        // Control: same length, different subject — the gate must still refuse,
+        // otherwise the fix would have disabled it.
+        let c = "der zahlungsdienst verwendet postgresql als primaeren datenspeicher \
+                 und schreibt jede buchung zuerst dorthin";
+        let d = "die marketingseite verwendet mysql fuer das archiv der kampagnen \
+                 und speichert dort alle entwuerfe";
         assert!(
-            !substitution_is_same_claim(&c, "postgresql", &d, "mysql"),
+            !substitution_is_same_claim(c, "postgresql", d, "mysql"),
             "different subjects must still be refused"
         );
     }
