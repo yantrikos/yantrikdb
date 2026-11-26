@@ -3059,14 +3059,18 @@ mod tests {
     /// report is what a reader trusts.
     #[test]
     fn a_missing_index_shows_up_in_the_result() {
-        let db = YantrikDB::with_default(":memory:").unwrap();
-        db.record_text(
+        // `with_default`/`record_text` need an embedder; the CI test job builds
+        // without one. Use the same constructor and explicit-vector `record`
+        // as the rest of this file.
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        db.record(
             "der zahlungsdienst verwendet postgresql als datenspeicher.",
             "semantic",
             0.5,
             0.0,
             604800.0,
             &serde_json::json!({}),
+            &vec_seed(1.0, 8),
             "default",
             0.8,
             "general",
