@@ -1032,9 +1032,24 @@ impl YantrikDB {
                                  ({span_start:?}, {span_end:?})"
                             ));
                         }
+                        // A window inherited from the memory's `event_time_min`
+                        // was never chosen by the writer. When that is what
+                        // collides, the message has to say what to do — and it
+                        // must not suggest copying the stored values, because
+                        // the explicit window has to express what the writer
+                        // actually means.
+                        let window_hint = if stored_from != valid_from || stored_to != valid_to {
+                            ". If this is the same statement restated, pass \
+                             valid_from/valid_to explicitly, with the values that \
+                             match what you mean rather than the stored ones: a \
+                             window inherited from the memory's event time was \
+                             never the writer's decision"
+                        } else {
+                            ""
+                        };
                         return Err(crate::error::YantrikDbError::InvalidInput(format!(
                             "identity collision: ({src_resolved}, {rel_type}, {dst_resolved}) \
-                             already exists; refusing to overwrite it with {}",
+                             already exists; refusing to overwrite it with {}{window_hint}",
                             differ.join(", ")
                         )));
                     }
@@ -1336,13 +1351,19 @@ pub struct StatedClaim {
     #[serde(default)]
     pub modality: Option<String>,
     /// Byte range of the statement inside the source memory's text — WHERE the
-    /// writer said it, not whether it said it twice. It is stored so a reader
-    /// can locate the statement, and it is part of the statement's qualifiers,
-    /// so a second claim with a *different* span is refused by the identity
-    /// guard instead of overwriting the first (see `QualifierCollision`).
+    /// writer said it, not whether it said it twice. Stored so a reader can
+    /// locate the statement, and part of the statement's qualifiers: a second
+    /// claim **from the same source memory** with a different span is refused
+    /// by the identity guard instead of overwriting the first (see
+    /// `QualifierCollision`). Across memories spans are not comparable — each
+    /// is an offset into its own text — so a restatement from another memory is
+    /// accepted regardless of its span.
     ///
-    /// It does **not** let two observations coexist: the stored uniqueness key
-    /// has no span. Making them coexist is the §31.1 identity migration.
+    /// A span does not let two observations coexist: the stored uniqueness key
+    /// has no span. Making them coexist takes a claim identity that includes
+    /// the observation, so two statements of one triple can both be stored; the
+    /// key would then be `(src, dst, rel_type, extractor, polarity, namespace,
+    /// source memory, span)` instead of the current one.
     /// `None` means the writer did not say where — not that the statement
     /// occurs only once.
     #[serde(default)]
@@ -1769,7 +1790,7 @@ impl super::YantrikDB {
                     continue;
                 }
                 // A store failure is not a statement about this claim.
-                // a catch-all here turned a broken store into a
+                // A catch-all here turned a broken store into a
                 // batch full of ordinary "rejected" rows, with the other claims
                 // already committed and the call still returning `Ok`.
                 Err(e) => return Err(e),

@@ -327,11 +327,12 @@ fn unknown_modality_is_rejected() {
 #[test]
 fn span_is_stored_as_the_local_part_of_the_observation() {
     // The span records WHERE in the text a statement sits, so a reader can
-    // locate it. It does NOT let two statements coexist: the stored identity
-    // key has no span, so a second claim with a different span is refused
-    // rather than merged (see `two_statements_differing_only_by_span_...`).
-    // the earlier comment here claimed the span kept the two
-    // statements apart, which the code never did.
+    // locate it. It does not let two statements coexist: the stored identity
+    // key has no span, so a second claim **from the same memory** with a
+    // different span is refused rather than merged (see
+    // `two_statements_differing_only_by_span_...`). A restatement from another
+    // memory is accepted whatever its span, because an offset into one text
+    // says nothing about another.
     let (db, rid) =
         db_with("Hugo leitet das UNIT Team. Spaeter sagt Vela, Hugo leitet das UNIT Team.");
     let mut c = claim("Hugo", "leads", "UNIT Team");
@@ -573,12 +574,11 @@ fn an_alias_folded_endpoint_is_detected_as_the_same_identity() {
 
 #[test]
 fn two_statements_differing_only_by_span_do_not_silently_merge() {
-    // The comment on `span_is_stored_as_the_local_part_of_the_
-    // observation` says the span keeps two statements in one memory apart. It
-    // does not: the identity key has no span, so they cannot coexist. Until the
-    // identity migration (§31.1) lands, the honest behaviour is to REFUSE the
-    // second observation instead of accepting it as a "refinement" and
-    // replacing the first one's span.
+    // Two statements of one triple cannot coexist while the identity key has no
+    // span. Making them coexist takes a claim identity that includes the
+    // observation — a different key shape, not a behaviour flag. Until then the
+    // honest answer is to REFUSE the second observation instead of accepting it
+    // as a "refinement" and replacing the first one's span.
     let (db, rid) =
         db_with("Hugo leitet das UNIT Team. Spaeter sagt Vela, Hugo leitet das UNIT Team.");
     let mut first = claim("Hugo", "leads", "UNIT Team");

@@ -70,9 +70,12 @@ impl PyYantrikDB {
                 modality: pick(&["modality"])?,
                 // Where in the text the statement sits. Stored so a reader can
                 // locate it, and part of the statement's qualifiers: a second
-                // claim with a different span is refused by the engine's
-                // identity guard rather than replacing the first. It does not
-                // let two observations coexist — the stored key has no span.
+                // claim from the same memory with a different span is refused
+                // by the engine's identity guard rather than replacing the
+                // first. Across memories spans are not comparable, so a
+                // restatement from another memory is accepted whatever its
+                // span. The span does not let two observations coexist — the
+                // stored key has no span.
                 span_start: int_field(&d, "span_start")?,
                 span_end: int_field(&d, "span_end")?,
                 valid_from: window("valid_from")?,
