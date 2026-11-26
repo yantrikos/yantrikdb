@@ -1359,8 +1359,17 @@ fn check_substitution_pair_in_index(
     let prose_b = strip_code_context(text_b);
     let words_a = tokenize_words(&prose_a);
     let words_b = tokenize_words(&prose_b);
-    let diff_a: Vec<&String> = words_a.difference(&words_b).collect();
-    let diff_b: Vec<&String> = words_b.difference(&words_a).collect();
+    // Sorted, not HashSet order: when two members of one category appear on
+    // each side, several token pairs can pass the gate, and the first hit
+    // becomes the stored `detection_reason`. `HashSet::difference` is randomly
+    // seeded per process, so an unsorted scan makes the reason string drift
+    // between runs and a conflict ledger impossible to diff. The memory pair
+    // was already stable (the outer loops are ordered by created_at); this
+    // keeps the payload stable too.
+    let mut diff_a: Vec<&String> = words_a.difference(&words_b).collect();
+    let mut diff_b: Vec<&String> = words_b.difference(&words_a).collect();
+    diff_a.sort();
+    diff_b.sort();
 
     for ta in &diff_a {
         let Some(cats_a) = index.get(ta.as_str()) else {
@@ -1403,8 +1412,13 @@ fn check_substitution_category_pair(
     let words_a = tokenize_words(&prose_a);
     let words_b = tokenize_words(&prose_b);
 
-    let diff_a: Vec<&String> = words_a.difference(&words_b).collect();
-    let diff_b: Vec<&String> = words_b.difference(&words_a).collect();
+    let mut diff_a: Vec<&String> = words_a.difference(&words_b).collect();
+    let mut diff_b: Vec<&String> = words_b.difference(&words_a).collect();
+    // Same deterministic tie-break as the index path, so the reference and the
+    // production implementation answer identically (the equivalence test
+    // compares them).
+    diff_a.sort();
+    diff_b.sort();
 
     // Check each diff token pair against substitution_members
     for ta in &diff_a {
