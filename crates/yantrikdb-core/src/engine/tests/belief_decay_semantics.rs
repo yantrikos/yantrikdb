@@ -401,3 +401,90 @@ fn waiting_does_not_make_a_decayed_belief_more_confident() {
          ({after_assert} -> {after_wait})"
     );
 }
+
+/// Main's rate, unscaled: a default belief at 1.9 decays to 0.76 at +37 days,
+/// and `persistence` no longer changes that (0, 0.8 and 1.0 agree).
+///
+/// The persistence-scaled rate was a fivefold slowdown of every default belief
+/// and made persistence 1.0 immortal. It is out of this PR; if it comes back,
+/// it is an opt-in config field, not a default.
+#[test]
+fn default_decay_rate_is_unscaled_by_persistence() {
+    let cfg = BeliefRevisionConfig::default();
+    let now = 1_800_000_000.0_f64;
+    let mut results = Vec::new();
+
+    for (i, persistence) in [0.0, 0.8, 1.0].into_iter().enumerate() {
+        // Evidence at `now`, decay pass at +37 days: 30 effective days after
+        // the 7-day grace, at the configured rate.
+        let trail = vec![EvidenceEntry {
+            source: "alt".into(),
+            weight: 1.9,
+            timestamp: now,
+            observation_id: None,
+            history: Vec::new(),
+            paths: Vec::new(),
+        }];
+        let mut node = belief(50 + i as u32, trail, 1.9);
+        node.attrs.persistence = persistence;
+        revise_beliefs(&mut [&mut node], now + 37.0 * 86400.0, &cfg);
+        results.push((persistence, lo(&node)));
+    }
+
+    for (persistence, value) in &results {
+        assert!(
+            (value - 0.76).abs() < 1e-9,
+            "persistence {persistence}: expected 0.76, got {value}"
+        );
+    }
+    assert!(
+        results
+            .iter()
+            .all(|(_, v)| (v - results[0].1).abs() < 1e-12),
+        "the decay rate must not depend on persistence: {results:?}"
+    );
+}
+
+/// Direct and propagated evidence about the SAME origin must not depend on
+/// arrival order.
+///
+/// Review (26.11.): direct-then-propagated gave 0.9, propagated-then-direct
+/// gave 1.9 — `already_direct` was only consulted in the propagation
+/// direction, so the second arrival added a second vote.
+#[test]
+fn direct_and_propagated_evidence_are_order_independent() {
+    let cfg = BeliefRevisionConfig::default();
+    let now = 1_800_000_000.0_f64;
+    let origin = "rid-x";
+    let id_direct = NodeId::new(NodeKind::Belief, 60);
+    let id_prop = NodeId::new(NodeKind::Belief, 61);
+    let via = NodeId::new(NodeKind::Belief, 62);
+
+    // Order A: direct first, then the propagation of the same origin.
+    let mut a = belief(60, Vec::new(), 0.0);
+    a.payload = NodePayload::Belief(match a.payload {
+        NodePayload::Belief(mut b) => {
+            b.update_with_id(1.0, 0.9, "obs", now, Some(&format!("{origin}")));
+            b
+        }
+        _ => unreachable!(),
+    });
+    if let NodePayload::Belief(b) = &mut a.payload {
+        b.update_propagated(1.0, "prop", now, &format!("{origin}"), via);
+    }
+    let a_value = lo(&a);
+
+    // Order B: the propagation arrives first, then the direct observation.
+    let mut b = belief(61, Vec::new(), 0.0);
+    if let NodePayload::Belief(payload) = &mut b.payload {
+        payload.update_propagated(1.0, "prop", now, &format!("{origin}"), via);
+        payload.update_with_id(1.0, 0.9, "obs", now, Some(&format!("{origin}")));
+    }
+    let b_value = lo(&b);
+
+    let _ = (id_direct, id_prop);
+    assert!(
+        (a_value - b_value).abs() < 1e-9,
+        "the result must not depend on arrival order: direct-first {a_value}, propagated-first {b_value}"
+    );
+}

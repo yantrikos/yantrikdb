@@ -668,6 +668,20 @@ impl BeliefPayload {
     ) {
         let effective_weight = weight * reliability;
         if let Some(oid) = observation_id {
+            // The derived vote may have arrived BEFORE the direct observation.
+            // The direct assertion is primary, so the propagation of the same
+            // origin has to be withdrawn rather than counted a second time —
+            // otherwise the result depends on arrival order (measured: 0.9
+            // direct-first, 1.9 propagated-first).
+            let derived_key = format!("prop|{oid}");
+            if let Some(pos) = self
+                .evidence_trail
+                .iter()
+                .position(|e| e.observation_id.as_deref() == Some(derived_key.as_str()))
+            {
+                let derived = self.evidence_trail.remove(pos);
+                self.shift_log_odds(-derived.weight);
+            }
             if let Some(entry) = self
                 .evidence_trail
                 .iter_mut()
