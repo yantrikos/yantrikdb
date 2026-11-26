@@ -88,7 +88,11 @@ class TestThink:
         """
         a = [1.0] + [0.0] * (DIM - 1)
         b = [0.9, math.sqrt(1 - 0.81)] + [0.0] * (DIM - 2)
-        quiet = {"run_consolidation": False, "run_conflict_scan": False, "max_triggers": 50}
+        # The pairwise redundancy scan runs inside the conflict scan, so
+        # `run_conflict_scan: False` no longer produces redundancy triggers.
+        # The threshold behaviour this test pins is unchanged; it just has to
+        # ask for the scan that now owns it.
+        quiet = {"run_consolidation": False, "run_conflict_scan": True, "max_triggers": 50}
 
         def redundancy_count(threshold):
             engine = YantrikDB(db_path=":memory:", embedding_dim=DIM)
