@@ -22,8 +22,8 @@
 use std::collections::HashMap;
 
 use crate::state::{
-    BeliefPayload, CognitiveAttrs, CognitiveEdge, CognitiveEdgeKind, CognitiveNode, EvidenceEntry,
-    NodeId, NodeKind, NodePayload, Provenance,
+    BeliefPayload, CognitiveAttrs, CognitiveEdge, CognitiveEdgeKind, CognitiveNode, NodeId, NodeKind,
+    NodePayload, Provenance,
 };
 
 // ── Evidence Types ──
