@@ -939,9 +939,16 @@ impl YantrikDB {
             // identical resubmission (same extractor + same polarity + same namespace) is
             // treated as an update — typically a validity window refinement.
             // The choke point: every writer of claims passes here, after alias
-            // resolution. A row that exists under the same identity with
+            // resolution — the cooperative path, the bound extractor, cognition
+            // and stats. A row that exists under the same identity with
             // different qualifiers cannot coexist with this one, and the
-            // UPSERT would silently replace it. `Refuse` reports instead.
+            // UPSERT would silently replace it.
+            //
+            // `Refuse` reports instead of replacing; `Overwrite` is the
+            // declared policy of the callers that legitimately refine a row
+            // (cognition, stats, the public ingest wrapper). The invariant is
+            // therefore "the cooperative path and the bound extractor refuse",
+            // not "nothing ever overwrites" — REVIEW5 A6.
             if collision == QualifierCollision::Refuse {
                 // Kein `tombstoned = 0` (REVIEW5 F6): der UNIQUE-Schlüssel
                 // ignoriert Tombstones und der UPSERT setzt `tombstoned` nicht
