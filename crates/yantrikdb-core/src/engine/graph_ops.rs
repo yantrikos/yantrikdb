@@ -951,17 +951,23 @@ impl YantrikDB {
             // declared policy of the callers that legitimately refine a row in
             // place — cognition, the two stats sites (which write real
             // `event_min` windows) and the public `ingest_claim` wrapper.
-            // REVIEW5 A6 / REVIEW6 C3.
             if collision == QualifierCollision::Refuse {
-                // Kein `tombstoned = 0` (REVIEW5 F6): der UNIQUE-Schlüssel
-                // ignoriert Tombstones und der UPSERT setzt `tombstoned` nicht
-                // zurück. Mit dem Filter landete ein Schreibvorgang auf einer
-                // begrabenen Zeile "erfolgreich", ersetzte deren Qualifikatoren
-                // und blieb unsichtbar. Jetzt kollidiert er und wird gemeldet —
-                // Wiederbelebung ist ein eigener Pfad, nicht ein Nebeneffekt.
-                let existing: Option<(String, Option<f64>, Option<f64>, Option<i32>, Option<i32>)> =
-                    conn.query_row(
-                        "SELECT modality, valid_from, valid_to, span_start, span_end FROM claims \
+                // No `tombstoned = 0` here: the UNIQUE key ignores tombstones
+                // and the UPSERT does not reset the flag, so a write landing on
+                // a buried row used to "succeed", replace its qualifiers and
+                // stay invisible. Now it collides and is reported; resurrection
+                // is a separate path, not a side effect.
+                let existing: Option<(
+                    String,
+                    Option<f64>,
+                    Option<f64>,
+                    Option<i32>,
+                    Option<i32>,
+                    Option<String>,
+                )> = conn
+                    .query_row(
+                        "SELECT modality, valid_from, valid_to, span_start, span_end, \
+                                source_memory_rid FROM claims \
                          WHERE src = ?1 AND dst = ?2 AND rel_type = ?3 AND extractor = ?4 \
                            AND polarity = ?5 AND namespace = ?6",
                         params![
@@ -979,30 +985,57 @@ impl YantrikDB {
                                 row.get(2)?,
                                 row.get(3)?,
                                 row.get(4)?,
+                                row.get(5)?,
                             ))
                         },
                     )
                     .optional()?;
-                if let Some((stored_mod, stored_from, stored_to, stored_span_s, stored_span_e)) =
-                    existing
+                if let Some((
+                    stored_mod,
+                    stored_from,
+                    stored_to,
+                    stored_span_s,
+                    stored_span_e,
+                    stored_memory,
+                )) = existing
                 {
-                    // Der Span gehört zur Beobachtungsidentität: die Identität
-                    // kann heute keine zwei Beobachtungen halten, also wird die
-                    // zweite abgelehnt statt als "Verfeinerung" den Span der
-                    // ersten zu überschreiben (REVIEW5 F1).
+                    // A span is an offset into its own memory's text, so two
+                    // memories' spans are never comparable. Comparing them
+                    // turned ordinary corroboration — the same fact stated
+                    // again in a second memory — into a rejection, while the
+                    // same restatement without spans was accepted. Only the
+                    // same source memory can collide on a span.
+                    let same_memory = stored_memory.as_deref() == source_memory_rid;
+                    let span_differs =
+                        same_memory && (stored_span_s != span_start || stored_span_e != span_end);
+
                     if stored_mod != modality
                         || stored_from != valid_from
                         || stored_to != valid_to
-                        || stored_span_s != span_start
-                        || stored_span_e != span_end
+                        || span_differs
                     {
+                        // Name what actually differs, so the writer knows what
+                        // to change instead of re-reading the whole row.
+                        let mut differ: Vec<String> = Vec::new();
+                        if stored_mod != modality {
+                            differ.push(format!("modality {stored_mod:?} -> {modality:?}"));
+                        }
+                        if stored_from != valid_from || stored_to != valid_to {
+                            differ.push(format!(
+                                "window ({stored_from:?}, {stored_to:?}) -> \
+                                 ({valid_from:?}, {valid_to:?})"
+                            ));
+                        }
+                        if span_differs {
+                            differ.push(format!(
+                                "span ({stored_span_s:?}, {stored_span_e:?}) -> \
+                                 ({span_start:?}, {span_end:?})"
+                            ));
+                        }
                         return Err(crate::error::YantrikDbError::InvalidInput(format!(
                             "identity collision: ({src_resolved}, {rel_type}, {dst_resolved}) \
-                             already exists with modality={stored_mod:?} \
-                             window=({stored_from:?}, {stored_to:?}) \
-                             span=({stored_span_s:?}, {stored_span_e:?}); refusing to overwrite it \
-                             with modality={modality:?} window=({valid_from:?}, {valid_to:?}) \
-                             span=({span_start:?}, {span_end:?})"
+                             already exists; refusing to overwrite it with {}",
+                            differ.join(", ")
                         )));
                     }
                 }
@@ -1330,14 +1363,15 @@ pub struct StatedClaim {
     pub valid_to: Option<f64>,
 }
 
-/// The five modalities `claims.modality` documents — a comment in the DDL, not
-/// a CHECK, so the cooperative path validates it here instead.
+/// The five modalities a `StatedClaim` may carry. `claims.modality` is a DDL
+/// comment rather than a CHECK constraint, so the cooperative writer validates
+/// here instead.
 ///
-/// REVIEW4 Q4: this is the fifth declaration of the same vocabulary in the
-/// tree (after the SQL comment, the literals in `distributed/conflict.rs` and
-/// `claims_lane.rs`). Authority is `schema.rs`; if the column ever grows, this
-/// list has to follow — and nothing enforces that, because none of those sites
-/// reads another.
+/// This list is the authority for what the cooperative path accepts; the column
+/// itself is defined in `schema.rs`. It is a superset of what the heuristic
+/// extractor in `knowledge/graph.rs` emits today (`asserted`, `reported`), and
+/// `every_modality_the_extractor_emits_is_accepted` pins that relationship — a
+/// new extractor value fails a test instead of being refused at write time.
 pub const STATED_MODALITIES: [&str; 5] =
     ["asserted", "reported", "hypothetical", "denied", "quoted"];
 
@@ -1694,7 +1728,7 @@ impl super::YantrikDB {
                 valid_from.map(f64::to_bits),
                 claim.valid_to.map(f64::to_bits),
                 // And the span: it is the local part of the observation, so a
-                // different span is a different observation (REVIEW5 F1).
+                // different span is a different observation.
                 claim.span_start,
                 claim.span_end,
             )) {
@@ -1735,7 +1769,7 @@ impl super::YantrikDB {
                     continue;
                 }
                 // A store failure is not a statement about this claim.
-                // REVIEW5 F3: a catch-all here turned a broken store into a
+                // a catch-all here turned a broken store into a
                 // batch full of ordinary "rejected" rows, with the other claims
                 // already committed and the call still returning `Ok`.
                 Err(e) => return Err(e),

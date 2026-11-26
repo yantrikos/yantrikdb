@@ -330,7 +330,7 @@ fn span_is_stored_as_the_local_part_of_the_observation() {
     // locate it. It does NOT let two statements coexist: the stored identity
     // key has no span, so a second claim with a different span is refused
     // rather than merged (see `two_statements_differing_only_by_span_...`).
-    // REVIEW5 F1: the earlier comment here claimed the span kept the two
+    // the earlier comment here claimed the span kept the two
     // statements apart, which the code never did.
     let (db, rid) =
         db_with("Hugo leitet das UNIT Team. Spaeter sagt Vela, Hugo leitet das UNIT Team.");
@@ -408,7 +408,7 @@ fn differing_modality_on_the_same_triple_is_refused_not_overwritten() {
 
 #[test]
 fn batch_dedup_must_not_swallow_a_validity_collision() {
-    // REVIEW4 G4, remaining half. The in-batch dedup key gained `modality`,
+    // The in-batch dedup key gained `modality`,
     // but not the validity window. Two statements about the same triple with
     // the same modality and different windows are two statements — they must
     // reach the identity guard and be refused as a collision there. Today the
@@ -463,7 +463,7 @@ fn record_at(db: &YantrikDB, text: &str, event_ts: f64) -> String {
 
 #[test]
 fn a_different_validity_window_alone_is_a_collision() {
-    // REVIEW4 G1: the guard compares three qualifiers, but only the modality
+    // the guard compares three qualifiers, but only the modality
     // branch had a test. The window branch is the one most likely to fire in
     // real data, because a stated claim inherits the record's event time.
     let db = YantrikDB::with_default(":memory:").unwrap();
@@ -523,7 +523,7 @@ fn an_identical_resubmission_is_still_accepted() {
 
 #[test]
 fn an_alias_folded_endpoint_is_detected_as_the_same_identity() {
-    // REVIEW4 R4-2 / G2: the guard queries resolved names because it runs
+    // The guard queries resolved names because it runs
     // inside `ingest_claim_grounded`, after `resolve_alias`. A claim written
     // under an alias must collide with the canonical row — otherwise the
     // UPSERT overwrites the canonical qualifiers through the alias door.
@@ -573,7 +573,7 @@ fn an_alias_folded_endpoint_is_detected_as_the_same_identity() {
 
 #[test]
 fn two_statements_differing_only_by_span_do_not_silently_merge() {
-    // REVIEW5 F1. The comment on `span_is_stored_as_the_local_part_of_the_
+    // The comment on `span_is_stored_as_the_local_part_of_the_
     // observation` says the span keeps two statements in one memory apart. It
     // does not: the identity key has no span, so they cannot coexist. Until the
     // identity migration (§31.1) lands, the honest behaviour is to REFUSE the
@@ -610,9 +610,53 @@ fn two_statements_differing_only_by_span_do_not_silently_merge() {
     assert_eq!((s, e), (Some(0), Some(24)), "the first span must survive");
 }
 
+/// A span is an offset into its own memory's text, so two memories' spans are
+/// never comparable. Corroboration across memories — the same fact stated again
+/// — must keep working; comparing spans turned it into a rejection.
+#[test]
+fn a_restatement_in_a_second_memory_is_accepted() {
+    let db = YantrikDB::with_default(":memory:").unwrap();
+    let m1 = record(&db, "Hugo leads the UNIT Team.");
+    let m2 = record(&db, "In today's sync, Hugo leads the UNIT Team again.");
+
+    let mut c1 = claim("Hugo", "leads", "UNIT Team");
+    c1.span_start = Some(0);
+    c1.span_end = Some(25);
+    let r1 = db.attach_claims(&m1, &[c1]).unwrap();
+    assert_eq!(r1.accepted.len(), 1, "{r1:?}");
+
+    let mut c2 = claim("Hugo", "leads", "UNIT Team");
+    c2.span_start = Some(16);
+    c2.span_end = Some(41);
+    let r2 = db.attach_claims(&m2, &[c2]).unwrap();
+
+    assert_eq!(r2.accepted.len(), 1, "{r2:?}");
+    assert!(
+        r2.rejected.is_empty(),
+        "a restatement from another memory is corroboration, not a collision: {r2:?}"
+    );
+}
+
+/// The heuristic extractor in `knowledge/graph.rs` emits a modality of its own,
+/// and the guard compares it against `STATED_MODALITIES`. If the extractor
+/// grows a value the list does not carry, every such claim is refused at write
+/// time — a silent feature loss. This pins the relationship instead of leaving
+/// it to a comment.
+#[test]
+fn every_modality_the_extractor_emits_is_accepted() {
+    // The extractor's full set today: `asserted` and `reported`
+    // (`knowledge/graph.rs`, the two literals in the cue branch).
+    for modality in ["asserted", "reported"] {
+        assert!(
+            crate::engine::graph_ops::STATED_MODALITIES.contains(&modality),
+            "the extractor emits {modality:?}, which the cooperative writer must accept"
+        );
+    }
+}
+
 #[test]
 fn a_stored_null_window_collides_with_an_inherited_one() {
-    // REVIEW5 F4.1. A row written without a window and a statement whose
+    // A row written without a window and a statement whose
     // record carries an event time describe the same statement to a reader,
     // but `None != Some(t)`, so the second is refused. That is fail-closed on
     // purpose — the identity has no notion of "unknown vs inherited" yet. This
@@ -638,7 +682,7 @@ fn a_stored_null_window_collides_with_an_inherited_one() {
 
 #[test]
 fn a_resubmission_that_drops_the_span_is_refused() {
-    // REVIEW6 C2/Q1. Under the one-observation rule a retry that omits the span
+    // Under the one-observation rule a retry that omits the span
     // is a *different* statement (`None != Some(0)`), so it is refused where
     // the older code accepted it as a refinement. That is deliberate, but it is
     // a behaviour change — pinned here because the retry test only covers

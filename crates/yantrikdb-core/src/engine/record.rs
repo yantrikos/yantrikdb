@@ -2002,7 +2002,7 @@ impl YantrikDB {
                     span_end,
                     1.0,
                     crate::engine::claims_lane::GROUNDING_EXTRACTOR_BOUND,
-                    // Review 5 (F2): this path writes `None`/`None` for the
+                    // this path writes `None`/`None` for the
                     // validity window under the SAME extractor (`heuristic_v1`)
                     // that `stats.rs` uses WITH a window. Under `Overwrite` the
                     // UPSERT would null a real window on contact. Refuse makes

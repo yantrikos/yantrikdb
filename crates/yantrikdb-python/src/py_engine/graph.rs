@@ -67,7 +67,7 @@ impl PyYantrikDB {
                 // engine's job (attach_claims rejects unknown values); the
                 // binding must not invent "asserted" here, which is what made
                 // every quotation and hypothesis look like a plain assertion.
-                modality: pick(&["modality", "modality_kind"])?,
+                modality: pick(&["modality"])?,
                 // Where in the text the statement sits. Stored so a reader can
                 // locate it, and part of the statement's qualifiers: a second
                 // claim with a different span is refused by the engine's
