@@ -28,6 +28,8 @@ mod encryption;
 // bytes rather than against the engine's own claim.
 #[cfg(feature = "bundled-embedder")]
 mod encryption_canary;
+#[cfg(feature = "bundled-embedder")]
+mod entity_uuid_admission;
 mod event_time_columns;
 mod event_time_recall;
 // The explain suite drives the full text path (record_text/

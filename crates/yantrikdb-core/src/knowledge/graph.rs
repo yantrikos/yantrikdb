@@ -331,7 +331,8 @@ fn is_prose_run(chunk: &[String]) -> bool {
 ///
 /// Names a caller deliberately created via `relate()` are NEVER judged by this
 /// — that check lives at the call site, which is the only place that knows
-/// provenance.
+/// provenance. A UUID-shaped name (#322) is the one exception by SHAPE: it is
+/// a record id, kept as a claim endpoint but never as a node.
 
 /// Is this name a UUID (8-4-4-4-12 hex, or 32 contiguous hex digits)?
 ///
@@ -365,6 +366,9 @@ pub(crate) fn is_uuid_shaped(name: &str) -> bool {
 }
 
 pub fn is_rejected_entity_name(name: &str) -> bool {
+    if is_uuid_shaped(name) {
+        return true;
+    }
     let toks: Vec<String> = name.split_whitespace().map(|s| s.to_string()).collect();
     if toks.is_empty() {
         return true;
@@ -3862,6 +3866,39 @@ mod entity_admission_tests {
             "Yantrikdb",
         ] {
             assert!(admit_entity(good), "{good:?} was refused");
+        }
+    }
+
+    #[test]
+    fn uuid_shaped_names_are_refused_but_real_hex_names_stay() {
+        // Both layouts, both cases, as a WHOLE name.
+        for rid in [
+            "01a1ee35-1c2d-7a00-9f00-0123456789ab",
+            "01A1EE35-1C2D-7A00-9F00-0123456789AB",
+            "01a1ee351c2d7a009f000123456789ab",
+            "01A1EE351C2D7A009F000123456789AB",
+        ] {
+            assert!(is_uuid_shaped(rid), "{rid:?} not recognised");
+            assert!(is_rejected_entity_name(rid), "{rid:?} admitted as a name");
+            assert!(!admit_entity(rid), "{rid:?} admitted as an entity");
+        }
+        // Hex-looking names are names: only the layout makes an id.
+        for name in ["ed25519", "face2face", "A380", "C0FFEE", "deadbeef"] {
+            assert!(!is_uuid_shaped(name), "{name:?} looks like a UUID");
+            assert!(admit_entity(name), "{name:?} was refused");
+        }
+        // Near misses must not match: the rule is whole-name and exact.
+        for near in [
+            "01a1ee35-1c2d-7a00-9f00-0123456789ab extra",
+            "01a1ee35-1c2d-7a00-9f00-0123456789a",
+            "01a1ee35-1c2d-7a00-9f00-0123456789abc",
+            "01a1ee351c2d7a009f000123456789abc",
+            "01a1ee35_1c2d_7a00_9f00_0123456789ab",
+            "g1a1ee35-1c2d-7a00-9f00-0123456789ab",
+            "01a1ee3-51c2d-7a00-9f00-0123456789ab",
+            "01a1ee35-1c2d-7a00-9f00-0123456789ag",
+        ] {
+            assert!(!is_uuid_shaped(near), "{near:?} matched");
         }
     }
 

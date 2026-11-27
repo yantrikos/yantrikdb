@@ -178,8 +178,14 @@ impl YantrikDB {
                 params![edge_id, src, dst, rel_type, weight, ts, edge_hlc],
             )?;
 
-            // Ensure entities exist with classified entity_type
+            // Ensure entities exist with classified entity_type. A
+            // UUID-shaped endpoint (a record id) keeps its claim but gets
+            // no entity row (#322): the relation is real, the id is not a
+            // node — the same treatment value objects get.
             for (entity, etype) in [(src, src_type), (dst, dst_type)] {
+                if crate::graph::is_uuid_shaped(entity) {
+                    continue;
+                }
                 conn.execute(
                     "INSERT INTO entities (name, entity_type, first_seen, last_seen) \
                      VALUES (?1, ?2, ?3, ?4) \
@@ -193,9 +199,17 @@ impl YantrikDB {
         // Phase 2: Lock graph_index write for in-memory updates, then drop
         {
             let mut gi = self.graph_index.write();
-            gi.add_entity(src, src_type);
-            gi.add_entity(dst, dst_type);
-            gi.add_edge(src, dst, weight as f32);
+            for (entity, etype) in [(src, src_type), (dst, dst_type)] {
+                if !crate::graph::is_uuid_shaped(entity) {
+                    gi.add_entity(entity, etype);
+                }
+            }
+            // `add_edge` mints both endpoints, so an edge to a record id
+            // would put the node back. The claim stays in SQL; the index
+            // carries no hop through a name that is not an entity.
+            if !crate::graph::is_uuid_shaped(src) && !crate::graph::is_uuid_shaped(dst) {
+                gi.add_edge(src, dst, weight as f32);
+            }
         } // graph_index dropped
 
         // Backfill memory_entities for newly-created entities.
@@ -364,8 +378,14 @@ impl YantrikDB {
             let was_new = inserted == 1;
 
             if was_new {
-                // Ensure entities exist with classified entity_type.
+                // Ensure entities exist with classified entity_type —
+                // with the same UUID-shaped exception as `relate()` (#322),
+                // or a follower replaying this edge would mint rows the
+                // leader no longer has and the two stores would diverge.
                 for (entity, etype) in [(src, src_type), (dst, dst_type)] {
+                    if crate::graph::is_uuid_shaped(entity) {
+                        continue;
+                    }
                     conn.execute(
                             "INSERT INTO entities (name, entity_type, first_seen, last_seen) \
                              VALUES (?1, ?2, ?3, ?3) \
@@ -385,9 +405,15 @@ impl YantrikDB {
         // replay since add_entity/add_edge dedupe by name).
         if was_new_row {
             let mut gi = self.graph_index.write();
-            gi.add_entity(src, src_type);
-            gi.add_entity(dst, dst_type);
-            gi.add_edge(src, dst, weight as f32);
+            for (entity, etype) in [(src, src_type), (dst, dst_type)] {
+                if !crate::graph::is_uuid_shaped(entity) {
+                    gi.add_entity(entity, etype);
+                }
+            }
+            // No indexed hop through a record id: `add_edge` would mint one.
+            if !crate::graph::is_uuid_shaped(src) && !crate::graph::is_uuid_shaped(dst) {
+                gi.add_edge(src, dst, weight as f32);
+            }
         }
 
         // Skip backfill_memory_entities on cluster path — followers will

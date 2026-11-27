@@ -187,7 +187,10 @@ pub struct EntityAdmissionReport {
     /// Inadmissible names kept because a manual or writer-stated claim
     /// references them — an assertion outranks a heuristic. Their
     /// `memory_entities` links are still removed (counted in
-    /// `links_removed`), so a value a claim asserts stops being a hub.
+    /// `links_removed`), so a value a claim asserts stops being a hub. A
+    /// UUID-shaped name is never kept this way (#322): it is an id, not a
+    /// name, and its claim is preserved separately (`claims_removed` stays 0
+    /// for it).
     pub kept_by_claims: usize,
     /// Active memories scanned to rebuild `token_case_stats` first.
     pub lexicon_memories: usize,
@@ -298,7 +301,7 @@ impl super::YantrikDB {
                 }
                 report.inadmissible += 1;
                 let refs: i64 = asserted.query_row(params![name], |r| r.get(0))?;
-                if refs > 0 {
+                if refs > 0 && !crate::graph::is_uuid_shaped(name) {
                     report.kept_by_claims += 1;
                     kept.push(name.clone());
                     continue;
@@ -327,12 +330,18 @@ impl super::YantrikDB {
                     "DELETE FROM memory_entities WHERE entity_name = ?1",
                     params![name],
                 )?;
-                report.claims_removed += conn.execute(
-                    "DELETE FROM claims WHERE (extractor IN ('heuristic_v1','learned_v1') \
-                     OR rel_type IN ('co_occurs_with','related_to','mentions')) \
-                     AND (src = ?1 OR dst = ?1)",
-                    params![name],
-                )?;
+                // #322: a UUID-shaped name is an id, not a name, and a claim
+                // that names an id is often a real relation (`related_to`
+                // from relate()). Drop the row and its links, keep the
+                // claim: the heal removes the node, not the assertion.
+                if !crate::graph::is_uuid_shaped(name) {
+                    report.claims_removed += conn.execute(
+                        "DELETE FROM claims WHERE (extractor IN ('heuristic_v1','learned_v1') \
+                         OR rel_type IN ('co_occurs_with','related_to','mentions')) \
+                         AND (src = ?1 OR dst = ?1)",
+                        params![name],
+                    )?;
+                }
                 report.entities_removed +=
                     conn.execute("DELETE FROM entities WHERE name = ?1", params![name])?;
             }
