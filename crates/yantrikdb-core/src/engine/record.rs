@@ -257,7 +257,8 @@ impl YantrikDB {
         allow_queued_route: bool,
         synthesis: Option<&SynthesisAdmission>,
         // #330: which payload shape decides idempotency. `Consolidation`
-        // leaves the engine-derived half_life out — see `PayloadVariant`.
+        // leaves the engine-derived importance, valence and half_life out —
+        // see `PayloadVariant`.
         digest_variant: crate::payload_digest::PayloadVariant,
     ) -> Result<String> {
         // v0.9.3 contract gate: validate before anything else. (Historically

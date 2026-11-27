@@ -395,6 +395,42 @@ mod tests {
         }
     }
 
+    /// #330: for `Consolidation`, the three engine-derived values must not move
+    /// the digest — any of them can change between two identical writes (recall
+    /// moves half-life, recalibration moves importance, `correct()` moves all
+    /// three). A caller-supplied field must still move it, or the exclusion
+    /// would be swallowing real payload differences.
+    #[test]
+    fn consolidation_digest_ignores_derived_fields_and_keeps_caller_fields() {
+        let meta = json!({});
+        let mut v = view("same text", &meta);
+        v.variant = PayloadVariant::Consolidation;
+        let base = payload_digest(&v);
+
+        for (label, mutate) in [
+            (
+                "importance",
+                (|x: &mut PayloadView| x.importance = 0.91) as fn(&mut PayloadView),
+            ),
+            ("valence", |x: &mut PayloadView| x.valence = -0.4),
+            ("half_life", |x: &mut PayloadView| x.half_life = 870912.0),
+        ] {
+            let mut m = view("same text", &meta);
+            m.variant = PayloadVariant::Consolidation;
+            mutate(&mut m);
+            assert_eq!(
+                payload_digest(&m),
+                base,
+                "{label} is engine-derived for a consolidation and must not be fed"
+            );
+        }
+
+        // A caller-supplied field still changes the digest.
+        let mut changed = view("different text", &meta);
+        changed.variant = PayloadVariant::Consolidation;
+        assert_ne!(payload_digest(&changed), base, "text is caller-supplied");
+    }
+
     #[test]
     fn absent_created_at_digest_is_byte_identical_to_v1() {
         // THE compat pin for the conditional created_at feed (module docs):

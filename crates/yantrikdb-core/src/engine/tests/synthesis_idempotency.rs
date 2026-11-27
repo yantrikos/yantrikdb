@@ -1,16 +1,17 @@
 //! #330 — an honest retry must survive a recall.
 //!
-//! `record_synthesis` and keyed `summarize_cluster` derive the consolidated
-//! half-life from the sources' *current* values (`max(sources) * 1.5`), and a
-//! plain `recall` reinforces those sources by 1.2. With `half_life` in the
-//! payload digest, the retry after a recall looked like a different payload and
-//! was refused — so the documented replay guarantee was unreachable in the
-//! order an agent actually works: read, synthesise, retry when unsure.
+//! `record_synthesis` and keyed `summarize_cluster` derive `importance`,
+//! `valence` and `half_life` from the sources' *current* values — a plain
+//! `recall` reinforces half-life by 1.2, importance recalibration rewrites
+//! importance, `correct()` can rewrite all three. With those values in the
+//! payload digest, a retry over the same evidence looked like a different
+//! payload and was refused, so the documented replay guarantee was unreachable
+//! in the order an agent actually works: read, synthesise, retry when unsure.
 //!
 //! Both paths go through `commit_consolidation`, which now digests with
 //! `PayloadVariant::Consolidation`: everything the caller supplied, without the
-//! engine-derived half-life. Plain `record()`/`record_text()` are untouched —
-//! there the half-life is a caller argument and stays in the digest.
+//! three engine-derived values. Plain `record()`/`record_text()` are untouched —
+//! there they are caller arguments and stay in the digest.
 
 use super::*;
 
