@@ -21,6 +21,7 @@ mod cognition_gates;
 mod consolidate_cluster;
 mod corrections;
 mod created_at;
+mod digest_changes;
 mod dimensions;
 mod drafted_facts;
 mod encryption;
