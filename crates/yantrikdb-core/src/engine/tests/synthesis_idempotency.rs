@@ -116,7 +116,7 @@ fn synthesis_replay_survives_a_recall_between_the_writes() {
         .expect("a retry over the same evidence must replay, not conflict");
     assert_eq!(second["idempotent_replay"], true);
     assert_eq!(
-        second["rid"], first["rid"],
+        second["consolidated_rid"], first["consolidated_rid"],
         "the retry returns the first write"
     );
 }
@@ -129,7 +129,7 @@ fn synthesis_replay_without_a_recall_still_replays() {
     let first = synthesis(&db, &rids, SYNTH_TEXT, "k-plain").unwrap();
     let second = synthesis(&db, &rids, SYNTH_TEXT, "k-plain").unwrap();
     assert_eq!(second["idempotent_replay"], true);
-    assert_eq!(second["rid"], first["rid"]);
+    assert_eq!(second["consolidated_rid"], first["consolidated_rid"]);
 }
 
 #[test]
@@ -141,7 +141,7 @@ fn synthesis_replay_survives_a_recall_that_does_not_reinforce() {
     recall_once(&db, true);
     let second = synthesis(&db, &rids, SYNTH_TEXT, "k-skip").unwrap();
     assert_eq!(second["idempotent_replay"], true);
-    assert_eq!(second["rid"], first["rid"]);
+    assert_eq!(second["consolidated_rid"], first["consolidated_rid"]);
 }
 
 #[test]
@@ -187,7 +187,7 @@ fn summary_replay_survives_a_recall_between_the_writes() {
     )
     .expect("a keyed summary retry must replay after a recall");
     assert_eq!(second["idempotent_replay"], true);
-    assert_eq!(second["rid"], first["rid"]);
+    assert_eq!(second["consolidated_rid"], first["consolidated_rid"]);
 }
 
 #[test]
@@ -212,7 +212,7 @@ fn summary_replay_without_a_recall_still_replays() {
     )
     .unwrap();
     assert_eq!(second["idempotent_replay"], true);
-    assert_eq!(second["rid"], first["rid"]);
+    assert_eq!(second["consolidated_rid"], first["consolidated_rid"]);
 }
 
 /// A stored digest from before the fix keeps conflicting — for every retry.
@@ -269,6 +269,76 @@ fn a_stored_digest_from_the_old_rule_keeps_conflicting() {
         )
         .unwrap();
     assert_eq!(still, old, "a conflict must not rewrite the claim");
+}
+
+#[test]
+fn a_changed_source_set_is_a_new_generation_not_a_conflict() {
+    // Spranab's spec asks for a case showing a real change to the source set is
+    // still refused. Measured first: it is NOT refused — the engine derives the
+    // key from `logical_key + evidence_version`, so different evidence is a
+    // different key, and the documented semantics are "changed evidence creates
+    // a new generation and atomically supersedes the older logical generation".
+    // A conflict here would mean the two are conflated, so the test asserts the
+    // documented behaviour instead of the expected one.
+    let db = YantrikDB::new(":memory:", 8).unwrap();
+    let rids = seed(&db, &["alpha one", "alpha two"]);
+    let first = synthesis(&db, &rids, SYNTH_TEXT, "k-set").unwrap();
+
+    let mut wider = rids.clone();
+    wider.push(
+        db.record(
+            "alpha three",
+            "episodic",
+            0.5,
+            0.0,
+            604800.0,
+            &empty_meta(),
+            &vec_seed(3.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap(),
+    );
+
+    let second = synthesis(&db, &wider, SYNTH_TEXT, "k-set")
+        .expect("different evidence is a new generation, not a conflict");
+    assert_ne!(
+        second["consolidated_rid"], first["consolidated_rid"],
+        "a new generation is a new record"
+    );
+    assert_eq!(second["idempotent_replay"], false);
+
+    // The older generation is retired through `synthesis_state`, not through
+    // `consolidation_status` — the refold picks the winner by generation HLC
+    // and marks the rest 'superseded'.
+    let state: Option<String> = db
+        .conn()
+        .query_row(
+            "SELECT synthesis_state FROM memories WHERE rid = ?1",
+            rusqlite::params![first["consolidated_rid"].as_str().unwrap()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        state.as_deref(),
+        Some("superseded"),
+        "the older generation must be retired, not left current"
+    );
+
+    let verified: i64 = db
+        .conn()
+        .query_row(
+            "SELECT COUNT(*) FROM memories WHERE synthesis_logical_key = ?1 \
+             AND synthesis_state = 'verified'",
+            // `admission.logical_key` is the key the caller passed.
+            rusqlite::params!["k-set"],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(verified, 1, "exactly one generation may be current");
 }
 
 #[test]
