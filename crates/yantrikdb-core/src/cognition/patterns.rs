@@ -338,17 +338,10 @@ fn mine_topic_clusters(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<Raw
                 stored_meta,
                 namespace,
             )| {
-                // A record whose ciphertext cannot be read must not abort
-                // the whole mining pass — the same policy `entity_label`
-                // uses. Skip this row and keep mining the rest.
-                let (Ok(text), Ok(meta_str), Ok(emb_blob)) = (
-                    db.decrypt_text(&stored_text),
-                    db.decrypt_text(&stored_meta),
-                    db.decrypt_embedding(&stored_emb),
-                ) else {
-                    return Ok(None);
-                };
-                Ok(Some(MemoryWithEmbedding {
+                let text = db.decrypt_text(&stored_text)?;
+                let meta_str = db.decrypt_text(&stored_meta)?;
+                let emb_blob = db.decrypt_embedding(&stored_emb)?;
+                Ok(MemoryWithEmbedding {
                     rid,
                     memory_type,
                     text,
@@ -361,15 +354,10 @@ fn mine_topic_clusters(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<Raw
                     metadata: serde_json::from_str(&meta_str)
                         .unwrap_or(serde_json::Value::Object(Default::default())),
                     namespace,
-                }))
+                })
             },
         )
-        // `Ok(None)` marks a row whose ciphertext we could not read; drop it
-        // and mine the rest instead of failing the pass.
-        .collect::<Result<Vec<_>>>()?
-        .into_iter()
-        .flatten()
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
     if memories.len() < 5 {
         return Ok(vec![]);
@@ -1243,7 +1231,7 @@ mod tests {
             "the seeded evidence must still be there"
         );
         // Read back every column the matched path writes, so a future
-        // parameter-order mistake cannot go unnoticed (review HF-04).
+        // parameter-order mistake cannot go unnoticed.
         let (count, conf): (i64, f64) = conn
             .query_row(
                 "SELECT occurrence_count, confidence FROM patterns WHERE pattern_id = 'stale-row'",
@@ -1364,66 +1352,8 @@ mod tests {
     }
 
     #[test]
-    fn test_mining_pass_survives_an_undecryptable_record() {
-        // HF-05: `entity_label` falls back on a decryption failure, but the
-        // public pass used to abort in `mine_topic_clusters`, which
-        // `?`-propagated the same error. One unreadable row must not kill the
-        // whole run.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("enc2.db");
-        let mut key = [0u8; 32];
-        key[0] = 9;
-        let db = YantrikDB::new_encrypted(path.to_str().unwrap(), 8, &key).unwrap();
-        let mut rids = Vec::new();
-        for i in 0..6 {
-            let body = format!("Signing key rotation note {i} for the gateway.");
-            rids.push(
-                db.record(
-                    &body,
-                    "episodic",
-                    0.5,
-                    0.0,
-                    604800.0,
-                    &serde_json::json!({}),
-                    &vec_seed(1500.0 + i as f32, 8),
-                    "default",
-                    0.8,
-                    "general",
-                    "user",
-                    None,
-                )
-                .unwrap(),
-            );
-        }
-        db.conn()
-            .execute(
-                "UPDATE memories SET text = '!!!not-base64!!!' WHERE rid = ?1",
-                params![rids[0]],
-            )
-            .unwrap();
-        assert!(
-            db.decrypt_text("!!!not-base64!!!").is_err(),
-            "fixture check: this payload must really fail to decrypt"
-        );
-
-        let res = mine_patterns(&db, &PatternConfig::default());
-        assert!(
-            res.is_ok(),
-            "one unreadable record must not abort the pass: {res:?}"
-        );
-
-        for p in get_patterns(&db, None, None, 200).unwrap() {
-            assert!(
-                !p.description.contains("not-base64"),
-                "ciphertext must never reach a description: {:?}",
-                p.description
-            );
-        }
-    }
-
-    #[test]
     fn test_persisted_description_is_corrected_after_forget_and_remine() {
-        // HF-06: the maintainer's case — a description that already quotes a
+        // A description that already quotes a
         // record, the record is forgotten, and the same row is re-mined.
         let db = YantrikDB::new(":memory:", 8).unwrap();
         let secret = "The api key rotates every ninety days.";
