@@ -99,8 +99,18 @@ fn mine_temporal_clusters(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<
     // Build hour-of-week histogram (168 buckets)
     let mut buckets: Vec<Vec<(String, f64)>> = (0..168).map(|_| Vec::new()).collect();
     for (rid, created_at, valence) in &rows {
+        // `created_at` is caller-supplied on the import path, and a float-to-int
+        // cast saturates: negative and NaN become 0, which would silently place an
+        // invalid timestamp in bucket 0 (Thursday 00:00). Skip those records
+        // instead of labelling them with a weekday that an input never had.
+        if !created_at.is_finite() || *created_at < 0.0 {
+            continue;
+        }
         let secs = *created_at as u64;
-        // Convert to hour-of-week (0 = Monday 00:00, 167 = Sunday 23:00)
+        // Epoch-based hour of week. The bucket is anchored at the Unix epoch, so
+        // bucket 0 is Thursday 00:00 UTC; `day_names` below is Monday-first and
+        // the label is derived with `day_of_week_utc` rather than by a local
+        // offset constant.
         let hour_of_week = ((secs / 3600) % 168) as usize;
         buckets[hour_of_week].push((rid.clone(), *valence));
     }
@@ -127,7 +137,11 @@ fn mine_temporal_clusters(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<
 
     for (hour, bucket) in buckets.iter().enumerate() {
         if (bucket.len() as f64) > threshold && bucket.len() >= config.temporal_cluster_min_events {
-            let day = day_names[hour / 24];
+            // Derive the weekday from the bucket's own instant with the project's
+            // canonical UTC helper (cognition/temporal.rs), instead of keeping a
+            // local epoch-offset constant beside two other copies of the same rule.
+            let bucket_ts = (hour as f64) * 3600.0;
+            let day = day_names[crate::cognition::temporal::day_of_week_utc(bucket_ts)];
             let hour_of_day = hour % 24;
             let label = format!("{day} {hour_of_day}:00");
 
@@ -1159,5 +1173,94 @@ mod tests {
         let trends = mine_valence_trends(&db, &config).unwrap();
         assert!(!trends.is_empty());
         assert_eq!(trends[0].pattern_type, "valence_trend");
+    }
+
+    #[test]
+    fn test_temporal_cluster_label_matches_known_weekdays() {
+        // Expectations are hardcoded from independently verified UTC dates, not
+        // derived from the implementation: 2026-11-26 is a Thursday,
+        // 2026-11-28 Saturday, 2026-11-29 Sunday, 2026-12-02 Wednesday.
+        let cases = [
+            (1_795_651_200.0_f64, "Thursday 0:00"),
+            (1_795_824_000.0, "Saturday 0:00"),
+            (1_795_910_400.0, "Sunday 0:00"),
+            (1_796_169_600.0, "Wednesday 0:00"),
+        ];
+
+        for (midnight, expected) in cases {
+            let db = YantrikDB::new(":memory:", 8).unwrap();
+            for i in 0..9 {
+                let rid = db
+                    .record(
+                        &format!("cluster {expected} {i}"),
+                        "episodic",
+                        0.5,
+                        0.0,
+                        604800.0,
+                        &serde_json::json!({}),
+                        &vec_seed(300.0 + i as f32, 8),
+                        "default",
+                        0.8,
+                        "general",
+                        "user",
+                        None,
+                    )
+                    .unwrap();
+                db.conn()
+                    .execute(
+                        "UPDATE memories SET created_at = ?1 WHERE rid = ?2",
+                        params![midnight + (i as f64) * 60.0, rid],
+                    )
+                    .unwrap();
+            }
+
+            let clusters = mine_temporal_clusters(&db, &PatternConfig::default()).unwrap();
+            assert_eq!(
+                clusters.len(),
+                1,
+                "one hour-of-week bucket must produce exactly one cluster"
+            );
+            assert_eq!(
+                clusters[0].context["label"], expected,
+                "bucket label must name the weekday of its own instant"
+            );
+        }
+    }
+
+    #[test]
+    fn test_temporal_cluster_ignores_invalid_timestamps() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        for i in 0..9 {
+            let rid = db
+                .record(
+                    &format!("invalid ts {i}"),
+                    "episodic",
+                    0.5,
+                    0.0,
+                    604800.0,
+                    &serde_json::json!({}),
+                    &vec_seed(500.0 + i as f32, 8),
+                    "default",
+                    0.8,
+                    "general",
+                    "user",
+                    None,
+                )
+                .unwrap();
+            // A negative instant saturates to 0 on an `as u64` cast and would
+            // otherwise be reported as "Thursday 0:00".
+            db.conn()
+                .execute(
+                    "UPDATE memories SET created_at = -1.0 WHERE rid = ?1",
+                    params![rid],
+                )
+                .unwrap();
+        }
+
+        let clusters = mine_temporal_clusters(&db, &PatternConfig::default()).unwrap();
+        assert!(
+            clusters.is_empty(),
+            "an invalid created_at must not be labelled as a weekday"
+        );
     }
 }
