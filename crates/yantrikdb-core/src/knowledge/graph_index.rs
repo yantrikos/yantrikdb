@@ -87,7 +87,10 @@ impl GraphIndex {
         // exempt. `claims.extractor` is the only provenance we have —
         // `'manual'` is what `relate()` writes — so an explicit relation
         // protects its endpoints even if they look like prose. Tolerate a
-        // missing table as "nothing protected".
+        // missing table as "nothing protected". A UUID-shaped name is the
+        // exception (#322): relate() takes record ids as endpoints, so the
+        // manual protection would otherwise keep exactly the ids this
+        // predicate exists to suppress.
         let protected: HashSet<String> = conn
             .prepare(
                 "SELECT src FROM claims WHERE extractor = 'manual' \
@@ -99,7 +102,8 @@ impl GraphIndex {
             })
             .unwrap_or_default();
         let suppressed = |name: &str| -> bool {
-            !protected.contains(name) && crate::graph::is_rejected_entity_name(name)
+            crate::graph::is_rejected_entity_name(name)
+                && (!protected.contains(name) || crate::graph::is_uuid_shaped(name))
         };
 
         // Load entities: canonical (non-aliased) rows first so their type
