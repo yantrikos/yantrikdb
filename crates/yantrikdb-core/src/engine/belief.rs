@@ -7,7 +7,7 @@
 use std::collections::HashMap;
 
 use crate::belief::{
-    self, apply_staleness_decay, assert_evidence, propagate_evidence, BeliefRevisionConfig,
+    apply_staleness_decay, assert_evidence, propagate_evidence_from, BeliefRevisionConfig,
     Evidence, EvidenceResult, RevisionSummary,
 };
 use crate::belief_query::{self, BeliefExplanation, BeliefInventory, BeliefPattern};
@@ -70,8 +70,11 @@ impl YantrikDB {
                     }
                 }
 
-                // Propagate
-                let effects = propagate_evidence(
+                // Propagate. The origin travels with the evidence so the same
+                // observation cannot vote twice downstream — neither across
+                // repeated runs nor across several graph paths.
+                let effects = propagate_evidence_from(
+                    evidence.observation_id.as_deref(),
                     evidence.target_belief,
                     result.effective_weight,
                     &epistemic_edges,
@@ -263,7 +266,7 @@ impl YantrikDB {
             node.attrs.provenance = crate::state::Provenance::Told;
             // Boost confidence for confirmed beliefs
             let boost = 1.0; // +1.0 log-odds ≈ +0.27 probability at P=0.5
-            belief.log_odds += boost;
+            belief.shift_log_odds(boost);
             node.attrs.confidence = crate::state::sigmoid(belief.log_odds);
             self.persist_cognitive_node(&node)?;
             Ok(true)
@@ -284,7 +287,7 @@ impl YantrikDB {
 
         if let NodePayload::Belief(ref mut belief) = node.payload {
             belief.user_confirmed = true; // Confirmed as FALSE
-            belief.log_odds = -4.0; // Strong disbelief
+            belief.set_log_odds(-4.0); // Strong disbelief
             node.attrs.confidence = crate::state::sigmoid(belief.log_odds);
             node.attrs.provenance = crate::state::Provenance::Told;
             self.persist_cognitive_node(&node)?;
@@ -320,6 +323,9 @@ mod tests {
                 domain: "test".to_string(),
                 evidence_trail: vec![],
                 user_confirmed: false,
+                undecayed_log_odds: None,
+                decayed_at: 0.0,
+                propagated: Vec::new(),
             }),
         );
         node.attrs.confidence = crate::state::sigmoid(log_odds);
@@ -341,6 +347,7 @@ mod tests {
             provenance: Provenance::Observed,
             propagate: false,
             timestamp: 1000.0,
+            observation_id: None,
         };
 
         let config = BeliefRevisionConfig::default();
@@ -383,6 +390,7 @@ mod tests {
             provenance: Provenance::Extracted,
             propagate: true,
             timestamp: 1000.0,
+            observation_id: None,
         };
 
         let config = BeliefRevisionConfig::default();
@@ -423,6 +431,7 @@ mod tests {
                 provenance: Provenance::Observed,
                 propagate: false,
                 timestamp: 1000.0,
+                observation_id: None,
             },
             Evidence {
                 target_belief: n2.id,
@@ -431,6 +440,7 @@ mod tests {
                 provenance: Provenance::Inferred,
                 propagate: false,
                 timestamp: 1000.0,
+                observation_id: None,
             },
         ];
 
@@ -500,6 +510,7 @@ mod tests {
             provenance: Provenance::Observed,
             propagate: false,
             timestamp: 1000.0,
+            observation_id: None,
         };
 
         let config = BeliefRevisionConfig::default();

@@ -429,6 +429,9 @@ mod tests {
                 domain: domain.to_string(),
                 evidence_trail: vec![],
                 user_confirmed: false,
+                undecayed_log_odds: None,
+                decayed_at: 0.0,
+                propagated: Vec::new(),
             }),
         );
         node.attrs.confidence = crate::state::sigmoid(log_odds);
@@ -594,6 +597,8 @@ mod tests {
                     source: format!("source_{i}"),
                     weight: 0.5,
                     timestamp: 1000.0 + i as f64,
+                    observation_id: None,
+                    history: Vec::new(),
                 });
             }
         }

@@ -399,14 +399,21 @@ pub fn build_aisha() -> Result<PersonaScenario> {
                     source: "successful operations".into(),
                     weight: 1.5,
                     timestamp: 1000.0,
+                    observation_id: None,
+                    history: Vec::new(),
                 },
                 EvidenceEntry {
                     source: "attending feedback".into(),
                     weight: 1.0,
                     timestamp: 2000.0,
+                    observation_id: None,
+                    history: Vec::new(),
                 },
             ],
             user_confirmed: true,
+            undecayed_log_odds: None,
+            decayed_at: 0.0,
+            propagated: Vec::new(),
         }),
     ));
 
@@ -423,14 +430,21 @@ pub fn build_aisha() -> Result<PersonaScenario> {
                     source: "encouraging messages".into(),
                     weight: 1.5,
                     timestamp: 1000.0,
+                    observation_id: None,
+                    history: Vec::new(),
                 },
                 EvidenceEntry {
                     source: "complained about missed dinner".into(),
                     weight: -0.5,
                     timestamp: 3000.0,
+                    observation_id: None,
+                    history: Vec::new(),
                 },
             ],
             user_confirmed: false,
+            undecayed_log_odds: None,
+            decayed_at: 0.0,
+            propagated: Vec::new(),
         }),
     ));
 
@@ -836,8 +850,13 @@ pub fn build_priya() -> Result<PersonaScenario> {
                 source: "conference talk".into(),
                 weight: 0.5,
                 timestamp: 1000.0,
+                observation_id: None,
+                history: Vec::new(),
             }],
             user_confirmed: false,
+            undecayed_log_odds: None,
+            decayed_at: 0.0,
+            propagated: Vec::new(),
         }),
     ));
 
@@ -854,14 +873,21 @@ pub fn build_priya() -> Result<PersonaScenario> {
                     source: "benchmark results".into(),
                     weight: 1.5,
                     timestamp: 1000.0,
+                    observation_id: None,
+                    history: Vec::new(),
                 },
                 EvidenceEntry {
                     source: "team productivity".into(),
                     weight: 0.5,
                     timestamp: 2000.0,
+                    observation_id: None,
+                    history: Vec::new(),
                 },
             ],
             user_confirmed: true,
+            undecayed_log_odds: None,
+            decayed_at: 0.0,
+            propagated: Vec::new(),
         }),
     ));
 
@@ -1567,6 +1593,9 @@ fn run_belief_revision_tests(run: &mut BenchRun) {
         domain: "test".into(),
         evidence_trail: vec![],
         user_confirmed: false,
+        undecayed_log_odds: None,
+        decayed_at: 0.0,
+        propagated: Vec::new(),
     };
 
     for i in 0..20 {
@@ -1596,6 +1625,9 @@ fn run_belief_revision_tests(run: &mut BenchRun) {
         domain: "test".into(),
         evidence_trail: vec![],
         user_confirmed: false,
+        undecayed_log_odds: None,
+        decayed_at: 0.0,
+        propagated: Vec::new(),
     };
     for i in 0..10 {
         let weight = if i % 2 == 0 { 0.5 } else { -0.5 };
@@ -1621,6 +1653,9 @@ fn run_belief_revision_tests(run: &mut BenchRun) {
         domain: "test".into(),
         evidence_trail: vec![],
         user_confirmed: false,
+        undecayed_log_odds: None,
+        decayed_at: 0.0,
+        propagated: Vec::new(),
     };
     let mut low_rel = BeliefPayload {
         proposition: "B".into(),
@@ -1628,6 +1663,9 @@ fn run_belief_revision_tests(run: &mut BenchRun) {
         domain: "test".into(),
         evidence_trail: vec![],
         user_confirmed: false,
+        undecayed_log_odds: None,
+        decayed_at: 0.0,
+        propagated: Vec::new(),
     };
     high_rel.update(1.0, 0.95, "reliable", 100.0);
     low_rel.update(1.0, 0.3, "unreliable", 100.0);
@@ -2243,6 +2281,7 @@ fn run_belief_engine_tests(run: &mut BenchRun, scenario: &PersonaScenario) {
             provenance: Provenance::Observed,
             propagate: false,
             timestamp: now_secs(),
+            observation_id: None,
         };
         if assert_evidence(node, &evidence, &config).is_some() {
             assertion_count += 1;

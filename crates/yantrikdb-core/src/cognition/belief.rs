@@ -22,14 +22,20 @@
 use std::collections::HashMap;
 
 use crate::state::{
-    BeliefPayload, CognitiveAttrs, CognitiveEdge, CognitiveEdgeKind, CognitiveNode, EvidenceEntry,
-    NodeId, NodeKind, NodePayload, Provenance,
+    BeliefPayload, CognitiveAttrs, CognitiveEdge, CognitiveEdgeKind, CognitiveNode, NodeId,
+    NodeKind, NodePayload, Provenance,
 };
 
 // ── Evidence Types ──
 
 /// A piece of evidence to be asserted into the belief system.
+///
+/// Built through [`Evidence::new`] plus the two builders, never through a
+/// struct literal: the type is `#[non_exhaustive]` so the next field does not
+/// break callers again, and a forgotten `timestamp` cannot silently become
+/// `0.0` (there is no `Default`).
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Evidence {
     /// Which belief this evidence applies to.
     pub target_belief: NodeId,
@@ -44,6 +50,45 @@ pub struct Evidence {
     pub propagate: bool,
     /// When this evidence was observed (unix timestamp seconds).
     pub timestamp: f64,
+    /// Stable identity of the observation, when the caller can name one.
+    /// Same id = same observation: it revises the previous effect instead of
+    /// voting twice. The engine never derives it; `observation_key` composes
+    /// one from belief + source + optional local key, without the provenance
+    /// kind and without the timestamp.
+    pub observation_id: Option<String>,
+}
+
+impl Evidence {
+    /// Direct evidence for `target_belief`, not propagated.
+    pub fn new(
+        target_belief: NodeId,
+        weight: f64,
+        source: impl Into<String>,
+        provenance: Provenance,
+        timestamp: f64,
+    ) -> Self {
+        Self {
+            target_belief,
+            weight,
+            source: source.into(),
+            provenance,
+            propagate: false,
+            timestamp,
+            observation_id: None,
+        }
+    }
+
+    /// Name the observation this evidence belongs to (dedup is opt-in).
+    pub fn with_observation_id(mut self, id: impl Into<String>) -> Self {
+        self.observation_id = Some(id.into());
+        self
+    }
+
+    /// Also propagate this evidence through epistemic edges.
+    pub fn with_propagation(mut self) -> Self {
+        self.propagate = true;
+        self
+    }
 }
 
 /// Result of asserting a piece of evidence.
@@ -165,6 +210,71 @@ impl Default for BeliefRevisionConfig {
 
 // ── Core Belief Revision Functions ──
 
+/// Compose the stable identity of ONE observation.
+///
+/// Three rules, all deliberate:
+/// * **without the provenance kind** — the same observation does not become a
+///   new one because it was re-classified (observed vs extracted vs told);
+/// * **without the timestamp** — a re-import, a consolidation or a corrected
+///   clock must not turn one observation into two;
+/// * **with a local key** — one source can carry several independent
+///   observations, so the caller names the one it means (sentence, claim id,
+///   span). Without a local key the whole source counts as one observation.
+///
+/// Callers that resolve a consolidated record back to its originals
+/// (`consolidation_members`) pass the ORIGINAL source rid, so a synthesis is
+/// not a second experience.
+///
+/// The belief id is rendered through `to_raw()`, not through `Debug`: an id
+/// that is part of a persisted identity must not change because a derive
+/// changes its output. (This is a one-time change of the id strings; callers
+/// that persisted the old `bNodeId(Belief:7)|…` form should re-derive.)
+pub fn observation_key(belief: NodeId, source_rid: &str, local: Option<&str>) -> String {
+    let id = belief.to_raw();
+    match local {
+        Some(l) => format!("b{id}|{source_rid}|{l}"),
+        None => format!("b{id}|{source_rid}"),
+    }
+}
+
+/// How much of ONE entry's weight has survived decay at `now`.
+///
+/// The re-assessment path needs the share of the ENTRY, not of the belief:
+/// after fresh evidence arrives, `shift_log_odds` resets the belief-level
+/// anchor, so the belief's own `value / anchor` ratio says "nothing decayed" —
+/// and then retracting a 100-day-old observation would remove its full weight
+/// from a value that only ever received a twentieth of it (measured: 1.1 - 2.0
+/// = -0.9 for evidence that was worth 0.1).
+///
+/// Same formula as `apply_staleness_decay`, applied to the entry's own age:
+/// no decay inside the grace period, then the configured rate per day, clipped
+/// at 95 %.
+pub fn entry_decay_share(
+    belief: &BeliefPayload,
+    observation_id: &str,
+    now: f64,
+    config: &BeliefRevisionConfig,
+) -> f64 {
+    let full_share = 1.0;
+    let Some(entry) = belief
+        .evidence_trail
+        .iter()
+        .find(|e| e.observation_id.as_deref() == Some(observation_id))
+    else {
+        return full_share;
+    };
+    let days = (now - entry.timestamp) / 86_400.0;
+    if !days.is_finite() || days <= config.staleness_grace_period_days {
+        return full_share;
+    }
+    let rate = config.staleness_rate_per_day;
+    if !rate.is_finite() || rate <= 0.0 {
+        return full_share;
+    }
+    let effective_days = days - config.staleness_grace_period_days;
+    (1.0 - (rate * effective_days).min(0.95)).max(0.05)
+}
+
 /// Assert a single piece of evidence against a belief node.
 ///
 /// Updates the belief's log-odds using Bayesian updating with source reliability priors.
@@ -174,8 +284,6 @@ impl Default for BeliefRevisionConfig {
 /// * `node` - The belief node to update (must be a Belief payload)
 /// * `evidence` - The evidence to assert
 /// * `config` - Revision configuration
-/// * `epistemic_edges` - Edges from this belief to other beliefs (for propagation)
-/// * `downstream_nodes` - Mutable map of downstream belief nodes (for propagation writes)
 pub fn assert_evidence(
     node: &mut CognitiveNode,
     evidence: &Evidence,
@@ -193,21 +301,34 @@ pub fn assert_evidence(
     let reliability = evidence.provenance.reliability_prior();
     let effective_weight = evidence.weight * reliability;
 
-    // Apply the Bayesian update
-    belief.update(
+    // Apply the Bayesian update. A re-assessment moves the belief by the share
+    // THIS entry has survived — computed from its own age, because the belief's
+    // value/anchor ratio stops meaning anything once fresher evidence arrives.
+    let decay_share = match evidence.observation_id.as_deref() {
+        Some(oid) => entry_decay_share(belief, oid, evidence.timestamp, config),
+        None => 1.0,
+    };
+    belief.update_with_id(
         evidence.weight,
         reliability,
         &evidence.source,
         evidence.timestamp,
+        evidence.observation_id.as_deref(),
+        decay_share,
     );
 
     // Enforce confidence ceiling for volatile beliefs
     enforce_confidence_ceiling(belief, &node.attrs, config);
 
-    // Enforce absolute log-odds cap
-    belief.log_odds = belief
+    // Enforce absolute log-odds cap. The cap limits the BELIEF, so the anchor
+    // moves with it: leaving 6.8 in the anchor while storing 3.3 let the next
+    // decay rebuild 6.0 from evidence that had already been capped away.
+    let capped = belief
         .log_odds
         .clamp(-config.max_abs_log_odds, config.max_abs_log_odds);
+    if capped != belief.log_odds {
+        belief.set_log_odds(capped);
+    }
 
     let posterior_log_odds = belief.log_odds;
     let posterior_probability = crate::state::sigmoid(posterior_log_odds);
@@ -259,6 +380,33 @@ pub fn propagate_evidence(
     config: &BeliefRevisionConfig,
     hop: u32,
 ) -> Vec<PropagationEffect> {
+    propagate_evidence_from(
+        None,
+        source_id,
+        effective_weight,
+        edges,
+        downstream_nodes,
+        config,
+        hop,
+    )
+}
+
+/// [`propagate_evidence`] with the originating observation named.
+///
+/// `origin` is the `observation_id` of the evidence that started the
+/// propagation. With it the downstream belief records the contribution under
+/// that origin, so the same observation cannot vote twice — neither across
+/// repeated runs nor across several graph paths (diamond). Without it the old
+/// additive behaviour is kept.
+pub fn propagate_evidence_from(
+    origin: Option<&str>,
+    source_id: NodeId,
+    effective_weight: f64,
+    edges: &[CognitiveEdge],
+    downstream_nodes: &mut HashMap<NodeId, CognitiveNode>,
+    config: &BeliefRevisionConfig,
+    hop: u32,
+) -> Vec<PropagationEffect> {
     if hop >= config.max_propagation_hops {
         return vec![];
     }
@@ -284,33 +432,70 @@ pub fn propagate_evidence(
             * edge.confidence
             * config.propagation_decay;
 
-        if propagated_weight.abs() < config.min_propagation_weight {
+        let Some(downstream) = downstream_nodes.get_mut(&edge.dst) else {
             continue;
-        }
+        };
+        let NodePayload::Belief(belief) = &mut downstream.payload else {
+            continue;
+        };
 
-        // Apply to downstream node
-        if let Some(downstream) = downstream_nodes.get_mut(&edge.dst) {
-            if let NodePayload::Belief(belief) = &mut downstream.payload {
-                let old_lo = belief.log_odds;
-                belief.log_odds += propagated_weight;
-                belief.log_odds = belief
-                    .log_odds
-                    .clamp(-config.max_abs_log_odds, config.max_abs_log_odds);
-
-                downstream.attrs.confidence = crate::state::sigmoid(belief.log_odds);
-
-                effects.push(PropagationEffect {
-                    belief_id: edge.dst,
-                    edge_kind: edge.kind,
+        // With an origin, the contribution is tracked PER PATH: an existing
+        // path may be weakened or withdrawn, so the minimum-weight guard only
+        // gates NEW propagation — never the correction of one already recorded.
+        // Without an origin the old additive behaviour is kept, min-weight
+        // guard included.
+        match origin {
+            None => {
+                if propagated_weight.abs() < config.min_propagation_weight {
+                    continue;
+                }
+                // shift, not `+=`: without an origin there is no trail entry,
+                // so the anchor has to move here or the next decay erases the
+                // contribution (measured: 2.9 -> 0.882).
+                belief.shift_log_odds(propagated_weight);
+            }
+            Some(o) => {
+                // A path that carries nothing either way is a withdrawal. It
+                // must reach the target so it can remove what it propagated
+                // earlier; the minimum-weight guard would swallow it.
+                let known_path = belief
+                    .propagated
+                    .iter()
+                    .any(|p| p.origin == o && p.paths.iter().any(|(id, _)| *id == source_id));
+                if !known_path
+                    && ((propagated_weight == 0.0 && effective_weight == 0.0)
+                        || (propagated_weight != 0.0
+                            && propagated_weight.abs() < config.min_propagation_weight))
+                {
+                    continue;
+                }
+                if !belief.update_propagated(
                     propagated_weight,
-                    new_log_odds: belief.log_odds,
-                });
-
-                // Don't record in evidence_trail for propagated evidence
-                // (it's derived, not primary). But do log the change.
-                let _ = old_lo; // suppress unused warning — change is tracked in effects
+                    edge.last_confirmed_ms as f64 / 1000.0,
+                    o,
+                    source_id,
+                ) {
+                    // Nothing changed. A skipped propagation must not be
+                    // reported as an effect carrying the full weight.
+                    continue;
+                }
             }
         }
+        let capped = belief
+            .log_odds
+            .clamp(-config.max_abs_log_odds, config.max_abs_log_odds);
+        if capped != belief.log_odds {
+            belief.set_log_odds(capped);
+        }
+
+        downstream.attrs.confidence = crate::state::sigmoid(belief.log_odds);
+
+        effects.push(PropagationEffect {
+            belief_id: edge.dst,
+            edge_kind: edge.kind,
+            propagated_weight,
+            new_log_odds: belief.log_odds,
+        });
     }
 
     effects
@@ -321,6 +506,17 @@ pub fn propagate_evidence(
 /// Beliefs that haven't received new evidence for a while gradually
 /// regress toward uncertainty (log_odds → 0). This prevents ancient
 /// beliefs from dominating when they may no longer be valid.
+///
+/// The value is recomputed from the undecayed base, never from the value
+/// the previous pass wrote:
+/// * **time-based** — the amount depends on how much time has passed since the
+///   newest evidence, not on how often the revision loop ran;
+/// * **idempotent** — a second pass at the same instant is a no-op, for
+///   evidence asserted in timestamp order (a back-dated assertion is anchored
+///   at the newest evidence and is documented under `decayed_at`).
+///
+/// The rate does NOT depend on `attrs.persistence`: scaling it was removed
+/// again in this series.
 ///
 /// Returns the amount of log-odds decayed (positive = moved toward 0).
 pub fn apply_staleness_decay(
@@ -344,17 +540,50 @@ pub fn apply_staleness_decay(
         return 0.0; // No evidence at all — nothing to decay
     }
 
-    let days_since_evidence = (now_secs - last_evidence_time) / 86400.0;
+    // Time runs from the LATER of the newest observation and the last
+    // recomputation: a value that was already decayed must not be charged for
+    // the same elapsed time again. `decayed_at == 0.0` means "never decayed",
+    // and must not act as a clock start — rows written before this field
+    // existed carry exactly that value.
+    let clock_start = if belief.decayed_at > 0.0 {
+        last_evidence_time.max(belief.decayed_at)
+    } else {
+        last_evidence_time
+    };
+    let days_since_evidence = (now_secs - clock_start) / 86400.0;
+    if !days_since_evidence.is_finite() || days_since_evidence <= 0.0 {
+        return 0.0;
+    }
 
     if days_since_evidence < config.staleness_grace_period_days {
         return 0.0; // Within grace period
     }
 
     let effective_days = days_since_evidence - config.staleness_grace_period_days;
-    let decay_factor = 1.0 - (config.staleness_rate_per_day * effective_days).min(0.95);
+    // Public behaviour preserved: the rate does not depend on `persistence`.
+    // Scaling it by (1 - persistence) slowed every default belief fivefold and
+    // made persistence 1.0 immortal — a behaviour change for the maintainer to
+    // decide, not one to slip in with a bug fix.
+    let rate = config.staleness_rate_per_day;
+    if !rate.is_finite() || rate <= 0.0 {
+        return 0.0;
+    }
+    let decay_factor = 1.0 - (rate * effective_days).min(0.95);
 
+    // The base is what the evidence (and the prior) support at the last
+    // change; the stored value may already be a decayed one.
+    let base = belief.undecayed_log_odds.unwrap_or(belief.log_odds);
     let old_log_odds = belief.log_odds;
-    belief.log_odds *= decay_factor;
+    /* Establish the anchor: rows written before the field existed have None,
+    and without it every later pass would take the already-decayed value as
+    the base and charge the same time again. */
+    belief.undecayed_log_odds = Some(base);
+    belief.log_odds =
+        (base * decay_factor).clamp(-config.max_abs_log_odds, config.max_abs_log_odds);
+    // `decayed_at` is NOT moved: it marks when the anchor was valid, and the
+    // factor is a pure function of `now - decayed_at`. Moving it here would
+    // make thirty daily passes decay only three times while one pass after
+    // thirty days decays once — the call-count dependence this PR removed.
 
     // Enforce ceiling after decay too
     enforce_confidence_ceiling(belief, &node.attrs, config);
@@ -406,16 +635,24 @@ pub fn revise_beliefs(
 // ── Internal Helpers ──
 
 /// Enforce confidence ceiling for volatile beliefs.
+///
+/// The clamp goes through [`BeliefPayload::set_log_odds`], like every other
+/// change to the value: writing `log_odds` alone left an anchor of 8.75 behind
+/// a stored 4.0, and the next decay rebuilt 3.5 from evidence the ceiling had
+/// already removed (main's formula gives 1.6).
 fn enforce_confidence_ceiling(
     belief: &mut BeliefPayload,
     attrs: &CognitiveAttrs,
     config: &BeliefRevisionConfig,
 ) {
     if attrs.volatility > config.volatility_threshold {
-        belief.log_odds = belief.log_odds.clamp(
+        let clamped = belief.log_odds.clamp(
             -config.volatile_ceiling_log_odds,
             config.volatile_ceiling_log_odds,
         );
+        if clamped != belief.log_odds {
+            belief.set_log_odds(clamped);
+        }
     }
 }
 
@@ -446,7 +683,7 @@ fn detect_threshold_crossing(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{sigmoid, NodeIdAllocator};
+    use crate::state::{sigmoid, EvidenceEntry, NodeIdAllocator};
 
     fn make_belief_node(alloc: &mut NodeIdAllocator, prop: &str, log_odds: f64) -> CognitiveNode {
         let id = alloc.alloc(NodeKind::Belief);
@@ -459,6 +696,9 @@ mod tests {
                 domain: "test".to_string(),
                 evidence_trail: vec![],
                 user_confirmed: false,
+                undecayed_log_odds: None,
+                decayed_at: 0.0,
+                propagated: Vec::new(),
             }),
         );
         node.attrs.confidence = sigmoid(log_odds);
@@ -473,6 +713,7 @@ mod tests {
             provenance: Provenance::Observed,
             propagate: false,
             timestamp: 1000.0,
+            observation_id: None,
         }
     }
 
@@ -557,6 +798,7 @@ mod tests {
             provenance: Provenance::Told, // highest reliability = 0.95
             propagate: false,
             timestamp: 1000.0,
+            observation_id: None,
         };
 
         let result = assert_evidence(&mut node, &evidence, &config).unwrap();
@@ -576,6 +818,8 @@ mod tests {
                 source: "test".to_string(),
                 weight: 2.0,
                 timestamp: 1000.0 - 3.0 * 86400.0,
+                observation_id: None,
+                history: Vec::new(),
             });
         }
 
@@ -596,6 +840,8 @@ mod tests {
                 source: "test".to_string(),
                 weight: 2.0,
                 timestamp: 1000.0 - 30.0 * 86400.0,
+                observation_id: None,
+                history: Vec::new(),
             });
         }
 
@@ -625,6 +871,8 @@ mod tests {
                         source: "old".to_string(),
                         weight: 1.5,
                         timestamp: 1000.0 - 60.0 * 86400.0, // 60 days ago
+                        observation_id: None,
+                        history: Vec::new(),
                     });
                 }
                 n
@@ -656,6 +904,7 @@ mod tests {
             provenance: Provenance::Told,
             propagate: false,
             timestamp: 1000.0,
+            observation_id: None,
         };
 
         let ev_inferred = Evidence {
@@ -665,6 +914,7 @@ mod tests {
             provenance: Provenance::Inferred,
             propagate: false,
             timestamp: 1000.0,
+            observation_id: None,
         };
 
         let r_told = assert_evidence(&mut node_told, &ev_told, &config).unwrap();
@@ -726,6 +976,7 @@ mod tests {
             provenance: Provenance::Told,
             propagate: false,
             timestamp: 1000.0,
+            observation_id: None,
         };
 
         let result = assert_evidence(&mut node, &evidence, &config).unwrap();
@@ -782,6 +1033,7 @@ mod tests {
             provenance: Provenance::Observed,
             propagate: false,
             timestamp: 1000.0,
+            observation_id: None,
         };
 
         assert!(assert_evidence(&mut node, &evidence, &config).is_none());
@@ -798,6 +1050,9 @@ mod tests {
                 domain: "test".to_string(),
                 evidence_trail: vec![],
                 user_confirmed: false,
+                undecayed_log_odds: None,
+                decayed_at: 0.0,
+                propagated: Vec::new(),
             }),
         );
         node.attrs.confidence = sigmoid(log_odds);

@@ -908,6 +908,9 @@ mod tests {
                 domain: "test".into(),
                 evidence_trail: vec![],
                 user_confirmed: false,
+                undecayed_log_odds: None,
+                decayed_at: 0.0,
+                propagated: Vec::new(),
             }),
             NodeKind::Goal => NodePayload::Goal(GoalPayload {
                 description: label.into(),

@@ -580,6 +580,7 @@ pub struct EpisodePayload {
 /// - No clamping at 0/1 boundaries
 /// - Natural handling of conflicting evidence
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct BeliefPayload {
     /// The proposition this belief represents (natural language).
     pub proposition: String,
@@ -593,9 +594,88 @@ pub struct BeliefPayload {
     pub evidence_trail: Vec<EvidenceEntry>,
     /// Whether this belief has been directly confirmed by the user.
     pub user_confirmed: bool,
+    /// Log-odds as supported by the evidence trail and the prior — i.e. the
+    /// value BEFORE any staleness decay was written into `log_odds`.
+    ///
+    /// Maintained wherever `log_odds` moves (`shift_log_odds`/`set_log_odds`),
+    /// so a decay pass recomputes the stored value from this base instead of
+    /// multiplying the running value again: a second revision at the same
+    /// instant is a no-op, and the result depends on elapsed time only, never
+    /// on how often `revise_beliefs` ran. `None` only on rows written before
+    /// this field existed.
+    ///
+    /// **Scope of that guarantee:** evidence asserted in timestamp order. An
+    /// assertion whose timestamp lies before the last recomputation moves the
+    /// clock back to that earlier instant (monotonically clamped, never
+    /// backwards past an already-reached point) and is anchored at the newest
+    /// evidence; a later pass can then reach a different value than asserting
+    /// both and decaying once. That is the pre-change behaviour too — it is
+    /// documented, not promised away.
+    #[serde(default)]
+    pub undecayed_log_odds: Option<f64>,
+    /// When the stored (`decayed`) value was last recomputed from the anchor.
+    ///
+    /// Without it the decay was only idempotent while `now` did not move: the
+    /// base is the evidence sum, so a second pass later would charge the same
+    /// elapsed time again. With it, decay measures time since the last
+    /// recomputation, and `log_odds` is always a pure function of
+    /// (anchor, elapsed, config) for evidence that arrives in timestamp
+    /// order.
+    #[serde(default)]
+    pub decayed_at: f64,
+    /// Evidence that reached this belief over epistemic edges — derived, never
+    /// directly observed here.
+    ///
+    /// Kept apart from `evidence_trail` for two reasons. The trail is read in
+    /// about ten modules (action, analogy, attention, belief_query, coherence,
+    /// contradiction, graph_state, …), each of which would otherwise need a
+    /// filter to tell the two channels apart. And sharing one key space was
+    /// behind three measured defects: a propagation that reset the staleness
+    /// clock, a propagation-only belief that decayed with an origin but not
+    /// without one, and `attrs.evidence_count` drifting from the trail length.
+    #[serde(default)]
+    pub propagated: Vec<PropagatedEvidence>,
 }
 
 impl BeliefPayload {
+    /// Build a belief from its identity: proposition, domain, prior log-odds.
+    ///
+    /// The prior is also the decay anchor — there is no evidence yet, so the
+    /// undecayed value and the stored value are the same. Everything else
+    /// starts empty, which is what main's struct literals expressed.
+    pub fn new(proposition: impl Into<String>, domain: impl Into<String>, log_odds: f64) -> Self {
+        Self {
+            proposition: proposition.into(),
+            domain: domain.into(),
+            log_odds,
+            evidence_trail: Vec::new(),
+            user_confirmed: false,
+            undecayed_log_odds: Some(log_odds),
+            decayed_at: 0.0,
+            propagated: Vec::new(),
+        }
+    }
+
+    /// Move `log_odds` by `delta` and keep the undecayed base in step.
+    ///
+    /// The base is what the evidence supports; it moves by the same amount, so
+    /// a later decay pass never mistakes an already-decayed value for an
+    /// undecayed one — which would charge the same elapsed time twice.
+    pub fn shift_log_odds(&mut self, delta: f64) {
+        // The anchor follows the VALUE, not the previous anchor. Anything else
+        // lets already-decayed evidence come back: after a year at 0.135 with
+        // an anchor of 2.7, adding +0.45 gave 0.585 and the next decay rebuilt
+        // 3.15 from the old anchor (3.087). With the value as the base, the
+        // aged evidence stays aged.
+        self.log_odds += delta;
+        self.undecayed_log_odds = Some(self.log_odds);
+    }
+
+    /// Set `log_odds` outright (a direct statement) and reset the base to it.
+    pub fn set_log_odds(&mut self, value: f64) {
+        self.log_odds = value;
+        self.undecayed_log_odds = Some(value);
+    }
     /// Convert log-odds to probability.
     pub fn probability(&self) -> f64 {
         sigmoid(self.log_odds)
@@ -605,13 +685,164 @@ impl BeliefPayload {
     /// `weight` is the log-likelihood ratio: positive supports, negative contradicts.
     /// `reliability` scales the update (0.0 = ignore, 1.0 = full weight).
     pub fn update(&mut self, weight: f64, reliability: f64, source: &str, timestamp: f64) {
+        self.update_with_id(weight, reliability, source, timestamp, None, 1.0);
+    }
+
+    /// [`update`] with a caller-supplied observation identity.
+    ///
+    /// * Same id already in the trail → REPLACE its weight and correct
+    ///   `log_odds` by the delta. The observation is re-evaluated, not
+    ///   re-counted; the original timestamp stays (an observation does not
+    ///   become a different one because it was re-assessed later).
+    /// * Unknown or absent id → append, exactly as before.
+    ///
+    /// Measured before this existed: asserting the same evidence twice doubled
+    /// the log-odds (0.90 → 1.80) and no repeat could be recognised.
+    pub fn update_with_id(
+        &mut self,
+        weight: f64,
+        reliability: f64,
+        source: &str,
+        timestamp: f64,
+        observation_id: Option<&str>,
+        decay_share: f64,
+    ) {
         let effective_weight = weight * reliability;
-        self.log_odds += effective_weight;
-        self.evidence_trail.push(EvidenceEntry {
-            source: source.to_string(),
-            weight: effective_weight,
-            timestamp,
-        });
+        if let Some(oid) = observation_id {
+            if let Some(idx) = self
+                .evidence_trail
+                .iter()
+                .position(|e| e.observation_id.as_deref() == Some(oid))
+            {
+                let delta = effective_weight - self.evidence_trail[idx].weight;
+                let previous = (
+                    self.evidence_trail[idx].weight,
+                    self.evidence_trail[idx].timestamp,
+                );
+                self.evidence_trail[idx].weight = effective_weight;
+                self.evidence_trail[idx].source = source.to_string();
+                // An unchanged re-assessment is not new evidence: moving the
+                // anchor (or restarting the staleness clock) for it would let
+                // the same elapsed time be charged again, and pushing a
+                // history row per replay grows without bound (1,000 replays
+                // produced one entry with a history of 999).
+                if delta != 0.0 {
+                    self.evidence_trail[idx].history.push(previous);
+                    // A re-assessment moves the belief TOWARD the new weight.
+                    // The delta is undecayed while the stored value may be
+                    // decayed, so applying it directly crossed zero: 2.0
+                    // decayed to 0.1, re-asserted at 1.0, became -0.9.
+                    self.reassess_log_odds(delta, decay_share);
+                    // The clock is deliberately NOT restarted. This is the
+                    // same observation, and it is exactly as old as it was;
+                    // restarting the clock would make a repeat assertion of
+                    // old evidence look like a fresh one.
+                }
+                return;
+            }
+        }
+        self.shift_log_odds(effective_weight);
+        // Monotonic: a back-dated assertion must not move the decay clock
+        // backwards and make the belief look older than a pass already
+        // accounted for.
+        self.decayed_at = self.decayed_at.max(timestamp);
+        let mut entry = EvidenceEntry::new(source, effective_weight, timestamp);
+        entry.observation_id = observation_id.map(|s| s.to_string());
+        self.evidence_trail.push(entry);
+    }
+
+    /// Move the belief by a re-assessed evidence delta without letting an
+    /// already-decayed value cross zero.
+    ///
+    /// `decay_share` is the share of THIS observation that survived decay — the
+    /// caller computes it from the entry's own age (`entry_decay_share`). It
+    /// must not be derived from `log_odds / anchor`: once fresher evidence
+    /// arrived, that ratio describes the whole belief (usually 1.0), and
+    /// retracting a 100-day-old observation would then remove its full weight
+    /// from a value that only ever held a twentieth of it.
+    pub fn reassess_log_odds(&mut self, delta: f64, decay_share: f64) {
+        let anchor = self.undecayed_log_odds.unwrap_or(self.log_odds);
+        let share = decay_share.clamp(0.0, 1.0);
+        self.undecayed_log_odds = Some(anchor + delta);
+        self.log_odds += delta * share;
+    }
+
+    /// Apply a PROPAGATED contribution that is derived from one originating
+    /// observation, arriving over ONE graph path (`via` = the belief the path
+    /// came from).
+    ///
+    /// Four properties, each the answer to a measured defect:
+    /// * **idempotent** — the same origin over the same path does not add a
+    ///   second vote, however often the run repeats;
+    /// * **one voice per observation** — several paths carrying the same
+    ///   observation contribute ONE aggregate: the strongest live path. A
+    ///   second, weaker path adds nothing, and the result does not depend on
+    ///   the order in which paths are walked;
+    /// * **per-path withdrawal** — withdrawing the strongest path demotes the
+    ///   aggregate to the next live path instead of erasing the effect; a
+    ///   path withdrawn with weight 0.0 leaves the others standing;
+    /// * **weakening is a re-assessment** — the same path arriving with a
+    ///   smaller magnitude lowers the aggregate (the origin evidence was
+    ///   re-evaluated, not retracted).
+    ///
+    /// A direct assertion of the same observation is a DIFFERENT channel: it
+    /// goes into `evidence_trail`, propagation goes into `propagated`, and
+    /// each is deduplicated within itself. Neither withdraws the other.
+    ///
+    /// The contribution lives in `BeliefPayload.propagated`, keyed by origin,
+    /// so it shares no key space with caller-supplied observation ids.
+    ///
+    /// Returns `true` when the belief actually changed. A propagation that is
+    /// skipped (nothing recorded for this origin, no change in the aggregate)
+    /// reports `false` instead of emitting an effect with the full weight.
+    pub fn update_propagated(
+        &mut self,
+        weight: f64,
+        timestamp: f64,
+        origin: &str,
+        via: NodeId,
+    ) -> bool {
+        let Some(idx) = self.propagated.iter().position(|p| p.origin == origin) else {
+            // No entry yet: a retraction has nothing to withdraw.
+            if weight == 0.0 {
+                return false;
+            }
+            self.propagated.push(PropagatedEvidence {
+                origin: origin.to_string(),
+                paths: vec![(via, weight)],
+                aggregate: weight,
+                history: Vec::new(),
+            });
+            // Deliberately NOT `self.decayed_at = timestamp`: propagation is
+            // derived evidence and never feeds the staleness clock. Setting it
+            // here made a +0.15 contribution keep 100-day-old evidence at 1.95
+            // while the same path without an origin decayed to 0.0975.
+            self.shift_log_odds(weight);
+            return true;
+        };
+
+        let entry = &mut self.propagated[idx];
+        // Upsert this path. A path withdrawn with weight 0.0 disappears, so it
+        // can no longer hold the aggregate up.
+        if let Some(p) = entry.paths.iter_mut().find(|(id, _)| *id == via) {
+            if weight == 0.0 {
+                entry.paths.retain(|(id, _)| *id != via);
+            } else {
+                p.1 = weight;
+            }
+        } else if weight != 0.0 {
+            entry.paths.push((via, weight));
+        }
+
+        let aggregate = strongest_path(&entry.paths);
+        if aggregate == entry.aggregate {
+            return false;
+        }
+        entry.history.push((entry.aggregate, timestamp));
+        let delta = aggregate - entry.aggregate;
+        entry.aggregate = aggregate;
+        self.shift_log_odds(delta);
+        true
     }
 
     /// How much evidence supports this belief (sum of positive weights).
@@ -633,8 +864,34 @@ impl BeliefPayload {
     }
 }
 
-/// A single piece of evidence for or against a belief.
+/// The aggregate a set of paths contributes: the one with the largest
+/// magnitude. Ties are broken by the source belief's id, so the result never
+/// depends on the order the graph was walked in.
+fn strongest_path(paths: &[(NodeId, f64)]) -> f64 {
+    let mut best: Option<(NodeId, f64)> = None;
+    for &(via, w) in paths {
+        best = match best {
+            None => Some((via, w)),
+            Some((bvia, bw)) => {
+                let strengthens =
+                    w.abs() > bw.abs() || (w.abs() == bw.abs() && via.to_raw() < bvia.to_raw());
+                if strengthens {
+                    Some((via, w))
+                } else {
+                    Some((bvia, bw))
+                }
+            }
+        };
+    }
+    best.map(|(_, w)| w).unwrap_or(0.0)
+}
+
+/// A single piece of DIRECT evidence for or against a belief.
+///
+/// Propagation is not stored here — it lives in [`PropagatedEvidence`] and
+/// never shares this key space.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct EvidenceEntry {
     /// Description of where this evidence came from.
     pub source: String,
@@ -642,6 +899,60 @@ pub struct EvidenceEntry {
     pub weight: f64,
     /// When this evidence was recorded.
     pub timestamp: f64,
+    /// Stable identity of the OBSERVATION this entry came from, when the caller
+    /// can name one. Two assertions with the same id are the same observation:
+    /// the second one revises the first instead of adding a second vote.
+    /// Re-imports, consolidations and corrected timestamps do not change the
+    /// id — the timestamp is not part of it on purpose.
+    ///
+    /// The engine never derives this id. It is caller-defined, and
+    /// [`crate::belief::observation_key`] composes one from belief + source +
+    /// optional local key — WITHOUT the provenance kind, so a re-classification
+    /// does not create a second identity.
+    #[serde(default)]
+    pub observation_id: Option<String>,
+    /// Earlier assessments of the SAME observation: (weight, timestamp), oldest
+    /// first. A re-evaluation replaces `weight` and moves the previous value
+    /// here, so the current state and its development stay distinguishable.
+    #[serde(default)]
+    pub history: Vec<(f64, f64)>,
+}
+
+impl EvidenceEntry {
+    /// A direct evidence entry with no identity and no history.
+    pub fn new(source: impl Into<String>, weight: f64, timestamp: f64) -> Self {
+        Self {
+            source: source.into(),
+            weight,
+            timestamp,
+            observation_id: None,
+            history: Vec::new(),
+        }
+    }
+}
+
+/// A PROPAGATED contribution to a belief: derived evidence that arrived over
+/// epistemic edges from another belief's observation.
+///
+/// Kept apart from [`EvidenceEntry`] on purpose — separate channel, separate
+/// deduplication, and no effect on the staleness clock.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct PropagatedEvidence {
+    /// The originating observation id, as the origin belief knew it.
+    pub origin: String,
+    /// The graph paths that carried this observation here, as
+    /// `(source belief, weight)`. Several paths are one voice: `aggregate`
+    /// below is the strongest live path, so withdrawing one path promotes the
+    /// next one instead of erasing the contribution.
+    #[serde(default)]
+    pub paths: Vec<(NodeId, f64)>,
+    /// The contribution the belief actually uses: the strongest live path.
+    #[serde(default)]
+    pub aggregate: f64,
+    /// Earlier aggregates: (aggregate, timestamp), oldest first.
+    #[serde(default)]
+    pub history: Vec<(f64, f64)>,
 }
 
 /// Goal: a desired future state.
@@ -1670,6 +1981,9 @@ mod tests {
             domain: "preferences".to_string(),
             evidence_trail: vec![],
             user_confirmed: false,
+            undecayed_log_odds: None,
+            decayed_at: 0.0,
+            propagated: Vec::new(),
         };
 
         assert!((belief.probability() - 0.5).abs() < 1e-10);
@@ -1855,6 +2169,9 @@ mod tests {
                 domain: "preferences".to_string(),
                 evidence_trail: vec![],
                 user_confirmed: false,
+                undecayed_log_odds: None,
+                decayed_at: 0.0,
+                propagated: Vec::new(),
             }),
         );
 
@@ -1996,6 +2313,9 @@ mod tests {
                 domain: "test".into(),
                 evidence_trail: vec![],
                 user_confirmed: false,
+                undecayed_log_odds: None,
+                decayed_at: 0.0,
+                propagated: Vec::new(),
             }),
             NodePayload::Goal(GoalPayload {
                 description: "test".into(),
@@ -2024,8 +2344,13 @@ mod tests {
                 source: "observation".to_string(),
                 weight: 2.0,
                 timestamp: 1000.0,
+                observation_id: None,
+                history: Vec::new(),
             }],
             user_confirmed: true,
+            undecayed_log_odds: None,
+            decayed_at: 0.0,
+            propagated: Vec::new(),
         });
 
         let json = serialize_payload(&original);
