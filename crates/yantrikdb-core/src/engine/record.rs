@@ -189,6 +189,7 @@ impl YantrikDB {
             created_at,
             true,
             None,
+            crate::payload_digest::PayloadVariant::Record,
         )
     }
 
@@ -213,6 +214,7 @@ impl YantrikDB {
         idempotency_key: Option<&str>,
         created_at: Option<f64>,
         synthesis: Option<&SynthesisAdmission>,
+        digest_variant: crate::payload_digest::PayloadVariant,
     ) -> Result<String> {
         self.record_with_idempotency_routed(
             text,
@@ -231,6 +233,7 @@ impl YantrikDB {
             created_at,
             false,
             synthesis,
+            digest_variant,
         )
     }
 
@@ -253,6 +256,10 @@ impl YantrikDB {
         created_at: Option<f64>,
         allow_queued_route: bool,
         synthesis: Option<&SynthesisAdmission>,
+        // #330: which payload shape decides idempotency. `Consolidation`
+        // leaves the engine-derived importance, valence and half_life out —
+        // see `PayloadVariant`.
+        digest_variant: crate::payload_digest::PayloadVariant,
     ) -> Result<String> {
         // v0.9.3 contract gate: validate before anything else. (Historically
         // "before any side effect" because importance calibration used to
@@ -340,7 +347,7 @@ impl YantrikDB {
                     });
                 }
                 let view = crate::payload_digest::PayloadView {
-                    variant: crate::payload_digest::PayloadVariant::Record,
+                    variant: digest_variant,
                     namespace,
                     text,
                     memory_type,

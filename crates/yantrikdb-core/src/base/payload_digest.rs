@@ -102,13 +102,26 @@ pub enum PayloadVariant {
     Record,
     /// `record_text()` — engine embeds the text; the generated vector is excluded.
     RecordText,
+    /// A write made by `commit_consolidation` (a synthesis, or a summary with a
+    /// caller key). Its `importance`, `valence` and `half_life` are DERIVED from
+    /// the sources' *current* state — and a plain `recall` reinforces half_life,
+    /// recalibration rewrites importance — so those values would make an honest
+    /// retry look like a different payload. None of the three is fed (#330, the
+    /// same class of defect #293 fixed for `consolidation_time`).
+    Consolidation,
 }
 
 impl PayloadVariant {
+    /// Tag allocation is part of the on-disk contract: 1–3 are taken. The design
+    /// doc (`docs/V0.10_ITEM4_DESIGN.md`) names two further op kinds the code
+    /// does not implement as variants yet — batch items currently fold into
+    /// tag 1 — so if they ever become variants they must take fresh tags. A new
+    /// variant never reuses an existing number.
     fn tag(self) -> u8 {
         match self {
             PayloadVariant::Record => 1,
             PayloadVariant::RecordText => 2,
+            PayloadVariant::Consolidation => 3,
         }
     }
 }
@@ -165,6 +178,13 @@ impl<'a> PayloadView<'a> {
             embedding: match variant {
                 PayloadVariant::Record => Some(&input.embedding),
                 PayloadVariant::RecordText => None,
+                // A consolidation reaches this view only through `record()`-
+                // shaped structs; the explicit-vector path builds its view by
+                // hand (engine/record.rs), so the caller-supplied vector is
+                // `None` here. If that ever changes, this arm must switch to
+                // `Some(&input.embedding)` — the two constructions would
+                // otherwise disagree for the same variant.
+                PayloadVariant::Consolidation => None,
             },
             created_at: input.created_at,
         }
@@ -324,9 +344,17 @@ pub fn payload_digest(v: &PayloadView<'_>) -> [u8; 32] {
     feed_str(&mut h, v.namespace);
     feed_str(&mut h, v.text);
     feed_str(&mut h, v.memory_type);
-    feed_f64(&mut h, v.importance);
-    feed_f64(&mut h, v.valence);
-    feed_f64(&mut h, v.half_life);
+    // #330: a consolidation derives importance, valence and half_life from its
+    // sources' CURRENT state — `(max(importance) * 1.1).min(1.0)`, the mean
+    // valence, `max(half_life) * 1.5` — and reading or recalibrating the sources
+    // moves all three. Feeding any of them would make an honest retry look like
+    // a different payload. They are left out for `Consolidation` only; on
+    // `record()`/`record_text()` they are caller arguments and stay in.
+    if !matches!(v.variant, PayloadVariant::Consolidation) {
+        feed_f64(&mut h, v.importance);
+        feed_f64(&mut h, v.valence);
+        feed_f64(&mut h, v.half_life);
+    }
     feed_f64(&mut h, v.certainty);
     feed_str(&mut h, v.domain);
     feed_str(&mut h, v.source);
@@ -365,6 +393,42 @@ mod tests {
             embedding: None,
             created_at: None,
         }
+    }
+
+    /// #330: for `Consolidation`, the three engine-derived values must not move
+    /// the digest — any of them can change between two identical writes (recall
+    /// moves half-life, recalibration moves importance, `correct()` moves all
+    /// three). A caller-supplied field must still move it, or the exclusion
+    /// would be swallowing real payload differences.
+    #[test]
+    fn consolidation_digest_ignores_derived_fields_and_keeps_caller_fields() {
+        let meta = json!({});
+        let mut v = view("same text", &meta);
+        v.variant = PayloadVariant::Consolidation;
+        let base = payload_digest(&v);
+
+        for (label, mutate) in [
+            (
+                "importance",
+                (|x: &mut PayloadView| x.importance = 0.91) as fn(&mut PayloadView),
+            ),
+            ("valence", |x: &mut PayloadView| x.valence = -0.4),
+            ("half_life", |x: &mut PayloadView| x.half_life = 870912.0),
+        ] {
+            let mut m = view("same text", &meta);
+            m.variant = PayloadVariant::Consolidation;
+            mutate(&mut m);
+            assert_eq!(
+                payload_digest(&m),
+                base,
+                "{label} is engine-derived for a consolidation and must not be fed"
+            );
+        }
+
+        // A caller-supplied field still changes the digest.
+        let mut changed = view("different text", &meta);
+        changed.variant = PayloadVariant::Consolidation;
+        assert_ne!(payload_digest(&changed), base, "text is caller-supplied");
     }
 
     #[test]

@@ -594,6 +594,7 @@ impl YantrikDB {
                 None,
                 None,
                 None,
+                crate::payload_digest::PayloadVariant::RecordText,
                 &embed,
             )?);
         }

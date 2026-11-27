@@ -3030,6 +3030,7 @@ impl YantrikDB {
             created_at,
             true,
             None,
+            crate::payload_digest::PayloadVariant::RecordText,
             None,
         )
     }
@@ -3053,6 +3054,7 @@ impl YantrikDB {
         idempotency_key: Option<&str>,
         created_at: Option<f64>,
         synthesis: Option<&SynthesisAdmission>,
+        digest_variant: crate::payload_digest::PayloadVariant,
     ) -> Result<String> {
         self.record_text_with_idempotency_routed(
             text,
@@ -3070,6 +3072,7 @@ impl YantrikDB {
             created_at,
             false,
             synthesis,
+            digest_variant,
             None,
         )
     }
@@ -3099,6 +3102,7 @@ impl YantrikDB {
         idempotency_key: Option<&str>,
         created_at: Option<f64>,
         synthesis: Option<&SynthesisAdmission>,
+        digest_variant: crate::payload_digest::PayloadVariant,
         text_embedder: &TextEmbedder<'_>,
     ) -> Result<String> {
         self.record_text_with_idempotency_routed(
@@ -3117,6 +3121,7 @@ impl YantrikDB {
             created_at,
             false,
             synthesis,
+            digest_variant,
             Some(text_embedder),
         )
     }
@@ -3139,6 +3144,9 @@ impl YantrikDB {
         created_at: Option<f64>,
         allow_queued_route: bool,
         synthesis: Option<&SynthesisAdmission>,
+        // #330: which payload shape decides idempotency. `Consolidation`
+        // leaves the engine-derived half_life out — see `PayloadVariant`.
+        digest_variant: crate::payload_digest::PayloadVariant,
         // An embedder the engine does not hold, used in place of the
         // runtime one (see `record_text_embedded_by_sync_only`).
         text_embedder: Option<&TextEmbedder<'_>>,
@@ -3229,7 +3237,7 @@ impl YantrikDB {
                     });
                 }
                 let view = crate::payload_digest::PayloadView {
-                    variant: crate::payload_digest::PayloadVariant::RecordText,
+                    variant: digest_variant,
                     namespace,
                     text,
                     memory_type,
