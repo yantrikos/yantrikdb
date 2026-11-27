@@ -217,6 +217,48 @@ def test_record_with_a_python_embedder_releases_the_gil(db):
     assert _seen_during(lambda: db.record("witness record about topic 3")) >= 1
 
 
+def _correcting(store, rid):
+    # A text-changing correction supersedes its target and returns a new
+    # rid, so each repeat corrects the latest version, as a caller would.
+    latest = {"rid": rid, "n": 0}
+
+    def call():
+        latest["n"] += 1
+        out = store.correct(
+            latest["rid"], "witness", new_text=f"witness correction {latest['n']} about topic 3"
+        )
+        latest["rid"] = out["corrected_rid"]
+
+    return call
+
+
+@needs_a_second_cpu
+def test_correct_without_new_text_releases_the_gil(db):
+    rid = db.record("witness record to correct")
+    assert _seen_during(lambda: db.correct(rid, "witness", new_importance=0.7)) >= 1
+
+
+@needs_a_second_cpu
+def test_correct_with_a_python_embedder_releases_the_gil(db):
+    # encode() runs with the GIL held (it is Python); the write after it must not.
+    rid = db.record("witness record to correct about topic 3")
+    assert _seen_during(_correcting(db, rid)) >= 1
+
+
+@needs_a_second_cpu
+def test_correct_with_the_engine_embedder_releases_the_gil(tmp_path):
+    # 64 dims: the bundled engine-native embedder is attached, no Python one,
+    # so the re-embed itself runs inside the detached engine call.
+    store = YantrikDB(os.path.join(str(tmp_path), "native-correct.db"), 64)
+    try:
+        if not store.has_embedder():
+            pytest.skip("this build has no bundled engine embedder")
+        rid = store.record("native witness record to correct")
+        assert _seen_during(_correcting(store, rid)) >= 1
+    finally:
+        store.close()
+
+
 @needs_a_second_cpu
 def test_record_with_the_engine_embedder_releases_the_gil(tmp_path):
     # 64 dims: the bundled engine-native embedder is attached, no Python one.
@@ -362,6 +404,62 @@ def test_close_while_record_is_inside_encode(db):
     assert "closed" in out.get("error", ""), out
 
 
+def _correct_in_a_thread_blocked_in_encode(db):
+    rid = db.record("a record to correct about topic 3")
+    emb = BlockingEmb()
+    db.set_embedder(emb, allow_unverified_embedder=True)
+    emb.armed = True
+    out = {}
+
+    def worker():
+        try:
+            out["result"] = db.correct(
+                rid, "blocked encode witness", new_text="corrected record about topic 3"
+            )
+        except Exception as e:  # noqa: BLE001 - every failure is the finding
+            out["error"] = repr(e)
+
+    t = threading.Thread(target=worker)
+    t.start()
+    assert emb.entered.wait(10), "correct() never reached the embedder"
+    return emb, t, out
+
+
+def test_set_embedder_while_correct_is_inside_encode(db):
+    # Before #296, correct() ran embed_text under the wrapper's shared
+    # borrow, so this set_embedder() was refused with "Already borrowed"
+    # for as long as encode() took. With the embedding planned from a
+    # snapshot, correct() holds nothing of the store across encode(); the
+    # swap lands, the plan is remade with the new embedder, and the
+    # correction completes.
+    emb, t, out = _correct_in_a_thread_blocked_in_encode(db)
+    try:
+        db.set_embedder(Emb(), allow_unverified_embedder=True)
+    finally:
+        emb.release.set()
+        t.join(30)
+    assert not t.is_alive()
+    assert "error" not in out, out.get("error")
+    assert out["result"]["corrected_rid"]
+
+
+def test_close_while_correct_is_inside_encode(db):
+    # correct() snapshots the search generation and plans its embedding
+    # before it takes the engine, so a close() landing while encode()
+    # runs is the exclusive close (True), and the correction reports the
+    # store closed, as if close() had come first. Before, the borrow held
+    # the wrapper across encode(): close() was refused or returned False
+    # and the correction finished on that reference.
+    emb, t, out = _correct_in_a_thread_blocked_in_encode(db)
+    try:
+        assert db.close() is True
+    finally:
+        emb.release.set()
+        t.join(30)
+    assert not t.is_alive()
+    assert "closed" in out.get("error", ""), out
+
+
 def test_close_under_write_load_keeps_other_threads_running(tmp_path):
     # close() stops the worker pool (joining a materializer mid-drain) and
     # closes SQLite (a WAL checkpoint). With the GIL held through both, a
@@ -438,6 +536,7 @@ RELEASES = {
     "think": None,
     "stats": None,
     "scan_conflicts": None,
+    "correct": None,
     # stops the workers and closes SQLite detached; its witness is
     # test_close_under_write_load_keeps_other_threads_running above (one
     # call per store, so it cannot run in the loop below)
@@ -683,8 +782,6 @@ HOLDS = {
         "its probe and identity check call the Python embedder; #295 "
         "released the wrapper's borrow there, not the GIL"
     ),
-    # in flight in their own PRs
-    "correct": "#296",
     # pure in-memory reads: an atomic, a field or the mounted-pack list,
     # whose lock is never held across I/O. Detaching would add a GIL handoff
     # (milliseconds when another thread is CPU-bound) to a call that costs
@@ -842,29 +939,6 @@ def test_a_closed_store_is_reported_before_a_bad_argument(tmp_path, name):
     store.close()
     with pytest.raises(RuntimeError, match="closed"):
         CLOSED_FIRST[name](store)
-
-
-# ── HOLDS entries that open PRs will change ──────────────────────────────
-#
-# correct is being detached in its own PR. Until it merges it must still
-# hold the GIL; once it does, this fails, and the method moves from HOLDS
-# to RELEASES with a witness entry.
-
-OWNED_BY_OPEN_PRS = {
-    "correct": ("#296", lambda db, c: db.correct(c["rid"], "witness", new_importance=0.7)),
-}
-
-
-@pytest.mark.parametrize("name", sorted(OWNED_BY_OPEN_PRS))
-def test_bindings_owned_by_open_prs_still_hold_the_gil(small_db, name):
-    pr, call = OWNED_BY_OPEN_PRS[name]
-    db, ctx = small_db
-    assert name in HOLDS
-    seen = _seen_during(lambda: call(db, ctx), attempts=200)
-    assert seen == 0, (
-        f"{name}() now releases the GIL: whoever merged {pr} should move it from "
-        f"HOLDS to RELEASES with a witness entry, and drop it here"
-    )
 
 
 # ── the other shapes of bindings witnessed above ─────────────────────────

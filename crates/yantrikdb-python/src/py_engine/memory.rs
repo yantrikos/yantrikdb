@@ -949,8 +949,7 @@ impl PyYantrikDB {
     #[pyo3(signature = (rid, reason, new_text=None, metadata_merge=None, new_importance=None, new_valence=None))]
     #[allow(clippy::too_many_arguments)]
     fn correct(
-        &self,
-        py: Python<'_>,
+        slf: &Bound<'_, Self>,
         rid: &str,
         reason: &str,
         new_text: Option<&str>,
@@ -958,51 +957,79 @@ impl PyYantrikDB {
         new_importance: Option<f64>,
         new_valence: Option<f64>,
     ) -> PyResult<PyObject> {
-        let db = self.get_inner()?;
+        let py = slf.py();
+        // Owned strings: everything below is used by the detached
+        // closure, which may not borrow `self` or any Python-bound
+        // argument.
+        let rid = rid.to_owned();
+        let reason = reason.to_owned();
+        let new_text = new_text.map(str::to_owned);
+        // v0.10 Item 3 embedder parity: a text-changing correction
+        // re-embeds inside the pure-Rust engine, which can only reach a
+        // NATIVE embedder (`search_state.embedder`). If the user attached
+        // a Python-callable embedder via `set_embedder(obj)` instead, the
+        // engine would raise NoEmbedder. Mirror `record`: pre-embed
+        // `new_text` here and hand the vector to
+        // `correct_with_embedding`. When a native embedder exists we let
+        // the engine embed (it also handles the reembed-cutover
+        // revalidation loop natively).
+        //
+        // sol r8 order: the search generation is snapshotted BEFORE any
+        // embedding, under a short borrow, so the vector is pinned to the
+        // space it is computed in. If a reembed cutover advances the
+        // generation before the correction commits, the engine rejects
+        // it retryably rather than committing a wrong-space vector. The
+        // snapshot precedes `planned` on purpose: the plan closure only
+        // sees the embedder snapshot, not the engine, so it cannot take
+        // the generation itself. If `planned` remakes the plan (a
+        // `set_embedder()` landed in between), the earlier generation is
+        // only more conservative.
+        let gen = Self::engine_and_embedder(slf)?.0.search_generation();
+        // Argument conversion comes after the handle: a closed store is
+        // reported before a bad metadata argument, as it was before.
         let metadata_json = match metadata_merge {
             Some(d) => Some(py_to_json(&d.as_any())?),
             None => None,
         };
-        // v0.10 Item 3 embedder parity: a text-changing correction re-embeds
-        // inside the pure-Rust engine, which can only reach a NATIVE embedder
-        // (`search_state.embedder`). If the user attached a Python-callable
-        // embedder via `set_embedder(obj)` instead, the engine would raise
-        // NoEmbedder. Mirror `record_text`: pre-embed `new_text` here on the
-        // Python thread (embed_text tries native first, then the Python
-        // embedder) and hand the vector to `correct_with_embedding`. When a
-        // native embedder exists we let the engine embed (it also handles the
-        // reembed-cutover revalidation loop natively).
-        let use_caller_embed = new_text.is_some() && self.embedder.is_some();
-        let result = if use_caller_embed {
-            // sol r8: snapshot the search generation BEFORE embedding so the
-            // vector is pinned to the space it is computed in. If a reembed
-            // cutover advances the generation before the correction commits,
-            // the engine rejects it retryably rather than committing a
-            // wrong-space vector.
-            let gen = db.search_generation();
-            let emb = self.embed_text(py, new_text.expect("checked is_some"))?;
-            db.correct_with_embedding(
-                rid,
-                new_text,
+        // The pre-embed is planned with nothing of the store held across
+        // `encode()` (see `planned`): the previous shape ran `embed_text`
+        // under the wrapper's shared borrow, so a `close()` or a swap
+        // arriving during a slow encode() was refused for its whole
+        // duration. Only a caller-attached Python embedder is planned
+        // here; the native path stays inside the engine call.
+        let text_ref = new_text.as_deref();
+        let (db, plan) = Self::planned(slf, |e| -> PyResult<Option<EmbedPlan<'_>>> {
+            match text_ref {
+                Some(t) if e.embedder.is_some() => plan_embed(py, e, t).map(Some),
+                _ => Ok(None),
+            }
+        })?;
+        // Release the GIL for the engine call (#271). A correction writes
+        // the revision, re-embeds inside the engine on the native path,
+        // and updates the indexes under SQLite locks; since #303 that
+        // write can also wait out another connection's write lock, and a
+        // correct() that waits with the GIL held stalls every other
+        // Python thread in the host.
+        let result = run_detached(py, db, move |db| match plan {
+            Some(EmbedPlan::Ready(emb)) => db.correct_with_embedding(
+                &rid,
+                text_ref,
                 &emb,
                 gen,
                 metadata_json.as_ref(),
                 new_importance,
                 new_valence,
-                reason,
-            )
-            .map_err(map_err)?
-        } else {
-            db.correct(
-                rid,
-                new_text,
+                &reason,
+            ),
+            _ => db.correct(
+                &rid,
+                text_ref,
                 metadata_json.as_ref(),
                 new_importance,
                 new_valence,
-                reason,
-            )
-            .map_err(map_err)?
-        };
+                &reason,
+            ),
+        })?;
         let dict = PyDict::new(py);
         dict.set_item("original_rid", &result.original_rid)?;
         dict.set_item("corrected_rid", &result.corrected_rid)?;
