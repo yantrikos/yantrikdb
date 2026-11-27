@@ -62,7 +62,9 @@ fn mine_co_occurrence(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<RawP
             pattern_type: "co_occurrence".to_string(),
             confidence,
             description: format!(
-                "'{entity_a}' and '{entity_b}' frequently appear together ({shared_count} shared connections)"
+                "'{}' and '{}' frequently appear together ({shared_count} shared connections)",
+                entity_label(&conn, &entity_a),
+                entity_label(&conn, &entity_b),
             ),
             evidence_rids: vec![],
             entity_names: vec![entity_a, entity_b],
@@ -72,6 +74,66 @@ fn mine_co_occurrence(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<RawP
     }
 
     Ok(patterns)
+}
+
+/// Is this name a UUID (8-4-4-4-12 hex, or 32 contiguous hex digits)?
+///
+/// Record ids are UUIDs, and `relate()` accepts them as endpoints. A pattern
+/// whose subject is a record id says nothing about the world — it says the
+/// extractor stored an id in the entity table. Matching is whole-name and
+/// case-insensitive; bare hex such as `ed25519`, `face2face`, `A380` or
+/// `C0FFEE` is a real name and stays admitted.
+fn is_uuid_shaped(name: &str) -> bool {
+    let n = name.len();
+    if n != 36 && n != 32 {
+        return false;
+    }
+    let mut group = 0usize;
+    for (i, ch) in name.chars().enumerate() {
+        if ch == '-' {
+            // Only the canonical 8-4-4-4-12 layout has separators.
+            if n != 36 || !matches!(i, 8 | 13 | 18 | 23) {
+                return false;
+            }
+            group += 1;
+            continue;
+        }
+        if !ch.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+    (n == 32 && group == 0) || (n == 36 && group == 4)
+}
+
+/// A one-line label for a pattern description.
+///
+/// `entity_names` stores names, but `relate()` puts record ids there too. When
+/// the name resolves to a memory, the description shows a short text snippet
+/// (what a human reads); otherwise the name stands as written. The rid stays in
+/// `entity_names` and `context` either way — this changes the prose only.
+fn entity_label(conn: &rusqlite::Connection, name: &str) -> String {
+    if !is_uuid_shaped(name) {
+        return name.to_string();
+    }
+    let text: Option<String> = conn
+        .query_row(
+            "SELECT text FROM memories WHERE rid = ?1",
+            rusqlite::params![name],
+            |row| row.get(0),
+        )
+        .ok();
+    match text {
+        Some(t) => {
+            let flat = t.split_whitespace().collect::<Vec<_>>().join(" ");
+            let snippet: String = flat.chars().take(80).collect();
+            if flat.chars().count() > 80 {
+                format!("{snippet}…")
+            } else {
+                snippet
+            }
+        }
+        None => name.to_string(),
+    }
 }
 
 /// Detect memories clustering around specific times of week.
@@ -415,6 +477,12 @@ fn mine_entity_hubs(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<RawPat
     let mut patterns = Vec::new();
 
     for (entity, degree) in rows {
+        // A record id in the entity table is an artefact of `relate()`, not a
+        // hub. Skipping it here keeps the pattern honest without touching the
+        // entity store (that heal belongs to the admission rule).
+        if is_uuid_shaped(&entity) {
+            continue;
+        }
         let confidence = degree as f64 / max_degree as f64;
 
         patterns.push(RawPattern {
@@ -699,6 +767,9 @@ fn mine_entity_bridges(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<Raw
     })? as f64;
 
     for (entity, domain_counts) in &entity_domains {
+        if is_uuid_shaped(entity) {
+            continue;
+        }
         if domain_counts.len() < min_domains {
             continue;
         }
@@ -787,10 +858,14 @@ fn upsert_pattern(db: &YantrikDB, raw: &RawPattern, ts: f64) -> Result<bool> {
     if let Some((pattern_id, count)) = existing {
         // Update existing
         conn.execute(
+            // v0.25: the description is refreshed too. Without this, a row
+            // mined before a rendering fix (the weekday label in #326, the
+            // snippet here) keeps the old text forever, because dedup matches
+            // the existing row and only the counters moved.
             "UPDATE patterns SET confidence = MAX(confidence, ?1), \
-             last_confirmed = ?2, occurrence_count = ?3 \
+             last_confirmed = ?2, occurrence_count = ?3, description = ?5 \
              WHERE pattern_id = ?4",
-            params![raw.confidence, ts, count + 1, pattern_id],
+            params![raw.confidence, ts, count + 1, pattern_id, raw.description],
         )?;
         Ok(false) // not new
     } else {
@@ -998,6 +1073,189 @@ mod tests {
             .collect();
         let norm: f32 = raw.iter().map(|x| x * x).sum::<f32>().sqrt();
         raw.iter().map(|x| x / norm).collect()
+    }
+
+    #[test]
+    fn test_uuid_shaped_recognises_record_ids_and_spares_real_names() {
+        assert!(is_uuid_shaped("01a21c67-9585-7268-ac2b-ed34ae58a8a8"));
+        assert!(is_uuid_shaped("01A21C67-9585-7268-AC2B-ED34AE58A8A8"));
+        assert!(is_uuid_shaped("01a21c6795857268ac2bed34ae58a8a8"));
+        // Real names that a naive hex rule would eat.
+        assert!(!is_uuid_shaped("ed25519"));
+        assert!(!is_uuid_shaped("face2face"));
+        assert!(!is_uuid_shaped("A380"));
+        assert!(!is_uuid_shaped("C0FFEE"));
+        assert!(!is_uuid_shaped("01a21c67_9585_7268_ac2b_ed34ae58a8a8"));
+        assert!(!is_uuid_shaped("01a21c67-9585-7268-ac2b-ed34ae58a8"));
+    }
+
+    #[test]
+    fn test_entity_label_shows_a_snippet_for_a_record_and_the_name_otherwise() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let rid = db
+            .record(
+                "Redis is the cache layer for the API gateway and it runs on port 6379.",
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &vec_seed(900.0, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+        let conn = db.conn();
+        let label = entity_label(&conn, &rid);
+        assert!(
+            label.contains("Redis is the cache layer"),
+            "a record id must render as readable text, got {label:?}"
+        );
+        assert!(
+            !label.contains(&rid),
+            "the description must not print the raw id"
+        );
+        drop(conn);
+        let conn2 = db.conn();
+        assert_eq!(entity_label(&conn2, "API"), "API");
+    }
+
+    #[test]
+    fn test_remine_refreshes_an_existing_mislabelled_pattern_in_place() {
+        // The #326 defect left already-persisted rows with the old weekday
+        // label, because dedup matched them and only the counters moved.
+        // After the description refresh, a re-mine must correct the text of
+        // the SAME row: same pattern id, one row, evidence untouched.
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        for i in 0..9 {
+            let rid = db
+                .record(
+                    &format!("remine {i}"),
+                    "episodic",
+                    0.5,
+                    0.0,
+                    604800.0,
+                    &serde_json::json!({}),
+                    &vec_seed(1100.0 + i as f32, 8),
+                    "default",
+                    0.8,
+                    "general",
+                    "user",
+                    None,
+                )
+                .unwrap();
+            db.conn()
+                .execute(
+                    "UPDATE memories SET created_at = ?1 WHERE rid = ?2",
+                    params![1_795_651_200.0 + (i as f64) * 60.0, rid],
+                )
+                .unwrap();
+        }
+
+        let mined = mine_temporal_clusters(&db, &PatternConfig::default()).unwrap();
+        assert_eq!(mined.len(), 1);
+        let raw = &mined[0];
+        let dedup = serde_json::json!({"dedup_key": raw.dedup_key}).to_string();
+
+        // A row from before the fix: right dedup key, wrong text, fixed id.
+        let conn = db.conn();
+        conn.execute(
+            "INSERT INTO patterns (pattern_id, pattern_type, status, confidence, \
+             description, evidence_rids, entity_names, context, first_seen, \
+             last_confirmed, occurrence_count, hlc, origin_actor) \
+             VALUES ('stale-row', 'temporal_cluster', 'active', 0.1, \
+                     'STALE LABEL from before the rendering fix (999 events)', '[]', '[]', \
+                     ?1, 0.0, 0.0, 1, x'0000000000000000', 'test')",
+            params![dedup],
+        )
+        .unwrap();
+        // Seed REAL evidence rows. Without them the "unchanged" assertion
+        // below compares 0 with 0 and passes even if the refresh deletes
+        // evidence — a vacuous guard, found by review.
+        let mut seeded_rids: Vec<String> = conn
+            .prepare("SELECT rid FROM memories ORDER BY rid LIMIT 3")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        seeded_rids.truncate(2);
+        for rid in &seeded_rids {
+            conn.execute(
+                "INSERT OR IGNORE INTO pattern_evidence (pattern_id, rid) VALUES ('stale-row', ?1)",
+                params![rid],
+            )
+            .unwrap();
+        }
+        let before_evidence: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pattern_evidence WHERE pattern_id = 'stale-row'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            before_evidence, 2,
+            "fixture check: evidence must exist to be preserved"
+        );
+        drop(conn);
+
+        let created = upsert_pattern(&db, raw, 1_800_000_000.0).unwrap();
+        assert!(!created, "the existing row must be matched, not duplicated");
+
+        let conn = db.conn();
+        let rows: Vec<(String, String)> = conn
+            .prepare(
+                "SELECT pattern_id, description FROM patterns \
+                 WHERE json_extract(context, '$.dedup_key') = json_extract(?1, '$.dedup_key')",
+            )
+            .unwrap()
+            .query_map(params![dedup], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(rows.len(), 1, "a re-mine must not create a duplicate row");
+        assert_eq!(rows[0].0, "stale-row", "the pattern id must survive");
+        assert_ne!(
+            raw.description, "STALE LABEL from before the rendering fix (999 events)",
+            "fixture check: the seeded text must differ from what mining produces, otherwise this cannot fail"
+        );
+        assert_eq!(
+            rows[0].1, raw.description,
+            "the stale label must be replaced by the freshly mined one"
+        );
+        let after_evidence: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pattern_evidence WHERE pattern_id = 'stale-row'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            before_evidence, after_evidence,
+            "refreshing a description must not change evidence semantics"
+        );
+        assert_eq!(
+            before_evidence, 2,
+            "the seeded evidence must still be there"
+        );
+        // Read back every column the matched path writes, so a future
+        // parameter-order mistake cannot go unnoticed (review HF-04).
+        let (count, conf): (i64, f64) = conn
+            .query_row(
+                "SELECT occurrence_count, confidence FROM patterns WHERE pattern_id = 'stale-row'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(count, 2, "the matched path increments the occurrence count");
+        assert!(
+            conf >= raw.confidence,
+            "confidence is raised, never lowered"
+        );
     }
 
     #[test]
