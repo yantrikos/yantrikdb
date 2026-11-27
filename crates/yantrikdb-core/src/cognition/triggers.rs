@@ -290,6 +290,28 @@ pub fn check_redundancy(db: &YantrikDB, sim_threshold: f64) -> Result<Vec<Trigge
     Ok(triggers)
 }
 
+/// A maintenance run must say when a namespace was not fully checked.
+///
+/// "No conflicts found" and "conflicts could not be evaluated" are different
+/// answers, and only one of them is good news. The log alone is not enough:
+/// whoever reads the result has to see it.
+fn incomplete_namespace_trigger(namespace: &str, reason: &str) -> Trigger {
+    Trigger {
+        trigger_type: "maintenance_incomplete".to_string(),
+        reason: format!(
+            "namespace {namespace} was not fully checked: {reason}; \
+             substitution conflicts are missing for it"
+        ),
+        urgency: 0.9,
+        source_rids: vec![],
+        suggested_action:
+            "inspect the substitution tables; this namespace's substitution conflicts \
+             were not evaluated"
+                .to_string(),
+        context: std::collections::HashMap::new(),
+    }
+}
+
 fn check_redundancy_in_namespace(
     db: &YantrikDB,
     namespace: &str,
@@ -331,6 +353,42 @@ fn check_redundancy_in_namespace(
 
     let mut triggers = Vec::new();
     let threshold = sim_threshold;
+
+    // Load the exclusive substitution categories ONCE per namespace.
+    //
+    // The per-pair helper used to run a JOIN query for every differing token
+    // pair of every near-duplicate memory pair: on this store (10 namespaces,
+    // ≤30 rows each) that is ~8,700 memory pairs, and two texts of a few
+    // thousand characters differ in hundreds of tokens each — tens of
+    // thousands of SQL round trips per memory pair. The table holds 8
+    // categories and 80 members; reading it once and answering the same
+    // predicate in memory removes the cost without changing a single result.
+    let substitution_index = {
+        let conn = db.conn();
+        match load_substitution_index_status(&conn) {
+            Ok((index, None)) => index,
+            // Loaded, but degraded (missing tables): the index is empty and
+            // still usable — the reason must reach the report.
+            Ok((index, Some(reason))) => {
+                triggers.push(incomplete_namespace_trigger(namespace, &reason));
+                index
+            }
+            // Degrade, do not abort. Review 8 (finding 3): propagating took
+            // down the remaining namespaces, both conflict scans, the
+            // consolidation and three further trigger checks — and surfaced as
+            // an exception in the Python and WASM APIs where the caller used
+            // to get a normal result.
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "substitution index unavailable for this namespace; \
+                     substitution conflicts are skipped for it"
+                );
+                triggers.push(incomplete_namespace_trigger(namespace, &format!("{e}")));
+                SubstitutionIndex::new()
+            }
+        }
+    };
 
     for i in 0..rows.len() {
         for j in (i + 1)..rows.len() {
@@ -399,17 +457,9 @@ fn check_redundancy_in_namespace(
                         suggested_action: "review_conflict".to_string(),
                         context,
                     });
-                } else if let Some((cat_name, token_a, token_b)) = {
-                    // CRITICAL: bind the conn guard inside this block so it
-                    // is dropped before create_conflict_if_absent() below takes
-                    // the same connection mutex. Without this scoping, the
-                    // if-let scrutinee's temporary MutexGuard lives through
-                    // the body and self-deadlocks the calling thread (the
-                    // engine's connection mutex is std::sync::Mutex, which
-                    // is non-reentrant).
-                    let conn = db.conn();
-                    check_substitution_category_pair(&*conn, &rows[i].1, &rows[j].1)
-                } {
+                } else if let Some((cat_name, token_a, token_b)) =
+                    check_substitution_pair_in_index(&substitution_index, &rows[i].1, &rows[j].1)
+                {
                     // Substitution category match -> create actual conflict record
                     let reason = format!(
                         "{} substitution: '{}' vs '{}' (similarity={:.0}%, rid_a={}, rid_b={})",
@@ -479,13 +529,12 @@ fn check_redundancy_in_namespace(
             let sim = crate::consolidate::cosine_similarity(&emb_a, &emb_b);
 
             if sim > cat_threshold && sim <= threshold {
-                // Same self-deadlock fix as the first pass above: bind the
-                // conn guard inside a scrutinee block so it drops before
-                // create_conflict_if_absent() reacquires the connection mutex.
-                if let Some((cat_name, token_a, token_b)) = {
-                    let conn = db.conn();
-                    check_substitution_category_pair(&*conn, &rows[i].1, &rows[j].1)
-                } {
+                // `substitution_index` is already loaded for this namespace;
+                // no per-pair SQL, so the self-deadlock hazard the previous
+                // scrutinee-scoped `db.conn()` guarded against is gone.
+                if let Some((cat_name, token_a, token_b)) =
+                    check_substitution_pair_in_index(&substitution_index, &rows[i].1, &rows[j].1)
+                {
                     let reason = format!(
                         "{} substitution: '{}' vs '{}' (similarity={:.0}%, rid_a={}, rid_b={})",
                         cat_name,
@@ -1173,30 +1222,369 @@ fn parse_persisted_trigger(row: &rusqlite::Row<'_>) -> rusqlite::Result<Persiste
 
 /// Check if two memory texts differ by tokens in the same substitution category.
 /// Returns (category_name, token_a, token_b) if a match is found.
+/// Token → (category_id, category name) for exclusive substitution categories.
+///
+/// Small by construction (this store: 8 categories, 80 members). Loaded once
+/// per `check_redundancy` pass instead of being queried per token pair.
+type SubstitutionIndex = std::collections::HashMap<String, Vec<(String, String)>>;
+
+fn load_substitution_index(conn: &rusqlite::Connection) -> crate::error::Result<SubstitutionIndex> {
+    load_substitution_index_status(conn).map(|(index, _)| index)
+}
+
+/// The loader, with the reason when the index could not be built.
+///
+/// `None` means "loaded". `Some(reason)` means "degraded": the caller must
+/// surface that in the maintenance RESULT, not only in the log — otherwise
+/// "no conflicts found" and "conflicts could not be evaluated" look alike.
+fn load_substitution_index_status(
+    conn: &rusqlite::Connection,
+) -> crate::error::Result<(SubstitutionIndex, Option<String>)> {
+    let mut index: SubstitutionIndex = std::collections::HashMap::new();
+    let mut stmt = match conn.prepare(
+        // ORDER BY, not insertion order: when a token sits in two exclusive
+        // categories, the first match decides the stored `conflict_type`
+        // (`cloud_providers` -> IdentityFact, everything else -> Preference).
+        // Without the order that verdict drifted between runs (review 7, B3).
+        "SELECT m.token_normalized, m.category_id, c.name
+           FROM substitution_members m
+           JOIN substitution_categories c ON c.id = m.category_id
+          WHERE m.status = 'active' AND m.confidence >= 0.6
+            AND c.status = 'active' AND c.conflict_mode = 'exclusive'
+          ORDER BY m.token_normalized, c.name",
+    ) {
+        Ok(s) => s,
+        // A store without the tables cannot answer the predicate; an empty
+        // index does that correctly. But "tables absent" has two very different
+        // causes and they must not look alike (review 8, finding 4):
+        //
+        //   * a store that never ran V13->V14 — supported, benign;
+        //   * a store that did run it and is still missing the tables — an
+        //     incomplete or rolled-back migration, i.e. damage.
+        //
+        // `entity_aliases` is created by the *same* V13->V14 script as the
+        // substitution tables (`schema.rs` MIGRATE_V13_TO_V14), so it separates
+        // the two cases. `claims` does NOT: it comes from an earlier migration
+        // (review 9, E3 — the first version of this check used `claims` and the
+        // premise was wrong).
+        Err(rusqlite::Error::SqliteFailure(_, Some(ref msg))) if msg.contains("no such table") => {
+            let migrated: i64 = conn
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master \
+                     WHERE type = 'table' AND name = 'entity_aliases'",
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap_or(0);
+            if migrated > 0 {
+                tracing::error!(
+                    "substitution tables are missing although V13->V14 ran \
+                     (entity_aliases exists) — the migration did not complete; \
+                     substitution conflicts are disabled for this store"
+                );
+                return Ok((
+                    index,
+                    Some(
+                        "substitution tables are missing although V13->V14 ran — \
+                         the migration did not complete"
+                            .to_string(),
+                    ),
+                ));
+            } else {
+                tracing::warn!(
+                    "store without V13->V14 — no substitution tables, which is \
+                     expected for this schema"
+                );
+                return Ok((
+                    index,
+                    Some("store without the V13->V14 migration".to_string()),
+                ));
+            }
+        }
+        // Every other failure is real. Returning an empty index here would
+        // silently disable substitution conflicts for the WHOLE namespace —
+        // the per-pair skip the index replaced was the smaller silence
+        // (review 7, B6).
+        Err(e) => return Err(e.into()),
+    };
+    let rows = stmt.query_map([], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+        ))
+    })?;
+    for row in rows {
+        let (token, category_id, name) = row?;
+        index.entry(token).or_default().push((category_id, name));
+    }
+    Ok((index, None))
+}
+
+/// How many content words around the two substituted tokens must agree before a
+/// category pair counts as a contradiction.
+///
+/// Category membership alone says the two values are *alternatives*; it says
+/// nothing about whether the two documents assert the same thing. Measured on
+/// the live store: without this gate every one of 45 open conflicts is a false
+/// alarm (ADR-0057 "google" vs ADR-0125 "deepseek"), with it none of them pass
+/// and the three positive controls do.
+const MIN_SHARED_CONTEXT: usize = 2;
+
+/// Tokens examined on each side of the substituted term.
+const CONTEXT_WINDOW: usize = 10;
+
+/// Minimum Jaccard overlap of the two frames once the substituted values are
+/// removed: same subject and same predicate, different value.
+const MIN_FRAME_SIMILARITY: f64 = 0.7;
+
+/// Remove fenced blocks and inline code spans. A token that only appears inside
+/// code is a value of the implementation, not a statement about the subject:
+/// `--data` is not a claim about a data layer, and `[data-provider=basic]` is
+/// not a preference.
+fn strip_code_context(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut in_fence = false;
+    for line in text.lines() {
+        if line.trim_start().starts_with("```") {
+            in_fence = !in_fence;
+            out.push('\n');
+            continue;
+        }
+        if in_fence {
+            out.push('\n');
+            continue;
+        }
+        let mut in_inline = false;
+        for ch in line.chars() {
+            match ch {
+                '`' => in_inline = !in_inline,
+                _ if !in_inline => out.push(ch),
+                _ => {}
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
+fn tokenize_words(text: &str) -> std::collections::HashSet<String> {
+    text.split_whitespace()
+        .map(|w| {
+            w.trim_matches(|c: char| !c.is_alphanumeric())
+                .to_lowercase()
+        })
+        .filter(|w| !w.is_empty())
+        .collect()
+}
+
+/// Split prose into sentences without breaking on numbers or abbreviations.
+///
+/// A `.` ends a sentence only when whitespace follows it — `0.23.6`, `z.B.`
+/// and `ADR-0139 §R.` therefore stay inside their sentence (review 9, E1).
+/// `!`, `?` and a newline always end one.
+fn sentence_spans(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    for i in 0..bytes.len() {
+        let ends = match bytes[i] {
+            b'\n' | b'!' | b'?' => true,
+            b'.' => bytes
+                .get(i + 1)
+                .map(|b| b.is_ascii_whitespace())
+                .unwrap_or(true),
+            _ => false,
+        };
+        if ends {
+            out.push(&text[start..=i]);
+            start = i + 1;
+        }
+    }
+    if start < text.len() {
+        out.push(&text[start..]);
+    }
+    out
+}
+
+/// The content words of the sentence that contains `token` — the frame a
+/// statement sits in.
+///
+/// Neither a ±N-token window nor the whole document. The window is blind to a
+/// clause that follows the value; the document scores two long notes as
+/// different frames merely because they are long. A sentence keeps subject,
+/// predicate and value together in both shapes.
+///
+/// **What this cannot see:** a retraction in the *next* sentence ("the
+/// decision was discarded") is outside the frame. That is a semantic judgement,
+/// not a frame question — it belongs to the knowledge layer, which is why the
+/// scan produces candidates. Recorded, not hidden: review 9, headline 1.
+fn context_frames(text: &str, token: &str) -> Vec<std::collections::HashSet<String>> {
+    let normalise = |s: &str| -> Vec<String> {
+        s.split_whitespace()
+            .map(|w| {
+                w.trim_matches(|c: char| !c.is_alphanumeric())
+                    .to_lowercase()
+            })
+            .filter(|w| !w.is_empty())
+            .collect()
+    };
+    // Every sentence that mentions the token, each kept as its own frame.
+    //
+    // The first mention alone loses real contradictions: prose that discusses
+    // the value earlier ("in adr-0139 we checked postgresql and rejected it …
+    // the service uses postgresql as its primary store") framed the
+    // *discussion*, while the other note framed the *statement*, so the two
+    // frames shared nothing. Merging all mentions into one set has the
+    // opposite defect — it dilutes the frame until a real match falls under
+    // the threshold. Keeping them apart and comparing every pair keeps both
+    // shapes. Capped at three mentions so a text that repeats the token
+    // everywhere cannot turn the frame into the whole document.
+    let mut out = Vec::new();
+    for sentence in sentence_spans(text) {
+        let words = normalise(sentence);
+        if !words.iter().any(|w| w == token) {
+            continue;
+        }
+        out.push(
+            words
+                .into_iter()
+                .filter(|w| w.len() >= 4 && w != token)
+                .collect::<std::collections::HashSet<String>>(),
+        );
+        if out.len() >= 3 {
+            break;
+        }
+    }
+    // No sentence mentions the token (e.g. an unnormalised form): no frames,
+    // so the gate fails closed, which is the intent.
+    out
+}
+
+/// The best agreement over every pair of mentioning sentences.
+///
+/// One matching pair is the evidence that both texts say it about the same
+/// subject; the maximum is therefore the right summary, not the average.
+/// Returns `(shared_terms, jaccard)`.
+fn best_frame_agreement(text_a: &str, token_a: &str, text_b: &str, token_b: &str) -> (usize, f64) {
+    let frames_a = context_frames(text_a, token_a);
+    let frames_b = context_frames(text_b, token_b);
+    let mut best = (0usize, 0.0f64);
+    for a in &frames_a {
+        for b in &frames_b {
+            let shared = a.intersection(b).count();
+            let union = a.union(b).count().max(1);
+            let similarity = shared as f64 / union as f64;
+            // Rank by WHETHER the pair clears the shared-term floor, then by
+            // Jaccard, only then by the raw shared count. Maximising `shared`
+            // first was wrong: a pair with four shared words plus three extra
+            // ones (4/7) outranked a sentence-for-sentence identical pair
+            // (2/2), so the gate rejected on the weaker similarity of the
+            // wrong pair.
+            let key = (shared >= MIN_SHARED_CONTEXT, similarity, shared);
+            let best_key = (best.0 >= MIN_SHARED_CONTEXT, best.1, best.0);
+            if key > best_key {
+                best = (shared, similarity);
+            }
+        }
+    }
+    best
+}
+
+/// The subject/frame gate: do the two documents assert the same thing about the
+/// same subject? Fail closed — an unchecked frame is not evidence of a
+/// contradiction, and a silence is not a conflict either.
+fn substitution_is_same_claim(prose_a: &str, ta: &str, prose_b: &str, tb: &str) -> bool {
+    let (shared, similarity) = best_frame_agreement(prose_a, ta, prose_b, tb);
+    shared >= MIN_SHARED_CONTEXT && similarity >= MIN_FRAME_SIMILARITY
+}
+
+/// Same predicate as [`check_substitution_category_pair`], answered in memory.
+///
+/// Two layers, and the second one is the point:
+///
+/// 1. **Category membership** — cheap, from the pre-loaded index: are the two
+///    differing tokens alternatives in one exclusive category?
+/// 2. **Same claim** — on the prose of the full texts: do they share the
+///    surrounding subject and predicate? Without layer 2 the index answers a
+///    question nobody asked ("do these two documents each mention a provider?")
+///    and every pair of ADRs becomes a contradiction.
+///
+/// Both call sites in `check_redundancy_in_namespace` go through this function,
+/// so the gate covers the high-similarity pass and the 0.65–0.85 substitution
+/// pass alike.
+fn check_substitution_pair_in_index(
+    index: &SubstitutionIndex,
+    text_a: &str,
+    text_b: &str,
+) -> Option<(String, String, String)> {
+    if index.is_empty() {
+        return None;
+    }
+    let prose_a = strip_code_context(text_a);
+    let prose_b = strip_code_context(text_b);
+    let words_a = tokenize_words(&prose_a);
+    let words_b = tokenize_words(&prose_b);
+    // Sorted, not HashSet order: when two members of one category appear on
+    // each side, several token pairs can pass the gate, and the first hit
+    // becomes the stored `detection_reason`. `HashSet::difference` is randomly
+    // seeded per process, so an unsorted scan makes the reason string drift
+    // between runs and a conflict ledger impossible to diff. The memory pair
+    // was already stable (the outer loops are ordered by created_at); this
+    // keeps the payload stable too.
+    let mut diff_a: Vec<&String> = words_a.difference(&words_b).collect();
+    let mut diff_b: Vec<&String> = words_b.difference(&words_a).collect();
+    diff_a.sort();
+    diff_b.sort();
+
+    for ta in &diff_a {
+        let Some(cats_a) = index.get(ta.as_str()) else {
+            continue;
+        };
+        if cats_a.is_empty() {
+            continue;
+        }
+        for tb in &diff_b {
+            let Some(cats_b) = index.get(tb.as_str()) else {
+                continue;
+            };
+            if let Some((_, name)) = cats_a
+                .iter()
+                .find(|(id_a, _)| cats_b.iter().any(|(id_b, _)| id_b == id_a))
+            {
+                // Layer 2: a category alternative is only a contradiction when
+                // both documents make the same claim about the same subject.
+                if !substitution_is_same_claim(&prose_a, ta, &prose_b, tb) {
+                    continue;
+                }
+                return Some((name.clone(), (*ta).clone(), (*tb).clone()));
+            }
+        }
+    }
+    None
+}
+
+/// Reference implementation, kept as the readable statement of the predicate.
+/// `check_redundancy` no longer calls it: one JOIN per token pair made a
+/// 30-row namespace cost minutes.
+#[allow(dead_code)]
 fn check_substitution_category_pair(
     conn: &rusqlite::Connection,
     text_a: &str,
     text_b: &str,
 ) -> Option<(String, String, String)> {
-    let words_a: std::collections::HashSet<String> = text_a
-        .split_whitespace()
-        .map(|w| {
-            w.trim_matches(|c: char| !c.is_alphanumeric())
-                .to_lowercase()
-        })
-        .filter(|w| !w.is_empty())
-        .collect();
-    let words_b: std::collections::HashSet<String> = text_b
-        .split_whitespace()
-        .map(|w| {
-            w.trim_matches(|c: char| !c.is_alphanumeric())
-                .to_lowercase()
-        })
-        .filter(|w| !w.is_empty())
-        .collect();
+    let prose_a = strip_code_context(text_a);
+    let prose_b = strip_code_context(text_b);
+    let words_a = tokenize_words(&prose_a);
+    let words_b = tokenize_words(&prose_b);
 
-    let diff_a: Vec<&String> = words_a.difference(&words_b).collect();
-    let diff_b: Vec<&String> = words_b.difference(&words_a).collect();
+    let mut diff_a: Vec<&String> = words_a.difference(&words_b).collect();
+    let mut diff_b: Vec<&String> = words_b.difference(&words_a).collect();
+    // Same deterministic tie-break as the index path, so the reference and the
+    // production implementation answer identically (the equivalence test
+    // compares them).
+    diff_a.sort();
+    diff_b.sort();
 
     // Check each diff token pair against substitution_members
     for ta in &diff_a {
@@ -1214,7 +1602,9 @@ fn check_substitution_category_pair(
                 |row| Ok((row.get::<_, String>(0)?,)),
             );
             if let Ok((cat_name,)) = result {
-                return Some((cat_name, ta.to_string(), tb.to_string()));
+                if substitution_is_same_claim(&prose_a, ta, &prose_b, tb) {
+                    return Some((cat_name, ta.to_string(), tb.to_string()));
+                }
             }
         }
     }
@@ -2199,5 +2589,598 @@ mod tests {
             .remove("redundancy_sim_threshold");
         let cfg: crate::types::ThinkConfig = serde_json::from_value(old).unwrap();
         assert_eq!(cfg.redundancy_sim_threshold, 0.85);
+    }
+
+    // ---- Substitution index vs. SQL reference (0010) ----------------------
+    //
+    // The index answers the same predicate as `check_substitution_category_pair`
+    // but loads the table once instead of issuing a JOIN per token pair. These
+    // tests pin the equivalence where a rewrite could silently drift: several
+    // categories matching the same token pair, the order in which tokens are
+    // visited (a HashSet's iteration order is not stable), and rows the SQL
+    // predicate must reject (inactive member, low confidence, non-exclusive or
+    // inactive category).
+    //
+    // The schema ships DEFAULT categories, so every fixture here uses names and
+    // tokens that cannot collide with them.
+
+    fn seed_category(
+        conn: &rusqlite::Connection,
+        id: &str,
+        name: &str,
+        conflict_mode: &str,
+        status: &str,
+        members: &[(&str, f64, &str)],
+    ) {
+        conn.execute(
+            "INSERT INTO substitution_categories
+               (id, name, conflict_mode, status, created_at, updated_at, hlc, origin_actor)
+             VALUES (?1, ?2, ?3, ?4, 0.0, 0.0, x'00', 'test')",
+            rusqlite::params![id, name, conflict_mode, status],
+        )
+        .unwrap();
+        for (i, (token, confidence, member_status)) in members.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO substitution_members
+                   (id, category_id, token_normalized, token_display, confidence, source,
+                    status, created_at, updated_at, hlc, origin_actor)
+                 VALUES (?1, ?2, ?3, ?3, ?4, 'test', ?5, 0.0, 0.0, x'00', 'test')",
+                rusqlite::params![format!("{id}-m{i}"), id, token, confidence, member_status],
+            )
+            .unwrap();
+        }
+    }
+
+    fn both(
+        conn: &rusqlite::Connection,
+        index: &SubstitutionIndex,
+        a: &str,
+        b: &str,
+    ) -> (
+        Option<(String, String, String)>,
+        Option<(String, String, String)>,
+    ) {
+        (
+            check_substitution_category_pair(conn, a, b),
+            check_substitution_pair_in_index(index, a, b),
+        )
+    }
+
+    #[test]
+    fn index_matches_sql_for_a_single_matching_category() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let conn = db.conn();
+        seed_category(
+            &conn,
+            "t-c1",
+            "t_single",
+            "exclusive",
+            "active",
+            &[("toka", 0.9, "active"), ("tokb", 0.9, "active")],
+        );
+        let index = load_substitution_index(&conn).unwrap();
+
+        let a = "wir setzen toka fuer den store ein";
+        let b = "wir setzen tokb fuer den store ein";
+        let (sql, mem) = both(&*conn, &index, a, b);
+        assert_eq!(sql.as_ref().map(|t| t.0.as_str()), Some("t_single"));
+        assert_eq!(mem.as_ref().map(|t| t.0.as_str()), Some("t_single"));
+        assert_eq!(
+            sql.as_ref().map(|t| t.1.as_str()),
+            mem.as_ref().map(|t| t.1.as_str()),
+            "same token_a"
+        );
+        assert_eq!(
+            sql.as_ref().map(|t| t.2.as_str()),
+            mem.as_ref().map(|t| t.2.as_str()),
+            "same token_b"
+        );
+    }
+
+    #[test]
+    fn index_matches_sql_when_several_categories_match() {
+        // Same token pair in TWO exclusive categories. The SQL `LIMIT 1` has no
+        // ORDER BY and the index walks a HashMap, so either may pick either.
+        // What must hold: both find a match, and both name a category that
+        // really contains the pair.
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let conn = db.conn();
+        seed_category(
+            &conn,
+            "t-c2a",
+            "t_multi_a",
+            "exclusive",
+            "active",
+            &[("tokm", 0.9, "active"), ("tokn", 0.9, "active")],
+        );
+        seed_category(
+            &conn,
+            "t-c2b",
+            "t_multi_b",
+            "exclusive",
+            "active",
+            &[("tokm", 0.8, "active"), ("tokn", 0.8, "active")],
+        );
+        let index = load_substitution_index(&conn).unwrap();
+
+        let a = "tokm laeuft hier";
+        let b = "tokn laeuft hier";
+        let (sql, mem) = both(&*conn, &index, a, b);
+        let allowed = ["t_multi_a", "t_multi_b"];
+        let sql_name = sql.as_ref().map(|t| t.0.as_str()).expect("sql must match");
+        let mem_name = mem
+            .as_ref()
+            .map(|t| t.0.as_str())
+            .expect("index must match");
+        assert!(allowed.contains(&sql_name), "sql picked {sql_name}");
+        assert!(allowed.contains(&mem_name), "index picked {mem_name}");
+    }
+
+    #[test]
+    fn index_matches_sql_regardless_of_token_order() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let conn = db.conn();
+        seed_category(
+            &conn,
+            "t-c3",
+            "t_order",
+            "exclusive",
+            "active",
+            &[("tokx", 0.9, "active"), ("toky", 0.9, "active")],
+        );
+        let index = load_substitution_index(&conn).unwrap();
+
+        // The differing token sits at the head, in the middle, and at the tail.
+        for (a, b) in [
+            ("tokx ist die wahl", "toky ist die wahl"),
+            ("wir nehmen tokx heute", "wir nehmen toky heute"),
+            ("die datenbank heisst tokx", "die datenbank heisst toky"),
+        ] {
+            let (sql, mem) = both(&*conn, &index, a, b);
+            assert_eq!(sql.is_some(), mem.is_some(), "{a} vs {b}");
+            assert_eq!(
+                sql.as_ref().map(|t| t.0.as_str()),
+                mem.as_ref().map(|t| t.0.as_str()),
+                "{a} vs {b}"
+            );
+        }
+    }
+
+    #[test]
+    fn index_ignores_rows_the_sql_predicate_rejects() {
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let conn = db.conn();
+        // member status inactive
+        seed_category(
+            &conn,
+            "t-r1",
+            "t_inactive_member",
+            "exclusive",
+            "active",
+            &[("tokp", 0.9, "inactive"), ("tokq", 0.9, "active")],
+        );
+        // confidence below the 0.6 floor
+        seed_category(
+            &conn,
+            "t-r2",
+            "t_low_confidence",
+            "exclusive",
+            "active",
+            &[("tokr", 0.3, "active"), ("toks", 0.9, "active")],
+        );
+        // category not exclusive
+        seed_category(
+            &conn,
+            "t-r3",
+            "t_compatible",
+            "compatible",
+            "active",
+            &[("tokt", 0.9, "active"), ("toku", 0.9, "active")],
+        );
+        // category inactive
+        seed_category(
+            &conn,
+            "t-r4",
+            "t_dead",
+            "exclusive",
+            "inactive",
+            &[("tokv", 0.9, "active"), ("tokw", 0.9, "active")],
+        );
+        let index = load_substitution_index(&conn).unwrap();
+
+        for (a, b) in [
+            ("tokp hier", "tokq hier"),
+            ("tokr hier", "toks hier"),
+            ("tokt hier", "toku hier"),
+            ("tokv hier", "tokw hier"),
+        ] {
+            let (sql, mem) = both(&*conn, &index, a, b);
+            assert!(sql.is_none(), "sql must reject {a} vs {b}");
+            assert!(mem.is_none(), "index must reject {a} vs {b}");
+        }
+    }
+
+    #[test]
+    fn index_returns_none_for_tokens_no_category_contains() {
+        // The schema seeds default categories, so the index is NOT empty here.
+        // What must hold: a pair outside every category is answered the same
+        // way by both implementations.
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let conn = db.conn();
+        let index = load_substitution_index(&conn).unwrap();
+        assert!(!index.is_empty(), "schema seeds default categories");
+
+        let a = "zzznosuchtoken hier";
+        let b = "zzzandertoken hier";
+        let (sql, mem) = both(&*conn, &index, a, b);
+        assert!(sql.is_none());
+        assert!(mem.is_none());
+    }
+
+    // ------------------------------------------------------------------
+    // Subject/frame gate — the composition of 0001 (#312) and 0010 (#315).
+    //
+    // These five cases are the acceptance criteria for the composed branch:
+    // the predicate must hold in the *index* path, in both passes, and must
+    // not turn every shared category into a contradiction.
+    // ------------------------------------------------------------------
+
+    /// A substitution index with the given (category, members) pairs. Category
+    /// id and name are the same string here; only membership matters.
+    fn test_index(cats: &[(&str, &[&str])]) -> SubstitutionIndex {
+        let mut index: SubstitutionIndex = std::collections::HashMap::new();
+        for (category, members) in cats {
+            for token in *members {
+                index
+                    .entry((*token).to_string())
+                    .or_default()
+                    .push(((*category).to_string(), (*category).to_string()));
+            }
+        }
+        index
+    }
+
+    fn provider_index() -> SubstitutionIndex {
+        test_index(&[("llm_providers", &["google", "deepseek", "openai"])])
+    }
+
+    /// Case 1 — same category, different subject. This is the live false
+    /// alarm: ADR-0057 (provenance) vs ADR-0125 (tooling standard). Both
+    /// mention a provider; neither talks about the other's subject.
+    #[test]
+    fn same_category_different_subject_is_not_a_conflict() {
+        let a = "ADR-0057 behandelt die Provenienz der Provider google und die Herkunft der Migrationen";
+        let b = "ADR-0125 behandelt den Werkzeug-Basisstandard der Agenten und nennt deepseek als Modell";
+        assert!(
+            check_substitution_pair_in_index(&provider_index(), a, b).is_none(),
+            "documents about different subjects must not be a contradiction"
+        );
+    }
+
+    /// Case 2 — same category, different situational context. Shared
+    /// vocabulary, but a test run and production are not in conflict about
+    /// which provider is right.
+    #[test]
+    fn same_category_different_situational_context_is_not_a_conflict() {
+        let a = "Im Testlauf nutzen wir google als Provider fuer die Evaluierung";
+        let b = "Im Produktivbetrieb nutzen wir deepseek als Provider fuer die Auslieferung";
+        assert!(
+            check_substitution_pair_in_index(&provider_index(), a, b).is_none(),
+            "different situational context must not be a contradiction"
+        );
+    }
+
+    /// Case 3 — the real contradiction: same subject, same predicate,
+    /// different value. This is what the rule exists for.
+    #[test]
+    fn actual_contradiction_with_same_subject_is_a_conflict() {
+        let a = "Wir setzen google als Provider fuer die Bildgenerierung ein";
+        let b = "Wir setzen deepseek als Provider fuer die Bildgenerierung ein";
+        let hit = check_substitution_pair_in_index(&provider_index(), a, b);
+        assert!(
+            hit.is_some(),
+            "same subject and frame, different value must be a conflict"
+        );
+        let (cat, ta, tb) = hit.unwrap();
+        assert_eq!(cat, "llm_providers");
+        assert!(
+            matches!(
+                (ta.as_str(), tb.as_str()),
+                ("google", "deepseek") | ("deepseek", "google")
+            ),
+            "returned tokens must be the pair that was substituted, got {ta}/{tb}"
+        );
+    }
+
+    /// Case 4 — several categories match on the same pair of texts. The
+    /// function must return a pair whose tokens really are alternatives in
+    /// the category it names, not a category from one pair and tokens from
+    /// another.
+    #[test]
+    fn multiple_matching_categories_return_consistent_tokens() {
+        let index = test_index(&[
+            ("roles", &["backend", "data"]),
+            ("llm_providers", &["google", "deepseek"]),
+        ]);
+        let a = "Wir setzen google fuer die Bildgenerierung ein und backend dauerhaft fuer die Auslieferung der Berichte";
+        let b = "Wir setzen deepseek fuer die Bildgenerierung ein und data dauerhaft fuer die Auslieferung der Berichte";
+        let hit = check_substitution_pair_in_index(&index, a, b);
+        assert!(
+            hit.is_some(),
+            "at least one clean contradiction exists here"
+        );
+        let (cat, ta, tb) = hit.unwrap();
+        let members: &[&str] = match cat.as_str() {
+            "roles" => &["backend", "data"],
+            "llm_providers" => &["google", "deepseek"],
+            other => panic!("unexpected category {other}"),
+        };
+        assert!(
+            members.contains(&ta.as_str()) && members.contains(&tb.as_str()),
+            "tokens {ta}/{tb} do not belong to category {cat}"
+        );
+    }
+
+    /// Case 5 — both passes of the substitution check. Pass 1 runs above the
+    /// redundancy threshold, pass 2 in the 0.65–0.85 band. A gate that lives
+    /// in only one of them shows up as a difference between the two arms.
+    #[test]
+    fn both_redundancy_passes_apply_the_subject_gate() {
+        fn seed_category(db: &YantrikDB) {
+            let hlc = db.tick_hlc().to_bytes().to_vec();
+            let ts = now();
+            db.conn()
+                .execute(
+                    "INSERT INTO substitution_categories
+                     (id, name, conflict_mode, status, created_at, updated_at, hlc, origin_actor)
+                     VALUES ('cat-llm-gate', 'llm_gate_test', 'exclusive', 'active',
+                             ?1, ?1, ?2, 'test')",
+                    rusqlite::params![ts, hlc],
+                )
+                .unwrap();
+            for (id, token) in [("m-google", "google"), ("m-deepseek", "deepseek")] {
+                let hlc = db.tick_hlc().to_bytes().to_vec();
+                db.conn()
+                    .execute(
+                        "INSERT INTO substitution_members
+                         (id, category_id, token_normalized, token_display, confidence,
+                          source, status, created_at, updated_at, hlc, origin_actor)
+                         VALUES (?1, 'cat-llm-gate', ?2, ?2, 0.9, 'test', 'active',
+                                 ?3, ?3, ?4, 'test')",
+                        rusqlite::params![id, token, ts, hlc],
+                    )
+                    .unwrap();
+            }
+        }
+
+        /// Two unit vectors with the requested cosine.
+        fn pair_with_cosine(cos: f32) -> (Vec<f32>, Vec<f32>) {
+            let dim = 8;
+            let mut a = vec![0.0f32; dim];
+            let mut b = vec![0.0f32; dim];
+            a[0] = 1.0;
+            b[0] = cos;
+            b[1] = (1.0 - cos * cos).max(0.0).sqrt();
+            (a, b)
+        }
+
+        fn record_pair(db: &YantrikDB, text_a: &str, text_b: &str, cos: f32) -> (String, String) {
+            let (ea, eb) = pair_with_cosine(cos);
+            let ra = db
+                .record(
+                    text_a,
+                    "semantic",
+                    0.8,
+                    0.0,
+                    604800.0,
+                    &serde_json::json!({}),
+                    &ea,
+                    "default",
+                    0.9,
+                    "general",
+                    "user",
+                    None,
+                )
+                .unwrap();
+            let rb = db
+                .record(
+                    text_b,
+                    "semantic",
+                    0.8,
+                    0.0,
+                    604800.0,
+                    &serde_json::json!({}),
+                    &eb,
+                    "default",
+                    0.9,
+                    "general",
+                    "user",
+                    None,
+                )
+                .unwrap();
+            (ra, rb)
+        }
+
+        fn conflict_count(db: &YantrikDB, a: &str, b: &str) -> i64 {
+            db.conn()
+                .query_row(
+                    "SELECT COUNT(*) FROM conflicts
+                     WHERE (memory_a = ?1 AND memory_b = ?2)
+                        OR (memory_a = ?2 AND memory_b = ?1)",
+                    rusqlite::params![a, b],
+                    |row| row.get(0),
+                )
+                .unwrap()
+        }
+
+        // 1.0 = high-similarity pass, 0.766 = substitution pass (cos 40°).
+        for (cos, pass) in [(1.0f32, "high-similarity"), (0.766f32, "substitution")] {
+            let db = YantrikDB::new(":memory:", 8).unwrap();
+            seed_category(&db);
+            let (ra, rb) = record_pair(
+                &db,
+                "Wir setzen google als Provider fuer die Bildgenerierung ein",
+                "Wir setzen deepseek als Provider fuer die Bildgenerierung ein",
+                cos,
+            );
+            let _ = check_redundancy(&db, 0.85).unwrap();
+            assert_eq!(
+                conflict_count(&db, &ra, &rb),
+                1,
+                "{pass} pass: a real contradiction must be recorded"
+            );
+
+            let db = YantrikDB::new(":memory:", 8).unwrap();
+            seed_category(&db);
+            let (ra, rb) = record_pair(
+                &db,
+                "ADR-0057 behandelt die Provenienz der Provider google und die Herkunft der Migrationen",
+                "ADR-0125 behandelt den Werkzeug-Basisstandard der Agenten und nennt deepseek als Modell",
+                cos,
+            );
+            let _ = check_redundancy(&db, 0.85).unwrap();
+            assert_eq!(
+                conflict_count(&db, &ra, &rb),
+                0,
+                "{pass} pass: different subjects must not be recorded as a conflict"
+            );
+        }
+    }
+
+    /// Review 7 (B5) / review 8 (finding 2): the earlier version of this test
+    /// used the *same* filler in both arms, so the whole-document Jaccard was
+    /// 53/55 = 0.96 and the test would have been green on the old frame too —
+    /// it proved nothing. This one differs in the second sentence and in the
+    /// filler, so a document-wide frame scores ~0.5 and rejects, while the
+    /// sentence-level frame sees the same statement.
+    #[test]
+    fn a_long_note_keeps_its_frame_when_the_sentence_agrees() {
+        let a = "der zahlungsdienst verwendet postgresql als primaeren datenspeicher \
+                 und schreibt jede buchung zuerst dorthin. die taegliche abrechnung \
+                 startet um zwei uhr nachts und wird vom controlling geprueft";
+        let b = "der zahlungsdienst verwendet mysql als primaeren datenspeicher \
+                 und schreibt jede buchung zuerst dorthin. die abrechnung laeuft \
+                 nachts um zwei uhr und wird von der revision kontrolliert";
+
+        assert!(
+            substitution_is_same_claim(a, "postgresql", b, "mysql"),
+            "the same sentence around the value must stay a candidate"
+        );
+
+        // Control: same length, different subject — the gate must still refuse,
+        // otherwise the fix would have disabled it.
+        let c = "der zahlungsdienst verwendet postgresql als primaeren datenspeicher \
+                 und schreibt jede buchung zuerst dorthin";
+        let d = "die marketingseite verwendet mysql fuer das archiv der kampagnen \
+                 und speichert dort alle entwuerfe";
+        assert!(
+            !substitution_is_same_claim(c, "postgresql", d, "mysql"),
+            "different subjects must still be refused"
+        );
+    }
+
+    /// A maintenance result must distinguish "no conflicts found" from
+    /// "conflicts could not be evaluated". Dropping the substitution table and
+    /// running the scan has to surface a trigger, not just a log line — the
+    /// report is what a reader trusts.
+    #[test]
+    fn a_missing_index_shows_up_in_the_result() {
+        // `with_default`/`record_text` need an embedder; the CI test job builds
+        // without one. Use the same constructor and explicit-vector `record`
+        // as the rest of this file.
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        db.record(
+            "der zahlungsdienst verwendet postgresql als datenspeicher.",
+            "semantic",
+            0.5,
+            0.0,
+            604800.0,
+            &serde_json::json!({}),
+            &vec_seed(1.0, 8),
+            "default",
+            0.8,
+            "general",
+            "user",
+            None,
+        )
+        .unwrap();
+        // The store is V14 (`claims` exists), so this is the damage case.
+        db.conn()
+            .execute("DROP TABLE substitution_members", [])
+            .unwrap();
+
+        let triggers = check_redundancy(&db, 0.85).unwrap();
+        let marked: Vec<_> = triggers
+            .iter()
+            .filter(|t| t.trigger_type == "maintenance_incomplete")
+            .collect();
+        assert_eq!(
+            marked.len(),
+            1,
+            "the incomplete namespace must be reported: {triggers:?}"
+        );
+        assert!(
+            marked[0].reason.contains("was not fully checked"),
+            "the reason must say what was skipped: {:?}",
+            marked[0].reason
+        );
+        // The store ran V13->V14 (it has the schema), so the missing tables are
+        // damage, not an old store — the reason must say that (review 9, E3).
+        assert!(
+            marked[0].reason.contains("migration did not complete"),
+            "the damage case must be named: {:?}",
+            marked[0].reason
+        );
+    }
+
+    /// A token mentioned earlier in the text must not hide the statement.
+    ///
+    /// First-mention-only framed the *discussion* sentence in note A and the
+    /// *statement* in note B, so the frames shared nothing and a real
+    /// contradiction was refused. Every mentioning sentence now contributes.
+    #[test]
+    fn an_earlier_mention_does_not_steal_the_frame() {
+        let a = "in adr-0139 haben wir postgresql geprueft und wegen der kosten \
+                 verworfen. der zahlungsdienst verwendet postgresql als primaeren \
+                 datenspeicher";
+        let b = "der zahlungsdienst verwendet mysql als primaeren datenspeicher";
+
+        assert!(
+            substitution_is_same_claim(a, "postgresql", b, "mysql"),
+            "the statement sentence must form the frame, not the earlier mention"
+        );
+    }
+
+    /// A sentence pair that matches exactly must not be outranked by a wider
+    /// pair that merely shares more words.
+    #[test]
+    fn a_better_matching_sentence_pair_is_not_outranked_by_a_wider_one() {
+        let a = "postgresql alpha beta gamma delta epsilon. postgresql omega sigma.";
+        let b = "mysql alpha beta gamma delta zeta. mysql omega sigma.";
+        assert!(
+            substitution_is_same_claim(a, "postgresql", b, "mysql"),
+            "the identical sentence pair must decide, not the wider one"
+        );
+    }
+
+    /// Review 9 (E1): a `.` inside a version number must not end the sentence.
+    /// With the naive split, `0.23.6` broke the frame down to a single short
+    /// word and the gate refused a real contradiction.
+    #[test]
+    fn a_version_number_does_not_cut_the_frame_apart() {
+        let a = "version 0.23.6 postgresql aktiv";
+        let b = "version 0.23.6 mysql aktiv";
+        assert!(
+            substitution_is_same_claim(a, "postgresql", b, "mysql"),
+            "the version number must stay inside the sentence"
+        );
+
+        // Abbreviation with two dots, same shape.
+        let c = "z.B. version 0.23.6 postgresql aktiv";
+        let d = "z.B. version 0.23.6 mysql aktiv";
+        assert!(
+            substitution_is_same_claim(c, "postgresql", d, "mysql"),
+            "z.B. must not end the sentence either"
+        );
     }
 }
