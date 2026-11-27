@@ -63,8 +63,8 @@ fn mine_co_occurrence(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<RawP
             confidence,
             description: format!(
                 "'{}' and '{}' frequently appear together ({shared_count} shared connections)",
-                entity_label(&conn, &entity_a),
-                entity_label(&conn, &entity_b),
+                entity_label(db, &conn, &entity_a),
+                entity_label(db, &conn, &entity_b),
             ),
             evidence_rids: vec![],
             entity_names: vec![entity_a, entity_b],
@@ -76,63 +76,41 @@ fn mine_co_occurrence(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<RawP
     Ok(patterns)
 }
 
-/// Is this name a UUID (8-4-4-4-12 hex, or 32 contiguous hex digits)?
-///
-/// Record ids are UUIDs, and `relate()` accepts them as endpoints. A pattern
-/// whose subject is a record id says nothing about the world — it says the
-/// extractor stored an id in the entity table. Matching is whole-name and
-/// case-insensitive; bare hex such as `ed25519`, `face2face`, `A380` or
-/// `C0FFEE` is a real name and stays admitted.
-fn is_uuid_shaped(name: &str) -> bool {
-    let n = name.len();
-    if n != 36 && n != 32 {
-        return false;
-    }
-    let mut group = 0usize;
-    for (i, ch) in name.chars().enumerate() {
-        if ch == '-' {
-            // Only the canonical 8-4-4-4-12 layout has separators.
-            if n != 36 || !matches!(i, 8 | 13 | 18 | 23) {
-                return false;
-            }
-            group += 1;
-            continue;
-        }
-        if !ch.is_ascii_hexdigit() {
-            return false;
-        }
-    }
-    (n == 32 && group == 0) || (n == 36 && group == 4)
-}
-
 /// A one-line label for a pattern description.
 ///
 /// `entity_names` stores names, but `relate()` puts record ids there too. When
 /// the name resolves to a memory, the description shows a short text snippet
 /// (what a human reads); otherwise the name stands as written. The rid stays in
 /// `entity_names` and `context` either way — this changes the prose only.
-fn entity_label(conn: &rusqlite::Connection, name: &str) -> String {
-    if !is_uuid_shaped(name) {
+fn entity_label(db: &YantrikDB, conn: &rusqlite::Connection, name: &str) -> String {
+    if !crate::knowledge::graph::is_uuid_shaped(name) {
         return name.to_string();
     }
-    let text: Option<String> = conn
+    // Only ACTIVE rows. `forget()` does not scrub the text — it sets
+    // `consolidation_status = 'tombstoned'` and leaves the content in place —
+    // so an unfiltered read would print a forgotten record's text into a
+    // pattern description, which defeats the forget.
+    let stored: Option<String> = conn
         .query_row(
-            "SELECT text FROM memories WHERE rid = ?1",
+            "SELECT text FROM memories WHERE rid = ?1 AND consolidation_status = 'active'",
             rusqlite::params![name],
             |row| row.get(0),
         )
         .ok();
-    match text {
-        Some(t) => {
-            let flat = t.split_whitespace().collect::<Vec<_>>().join(" ");
-            let snippet: String = flat.chars().take(80).collect();
-            if flat.chars().count() > 80 {
-                format!("{snippet}…")
-            } else {
-                snippet
-            }
-        }
-        None => name.to_string(),
+    let Some(stored) = stored else {
+        return name.to_string();
+    };
+    // `memories.text` is ciphertext at rest when a key is set. Never print the
+    // stored bytes; a failed decryption is not worth aborting a mining pass.
+    let Ok(text) = db.decrypt_text(&stored) else {
+        return name.to_string();
+    };
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let snippet: String = flat.chars().take(80).collect();
+    if flat.chars().count() > 80 {
+        format!("{snippet}…")
+    } else {
+        snippet
     }
 }
 
@@ -480,7 +458,7 @@ fn mine_entity_hubs(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<RawPat
         // A record id in the entity table is an artefact of `relate()`, not a
         // hub. Skipping it here keeps the pattern honest without touching the
         // entity store (that heal belongs to the admission rule).
-        if is_uuid_shaped(&entity) {
+        if crate::knowledge::graph::is_uuid_shaped(&entity) {
             continue;
         }
         let confidence = degree as f64 / max_degree as f64;
@@ -767,7 +745,7 @@ fn mine_entity_bridges(db: &YantrikDB, config: &PatternConfig) -> Result<Vec<Raw
     })? as f64;
 
     for (entity, domain_counts) in &entity_domains {
-        if is_uuid_shaped(entity) {
+        if crate::knowledge::graph::is_uuid_shaped(entity) {
             continue;
         }
         if domain_counts.len() < min_domains {
@@ -1077,16 +1055,26 @@ mod tests {
 
     #[test]
     fn test_uuid_shaped_recognises_record_ids_and_spares_real_names() {
-        assert!(is_uuid_shaped("01a21c67-9585-7268-ac2b-ed34ae58a8a8"));
-        assert!(is_uuid_shaped("01A21C67-9585-7268-AC2B-ED34AE58A8A8"));
-        assert!(is_uuid_shaped("01a21c6795857268ac2bed34ae58a8a8"));
+        assert!(crate::knowledge::graph::is_uuid_shaped(
+            "01a21c67-9585-7268-ac2b-ed34ae58a8a8"
+        ));
+        assert!(crate::knowledge::graph::is_uuid_shaped(
+            "01A21C67-9585-7268-AC2B-ED34AE58A8A8"
+        ));
+        assert!(crate::knowledge::graph::is_uuid_shaped(
+            "01a21c6795857268ac2bed34ae58a8a8"
+        ));
         // Real names that a naive hex rule would eat.
-        assert!(!is_uuid_shaped("ed25519"));
-        assert!(!is_uuid_shaped("face2face"));
-        assert!(!is_uuid_shaped("A380"));
-        assert!(!is_uuid_shaped("C0FFEE"));
-        assert!(!is_uuid_shaped("01a21c67_9585_7268_ac2b_ed34ae58a8a8"));
-        assert!(!is_uuid_shaped("01a21c67-9585-7268-ac2b-ed34ae58a8"));
+        assert!(!crate::knowledge::graph::is_uuid_shaped("ed25519"));
+        assert!(!crate::knowledge::graph::is_uuid_shaped("face2face"));
+        assert!(!crate::knowledge::graph::is_uuid_shaped("A380"));
+        assert!(!crate::knowledge::graph::is_uuid_shaped("C0FFEE"));
+        assert!(!crate::knowledge::graph::is_uuid_shaped(
+            "01a21c67_9585_7268_ac2b_ed34ae58a8a8"
+        ));
+        assert!(!crate::knowledge::graph::is_uuid_shaped(
+            "01a21c67-9585-7268-ac2b-ed34ae58a8"
+        ));
     }
 
     #[test]
@@ -1109,7 +1097,7 @@ mod tests {
             )
             .unwrap();
         let conn = db.conn();
-        let label = entity_label(&conn, &rid);
+        let label = entity_label(&db, &conn, &rid);
         assert!(
             label.contains("Redis is the cache layer"),
             "a record id must render as readable text, got {label:?}"
@@ -1120,7 +1108,7 @@ mod tests {
         );
         drop(conn);
         let conn2 = db.conn();
-        assert_eq!(entity_label(&conn2, "API"), "API");
+        assert_eq!(entity_label(&db, &conn2, "API"), "API");
     }
 
     #[test]
@@ -1255,6 +1243,111 @@ mod tests {
         assert!(
             conf >= raw.confidence,
             "confidence is raised, never lowered"
+        );
+    }
+
+    #[test]
+    fn test_forgotten_text_never_reappears_in_a_label() {
+        // forget() does not scrub `memories.text`; it only flips
+        // consolidation_status to 'tombstoned'. An unfiltered read in
+        // `entity_label` therefore printed forgotten content into a pattern
+        // description, which defeats the forget.
+        let db = YantrikDB::new(":memory:", 8).unwrap();
+        let secret = "The api key rotates every ninety days.";
+        let rid = db
+            .record(
+                secret,
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &vec_seed(1300.0, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+
+        // Positive control: while active, the label really is the snippet.
+        let conn = db.conn();
+        let label = entity_label(&db, &conn, &rid);
+        assert!(
+            label.contains("api key rotates"),
+            "positive control: an active record must render its text, got {label:?}"
+        );
+        drop(conn);
+
+        db.forget(&rid).unwrap();
+
+        let conn = db.conn();
+        let label = entity_label(&db, &conn, &rid);
+        assert!(
+            !label.contains("api key rotates"),
+            "the forgotten text must not reappear in a label, got {label:?}"
+        );
+        assert_eq!(label, rid, "an unresolvable record falls back to its name");
+        drop(conn);
+
+        // Re-mining must not resurrect it either.
+        let _ = mine_patterns(&db, &PatternConfig::default()).unwrap();
+        for p in get_patterns(&db, None, None, 200).unwrap() {
+            assert!(
+                !p.description.contains("api key rotates"),
+                "a mined pattern must not quote a forgotten record: {:?}",
+                p.description
+            );
+        }
+    }
+
+    #[test]
+    fn test_encrypted_store_labels_show_plaintext_never_ciphertext() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("enc.db");
+        let mut key = [0u8; 32];
+        key[0] = 7;
+        let db = YantrikDB::new_encrypted(path.to_str().unwrap(), 8, &key).unwrap();
+        let secret = "Rotate the signing key before the quarter ends.";
+        let rid = db
+            .record(
+                secret,
+                "episodic",
+                0.5,
+                0.0,
+                604800.0,
+                &serde_json::json!({}),
+                &vec_seed(1400.0, 8),
+                "default",
+                0.8,
+                "general",
+                "user",
+                None,
+            )
+            .unwrap();
+
+        let conn = db.conn();
+        let stored: String = conn
+            .query_row(
+                "SELECT text FROM memories WHERE rid = ?1",
+                params![rid],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_ne!(
+            stored, secret,
+            "the fixture must actually be encrypted at rest"
+        );
+
+        let label = entity_label(&db, &conn, &rid);
+        assert!(
+            label.contains("signing key"),
+            "positive control: the label must show the decrypted text, got {label:?}"
+        );
+        assert!(
+            !label.contains(&stored[..8.min(stored.len())]),
+            "the label must never print ciphertext, got {label:?}"
         );
     }
 

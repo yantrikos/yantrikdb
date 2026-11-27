@@ -332,6 +332,38 @@ fn is_prose_run(chunk: &[String]) -> bool {
 /// Names a caller deliberately created via `relate()` are NEVER judged by this
 /// — that check lives at the call site, which is the only place that knows
 /// provenance.
+
+/// Is this name a UUID (8-4-4-4-12 hex, or 32 contiguous hex digits)?
+///
+/// Record ids are UUIDs and `relate()` accepts them as endpoints, so this
+/// shape turns up wherever an entity name is taken from user-supplied ids.
+/// It is the *shape* test only — the full admission rule
+/// (`is_rejected_entity_name`) lives below and applies more than this.
+///
+/// Matching is whole-name and case-insensitive. Bare hex such as `ed25519`,
+/// `face2face`, `A380` or `C0FFEE` is a real name and stays admitted.
+pub(crate) fn is_uuid_shaped(name: &str) -> bool {
+    let n = name.len();
+    if n != 36 && n != 32 {
+        return false;
+    }
+    let mut group = 0usize;
+    for (i, ch) in name.chars().enumerate() {
+        if ch == '-' {
+            // Only the canonical 8-4-4-4-12 layout has separators.
+            if n != 36 || !matches!(i, 8 | 13 | 18 | 23) {
+                return false;
+            }
+            group += 1;
+            continue;
+        }
+        if !ch.is_ascii_hexdigit() {
+            return false;
+        }
+    }
+    (n == 32 && group == 0) || (n == 36 && group == 4)
+}
+
 pub fn is_rejected_entity_name(name: &str) -> bool {
     let toks: Vec<String> = name.split_whitespace().map(|s| s.to_string()).collect();
     if toks.is_empty() {
